@@ -29,7 +29,7 @@ describe("the fixed slot", () => {
     expect(aborted).toBe(true);
     for (const run of [quick, crash, slow]) { expect(run.ms).toBeGreaterThanOrEqual(SLOT - 15); expect(run.ms).toBeLessThan(SLOT + 400); }
   });
-  it("uses the injected clock, and a default of ten minutes for a slot that is not a whole number", async () => {
+  it("uses the injected clock, and a default of two minutes for a slot that is not a whole number", async () => {
     let now = 0;
     const slept: number[] = [];
     const clock: EvalClock = { now: () => now, sleep: (ms) => { slept.push(ms); now += ms; return Promise.resolve(); } };
@@ -37,8 +37,8 @@ describe("the fixed slot", () => {
     expect(slept.at(-1)).toBe(500);
     slept.length = 0;
     await runInHiddenSlot({ slotMs: Number.NaN, clock, run: () => Promise.resolve(1) });
-    expect(slept.at(-1)).toBe(600_000);
-    expect(HIDDEN_ROUND_SLOT_MS_DEFAULT).toBe(600_000);
+    expect(slept.at(-1)).toBe(120_000);
+    expect(HIDDEN_ROUND_SLOT_MS_DEFAULT).toBe(120_000);
   });
 });
 
@@ -73,7 +73,7 @@ async function round(): Promise<GatedEvalRoundInput> {
 }
 
 describe("the gated round in its slot", () => {
-  it("takes the same wall-clock time for a pass, for a used-up check limit and for a runner that never ends", async () => {
+  it("takes the same wall-clock time for a pass, a crash and a runner that never ends; a stop BEFORE the runner (limit used up) returns at once", async () => {
     const input = await round();
     const ran = await timed(() => runGatedEvalRoundInSlot(input, () => Promise.resolve(), { slotMs: SLOT, clock: real }));
     expect(ran.value).toMatchObject({ status: "done", gate: { qualified: true }, feedback: { result: "pass" } });
@@ -85,7 +85,8 @@ describe("the gated round in its slot", () => {
     const crashRound = await round();
     const crash = await timed(() => runGatedEvalRoundInSlot(crashRound, () => Promise.reject(new Error("runner failed")), { slotMs: SLOT, clock: real }));
     expect(crash.value).toMatchObject({ gate: { qualified: false }, feedback: { result: "not_run" } });
-    for (const run of [ran, usedUp, never, crash]) { expect(run.ms).toBeGreaterThanOrEqual(SLOT - 15); expect(run.ms).toBeLessThan(SLOT + 500); }
+    for (const run of [ran, never, crash]) { expect(run.ms).toBeGreaterThanOrEqual(SLOT - 15); expect(run.ms).toBeLessThan(SLOT + 500); }
+    expect(usedUp.ms).toBeLessThan(SLOT - 20);
   });
   it("counts the hidden round against the limit even when its runner timed out, and does not touch a round that needs no eval", async () => {
     const input = await round();
@@ -95,5 +96,32 @@ describe("the gated round in its slot", () => {
     const skip = await timed(() => runGatedEvalRoundInSlot({ ...input, trigger: { needed: false, reason: "none_found" } }, () => Promise.resolve(), { slotMs: SLOT, clock: real }));
     expect(skip.value).toEqual({ status: "skipped", reason: "none_found" });
     expect(skip.ms).toBeLessThan(SLOT);
+  });
+  it("runs the old-code rounds BEFORE the slot: a slow baseline neither eats the slot nor times the round out", async () => {
+    const input = await round();
+    const slowBase = (original: GatedEvalRoundInput["visible"]["runBaseRound"]) => async () => { await new Promise((resolve) => setTimeout(resolve, 300)); return original(); };
+    const slow: GatedEvalRoundInput = { ...input, visible: { ...input.visible, runBaseRound: slowBase(input.visible.runBaseRound) }, holdout: { ...input.holdout!, runBaseRound: slowBase(input.holdout!.runBaseRound) } };
+    let runnerStartedAt = 0;
+    const t0 = Date.now();
+    const out = await runGatedEvalRoundInSlot(slow, () => { runnerStartedAt = Date.now(); return Promise.resolve(); }, { slotMs: SLOT, clock: real });
+    const ms = Date.now() - t0;
+    expect(out).toMatchObject({ gate: { qualified: true }, feedback: { result: "pass" } });
+    expect(runnerStartedAt - t0).toBeGreaterThanOrEqual(580);
+    expect(ms).toBeGreaterThanOrEqual(580 + SLOT - 20);
+  });
+  it("kills the sealed runner at the slot's end, before it returns (so before the working sandbox resumes), whatever the round did", async () => {
+    for (const how of ["done", "never", "crash"] as const) {
+      const input = await round();
+      const events: string[] = [];
+      const runner = how === "never" ? (_plan: unknown, signal: AbortSignal) => new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve())) : how === "crash" ? () => Promise.reject(new Error("x")) : () => Promise.resolve();
+      const out = await runGatedEvalRoundInSlot(input, runner, { slotMs: 50, clock: real, killRunner: async () => { await new Promise((resolve) => setTimeout(resolve, 30)); events.push("killed"); } });
+      events.push("returned");
+      expect(events).toEqual(["killed", "returned"]);
+      expect(out.status).toBe("done");
+    }
+  });
+  it("is not run when the runner could not be killed", async () => {
+    const out = await runGatedEvalRoundInSlot(await round(), () => Promise.resolve(), { slotMs: 30, clock: real, killRunner: () => Promise.reject(new Error("docker kill failed")) });
+    expect(out).toMatchObject({ gate: { qualified: false, detail: "hidden_round_timed_out" }, feedback: { result: "not_run" } });
   });
 });

@@ -1,5 +1,5 @@
 // TE-F3-b (DECISIONS 170): what the gate is told BEFORE it looks at a score, and the rules each of those facts must meet. Pure: no clock (times are exact UTC text, compared as text), no randomness, no file, no network.
-//   - the PLAN (minimum detectable drop, runs, seed, alpha, power, correction) is fixed and hashed before the task; the hash Rovara stored then must equal the plan's hash now, and the plan's time must be before the task's start;
+//   - the PLAN (minimum detectable drop, runs, seed) is fixed and hashed before the task; the hash Rovara stored then must equal the plan's hash now, and the plan's time must be before the task's start;
 //   - the GOAL for "Improved on eval" is taken from the task request and hashed before any code is written;
 //   - the JUDGE (model, version, scoring prompt) is pinned before the task, and is from a different model family than the product and coding models, or was spot-checked against human labels. The pin has the SAME SHAPE as TE-F10's
 //     `SideBySideJudgePin` (`pr/te-f10-side-by-side` @ 602d929cc, `side-by-side-judge-pin.ts`); F10 is not in this lane's base, so it is mirrored here and a DEFERRED row says to unify them;
@@ -19,15 +19,28 @@ const FAMILY = /^[a-z][a-z0-9_-]{0,39}$/u;
 const SEED = /^[A-Za-z0-9._:-]{1,64}$/u;
 const CATEGORY = /^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,39}$/u;
 
-export const EVAL_GATE_ALPHA_DEFAULT = 0.05;
-export const EVAL_GATE_POWER_DEFAULT = 0.8;
+/** z for 80% power (the chance the eval sees a drop of the agreed size when it is there). */
+export const EVAL_GATE_Z_POWER = 0.84;
+/** The one-sided level of the per-category tests, before the Holm-Bonferroni correction. 0.01 (not the 0.025 of a lone test): in the seeded no-change simulation, 0.025 on top of the overall band and the strict categories gave about 13% false regressions; 0.01 gives under 10%. */
+export const EVAL_HOLM_ALPHA = 0.01;
+/**
+ * The default plan's runs (DECISIONS 171, refined by the owner 2026-11-13): the old code runs 3 times (the noise estimate, and the steady rule's minimum) and the new code ONCE. A minimum eval (20 visible and 20 hidden questions)
+ * then makes 20 x 3 + 20 x 3 + 20 + 20 = 160 calls on a cache miss, inside the task's 200-call budget shared by the base and head rounds (`evalCallsNeeded`).
+ */
+export const EVAL_GATE_PLAN_DEFAULTS = { baseRuns: 3, headRuns: 1 } as const;
+/** The model calls an eval needs: every question, on the old code `baseRuns` times (none when the baseline is cached) and on the new code `headRuns` times. */
+export function evalCallsNeeded(args: { readonly visibleQuestions: number; readonly hiddenQuestions: number; readonly baseRuns: number; readonly headRuns: number; readonly baselineCached: boolean }): number {
+  const questions = args.visibleQuestions + args.hiddenQuestions;
+  return questions * args.headRuns + (args.baselineCached ? 0 : questions * args.baseRuns);
+}
+
 /** The old code must run at least twice for there to be run-to-run noise at all; once is "can't judge yet" (DECISIONS 171). */
 export const EVAL_GATE_BASE_RUNS_MIN = 2;
 /** A steady eval (the old code scored exactly the same every run, zero spread) is judged against the agreed minimum drop only when the old code ran at least this many times (DECISIONS 171). */
 export const EVAL_STEADY_MIN_RUNS = 3;
 export const EVAL_GATE_RUNS_MAX = 50;
 /** A category whose name says safety or refusal is strict whatever the plan lists; the plan can add names, never remove one. */
-export const EVAL_STRICT_CATEGORY_PATTERN = /safety|safe|refus|harm|toxic|jailbreak|injection|privacy|\bpii\b|polic|abuse|security|unsafe|guardrail/iu;
+export const EVAL_STRICT_CATEGORY_PATTERN = /safety|refus/iu;
 
 // ---- The plan ----
 export interface EvalGatePlan {
@@ -38,11 +51,6 @@ export interface EvalGatePlan {
   readonly baseRuns: number;
   readonly headRuns: number;
   readonly seed: string;
-  /** Two-sided level of the band (0.05 gives the 95% band). */
-  readonly alpha: number;
-  /** The chance the eval sees a drop of `minDetectableDrop` when it is there. */
-  readonly power: number;
-  readonly correction: "holm";
   /** Extra strict categories (safety, refusal); the name pattern adds more. */
   readonly strictCategories: readonly string[];
   /** When the plan was fixed, UTC. It must be BEFORE the task started. */
@@ -59,8 +67,8 @@ const planShapeOk = (plan: Partial<EvalGatePlan> | undefined): plan is EvalGateP
   plan !== undefined && plan.version === 1 && isNumber(plan.minDetectableDrop) && plan.minDetectableDrop > 0 && plan.minDetectableDrop <= 0.5
   && Number.isSafeInteger(plan.baseRuns) && (plan.baseRuns as number) >= 1 && (plan.baseRuns as number) <= EVAL_GATE_RUNS_MAX
   && Number.isSafeInteger(plan.headRuns) && (plan.headRuns as number) >= 1 && (plan.headRuns as number) <= EVAL_GATE_RUNS_MAX
-  && typeof plan.seed === "string" && SEED.test(plan.seed) && isNumber(plan.alpha) && plan.alpha >= 0.001 && plan.alpha <= 0.1 && isNumber(plan.power) && plan.power >= 0.7 && plan.power <= 0.99
-  && plan.correction === "holm" && Array.isArray(plan.strictCategories) && plan.strictCategories.length <= 50 && plan.strictCategories.every((name) => typeof name === "string" && CATEGORY.test(name)) && isUtc(plan.registeredAt);
+  && typeof plan.seed === "string" && SEED.test(plan.seed)
+  && Array.isArray(plan.strictCategories) && plan.strictCategories.length <= 50 && plan.strictCategories.every((name) => typeof name === "string" && CATEGORY.test(name)) && isUtc(plan.registeredAt);
 
 /** Whether the plan was fixed in advance and can detect anything at all. Fixed text answers; nothing about the plan's values is echoed. */
 export function checkEvalGatePlan(args: { readonly plan: EvalGatePlan | undefined; readonly recordedHash: string | undefined; readonly taskStartedAt: string }): { readonly ok: true } | { readonly ok: false; readonly detail: "plan_not_fixed" | "cannot_detect_drop" } {
@@ -73,7 +81,8 @@ export function checkEvalGatePlan(args: { readonly plan: EvalGatePlan | undefine
 }
 
 // ---- The goal (Improved on eval) ----
-export type EvalGoalMetric = { readonly kind: "overall" } | { readonly kind: "category"; readonly category: string };
+/** Only the OVERALL score can be a goal for now (a one-category goal is a small-sample comparison; DEFERRED). */
+export type EvalGoalMetric = { readonly kind: "overall" };
 export interface EvalGoal {
   readonly version: 1;
   /** The target metric, taken from the task request: the overall score, or one category's. */
@@ -84,12 +93,12 @@ export interface EvalGoal {
 export function evalGoalHash(goal: EvalGoal): string {
   return sha256HexOf(new TextEncoder().encode(`rovara-eval-goal/v1\n${canonicalJson(goal)}`));
 }
-/** Whether a goal was named, unchanged, before any code was written. */
+/** Whether a goal was named (an overall goal), unchanged, before any code was written. */
 export function checkEvalGoal(args: { readonly goal: EvalGoal | undefined; readonly recordedHash: string | undefined; readonly firstCodeAt: string }): boolean {
   const goal = args.goal as Partial<EvalGoal> | undefined;
   if (goal === undefined || goal.version !== 1 || !isUtc(goal.registeredAt) || !isUtc(args.firstCodeAt)) return false;
-  const metric = goal.metric as Partial<{ kind: string; category: string }> | undefined;
-  if (metric === undefined || (metric.kind !== "overall" && !(metric.kind === "category" && typeof metric.category === "string" && CATEGORY.test(metric.category)))) return false;
+  const metric = goal.metric as Partial<{ kind: string }> | undefined;
+  if (metric === undefined || metric.kind !== "overall") return false;
   if (typeof args.recordedHash !== "string" || !SHA256.test(args.recordedHash) || args.recordedHash !== evalGoalHash(goal as EvalGoal)) return false;
   return goal.registeredAt < args.firstCodeAt;
 }

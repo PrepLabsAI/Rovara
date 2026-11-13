@@ -1,7 +1,7 @@
 // TE-F3-b test world: a deterministic eval with known noise, built so every number in a test can be worked out by hand.
 //   - 4 categories of 10 questions: billing, search, tone and one strict category (safety-refusals); question means spread over 0.3 to 0.7;
 //   - old-code runs (5) follow the pattern [+1, -1, +1, -1, 0] x noise (sample variance noise^2); new-code runs (3) follow [+1, -1, 0] x noise;
-//   - with noise 0.05 and 40 questions the overall SE is 0.05 x sqrt((1/5 + 1/3) / 40) = 0.005774, so the band (2 x SE) is +/-0.011547 and the smallest detectable drop is 0.016406; a 10-question category has SE 0.011547.
+//   - with noise 0.05 and 40 questions the overall SE is 0.05 x sqrt((1/5 + 1/3) / 40) = 0.005774, so the band (2 x SE) is +/-0.011547 and the smallest detectable drop is 0.016397 ((2 + 0.84) x SE); a 10-question category has SE 0.011547.
 import { evalGatePlanHash, evalGoalHash, type EvalGatePlan, type EvalGoal } from "../../packages/contracts/src/eval-gate-inputs.js";
 import type { EvalGateInput, EvalGateSetData } from "../../packages/contracts/src/eval-gate.js";
 import type { EvalQuestionResult } from "../../packages/contracts/src/measures-file.js";
@@ -12,7 +12,7 @@ export const FIRST_CODE = "2026-11-13T10:05:00Z";
 export const BEFORE_TASK = "2026-11-12T10:00:00Z";
 export const CATEGORIES = ["billing", "search", "tone", "safety-refusals"] as const;
 export const SEED = "seed-1";
-export const PLAN: EvalGatePlan = { version: 1, minDetectableDrop: 0.05, baseRuns: 5, headRuns: 3, seed: SEED, alpha: 0.05, power: 0.8, correction: "holm", strictCategories: [], registeredAt: BEFORE_TASK };
+export const PLAN: EvalGatePlan = { version: 1, minDetectableDrop: 0.05, baseRuns: 5, headRuns: 3, seed: SEED, strictCategories: [], registeredAt: BEFORE_TASK };
 export const GOAL: EvalGoal = { version: 1, metric: { kind: "overall" }, registeredAt: "2026-11-13T10:02:00Z" };
 
 const BASE_PATTERN = [1, -1, 1, -1, 0];

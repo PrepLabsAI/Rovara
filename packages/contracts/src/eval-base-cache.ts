@@ -153,6 +153,8 @@ export interface EvalBaseWriteProvenance {
 
 /** The read and write seam. TE-C1's baseline store implements the same two calls. */
 export interface BaseScoreCache {
+  /** The ONE maximum age (whole days, at most 30) this cache trusts a score for. The round reads it from here for the gate's baseline check, so the two can never differ. */
+  readonly maxAgeDays?: number;
   /** The record for these parts, or undefined (a miss, an unreadable record, another company's, an expired one, a store that is down). */
   read(parts: EvalBaseCacheKeyParts): Promise<EvalBaseRecord | undefined>;
   write(parts: EvalBaseCacheKeyParts, record: EvalBaseRecord, provenance: EvalBaseWriteProvenance): Promise<"stored" | "refused">;
@@ -174,6 +176,7 @@ export function createDocumentBaseScoreCache(store: Pick<DocumentStore, "get" | 
     }
   };
   return {
+    maxAgeDays,
     async read(parts) {
       const key = keyFor(parts);
       if (key === undefined) return undefined;

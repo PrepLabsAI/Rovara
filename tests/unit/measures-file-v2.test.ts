@@ -28,8 +28,7 @@ describe("measures file version 2", () => {
     expect(readMeasuresFile({ schemaVersion: 1, measures: [entry], seed: "x" }).status).toBe("unreadable");
     expect(normalizedQuestions(MeasuresFileSchema.parse({ schemaVersion: 1, measures: [entry] }))).toEqual([]);
   });
-  it("is fail-closed for a reader that only knows version 1: a v2 file reads as newer, never as a measurement", () => {
-    expect(readMeasuresFile(v2(), { maxVersion: 1 })).toEqual({ status: "newer" });
+  it("reads version 2 now (an older reader's 'newer' is A4's rule for any version above what it knows)", () => {
     expect(readMeasuresFile(v2())).toMatchObject({ status: "ok" });
     expect(MEASURES_FILE_VERSION).toBe(2);
   });

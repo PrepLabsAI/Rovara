@@ -68,13 +68,12 @@ export function normalizedQuestions(file: Pick<MeasuresFile, "questions">): Eval
 export type MeasuresFileRead = { status: "ok"; file: MeasuresFile } | { status: "newer" } | { status: "unreadable" };
 
 /**
- * Strict for the known versions. Future versions are ignored, never interpreted as a successful measurement. `maxVersion` is the newest version the READER understands (default: this build's): a reader that only knows version 1
- * answers `newer` for a version 2 file, and A4's report reader turns that into a refusal, so an older reader never reads a v2 file as a measurement.
+ * Strict for the known versions. Future versions are ignored, never interpreted as a successful measurement. A reader answers `newer` for any version above the one it knows (A4's rule), and A4's report reader turns that into a refusal, so an older reader never reads a newer file as a measurement.
  */
-export function readMeasuresFile(input: unknown, options: { readonly maxVersion?: number } = {}): MeasuresFileRead {
+export function readMeasuresFile(input: unknown): MeasuresFileRead {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return { status: "unreadable" };
   const version = (input as { schemaVersion?: unknown }).schemaVersion;
-  if (typeof version === "number" && Number.isSafeInteger(version) && version > (options.maxVersion ?? MEASURES_FILE_VERSION)) return { status: "newer" };
+  if (typeof version === "number" && Number.isSafeInteger(version) && version > MEASURES_FILE_VERSION) return { status: "newer" };
   const parsed = MeasuresFileSchema.safeParse(input);
   return parsed.success ? { status: "ok", file: parsed.data } : { status: "unreadable" };
 }

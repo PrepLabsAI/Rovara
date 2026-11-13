@@ -6,9 +6,9 @@
 //     The spread BETWEEN questions never enters it (that is what pairing removes).
 //   - BAND: +/- k x SE with k = 2 (DECISIONS 171: "2x the run-to-run spread, from repeated OLD-code runs only"). A change is "beyond the band" only when it is strictly outside it.
 //   - STEADY: when the old code scored exactly the same on every run (zero spread) and ran at least 3 times, there is no band: the effect is judged against the agreed minimum drop (a drop of at least that is worse). With fewer runs there is no noise estimate.
-//   - DETECTABLE: the smallest drop the eval could see with the planned power is (k + z(power)) x SE. If that is more than the agreed minimum drop, the eval cannot detect the agreed drop.
-//   - CATEGORIES: each ordinary category gets a one-sided test for a drop (tail alpha/2), and the Holm-Bonferroni step-down correction decides which of them are clear drops. Strict (safety and refusal)
-//     categories are not corrected: any drop beyond their own uncorrected band is clear.
+//   - DETECTABLE: the smallest drop the eval could see with 80% power is (k + 0.84) x SE (`EVAL_GATE_Z_POWER`). If that is more than the agreed minimum drop, the eval cannot detect the agreed drop.
+//   - CATEGORIES: each ordinary category gets a one-sided test for a drop (tail `EVAL_HOLM_ALPHA` = 0.01), and the Holm-Bonferroni step-down correction decides which of them are clear drops. Strict (safety and refusal)
+//     categories are not corrected: any drop beyond their own uncorrected band is clear. A category whose old runs never varied has no noise estimate: it gets p = 1 (it can never alone be a clear drop), because a zero standard error would make any wobble of the new code look infinitely significant.
 import type { EvalQuestionResult } from "./measures-file.js";
 
 /** Twelve significant digits: the same edge in two float spellings is one edge. */
@@ -29,31 +29,6 @@ export function normalCdf(x: number): number {
     if (sum === previous) break;
   }
   return Math.min(1, Math.max(0, 0.5 + sum * Math.exp(-0.5 * square - 0.9189385332046727)));
-}
-
-const A = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00] as const;
-const B = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01] as const;
-const C = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00] as const;
-const D = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00] as const;
-
-/** The standard normal quantile (Acklam's rational approximation plus one Halley step). NaN outside (0, 1). */
-export function normalQuantile(p: number): number {
-  if (!(p > 0 && p < 1)) return Number.NaN;
-  let x: number;
-  if (p < 0.02425) {
-    const q = Math.sqrt(-2 * Math.log(p));
-    x = (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1);
-  } else if (p > 1 - 0.02425) {
-    const q = Math.sqrt(-2 * Math.log(1 - p));
-    x = -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1);
-  } else {
-    const q = p - 0.5;
-    const r = q * q;
-    x = ((((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q) / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1);
-  }
-  const error = normalCdf(x) - p;
-  const u = error * Math.sqrt(2 * Math.PI) * Math.exp((x * x) / 2);
-  return x - u / (1 + (x * u) / 2);
 }
 
 /**

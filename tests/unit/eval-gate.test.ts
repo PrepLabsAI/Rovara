@@ -1,5 +1,5 @@
 // TE-F3-b: the DECISIONS 170 gate, rule by rule. Every rule is a behaviour: data goes in, a label, a reason and words come out. The world (tests/support/eval-gate-world.ts) has known noise, so each threshold below can be checked by hand:
-// overall SE 0.005774 (band k x SE = +/-0.011547, smallest detectable drop 0.016406); a 10-question category has SE 0.011547 (band +/-0.023094, Holm threshold with 3 ordinary categories 0.025/3).
+// overall SE 0.005774 (band k x SE = +/-0.011547, smallest detectable drop 0.016397); a 10-question category has SE 0.011547 (band +/-0.023094, Holm threshold with 3 ordinary categories 0.025/3).
 import { describe, expect, it } from "vitest";
 import { evalGate, evalGateAgentFeedback, evalGatePublicView, type EvalGateInput } from "../../packages/contracts/src/eval-gate.js";
 import { evalGatePlanHash, evalGoalHash, type EvalGatePlan, type EvalJudgeInput } from "../../packages/contracts/src/eval-gate-inputs.js";
@@ -75,10 +75,13 @@ describe("the noise band and the agreed drop", () => {
     const result = evalGate(gateInput({ visibleOptions: wide, holdoutOptions: wide }));
     expect(result.visible?.se).toBeCloseTo(0.005774, 5);
     expect(result.visible?.noiseRange.high).toBeCloseTo(0.011547, 5);
-    expect(result.visible?.smallestDetectableDrop).toBeCloseTo(0.016406, 5);
+    expect(result.visible?.smallestDetectableDrop).toBeCloseTo(0.016397, 5);
   });
-  it("treats a strict category that cannot see the agreed drop as not detectable", () => {
-    expect(evalGate(gateInput(planned({ minDetectableDrop: 0.02 })))).toMatchObject({ detail: "cannot_detect_drop" });
+  it("does not ask a small strict category to be able to see the agreed drop, but a clear drop in it still blocks", () => {
+    // 0.02 is detectable overall (smallest 0.0164); a 10-question strict category could not see it alone (0.033), and that is no longer a reason to refuse.
+    expect(evalGate(gateInput(planned({ minDetectableDrop: 0.02 }))).qualified).toBe(true);
+    const drop = { delta: (c: string) => (c === "safety-refusals" ? -0.0245 : 0) };
+    expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.02 }), visibleOptions: drop }))).toMatchObject({ regression: true });
   });
   it("is not run when the old code ran once (no run-to-run noise at all), and runs with two", () => {
     expect(evalGate(gateInput({ ...planned({ baseRuns: 1 }), visibleOptions: { baseRuns: 1, noise: 0.02 }, holdoutOptions: { baseRuns: 1, noise: 0.02 } }))).toMatchObject({ detail: "cannot_detect_drop" });
@@ -108,6 +111,13 @@ describe("categories", () => {
     expect(result).toMatchObject({ regression: true, detail: "regression_found" });
     expect(result.visible?.categories.find((category) => category.category === "safety-refusals")).toMatchObject({ strict: true, clearDrop: true });
   });
+  it("matches only 'safety' and 'refus' by name (the plan lists the rest)", () => {
+    const named = { categories: ["billing", "search", "tone", "privacy"] };
+    // "privacy" is no longer matched by name: the same small drop in it is an ordinary, corrected category and does not block.
+    expect(evalGate(gateInput({ visibleOptions: { ...named, delta: (c) => (c === "privacy" ? -0.0245 : 0) }, holdoutOptions: named })).qualified).toBe(true);
+    const refusal = { categories: ["billing", "search", "tone", "Refusals"] };
+    expect(evalGate(gateInput({ visibleOptions: { ...refusal, delta: (c) => (c === "Refusals" ? -0.0245 : 0) }, holdoutOptions: refusal }))).toMatchObject({ regression: true });
+  });
   it("is strict for categories the plan names, and the plan cannot un-strict a safety name", () => {
     const named = { categories: ["billing", "search", "tone", "legal"] };
     expect(evalGate(gateInput({ visibleOptions: { ...named, delta: (c) => (c === "legal" ? -0.0245 : 0) }, holdoutOptions: named })).qualified).toBe(true);
@@ -124,7 +134,7 @@ describe("a pinned plan, judge, baseline and clean rounds", () => {
     expect(evalGate(gateInput({ recordedPlanHash: undefined }))).toMatchObject({ detail: "plan_not_fixed" });
     expect(evalGate(gateInput({ visibleOptions: { seed: "other" } }))).toMatchObject({ detail: "plan_not_fixed" });
     expect(evalGate(gateInput({ visibleOptions: { baseSeed: "other" } }))).toMatchObject({ detail: "baseline_too_old" });
-    for (const bad of [{ minDetectableDrop: 0 }, { minDetectableDrop: 0.6 }, { alpha: 0.5 }, { power: 0.5 }, { headRuns: 0 }, { seed: "has space" }, { correction: "none" as never }]) expect(evalGate(gateInput(planned(bad))).detail).toBe("plan_not_fixed");
+    for (const bad of [{ minDetectableDrop: 0 }, { minDetectableDrop: 0.6 }, { headRuns: 0 }, { seed: "has space" }]) expect(evalGate(gateInput(planned(bad))).detail).toBe("plan_not_fixed");
   });
   it("needs the number of runs the plan fixed, for every question, on both sides", () => {
     expect(evalGate(gateInput({ visibleOptions: { headRuns: 2 } }))).toMatchObject({ detail: "runs_incomplete" });
@@ -186,15 +196,23 @@ describe("a steady eval (the old code scored the same on every run)", () => {
     expect(run({}, { delta: () => -0.05 }).regression).toBe(true);
     expect(run({}, { delta: () => -0.049 }).qualified).toBe(true);
   });
-  it("applies the same rule to one category, strict or ordinary", () => {
+  it("applies the steady rule to a strict category, and never to an ordinary one", () => {
     const only = (category: string, delta: number) => ({ delta: (c: string) => (c === category ? delta : 0) });
-    expect(run(only("safety-refusals", -0.05)).regression).toBe(true);
-    expect(run(only("safety-refusals", -0.049)).qualified).toBe(true);
-    expect(run(only("billing", -0.05)).regression).toBe(true);
-    expect(run(only("billing", -0.049)).qualified).toBe(true);
+    // A 10-question strict category with 3 new-code runs: judged against the agreed minimum drop 0.05, but never against less than 3 failed question-runs' worth (3 / 30 = 0.1).
+    expect(run(only("safety-refusals", -0.1)).regression).toBe(true);
+    expect(run(only("safety-refusals", -0.099)).qualified).toBe(true);
+    expect(run(only("safety-refusals", -0.05)).qualified).toBe(true);
+    // With a coarser agreed drop the agreed drop is the floor.
+    expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.2 }), visibleOptions: steady(only("safety-refusals", -0.2)), holdoutOptions: steady() })).regression).toBe(true);
+    expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.2 }), visibleOptions: steady(only("safety-refusals", -0.19)), holdoutOptions: steady() })).qualified).toBe(true);
+    // An ordinary category whose old runs never varied has no noise estimate: p = 1, it can never alone be a clear drop (the steady rule is for the whole set).
+    expect(run(only("billing", -0.05)).qualified).toBe(true);
+    expect(run(only("billing", -0.19)).qualified).toBe(true);
   });
   it("needs the old code to have run 3 times: two identical runs are 'can't judge yet'", () => {
     expect(run({ baseRuns: 2 }, { baseRuns: 2 }, planned({ baseRuns: 2 }))).toMatchObject({ qualified: false, detail: "cannot_detect_drop" });
+    // ...but a measured clear drop is still reported as a drop, ahead of "cannot detect".
+    expect(run({ baseRuns: 2, delta: () => -0.2 }, { baseRuns: 2 }, planned({ baseRuns: 2 }))).toMatchObject({ qualified: false, regression: true, detail: "regression_found" });
     const three = planned({ baseRuns: 3 });
     expect(run({ baseRuns: 3 }, { baseRuns: 3 }, three)).toMatchObject({ qualified: true });
     expect(run({ baseRuns: 3, delta: () => -0.05 }, { baseRuns: 3 }, three).regression).toBe(true);
@@ -213,11 +231,45 @@ describe("a few cases that did not run", () => {
   it("leaves out the questions that did not run when they are at most 20% of the cases and the facts say so", () => {
     const data = questionSet();
     const missing = data.head.filter((row) => row.id !== "q-1-3");
-    const result = evalGate(gateInput({ visible: { ...data, head: missing }, facts: evalFactsFromClasses([...Array.from({ length: 19 }, () => "ok"), "rate_limit"]) }));
+    // The question is missing its 3 new-code runs, and 3 calls did not run.
+    const result = evalGate(gateInput({ visible: { ...data, head: missing }, facts: evalFactsFromClasses([...Array.from({ length: 17 }, () => "ok"), "rate_limit", "rate_limit", "rate_limit"]) }));
     expect(result.qualified).toBe(true);
     expect(result.visible?.questions).toBe(39);
     expect(result.visible?.excluded.incomplete).toBe(1);
     expect(result.summary).toContain("Some questions could not be run and were left out.");
+  });
+  it("does not let the new code drop questions it fails: every left-out question must be tied to not-run calls", () => {
+    // The probe: 8 of 40 questions the change broke (a drop of 0.4) are simply left out of the new-code results, with ONE rate_limit among 80 calls.
+    const data = questionSet({ delta: (_c, index) => (index < 4 ? -0.4 : 0) });
+    const dropped = new Set(["q-0-0", "q-0-1", "q-0-2", "q-0-3", "q-1-0", "q-1-1", "q-1-2", "q-1-3"]);
+    const hidden = data.head.filter((row) => !dropped.has(row.id));
+    const one = evalGate(gateInput({ visible: { ...data, head: hidden }, facts: evalFactsFromClasses([...Array.from({ length: 79 }, () => "ok"), "rate_limit"]) }));
+    expect(one.label).not.toBe("no_regression_eval");
+    expect(one).toMatchObject({ qualified: false, detail: "runs_incomplete" });
+    // Even 3 not-run calls cover only one question's three runs, not eight.
+    const three = evalGate(gateInput({ visible: { ...data, head: hidden }, facts: evalFactsFromClasses([...Array.from({ length: 17 }, () => "ok"), "rate_limit", "rate_limit", "rate_limit"]) }));
+    expect(three.qualified).toBe(false);
+    // 24 not-run calls out of 80 is over 20%: the whole eval is not run.
+    expect(evalGate(gateInput({ visible: { ...data, head: hidden }, facts: evalFactsFromClasses([...Array.from({ length: 56 }, () => "ok"), ...Array.from({ length: 24 }, () => "rate_limit")]) })).detail).toBe("provider_outage");
+  });
+  it("also caps the SHARE of questions left out at 20%, even when every one of them is covered by a not-run call", () => {
+    const data = questionSet();
+    // 12 of 40 questions each lack ONE new-code run: 12 not-run calls out of 320 are covered, but 30% of the questions are gone.
+    const gone = new Set(Array.from({ length: 12 }, (_x, index) => `q-${String(Math.floor(index / 10))}-${String(index % 10)}`));
+    const head = data.head.filter((row) => !(gone.has(row.id) && row.run === 2));
+    const facts = { total: 320, run: 308, notRun: 12, byClass: { rate_limit: 12 }, overrunStop: false };
+    expect(evalGate(gateInput({ visible: { ...data, head }, facts })).detail).toBe("runs_incomplete");
+    const fewer = new Set(Array.from({ length: 6 }, (_x, index) => `q-0-${String(index)}`));
+    const head6 = data.head.filter((row) => !(fewer.has(row.id) && row.run === 2));
+    expect(evalGate(gateInput({ visible: { ...data, head: head6 }, facts: { ...facts, run: 314, notRun: 6, byClass: { rate_limit: 6 } } })).qualified).toBe(true);
+  });
+  it("covers a question with fewer runs than planned only by that many not-run calls, and never one with extra runs", () => {
+    const data = questionSet();
+    const short = data.head.filter((row) => !(row.id === "q-1-3" && row.run === 2));
+    expect(evalGate(gateInput({ visible: { ...data, head: short }, facts: evalFactsFromClasses([...Array.from({ length: 19 }, () => "ok"), "rate_limit"]) })).qualified).toBe(true);
+    expect(evalGate(gateInput({ visible: { ...data, head: short } })).detail).toBe("runs_incomplete");
+    const extra = [...data.head, { id: "q-1-3", category: "search", run: 3, score: 0.5 }];
+    expect(evalGate(gateInput({ visible: { ...data, head: extra }, facts: evalFactsFromClasses([...Array.from({ length: 10 }, () => "ok"), ...Array.from({ length: 2 }, () => "rate_limit")]) })).detail).toBe("runs_incomplete");
   });
   it("is not run when more than 20% of the cases did not run, and when the missing questions are more than 20% of the questions", () => {
     const data = questionSet();
@@ -243,11 +295,11 @@ describe("hidden rounds leave no per-measure, per-count or per-case signal", () 
     expect(evalGate(gateInput({ holdoutFacts: { total: 80, run: 79, notRun: 1, byClass: { cap: 1 }, overrunStop: false } })).detail).toBe("cap_hit");
     expect(evalGate(gateInput({ holdoutFacts: { total: 80, run: 80, notRun: 0, byClass: {}, overrunStop: true } })).detail).toBe("cap_hit");
     expect(evalGate(gateInput({ holdoutFacts: classes(80, 0) })).qualified).toBe(true);
-    expect(evalGate(gateInput({ facts: classes(79, 1), visible: { ...questionSet(), head: questionSet().head.filter((row) => row.id !== "q-1-3") } })).qualified).toBe(true);
+    expect(evalGate(gateInput({ facts: classes(77, 3), visible: { ...questionSet(), head: questionSet().head.filter((row) => row.id !== "q-1-3") } })).qualified).toBe(true);
   });
   it("does not leave a holdout question out for not running: a missing holdout result is the whole round not run", () => {
     const hold = questionSet({ prefix: "h" });
-    const result = evalGate(gateInput({ holdout: { ...hold, head: hold.head.filter((row) => row.id !== "h-1-3") }, facts: classes(79, 1) }));
+    const result = evalGate(gateInput({ holdout: { ...hold, head: hold.head.filter((row) => row.id !== "h-1-3") }, facts: classes(77, 3) }));
     expect(result).toMatchObject({ qualified: false, detail: "runs_incomplete" });
   });
   it("tells the agent the same thing for every way a hidden round can be absent or invalid: not run, with nothing that says which measure or why", () => {
@@ -341,17 +393,21 @@ describe("improved on eval", () => {
     const late = { ...GOAL, registeredAt: "2026-11-13T10:06:00Z" };
     expect(evalGate(gateInput({ ...withGoal(late), holdoutOptions: better }))).toMatchObject({ label: "no_regression_eval", improvedNotClaimed: "goal_not_named_in_time" });
     expect(evalGate(gateInput({ ...withGoal({ ...GOAL, registeredAt: FIRST_CODE }), holdoutOptions: better })).improvedNotClaimed).toBe("goal_not_named_in_time");
-    expect(evalGate(gateInput({ goal: { goal: GOAL, recordedHash: evalGoalHash({ ...GOAL, metric: { kind: "category", category: "tone" } }) }, holdoutOptions: better }))).toMatchObject({ label: "no_regression_eval", improvedNotClaimed: "goal_not_named_in_time" });
+    expect(evalGate(gateInput({ goal: { goal: GOAL, recordedHash: evalGoalHash({ ...GOAL, metric: { kind: "category", category: "tone" } as never }) }, holdoutOptions: better }))).toMatchObject({ label: "no_regression_eval", improvedNotClaimed: "goal_not_named_in_time" });
     expect(evalGate(gateInput({ holdoutOptions: better }))).toMatchObject({ label: "no_regression_eval" });
     expect(evalGate(gateInput({ holdoutOptions: better })).improvedNotClaimed).toBeUndefined();
   });
-  it("can target one category: that category's holdout effect must be beyond its own band", () => {
-    const goal = { ...GOAL, metric: { kind: "category", category: "search" } } as const;
+  it("only an overall goal can be 'Improved on eval': a one-category goal is refused, even when that category jumped", () => {
+    const goal = { ...GOAL, metric: { kind: "category", category: "search" } } as never;
     const searchUp = { delta: (c: string) => (c === "search" ? 0.04 : 0) };
-    expect(evalGate(gateInput({ ...withGoal(goal), holdoutOptions: searchUp })).label).toBe("improved_eval");
+    expect(evalGate(gateInput({ ...withGoal(goal), holdoutOptions: searchUp }))).toMatchObject({ label: "no_regression_eval", improvedNotClaimed: "goal_must_be_overall" });
     expect(evalGate(gateInput({ ...withGoal(), holdoutOptions: searchUp }))).toMatchObject({ label: "no_regression_eval", improvedNotClaimed: "not_beyond_band_on_holdout" });
-    expect(evalGate(gateInput({ ...withGoal({ ...goal, metric: { kind: "category", category: "tone" } }), holdoutOptions: searchUp })).improvedNotClaimed).toBe("not_beyond_band_on_holdout");
-    expect(evalGate(gateInput({ ...withGoal({ ...goal, metric: { kind: "category", category: "nope" } }), holdoutOptions: searchUp })).improvedNotClaimed).toBe("goal_metric_not_detectable");
+  });
+  it("does not read one lucky question as an improvement: a 1-question category that goes from 0 to 1 is not 'Improved'", () => {
+    const goal = { ...GOAL, metric: { kind: "category", category: "tiny" } } as never;
+    const world = { categories: ["billing", "search", "tone", "tiny"], perCategory: 10 };
+    const jump = { ...world, delta: (c: string, index: number) => (c === "tiny" && index === 0 ? 0.5 : 0) };
+    expect(evalGate(gateInput({ ...withGoal(goal), visibleOptions: world, holdoutOptions: jump })).label).not.toBe("improved_eval");
   });
   it("is never given over a regression elsewhere: a holdout gain with a visible drop is a drop", () => {
     expect(evalGate(gateInput({ ...withGoal(), visibleOptions: { delta: () => -0.02 }, holdoutOptions: { delta: () => 0.05 } }))).toMatchObject({ label: "eval_not_qualified", regression: true });

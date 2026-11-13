@@ -66,7 +66,6 @@ export interface GatedEvalRoundInput {
   /** The facts of the HIDDEN head round's model calls (counts only; never shown while the task runs). Any case not run makes the whole holdout not run. */
   readonly holdoutFacts: EvalRoundFacts;
   readonly measuresOnly?: EvalGateMeasuresOnly;
-  readonly maxAgeDays?: number;
   readonly today: () => string;
 }
 
@@ -78,8 +77,8 @@ export type GatedEvalRoundOutput =
   | { readonly status: "done"; readonly gate: EvalGateResult; readonly feedback: EvalGateAgentFeedback; readonly hiddenMount?: HiddenEvalMount; readonly cache: { readonly visible: BaseSource; readonly holdout?: BaseSource } };
 type BaseSource = "hit" | "filled" | "not_filled" | "not_used";
 
-/** What the caller must do for a hidden round (F3 part 1 enforces the first two in the sandbox plan): a throwaway copy of the workspace, the working sandbox paused, and nothing the runner printed going back to the agent. */
-export const HIDDEN_ROUND_REQUIREMENTS = { throwawayWorkspaceCopy: true, pauseWorkingSandbox: true, returnRunnerOutputToAgent: false } as const;
+/** What the caller must do for a hidden round (F3 part 1 enforces the first two in the sandbox plan): a throwaway copy of the workspace, the working sandbox paused, nothing the runner printed going back to the agent, and the sealed runner KILLED at the slot's end before the working sandbox is resumed. */
+export const HIDDEN_ROUND_REQUIREMENTS = { throwawayWorkspaceCopy: true, pauseWorkingSandbox: true, returnRunnerOutputToAgent: false, killSealedRunnerAtSlotEnd: true, resumeWorkingSandbox: "only_after_sealed_runner_killed" } as const;
 
 const stopped = (detail: Parameters<typeof evalGateStopped>[0]): GatedEvalRoundOutput => {
   const gate = evalGateStopped(detail);
@@ -102,11 +101,11 @@ export async function planGatedEvalRound(input: Pick<GatedEvalRoundInput, "trigg
   return { status: "ready", hiddenHash: planned.hiddenHash, hiddenMount: planned.hiddenMount, checkIndex: taken.checkIndex, hiddenRound: HIDDEN_ROUND_REQUIREMENTS };
 }
 
-interface BaseFound { readonly record: EvalBaseRecord; readonly source: BaseSource; readonly facts?: EvalRoundFacts }
+export interface BaseFound { readonly record: EvalBaseRecord; readonly source: BaseSource; readonly facts?: EvalRoundFacts }
 const hasUsableQuestions = (record: EvalBaseRecord, seed: string | undefined, modelVersion: string): boolean => record.questions !== undefined && record.questions.length > 0 && record.seed === seed && record.modelVersion === modelVersion;
 
 /** The base record for one set: from the cache when it can be used, else from Rovara's own base round (cached only when clean and attested). */
-async function baseFor(args: { set: GatedSetInput; hiddenHash: string; key: GatedEvalRoundInput["key"]; settingsFingerprint: string; cache: BaseScoreCache; roundKind: EvalRoundKind; seed: string; today: string; maxAgeDays: number | undefined }): Promise<BaseFound | "unattested" | undefined> {
+async function baseFor(args: { set: GatedSetInput; hiddenHash: string; key: GatedEvalRoundInput["key"]; settingsFingerprint: string; cache: BaseScoreCache; roundKind: EvalRoundKind; seed: string; today: string }): Promise<BaseFound | "unattested" | undefined> {
   const parts: EvalBaseCacheKeyParts = { ...args.key, evalSetHash: args.set.baseEvalSetHash, hiddenSetHash: args.hiddenHash, settingsFingerprint: args.settingsFingerprint };
   try {
     evalBaseCacheKey(parts);
@@ -149,13 +148,17 @@ const mergeFacts = (...all: readonly EvalRoundFacts[]): EvalRoundFacts => {
   return { total, run, notRun, byClass, overrunStop };
 };
 
-/** After the runner: the gate over the visible and holdout sets. */
-export async function completeGatedEvalRound(input: GatedEvalRoundInput, plan: Extract<GatedEvalRoundPlan, { status: "ready" }>): Promise<GatedEvalRoundOutput> {
-  const done = (gate: EvalGateResult, cache: { visible: BaseSource; holdout?: BaseSource }): GatedEvalRoundOutput => ({ status: "done", gate, feedback: evalGateAgentFeedback(gate), ...(plan.hiddenMount === undefined ? {} : { hiddenMount: plan.hiddenMount }), cache });
-  const unreadable = (cache: { visible: BaseSource; holdout?: BaseSource } = { visible: "not_used" }): GatedEvalRoundOutput => done(evalGateStopped("inputs_unreadable"), cache);
+/** The old-code baselines for both sets, resolved BEFORE the hidden slot (they run on Rovara's own checkout of main, so how long they take says nothing about the agent's code). */
+export interface GatedBases { readonly visible: BaseFound; readonly holdout: BaseFound; readonly cache: { readonly visible: BaseSource; readonly holdout: BaseSource } }
+export type GatedBasesResult = { readonly ok: true; readonly bases: GatedBases } | { readonly ok: false; readonly output: GatedEvalRoundOutput };
+
+const outputOf = (plan: Extract<GatedEvalRoundPlan, { status: "ready" }>, gate: EvalGateResult, cache: { visible: BaseSource; holdout?: BaseSource }): GatedEvalRoundOutput => ({ status: "done", gate, feedback: evalGateAgentFeedback(gate), ...(plan.hiddenMount === undefined ? {} : { hiddenMount: plan.hiddenMount }), cache });
+
+/** Finds or measures the old-code baselines (cache first; Rovara's own attested base round on a miss). */
+export async function resolveGatedBases(input: GatedEvalRoundInput, plan: Extract<GatedEvalRoundPlan, { status: "ready" }>): Promise<GatedBasesResult> {
+  const unreadable = (cache: { visible: BaseSource; holdout?: BaseSource } = { visible: "not_used" }): GatedBasesResult => ({ ok: false, output: outputOf(plan, evalGateStopped("inputs_unreadable"), cache) });
   const gatePlan = input.gate.plan;
   if (input.holdout === undefined || gatePlan === undefined || plan.checkIndex === undefined) return unreadable();
-  const holdoutInput = input.holdout;
   const today = input.today();
   let settingsFingerprint: string;
   try {
@@ -164,14 +167,27 @@ export async function completeGatedEvalRound(input: GatedEvalRoundInput, plan: E
   } catch {
     return unreadable();
   }
-  const [visibleHead, holdoutHead] = await Promise.all([readEvalMeasures(input.visible.report), readEvalMeasures(holdoutInput.report)]);
-  if (!visibleHead.ok || !holdoutHead.ok) return unreadable();
-  const visibleBase = await baseFor({ set: input.visible, hiddenHash: "none", key: input.key, settingsFingerprint, cache: input.cache, roundKind: input.roundKind, seed: gatePlan.seed, today, maxAgeDays: input.maxAgeDays });
-  const holdoutBase = await baseFor({ set: holdoutInput, hiddenHash: plan.hiddenHash, key: input.key, settingsFingerprint, cache: input.cache, roundKind: input.roundKind, seed: gatePlan.seed, today, maxAgeDays: input.maxAgeDays });
+  const visibleBase = await baseFor({ set: input.visible, hiddenHash: "none", key: input.key, settingsFingerprint, cache: input.cache, roundKind: input.roundKind, seed: gatePlan.seed, today });
+  const holdoutBase = await baseFor({ set: input.holdout, hiddenHash: plan.hiddenHash, key: input.key, settingsFingerprint, cache: input.cache, roundKind: input.roundKind, seed: gatePlan.seed, today });
   const source = (found: BaseFound | "unattested" | undefined): BaseSource => (typeof found === "object" ? found.source : "not_filled");
   const cache = { visible: source(visibleBase), holdout: source(holdoutBase) };
-  if (visibleBase === "unattested" || holdoutBase === "unattested") return done(evalGateStopped("base_round_unattested"), cache);
+  if (visibleBase === "unattested" || holdoutBase === "unattested") return { ok: false, output: outputOf(plan, evalGateStopped("base_round_unattested"), cache) };
   if (visibleBase === undefined || holdoutBase === undefined) return unreadable(cache);
+  return { ok: true, bases: { visible: visibleBase, holdout: holdoutBase, cache: { visible: cache.visible, holdout: cache.holdout } } };
+}
+
+/** After the runner: the gate over the visible and holdout sets. `bases` come from `resolveGatedBases` (run before the hidden slot); without them they are resolved here. */
+export async function completeGatedEvalRound(input: GatedEvalRoundInput, plan: Extract<GatedEvalRoundPlan, { status: "ready" }>, bases?: GatedBases): Promise<GatedEvalRoundOutput> {
+  const unreadable = (cache: { visible: BaseSource; holdout?: BaseSource } = { visible: "not_used" }): GatedEvalRoundOutput => outputOf(plan, evalGateStopped("inputs_unreadable"), cache);
+  const gatePlan = input.gate.plan;
+  if (input.holdout === undefined || gatePlan === undefined || plan.checkIndex === undefined) return unreadable();
+  const holdoutInput = input.holdout;
+  const today = input.today();
+  const resolved: GatedBasesResult = bases === undefined ? await resolveGatedBases(input, plan) : { ok: true, bases };
+  if (!resolved.ok) return resolved.output;
+  const { visible: visibleBase, holdout: holdoutBase, cache } = resolved.bases;
+  const [visibleHead, holdoutHead] = await Promise.all([readEvalMeasures(input.visible.report), readEvalMeasures(holdoutInput.report)]);
+  if (!visibleHead.ok || !holdoutHead.ok) return unreadable(cache);
 
   const baseRows = (found: BaseFound) => normalizedQuestions({ questions: found.record.questions });
   const holdoutBaseRows = baseRows(holdoutBase);
@@ -188,7 +204,7 @@ export async function completeGatedEvalRound(input: GatedEvalRoundInput, plan: E
   // The baseline is the OLDER of the two records, and both must be of the exact model version in use.
   const older = visibleBase.record.recordedOn <= holdoutBase.record.recordedOn ? visibleBase.record : holdoutBase.record;
   const sameVersion = visibleBase.record.modelVersion === holdoutBase.record.modelVersion;
-  const baseline: EvalBaselineFacts = { modelVersionAtBase: sameVersion ? (older.modelVersion ?? "") : "", modelVersionNow: input.key.modelVersion, recordedOn: older.recordedOn, today, ...(input.maxAgeDays === undefined ? {} : { maxAgeDays: input.maxAgeDays }) };
+  const baseline: EvalBaselineFacts = { modelVersionAtBase: sameVersion ? (older.modelVersion ?? "") : "", modelVersionNow: input.key.modelVersion, recordedOn: older.recordedOn, today, ...(input.cache.maxAgeDays === undefined ? {} : { maxAgeDays: input.cache.maxAgeDays }) };
   const factsOf = (found: BaseFound): EvalRoundFacts[] => (found.facts === undefined ? [] : [found.facts]);
   const facts = mergeFacts(input.facts, ...factsOf(visibleBase));
   const holdoutFacts = mergeFacts(input.holdoutFacts, ...factsOf(holdoutBase));
@@ -197,7 +213,7 @@ export async function completeGatedEvalRound(input: GatedEvalRoundInput, plan: E
   const said = input.gate.edits;
   const edits = hashesMoved && said !== undefined && said.status === "known" && said.editedQuestionIds.length === 0 && !said.scoringEdited && !said.thresholdsEdited ? { status: "unknown" as const } : said;
   const gate = evalGate({ ...input.gate, edits, visible: visibleData, holdout: holdoutData, facts, holdoutFacts, baseline, ...(input.measuresOnly === undefined ? {} : { measuresOnly: input.measuresOnly }) });
-  return done(gate, cache);
+  return outputOf(plan, gate, cache);
 }
 
 /** Plans, then completes: for callers (and tests) with no step between the two. */

@@ -1,19 +1,17 @@
 // TE-F3-b: the statistics behind the gate. Known values from standard tables, then the paired and Holm rules as behaviour.
 import { describe, expect, it } from "vitest";
-import { holmRejections, normalCdf, normalQuantile, pairQuestionRuns, pairedEffect } from "../../packages/contracts/src/eval-gate-stats.js";
+import { holmRejections, normalCdf, pairQuestionRuns, pairedEffect } from "../../packages/contracts/src/eval-gate-stats.js";
 
 describe("normal distribution", () => {
   it.each([[0, 0.5], [1.959963984540054, 0.975], [-1.959963984540054, 0.025], [0.8416212335729143, 0.8], [3, 0.9986501019683699], [-3, 0.0013498980316301]])("cdf(%s) = %s", (x, expected) => {
     expect(normalCdf(x)).toBeCloseTo(expected, 12);
   });
-  it.each([[0.975, 1.959963984540054], [0.8, 0.8416212335729143], [0.5, 0], [0.995, 2.5758293035489], [0.001, -3.090232306167813], [0.9999, 3.719016485455709]])("quantile(%s) = %s", (p, expected) => {
-    expect(normalQuantile(p)).toBeCloseTo(expected, 9);
-  });
-  it("is the inverse of the cdf, and refuses a p outside (0, 1)", () => {
-    for (const p of [0.01, 0.1, 0.3, 0.7, 0.9, 0.99]) expect(normalCdf(normalQuantile(p))).toBeCloseTo(p, 12);
-    for (const p of [0, 1, -0.1, 1.1, Number.NaN]) expect(Number.isNaN(normalQuantile(p))).toBe(true);
+  it("is monotone, symmetric and clamped", () => {
+    expect(normalCdf(1) + normalCdf(-1)).toBeCloseTo(1, 12);
+    expect(normalCdf(0.84)).toBeCloseTo(0.79955, 4);
     expect(normalCdf(Number.POSITIVE_INFINITY)).toBe(1);
     expect(normalCdf(-100)).toBe(0);
+    expect(Number.isNaN(normalCdf(Number.NaN))).toBe(true);
   });
 });
 

@@ -179,7 +179,21 @@ describe("Rovara's own facts about the base and the head", () => {
     const bad = await setup({ hashHiddenSet: () => Promise.resolve("0".repeat(64)) });
     expect(await runGatedEvalRound(bad.input)).toMatchObject({ gate: { detail: "no_holdout" } });
     const ok = await setup();
-    expect(await planGatedEvalRound(ok.input)).toMatchObject({ status: "ready", hiddenRound: { throwawayWorkspaceCopy: true, pauseWorkingSandbox: true, returnRunnerOutputToAgent: false } });
+    expect(await planGatedEvalRound(ok.input)).toMatchObject({ status: "ready", hiddenRound: { throwawayWorkspaceCopy: true, pauseWorkingSandbox: true, returnRunnerOutputToAgent: false, killSealedRunnerAtSlotEnd: true, resumeWorkingSandbox: "only_after_sealed_runner_killed" } });
+  });
+});
+
+describe("one maximum age", () => {
+  it("is the cache's own: a baseline older than the cache's setting is refused by the gate even when it was read from the cache", async () => {
+    const first = await setup();
+    await runGatedEvalRound({ ...first.input, today: () => "2026-11-13" });
+    // 12 days later by the round's calendar, but the store's own clock still reads the record as fresh: only the one shared setting (7 days) can refuse it.
+    const store = first.held;
+    const sevenDays = { ...(await setup({ held: store })).input, cache: createDocumentBaseScoreCache(store, { companyId: COMPANY, maxAgeDays: 7 }), today: () => "2026-11-25", task: "task-age" };
+    const out = await runGatedEvalRound(sevenDays);
+    expect(out).toMatchObject({ cache: { visible: "hit" }, gate: { qualified: false, detail: "baseline_too_old" } });
+    const thirty = { ...(await setup({ held: store })).input, today: () => "2026-11-25", task: "task-age2" };
+    expect(await runGatedEvalRound(thirty)).toMatchObject({ gate: { qualified: true } });
   });
 });
 
