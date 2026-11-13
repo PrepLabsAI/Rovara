@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ChangeRequestFilesPage, ChangeRequestRef, CodeHost, HostScope } from "../../packages/contracts/src/index.js";
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
+import { tierGate } from "../../packages/broker/src/core/merge/merge.js";
 import { patchDigestOf, recordQuestionsAnswered, recordTierReview, tierFromDiff, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { readReviewInput } from "../../packages/broker/src/core/merge/change-tier-read.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
@@ -248,6 +249,8 @@ describe("the merge recomputes the change tier from the host", () => {
     mode.afterRead = () => { const pr = world.prs[0]!; pr.model.commit(pr.model.getChangeRequest(String(pr.number)).sourceBranch, { "src/late.ts": "export const late = 1;\n" }); mode.afterRead = undefined; };
     expect((await rejects(run)).message).toBe(M.changedAfterConfirm);
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+    // Refused at the tier gate, before anything was claimed: no audit row was staged for a merge that never began.
+    expect(await world.auditRows()).toHaveLength(0);
   });
 
   it("the questions are asked again after a push", async () => {
@@ -305,5 +308,17 @@ describe("the merge recomputes the change tier from the host", () => {
     const direct = tierFromDiff({ files: [{ repository: "app", path: "src/a.ts", status: "added", additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+export const a = 1;" }], complete: true }, { at: AT });
     expect(tier?.level).toBe(direct.level);
     expect(ORG).toBeDefined();
+  });
+});
+
+describe("a head that cannot be bound", () => {
+  it("is refused: the records of reviews are for a head, and there is none to compare", async () => {
+    const { world } = await worldAt("small");
+    const pr = world.prs[0]!;
+    const home = (await world.host.repository("web", 1, pr.repositoryId, ORG))!;
+    // A code host that answers with something that is not a commit id (the fake's own are always 40 hex characters).
+    const odd = Object.create(home.codeHost, { pathKind: { value: undefined }, changeRequestStatus: { value: async (...args: Parameters<CodeHost["changeRequestStatus"]>) => ({ ...(await home.codeHost.changeRequestStatus(...args)), headRevision: "not-a-commit" }) } }) as CodeHost;
+    const task = await world.task();
+    await expect(tierGate(world.deps, task as never, [{ host: odd, repositoryId: pr.repositoryId, repositoryUrl: home.url, number: pr.number, headSha: "not-a-commit" }], world.host.scope(ORG), "small")).rejects.toThrow("which version of the code this is");
   });
 });
