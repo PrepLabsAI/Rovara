@@ -33,6 +33,7 @@ import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { sessionEventItem } from "../core/sessions/store.js";
 import { verifyPublishedChanges } from "../core/build-step/changed-files.js";
+import { runTierChecks } from "../core/build-step/tier-checks.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { announceTaskEnd, completedByMerge } from "../core/task-flow/task-end.js";
@@ -310,6 +311,9 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
           // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
           const task = await readTask(flow, row.taskId);
           if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
+          // A task whose planning steps were skipped: the reviewer's questions, the quick checks and, for a change that grew, the grown tier's reviews, on the head the pull requests have now (read afresh: the post-push write above may have tiered it).
+          const tiered = task === undefined ? undefined : await readTask(flow, row.taskId);
+          if (tiered !== undefined && (await runTierChecks(flow, tiered, budget.beforeRequest)) === "unavailable") unverified = true;
           result = await reconcileTrackingTask(deps, row.taskId, budget);
         } catch (error) {
           const limitedUntil = hostRateLimitRetryAt(error);
