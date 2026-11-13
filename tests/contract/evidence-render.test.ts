@@ -61,11 +61,33 @@ describe("the producer line", () => {
 // M4: the first line never says "Real" for a pack that did not run in a sealed round or that rests on scripted AI replies.
 describe("the first line is never better than where the checks ran", () => {
   it("words a 'real run' claimed outside a sealed round as what it was", () => {
-    for (const isolation of ["sandbox", "developer_machine", "imported"]) {
-      const first = renderEvidence(withLevel("rovara_real_run", isolation)).firstLine;
-      expect(first, isolation).toBe("Verified · Run by Rovara, not sealed");
-      expect(first).not.toMatch(/real/iu);
-    }
+    const first = renderEvidence(withLevel("rovara_real_run", "sandbox")).firstLine;
+    expect(first).toBe("Verified · Run by Rovara, not sealed");
+    expect(first).not.toMatch(/real/iu);
+  });
+
+  // TE-A2b review M3: only a sealed round or the agent's sandbox is a Rovara run; a stored pack (read tolerantly) that says otherwise is worded as where it really ran.
+  it.each([
+    ["developer_machine", "Verified · Ran on a developer machine"],
+    ["imported", "Verified · Imported, not run by Rovara"],
+    ["teleport", "Verified · Where the checks ran is not known"],
+  ])("a 'real run' claimed with isolation %s is not worded as a Rovara run", (isolation, expected) => {
+    const read = readEvidencePack({ ...clone(withLevel("rovara_real_run")), producer: { edition: "code", isolation } });
+    expect(read.status).toBe("v2");
+    if (read.status !== "v2") return;
+    const first = renderEvidence(read.pack, { newer: read.newer }).firstLine;
+    expect(first.startsWith(expected)).toBe(true);
+    expect(first).not.toContain("Run by Rovara");
+    expect(first).not.toMatch(/real/iu);
+  });
+
+  // TE-A2b review L1: a laptop report whose CI has not finished says where it ran (O26), never "Sandbox only, no sealed run".
+  it("a developer machine with the CI still running says it ran on a developer machine", () => {
+    const first = renderEvidence(withLevel("sandbox_only", "developer_machine")).firstLine;
+    expect(first).toBe("Verified · Ran on a developer machine");
+    expect(first).not.toContain("Sandbox only");
+    expect(renderEvidence(withLevel("sandbox_only", "imported")).firstLine).toBe("Verified · Imported, not run by Rovara");
+    expect(renderEvidence(withLevel("sandbox_only", "sandbox")).firstLine).toContain("Sandbox only, no sealed run");
   });
 
   it("words a scripted-AI proof as such and the change proof line says so", () => {
@@ -322,10 +344,32 @@ describe("callers", () => {
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
     // TE-A2b is the first caller (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
     expect(hits.filter((file) => !file.startsWith("packages/contracts/")).sort()).toEqual([
+      "packages/broker/src/core/proof/evidence-guard.ts",
       "packages/broker/src/core/proof/evidence-keep.ts",
       "packages/broker/src/core/proof/evidence-lines.ts",
       "packages/broker/src/core/proof/evidence-pack.ts",
       "packages/broker/src/core/proof/evidence-v2-lines.ts",
     ]);
+  });
+});
+
+// TE-A2b review L2: version 2 is off everywhere until the Cloud half and the TE-A1 gate turn it on. Nothing in a package may set the description's writer to 2, give `keepEvidence` a writer, or read a pack with `loadEvidenceRead` but the files named here.
+describe("nothing turns the version 2 writer on yet", () => {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const grep = (...args: string[]) => {
+    const found = spawnSync("git", ["grep", "--untracked", ...args, "--", ":(glob)packages/*/src/**"], { encoding: "utf8", cwd: root });
+    expect([0, 1]).toContain(found.status);
+    return found.stdout.split("\n").filter((entry) => entry !== "");
+  };
+  it("no package sets `evidenceWriter: 2`", () => {
+    expect(grep("-nE", "evidenceWriter[[:space:]]*:[[:space:]]*2")).toEqual([]);
+  });
+  it("only the writer's own file and the local wiring name keepEvidence, and the wiring gives it no writer", () => {
+    expect(grep("-lE", "keepEvidence\\(").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/local/app/evidence.ts"]);
+    expect(readFileSync(`${root}/packages/broker/src/local/app/evidence.ts`, "utf8")).not.toMatch(/\bwriter\b/u);
+    expect(grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2")).toEqual([]);
+  });
+  it("only the evidence keep file and a comment in the evidence lines name loadEvidenceRead", () => {
+    expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts"]);
   });
 });

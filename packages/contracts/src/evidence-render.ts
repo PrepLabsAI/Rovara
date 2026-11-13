@@ -32,6 +32,9 @@ export const EVIDENCE_LEVEL_WORDS: Record<(typeof EVIDENCE_LEVELS)[number], stri
 /** The level words for a pack that claims a real run but ran somewhere that is not a sealed round, or whose proof rests on scripted AI replies (DECISIONS 156: never "Real"). */
 const NOT_SEALED_LEVEL_WORDS = "Run by Rovara, not sealed";
 const SCRIPTED_AI_LEVEL_WORDS = "Run against scripted AI replies";
+/** The level words when the checks did not run in a sealed round or the agent's sandbox: only those two are a Rovara run, so a laptop report, an imported result or a place this build does not know says where it ran (O26) and never "Run by Rovara". */
+const ELSEWHERE_LEVEL_WORDS = { developer_machine: "Ran on a developer machine", imported: "Imported, not run by Rovara" } as const;
+const UNKNOWN_PLACE_LEVEL_WORDS = "Where the checks ran is not known";
 /** Where the checks ran (O26, O44). */
 export const EVIDENCE_PRODUCER_WORDS = {
   developer_machine: "Ran on a developer machine",
@@ -187,7 +190,13 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const weakest = pack.level.weakest;
   const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
   // The first line is never better than where the checks ran: a "real run" claimed by a pack that ran in the sandbox, on a laptop or elsewhere, or whose proof rests on scripted AI replies, is worded as what it was.
-  const level = pack.level.reached === "rovara_real_run" && scripted ? SCRIPTED_AI_LEVEL_WORDS : pack.level.reached === "rovara_real_run" && isolation !== "sealed" ? NOT_SEALED_LEVEL_WORDS : wordOf(EVIDENCE_LEVEL_WORDS, pack.level.reached);
+  const reached = pack.level.reached as string;
+  const rovaraRan = isolation === "sealed" || isolation === "sandbox";
+  // A level that is about a Rovara run or the sandbox (`rovara_real_run`, `sandbox_only`) is never worded as one when the checks ran elsewhere: a stored pack is read tolerantly, so its producer and its level can disagree.
+  const elsewhere = !rovaraRan && (reached === "rovara_real_run" || reached === "sandbox_only")
+    ? (Object.hasOwn(ELSEWHERE_LEVEL_WORDS, isolation) ? ELSEWHERE_LEVEL_WORDS[isolation as keyof typeof ELSEWHERE_LEVEL_WORDS] : UNKNOWN_PLACE_LEVEL_WORDS)
+    : undefined;
+  const level = elsewhere ?? (reached === "rovara_real_run" && scripted ? SCRIPTED_AI_LEVEL_WORDS : reached === "rovara_real_run" && isolation !== "sealed" ? NOT_SEALED_LEVEL_WORDS : wordOf(EVIDENCE_LEVEL_WORDS, pack.level.reached));
   const firstLine = line([
     wordOf(EVIDENCE_RESULT_WORDS, pack.result),
     level,

@@ -113,6 +113,25 @@ describe("the flags and the weakening words are the shared ones, once", () => {
   });
 });
 
+describe("a stored pack whose producer and level disagree is not shown as a Rovara run (TE-A2b review M3)", () => {
+  it.each(["developer_machine", "imported", "teleport"])("a v2 pack with isolation %s and level rovara_real_run gives no Evidence block", (isolation) => {
+    const wire = JSON.parse(JSON.stringify(evidencePackV2Of(v1Pack(), { ...writer, producer: { edition: "code", isolation: "sealed" } }))) as { producer: { isolation: string }; level: { reached: string } };
+    wire.producer.isolation = isolation;
+    wire.level.reached = "rovara_real_run";
+    const read = readEvidencePack(wire);
+    expect(read.status).toBe("v2");
+    const text = status(context({ evidenceWriter: 2 }, { read })).join("\n");
+    expect(text).not.toContain("## Evidence");
+    expect(text).not.toContain("Run by Rovara");
+  });
+  it("a laptop pack that is honest about itself (the CI still running) still shows, in the laptop words", () => {
+    const wire = JSON.parse(JSON.stringify(evidencePackV2Of(v1Pack(), { ...writer, producer: { edition: "code", isolation: "developer_machine" } }))) as unknown;
+    const text = status(context({ evidenceWriter: 2 }, { read: readEvidencePack(wire) })).join("\n");
+    expect(text).toContain("Verified · Ran on a developer machine");
+    expect(text).not.toContain("Sandbox only");
+  });
+});
+
 describe("a proof that could not compare says so in the v2 block too (TE-B3)", () => {
   const proof = (over: Record<string, unknown> = {}) => ({ schemaVersion: 1 as const, candidateDigest: DIGEST, status: "not_checked" as const, note: "stopped" as const, changedTests: { added: 1, changed: 0, deleted: 0 }, items: [], durationMs: 1, ...over }) as never;
   const LINE = "Test weakening: could not compare (the run was stopped)";

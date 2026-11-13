@@ -109,6 +109,12 @@ describe("the level and the result", () => {
     expect(pack.level.reached).toBe(reached);
     expect(pack.level.weakest?.words).toBe(weakestWords);
   });
+  it("a developer machine while the CI is still running is worded as a laptop report, not as a sandbox with no sealed run (L1, O26)", () => {
+    const pack = evidencePackV2Of(v1([entry("readiness:0", "pytest -q")]), { version: 2, producer: { edition: "code", isolation: "developer_machine" } })!;
+    const first = renderEvidence(pack).firstLine;
+    expect(first).toBe("Verified · Ran on a developer machine");
+    expect(first).not.toContain("Sandbox only");
+  });
   it("a Rovara run with no check that ran is not a real run", () => {
     expect(evidenceLevelOf(v1([entry("readiness:0", "pytest -q", { after: "not_run" })]), sandbox).reached).toBe("sandbox_only");
     expect(evidenceLevelOf(v1([]), sandbox).reached).toBe("sandbox_only");
@@ -185,5 +191,99 @@ describe("TE-B3's shapes: no zero or empty shape is made up", () => {
     expect(v2.weakening).toBeUndefined();
     expect(v2.flags).toBeUndefined();
     expect(EvidencePackV2Schema.safeParse(v2).success).toBe(true);
+  });
+});
+
+describe("TE-A2b review M1: a stored v2 pack with something newer in a check's tests still loads as v1 parts", () => {
+  it("loadEvidencePack reads a v2 pack whose tests part has a key this build does not know", async () => {
+    const w = world();
+    await keepEvidence(w.deps, keepInput({ writer: sandbox }));
+    const pack = await stored(w.blobs) as { checks: { tests: Record<string, unknown> }[] };
+    pack.checks[0]!.tests.flakyRetries = 3;
+    await w.blobs.put(evidencePackKey(TASK, DIGEST), Buffer.from(JSON.stringify(pack), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" }, { overwrite: true });
+    expect((await loadEvidenceRead(w.blobs, TASK, DIGEST))?.status).toBe("v2");
+    const v1 = await loadEvidencePack(w.blobs, TASK, DIGEST);
+    expect(v1?.checks[0]).toMatchObject({ checkId: "readiness:0" });
+  });
+});
+
+describe("TE-A2b review M2: one odd file name never suppresses the pack", () => {
+  const entryOf = (path: string, extra: Record<string, unknown> = {}) => ({ repository: "app", path, added: 1, removed: 0, ...extra });
+  const longClaude = `${"d/".repeat(260)}CLAUDE.md`;
+  const longSnapshot = `tests/__snapshots__/${"a".repeat(586)}.snap`;
+  it.each([
+    ["a 529-character CLAUDE.md path", entryOf(longClaude)],
+    ["a name with a newline", entryOf("AGENTS.md\nevil")],
+    ["a 611-character snapshot path", entryOf(longSnapshot, { snapshotChanged: true })],
+  ])("%s still produces a pack, with the path cut to what the schema reads", (_name, file) => {
+    expect(longClaude.length).toBe(529);
+    expect(longSnapshot.length).toBe(611);
+    const pack = evidencePackV2Of(v1([entry("readiness:0", "pytest -q")], { rawText: raw }), { ...sandbox, changedFiles: [file] });
+    expect(pack).toBeDefined();
+    expect(EvidencePackV2Schema.safeParse(pack).success).toBe(true);
+  });
+  it("keeps the end of a long path (the file name) and a flagged instruction file stays flagged", () => {
+    const pack = evidencePackV2Of(v1([entry("readiness:0", "pytest -q")], { rawText: raw }), { ...sandbox, changedFiles: [entryOf(longClaude)] })!;
+    const [shown] = pack.flags!.instructionFiles;
+    expect(shown!.length).toBeLessThanOrEqual(500);
+    expect(shown!.endsWith("CLAUDE.md")).toBe(true);
+  });
+  it("a name that is nothing but hidden characters is dropped and counted, and the pack is still kept", async () => {
+    const report = { droppedPaths: 0 };
+    const pack = evidencePackV2Of(v1([entry("readiness:0", "pytest -q")], { rawText: raw }), { ...sandbox, changedFiles: [entryOf("\u200b\n", { snapshotChanged: true }), entryOf("a/__snapshots__/x.snap", { snapshotChanged: true })] }, report);
+    expect(pack?.weakening?.changedSnapshots).toEqual(["a/__snapshots__/x.snap"]);
+    expect(report.droppedPaths).toBe(1);
+    const w = world();
+    const logged: unknown[] = [];
+    const result = await keepEvidence({ ...w.deps, log: (event, data) => { logged.push([event, data]); } }, keepInput({ writer: { ...sandbox, changedFiles: [entryOf("\u200b", { snapshotChanged: true })] } }));
+    expect(result).toMatchObject({ kept: true });
+    expect(logged).toContainEqual(["evidence.paths_dropped", { count: 1 }]);
+  });
+  it("the whole keep path keeps a pack for each odd name", async () => {
+    for (const file of [entryOf(longClaude), entryOf("AGENTS.md\nevil"), entryOf(longSnapshot, { snapshotChanged: true })]) {
+      const w = world();
+      expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, changedFiles: [file] } }))).toMatchObject({ kept: true });
+      expect((await stored(w.blobs)).schemaVersion).toBe(2);
+    }
+  });
+});
+
+describe("TE-A2b review M4: the parts only a v2 writer adds go through the data guard too", () => {
+  const CARD = "4111 1111 1111 1111";
+  const KEY = `${"AKIA"}${"ABCDEFGHIJKLMNOP"}`;
+  const proofWith = (reason: string) => ({ verdicts: [], provenCount: 1, loadFailureOnOld: 0, heldDraft: false, override: { actorId: "user-1", at: "2026-11-13T12:00:00.000Z", reason } });
+  it("a card number in an override reason is not stored; the rest of the proof is", async () => {
+    const w = world();
+    expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, proof: proofWith(`ok, paid with ${CARD}`) } }))).toMatchObject({ kept: true });
+    const text = JSON.stringify(await stored(w.blobs));
+    expect(text).not.toContain("4111");
+    const pack = await stored(w.blobs) as { proof?: { provenCount: number; override?: { actorId: string; reason?: string } }; notTested: { id?: string }[] };
+    expect(pack.proof?.provenCount).toBe(1);
+    expect(pack.proof?.override?.reason).toBeUndefined();
+    expect(pack.notTested.some((item) => item.id === "data_guard")).toBe(true);
+  });
+  it("a credential in an actor id drops the proof part, and one in a changed file name drops the weakening and flags parts", async () => {
+    const w = world();
+    const files = [{ repository: "app", path: `CLAUDE.md.${KEY}/__snapshots__/x.snap`, added: 1, removed: 0, snapshotChanged: true }];
+    const proof = { ...proofWith("fine"), override: { actorId: KEY, at: "2026-11-13T12:00:00.000Z" } };
+    expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, proof, changedFiles: files } }))).toMatchObject({ kept: true });
+    const text = JSON.stringify(await stored(w.blobs));
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain("AKIA");
+  });
+  it("an address in a repository's branch name is not stored", async () => {
+    const w = world();
+    const repositories = [{ id: "app", baseBranch: "fix/jane.doe@gmail.com", baseCommit: "1".repeat(40), headCommit: "2".repeat(40) }];
+    expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, repositories } }))).toMatchObject({ kept: true });
+    expect(JSON.stringify(await stored(w.blobs))).not.toContain("jane.doe");
+  });
+  it("clean v2 parts are stored as they are (nothing is dropped for nothing)", async () => {
+    const w = world();
+    const repositories = [{ id: "app", baseBranch: "main", baseCommit: "1".repeat(40), headCommit: "2".repeat(40) }];
+    await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, repositories, proof: proofWith("reviewed by hand") } }));
+    const pack = await stored(w.blobs) as { proof?: { override?: { reason?: string } }; candidate: { repositories: unknown[] }; notTested: { id?: string }[] };
+    expect(pack.proof?.override?.reason).toBe("reviewed by hand");
+    expect(pack.candidate.repositories).toHaveLength(1);
+    expect(pack.notTested.some((item) => item.id === "data_guard")).toBe(false);
   });
 });

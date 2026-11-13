@@ -386,14 +386,14 @@ export function evidenceLevelOf(pack: Pick<EvidencePack, "checks">, writer: Pick
  * The broker's pack as a version 2 pack, every v1 part kept (`evidencePackV2ToV1` gives the v1 pack back). Undefined when the result does not fit the strict v2 schema: nothing is written then, never a pack a reader would
  * have to guess about.
  */
-export function evidencePackV2Of(pack: EvidencePack, writer: EvidenceV2Writer): EvidencePackV2 | undefined {
+export function evidencePackV2Of(pack: EvidencePack, writer: EvidenceV2Writer, report?: { droppedPaths: number }): EvidencePackV2 | undefined {
   const base = evidencePackV1ToV2(pack, {
     producer: writer.producer,
     level: evidenceLevelOf(pack, writer),
     result: evidenceResultOf(pack, writer.blockedByEnvironment === true),
     ...(writer.repositories === undefined ? {} : { repositories: writer.repositories }),
   });
-  const parts = writer.changedFiles === undefined ? {} : weakeningPartsOf(weakeningFactsOf(writer.changedFiles, pack));
+  const parts = writer.changedFiles === undefined ? {} : weakeningPartsOf(weakeningFactsOf(writer.changedFiles, pack), [], report);
   const v2 = {
     ...base,
     ...parts,

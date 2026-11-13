@@ -8,7 +8,7 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
@@ -16,7 +16,7 @@ import { storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-a
 import type { EvidenceBlobStore } from "./evidence-blob-store.js";
 import type { PinnedDependency } from "./dependency-evidence.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
-import { NO_PROD_DENY, dataGuardScanWorks, guardPack, guardRaw, type DataGuardScan } from "./evidence-guard.js";
+import { NO_PROD_DENY, dataGuardScanWorks, guardPack, guardRaw, guardV2Parts, type DataGuardScan } from "./evidence-guard.js";
 import { kindOfRawCheck } from "./evidence-risk.js";
 
 export interface EvidenceTask { ownerKey: string; workspaceId: string; taskId: string }
@@ -173,8 +173,17 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     const checked = EvidencePackSchema.safeParse(pack);
     if (!checked.success) return { kept: false, reason: "invalid" };
     // TE-A2b: a version 2 writer keeps the same pack as a v2 pack (every v1 part kept); a pack the strict v2 schema refuses is not kept at all.
-    const toKeep = input.writer?.version === 2 ? evidencePackV2Of(checked.data, input.writer) : checked.data;
+    const droppedPaths = { droppedPaths: 0 };
+    let toKeep = input.writer?.version === 2 ? evidencePackV2Of(checked.data, input.writer, droppedPaths) : checked.data;
     if (toKeep === undefined) return { kept: false, reason: "invalid" };
+    if (droppedPaths.droppedPaths > 0) deps.log?.("evidence.paths_dropped", { count: droppedPaths.droppedPaths });
+    // The v1 pack went through the data guard above; what only a v2 pack adds (override reason, file names, branch names, meters) goes through it here, and a part with a finding is left out with the same "left out" line.
+    if (toKeep.schemaVersion === 2) {
+      const v2 = guardV2Parts(toKeep, deny, deps.scan);
+      guarded += v2.dropped.parts;
+      toKeep = v2.dropped.parts === 0 || v2.pack.notTested.some((item) => item.id === WITHHELD_ITEM.id) ? v2.pack
+        : { ...v2.pack, notTested: [...v2.pack.notTested, { kind: WITHHELD_ITEM.kind, id: WITHHELD_ITEM.id, what: WITHHELD_ITEM.text, reason: WITHHELD_ITEM.reason }].slice(0, EVIDENCE_NOT_TESTED_MAX) };
+    }
     if (deps.late?.() === true) return { kept: false, reason: "fault" };
     // The stored pack is kept like the tails (`evidence-std`): it expires with them and is deleted with them on erasure.
     await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(toKeep), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" },
@@ -216,7 +225,7 @@ export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, ta
   if (read.status !== "v2") return undefined;
   // `evidencePackV2ToV1` picks only the fields v1 has (an unknown part or kind is left behind, a kind v1 lacks is `other`), and the result must still parse as a v1 pack: a value this build does not know ("newer") does not.
   const v1 = evidencePackV2ToV1(read.pack as unknown as EvidencePackV2);
-  const parsed = v1 === undefined ? undefined : EvidencePackSchema.safeParse(v1);
+  const parsed = v1 === undefined ? undefined : EvidencePackReadSchema.safeParse(v1);
   return parsed?.success === true ? parsed.data : undefined;
 }
 

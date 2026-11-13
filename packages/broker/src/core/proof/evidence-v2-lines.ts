@@ -21,7 +21,26 @@ export const EVIDENCE_V2_COMPACT_LEVEL = 3;
 export function boundEvidenceV2(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined): { pack: EvidencePackV2Read; newer: Extract<NonNullable<ProofEvidenceContext["read"]>, { status: "v2" }>["newer"] } | undefined {
   const read = context?.read;
   if (read === undefined || read.status !== "v2" || candidateDigest === undefined || read.pack.candidate.digest !== candidateDigest) return undefined;
+  // Only a sealed round or the agent's sandbox is a Rovara run. A stored pack is read tolerantly, so one that claims a real run from a laptop, an imported result or a place this build does not know is not shown as evidence at all.
+  const isolation = read.pack.producer.isolation as string;
+  if (read.pack.level.reached === "rovara_real_run" && isolation !== "sealed" && isolation !== "sandbox") return undefined;
   return { pack: read.pack, newer: read.newer };
+}
+
+/** The longest changed-file path a pack's `flags` and `weakening` parts hold (the schema's line limit). */
+export const EVIDENCE_PATH_MAX = 500;
+/**
+ * A changed-file path as the pack holds it: hidden and control characters (a newline, a bidirectional override) become a space, and a path longer than the schema reads keeps its END (the file name is what a reviewer
+ * looks for) behind an ellipsis. A path with nothing left is dropped and counted in `dropped`. The flag was decided from the real path before this: cleaning never hides a flagged file.
+ */
+export function cleanPaths(paths: readonly string[], dropped?: { droppedPaths: number }): string[] {
+  const out: string[] = [];
+  for (const path of paths) {
+    const clean = path.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim();
+    if (clean === "") { if (dropped !== undefined) dropped.droppedPaths += 1; continue; }
+    out.push(clean.length <= EVIDENCE_PATH_MAX ? clean : `…${clean.slice(clean.length - (EVIDENCE_PATH_MAX - 1))}`);
+  }
+  return out;
 }
 
 /**
@@ -29,13 +48,14 @@ export function boundEvidenceV2(context: ProofEvidenceContext | undefined, candi
  * a count of tests that ran before and not now only when it is above zero, and a part at all only when it says something; no zero or empty shape is made up. The lists the strict schema requires inside a part that is given
  * are filled from the facts, whatever they hold. "Could not compare" is not a part of the pack: it is a line of the description (`evidenceV2Lines`, `notCompared`).
  */
-export function weakeningPartsOf(facts: WeakeningFacts, fallbackRemoved: readonly string[] = []): { weakening?: EvidencePackV2Read["weakening"]; flags?: EvidencePackV2Read["flags"] } {
-  const lists = { absentOnNew: [...(facts.absentOnNew ?? [])], changedTestConfig: [...(facts.changedTestConfig ?? [])], changedSnapshots: [...(facts.changedSnapshots ?? [])], changedFixtures: [...(facts.changedFixtures ?? [])] };
+export function weakeningPartsOf(facts: WeakeningFacts, fallbackRemoved: readonly string[] = [], dropped?: { droppedPaths: number }): { weakening?: EvidencePackV2Read["weakening"]; flags?: EvidencePackV2Read["flags"] } {
+  const paths = (list: readonly string[] | undefined) => cleanPaths(list ?? [], dropped);
+  const lists = { absentOnNew: [...(facts.absentOnNew ?? [])], changedTestConfig: paths(facts.changedTestConfig), changedSnapshots: paths(facts.changedSnapshots), changedFixtures: paths(facts.changedFixtures) };
   const count = facts.absentOnNewCount;
   const rise = facts.skipRise !== undefined && facts.skipRise.after > facts.skipRise.before ? facts.skipRise : undefined;
   const says = rise !== undefined || (count ?? 0) > 0 || fallbackRemoved.length > 0 || Object.values(lists).some((list) => list.length > 0);
-  const instructionFiles = [...(facts.instructionFiles ?? [])];
-  const ciExecutedFiles = [...(facts.ciExecutedFiles ?? [])];
+  const instructionFiles = paths(facts.instructionFiles);
+  const ciExecutedFiles = paths(facts.ciExecutedFiles);
   return {
     ...(says ? { weakening: { ...(rise === undefined ? {} : { skipRise: { before: rise.before, after: rise.after } }), removedTests: [...fallbackRemoved], ...lists, ...((count ?? 0) > 0 ? { absentOnNewCount: count } : {}) } } : {}),
     ...(instructionFiles.length + ciExecutedFiles.length > 0 ? { flags: { instructionFiles, ciExecutedFiles } } : {}),
