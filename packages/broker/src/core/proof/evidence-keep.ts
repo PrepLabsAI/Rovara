@@ -49,6 +49,8 @@ export interface KeepEvidenceInput {
   environmentNote?: EvidenceNotTested | undefined;
   /** Test services: the dependencies the broker pinned for the run (see `PinnedDependency`). */
   dependencies?: readonly PinnedDependency[] | undefined;
+  /** FIX-0518: fixed items the broker adds to the pack's "not tested" list as they are (the laptop's "model hosts allowed in the test sandbox by project setting"). Words from code, never from a repository. */
+  extraNotTested?: readonly EvidenceNotTested[] | undefined;
 }
 
 export interface KeepEvidenceDeps {
@@ -107,7 +109,7 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     const environment = input.environment ?? DEFAULT_EVIDENCE_ENVIRONMENT;
     const built = buildEvidencePack({
       candidateDigest: input.candidateDigest, rawText, checks: input.checks, checkKinds: kinds, environment, ...(input.dependencies === undefined ? {} : { dependencies: input.dependencies }),
-      notTested: [...(environment.envRevision === 0 ? [input.environmentNote ?? NO_ENVIRONMENT_ITEM] : []), ...(rawText === undefined ? [NOT_CAPTURED_ITEM] : []), ...(guarded > 0 ? [WITHHELD_ITEM] : [])], storedArtifacts: new Map(),
+      notTested: [...(input.extraNotTested ?? []), ...(environment.envRevision === 0 ? [input.environmentNote ?? NO_ENVIRONMENT_ITEM] : []), ...(rawText === undefined ? [NOT_CAPTURED_ITEM] : []), ...(guarded > 0 ? [WITHHELD_ITEM] : [])], storedArtifacts: new Map(),
     });
     if (built.pack === undefined) return { kept: false, reason: "invalid" };
     const guardedPack = guardPack(built.pack, built.newArtifacts, deny, deps.scan);

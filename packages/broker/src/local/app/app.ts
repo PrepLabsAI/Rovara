@@ -157,6 +157,8 @@ export interface LocalAppOptions {
   setupAgent?: boolean;
   /** The websites this install's machines reach by their own list, so a setup run's ask for one of them is "already allowed". */
   installDomains?: () => readonly string[];
+  /** FIX-0518: whether the owner let this project's sandboxes reach the model hosts (the owner's config). True puts the fixed sentence in the evidence of the project's runs. Absent: never. */
+  sandboxModelHostsAllowed?: (project: string) => boolean;
   /** For tests: the fetch under a connection's check, and the check that refuses an address that must not be called. */
   connectionsFetch?: typeof fetch;
   connectionsCheckEndpoint?: (url: string) => Promise<void>;
@@ -333,7 +335,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
-  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
+  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs, ...(options.sandboxModelHostsAllowed === undefined ? {} : { sandboxModelHostsAllowed: options.sandboxModelHostsAllowed }) });
   // The project's approved test environment: tasks pin it when they start, a coding or verification run is told its plan, and the owner approves a change on a page (the gate decides it).
   // `pages` and `gate` are made below; the module asks for them when it is used, never when it is built.
   const pagesServer: { current?: LocalPagesServer } = {};

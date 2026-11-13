@@ -6,9 +6,10 @@
 //     re-check of the same code replaces, with the documented opt-in (`overwrite: true` in `evidence-keep.ts`: one pack per task and candidate digest).
 // It is informational: a fault or a slow store only means there is no evidence for this code. It never changes a verdict and never holds a callback longer than `EVIDENCE_KEEP_MAX_MS`.
 import { scanText } from "@agentx/verifier";
-import { workflowSelectedChecks, type CheckEntry, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
+import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, workflowSelectedChecks, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
 import { keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
+import { workspaceKey } from "../../core/task-flow/keys.js";
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
 import { readVerifiedText } from "./documents.js";
 
@@ -22,9 +23,25 @@ export interface LocalEvidence {
   packOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidencePack | undefined>;
 }
 
-export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">; blobs: ObjectStorage }): LocalEvidence {
+/** FIX-0518: the pack's line when the owner let a project's sandboxes reach the model hosts: the fixed sentence, and the setting named (a name, never a value from the repository). */
+export const MODEL_HOSTS_ALLOWED_ITEM: EvidenceNotTested = { kind: "environment", id: "sandbox_model_hosts", text: MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, reason: "sandboxModelHosts is allow in the Rovara config" };
+
+export function createLocalEvidence(options: {
+  flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">;
+  blobs: ObjectStorage;
+  /** FIX-0518: whether the owner let this project's sandboxes reach the model hosts. Absent: the deny stands and the pack says nothing about it. */
+  sandboxModelHostsAllowed?: ((project: string) => boolean) | undefined;
+}): LocalEvidence {
   const { flow, blobs } = options;
   const log = (event: string, fields: Record<string, unknown>): void => flow.log?.({ component: "evidence", event, ...fields });
+  // The task's project is on its workspace record. Anything unreadable says nothing: the pack never claims the setting was used on a guess.
+  const modelHostsAllowed = async (workspaceId: string): Promise<boolean> => {
+    if (options.sandboxModelHostsAllowed === undefined) return false;
+    try {
+      const record = await flow.store.get(workspaceKey(workspaceId));
+      return typeof record?.["projectName"] === "string" && options.sandboxModelHostsAllowed(record["projectName"]) === true;
+    } catch { return false; }
+  };
   return {
     async keepAfterChecks(input) {
       const { task, operation } = input;
@@ -57,6 +74,7 @@ export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" 
       }, {
         orgId: flow.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),
+        ...(await modelHostsAllowed(task.workspaceId) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => { late = true; resolve(undefined); }, EVIDENCE_KEEP_MAX_MS); timer.unref(); });
