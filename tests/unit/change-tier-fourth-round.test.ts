@@ -105,7 +105,7 @@ describe("the records are bound to the full head and the patch", () => {
   const h1 = `abcdef0123${"1".repeat(30)}`;
   const h2 = `abcdef0123${"2".repeat(30)}`;
   const PATCH = "@@ -1 +1 @@\n-a\n+b";
-  const small = (head: string | undefined) => tierFromDiff({ files: [f("src/a.ts", chg(["a"], ["b"]))], complete: true }, { ...ctx, headSha: head as string, ...(head === undefined ? { headSha: undefined } : {}) } as never);
+  const small = (head: string | undefined) => tierFromDiff({ files: [f("src/a.ts", chg(["a"], ["b"]))], complete: true }, { ...ctx, headSha: head, ...(head === undefined ? { headSha: undefined } : {}) });
 
   it("a record for one head does not satisfy another that shares its first 10 characters", async () => {
     const flow = recordReviewerFloor(recordTier(undefined, small(h1)).flow, await applyReviewerFloor({ tier: small(h1), reviewer: allNo, files: [], patchText: PATCH }), ctx.at);

@@ -12,7 +12,7 @@ import { MERGE_NOT_READY_MESSAGES as M } from "../../packages/contracts/src/inde
 
 const AT = "2026-11-09T10:00:00.000Z";
 
-type Mode = { patches: boolean; failing: boolean; calls: number; afterRead?: () => void };
+type Mode = { patches: boolean; failing: boolean; calls: number; afterRead?: (() => void) | undefined };
 
 /** A host that calls itself github. The fake lists each file with the text of its change, as GitHub does; this one can be told to leave the text out, or to fail. */
 function patchingHost(model: FakeHostModel, mode: Mode): CodeHost {
