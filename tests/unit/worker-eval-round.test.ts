@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentBaseScoreCache, evalCommandFingerprint, type BaseScoreCache, type EvalBaseAttestation, type EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
+// The attestation brand lives in one module instance: the worker's (the built contracts package), so the factory comes from there too.
+import { attestRovaraOnlyBaseCheckout } from "@agentx/contracts";
 import { MeasuresFileSchema } from "../../packages/contracts/src/measures-file.js";
 import { evalFactsAllRun, evalFactsFromClasses } from "../../packages/contracts/src/eval-pacing.js";
 import type { HiddenEvalSetSource } from "../../packages/contracts/src/eval-hidden-set.js";
@@ -46,7 +48,7 @@ async function setup(over: Partial<EvalRoundInput> = {}, options: { head?: strin
     settings: { runs: 3, seed: "seed-1", repeats: 5, imageDigest: `registry.example/worker@sha256:${"c".repeat(64)}`, route: "gemini" },
     evalSetHash: SET_HASH,
     cache,
-    runBaseRound: () => { baseRuns.count += 1; return Promise.resolve(options.baseFile === undefined && "baseFile" in options ? { ok: false as const } : { ok: true as const, measures: options.baseFile ?? baseFile(), caseCount: 50, facts: options.baseFacts ?? evalFactsAllRun(50), evalSetHash: options.baseEvalSetHash ?? options.baseFile?.eval_set_hash ?? SET_HASH, attestation: "attestation" in options ? (options.attestation as EvalBaseAttestation) : { checkout: "rovara_only" as const, workingSandboxPaused: true as const, baseCommit: input.key.baseCommit } }); },
+    runBaseRound: () => { baseRuns.count += 1; return Promise.resolve(options.baseFile === undefined && "baseFile" in options ? { ok: false as const } : { ok: true as const, measures: options.baseFile ?? baseFile(), caseCount: 50, facts: options.baseFacts ?? evalFactsAllRun(50), evalSetHash: options.baseEvalSetHash ?? options.baseFile?.eval_set_hash ?? SET_HASH, attestation: "attestation" in options ? (options.attestation as EvalBaseAttestation) : attestRovaraOnlyBaseCheckout({ baseCommit: input.key.baseCommit }) }); },
     facts: evalFactsAllRun(50),
     today: () => "2026-11-13",
     ...over,
@@ -156,13 +158,17 @@ describe("the base score cache in the round", () => {
     const { input } = await setup({}, { head: JSON.stringify({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.82, direction: "up_good", spread: 0.05, count: 50 }] }) });
     expect(await runEvalRound(input)).toMatchObject({ status: "done", result: { verdicts: [{ verdict: "no_detectable_change" }] } });
   });
-  it("accepts a base round only with the runner's attestation of a Rovara-only checkout and a paused working sandbox for THAT commit: otherwise nothing is cached or compared", async () => {
-    const good = { checkout: "rovara_only" as const, workingSandboxPaused: true as const, baseCommit: COMMIT };
-    for (const bad of [undefined, { ...good, checkout: "shared_workspace" }, { ...good, workingSandboxPaused: false }, { ...good, baseCommit: "c".repeat(40) }, null, {}] as unknown[]) {
-      const round = await setup({}, { attestation: bad as never });
-      expect(await runEvalRound(round.input), JSON.stringify(bad)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "not_run", notRun: { reason: "base_round_unattested" }, measures: [] } });
+  it("accepts a base round only with a BRANDED attestation for THAT commit, made by the factory: a hand-written object, however well-formed, is refused, and nothing is cached or compared", async () => {
+    const good = attestRovaraOnlyBaseCheckout({ baseCommit: COMMIT });
+    const bad: unknown[] = [undefined, null, {}, { checkout: "rovara_only", workingSandboxPaused: true, baseCommit: COMMIT }, { ...good }, Object.assign(Object.create(null), good) as unknown, attestRovaraOnlyBaseCheckout({ baseCommit: "c".repeat(40) })];
+    for (const attestation of bad) {
+      const round = await setup({}, { attestation: attestation as never });
+      expect(await runEvalRound(round.input), JSON.stringify(attestation)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "not_run", notRun: { reason: "base_round_unattested" }, measures: [] } });
       expect((await round.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
     }
+    expect(() => attestRovaraOnlyBaseCheckout({ baseCommit: "main" })).toThrow(RangeError);
+    const accepted = await setup({}, { attestation: good });
+    expect(await runEvalRound(accepted.input)).toMatchObject({ status: "done", cache: "filled" });
   });
   it("applies the minimum to the base round too: a base round with too few cases is neither cached nor compared", async () => {
     const small = await setup({}, { baseFacts: evalFactsAllRun(19) });

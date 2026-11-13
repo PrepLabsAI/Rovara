@@ -3,7 +3,7 @@
 //
 // THE RULE (the plan block TE-F3, DECISIONS 162 layer 4): the band is base +/- k x spread, k = 2 (`EVAL_NOISE_K`, a data constant). A measure is `better` or `worse` ONLY when the head is strictly OUTSIDE the band, in the measure's
 // `direction`. Inside it, or on its edge, nothing changed ("no detectable change"). With no spread at all (the runner gave none and the base round had none, or both are zero) there is no noise estimate, and the difference is
-// not judged ("difference not judged: no noise estimate"): nothing but a measured difference outside a measured band ever reads as a change. The spread comes from the base round only; the head runner's own spread is ignored (it is the thing under test).
+// not judged ("difference not judged: no noise estimate"): nothing but a measured difference outside a measured band ever reads as a change. The spread is the one MAIN's runner reported in the base round's measures file (cached with the base score); the head runner's own spread is ignored (it is the thing under test). Rovara-measured paired repeats are F3-b's.
 //
 // This layer assigns NO label. DECISIONS 170 has three: "Proven", "No regression measured (eval)" and "Improved on eval"; the last two need more than a measure outside a band (a pre-fixed minimum detectable drop, paired per-question noise, a rotating
 // holdout, coverage, categories). That is the next lane (F3-b). A `better` here is a measure beyond the band, never "Improved on eval", and nothing here is "Proven".
@@ -71,7 +71,7 @@ export interface EvalVerdictInput {
   readonly base: number;
   readonly head: number;
   /**
-   * The noise estimate: the spread of Rovara's OWN repeated base runs. The runner's own spread for the head scores is never an input (a runner could report any spread, and a wide one would hide a real drop).
+   * The noise estimate: the spread main's runner reported in the base round (not a Rovara-measured repeat: F3-b owns those). The runner's own spread for the head scores is never an input (a runner could report any spread, and a wide one would hide a real drop).
    */
   readonly spread?: number;
 }
@@ -112,7 +112,7 @@ export function evalVerdictFor(input: EvalVerdictInput): EvalVerdictOutput {
 export type EvalEvidenceMeasure = z.infer<typeof EvidenceMeasureSchema>;
 
 export interface EvalMeasureResult {
-  /** The measure's position in the runner's file. */
+  /** The measure's position: in the runner's file, or (hidden round) in Rovara's base record. */
   readonly index: number;
   /** Inert, bounded text: the runner's name, the base record's name, or "eval measure N" (a hidden-set round never shows the runner's own). */
   readonly label: string;
@@ -208,12 +208,14 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
     const match = input.base?.measures.find((candidate) => candidate.name === entry.name && candidate.unit === entry.unit && candidate.direction === entry.direction);
     // A hidden-set round reports ONLY measures Rovara's own base round knows: a measure it does not know is dropped entirely (its name, unit and value never reach the result).
     if (hidden && match === undefined) return;
+    // The position a measure is reported at: in a hidden round it is the measure's place in Rovara's BASE record, never its place in the runner's list (the runner would otherwise choose the position, and with it ~5 bits per measure).
+    const slot = hidden && match !== undefined && input.base !== undefined ? input.base.measures.indexOf(match) : index;
     const label = inert(hidden ? (match?.name ?? "") : entry.name, 40);
     const unit = inert(hidden ? (match?.unit ?? "") : entry.unit, 10);
     // The cases behind a score are the cases that ran, from Rovara's facts: the runner's own count is only read to decide whether the score may be compared.
     const count = facts.run;
     const refuse = (reason: EvalNotRunReason, showHead: boolean): void => {
-      verdicts.push({ index, label, unit, verdict: "not_run", reason, sentence: EVAL_NOT_RUN_SENTENCES[reason], ...(showHead && !hidden && readable(entry.value) ? { head: clamp(entry.value) } : {}), count });
+      verdicts.push({ index: slot, label, unit, verdict: "not_run", reason, sentence: EVAL_NOT_RUN_SENTENCES[reason], ...(showHead && !hidden && readable(entry.value) ? { head: clamp(entry.value) } : {}), count });
     };
     if (entry.count !== undefined && entry.count < minQuestions) return refuse("too_few_questions", false);
     if (facts.notRun > 0 && entry.count !== facts.run) return refuse("partial_run", false);
@@ -224,7 +226,7 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
     if (hidden) {
       // Pass or fail only: a score beyond the band reads as no drop, and no value is kept.
       const verdict = judged.verdict === "worse" ? "worse" : judged.verdict === "no_noise_estimate" ? "no_noise_estimate" : "no_detectable_change";
-      verdicts.push({ index, label, unit, verdict, sentence: verdict === "no_noise_estimate" ? EVAL_VERDICT_WORDS.no_noise_estimate : HIDDEN_VERDICT_WORDS[verdict], count });
+      verdicts.push({ index: slot, label, unit, verdict, sentence: verdict === "no_noise_estimate" ? EVAL_VERDICT_WORDS.no_noise_estimate : HIDDEN_VERDICT_WORDS[verdict], count });
       return;
     }
     verdicts.push({ index, label, unit, verdict: judged.verdict, sentence: EVAL_VERDICT_WORDS[judged.verdict], head: clamp(entry.value), base: match.value, count });
@@ -235,6 +237,8 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
     const checked = EvidenceMeasureSchema.safeParse(candidate);
     if (checked.success && measures.length < EVIDENCE_MEASURES_MAX) measures.push(checked.data);
   });
+  // A hidden round lists its measures in the BASE record's order, whatever order the runner wrote them in.
+  if (hidden) verdicts.sort((left, right) => left.index - right.index);
   if (hidden && verdicts.length === 0) return evalNotRunResult({ roundKind, reason: "no_base_score", facts, hiddenSetUsed: true });
   const lines = verdicts.slice(0, SUMMARY_MEASURES_LISTED).map((verdict) => {
     if (verdict.base === undefined || verdict.head === undefined) return `${verdict.label}: ${verdict.sentence}`;

@@ -74,7 +74,7 @@
 //   h. spoofing: a packet from .4 with the source address .3 or .2 gets no answer from the helper, and a bound-address trick (IP_FREEBIND) cannot make the helper count a name for a caller it does not serve
 //      (a spoofed source on the same bridge can only add a name to the record blindly: it never receives the answer).
 import { isIP } from "node:net";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { chmod, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { HIDDEN_EVAL_MOUNT_PATH, agentXError } from "@agentx/contracts";
@@ -381,13 +381,36 @@ function realish(path: string): string {
   const rest: string[] = [];
   for (;;) {
     try {
-      return posix.join(realpathSync(ancestor), ...rest);
+      // `.native`: the system's own answer, so a case change on a case-insensitive disk (`.../TASK` for `.../task`) is the real spelling, not a different path.
+      return posix.join(realpathSync.native(ancestor), ...rest);
     } catch {
       const parent = posix.dirname(ancestor);
       if (parent === ancestor) return resolved;
       rest.unshift(posix.basename(ancestor));
       ancestor = parent;
     }
+  }
+}
+
+/** The device and inode of a path (links followed), or undefined when it does not exist. Two paths with one id are one directory, whatever they are called (a case change, a bind mount). */
+function pathId(path: string): string | undefined {
+  try {
+    const found = statSync(path, { bigint: true });
+    return `${String(found.dev)}:${String(found.ino)}`;
+  } catch {
+    return undefined;
+  }
+}
+/** The ids of a path and of every existing ancestor of it. */
+function chainIds(path: string): Set<string> {
+  const ids = new Set<string>();
+  let at = posix.resolve(path);
+  for (;;) {
+    const id = pathId(at);
+    if (id !== undefined) ids.add(id);
+    const parent = posix.dirname(at);
+    if (parent === at) return ids;
+    at = parent;
   }
 }
 
@@ -455,6 +478,16 @@ function assertHiddenRound(args: { hiddenEvalSetPath: string; hiddenRoundWorkspa
   if (path === args.files.resolvConfPath || path === args.files.hostsPath) throw agentXError("CONFIG_INVALID", "the hidden eval set cannot be one of the run's own files");
   const real = realish(path);
   if (isUnder(real, copy) || isUnder(real, task) || isUnder(copy, real) || isUnder(task, real)) throw agentXError("CONFIG_INVALID", "the hidden eval set is inside a workspace (or around one): it must be outside every workspace tree");
+  // The same checks by device and inode, which no spelling of a path can change: a bind mount, or a name that differs only in case, is still the same directory.
+  const copyId = pathId(copy);
+  const taskId = pathId(task);
+  const hiddenId = pathId(real);
+  const copyChain = chainIds(copy);
+  const taskChain = chainIds(task);
+  const hiddenChain = chainIds(real);
+  if (copyId !== undefined && taskId !== undefined && (copyId === taskId || copyChain.has(taskId) || taskChain.has(copyId))) throw agentXError("CONFIG_INVALID", "the hidden round's workspace copy is the task workspace, or inside it");
+  for (const id of [copyId, taskId]) if (id !== undefined && hiddenChain.has(id)) throw agentXError("CONFIG_INVALID", "the hidden eval set is inside a workspace (or around one): it must be outside every workspace tree");
+  if (hiddenId !== undefined && (copyChain.has(hiddenId) || taskChain.has(hiddenId))) throw agentXError("CONFIG_INVALID", "the hidden eval set is inside a workspace (or around one): it must be outside every workspace tree");
   return real;
 }
 
@@ -786,6 +819,7 @@ export async function startCheckSandbox(docker: DockerCli, plan: CheckSandboxPla
   });
   if (problems.length > 0) throw agentXError("CONFIG_INVALID", `the sealed check sandbox's arguments are unsound: ${problems.join("; ")}`);
   if (plan.hiddenEvalSetPath !== undefined) {
+    if (plan.mustPauseWorking !== true) throw agentXError("CONFIG_INVALID", "a plan that mounts a hidden eval set must say the working sandbox is paused for the round");
     // The hidden set's rules are asserted again from the plan's own data (it is plain data, and may have been edited), and the working sandbox must be paused: the proof is held AND the state is read once more.
     const real = assertHiddenRound({ hiddenEvalSetPath: plan.hiddenEvalSetPath, hiddenRoundWorkspace: plan.hiddenRoundWorkspace, rootPath: plan.rootPath, files: { resolvConfPath: plan.resolvConfPath, hostsPath: plan.hostsPath } });
     if (real !== plan.hiddenEvalSetPath) throw agentXError("CONFIG_INVALID", "the hidden eval set's path in the plan is not its real path");
@@ -859,8 +893,12 @@ export async function withDetachedWorking<T>(
   // network at .3, as before.
   if (options.returnTo !== undefined && options.returnTo !== "none") assertWorkingPhaseNetwork(plan, options.returnTo);
   // A hidden round needs a way to discard its throwaway workspace copy afterwards: without one it does not start.
-  const hiddenRound = plan.hiddenEvalSetPath !== undefined;
+  // `mustPauseWorking` is enforced here: a plan that says it (or that mounts a hidden set, which must say it) pauses the working sandbox, confirmed, for the whole round.
+  const hiddenRound = plan.hiddenEvalSetPath !== undefined || plan.mustPauseWorking === true;
+  if (plan.hiddenEvalSetPath !== undefined && plan.mustPauseWorking !== true) throw agentXError("CONFIG_INVALID", "a plan that mounts a hidden eval set must say the working sandbox is paused for the round");
   if (hiddenRound && typeof options.discardWorkspaceCopy !== "function") throw agentXError("CONFIG_INVALID", "a hidden round discards its throwaway workspace copy afterwards: say how");
+  // The working sandbox never rejoins the round's own network in a hidden round (it is paused, and the helpers are shared): the caller names where it belongs afterwards.
+  if (hiddenRound && options.returnTo === undefined) throw agentXError("CONFIG_INVALID", "a hidden round says where the working sandbox goes back to (returnTo): it never rejoins the round's network");
   const detached = await detachWorkingSandbox(docker, plan);
   // `pauseWorking`: the working sandbox is FROZEN (`docker pause`) from before the check sandbox starts until the check sandbox is gone. The two share the workspace volume, so a process the agent or a seed left running in the
   // working sandbox could otherwise relay workspace files to the internet during a sealed round. A pause that fails stops the round (fail closed); a sandbox that could not be removed stays paused.
@@ -883,8 +921,21 @@ export async function withDetachedWorking<T>(
   }
   let cleanup: unknown;
   try {
-    await removeCheckSandbox(docker, plan);
-    if (hiddenRound) await options.discardWorkspaceCopy!();
+    try {
+      await removeCheckSandbox(docker, plan);
+    } catch (error) {
+      // The check sandbox is still alive and still mounts the copy: the copy is NOT discarded (it is in use), the working sandbox stays paused, and the error says so.
+      if (hiddenRound) throw agentXError("RUNTIME_UNAVAILABLE", `${(error as Error).message}; the throwaway workspace copy was left on disk and the working sandbox stays paused`);
+      throw error;
+    }
+    if (hiddenRound) {
+      // Discard BEFORE the working sandbox is unpaused: it must not wake up next to a copy of its workspace. A discard that fails is loud and leaves the working sandbox paused.
+      try {
+        await options.discardWorkspaceCopy!();
+      } catch {
+        throw agentXError("RUNTIME_UNAVAILABLE", "the throwaway workspace copy could not be discarded and was left on disk; the working sandbox stays paused");
+      }
+    }
     if (options.returnTo === undefined) await reattachWorkingSandbox(docker, plan);
     else if (options.returnTo !== "none") await ensureOnWorkingPhaseNetwork(docker, plan, options.returnTo);
     if (paused) await unpauseWorkingSandbox(docker, plan);
