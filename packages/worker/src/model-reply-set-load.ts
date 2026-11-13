@@ -170,20 +170,31 @@ async function objectsDirectoryOf(repositoryRoot: string): Promise<string | unde
   return objects.includes("\n") ? undefined : objects;
 }
 
-/** One entry of a raw tree object (`<mode> <name>\0<20 raw bytes>`, repeated), found by name; `malformed` for a tree that does not parse. */
+/**
+ * One entry of a raw tree object (`<mode> <name>\0<20 raw bytes>`, repeated), found by name. The WHOLE tree is parsed and held to git's own rules: names are unique and entries are in git's order (by name, a folder as if it had a
+ * trailing `/`), so an object that lists a name twice (first match would win) or out of order is `malformed`, never read. Undefined when the name is not there.
+ */
 function findTreeEntry(tree: Buffer, name: string): { mode: string; id: string } | "malformed" | undefined {
   let at = 0;
+  let found: { mode: string; id: string } | undefined;
+  let previous: Buffer | undefined;
+  const names = new Set<string>();
   while (at < tree.length) {
     const space = tree.indexOf(0x20, at);
     const nul = space < 0 ? -1 : tree.indexOf(0, space);
     if (space < 0 || nul < 0 || nul + 21 > tree.length) return "malformed";
     const mode = tree.subarray(at, space).toString("latin1");
-    const entryName = tree.subarray(space + 1, nul).toString("utf8");
-    if (!/^\d{5,6}$/u.test(mode)) return "malformed";
-    if (entryName === name) return { mode, id: tree.subarray(nul + 1, nul + 21).toString("hex") };
+    const nameBytes = tree.subarray(space + 1, nul);
+    const entryName = nameBytes.toString("latin1");
+    if (!/^\d{5,6}$/u.test(mode) || entryName === "" || names.has(entryName)) return "malformed";
+    names.add(entryName);
+    const key = Buffer.concat([nameBytes, Buffer.from(mode === "40000" ? "/" : "")]);
+    if (previous !== undefined && Buffer.compare(previous, key) >= 0) return "malformed";
+    previous = key;
+    if (entryName === name) found = { mode, id: tree.subarray(nul + 1, nul + 21).toString("hex") };
     at = nul + 21;
   }
-  return undefined;
+  return found;
 }
 
 /**

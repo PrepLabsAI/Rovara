@@ -53,6 +53,14 @@ describe("the variables", () => {
       ["GCLOUD_PROJECT", "kept"], ["GOOGLE_CLOUD_QUOTA_PROJECT", "kept"], ["TOKENIZERS_PARALLELISM", "kept"], ["SERVICE_AUTH", "kept"], ["BASIC_AUTH", "kept"], ["SLACK_WEBHOOK_URL", "kept"], ["SESSIONKEY", "kept"], ["DOCKER_CONFIG", "kept"], ["KUBECONFIG", "kept"],
       ["GOOGLE_CLOUD_PROJECT", "kept"], ["NPM_CONFIG__AUTH", "kept"], ["SIGNING_KEY", "kept"], ["KEYBOARD", "kept"], ["MONKEY", "kept"], ["PRIMARY_KEY", "kept"], ["SORT_KEY", "kept"], ["TURNKEY", "kept"], ["SSH_KEY", "kept"], ["CONFIG_KEY_PATH", "kept"],
       ["PATH", "kept"], ["HOME", "kept"], ["UNRELATED", "kept"],
+      // the vendor-prefixed rule (the second re-check's probe list): every AI or cloud vendor name carrying KEY, AUTH, BEARER, CREDENTIAL or PAT, PRIVATE_KEY, SERVICE_ACCOUNT, GH_PAT and GITHUB_PAT; checked BEFORE any *_PASS/*_PWD/*_PASSWORD exemption
+      ...["GEMINI_KEY", "OPENAI_KEY", "ANTHROPIC_KEY", "MISTRAL_KEY", "GROQ_KEY", "AZURE_OPENAI_KEY", "COHERE_KEY", "LLM_KEY", "AI_KEY", "MODEL_KEY", "OPENAI_AUTH", "ANTHROPIC_AUTH", "LLM_AUTH", "AZURE_AD_AUTH", "VERTEX_PRIVATE_KEY", "GOOGLE_PRIVATE_KEY",
+        "GCP_SA_KEY", "GOOGLE_SERVICE_ACCOUNT_KEY", "GOOGLE_SERVICE_ACCOUNT_JSON", "BEDROCK_BEARER", "OPENAI_BEARER", "GITHUB_PAT", "GH_PAT", "ANTHROPIC_OAUTH", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_ACCESS_KEY", "AWS_ACCESS_KEY", "AZURE_CLIENT_CERTIFICATE_PATH",
+        "HUGGINGFACE_KEY", "GITHUB_TOKEN_PASSWORD", "OPENAI_API_KEY_PASS", "ANTHROPIC_API_KEY_PWD", "OPENAI_APIKEY_PASSWORD", "GOOGLE_API_CREDENTIAL", "OPENAI_CREDENTIAL", "SERVICE_ACCOUNT", "GCLOUD_SERVICE_KEY", "VERTEX_AI_KEY", "VERTEXAI_KEY",
+        "DEEPSEEK_KEY", "PORTKEY_KEY", "HELICONE_AUTH", "COHERE_AUTH", "xai_key", "Together_Key", "Perplexity_Auth", "FIREWORKS_PAT", "OPENROUTER_KEY", "HF_KEY", "HUGGING_AUTH", "CLOUDSDK_AUTH_X", "GCP_CREDENTIAL", "MY_CREDENTIAL", "app_credential", "SERVICE_CREDENTIAL"].map((name): [string, "unset"] => [name, "unset"]),
+      // deliberately KEPT: a vendor name with none of the words, and a bare non-vendor *_KEY name
+      ["AZURE_OPENAI_ENDPOINT", "kept"], ["AZURE_API_BASE", "kept"], ["OPENAI_ORG_ID", "kept"], ["OPENAI_PROJECT", "kept"], ["OAUTH_JSON", "kept"], ["AZURE_CLIENT_ID", "kept"], ["AZURE_TENANT_ID", "kept"], ["CLOUDSDK_CORE_ACCOUNT", "kept"],
+      ["AWS_SSO_SESSION", "kept"], ["OPENAI_SESSION", "kept"], ["STRIPE_KEY", "kept"], ["CACHE_KEY", "kept"],
     ];
     const inherited = Object.fromEntries(TABLE.map(([name]) => [name, secret]));
     const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai"], baseUrl: "http://h:1", metadataHostPort: "127.0.0.1:9", adc: ADC, inherited });
@@ -146,6 +154,8 @@ describe("the loopback child", () => {
     setEnv("GEMINI_API_KEY", key);
     setEnv("AGENTX_TASK_SHELL", "local");
     setEnv("AWS_SECRET_ACCESS_KEY", key);
+    setEnv("GEMINI_KEY", key);
+    setEnv("STRIPE_KEY", "stripe-test-value");
     setEnv("NPM_TOKEN", key);
     setEnv("DATABASE_URL", "postgres://local/test");
     const { root, source } = repo();
@@ -157,19 +167,22 @@ describe("the loopback child", () => {
       const url = new URL(process.env.OPENAI_BASE_URL + "/chat/completions");
       const body = JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "hi" }] });
       const req = http.request(url, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + process.env.OPENAI_API_KEY } }, (res) => {
-        let text = ""; res.on("data", (c) => (text += c)); res.on("end", () => console.log(JSON.stringify({ status: res.statusCode, key: process.env.OPENAI_API_KEY, gemini: process.env.GEMINI_API_KEY, creds: process.env.GOOGLE_APPLICATION_CREDENTIALS, aws: process.env.AWS_SECRET_ACCESS_KEY, npm: process.env.NPM_TOKEN, db: process.env.DATABASE_URL, text })));
+        let text = ""; res.on("data", (c) => (text += c)); res.on("end", () => console.log(JSON.stringify({ status: res.statusCode, key: process.env.OPENAI_API_KEY, gemini: process.env.GEMINI_API_KEY, creds: process.env.GOOGLE_APPLICATION_CREDENTIALS, aws: process.env.AWS_SECRET_ACCESS_KEY, geminiKey: process.env.GEMINI_KEY, stripe: process.env.STRIPE_KEY, npm: process.env.NPM_TOKEN, db: process.env.DATABASE_URL, text })));
       });
       req.end(body);`;
     const result = await runners.runProjectCommand({ cwd: ".", executable: process.execPath, args: ["-e", script], timeoutSeconds: 30 }, new AbortController().signal);
     await runners.endRound?.();
     expect(result.exitCode, result.stderr).toBe(0);
-    const out = JSON.parse(result.stdout) as { status: number; key: string; gemini: string; creds: string; aws?: string; npm?: string; db?: string; text: string };
+    const out = JSON.parse(result.stdout) as { status: number; key: string; gemini: string; creds: string; aws?: string; geminiKey?: string; stripe?: string; npm?: string; db?: string; text: string };
     expect(out.status).toBe(200);
     expect(out.key).toBe(MODEL_DUMMY_KEY);
     expect(out.gemini).toBe(MODEL_DUMMY_KEY);
     expect(out.creds).toBe("");
     // unset (absent, not blank) in the command; a database URL is untouched
     expect(out.aws).toBeUndefined();
+    // the review's probe: a vendor-prefixed KEY name never reaches the child; a bare non-vendor *_KEY name is deliberately kept
+    expect(out.geminiKey).toBeUndefined();
+    expect(out.stripe).toBe("stripe-test-value");
     expect(out.npm).toBeUndefined();
     expect(out.db).toBe("postgres://local/test");
     expect(out.text).toContain("Hello from the laptop script.");

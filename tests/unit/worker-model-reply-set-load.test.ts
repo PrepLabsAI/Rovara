@@ -227,4 +227,33 @@ describe("provenance from the base commit", () => {
     writeFileSync(target, file([{ id: "a" }]));
     expect((await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000)).kind).toBe("file");
   });
+  // Low: a tree with a duplicate name or out of git's order is refused (fail closed), not read first-match-wins
+  function repoWithRawTrees(modelEntries: Array<[string, string, string]>, fileBeforeFolder = false): { root: string; commit: string; scratch: string } {
+    const root = tmp();
+    git(root, "init", "--quiet");
+    const raw = (type: "blob" | "tree", body: Buffer): string => execFileSync("git", ["hash-object", "-t", type, "-w", "--literally", "--stdin"], { cwd: root, env: GIT_ENV, input: body, encoding: "utf8" }).trim();
+    const entry = (mode: string, name: string, id: string): Buffer => Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(id, "hex")]);
+    const modelTree = raw("tree", Buffer.concat(modelEntries.map(([mode, name, text]) => entry(mode, name, raw("blob", Buffer.from(text))))));
+    // `fileBeforeFolder`: the folder above holds a FILE named `model` and then the folder `model` (git's order, but one name twice)
+    const mocks = raw("tree", Buffer.concat([...(fileBeforeFolder ? [entry("100644", "model", raw("blob", Buffer.from("x")))] : []), entry("40000", "model", modelTree)]));
+    const rovara = raw("tree", entry("40000", "mocks", mocks));
+    const top = raw("tree", entry("40000", ".rovara", rovara));
+    const commit = execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit-tree", top, "-m", "base"], { cwd: root, env: GIT_ENV, encoding: "utf8" }).trim();
+    return { root, commit, scratch: tmp() };
+  }
+  const readRaw = (r: { root: string; commit: string; scratch: string }) => readFileAtCommit({ repositoryRoot: r.root, commitSha: r.commit, path: modelReplyFilePath(FAMILY), scratchRoot: r.scratch, maxBytes: 1_000_000, signal });
+  it("a tree with a DUPLICATE name or entries out of git's order is unreadable; a well-formed tree still reads", async () => {
+    const good = file([{ id: "a" }]);
+    const bad = file([{ id: "a", response: { text: "AGENT", finish: "stop" } }]);
+    expect((await readRaw(repoWithRawTrees([["100644", "openai_compatible.json", good]]))).kind).toBe("file");
+    expect(await readRaw(repoWithRawTrees([["100644", "openai_compatible.json", good], ["100644", "openai_compatible.json", bad]]))).toEqual({ kind: "unreadable" });
+    expect(await readRaw(repoWithRawTrees([["100644", "openai_compatible.json", bad], ["100644", "openai_compatible.json", good]]))).toEqual({ kind: "unreadable" });
+    // out of order: "z" before "openai_compatible.json"
+    expect(await readRaw(repoWithRawTrees([["100644", "z.json", "x"], ["100644", "openai_compatible.json", good]]))).toEqual({ kind: "unreadable" });
+    // a file and a folder with one name are in git's order (the folder sorts as `name/`) but are still a duplicate
+    expect(await readRaw(repoWithRawTrees([["100644", "openai_compatible.json", good], ["40000", "openai_compatible.json", bad]]))).toEqual({ kind: "unreadable" });
+    expect(await readRaw(repoWithRawTrees([["100644", "openai_compatible.json", good]], true))).toEqual({ kind: "unreadable" });
+    // two different names that merely share a prefix are fine
+    expect((await readRaw(repoWithRawTrees([["100644", "openai_compatible.json", good], ["100644", "openai_compatible.json2", good]]))).kind).toBe("file");
+  });
 });

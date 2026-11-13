@@ -5,10 +5,13 @@
 // The dummy key is a fixed, non-secret string that matches no real key shape. On the laptop the worker inherits the user's shell, which may hold REAL AI-provider and cloud credentials. The GOAL: none of them reaches a model host
 // from a customer's test in a helper round. Three layers, all returned from `laptopModelEnvironment` (`environment` is SET in the commands, `unset` is REMOVED from them):
 //   1. SET: every model key and token variable the catalog or this file knows (`modelKeyVariables`) gets the dummy; the redirect variables point at the helper.
-//   2. UNSET (removed, not blanked, so a client sees no credential at all): every variable of the user's shell whose name, case-insensitively, CONTAINS `APIKEY`, `API_KEY`, `TOKEN`, `SECRET`, `CREDENTIALS` or `PASSPHRASE`
-//      (`AUTH_TOKEN` is covered by `TOKEN`), and an explicit list of cloud and AI names even when the shell does not hold them now (AWS keys, profile and bearer token, Google OAuth, Hugging Face). KEPT on purpose, because
-//      blanking them breaks ordinary local tests and protects no AI key: `DATABASE_URL`, `REDIS_URL`, every `*_PASSWORD`/`*_PASS`/`*_PWD` and `PGPASSWORD` database variable, `SSH_AUTH_SOCK`, `SENTRY_DSN`,
-//      `GCLOUD_PROJECT`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `TOKENIZERS_PARALLELISM`. The rule and the kept list are `isCredentialVariable` and `KEPT_VARIABLES` below; the PR body and the release notes repeat them.
+//   2. UNSET (removed, not blanked, so a client sees no credential at all), case-insensitively: every variable of the user's shell whose name (a) CONTAINS `APIKEY`, `API_KEY`, `TOKEN`, `SECRET`, `CREDENTIAL` or
+//      `PASSPHRASE` (`AUTH_TOKEN` is covered by `TOKEN`); (b) starts with an AI or cloud VENDOR (OPENAI, ANTHROPIC, GEMINI, GOOGLE, VERTEX, AZURE, MISTRAL, GROQ, COHERE, DEEPSEEK, XAI, TOGETHER, PERPLEXITY, FIREWORKS,
+//      OPENROUTER, HF, HUGGING, HUGGINGFACE, BEDROCK, AWS, GCP, GCLOUD, CLOUDSDK, HELICONE, PORTKEY, LLM, AI, MODEL) and an underscore and later has KEY, AUTH, BEARER, CREDENTIAL or PAT (`GEMINI_KEY`, `OPENAI_AUTH`); (c)
+//      contains `PRIVATE_KEY` or `SERVICE_ACCOUNT`; (d) is `GH_PAT` or `GITHUB_PAT`; and an explicit list of cloud and AI names even when the shell does not hold them now (AWS keys, profile and bearer token, Google OAuth, Hugging Face). KEPT on purpose, because
+//      blanking them breaks ordinary local tests and protects no AI key: `DATABASE_URL`, `REDIS_URL`, every database `*_PASSWORD`/`*_PASS`/`*_PWD` and `PGPASSWORD` variable (unless the name ALSO carries an AI or cloud
+//      pattern above: `OPENAI_API_KEY_PASS` is unset), `SSH_AUTH_SOCK`, `SENTRY_DSN`, `GCLOUD_PROJECT`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `TOKENIZERS_PARALLELISM`, and BARE non-vendor `*_KEY` names such as `STRIPE_KEY` and
+//      `CACHE_KEY` (as often a cache key as a secret). The rule and the kept list are `isCredentialVariable` and `KEPT_VARIABLES` below; the PR body and the release notes repeat them.
 //      A project test that needs one of the unset names in a helper round on a laptop must be given it by the readiness run, never inherited from the shell.
 //   3. Google Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS` is empty, `CLOUDSDK_CONFIG` is an EMPTY worker-owned directory (the user's real `application_default_credentials.json`, a real refresh token, is
 //      never found) and `GCE_METADATA_HOST` is the helper's metadata server, so google-auth (JS: verified by the reviewer) takes the metadata path, gets the dummy token and never calls `oauth2.googleapis.com`.
@@ -26,15 +29,20 @@ export function modelKeyVariables(rows: readonly Pick<ModelCatalogRow, "redirect
   return [...names].sort();
 }
 
-const CREDENTIAL_WORD = /APIKEY|API_KEY|TOKEN|SECRET|CREDENTIALS|PASSPHRASE/iu;
-/** Variables the rule never unsets: databases, ssh, monitoring and the two Google project names. Matched case-insensitively. */
+const CREDENTIAL_WORD = /APIKEY|API_KEY|TOKEN|SECRET|CREDENTIAL|PASSPHRASE/iu;
+/** An AI or cloud VENDOR prefix, then anything, then KEY, AUTH, BEARER, CREDENTIAL or PAT: `GEMINI_KEY`, `OPENAI_AUTH`, `AWS_ACCESS_KEY`, `ANTHROPIC_OAUTH`. */
+const VENDOR_CREDENTIAL = /^(?:OPENAI|ANTHROPIC|GEMINI|GOOGLE|VERTEX|VERTEXAI|AZURE|MISTRAL|GROQ|COHERE|DEEPSEEK|XAI|TOGETHER|PERPLEXITY|FIREWORKS|OPENROUTER|HF|HUGGING|HUGGINGFACE|BEDROCK|AWS|GCP|GCLOUD|CLOUDSDK|HELICONE|PORTKEY|LLM|AI|MODEL)_.*(?:KEY|AUTH|BEARER|CREDENTIAL|PAT)/iu;
+/** Variables the rule never unsets: databases, ssh, monitoring and the two Google project names. Matched case-insensitively and exactly. */
 export const KEPT_VARIABLES: readonly string[] = ["DATABASE_URL", "REDIS_URL", "SSH_AUTH_SOCK", "SENTRY_DSN", "GCLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT", "PGPASSWORD", "TOKENIZERS_PARALLELISM"];
 const KEPT_SET: ReadonlySet<string> = new Set(KEPT_VARIABLES.map((name) => name.toUpperCase()));
-const DATABASE_PASSWORD = /(?:_PASSWORD|_PASS|_PWD)$/iu;
-/** Whether a name of the user's shell is an AI-provider or cloud credential by the rule above (and not on the kept list). */
+/**
+ * Whether a name of the user's shell is an AI-provider or cloud credential (and not on the exact kept list). The AI and cloud patterns come FIRST: `OPENAI_API_KEY_PASS`, `ANTHROPIC_API_KEY_PWD` and `GITHUB_TOKEN_PASSWORD` are
+ * unset even though they end like a database password. A name with none of the words (`DB_PASSWORD`, `POSTGRES_PASS`, `MYSQL_PWD`) matches nothing here and so is kept, and so are bare non-vendor `*_KEY` names such as
+ * `STRIPE_KEY` and `CACHE_KEY`, deliberately: they are as often a cache key as a secret and blanking them breaks ordinary tests.
+ */
 export function isCredentialVariable(name: string): boolean {
-  if (KEPT_SET.has(name.toUpperCase()) || DATABASE_PASSWORD.test(name)) return false;
-  return CREDENTIAL_WORD.test(name);
+  if (KEPT_SET.has(name.toUpperCase())) return false;
+  return VENDOR_CREDENTIAL.test(name) || /PRIVATE_KEY|SERVICE_ACCOUNT/iu.test(name) || /^(?:GH_PAT|GITHUB_PAT)$/iu.test(name) || CREDENTIAL_WORD.test(name);
 }
 /** Cloud and AI credential names unset even when the shell does not hold them now (a profile file may set them later): AWS, Google OAuth, Hugging Face. */
 export const EXPLICIT_UNSET_VARIABLES = [
