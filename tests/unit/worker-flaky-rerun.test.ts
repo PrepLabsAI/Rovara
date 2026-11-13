@@ -38,7 +38,7 @@ function vitestJson(states: Record<string, State>): string {
   return JSON.stringify({ testResults: [...byFile].map(([name, assertionResults]) => ({ name: join(root, name), status: assertionResults.some((entry) => entry.status === "failed") ? "failed" : "passed", assertionResults })) });
 }
 
-type Script = Array<Record<string, State> | "no_report" | "unreadable" | "timeout" | "hang">;
+type Script = Array<Record<string, State> | "no_report" | "unreadable" | "timeout" | "timeout_after_report" | "hang">;
 interface World {
   /** The first run's report, then each rerun's, in order; the last repeats. */
   runs: Script;
@@ -64,7 +64,9 @@ function worldRunners(world: World) {
       if (step === "timeout") return { exitCode: null, timedOut: true, stdout: "", stderr: "" };
       const path = join(root, command.args.some((arg) => arg.includes("out.json")) ? "out.json" : "report.xml");
       if (step === "unreadable") await writeFile(path, "<testsuite><testcase name=");
+      else if (step === "timeout_after_report") await writeFile(path, junit({ [ID_TOTAL]: "passed" }));
       else if (step !== "no_report") await writeFile(path, world.format === "json" ? vitestJson(step) : junit(step));
+      if (step === "timeout_after_report") return { exitCode: null, timedOut: true, stdout: "", stderr: "" };
       const failed = step !== "no_report" && step !== "unreadable" && Object.values(step).includes("failed");
       return { exitCode: failed ? 1 : 0, timedOut: false, stdout: "", stderr: "" };
     },
@@ -136,9 +138,11 @@ describe("a failing test that passes on the rerun is flaky", () => {
 });
 
 describe("a rerun that did not run leaves the failure a failure", () => {
-  it("a rerun that timed out", async () => {
-    const { rerun } = await afterRound({ runs: [FIRST, "timeout"] });
-    expect((await rerun()).get("readiness:0")).toEqual({ checkId: "readiness:0", flaky: [], failing: [ID_TOTAL] });
+  it("a rerun that timed out, even one that had already written a report that says passed", async () => {
+    for (const step of ["timeout", "timeout_after_report"] as const) {
+      const { rerun } = await afterRound({ runs: [FIRST, step] });
+      expect((await rerun()).get("readiness:0"), step).toEqual({ checkId: "readiness:0", flaky: [], failing: [ID_TOTAL] });
+    }
   });
 
   it("a rerun that writes no report, or one that cannot be read", async () => {
@@ -301,7 +305,7 @@ describe("the extra turn", () => {
   });
 
   it("a rerun that timed out, wrote nothing or left the test out gives the extra turn", async () => {
-    for (const step of ["timeout", "no_report", { "tests/test_cart.py::test_other": "passed" }] as const) {
+    for (const step of ["timeout", "timeout_after_report", "no_report", { "tests/test_cart.py::test_other": "passed" }] as const) {
       const { first } = await settle({ runs: [FIRST, step] });
       expect(first.continue, JSON.stringify(step)).toBe(true);
     }
