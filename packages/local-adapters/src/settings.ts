@@ -1,6 +1,6 @@
 // Port lane L3: reading a plug-in's block of the config file (`PluginContext.settings`). The config is owner-controlled, but a typo in
 // it should be named, not ignored, so unknown settings are refused. No secret is ever read here.
-import { lstatSync, realpathSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { PluginRegistryError, type JsonObject, type JsonValue } from "@agentx/contracts";
@@ -29,14 +29,16 @@ export const STORE_PATH_IN_REPOSITORY_SENTENCE = "is inside a git repository, wh
 export interface DatabasePathOptions {
   /** The install's own folder (`PluginContext.stateDirectory`). A relative path is kept under it. Absent: `~/.rovara`. */
   stateDirectory?: string;
-  /** Told once when a relative path now points somewhere other than where the old rule put it and a file is still there. Nothing is moved or deleted. */
-  notice?: (line: string) => void;
 }
 
 /**
  * The database file. A relative path is kept under the state folder (`~/.rovara` by default), not the folder the process runs in, so a
  * documented `state.db` can never put the database inside a repository. An absolute path is kept as it is. A path inside a git work
  * tree is refused. `:memory:` is refused: a configured store keeps its data.
+ *
+ * Moving from the old rule: if a relative path would now point somewhere else, a SQLite database is still where the old rule put it
+ * and nothing is at the new place, the start is refused with what to move. Quietly opening an empty database would look like lost data.
+ * Nothing is moved or deleted here.
  */
 export function databasePath(settings: JsonObject, options: DatabasePathOptions = {}): string {
   const value = settings.path;
@@ -45,11 +47,27 @@ export function databasePath(settings: JsonObject, options: DatabasePathOptions 
   const stateDirectory = resolve(options.stateDirectory ?? join(homedir(), ".rovara"));
   const path = isAbsolute(value) ? value : resolve(stateDirectory, value);
   assertOutsideGitWorkTree(path, stateDirectory);
-  if (!isAbsolute(value) && options.notice !== undefined) {
+  if (!isAbsolute(value)) {
     const old = resolve(value);
-    if (old !== path && exists(old)) options.notice(`the store path ${JSON.stringify(value.slice(0, 200))} is now kept under the state folder: using ${path}; a database from the old rule at ${old} was not moved or deleted, so copy it to the new place if you want its data`);
+    if (old !== path && isSqliteFile(old) && !exists(path)) {
+      throw new PluginRegistryError("create_failed", `Rovara's database moved: stop Rovara, then move ${old} and its -wal and -shm files to ${path} (or delete them on purpose), or give an absolute path outside any repository.`);
+    }
   }
   return path;
+}
+
+/** True when the file starts with the SQLite header, "SQLite format 3" and a NUL. Anything that cannot be read is not counted. */
+function isSqliteFile(path: string): boolean {
+  let handle: number | undefined;
+  try {
+    handle = openSync(path, "r");
+    const header = Buffer.alloc(16);
+    return readSync(handle, header, 0, 16, 0) === 16 && header.equals(Buffer.from("SQLite format 3\u0000", "latin1"));
+  } catch {
+    return false;
+  } finally {
+    if (handle !== undefined) closeSync(handle);
+  }
 }
 
 const exists = (path: string): boolean => {
