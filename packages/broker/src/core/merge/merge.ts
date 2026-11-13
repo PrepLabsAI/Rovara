@@ -54,7 +54,7 @@ import {
 } from "@agentx/contracts";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import {
-  needsReviewerFloor, planningLevelOf, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
+  canonicalPatchText, needsReviewerFloor, patchDigestOf, planningLevelOf, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
 } from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { inertLine } from "../proof/inert-text.js";
@@ -571,6 +571,7 @@ async function mergeableNow(
 }
 
 const FLOOR_OWED = "A reviewer has not yet answered the security questions for the current version of this change, so it can't be merged yet.";
+const HEAD_UNBOUND = "Rovara couldn't tell exactly which version of the code this is, so nothing was merged.";
 const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code host just now, so nothing was merged. Try again in a moment.";
 
 /**
@@ -591,8 +592,22 @@ async function tierGate(
     deps.host.log?.("merge.tier_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     throw agentXError("MERGE_NOT_READY", TIER_UNREADABLE);
   }
+  // The head must not have moved while the files were read: the tier is for the code that would be merged.
+  try {
+    for (const target of targets) {
+      const status = await target.host.changeRequestStatus(changeRequestRef(target.repositoryUrl, target.number), scope);
+      if (status.state !== "merged" && status.headRevision !== target.headSha) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+    }
+  } catch (error) {
+    if (isHostRateLimit(error) || (error instanceof Error && "code" in error && (error as { code?: string }).code === "MERGE_NOT_READY")) throw error;
+    deps.host.log?.("merge.tier_head_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    throw agentXError("MERGE_NOT_READY", TIER_UNREADABLE);
+  }
   const at = new Date(deps.now()).toISOString();
   const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: task.workflow.reviewBase?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
+  // A tier that cannot be bound to the head is not a tier: records of reviews are for a head, and there is none to compare.
+  if (bound.headSha === undefined) throw agentXError("MERGE_NOT_READY", HEAD_UNBOUND);
+  const patchDigest = patchDigestOf(canonicalPatchText(input.diff.files));
   const fresh = tierFromDiff(input.diff, { ...bound, at, head: input.head });
   const approvedAt: TierLevel = shown ?? "small";
   // What the record says is judged against the task as it is NOW: a growth is written until it is on the record, however often another writer got in first.
@@ -607,7 +622,7 @@ async function tierGate(
     const covered = tierReviewRecorded(flow, raised.level, bound.headSha);
     const grew = !covered && (tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised)));
     const owed = !covered && !grew && flow?.grewAfterBuild !== undefined && !tierReviewRecorded(flow, flow.grewAfterBuild.to, bound.headSha);
-    const floor = !grew && !owed && deps.tierFloor !== "off" && needsReviewerFloor(raised) && !reviewerFloorRecorded(flow, bound.headSha);
+    const floor = !grew && !owed && deps.tierFloor !== "off" && needsReviewerFloor(raised) && !reviewerFloorRecorded(flow, bound.headSha, patchDigest);
     verdict = grew ? "grew" : owed ? "owed" : floor ? "floor" : "ok";
     const recorded = recordTier(flow, { ...fresh, source: "merge" });
     const from: TierLevel = planned !== undefined && tierRank(planned) < tierRank(approvedAt) ? planned : approvedAt;

@@ -2464,6 +2464,22 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
   type TierShape = { tier?: { level: string; kinds: string[]; source: string; headSha?: string; mergeBase?: string; reasons: Array<{ code: string }> }; tierHistory?: Array<{ source: string }>; catchCounters?: Array<{ step: string; findings: number; mustFix: number; changedCode: number }>; rulesVersion?: number };
   const flowOf = async (h: Awaited<ReturnType<typeof launch>>, taskId: string): Promise<TierShape> => ((await taskRecord(h, taskId)).workflow as unknown as { flow?: TierShape }).flow ?? {};
 
+  it("the tier is not written when the head moved while the files were read", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId, cr } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    const original = h.host.changedFiles.bind(h.host);
+    let moved = false;
+    h.host.changedFiles = async (ref, page, scope) => {
+      const read = await original(ref, page, scope);
+      if (!moved) { moved = true; h.model.commit(cr.sourceBranch, { "src/late.ts": "export const late = 1;\n" }); }
+      return read;
+    };
+    await h.runtime.tick();
+    expect(moved).toBe(true);
+    expect((await flowOf(h, taskId)).tier?.source).toBe("estimate");
+  });
+
   it("the change tier is written at plan time (an estimate), after the push (the host's diff, bound to the head and the base) and per review step (catch counters)", async () => {
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });

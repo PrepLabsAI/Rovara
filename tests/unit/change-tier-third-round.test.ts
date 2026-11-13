@@ -2,7 +2,7 @@
 // A case that no list of words or paths can name (`question`) is answered by the model-based floor instead: the tier says the change owes the reviewer's questions, and a fake reviewer's yes raises it to risky.
 import { describe, expect, it } from "vitest";
 import {
-  factKey, needsReviewerFloor, recordTier, tierFromDiff, type ChangeTier, type HeadFacts, type TierFile,
+  factKey, needsReviewerFloor, patchDigestOf, recordTier, reviewerFloorRecorded, tierFromDiff, type ChangeTier, type HeadFacts, type TierFile,
 } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { TIER_QUESTIONS, applyReviewerFloor, recordReviewerFloor, type TierReviewer } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
 import { boundCommits, readHeadFacts } from "../../packages/broker/src/core/merge/change-tier-read.js";
@@ -203,7 +203,7 @@ describe("the reviewer floor fails closed and is bound to the head", () => {
       expect(result.raised).toBe(true);
     }
     const slow: TierReviewer = { answer: () => new Promise(() => undefined) };
-    const timedOut = await applyReviewerFloor({ tier: small(), reviewer: slow, files: [], patchText: "", timeoutMs: 20 });
+    const timedOut = await applyReviewerFloor({ tier: small(), reviewer: slow, files: [], patchText: "@@ x", timeoutMs: 20 });
     expect(timedOut.tier.level).toBe("risky");
     expect(timedOut.tier.reasons[0]!.code).toBe("reviewer_unavailable");
   });
@@ -221,7 +221,7 @@ describe("the reviewer floor fails closed and is bound to the head", () => {
   });
   it("a floor on an estimate is not lowered by the first diff tier", async () => {
     const estimate: ChangeTier = { ...small(), source: "estimate" };
-    const result = await applyReviewerFloor({ tier: estimate, reviewer: reviewerOf(() => answers(["auth"])), files: [], patchText: "" });
+    const result = await applyReviewerFloor({ tier: estimate, reviewer: reviewerOf(() => answers(["auth"])), files: [], patchText: "@@ -1 +1 @@\n-a\n+b" });
     const flow = recordReviewerFloor(recordTier(undefined, estimate).flow, result, ctx.at)!;
     expect(recordTier(flow, small()).tier.level).toBe("risky");
   });
@@ -229,10 +229,12 @@ describe("the reviewer floor fails closed and is bound to the head", () => {
     const tierA = { ...small(), headSha: "1".repeat(40) };
     const tierB = { ...small(), headSha: "2".repeat(40) };
     const flowB = recordTier(recordTier(undefined, tierA).flow, tierB).flow;
-    const stale = await applyReviewerFloor({ tier: tierA, reviewer: reviewerOf(() => answers(["auth"])), files: [], patchText: "" });
+    const stale = await applyReviewerFloor({ tier: tierA, reviewer: reviewerOf(() => answers(["auth"])), files: [], patchText: "@@ -1 +1 @@\n-a\n+b" });
     expect(recordReviewerFloor(flowB, stale, ctx.at)).toBe(flowB);
-    const fresh = await applyReviewerFloor({ tier: tierB, reviewer: reviewerOf(() => answers()), files: [], patchText: "" });
-    expect(recordReviewerFloor(flowB, fresh, ctx.at)!.catchCounters!.map((counter) => counter.step)).toEqual([`tier_questions_${"2".repeat(10)}`]);
+    const fresh = await applyReviewerFloor({ tier: tierB, reviewer: reviewerOf(() => answers()), files: [], patchText: "@@ -1 +1 @@\n-a\n+b" });
+    const written = recordReviewerFloor(flowB, fresh, ctx.at)!;
+    expect(reviewerFloorRecorded(written, "2".repeat(40), patchDigestOf("@@ -1 +1 @@\n-a\n+b"))).toBe(true);
+    expect(reviewerFloorRecorded(written, "1".repeat(40), patchDigestOf("@@ -1 +1 @@\n-a\n+b"))).toBe(false);
   });
 });
 

@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import type { ChangeRequestFile, CodeHost, HostScope } from "@agentx/contracts";
 import { changedFilesFromHostFiles, plainChangedPath } from "../proof/changed-files.js";
-import { factKey, type DiffInput, type HeadFacts, type TierFile } from "../decisions/change-tier.js";
+import { canonicalPatchText, factKey, type DiffInput, type HeadFacts, type TierFile } from "../decisions/change-tier.js";
 import { DOCS_SITE_PROBES, fileTypeOf, normalizedTierPath } from "../decisions/sensitive-list.js";
 import { changeRequestRef, readChangeRequestFiles } from "./host-port.js";
 
@@ -190,4 +190,13 @@ export function boundCommits(entries: ReadonlyArray<{ repositoryId: string; head
     headSha: digestOf(sorted.map((entry) => `${entry.repositoryId}\u0000${entry.headSha}`)),
     ...(baseKnown ? { mergeBase: digestOf(sorted.map((entry) => `${entry.repositoryId}\u0000${entry.baseCommitSha!}`)) } : {}),
   };
+}
+
+/**
+ * What the reviewer floor is given, read from the code host at the pinned head by the same read the merge gate makes: the paths and the patch text in the one canonical form (`canonicalPatchText`), so the digest the floor
+ * records is the digest the gate recomputes. A caller never builds the patch text itself.
+ */
+export async function readReviewInput(targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, beforeRequest?: () => void): Promise<{ files: string[]; patchText: string; diff: DiffInput }> {
+  const read = await readTierInput(targets, scope, beforeRequest);
+  return { files: read.diff.files.map((file) => file.path), patchText: canonicalPatchText(read.diff.files), diff: read.diff };
 }

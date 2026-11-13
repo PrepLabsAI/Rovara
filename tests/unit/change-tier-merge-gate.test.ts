@@ -4,12 +4,14 @@ import { describe, expect, it } from "vitest";
 import type { ChangeRequestFilesPage, ChangeRequestRef, CodeHost, HostScope } from "../../packages/contracts/src/index.js";
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
-import { recordCatch, recordTierReview, tierFromDiff, tierQuestionsStep, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { patchDigestOf, recordQuestionsAnswered, recordTierReview, tierFromDiff, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { readReviewInput } from "../../packages/broker/src/core/merge/change-tier-read.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
+import { MERGE_NOT_READY_MESSAGES as M } from "../../packages/contracts/src/index.js";
 
 const AT = "2026-11-09T10:00:00.000Z";
 
-type Mode = { patches: boolean; failing: boolean; calls: number };
+type Mode = { patches: boolean; failing: boolean; calls: number; afterRead?: () => void };
 
 /** A host that calls itself github. The fake lists each file with the text of its change, as GitHub does; this one can be told to leave the text out, or to fail. */
 function patchingHost(model: FakeHostModel, mode: Mode): CodeHost {
@@ -21,6 +23,7 @@ function patchingHost(model: FakeHostModel, mode: Mode): CodeHost {
         mode.calls += 1;
         if (mode.failing) throw new Error("the host is down");
         const read = await fake.changedFiles(ref, page, scope);
+        mode.afterRead?.();
         return mode.patches ? read : { ...read, files: read.files.map(({ patch: _patch, ...file }) => file) }; // eslint-disable-line @typescript-eslint/no-unused-vars -- left out on purpose
       },
     },
@@ -42,10 +45,13 @@ async function reviewed(world: MergeWorld, level: TierLevel, head = world.prs[0]
   await world.setWorkflow({ flow: recordTierReview(flow, { level, headSha: head, findings: 0, mustFix: 0 }) });
 }
 
-/** The reviewer's questions were answered for the head the pull request has now (what the reviewer floor records). */
-async function questioned(world: MergeWorld, head = world.prs[0]!.head): Promise<void> {
+/** The reviewer's questions were answered for the head the pull request has now, about the patch the host lists (what the reviewer floor records). `head` and `digest` can be given to make a record for another head or patch. */
+async function questioned(world: MergeWorld, head = world.prs[0]!.head, digest?: string): Promise<void> {
+  const pr = world.prs[0]!;
+  const home = (await world.host.repository("web", 1, pr.repositoryId, ORG))!;
+  const input = await readReviewInput([{ host: home.codeHost, repositoryId: pr.repositoryId, repositoryUrl: home.url, number: pr.number, headSha: pr.head }], world.host.scope(ORG));
   const flow = (await world.task()).workflow.flow;
-  await world.setWorkflow({ flow: recordCatch(flow, { step: tierQuestionsStep(head), findings: 0, mustFix: 0 }) });
+  await world.setWorkflow({ flow: recordQuestionsAnswered(flow, { headSha: head, patchDigest: digest ?? patchDigestOf(input.patchText), at: AT }) });
 }
 
 async function worldAt(level: "small" | "standard" | "risky", mode: Mode = { patches: true, failing: false, calls: 0 }) {
@@ -227,6 +233,21 @@ describe("the merge recomputes the change tier from the host", () => {
     expect((await rejects((await press(world)).run)).message).toContain("security questions");
     await questioned(world);
     expect((await (await press(world)).run()).status).toBe("MERGED");
+  });
+
+  it("answers about another patch do not count (the patch is recomputed from the host)", async () => {
+    const { world } = await worldAt("small");
+    await questioned(world, undefined, "0".repeat(64));
+    expect((await rejects((await press(world)).run)).message).toContain("security questions");
+  });
+
+  it("a head that moved while the files were read refuses the merge", async () => {
+    const { world, mode } = await worldAt("small");
+    await questioned(world);
+    const { run } = await press(world);
+    mode.afterRead = () => { const pr = world.prs[0]!; pr.model.commit(pr.model.getChangeRequest(String(pr.number)).sourceBranch, { "src/late.ts": "export const late = 1;\n" }); mode.afterRead = undefined; };
+    expect((await rejects(run)).message).toBe(M.changedAfterConfirm);
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
   });
 
   it("the questions are asked again after a push", async () => {

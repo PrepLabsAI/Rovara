@@ -1,7 +1,7 @@
 // The model-based floor: the one reviewer a small change gets also answers a fixed set of yes/no questions, and any yes raises the tier to risky (only up, with the reviewer's reason). Tested with a fake reviewer.
 // The failure cases (a throw, a timeout, malformed output, a missing or repeated answer) are in change-tier-third-round.test.ts.
 import { describe, expect, it } from "vitest";
-import { recordTier, tierFromDiff, tierReviewRecorded, tierQuestionsStep, reviewerFloorRecorded, type ChangeTier, type TierFile } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { patchDigestOf, recordTier, tierFromDiff, tierReviewRecorded, reviewerFloorRecorded, type ChangeTier, type TierFile } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { TIER_QUESTIONS, applyReviewerFloor, recordReviewerFloor, tierReviewPrompt, type TierReviewAnswer, type TierReviewer } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
 
 const AT = "2026-11-13T12:00:00.000Z";
@@ -34,9 +34,12 @@ describe("the reviewer floor", () => {
     const flow = recordReviewerFloor(recordTier(undefined, smallTier()).flow, result, AT)!;
     expect(flow.tier?.level).toBe("risky");
     expect(flow.grewAfterBuild).toMatchObject({ from: "small", to: "risky" });
-    expect(flow.catchCounters).toContainEqual({ step: tierQuestionsStep("a".repeat(40)), findings: 1, mustFix: 1, changedCode: 0 });
-    expect(reviewerFloorRecorded(flow, "a".repeat(40))).toBe(true);
-    expect(reviewerFloorRecorded(flow, "b".repeat(40))).toBe(false);
+    expect(flow.catchCounters).toContainEqual({ step: "tier_questions", findings: 1, mustFix: 1, changedCode: 0 });
+    const digest = patchDigestOf(PATCH);
+    expect(reviewerFloorRecorded(flow, "a".repeat(40), digest)).toBe(true);
+    expect(reviewerFloorRecorded(flow, "b".repeat(40), digest)).toBe(false);
+    expect(reviewerFloorRecorded(flow, "a".repeat(40), patchDigestOf("another patch"))).toBe(false);
+    expect(reviewerFloorRecorded(flow, undefined, digest)).toBe(false);
     // The raise needs the risky review on this head before a merge (the gate's rule).
     expect(tierReviewRecorded(flow, "risky", "a".repeat(40))).toBe(false);
   });
@@ -51,7 +54,7 @@ describe("the reviewer floor", () => {
   });
 
   it("only goes up: a risky tier stays risky whatever the reviewer says, and the reasons are kept", async () => {
-    const risky = tierFromDiff({ files: [file("src/auth/session.ts")], complete: true }, { at: AT });
+    const risky = tierFromDiff({ files: [file("src/auth/session.ts")], complete: true }, { headSha: "a".repeat(40), at: AT });
     const result = await ask(reviewer(() => answers()), risky);
     expect(result.tier).toEqual(risky);
     const yes = await ask(reviewer(() => answers({ money: "price list" })), risky);
