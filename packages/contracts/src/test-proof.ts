@@ -45,7 +45,33 @@ export const TestProofItemSchema = z.object({
 }).strict();
 export type TestProofItem = z.infer<typeof TestProofItemSchema>;
 
-export const TestProofSchema = z.object({
+/** The most test ids one check names as "ran before, not now" (the count says the rest). */
+export const ABSENT_ON_NEW_MAX = 100;
+
+/** Why a check's untouched tests could not be compared with the run on the original code. Fixed codes only. `no_report`: one of the two runs left no report of its own that can be read. `original_run_incomplete`: the run on the original code did not end (timed out, stopped). `original_run_truncated`: it looks cut short (collection errors, a stop-at-first-failure option, far fewer untouched tests than this code's run), so a missing test or a skip count would only be the cut. */
+export const TestProofNotComparedReasonSchema = z.enum(["no_report", "original_run_incomplete", "original_run_truncated"]);
+export type TestProofNotComparedReason = z.infer<typeof TestProofNotComparedReasonSchema>;
+
+/**
+ * TE-B3: what the run on the original code shows about a check's untouched tests, per COMPARED check (a check that was compared and shows nothing has zeros, so a reader can tell it from one that was not compared).
+ * `skippedBefore` and `skippedAfter` are the skips among tests the change did not touch (original code, this code); `absentOnNew` names tests that ran on the original code and are not in this code's report (at most
+ * `ABSENT_ON_NEW_MAX`, as test ids), and `absentOnNewCount` is how many there are in all. Facts only: the broker words them.
+ * The WRITER's schema is strict. The READER (`TestProofSchema`) strips what it does not know and drops a weakening part it cannot read, so a broker ships the reader before any worker writes the part.
+ */
+const weakeningShape = {
+  checkId: z.string().min(1).max(64),
+  skippedBefore: z.number().int().min(0).max(100_000_000),
+  skippedAfter: z.number().int().min(0).max(100_000_000),
+  absentOnNew: z.array(z.string().min(1).max(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX),
+  absentOnNewCount: z.number().int().min(0).max(100_000_000),
+};
+const countCheck = (item: { absentOnNew: unknown[]; absentOnNewCount: number }) => item.absentOnNewCount >= item.absentOnNew.length;
+export const TestProofWeakeningSchema = z.object(weakeningShape).strict().refine(countCheck, "the count is at least the names listed");
+const TestProofWeakeningReadSchema = z.object(weakeningShape).refine(countCheck, "the count is at least the names listed");
+export type TestProofWeakening = z.infer<typeof TestProofWeakeningSchema>;
+
+const notComparedShape = { checkId: z.string().min(1).max(64), reason: TestProofNotComparedReasonSchema };
+const proofShape = {
   schemaVersion: z.literal(1),
   /** The candidate digest of the code the checks passed on. A proof for any other digest is ignored. */
   candidateDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -55,5 +81,21 @@ export const TestProofSchema = z.object({
   changedTests: z.object({ added: z.number().int().nonnegative(), changed: z.number().int().nonnegative(), deleted: z.number().int().nonnegative() }).strict(),
   items: z.array(TestProofItemSchema).max(200),
   durationMs: z.number().int().nonnegative(),
+};
+
+/** What the WORKER writes (strict). */
+export const TestProofWriteSchema = z.object({
+  ...proofShape,
+  /** TE-B3: per compared check, what the original code's run shows about tests the change did not touch. */
+  weakening: z.array(TestProofWeakeningSchema).max(64).optional(),
+  /** TE-B3: the checks that were run on the original code and could not be compared, with the fixed reason. */
+  weakeningNotCompared: z.array(z.object(notComparedShape).strict()).max(64).optional(),
 }).strict();
+
+/** What READERS parse: the same, but a key a newer writer added is dropped, and a weakening part that does not read is dropped alone (the rest of the proof still reads). */
+export const TestProofSchema = z.object({
+  ...proofShape,
+  weakening: z.array(TestProofWeakeningReadSchema).max(64).optional().catch(undefined),
+  weakeningNotCompared: z.array(z.object(notComparedShape)).max(64).optional().catch(undefined),
+});
 export type TestProof = z.infer<typeof TestProofSchema>;
