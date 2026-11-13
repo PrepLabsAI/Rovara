@@ -2453,6 +2453,44 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(cr.body).toBe(openingBody);
   });
 
+  /** The host lists each changed file with the text of its change, as GitHub does (the fake gives none). */
+  const givePatches = (h: Awaited<ReturnType<typeof launch>>): void => {
+    const original = h.host.changedFiles.bind(h.host);
+    h.host.changedFiles = async (ref, page, scope) => {
+      const read = await original(ref, page, scope);
+      return { ...read, files: read.files.map((file) => (file.status === "removed" ? file : { ...file, patch: `@@ -0,0 +1,1 @@\n+${file.path}` })) };
+    };
+  };
+  type TierShape = { tier?: { level: string; kinds: string[]; source: string; headSha?: string; mergeBase?: string; reasons: Array<{ code: string }> }; tierHistory?: Array<{ source: string }>; catchCounters?: Array<{ step: string; findings: number; mustFix: number; changedCode: number }>; rulesVersion?: number };
+  const flowOf = async (h: Awaited<ReturnType<typeof launch>>, taskId: string): Promise<TierShape> => ((await taskRecord(h, taskId)).workflow as unknown as { flow?: TierShape }).flow ?? {};
+
+  it("the change tier is written at plan time (an estimate), after the push (the host's diff, bound to the head and the base) and per review step (catch counters)", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    givePatches(h);
+    const { taskId, commit } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    // Before the host's files are read, the estimate from the plan and the review counters are on the record.
+    const early = await flowOf(h, taskId);
+    expect(early.tier?.source).toBe("estimate");
+    expect(early.catchCounters?.map((counter) => counter.step).sort()).toEqual(["code_review", "plan_check", "security_review"]);
+    expect(early.catchCounters).toEqual(expect.arrayContaining([{ step: "code_review", findings: 0, mustFix: 0, changedCode: 0 }]));
+    await h.runtime.tick();
+    const flow = await flowOf(h, taskId);
+    expect(flow.rulesVersion).toBe(1);
+    expect(flow.tier).toMatchObject({ level: "small", kinds: ["code_config"], source: "diff", headSha: commit, mergeBase: h.base });
+    expect(flow.tierHistory?.map((tier) => tier.source)).toEqual(["estimate"]);
+  });
+
+  it("a host that gives no patch text puts the change at risky (it cannot be cleared), and the tier never goes back down on a later read", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    await h.runtime.tick();
+    const flow = await flowOf(h, taskId);
+    expect(flow.tier).toMatchObject({ level: "risky", source: "diff" });
+    expect(flow.tier?.reasons.map((reason) => reason.code)).toContain("unreadable_content");
+  });
+
   it("lessons are on in a fresh install (the description says none were used yet), and ROVARA_LESSONS=0 turns them off (the description says so)", async () => {
     const clock = movingClock();
     const fresh = await launch({ host: true, now: clock.now });
