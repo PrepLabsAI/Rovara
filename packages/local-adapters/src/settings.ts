@@ -1,7 +1,9 @@
 // Port lane L3: reading a plug-in's block of the config file (`PluginContext.settings`). The config is owner-controlled, but a typo in
 // it should be named, not ignored, so unknown settings are refused. No secret is ever read here.
-import { isAbsolute, resolve } from "node:path";
-import type { JsonObject, JsonValue } from "@agentx/contracts";
+import { lstatSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { PluginRegistryError, type JsonObject, type JsonValue } from "@agentx/contracts";
 
 export class SettingsError extends Error {
   constructor(message: string) {
@@ -21,12 +23,103 @@ export function optionalNumber(settings: JsonObject, key: string, minimum: numbe
   return value;
 }
 
-/** The database file. A relative path is relative to the folder the process runs in. `:memory:` is refused: a configured store keeps its data. */
-export function databasePath(settings: JsonObject): string {
+/** The fixed part of the refusal of a store path inside a git work tree (TE-D10a). The sentence also names the path and the state folder. */
+export const STORE_PATH_IN_REPOSITORY_SENTENCE = "is inside a git repository, which a commit or a push could publish; choose a path outside any git repository, or a bare file name such as \"state.db\", which is kept in the state folder";
+
+export interface DatabasePathOptions {
+  /** The install's own folder (`PluginContext.stateDirectory`). A relative path is kept under it. Absent: `~/.rovara`. */
+  stateDirectory?: string;
+  /** Told once when a relative path now points somewhere other than where the old rule put it and a file is still there. Nothing is moved or deleted. */
+  notice?: (line: string) => void;
+}
+
+/**
+ * The database file. A relative path is kept under the state folder (`~/.rovara` by default), not the folder the process runs in, so a
+ * documented `state.db` can never put the database inside a repository. An absolute path is kept as it is. A path inside a git work
+ * tree is refused. `:memory:` is refused: a configured store keeps its data.
+ */
+export function databasePath(settings: JsonObject, options: DatabasePathOptions = {}): string {
   const value = settings.path;
   if (typeof value !== "string" || value === "" || value.includes("\u0000")) throw new SettingsError("path is the database file, as text");
   if (value === ":memory:" || value.startsWith("file:")) throw new SettingsError("path is a file path (not :memory: or a file: URL)");
-  return isAbsolute(value) ? value : resolve(value);
+  const stateDirectory = resolve(options.stateDirectory ?? join(homedir(), ".rovara"));
+  const path = isAbsolute(value) ? value : resolve(stateDirectory, value);
+  assertOutsideGitWorkTree(path, stateDirectory);
+  if (!isAbsolute(value) && options.notice !== undefined) {
+    const old = resolve(value);
+    if (old !== path && exists(old)) options.notice(`the store path ${JSON.stringify(value.slice(0, 200))} is now kept under the state folder: using ${path}; a database from the old rule at ${old} was not moved or deleted, so copy it to the new place if you want its data`);
+  }
+  return path;
+}
+
+const exists = (path: string): boolean => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** The real path of `path`, whether or not the file or its folders exist yet. A link that leads nowhere, or anything unreadable, throws. */
+function realPathOfNearest(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  // Nothing there: if even the name itself is a (dangling) link, where it leads is unknown, so fail closed.
+  try {
+    lstatSync(path);
+    throw new Error("dangling link");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const parent = dirname(path);
+  if (parent === path) throw new Error("no folder to start from");
+  return join(realPathOfNearest(parent), basename(path));
+}
+
+/**
+ * Refuses a store path whose real location (links resolved) has a `.git` file or folder in any folder above it: a work tree, a linked
+ * work tree and a submodule all have one. It reads the folders itself instead of asking `git`, so inherited `GIT_DIR`, `GIT_WORK_TREE`
+ * or pathspec variables cannot change the answer. The state folder is vetted by the install, so the walk stops there (a home folder that
+ * is itself a repository, as with dotfiles, does not make `~/.rovara` unusable). Anything that cannot be read is refused.
+ */
+function assertOutsideGitWorkTree(path: string, stateDirectory: string): void {
+  const shown = JSON.stringify(path.slice(0, 300));
+  let real: string;
+  let realState: string | undefined;
+  try {
+    real = realPathOfNearest(path);
+    realState = (() => {
+      try {
+        return realPathOfNearest(stateDirectory);
+      } catch {
+        return undefined;
+      }
+    })();
+  } catch {
+    throw new PluginRegistryError("create_failed", `the database path ${shown} could not be checked, so it is refused; choose a path outside any git repository, or a bare file name such as "state.db", which is kept in the state folder`);
+  }
+  try {
+    for (let folder = dirname(real); ; folder = dirname(folder)) {
+      if (folder === realState) return;
+      let found = true;
+      try {
+        lstatSync(join(folder, ".git"));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+        found = false;
+      }
+      if (found) throw new PluginRegistryError("create_failed", `the database path ${shown} ${STORE_PATH_IN_REPOSITORY_SENTENCE} (${JSON.stringify(stateDirectory.slice(0, 300))})`);
+      if (dirname(folder) === folder) return;
+    }
+  } catch (error) {
+    if (error instanceof PluginRegistryError) throw error;
+    throw new PluginRegistryError("create_failed", `the database path ${shown} could not be checked, so it is refused; choose a path outside any git repository, or a bare file name such as "state.db", which is kept in the state folder`);
+  }
 }
 
 export function synchronousSetting(settings: JsonObject): "FULL" | "NORMAL" | undefined {
