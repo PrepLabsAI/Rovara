@@ -188,8 +188,9 @@ describe("line breaks other than the newline, and control characters in a path",
     expect(parsed).toHaveLength(1);
     expect(parsed[0]!.path).toContain("### src/b.ts");
     const renamed: TierFile = { repository: R, path: "b.ts", previousPath: "a.ts", status: "renamed", additions: 0, deletions: 0 };
-    const other: TierFile = { repository: R, path: "a.ts -> b.ts", status: "renamed", additions: 0, deletions: 0 };
+    const other: TierFile = { repository: R, path: "b.ts", previousPath: "c.ts", status: "renamed", additions: 0, deletions: 0 };
     expect(canonicalPatchText([renamed])).not.toBe(canonicalPatchText([other]));
+    expect(canonicalPatchText([renamed])).toContain('"previousPath":"a.ts"');
   });
   it("the prompt writes line and paragraph separators out", () => {
     expect(escapedForPrompt("a\u2028b\u2029c")).toBe("a\\u{2028}b\\u{2029}c");
@@ -201,7 +202,12 @@ describe("the records keep the flow record under its size limit", () => {
     const base = tierFromDiff({ files: Array.from({ length: 60 }, (_, index) => f(`src/auth/${"x".repeat(400)}${index}.ts`, chg(["a"], ["b"]))), complete: true }, ctx);
     let flow = recordTier(undefined, base).flow;
     for (let index = 0; index < 30; index += 1) flow = recordTier(flow, { ...base, headSha: index.toString(16).padStart(40, "0") }).flow;
-    const written = recordQuestionsAnswered(flow, { headSha: "a".repeat(40), patchDigest: "b".repeat(64), at: ctx.at });
+    // Fill the record to within a few bytes of its limit, with reasons the record can give up.
+    const filled = (pathLength: number) => ({ ...flow, tier: { ...flow.tier!, reasons: Array.from({ length: 50 }, (_unused, index) => ({ code: `filler_${index}`, path: "p".repeat(pathLength) })) } });
+    let length = 1;
+    while (flowRecordBytes(filled(length + 1)) < FLOW_MAX_BYTES - 40 && length < 400) length += 1;
+    expect(flowRecordBytes(filled(length))).toBeLessThan(FLOW_MAX_BYTES);
+    const written = recordQuestionsAnswered(filled(length), { headSha: "a".repeat(40), patchDigest: "b".repeat(64), at: ctx.at });
     expect(flowRecordBytes(written)).toBeLessThanOrEqual(FLOW_MAX_BYTES);
     expect(reviewerFloorRecorded(written, "a".repeat(40), "b".repeat(64))).toBe(true);
   });
