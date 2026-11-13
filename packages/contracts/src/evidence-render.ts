@@ -8,6 +8,7 @@ import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
 import { weakeningLines } from "./evidence-weakening.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
+import { rovaraProblem, type RovaraProblemFacts } from "./rovara-problem.js";
 
 /** The last line of the compact form: where the checks, the dependencies and the not-tested list are. */
 export const EVIDENCE_COMPACT_POINTER = "Checks, dependencies and what was not tested: open in Rovara";
@@ -50,6 +51,11 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 export interface EvidenceRenderOptions {
   timeTargetLine?: string | undefined;
   rovaraProblemLine?: string | undefined;
+  /**
+   * TE-B8 (O22): the fault behind a "Rovara problem" hold, as facts. The renderer makes the line from the words table (`rovara-problem.ts`: cause, what was tried, the next step by what is live today) and gives the person's action
+   * as `rovaraProblemButton`. It wins over `rovaraProblemLine`. The caller (behind the company gate `honestCi`) gives it only when a fault of Rovara's own holds the pull request.
+   */
+  rovaraProblem?: RovaraProblemFacts | undefined;
   /** What `readEvidencePack` reported, for the "newer evidence" line. */
   newer?: NewerEvidence | undefined;
   /**
@@ -67,6 +73,8 @@ export interface EvidenceRendering {
   body: string[];
   /** `firstLine` and `body`, one per line. */
   text: string;
+  /** The label of the person's action for the "Rovara problem" line (TE-B8); present only when `rovaraProblem` was given. The text has no button: the page and the Check put it. */
+  rovaraProblemButton?: string;
 }
 
 const cut = (text: string, max: number) => {
@@ -216,6 +224,9 @@ export function evidenceFirstLine(facts: EvidenceFirstLineFacts): string {
   ].join(" · "));
 }
 
+/** The button label of a rendered problem, as a spread (nothing when there is none, so the shape of a pack without one is unchanged). */
+const buttonOf = (problem: { button: string } | undefined) => (problem === undefined ? {} : { rovaraProblemButton: problem.button });
+
 /** The first line and the body of a v2 pack. Pure; the same pack and options always give the same text. */
 export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, options: EvidenceRenderOptions = {}): EvidenceRendering {
   const pack = input as EvidencePackV2Read;
@@ -225,17 +236,20 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const firstLine = evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words });
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
+  // The structured problem is already inert (every piece went through `inertEvidenceText`), so it is not made inert again (that would escape an `&` twice).
+  const problem = options.rovaraProblem === undefined ? undefined : rovaraProblem(options.rovaraProblem);
+  const problemLines = problem === undefined ? slot(options.rovaraProblemLine) : [problem.line];
   const newer = options.newer ?? noNewerEvidence();
   const notTested = pack.notTested;
   const flagged = weakeningPart(pack);
   if (options.compact === true) {
-    const short = [producerLine, ...flagged.flags, ...slot(options.rovaraProblemLine), ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
-    return { firstLine, producerLine, body: short, text: [firstLine, ...short].join("\n") };
+    const short = [producerLine, ...flagged.flags, ...problemLines, ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
+    return { firstLine, producerLine, body: short, text: [firstLine, ...short].join("\n"), ...buttonOf(problem) };
   }
   const body = [
     producerLine,
     ...flagged.flags,
-    ...slot(options.rovaraProblemLine),
+    ...problemLines,
     ...slot(options.timeTargetLine),
     ...checksLines(pack.checks),
     ...(pack.proof === undefined ? [] : proofLines(pack.proof, scripted)),
@@ -249,7 +263,7 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
     ]),
     ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []),
   ];
-  return { firstLine, producerLine, body, text: [firstLine, ...body].join("\n") };
+  return { firstLine, producerLine, body, text: [firstLine, ...body].join("\n"), ...buttonOf(problem) };
 }
 
 /**
