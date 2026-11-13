@@ -128,6 +128,8 @@ export interface MergeTrackingDependencies {
   recordedHead?(workspaceId: string, repositoryId: string, number: number): Promise<string | undefined>;
   /** The project's real-check mode (TE-B2): what "No CI" and unreadable CI mean for marking ready. `DEFAULT_CI_MODE` when not given. */
   ciMode?(task: TrackedTask): Promise<ProjectCiMode> | ProjectCiMode;
+  /** Whether the task's draft must stay a draft (a small change that grew to risky, not yet kept by a person or not yet reviewed at risky). Absent: nothing holds it. */
+  readyHold?(task: TrackedTask): Promise<boolean>;
   /** The org's autonomy for Rovara Code, for the deciders; `prepare` when not given. */
   autonomy?(task: TrackedTask): Promise<Autonomy> | Autonomy;
   /**
@@ -588,6 +590,9 @@ async function trackOne(
     // A draft is taken out of draft only where the mode allows it; a pull request that is not a draft (the host refuses drafts, or a person marked it ready) cannot be kept back, so it gets its reviewers on passing CI or no CI.
     && (status.draft ? ciAllowsReady(ci.ci, ciMode) : ciAllowsMerge(ci.ci))
     && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING";
+  // A change that grew to risky stays a draft until a person keeps it and the risky reviews pass: it is not marked ready, and one a person marked ready on the code host is noted (it cannot be undone from here).
+  const held = deps.readyHold === undefined ? false : await deps.readyHold(task).catch(() => true);
+  if (held && status.state === "open" && !status.draft) deps.log?.("merge_tracking.held_pull_request_not_draft", { taskId: task.taskId, number: pullRequest.number });
   let readyNow = false;
   let asked = false;
   let markedReady = false;
@@ -601,7 +606,7 @@ async function trackOne(
       return false;
     }
   };
-  if (wantsReady) {
+  if (wantsReady && !held) {
     // A host that cannot take a change request out of draft leaves it a draft: it is never read as ready.
     const markReady = codeHost.markReady?.bind(codeHost);
     const drafted = !status.draft || (markReady !== undefined && await attempt_(() => markReady(ref, scope, budget), "mark_ready"));
