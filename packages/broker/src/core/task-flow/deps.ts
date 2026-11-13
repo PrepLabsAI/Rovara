@@ -1,6 +1,6 @@
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
-import type { TierReviewCall } from "../build-step/tier-review-calls.js";
+import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
 import type { TaskTestEnvironment } from "../test-env/seam.js";
 import type {
   Admission,
@@ -332,6 +332,8 @@ export interface TaskFlowDeps {
    * a task that skipped steps owes the questions after the switch went off. Absent: nothing can be asked, so such a task cannot merge.
    */
   tierReviewCall?: TierReviewCall;
+  /** Counts each lighter-flow reviewer call against the task's spend (Cloud's S3 wiring). A refusal makes the reviewer unavailable (the change fails closed). Absent: not metered. */
+  tierReviewMeter?: TierReviewMeter;
 }
 
 export const DEFAULT_DISPATCH_QUEUE = "task-dispatch";

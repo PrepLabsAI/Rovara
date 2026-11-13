@@ -11,6 +11,7 @@ import {
 } from "@agentx/contracts";
 import { estimateTier, fitFlow, recordTier, TIER_RULES_VERSION } from "../decisions/change-tier.js";
 import { pathsIn, planFiles } from "../decisions/plan-facts.js";
+import { DECISION_PLAN_COST_MEDIUM_USD } from "../decisions/risk-tier.js";
 
 export interface StageSelectionInput {
   /** The estimate of the CURRENT plan (or of the request and Understand's reading, before a plan exists). Undefined: nothing is known, nothing is skipped. */
@@ -146,17 +147,27 @@ function toQuick(workflow: WorkflowSnapshot): WorkflowSnapshot {
  * runs as today (code and security: the contract requires both before a pull request step). The skip and its record are in the returned workflow, committed in one write by the caller.
  * Returns undefined when nothing is skipped (today's steps run).
  */
-export function smallPlanRoute(input: { submitted: WorkflowSnapshot; plan: PlanDocument | undefined; requestText: string | undefined; noChangeNeeded: boolean; at: string }): { workflow: WorkflowSnapshot; skipped: FlowSkippableStep[] } | undefined {
+export function smallPlanRoute(input: {
+  submitted: WorkflowSnapshot; plan: PlanDocument | undefined; requestText: string | undefined; noChangeNeeded: boolean; at: string;
+  /** The plan as text (its Markdown, or the structured plan's rendering). Undefined: it could not be read, and nothing is skipped. */
+  planText: string | undefined;
+  /** The run's expected cost, high end (dollars). Over the medium line the plan still goes to a person. */
+  costHighUsd: number | undefined;
+}): { workflow: WorkflowSnapshot; skipped: FlowSkippableStep[] } | undefined {
   const { submitted } = input;
   const waiting = (submitted.stage === "PLAN_CRITIQUE" && submitted.state === "READY") || (submitted.stage === "PLAN_REVIEW" && submitted.state === "WAITING");
   if (!waiting || input.noChangeNeeded || submitted.definitionVersion !== "1.1.0" || submitted.path !== "QUICK" || submitted.designReview !== undefined) return undefined;
   if ((input.plan?.workBreakdown?.items.length ?? 0) > 0) return undefined;
   const assessment = submitted.intent?.assessment;
   const paths = [...new Set([...(input.plan === undefined ? [] : planFiles(input.plan)), ...namedPaths(input.requestText, assessment)])];
-  const estimate = estimateTier({ plannedPaths: paths, requestText: input.requestText }, { at: input.at });
+  // The plan's own words count against it, never for it: its sensitive words (the classifier's list, read over the plan as over the request), a path it names that the estimate's files do not hold, and, for
+  // a documents-only estimate, words for code. What the plan says about itself ("docs only") is never read as a reason to lower anything.
+  const estimate = planRaised(estimateTier({ plannedPaths: paths, requestText: [input.requestText ?? "", input.planText ?? ""].join("\n") }, { at: input.at }), paths, input.planText, input.requestText);
   const before = tiersOf(submitted.flow);
   const recorded = recordTier(submitted.flow, estimate).flow;
   const planned: FlowSkippableStep[] = [...(submitted.stage === "PLAN_CRITIQUE" ? ["plan_check" as const] : []), "plan_approval"];
+  // A run expected to cost more than the medium line goes to a person, whatever its size (the cost-graded plan approval); a plan that could not be read skips nothing.
+  if (input.planText === undefined || (input.costHighUsd ?? 0) > DECISION_PLAN_COST_MEDIUM_USD) return { workflow: { ...submitted, flow: recorded }, skipped: [] };
   const selection = selectStages({ estimate, recorded: before, planned, lighterFlow: true });
   if (selection.skip.length === 0) return { workflow: { ...submitted, flow: recorded }, skipped: [] };
   const advance = advanceStage(submitted, "IMPLEMENT");
@@ -169,4 +180,53 @@ export function smallPlanRoute(input: { submitted: WorkflowSnapshot; plan: PlanD
     flow: withSkipped(recorded, selection.skip),
   });
   return { workflow, skipped: selection.skip };
+}
+
+/** Words for code in a request or plan of a documents-only change: such a change is not documents only, whatever its files. */
+const CODE_WORDS = /\b(?:cli|parser|loader|config(?:uration)? (?:file|loader|option)|environment variables?|endpoints?|functions?|class(?:es)?|methods?|api|scripts?|database|schema|server|handlers?|modules?|packages?|dependenc(?:y|ies)|source code|entry point|arguments?)\b/iu;
+
+/** The estimate raised to at least standard by the plan's words (only up): a path the estimate's files do not hold, or words for code in a documents-only change. */
+export function planRaised(estimate: FlowTier, paths: readonly string[], planText: string | undefined, requestText: string | undefined): FlowTier {
+  if (estimate.level !== "small") return estimate;
+  const known = new Set(paths.map((path) => path.replace(/^\.\//u, "")));
+  const other = pathsIn(planText ?? "").filter((path) => !known.has(path));
+  const reasons: FlowTier["reasons"] = [];
+  if (other.length > 0) reasons.push({ code: "plan_names_other_files", path: other[0]!.slice(0, 200) });
+  if (estimate.kinds.length > 0 && estimate.kinds.every((kind) => kind === "docs") && CODE_WORDS.test(`${planText ?? ""}\n${requestText ?? ""}`)) reasons.push({ code: "plan_names_code" });
+  return reasons.length === 0 ? estimate : { ...estimate, level: "standard", reasons: [...reasons, ...estimate.reasons].slice(0, 50) };
+}
+
+/** Whether the current coding plan went to coding without its approval (the lighter flow skipped it): it is then never called approved. */
+export function planApprovalSkipped(workflow: Pick<WorkflowSnapshot, "flow" | "decisions" | "artifacts">, planSha256?: string): boolean {
+  if (workflow.flow?.skippedSteps?.includes("plan_approval") !== true) return false;
+  const digest = planSha256 ?? workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)?.sha256;
+  return !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === digest);
+}
+
+/** The planning steps Understand skipped (the design review, the requirements and design approvals): restored when the plan's estimate is above small. */
+export const UNDERSTAND_SKIPS: readonly FlowSkippableStep[] = ["design_review", "requirements_approval", "design_approval"];
+
+/**
+ * The workflow ready to plan again on today's path, when Understand skipped steps for a change the plan shows is not small: `before` is the workflow as it stood before the plan was submitted (planning,
+ * no plan yet). The steps it gives back are dropped from `skippedSteps` (they will run), the estimate stays on the record, and the restore is noted. The caller then switches the design review on again
+ * when it was the step skipped, else the Full path (`toFull`) brings back the requirements and design approvals.
+ */
+export function restoredForPlanning(before: WorkflowSnapshot, estimated: WorkflowFlow | undefined, at: string): { workflow: WorkflowSnapshot; restored: FlowSkippableStep[] } | undefined {
+  const skipped = estimated?.skippedSteps ?? [];
+  const restored = skipped.filter((step) => UNDERSTAND_SKIPS.includes(step));
+  if (restored.length === 0 || before.stage !== "PLAN" || before.state !== "RUNNING") return undefined;
+  const left = skipped.filter((step) => !restored.includes(step));
+  const { skippedSteps: _skipped, ...flowRest } = estimated!;
+  void _skipped;
+  const noted = withQuickChecks({ ...flowRest, ...(left.length === 0 ? {} : { skippedSteps: left }) }, [quickCheckEntry({ kind: "code_config", outcome: "not_run", at,
+    detail: `restored ${restored.join(", ")}: the plan's estimate is ${estimated?.tier?.level ?? "unknown"}, so the steps a small change skips run as today` })]);
+  return { workflow: WorkflowSnapshotSchema.parse({ ...before, revision: before.revision + 1, state: "READY", flow: noted, updatedAt: at }), restored };
+}
+
+/** The workflow on the Full path: requirements first, then the design, then the plan (each approved by a person). */
+export function toFull(workflow: WorkflowSnapshot): WorkflowSnapshot {
+  if (workflow.path === "FULL") return workflow;
+  const intent = workflow.intent;
+  const assessment = intent?.assessment?.kind === "ready" ? { ...intent.assessment, path: "FULL" as const } : intent?.assessment;
+  return WorkflowSnapshotSchema.parse({ ...workflow, path: "FULL", reviewPhase: "REQUIREMENTS", ...(intent === undefined ? {} : { intent: { ...intent, ...(assessment === undefined ? {} : { assessment }) } }) });
 }
