@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { AgentXError, agentXError, createCandidateManifest, type WorkerInvocation, type WorkflowFeedbackBundleRef } from "@agentx/contracts";
+import { AgentXError, agentXError, createCandidateManifest, neverCommitRefusal, type WorkerInvocation, type WorkflowFeedbackBundleRef } from "@agentx/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";
@@ -121,6 +121,64 @@ describe("pull request publication", () => {
     expect(pullRequestSink).not.toHaveBeenCalled();
     await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`]))
       .rejects.toThrow();
+  });
+
+  it("never publishes Rovara's own working files, even when the task force-added them (TE-B9)", async () => {
+    const fixture = await createFixture();
+    await mkdir(join(fixture.checkout, ".agentx"), { recursive: true });
+    await mkdir(join(fixture.checkout, ".agentx-tmp"), { recursive: true });
+    await mkdir(join(fixture.checkout, "svc", ".rovara"), { recursive: true });
+    await writeFile(join(fixture.checkout, ".agentx", "x"), "state\n", "utf8");
+    await writeFile(join(fixture.checkout, ".agentx-tmp", "y"), "scratch\n", "utf8");
+    await writeFile(join(fixture.checkout, "svc", ".rovara", "state.db"), "db\n", "utf8");
+    await writeFile(join(fixture.checkout, "WORK.md"), "the customer's change\n", "utf8");
+    await git(fixture.checkout, ["add", "-f", ".agentx", ".agentx-tmp", "svc/.rovara"]);
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({ number: 13, url: "https://github.com/example/demo/pull/13", reconciled: false }),
+    });
+    // Positive control: the customer's file went; the working files did not, and are still on disk.
+    expect((await git(fixture.bare, ["ls-tree", "-r", "--name-only", result.commit])).split("\n").filter((line) => line !== "")).toEqual(["README.md", "WORK.md"]);
+    expect(await readFile(join(fixture.checkout, ".agentx", "x"), "utf8")).toBe("state\n");
+  });
+
+  it("refuses a branch whose task commits hold Rovara's working files, even when the last commit is clean, before any credential, push or pull request (TE-B9 M4, L2)", async () => {
+    const fixture = await createFixture();
+    const author = ["-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local"];
+    await git(fixture.checkout, ["checkout", "-b", fixture.invocation.payload.headBranch]);
+    await mkdir(join(fixture.checkout, ".agentx"), { recursive: true });
+    await writeFile(join(fixture.checkout, ".agentx", "x"), "state\n", "utf8");
+    await git(fixture.checkout, ["add", "-f", ".agentx"]);
+    await git(fixture.checkout, [...author, "commit", "-m", "task: leaked state"]);
+    await writeFile(join(fixture.checkout, "WORK.md"), "the customer's change\n", "utf8");
+    await git(fixture.checkout, ["add", "WORK.md"]);
+    await git(fixture.checkout, [...author, "commit", "-m", "task: the work"]);
+    // Positive control: the last commit alone is clean, so a check against HEAD^ would pass this.
+    expect((await git(fixture.checkout, ["diff", "--name-only", "HEAD^", "HEAD"])).trim()).toBe("WORK.md");
+    const credentialProvider = vi.fn(async () => ({}));
+    const pullRequestSink = vi.fn();
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation: fixture.invocation, credentialProvider, pullRequestSink }))
+      .rejects.toThrow(neverCommitRefusal(".agentx/x"));
+    expect(credentialProvider).not.toHaveBeenCalled();
+    expect(pullRequestSink).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).rejects.toThrow();
+  });
+
+  it("a working file the task committed never reaches the checked tree that is published (TE-B9 M1)", async () => {
+    const fixture = await createFixture();
+    const author = ["-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local"];
+    const taskBase = (await git(fixture.checkout, ["rev-parse", "HEAD"])).trim();
+    await mkdir(join(fixture.checkout, ".agentx-tmp"), { recursive: true });
+    await writeFile(join(fixture.checkout, ".agentx-tmp", "y"), "scratch\n", "utf8");
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    await git(fixture.checkout, ["add", "-f", ".agentx-tmp", "WORK.md"]);
+    await git(fixture.checkout, [...author, "commit", "-m", "task: work and scratch"]);
+    const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout, baseCommitSha: taskBase }]);
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha, publicationMode: "CHECKED_TREE", workflowBaseCommit: taskBase } } as typeof fixture.invocation;
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: async () => ({ number: 16, url: "https://github.com/example/demo/pull/16", reconciled: false }) });
+    expect((await git(fixture.bare, ["ls-tree", "-r", "--name-only", result.commit])).split("\n").filter((line) => line !== "")).toEqual(["README.md", "WORK.md"]);
   });
 
   it("publishes exactly the checked tree on the task's base and refuses a tree that changed before pushing", async () => {
