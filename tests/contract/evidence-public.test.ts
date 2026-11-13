@@ -6,12 +6,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   EVIDENCE_ISOLATIONS, EVIDENCE_LEVELS, EVIDENCE_RESULTS, EVIDENCE_TRUST_CLASSES, NEWER_EVIDENCE_WORDS, PUBLIC_CHANGE_TYPE_WORDS, PUBLIC_DETAILS_WORDS, PUBLIC_NOT_SEALED_WORDS, PUBLIC_WEAKEST_WORDS,
-  isPublicDetailsUrl, publicEvidenceView, readEvidencePack, readEvidencePackText, renderEvidence, renderEvidencePublic, type EvidencePackV2,
+  PUBLIC_RENDER_LIMITS, publicDetailsUrl, publicEvidenceView, readEvidencePack, readEvidencePackText, renderEvidence, renderEvidencePublic, type EvidencePackV2,
 } from "../../packages/contracts/src/index.js";
 import { v2Pack } from "../support/evidence-v2-fixtures.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const ZWJ = "‍";
+const DETAILS = { origin: "https://app.example.test", taskId: "tsk_8fK2mQ9xLp3a" };
+const DETAILS_LINK = "https://app.example.test/t/tsk_8fK2mQ9xLp3a";
 
 // ---- the planted values, all built at run time (the public repo refuses key-shaped literals)
 const rand = (seed: number) => () => {
@@ -103,7 +105,7 @@ describe("the redaction fixture: nothing planted reaches the public output", () 
   });
 
   it("prints none of the planted values, in the text or in the view", () => {
-    const out = renderEvidencePublic(planted(), { detailsUrl: "https://app.example.test/tasks/t1" });
+    const out = renderEvidencePublic(planted(), { details: DETAILS });
     expect(leaks(out.text)).toEqual([]);
     expect(leaks(JSON.stringify(publicEvidenceView(planted())))).toEqual([]);
     // also no name, address, amount or file name in any other form
@@ -140,7 +142,7 @@ const inertLabel = (value: string) => value.replace("@", `@${ZWJ}`).replace("://
 
 describe("what it prints", () => {
   it("is this golden for the planted pack", () => {
-    const out = renderEvidencePublic(planted(), { changeType: "bug_fix", detailsUrl: "https://app.example.test/tasks/t1" });
+    const out = renderEvidencePublic(planted(), { changeType: "bug_fix", details: DETAILS });
     expect(out.firstLine).toBe("Verified · Real run by Rovara · weakest stage: open in Rovara");
     expect(out.body).toEqual([
       "Checked in a sealed round",
@@ -160,9 +162,9 @@ describe("what it prints", () => {
       "- 1 test removed",
       "- 1 test config file changed",
       "- 2 snapshot files changed",
-      "Dependencies: 2 (Real 1 · Recorded 1 (oldest recorded 12 Nov))",
+      "Dependencies: 2 (Real 1 · Recorded 1 (oldest recorded 12 Nov 2026))",
       "Not tested: 2 items (the list is in Rovara)",
-      `${PUBLIC_DETAILS_WORDS}: [Open in Rovara](https://app.example.test/tasks/t1)`,
+      `${PUBLIC_DETAILS_WORDS}: [Open in Rovara](${DETAILS_LINK})`,
     ]);
   });
 
@@ -175,7 +177,7 @@ describe("what it prints", () => {
       "Tests: 3 tests run, 0 failed, 1 new",
       "90% of changed lines covered",
       "Change proof: 1 proven",
-      "Dependencies: 2 (Real 1 · Recorded 1 (oldest recorded 12 Nov))",
+      "Dependencies: 2 (Real 1 · Recorded 1 (oldest recorded 12 Nov 2026))",
       "Not tested: 1 item (the list is in Rovara)",
       `${PUBLIC_DETAILS_WORDS}: open in Rovara`,
     ].join("\n"));
@@ -198,7 +200,7 @@ describe("what it prints", () => {
     expect(read.status).toBe("v2");
     if (read.status !== "v2") return;
     const out = renderEvidencePublic(read.pack, { newer: read.newer });
-    expect(out.body).toContain("Checks: 2 (1 not checked, 1 newer evidence, open in rovara)");
+    expect(out.body).toContain("Checks: 2 (1 not checked, 1 with newer evidence)");
     expect(out.body).toContain(NEWER_EVIDENCE_WORDS);
   });
 });
@@ -319,7 +321,7 @@ describe("property: random packs never leak a marked canary", () => {
     for (let index = 0; index < 300; index += 1) {
       const raw = mutate(clone(plantedPack()), next, index % 2 === 0);
       const view = (() => { try { return publicEvidenceView(raw as EvidencePackV2); } catch (error) { throw new Error(`view threw on run ${String(index)}`, { cause: error }); } })();
-      const out = renderEvidencePublic(raw as EvidencePackV2, { changeType: next() < 0.5 ? MARK : "refactor", detailsUrl: next() < 0.5 ? `https://x.example/${MARK}?t=${MARK}` : undefined });
+      const out = renderEvidencePublic(raw as EvidencePackV2, { changeType: next() < 0.5 ? MARK : "refactor", details: next() < 0.5 ? { origin: `https://x.example/${MARK}`, taskId: `${MARK}/x` } : undefined });
       expect(out.text, `run ${String(index)}`).not.toContain(MARK);
       expect(JSON.stringify(view)).not.toContain(MARK);
       expect(renderEvidencePublic(raw as EvidencePackV2, { changeType: "refactor" }).text).toBe(renderEvidencePublic(raw as EvidencePackV2, { changeType: "refactor" }).text);
@@ -357,14 +359,14 @@ describe("free text stays inert (and is not printed at all)", () => {
     pack.notTested = nasty.map((what) => ({ what, reason: what }));
     pack.level.weakest.words = nasty.join(" ");
     pack.dependencies[0].name = nasty[0];
-    const out = renderEvidencePublic(pack as unknown as EvidencePackV2, { detailsUrl: "https://app.example.test/tasks/t1" });
-    const withoutLink = out.text.replace("[Open in Rovara](https://app.example.test/tasks/t1)", "");
+    const out = renderEvidencePublic(pack as unknown as EvidencePackV2, { details: DETAILS });
+    const withoutLink = out.text.replace(`[Open in Rovara](${DETAILS_LINK})`, "");
     expect(withoutLink).not.toMatch(/evil|octocat|#123|ENG-42|<|>|!\[|\]\(|\[|^#|^>|^---|^```|^~~~|www\.|@/mu);
     expect(out.text.includes("\u202E") || out.text.includes("\uFE0F") || out.text.includes("\u200B")).toBe(false);
   });
 
   it("every line it prints is already what the shared inert function would give it (the words are fixed), except the one sign-in link", () => {
-    const out = renderEvidencePublic(plantedPack(), { detailsUrl: "https://app.example.test/tasks/t1" });
+    const out = renderEvidencePublic(plantedPack(), { details: DETAILS });
     for (const line of out.text.split("\n")) {
       if (line.includes("](")) continue;
       const content = line.startsWith("- ") ? line.slice(2) : line;
@@ -373,13 +375,20 @@ describe("free text stays inert (and is not printed at all)", () => {
     }
   });
 
-  it("the sign-in link is used only when it is a plain https address", () => {
-    expect(isPublicDetailsUrl("https://app.example.test/tasks/t1")).toBe(true);
-    expect(isPublicDetailsUrl("https://app.example.test:8443/a/b_c-d.e~f")).toBe(true);
-    for (const bad of ["http://app.example.test/x", "javascript:alert(1)", "//app.example.test/x", "https://user:pass@app.example.test/x", "https://app.example.test/x?sig=abc", "https://app.example.test/x#frag", "https://app.example.test/x)[y](z", "https://app.example.test/x y", "https://app.example.test/<x>", "https://app.example.test/x\nHello", "https://", `https://app.example.test/${"a".repeat(400)}`, "data:text/html,x", 5, undefined, null]) {
-      expect(isPublicDetailsUrl(bad), String(bad)).toBe(false);
-      expect(renderEvidencePublic(v2Pack(), { detailsUrl: bad as string }).body.at(-1)).toBe(`${PUBLIC_DETAILS_WORDS}: open in Rovara`);
+  it("the sign-in link is built from ONE configured origin and an opaque task id, and nothing else", () => {
+    expect(publicDetailsUrl(DETAILS.origin, DETAILS.taskId)).toBe(DETAILS_LINK);
+    expect(publicDetailsUrl("https://app.rovara.dev", "01HZX3K9M2Q7R8T5V6W4Y1Z0AB")).toBe("https://app.rovara.dev/t/01HZX3K9M2Q7R8T5V6W4Y1Z0AB");
+    const badOrigins = ["http://app.example.test", "https://10.0.0.5", "https://10.0.0.5:8443", "https://127.0.0.1", "https://[::1]", "https://[2001:db8::1]", "https://localhost", "https://intranet", "https://a..b", "https://a.b.", "https://.a.b", "https://app.example.test:8443", "https://app.example.test/", "https://app.example.test/acme", "https://app.example.test?x=1", "https://app.example.test#f", "https://user:pw@app.example.test", "https://app.example.test/x)[y](z", "https://app.example.test y", "https://app.example.test\nHello", "https://", "https://a.123", "https://1.2.3.4.5", "https://-a.example.test", "https://a-.example.test", "javascript:alert(1)", "//app.example.test", `https://${"a".repeat(64)}.example.test`, `https://${"a.".repeat(130)}com`, "https://rovara.internal.acme.com/acme/payments-team", 5, undefined, null];
+    for (const bad of badOrigins) {
+      expect(publicDetailsUrl(bad as string, DETAILS.taskId), `origin ${String(bad)}`).toBeUndefined();
+      expect(renderEvidencePublic(v2Pack(), { details: { origin: bad as string, taskId: DETAILS.taskId } }).body.at(-1), String(bad)).toBe(`${PUBLIC_DETAILS_WORDS}: open in Rovara`);
     }
+    const badIds = ["t/9", "acme/payments-team/t/9", "../x", "a b", "short", "", "x".repeat(65), "tsk_8fK2mQ9xLp3a?x=1", "tsk_8fK2mQ9xLp3a#f", "tsk_8fK2mQ9xLp3a\n", "tsk_8fK2mQ9xLp3a)", "tsk:8fK2mQ9xLp3a", "tsk.8fK2mQ9xLp3a", "tsk@8fK2mQ9xLp3a", "%2e%2e%2fadmin1234", 5, undefined, null];
+    for (const bad of badIds) {
+      expect(publicDetailsUrl(DETAILS.origin, bad as string), `id ${String(bad)}`).toBeUndefined();
+      expect(renderEvidencePublic(v2Pack(), { details: { origin: DETAILS.origin, taskId: bad as string } }).body.at(-1), String(bad)).toBe(`${PUBLIC_DETAILS_WORDS}: open in Rovara`);
+    }
+    expect(PUBLIC_RENDER_LIMITS.linkMax).toBeGreaterThan(DETAILS_LINK.length);
   });
 });
 
@@ -424,6 +433,83 @@ describe("bounded and fast", () => {
     pack.checks.push(null, 7);
     const out = renderEvidencePublic(pack as unknown as EvidencePackV2);
     expect(out.text).not.toMatch(/NaN|Infinity|undefined|null|\[object/u);
+  });
+});
+
+describe("review fixes (Opus review of B12)", () => {
+  const withDeps = (dependencies: unknown[]) => renderEvidencePublic(v2Pack({ dependencies }));
+  const depLine = (out: { body: string[] }) => out.body.find((entry) => entry.startsWith("Dependencies:"));
+
+  it("L1: a negative zero is printed as 0, never -0", () => {
+    const pack = clone(v2Pack()) as unknown as Record<string, any>;
+    pack.checks[0].tests = { total: -0, failed: -0, errored: -0, newTests: [] };
+    pack.checks[0].coverage = { linesChanged: -0, linesCovered: -0 };
+    pack.proof = { provenCount: -0, loadFailureOnOld: -0, heldDraft: false };
+    pack.weakening = { skipRise: { before: 0, after: -0 }, removedTests: [], absentOnNew: [], absentOnNewCount: -0, changedTestConfig: [], changedSnapshots: [], changedFixtures: [] };
+    const out = renderEvidencePublic(pack as unknown as EvidencePackV2);
+    expect(out.text).not.toContain("-0");
+    expect(out.body).toContain("Tests: 0 tests run, 0 failed, 0 new");
+    expect(Object.is(publicEvidenceView(pack as unknown as EvidencePackV2).checks.tests!.total, -0)).toBe(false);
+  });
+
+  it("L2: only a real calendar date counts, and the year is shown", () => {
+    for (const bad of ["2026-13-99", "0000-00-00", "2026-02-30", "2026-00-10", "2026-04-31", "1999-12-31", "2026-11-02\n", "2026-1-2", "12 Nov 2026", ""]) {
+      expect(depLine(withDeps([{ name: "x", kind: "http", backing: "fake", label: "recorded_fake", trust: "recorded", recordedOn: bad }])), bad).toBe("Dependencies: 1 (Recorded 1)");
+    }
+    expect(depLine(withDeps([{ trust: "recorded", recordedOn: "2024-02-29" }]))).toBe("Dependencies: 1 (Recorded 1 (oldest recorded 29 Feb 2024))");
+    expect(depLine(withDeps([{ trust: "recorded", recordedOn: "2023-02-29" }]))).toBe("Dependencies: 1 (Recorded 1)");
+    // the oldest valid date wins; an invalid older one is skipped
+    expect(depLine(withDeps([{ trust: "recorded", recordedOn: "2026-11-12" }, { trust: "recorded", recordedOn: "2025-03-01" }, { trust: "recorded", recordedOn: "2020-13-01" }]))).toBe("Dependencies: 3 (Recorded 3 (oldest recorded 1 Mar 2025))");
+  });
+
+  it("L2: with today's date given, a recording over 90 days old says so (and one that is not does not)", () => {
+    const old = renderEvidencePublic(v2Pack({ dependencies: [{ trust: "recorded", recordedOn: "2026-07-01" }] }), { today: "2026-11-13" });
+    expect(depLine(old)).toBe("Dependencies: 1 (Recorded 1 (oldest recorded 1 Jul 2026, over 90 days old))");
+    const edge = (day: string) => depLine(renderEvidencePublic(v2Pack({ dependencies: [{ trust: "recorded", recordedOn: day }] }), { today: "2026-11-13" }));
+    expect(edge("2026-08-14")).toContain("over 90 days old"); // 91 days
+    expect(edge("2026-08-15")).not.toContain("over 90 days old"); // exactly 90 days is not over
+    for (const badToday of ["2026-13-01", "today", "", undefined]) expect(depLine(renderEvidencePublic(v2Pack({ dependencies: [{ trust: "recorded", recordedOn: "2020-01-01" }] }), { today: badToday as string }))).not.toContain("days old");
+  });
+
+  it("L3: the exported word tables are frozen", () => {
+    for (const table of [PUBLIC_CHANGE_TYPE_WORDS, PUBLIC_WEAKEST_WORDS, PUBLIC_RENDER_LIMITS]) expect(Object.isFrozen(table)).toBe(true);
+    expect(() => { (PUBLIC_CHANGE_TYPE_WORDS as Record<string, string>).feature = "x"; }).toThrow();
+    expect(() => { (PUBLIC_WEAKEST_WORDS as string[]).push("x"); }).toThrow();
+  });
+
+  it("L4: until the model-host block exists, the residual line says the network was open", () => {
+    expect(PUBLIC_NOT_SEALED_WORDS).toBe("Not sealed: outside network access was open in this run");
+    expect(renderEvidencePublic(v2Pack({ producer: { edition: "cloud", isolation: "sandbox" }, level: { reached: "sandbox_only", required: [] } })).body).toContain("Not sealed: outside network access was open in this run");
+  });
+
+  it("L5: off-table strings in result, level, producer, check outcome and trust, and dependency trust leave only table members in the view", () => {
+    const off = pieces("CANARY", "-off-table");
+    const pack = clone(v2Pack()) as unknown as Record<string, any>;
+    pack.result = off;
+    pack.level = { reached: off, required: [] };
+    pack.producer = { edition: "cloud", isolation: off };
+    pack.checks = [{ id: "a", kind: "test", label: "x", before: "passed", after: off, class: "passing", durationMs: 1, trust: off }, { id: "b", kind: "test", label: "y", before: "passed", after: "passed", class: "passing", durationMs: 1, trust: "real" }];
+    pack.dependencies = [{ name: "d", kind: "http", backing: "fake", label: "real", trust: off }, { name: "e", kind: "http", backing: "fake", label: "real", trust: "constructor" }];
+    const view = publicEvidenceView(pack as unknown as EvidencePackV2);
+    expect(JSON.stringify(view)).not.toContain("CANARY");
+    expect([view.result, view.reached, view.isolation]).toEqual(["newer", "newer", "newer"]);
+    expect(view.checks.byOutcome).toEqual({ passed: 1, failed: 0, timed_out: 0, unknown: 0, not_run: 0, newer: 1 });
+    expect(view.checks.byTrust).toEqual({ real: 1, recorded: 0, simulated: 0, made_by_rovara: 0, no_outside_calls: 0, newer: 1 });
+    expect(view.dependencies.byTrust).toEqual({ real: 0, recorded: 0, simulated: 0, made_by_rovara: 0, no_outside_calls: 0, newer: 2 });
+    const out = renderEvidencePublic(pack as unknown as EvidencePackV2);
+    expect(out.text).not.toContain("CANARY");
+    expect(out.firstLine).toBe(`${NEWER_EVIDENCE_WORDS} · ${NEWER_EVIDENCE_WORDS}`);
+  });
+
+  it("cosmetic: counts of newer values read as plain words", () => {
+    const pack = clone(v2Pack()) as unknown as Record<string, any>;
+    pack.checks = [{ id: "a", kind: "test", label: "x", before: "passed", after: "quantum", class: "passing", durationMs: 1, trust: "quantum" }];
+    pack.dependencies = [{ name: "d", kind: "http", backing: "fake", label: "real", trust: "quantum" }];
+    const out = renderEvidencePublic(pack as unknown as EvidencePackV2);
+    expect(out.body).toContain("Checks: 1 (1 with newer evidence)");
+    expect(out.body).toContain("Checks by trust: 1 with newer evidence");
+    expect(out.body).toContain("Dependencies: 1 (1 with newer evidence)");
+    expect(out.text).not.toMatch(/open in rovara|Newer evidence, open in Rovara \d/u);
   });
 });
 
