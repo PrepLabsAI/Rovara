@@ -35,10 +35,10 @@ export const EVAL_GATE_Z_POWER = 0.84;
 /** The one-sided level of the per-category tests, before the Holm-Bonferroni correction. 0.01 (not the 0.025 of a lone test): in the seeded no-change simulation, 0.025 on top of the overall band and the strict categories gave about 13% false regressions; 0.01 gives under 10%. */
 export const EVAL_HOLM_ALPHA = 0.01;
 /**
- * The default plan (DECISIONS 171, refined by the owner 2026-11-13): the old code runs 3 times (the noise estimate, and the steady rule's minimum), the new code ONCE, and the minimum detectable drop is 0.15 (15 points). A project may set a smaller drop only if its eval can detect it; otherwise the gate says "cannot detect the agreed drop". A minimum eval (20 visible and 20 hidden questions)
+ * The default plan (DECISIONS 171, refined by the owner 2026-11-13; noise band k = 2.5 is DECISIONS 187): the old code runs 3 times (the noise estimate, and the steady rule's minimum), the new code ONCE, and the minimum detectable drop is 0.20 (20 points; DECISIONS 186, replacing 184's 0.15). A project may set a smaller drop only if its eval can detect it; otherwise the gate says "cannot detect the agreed drop". A minimum eval (20 visible and 20 hidden questions)
  * then makes 20 x 3 + 20 x 3 + 20 + 20 = 160 calls on a cache miss, inside the task's 200-call budget shared by the base and head rounds (`evalCallsNeeded`).
  */
-export const EVAL_GATE_PLAN_DEFAULTS = { baseRuns: 3, headRuns: 1, minDetectableDrop: 0.15 } as const;
+export const EVAL_GATE_PLAN_DEFAULTS = { baseRuns: 3, headRuns: 1, minDetectableDrop: 0.2 } as const;
 /** The model calls an eval needs: every question, on the old code `baseRuns` times (none when the baseline is cached) and on the new code `headRuns` times. */
 export function evalCallsNeeded(args: { readonly visibleQuestions: number; readonly hiddenQuestions: number; readonly baseRuns: number; readonly headRuns: number; readonly baselineCached: boolean }): number {
   const questions = args.visibleQuestions + args.hiddenQuestions;

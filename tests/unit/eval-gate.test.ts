@@ -259,10 +259,10 @@ describe("the steady floor on the whole set, the variance floor, k and the defau
     const result = evalGate(gateInput());
     expect(result.visible?.noiseRange.high).toBeCloseTo(2.5 * (result.visible?.se ?? 0), 9);
   });
-  it("has a default minimum detectable drop of 0.15, and says so in the label wording: 'No drop of 15 points or more measured'", () => {
-    expect(EVAL_GATE_PLAN_DEFAULTS.minDetectableDrop).toBe(0.15);
-    const fifteen = planned({ minDetectableDrop: 0.15 });
-    expect(evalGate(gateInput(fifteen)).summary).toContain("No drop of 15 points or more measured.");
+  it("has a default minimum detectable drop of 0.20, and says so in the label wording: 'No drop of 20 points or more measured'", () => {
+    expect(EVAL_GATE_PLAN_DEFAULTS.minDetectableDrop).toBe(0.2);
+    const twenty = planned({ minDetectableDrop: 0.2 });
+    expect(evalGate(gateInput(twenty)).summary).toContain("No drop of 20 points or more measured.");
     expect(evalGate(gateInput(planned({ minDetectableDrop: 0.05 }))).summary).toContain("No drop of 5 points or more measured.");
   });
   it("a strict category whose old runs never varied: 2 failed question-runs block (the floor), 1 does not", () => {

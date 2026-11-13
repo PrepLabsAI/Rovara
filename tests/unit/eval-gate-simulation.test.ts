@@ -20,7 +20,7 @@ function seeded(seed: number): () => number {
   };
 }
 const planWith = (minDetectableDrop: number) => { const plan = { ...PLAN, ...EVAL_GATE_PLAN_DEFAULTS, minDetectableDrop }; return { plan, recordedPlanHash: evalGatePlanHash(plan) }; };
-/** The owner's default minimum detectable drop (0.15), and the finer 0.05 a project may ask for. */
+/** The owner's default minimum detectable drop (0.20, DECISIONS 186), and the finer 0.05 a project may ask for. */
 const DROPS = [EVAL_GATE_PLAN_DEFAULTS.minDetectableDrop, 0.05] as const;
 type Layout = ReadonlyArray<readonly [string, number]>;
 /** 20 questions without a strict category, or 20 with one strict category of 10. */
@@ -64,8 +64,8 @@ describe("no-change simulation at the owner's defaults (3 old runs, 1 new run, 2
       }
     }
   }
-  it("is not just refusing everything: at the default drop of 0.15 and a 0.99 pass rate, about a quarter of unchanged systems are cleared", () => {
-    expect(trials(LAYOUTS["no strict"]!, RATES["0.99"]!, 0, COUNT, 20261113, 0.15).qualified).toBeGreaterThan(0.2);
+  it("is not just refusing everything: at the default drop of 0.20 and a 0.99 pass rate, more than a fifth of unchanged systems are cleared", () => {
+    expect(trials(LAYOUTS["no strict"]!, RATES["0.99"]!, 0, COUNT, 20261113, EVAL_GATE_PLAN_DEFAULTS.minDetectableDrop).qualified).toBeGreaterThan(0.2);
   });
 });
 
