@@ -192,13 +192,16 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
       // One pack per task and candidate digest: re-keeping the same candidate (a re-check, a retried keep) writes the pack again, so this caller overwrites on purpose.
       { overwrite: true });
     // TE-C1: the words beside the pack, replaced (or removed) with every keep of the same code, so they never describe a run this keep did not compare with. Informational: a fault here is only a missing line.
-    try {
-      // An abandoned call (its time has run out) writes nothing more.
-      if (deps.late?.() === true) return { kept: true, problems: built.problems, guardedParts: guarded };
-      if (baselineWords === undefined) await deps.store.blobs.delete(evidenceBaselineKey(input.task, input.candidateDigest));
-      else await deps.store.blobs.put(evidenceBaselineKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(EvidenceBaselineSchema.parse(baselineWords)), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-baseline" }, retention: "evidence-std" }, { overwrite: true });
-    } catch (error) {
-      deps.log?.("evidence.baseline_not_kept", { error: error instanceof Error ? error.name : "unknown" });
+    // Only for a keep that was given baseline input (the switch on): with it off nothing here runs, so the keeper is byte for byte what it was.
+    if (input.baseline !== undefined) {
+      try {
+        // An abandoned call (its time has run out) writes nothing more.
+        if (deps.late?.() === true) return { kept: true, problems: built.problems, guardedParts: guarded };
+        if (baselineWords === undefined) await deps.store.blobs.delete(evidenceBaselineKey(input.task, input.candidateDigest));
+        else await deps.store.blobs.put(evidenceBaselineKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(EvidenceBaselineSchema.parse(baselineWords)), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-baseline" }, retention: "evidence-std" }, { overwrite: true });
+      } catch (error) {
+        deps.log?.("evidence.baseline_not_kept", { error: error instanceof Error ? error.name : "unknown" });
+      }
     }
     return { kept: true, problems: built.problems, guardedParts: guarded };
   } catch (error) {

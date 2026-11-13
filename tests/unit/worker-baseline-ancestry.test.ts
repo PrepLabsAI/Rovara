@@ -1,7 +1,8 @@
 // TE-C1, the worker's half: at the start of its checks round the worker checks the engine's candidate commits against the task's base commit, in the isolated git environment (a throwaway repository that sees the
 // candidate's objects and nothing else: no refs, no replace refs, no shallow file, no inherited GIT_* settings), and keeps the nearest ancestor within 50 commits. Real temporary repositories, real git.
-import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback, spawnSync } from "node:child_process";
+import { chmod, mkdtemp, mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -66,7 +67,7 @@ describe("the nearest trusted ancestor of the task's base", () => {
     expect(await ask(directory, base, [shas[8]!, shas[5]!, shas[2]!])).toEqual({ sha: shas[8], commitsBack: 3 });
   });
 
-  it("through a merge commit, counts the commits on the base's own line, and a commit only on the merged side is still an ancestor", async () => {
+  it("through a merge commit, counts the commits on the base's own line, and a commit only on the merged side is not counted", async () => {
     const directory = await repository();
     const [root] = await line(directory, 1);
     await git(directory, "checkout", "--quiet", "-b", "feature");
@@ -78,8 +79,9 @@ describe("the nearest trusted ancestor of the task's base", () => {
     const after = await commit(directory);
     expect(await ask(directory, after, [merged])).toEqual({ sha: merged, commitsBack: 1 });
     expect(await ask(directory, after, [mainLine[0]!])).toEqual({ sha: mainLine[0], commitsBack: 4 });
-    expect(await ask(directory, after, [side[1]!])).toMatchObject({ sha: side[1] });
-    expect(await ask(directory, after, [root!])).toMatchObject({ sha: root });
+    // First-parent only, consistently: a commit that is only on the merged side is not "on the base's line".
+    expect(await ask(directory, after, [side[1]!])).toBeUndefined();
+    expect(await ask(directory, after, [root!])).toEqual({ sha: root, commitsBack: 5 });
   });
 
   it("a force-pushed or rewritten base: a candidate that is not an ancestor, or not here at all, is a miss, never a match", async () => {
@@ -172,5 +174,95 @@ describe("the nearest trusted ancestor of the task's base", () => {
     // Only the first five are looked at: the sixth is not even asked about.
     expect(await ask(directory, shas[2], ["a".repeat(40), "b".repeat(40), "c".repeat(40), "d".repeat(40), "e".repeat(40), shas[1]!])).toBeUndefined();
     expect(await ask(directory, shas[2], [shas[1]!, shas[1]!, shas[0]!])).toEqual({ sha: shas[1], commitsBack: 1 });
+  });
+});
+
+// The agent owns .git/objects from the coding step on. Git does not re-hash a commit's parents while it walks, so an object the agent rewrote can make `merge-base --is-ancestor` say yes.
+// The worker therefore reads every commit on the base's first-parent line itself and re-hashes it: a commit whose bytes do not hash to its own name ends the answer (a miss).
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const forgedBody = (parent: string, message: string): string => `tree ${EMPTY_TREE}\nparent ${parent}\nauthor a <a@b> 1 +0000\ncommitter a <a@b> 1 +0000\n\n${message}\n`;
+
+describe("an object store the agent rewrote", () => {
+  it("a genuine line is still vouched for commit by commit (control for the refusals below)", async () => {
+    const directory = await repository();
+    const shas = await line(directory, 4);
+    expect(await ask(directory, shas[3], [shas[0]!])).toEqual({ sha: shas[0], commitsBack: 3 });
+  });
+
+  /** X, Y on main; an orphan line P, B. Then the loose object of P is overwritten with a commit that names X as its parent. */
+  async function forgedLoose(): Promise<{ directory: string; x: string; b: string }> {
+    const directory = await repository();
+    await git(directory, "commit", "-q", "--allow-empty", "-m", "X");
+    const x = await git(directory, "rev-parse", "HEAD");
+    await git(directory, "commit", "-q", "--allow-empty", "-m", "Y");
+    await git(directory, "checkout", "-q", "--orphan", "other");
+    await git(directory, "commit", "-q", "--allow-empty", "-m", "P");
+    const p = await git(directory, "rev-parse", "HEAD");
+    await git(directory, "commit", "-q", "--allow-empty", "-m", "B");
+    const b = await git(directory, "rev-parse", "HEAD");
+    const loose = join(directory, ".git", "objects", p.slice(0, 2), p.slice(2));
+    await chmod(loose, 0o644);
+    const body = forgedBody(x, "P");
+    await writeFile(loose, deflateSync(Buffer.concat([Buffer.from(`commit ${String(Buffer.byteLength(body))}\0`), Buffer.from(body)])));
+    return { directory, x, b };
+  }
+
+  it("a loose commit rewritten to claim a parent is refused (control: plain git answers yes)", async () => {
+    const { directory, x, b } = await forgedLoose();
+    const plain = await execFile("git", ["-C", directory, "merge-base", "--is-ancestor", x, b], { env: { ...clean(), HOME: directory } }).then(() => true, () => false);
+    expect(plain).toBe(true);
+    expect(await ask(directory, b, [x])).toBeUndefined();
+    expect(await ask(directory, b, [b])).toEqual({ sha: b, commitsBack: 0 });
+  });
+
+  const gitInput = (directory: string, input: string, ...args: string[]): string => {
+    const run = spawnSync("git", ["-C", directory, ...args], { input, encoding: "utf8", env: { ...clean(), GIT_CONFIG_NOSYSTEM: "1", HOME: directory } });
+    if (run.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${run.stderr}`);
+    return run.stdout.trim();
+  };
+
+  /** X, Y on main; an orphan B, packed. A second, newer pack holds a hand-made commit (tree empty, parent X) whose index entry is relabelled with B's name. */
+  async function forgedPack(): Promise<{ directory: string; x: string; b: string }> {
+    const directory = await repository();
+    await git(directory, "commit", "-q", "--allow-empty", "-m", "X");
+    const x = await git(directory, "rev-parse", "HEAD");
+    await git(directory, "commit", "-q", "--allow-empty", "-m", "Y");
+    await git(directory, "checkout", "-q", "--orphan", "other");
+    await git(directory, "commit", "-q", "--allow-empty", "-m", "B");
+    const b = await git(directory, "rev-parse", "HEAD");
+    await git(directory, "gc", "-q");
+    const side = await repository();
+    const f = gitInput(side, forgedBody(x, "B"), "hash-object", "-t", "commit", "-w", "--stdin");
+    gitInput(side, `${f}\n`, "pack-objects", "-q", join(side, "forged"));
+    const packName = (await readdir(side)).find((name) => /^forged-.*\.pack$/u.test(name))!;
+    const pack = join(side, packName);
+    const index = pack.replace(/\.pack$/u, ".idx");
+    const data = Buffer.from(await readFile(index));
+    // Version 2 index with one object: fanout from byte 8, then the object name at 8 + 1024. Relabel F as B.
+    expect(data.subarray(0, 4).toString("hex")).toBe("ff744f63");
+    const bytes = Buffer.from(b, "hex");
+    for (let i = 0; i < 256; i += 1) data.writeUInt32BE(i < bytes[0]! ? 0 : 1, 8 + i * 4);
+    expect(data.subarray(8 + 1024, 8 + 1024 + 20).toString("hex")).toBe(f);
+    bytes.copy(data, 8 + 1024);
+    const target = join(directory, ".git", "objects", "pack");
+    await writeFile(join(target, packName), await readFile(pack));
+    await writeFile(join(target, packName.replace(/\.pack$/u, ".idx")), data);
+    // Newer than the real pack, so git prefers it.
+    const later = new Date(Date.now() + 60_000);
+    await utimes(join(target, packName), later, later);
+    return { directory, x, b };
+  }
+
+  it("a newer hand-made pack that relabels a forged commit as the base is refused, whether the candidate is its claimed parent or the base itself", async () => {
+    const { directory, x, b } = await forgedPack();
+    // Control: git reads the forged commit under the base's name (it names X as the parent of the base).
+    expect(await git(directory, "cat-file", "-p", b)).toContain(`parent ${x}`);
+    expect(await ask(directory, b, [x])).toBeUndefined();
+    // The base itself is not vouched for either (its bytes do not hash to its name).
+    expect(await ask(directory, b, [b])).toBeUndefined();
+    // Positive control: with the forged pack removed the same repository vouches for its own base.
+    const packs = join(directory, ".git", "objects", "pack");
+    for (const name of await readdir(packs)) if (name.startsWith("forged-")) await rm(join(packs, name), { force: true });
+    expect(await ask(directory, b, [b])).toEqual({ sha: b, commitsBack: 0 });
   });
 });

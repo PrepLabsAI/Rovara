@@ -161,6 +161,19 @@ describe("the claim is used only for a commit this task's plan offered", () => {
     expect(await kept(w)).toBeDefined();
   });
 
+  it("with the switch off (no baseline input) the keeper does not touch the words object at all: no write and no delete", async () => {
+    const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
+    const touched: string[] = [];
+    const spy = { ...w.blobs, put: async (key: string, ...rest: Parameters<typeof w.blobs.put> extends [string, ...infer R] ? R : never) => { touched.push(`put ${key}`); await w.blobs.put(key, ...rest); }, delete: async (key: string) => { touched.push(`delete ${key}`); await w.blobs.delete(key); } };
+    const deps = { ...w.deps, store: { blobs: spy } };
+    await keepEvidence(deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")] });
+    expect(touched.some((entry) => entry.includes(".baseline.json"))).toBe(false);
+    expect(touched.some((entry) => entry.startsWith("put ") && entry.includes("evidence-pack"))).toBe(true);
+    // Positive control: with baseline input the same keeper does write or delete the words object.
+    await keepEvidence(deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: w.baseline([sha(1)]) });
+    expect(touched.some((entry) => entry.includes(".baseline.json"))).toBe(true);
+  });
+
   it("is deleted with the task's evidence (erase by task or workspace prefix), and the object expires with it", async () => {
     const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
     await w.keep([sha(1)]);
