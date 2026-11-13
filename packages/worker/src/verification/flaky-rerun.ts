@@ -64,6 +64,17 @@ export function flakyRerunFileOf(result: FlakyRerunResult | undefined): { name: 
   return FlakyRerunFileSchema.safeParse(file).success ? { name: FLAKY_RERUN_ARTIFACT, content: JSON.stringify(file) } : undefined;
 }
 
+/** The rerun result that came with a report: the file is only for THAT report. */
+export interface ReportedFlaky { report: object; result: FlakyRerunResult }
+
+/**
+ * The file for the report that stands now: only when the report the worker holds IS the one the result came with (same object). Any later report (a fresh round, a stop, an error) is a different object, so a result from an earlier
+ * round can never be saved next to a newer checks.json.
+ */
+export function flakyRerunFileFor(reported: object | undefined, held: ReportedFlaky | undefined): ReturnType<typeof flakyRerunFileOf> {
+  return reported === undefined || held === undefined || held.report !== reported ? undefined : flakyRerunFileOf(held.result);
+}
+
 const READINESS_ID = /^readiness:(\d{1,3})$/u;
 
 export async function rerunFlaky(input: FlakyRerunInput): Promise<FlakyRerunResult> {
@@ -109,9 +120,10 @@ async function rerunCheck(input: FlakyRerunInput, checkId: string, command: Proj
       const wrote = Date.now();
       const round = await runChecks({ source: "project", readiness: [rerun], projectBefore: ["passed"] }, input.runners, { budgetMs: left, signal: input.signal, now });
       if (round.stopped || input.signal.aborted) return undefined;
-      // A rerun that timed out, ran out of budget or never ran shows nothing as fixed; one that wrote nothing fresh and readable does not either.
+      // A rerun that timed out, ran out of budget or never ran shows nothing as fixed; one that wrote nothing fresh and readable does not either. And a rerun that did not EXIT 0 shows nothing as fixed even when its report says
+      // passed (a coverage threshold, an afterAll hook or a crash fail the command without failing a test): its tests stay failing, so the check is not fully flaky.
       const ran = round.entries[0];
-      if (ran === undefined || (ran.after !== "passed" && ran.after !== "failed")) continue;
+      if (ran === undefined || ran.after !== "passed") continue;
       const second = await readCheckTests(input.rootPath, rerun, { notBeforeMs: wrote });
       if (second === undefined) continue;
       for (const [id, state] of testStatesOf(second.report)) again.set(id, state);

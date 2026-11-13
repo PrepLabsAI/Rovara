@@ -18,7 +18,9 @@ export function createLocalFlakyChecks(options: { flow: Pick<TaskFlowDeps, "stor
       const { task, operation } = input;
       const actions = operationArtifactActions({ store: options.flow.store, blobs: options.blobs }, task, operation);
       const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
-      const artifact = (await actions.artifacts(task.workspaceId, operation.id)).find((entry) => entry.name === FLAKY_RERUN_ARTIFACT);
+      // Exactly one file: an operation that lists two (or more) is not read, never "the first" or "the last".
+      const named = (await actions.artifacts(task.workspaceId, operation.id)).filter((entry) => entry.name === FLAKY_RERUN_ARTIFACT);
+      const artifact = named.length === 1 ? named[0] : undefined;
       if (artifact === undefined || !artifact.objectKey.startsWith(prefix)) return undefined;
       const text = await actions.readArtifact(artifact.objectKey, FLAKY_RERUN_FILE_MAX_BYTES + 1);
       if (text === "" || Buffer.byteLength(text, "utf8") > FLAKY_RERUN_FILE_MAX_BYTES) return undefined;

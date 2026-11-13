@@ -33,8 +33,11 @@ export interface VerificationOptions {
   /** Fires on cancel, loop-guard stop or eval limit: a running check stops, and no new one starts. */
   signal: AbortSignal;
   recorder: CommandRecorder;
-  /** AgentX's result. Called again if Pi settles again later (a queued message); the last call is the result. */
-  onReport: (report: CheckReport) => void | Promise<void>;
+  /**
+   * AgentX's result. Called again if Pi settles again later (a queued message); the last call is the result. TE-C6: `flakyRerun` is the rerun result of the settle round THIS report came from (absent for every other report), so
+   * the worker can save what the broker needs next to exactly this report and no other.
+   */
+  onReport: (report: CheckReport, flakyRerun?: FlakyRerunResult) => void | Promise<void>;
   /** Graph implementation: intermediate item settles defer checks until the final item. */
   shouldRun?: () => boolean;
   /** IMPLEMENT only: commit the completed worktree before its final selected checks run. */
@@ -60,11 +63,6 @@ export interface VerificationOptions {
    * rerun is flaky: it does not give the agent its extra turn and is left out of what the agent reads. The report is not changed: it keeps the regression. Absent = no rerun, today's behaviour.
    */
   flakyRerun?: { rootPath: string; checks: readonly FlakyCheckSpec[] };
-  /**
-   * TE-C6: told with every report this extension makes from a settle round that decided the extra turn (the rerun's result, or undefined when there was none), so the worker can save what the broker needs (`flaky-rerun.json`).
-   * A later report replaces it: only the result of the round the final report came from counts.
-   */
-  onFlakyRerun?: (result: FlakyRerunResult | undefined) => void;
 }
 
 /** The share of a round's budget the before runs may use, so the after runs always have time left. */
@@ -149,8 +147,9 @@ export function verificationExtension(options: VerificationOptions): InlineExten
 
       pi.on("agent_before_settle", async (event) => {
         const claim = parseAgentClaim(finalText);
+        let roundFlaky: FlakyRerunResult | undefined;
         const report = async (value: CheckReport): Promise<Record<string, never>> => {
-          await options.onReport(value);
+          await (roundFlaky === undefined ? options.onReport(value) : options.onReport(value, roundFlaky));
           return {};
         };
         if (options.shouldRun !== undefined && !options.shouldRun()) return {};
@@ -222,7 +221,7 @@ export function verificationExtension(options: VerificationOptions): InlineExten
             // A custom message reaches the model as a user message, so Pi can run the extra turn (canContinue).
             return { entries: [...event.entries, message], continue: true };
           }
-          options.onFlakyRerun?.(flaky);
+          roundFlaky = flaky;
           return report(roundReport());
         } catch (error) {
           options.onCandidateDrift?.();
