@@ -74,6 +74,14 @@ describe("POST /v1/dev/access with the person's token for the service (FR-004)",
     });
   });
 
+  it("lists the projects they administer too (spec 065), once each, and only a registered one", async () => {
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#hidden", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "hidden", role: "administrator" });
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#gone", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "gone", role: "administrator" });
+    expect((await bearer()).body.projects).toEqual([
+      { name: "payments-api", access: "channel" }, { name: "solo", access: "granted" }, { name: "hidden", access: "administrator" },
+    ]);
+  });
+
   it("reads grants live: a revoked grant is gone on the next call", async () => {
     db.delete(`MEMBER#${developerId}`, "PROJECT#solo");
     expect((await bearer()).body.projects).toEqual([{ name: "payments-api", access: "channel" }]);

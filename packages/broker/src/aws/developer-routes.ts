@@ -662,9 +662,19 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
   });
+  // Spec 065: the projects they administer too, which task access (developer grants and channels) leaves out, so a
+  // service shows an administrator their own projects. Only a registered one.
+  const usable = new Set(listed.projects.map((project) => project.name));
+  const administered = (await queryAll<{ projectName?: unknown; role?: unknown }>(deps, `MEMBER#${developerId}`, "PROJECT#"))
+    .filter((membership) => membership.role === "administrator" && typeof membership.projectName === "string" && !usable.has(membership.projectName))
+    .map((membership) => membership.projectName as string);
+  const registered = await projectsWithPolicy(deps, administered);
   return {
     developerId, displayName: developer.displayName, administrator,
-    projects: listed.projects.map((project) => ({ name: project.name, access: project.access })),
+    projects: [
+      ...listed.projects.map((project) => ({ name: project.name, access: project.access })),
+      ...administered.filter((name) => registered.has(name)).sort().map((name) => ({ name, access: "administrator" as const })),
+    ],
     notices: listed.notices,
   };
 }
