@@ -3,9 +3,12 @@
 // text and checks every count against the files, so a worker's own summary is never taken as truth. Every list and string is bounded, every text is one plain line
 // (no control or format characters) that readers escape for their own markup, and a pack for any other candidate digest is ignored by the broker.
 import { z } from "zod";
-import { forwardReader } from "./forward-reader.js";
+import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES, isRegisteredCheckKind, partsOutsideKind } from "./check-kinds.js";
+import { forwardReader, openEnum, unknownKeysOf, type ForwardReader } from "./forward-reader.js";
+import { readsAsUnknown } from "./forward-reader-unknown.js";
 import { TEST_ID_MAX } from "./test-id.js";
-import { TestProofVerdictSchema } from "./test-proof.js";
+import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
+import { TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
 import { TestServicesUsageRecordSchema } from "./test-services-usage.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -556,4 +559,356 @@ export function resolveEvidenceMode(input: { configured?: EvidenceMode; reposito
   const mode = input.configured ?? EVIDENCE_MODE_DEFAULT;
   if (mode === "embed" && !(input.embedAllowed && input.repositoryVisibility === "private")) return "link";
   return mode;
+}
+
+// ---- evidence pack v2 (TE-A2a, design testing-build-plan section 3.1): the SHAPE only. Nothing writes a v2 pack yet: the broker keeps writing v1 (`evidencePackShape`, unchanged above) until the gate of TE-A1 and
+// the Cloud half (TE-A2-cl) land, and a v1 reader refuses a v2 pack. Replaces: nothing; v1 stays valid. Differences from the sketch, each so a v1 pack converts both ways without loss:
+//   - the v1 parts `environment`, `selection`, `api` and `browser` are carried as optional parts (a v2 pack built by Rovara itself may leave them out);
+//   - a check keeps v1's `durationMs`, `exitCode` and `outputTailRef`, and `stage`, `command`, `producer` (who ran it: rovara or imported), `attribution`, `trust` and `proofBasis` are optional;
+//   - `proof`, `weakening`, `dependencies`, `tests` and `meters` are optional, because a v1 pack cannot say them;
+//   - a not-tested row is `{what, reason}` and may keep v1's `kind` and `id`.
+// Two schemas come from one definition: `EvidencePackV2Schema` is the WRITER's (strict, registered kinds only, every cross-check) and `EvidencePackV2ReaderSchema` is the READER's (unknown fields kept, unknown enum values read
+// as "unknown", any kind id). `readEvidencePack` is the rule readers use: core fields strict, everything else tolerant and reported as newer evidence.
+
+export const EVIDENCE_V2_SCHEMA_VERSION = 2 as const;
+export const EVIDENCE_EDITIONS = ["cloud", "code"] as const;
+/** Where the checks ran. `sealed`: Rovara's sealed round. `sandbox`: the agent's own sandbox (not sealed, O44). `developer_machine`: a person's laptop (O26). `imported`: another system's result Rovara fetched or was sent. */
+export const EVIDENCE_ISOLATIONS = ["sealed", "sandbox", "developer_machine", "imported"] as const;
+/** The five levels of the first line: never better than the weakest required stage. */
+export const EVIDENCE_LEVELS = ["their_ci", "rovara_real_run", "sandbox_only", "no_ci", "ci_not_readable"] as const;
+/** The v1 result axis, kept. */
+export const EVIDENCE_RESULTS = ["verified", "code_failed", "partially_verified", "blocked_by_environment"] as const;
+export const EVIDENCE_CHECK_STAGES = ["sandbox", "sealed", "confirm", "followup", "imported"] as const;
+export const EVIDENCE_CHECK_PRODUCERS = ["rovara", "imported"] as const;
+export const EVIDENCE_ATTRIBUTIONS = ["per_test", "per_check", "none"] as const;
+export const EVIDENCE_MEASURE_DIRECTIONS = ["up_good", "down_good"] as const;
+export const EVIDENCE_MOCK_MADE_IN = ["setup", "this_task", "merged"] as const;
+export const EVIDENCE_MOCK_STORES = ["rovara", "repo"] as const;
+export const EVIDENCE_RECORDING_STORES = ["customer_bucket", "rovara", "repo", "local_file"] as const;
+export const EVIDENCE_REPOSITORIES_MAX = 16;
+export const EVIDENCE_MEASURES_MAX = 50;
+export const EVIDENCE_PAIRS_MAX = 50;
+export const EVIDENCE_PROOF_VERDICTS_MAX = 200;
+export const EVIDENCE_WEAKENING_LIST_MAX = 200;
+/** The most bytes of text `readEvidencePackText` reads. A v1 pack is bounded by its parts (about 2 MiB of test names); this leaves room for the v2 parts. */
+export const EVIDENCE_V2_MAX_BYTES = 4 * 1_048_576;
+
+type Mode = "strict" | "reader";
+const GitCommitSchema = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u, "a commit id");
+const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "a date");
+const MeasureNumberSchema = z.number().min(-1e12).max(1e12);
+const MoneySchema = z.number().min(0).max(1e9);
+
+/** A strict enum for a writer, an open one for a reader (a value it does not know reads as "unknown"). */
+function enumFor<const T extends readonly [string, ...string[]]>(mode: Mode, values: T): z.ZodType<T[number]> {
+  return mode === "strict" ? z.enum(values) : (openEnum(values));
+}
+/** `enumFor` for an existing enum schema (the test proof's verdicts and reasons). */
+function enumOfSchema<S extends z.ZodEnum>(mode: Mode, schema: S): z.ZodType<z.output<S>> {
+  return enumFor(mode, schema.options as unknown as readonly [string, ...string[]]) as z.ZodType<z.output<S>>;
+}
+/** An object a writer refuses unknown fields on and a reader keeps them. */
+function objectFor<S extends z.ZodRawShape>(mode: Mode, shape: S) {
+  const strict = z.object(shape).strict();
+  return mode === "strict" ? strict : (z.looseObject(shape) as unknown as typeof strict);
+}
+/** A v1 part: strict for a writer; for a reader the strict reading first (bounded), else the forward-compatible one. */
+function partFor<S extends z.ZodType>(mode: Mode, schema: S): S {
+  return mode === "strict" ? schema : (z.union([schema, forwardReader(schema)]) as unknown as S);
+}
+
+function evidencePackV2Schemas(mode: Mode) {
+  const en = <const T extends readonly [string, ...string[]]>(values: T) => enumFor(mode, values);
+  const obj = <S extends z.ZodRawShape>(shape: S) => objectFor(mode, shape);
+  const part = <S extends z.ZodType>(schema: S) => partFor(mode, schema);
+  const artifact = part(ArtifactRefSchema);
+  const kind = mode === "strict" ? z.string().regex(CHECK_KIND_ID_PATTERN).refine(isRegisteredCheckKind, "a registered check kind") : line(64);
+
+  const measure = obj({
+    name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
+    direction: en(EVIDENCE_MEASURE_DIRECTIONS), band: obj({ low: MeasureNumberSchema, high: MeasureNumberSchema }).optional(),
+  });
+  const pair = obj({ id: line(80), before: artifact.optional(), after: artifact.optional(), diff: artifact.optional() });
+
+  const checkObject = obj({
+    id: line(64),
+    kind,
+    label: line(200),
+    command: line(500).optional(),
+    stage: en(EVIDENCE_CHECK_STAGES).optional(),
+    before: en(EVIDENCE_CHECK_OUTCOMES),
+    after: en(EVIDENCE_CHECK_OUTCOMES),
+    class: en(EVIDENCE_CHECK_CLASSES),
+    /** Who ran the check: Rovara, or another system whose result was imported (`run_by` in the design). */
+    producer: en(EVIDENCE_CHECK_PRODUCERS).optional(),
+    durationMs: z.number().int().min(0),
+    exitCode: z.number().int().nullable().optional(),
+    tests: part(EvidenceChecksTestsSchema).optional(),
+    coverage: part(EvidenceCoverageSchema).optional(),
+    findings: part(EvidenceFindingsSchema).optional(),
+    migrations: part(EvidenceMigrationsSchema).optional(),
+    outputTailRef: artifact.optional(),
+    measures: z.array(measure).max(EVIDENCE_MEASURES_MAX).optional(),
+    pairs: z.array(pair).max(EVIDENCE_PAIRS_MAX).optional(),
+    attribution: en(EVIDENCE_ATTRIBUTIONS).optional(),
+    trust: en(EVIDENCE_TRUST_CLASSES).optional(),
+    proofBasis: en(PROOF_BASES).optional(),
+  });
+  const check = mode === "strict"
+    ? checkObject.superRefine((entry, context) => {
+      const issue = (path: (string | number)[], message: string) => context.addIssue({ code: "custom", path, message });
+      checkPartsProblems(entry, issue);
+      const present = CHECK_PARTS.filter((name) => (entry as Record<string, unknown>)[name] !== undefined);
+      for (const name of partsOutsideKind(entry.kind, present)) issue([name], `a ${entry.kind} check does not carry ${name}`);
+      if (entry.proofBasis !== undefined && entry.trust !== undefined && entry.trust !== "simulated") issue(["trust"], "a change proven with scripted AI replies is simulated, never real");
+    })
+    : checkObject;
+
+  const dependency = obj({
+    name: line(80),
+    kind: line(40),
+    backing: en(EVIDENCE_BACKING_KINDS),
+    label: en(EVIDENCE_DEPENDENCY_LABELS),
+    trust: en(EVIDENCE_TRUST_CLASSES),
+    recordedOn: DaySchema.optional(),
+    mock: obj({ setId: line(120), version: CountSchema, branch: line(200), madeIn: en(EVIDENCE_MOCK_MADE_IN), store: en(EVIDENCE_MOCK_STORES), link: EvidenceHrefSchema.optional() }).optional(),
+    recording: obj({ store: en(EVIDENCE_RECORDING_STORES), recordedOn: DaySchema }).optional(),
+    protocol: line(40).optional(),
+    spec: line(200).optional(),
+  });
+  const dependencyChecked = mode === "strict"
+    ? dependency.superRefine((entry, context) => {
+      if (entry.trust === "recorded" && entry.recordedOn === undefined && entry.recording === undefined) context.addIssue({ code: "custom", path: ["recordedOn"], message: "a recorded answer states when it was recorded" });
+    })
+    : dependency;
+
+  const sections = {
+    proof: obj({
+      verdicts: z.array(obj({ checkId: line(64).optional(), testId: line(TEST_ID_MAX).optional(), verdict: enumOfSchema(mode, TestProofVerdictSchema), reason: enumOfSchema(mode, TestProofReasonSchema).optional() })).max(EVIDENCE_PROOF_VERDICTS_MAX),
+      provenCount: CountSchema,
+      loadFailureOnOld: CountSchema,
+      heldDraft: z.boolean(),
+      /** "Mark ready anyway" (O2); the reason stays optional for now (O59). */
+      override: obj({ actorId: line(120), at: z.string().datetime(), reason: line(300).optional() }).optional(),
+    }).optional(),
+    weakening: obj({
+      skipRise: obj({ before: CountSchema, after: CountSchema }).optional(),
+      removedTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
+      absentOnNew: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
+      changedTestConfig: z.array(line(500)).max(100),
+      changedSnapshots: z.array(line(500)).max(100),
+      changedFixtures: z.array(line(500)).max(100),
+    }).optional(),
+    dependencies: z.array(dependencyChecked).max(EVIDENCE_DEPENDENCIES_MAX).optional(),
+    tests: part(TestAnswerRecordsSchema).optional(),
+    meters: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9), machineUsd: MoneySchema, caps: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9) }) }).optional(),
+    notTested: z.array(obj({ what: line(300, 0), reason: line(100), kind: en(EVIDENCE_NOT_TESTED_KINDS).optional(), id: line(64).optional() })).max(EVIDENCE_NOT_TESTED_MAX),
+    // v1's parts, kept so a v1 pack converts without loss.
+    environment: part(EvidenceEnvironmentSchema).optional(),
+    selection: part(EvidenceSelectionSchema).optional(),
+    api: part(EvidencePackSchema.shape.api).optional(),
+    browser: part(EvidencePackSchema.shape.browser).optional(),
+  };
+  const core = {
+    schemaVersion: z.literal(EVIDENCE_V2_SCHEMA_VERSION),
+    candidate: obj({ digest: Sha256Schema, repositories: z.array(obj({ id: line(120), baseBranch: line(200), baseCommit: GitCommitSchema, headCommit: GitCommitSchema })).max(EVIDENCE_REPOSITORIES_MAX) }),
+    producer: obj({ edition: en(EVIDENCE_EDITIONS), isolation: en(EVIDENCE_ISOLATIONS) }),
+    /** The first line; never better than the weakest required stage. */
+    level: obj({ reached: en(EVIDENCE_LEVELS), required: z.array(line(64)).max(16), weakest: obj({ stageId: line(64), words: line(200) }).optional() }),
+    result: en(EVIDENCE_RESULTS),
+  };
+  const packObject = obj({ ...core, checks: z.array(check).max(EVIDENCE_CHECKS_MAX), ...sections });
+  const pack = mode === "strict"
+    ? packObject.superRefine((entry, context) => {
+      const issue = (path: (string | number)[], message: string) => context.addIssue({ code: "custom", path, message });
+      const duplicate = (values: readonly string[]) => new Set(values).size !== values.length;
+      if (duplicate(entry.checks.map((item) => item.id))) issue(["checks"], "check ids are unique");
+      if (duplicate((entry.dependencies ?? []).map((item) => item.name))) issue(["dependencies"], "dependency names are unique");
+      if (entry.checks.reduce((sum, item) => sum + (item.tests?.names.length ?? 0), 0) > EVIDENCE_TEST_NAMES_TOTAL_MAX) issue(["checks"], "a pack names at most 2,000 tests in all");
+      if (entry.selection !== undefined && entry.selection.selected > entry.selection.total) issue(["selection", "selected"], "selected is some of the total");
+      if (entry.environment !== undefined && duplicate(entry.environment.services.map((item) => item.name))) issue(["environment", "services"], "service names are unique");
+      if (entry.api !== undefined && duplicate(entry.api.map((item) => item.scenarioId))) issue(["api"], "API scenarios are unique");
+      if (entry.browser !== undefined && duplicate(entry.browser.map((item) => item.scenarioId))) issue(["browser"], "browser scenarios are unique");
+    })
+    : packObject;
+  return { check, pack, core, sections };
+}
+
+const V2_STRICT = evidencePackV2Schemas("strict");
+const V2_READER = evidencePackV2Schemas("reader");
+
+/** What the writer builds. Strict: every kind registered, every part one the kind carries, unknown fields refused. */
+export const EvidencePackV2Schema = V2_STRICT.pack;
+export type EvidencePackV2 = z.infer<typeof EvidencePackV2Schema>;
+export type EvidenceCheckV2 = EvidencePackV2["checks"][number];
+/** What a reader gives: unknown fields kept, a value of an enum it does not know as "unknown". Use `readEvidencePack` for the whole rule (it also tolerates a check or a part it cannot read). */
+export const EvidencePackV2ReaderSchema = V2_READER.pack as unknown as z.ZodType<ForwardReader<EvidencePackV2>>;
+export type EvidencePackV2Read = ForwardReader<EvidencePackV2>;
+
+const V2_TOP_KEYS = Object.keys(V2_STRICT.pack.shape);
+const V2_CHECK_KEYS = Object.keys(V2_STRICT.check.shape);
+const V2_CORE_KEYS = Object.keys(V2_STRICT.core);
+const V2_SECTION_KEYS = Object.keys(V2_STRICT.sections);
+
+/** What a reader met that it does not know. Each list is cut at `NEWER_EVIDENCE_LISTED`; the flags are exact. */
+export interface NewerEvidence {
+  /** Fields a newer writer added, by path (`hologram`, `checks[2].extra`), and sections this reader could not read at all (by name). */
+  unknownParts: string[];
+  /** Check kinds this build has not registered. */
+  unknownKinds: string[];
+  /** An enum had a value this build does not know (it reads as "unknown"). */
+  unknownValues: boolean;
+  /** Checks that could not be read, or were beyond the limit: counted, left out. */
+  unreadableChecks: number;
+}
+export const NEWER_EVIDENCE_LISTED = 20;
+export const noNewerEvidence = (): NewerEvidence => ({ unknownParts: [], unknownKinds: [], unknownValues: false, unreadableChecks: 0 });
+export function hasNewerEvidence(newer: NewerEvidence): boolean {
+  return newer.unknownParts.length > 0 || newer.unknownKinds.length > 0 || newer.unknownValues || newer.unreadableChecks > 0;
+}
+
+export type EvidenceRead =
+  | { status: "v1"; pack: EvidencePack }
+  | { status: "v2"; pack: EvidencePackV2Read; newer: NewerEvidence }
+  | { status: "newer"; schemaVersion: number; candidateDigest?: string }
+  | { status: "unreadable"; reason: "not_json" | "too_large" | "not_a_pack" | "core_invalid" };
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The reader rule for every version of the pack. Never throws and never fails on what it does not know:
+ *   - version 1: the strict v1 parse, as before (a v1 pack that does not parse is `unreadable`);
+ *   - version 2: the core (version, candidate, producer, level, result) is strict, so a pack that cannot say what it is for or where it ran is `unreadable`. Everything else is read as far as it can be: unknown fields are KEPT and
+ *     reported, an unknown enum value reads as "unknown", an unknown check kind is kept, a section or a check that cannot be read is left out and counted. All of it is reported in `newer`;
+ *   - a later version: `newer`, not parsed, with the candidate digest when it is there.
+ */
+export function readEvidencePack(input: unknown): EvidenceRead {
+  if (!isRecord(input) || typeof input.schemaVersion !== "number" || !Number.isInteger(input.schemaVersion)) return { status: "unreadable", reason: "not_a_pack" };
+  if (input.schemaVersion === 1) {
+    const parsed = EvidencePackSchema.safeParse(input);
+    return parsed.success ? { status: "v1", pack: parsed.data } : { status: "unreadable", reason: "not_a_pack" };
+  }
+  if (input.schemaVersion > EVIDENCE_V2_SCHEMA_VERSION) {
+    const digest = isRecord(input.candidate) && typeof input.candidate.digest === "string" && Sha256Schema.safeParse(input.candidate.digest).success ? input.candidate.digest : undefined;
+    return { status: "newer", schemaVersion: input.schemaVersion, ...(digest === undefined ? {} : { candidateDigest: digest }) };
+  }
+  if (input.schemaVersion !== EVIDENCE_V2_SCHEMA_VERSION) return { status: "unreadable", reason: "not_a_pack" };
+
+  const newer = noNewerEvidence();
+  const note = (list: string[], text: string) => { if (list.length < NEWER_EVIDENCE_LISTED) list.push(text); };
+  const out: Record<string, unknown> = {};
+  for (const key of unknownKeysOf(input, V2_TOP_KEYS)) {
+    out[key] = input[key];
+    note(newer.unknownParts, key);
+  }
+  for (const key of V2_CORE_KEYS) {
+    const parsed = (V2_READER.core as Record<string, z.ZodType>)[key]!.safeParse(input[key]);
+    if (!parsed.success) return { status: "unreadable", reason: "core_invalid" };
+    out[key] = parsed.data;
+  }
+  for (const key of V2_SECTION_KEYS) {
+    if (input[key] === undefined) {
+      if (key === "notTested") out[key] = [];
+      continue;
+    }
+    const parsed = (V2_READER.sections as Record<string, z.ZodType>)[key]!.safeParse(input[key]);
+    if (parsed.success) out[key] = parsed.data;
+    else {
+      if (key === "notTested") out[key] = [];
+      note(newer.unknownParts, key);
+    }
+  }
+  if (!Array.isArray(input.checks)) return { status: "unreadable", reason: "core_invalid" };
+  const checks: unknown[] = [];
+  for (const [index, raw] of input.checks.entries()) {
+    const parsed = index < EVIDENCE_CHECKS_MAX ? V2_READER.check.safeParse(raw) : undefined;
+    if (parsed === undefined || !parsed.success) {
+      newer.unreadableChecks += 1;
+      continue;
+    }
+    const entry = parsed.data as Record<string, unknown>;
+    for (const key of unknownKeysOf(raw, V2_CHECK_KEYS)) {
+      entry[key] = (raw as Record<string, unknown>)[key];
+      note(newer.unknownParts, `checks[${String(index)}].${key}`);
+    }
+    if (typeof entry.kind === "string" && !isRegisteredCheckKind(entry.kind) && !newer.unknownKinds.includes(entry.kind)) note(newer.unknownKinds, entry.kind);
+    checks.push(entry);
+  }
+  out.checks = checks;
+  newer.unknownValues = readsAsUnknown(V2_STRICT.pack, out);
+  return { status: "v2", pack: out as EvidencePackV2Read, newer };
+}
+
+/** `readEvidencePack` for stored text: larger than `EVIDENCE_V2_MAX_BYTES` is refused before parsing, and text that is not JSON is `unreadable`. */
+export function readEvidencePackText(text: string): EvidenceRead {
+  if (utf8Length(text) > EVIDENCE_V2_MAX_BYTES) return { status: "unreadable", reason: "too_large" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { status: "unreadable", reason: "not_json" };
+  }
+  return readEvidencePack(parsed);
+}
+/** UTF-8 length without Buffer (this file is browser-safe). */
+function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/** What a v1 pack does not say and a v2 pack must: who ran it, how far it got, and the result. The repositories are unknown to a v1 pack and default to none. */
+export interface EvidenceV2Context {
+  producer: EvidencePackV2["producer"];
+  level: EvidencePackV2["level"];
+  result: EvidencePackV2["result"];
+  repositories?: EvidencePackV2["candidate"]["repositories"];
+}
+
+/** A v1 pack as a v2 pack, with everything v1 held kept (`evidencePackV2ToV1` gives the same v1 pack back). Validate the result with `EvidencePackV2Schema` before storing it. */
+export function evidencePackV1ToV2(pack: EvidencePack, context: EvidenceV2Context): EvidencePackV2 {
+  return {
+    schemaVersion: 2,
+    candidate: { digest: pack.candidateDigest, repositories: context.repositories ?? [] },
+    producer: context.producer,
+    level: context.level,
+    result: context.result,
+    checks: pack.checks.map(({ checkId, ...rest }) => ({ id: checkId, ...rest })),
+    notTested: pack.notTested.map(({ text, ...rest }) => ({ what: text, ...rest })),
+    environment: pack.environment,
+    selection: pack.selection,
+    api: pack.api,
+    browser: pack.browser,
+  };
+}
+
+/**
+ * A v2 pack as a v1 pack, for a v1-only reader: what v1 has no place for (producer, level, proof, weakening, dependencies, meters, `measures`, `pairs`) is dropped, and a check kind v1 does not have is `other`.
+ * Undefined when the v2 pack does not carry the parts v1 requires (`environment`, `selection`, `api`, `browser`): a pack Rovara built for v2 has no honest v1 form.
+ */
+export function evidencePackV2ToV1(pack: EvidencePackV2): EvidencePack | undefined {
+  if (pack.environment === undefined || pack.selection === undefined || pack.api === undefined || pack.browser === undefined) return undefined;
+  const v1Kinds: readonly string[] = CHECK_KINDS;
+  return {
+    schemaVersion: 1,
+    candidateDigest: pack.candidate.digest,
+    environment: pack.environment,
+    checks: pack.checks.map((entry) => ({
+      checkId: entry.id,
+      kind: (v1Kinds.includes(entry.kind) ? entry.kind : "other") as CheckKind,
+      label: entry.label,
+      before: entry.before,
+      after: entry.after,
+      class: entry.class,
+      durationMs: entry.durationMs,
+      ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
+      ...(entry.tests === undefined ? {} : { tests: entry.tests }),
+      ...(entry.coverage === undefined ? {} : { coverage: entry.coverage }),
+      ...(entry.findings === undefined ? {} : { findings: entry.findings }),
+      ...(entry.migrations === undefined ? {} : { migrations: entry.migrations }),
+      ...(entry.outputTailRef === undefined ? {} : { outputTailRef: entry.outputTailRef }),
+    })),
+    selection: pack.selection,
+    api: pack.api,
+    browser: pack.browser,
+    notTested: pack.notTested.map((entry, index) => ({ kind: entry.kind ?? "claim", id: entry.id ?? `item-${String(index + 1)}`, text: entry.what, reason: entry.reason })),
+  };
 }
