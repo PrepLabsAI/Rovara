@@ -154,7 +154,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     }
   }
   // The approved test environment this task pinned: its dependencies are started for the coding run (the working sandbox gets them while the agent codes). A plan that cannot be built blocks the task with its sentence.
-  const testPlan = await testPlanFor(deps, task, "IMPLEMENT", undefined);
+  const testPlan = await testPlanFor(deps, task, "IMPLEMENT", readiness);
   if (typeof testPlan === "string") {
     await commitWorkflow(deps, task, blockWorkflow(workflow, testPlan, receivedAt));
     return settled(deps, row, "STALE");

@@ -8,6 +8,7 @@ import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
 import { TEST_ID_MAX } from "./test-id.js";
 import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
+import { FLAKY_ON_RERUN_MAX } from "./test-flaky.js";
 import { ABSENT_ON_NEW_MAX, TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
 import { TestServicesUsageRecordSchema } from "./test-services-usage.js";
 
@@ -347,6 +348,9 @@ const testsShape = {
     /** TE-B3: tests that ran on the original code and are not in this code's report (test ids, at most `ABSENT_ON_NEW_MAX`), and how many there are in all. Both or neither; absent on every pack built before TE-B3. A reader built before this field refuses a pack that has it: upgrade readers first. */
     absentOnNew: z.array(line(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX).optional(),
     absentOnNewCount: CountSchema.optional(),
+    /** TE-C6: failing tests that passed on the round's one rerun (test ids, at most `FLAKY_ON_RERUN_MAX`) and how many there are in all. Both or neither; written only for a task whose plan asked for the rerun (`flakyRerun`), so a pack built without it has neither key and a reader built before them never meets one. */
+    flakyOnRerun: z.array(line(TEST_ID_MAX)).max(FLAKY_ON_RERUN_MAX).optional(),
+    flakyOnRerunCount: CountSchema.optional(),
     names: z.array(EvidenceTestSchema).max(EVIDENCE_TEST_NAMES_MAX),
     newTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_NEW_TESTS_MAX),
 };
@@ -401,6 +405,10 @@ function checkPartsProblems(entry: { tests?: z.infer<typeof EvidenceChecksTestsS
   const absent = (tests as { absentOnNew?: unknown[]; absentOnNewCount?: number } | undefined);
   if (absent !== undefined && (absent.absentOnNew === undefined) !== (absent.absentOnNewCount === undefined)) issue(["tests", "absentOnNewCount"], "absentOnNew and absentOnNewCount come together");
   if (absent?.absentOnNew !== undefined && absent.absentOnNewCount !== undefined && absent.absentOnNewCount < absent.absentOnNew.length) issue(["tests", "absentOnNewCount"], "the count is at least the names listed");
+  const flaky = (tests as { flakyOnRerun?: unknown[]; flakyOnRerunCount?: number } | undefined);
+  if (flaky !== undefined && (flaky.flakyOnRerun === undefined) !== (flaky.flakyOnRerunCount === undefined)) issue(["tests", "flakyOnRerunCount"], "flakyOnRerun and flakyOnRerunCount come together");
+  if (flaky?.flakyOnRerun !== undefined && flaky.flakyOnRerunCount !== undefined && flaky.flakyOnRerunCount < flaky.flakyOnRerun.length) issue(["tests", "flakyOnRerunCount"], "the count is at least the names listed");
+  if (tests !== undefined && flaky?.flakyOnRerunCount !== undefined && flaky.flakyOnRerunCount > tests.failed + tests.errored) issue(["tests", "flakyOnRerunCount"], "a flaky test failed in this round, so there are at most as many as failing tests");
   if (entry.coverage !== undefined && entry.coverage.linesCovered > entry.coverage.linesChanged) issue(["coverage", "linesCovered"], "covered lines are some of the changed lines");
   if (entry.findings !== undefined && entry.findings.newCount !== Object.values(entry.findings.bySeverity).reduce((sum, count) => sum + count, 0)) issue(["findings", "newCount"], "newCount is the severities together");
 }

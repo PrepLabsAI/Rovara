@@ -138,6 +138,16 @@ export function buildEvidencePack(input: EvidenceBuildInput): EvidenceBuildResul
       problems.add("tests_names_exceed_counts");
       tests = undefined;
     }
+    // TE-C6: a test that "passed on the rerun" failed in this round's report: a check that did not fail, or an id the report does not show failing, says nothing flaky (only the flaky part is dropped; the tests part stays).
+    if (tests?.flakyOnRerun !== undefined) {
+      const failing = new Set(tests.names.filter((name) => name.status === "failed" || name.status === "errored").map((name) => name.name));
+      if (entry.after !== "failed" || !tests.flakyOnRerun.every((id) => failing.has(id))) {
+        problems.add("tests_disagree_with_check");
+        const { flakyOnRerun: _ids, flakyOnRerunCount: _count, ...rest } = tests;
+        void _ids; void _count;
+        tests = rest;
+      }
+    }
     let coverage = extra?.coverage;
     if (coverage !== undefined && coverage.files.reduce((sum, file) => sum + file.uncovered.length, 0) > coverage.linesChanged - coverage.linesCovered) {
       problems.add("coverage_inconsistent");
@@ -171,7 +181,7 @@ export function buildEvidencePack(input: EvidenceBuildInput): EvidenceBuildResul
       before: entry.before, after: entry.after, class: entry.class, durationMs: entry.durationMs,
       ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
       // TE-B3: the tests that ran before and are gone are named like the new ones: redacted again, a valid id as it is, anything else one plain cut line.
-      ...(tests === undefined ? {} : { tests: { ...tests, names: tests.names.map((name) => ({ ...name, ...testNameOf(name.name, name.unlisted === true) })), newTests: tests.newTests.map((name) => testNameOf(name, false).name), ...(tests.absentOnNew === undefined ? {} : { absentOnNew: tests.absentOnNew.map((name) => testNameOf(name, false).name) }) } }),
+      ...(tests === undefined ? {} : { tests: { ...tests, names: tests.names.map((name) => ({ ...name, ...testNameOf(name.name, name.unlisted === true) })), newTests: tests.newTests.map((name) => testNameOf(name, false).name), ...(tests.absentOnNew === undefined ? {} : { absentOnNew: tests.absentOnNew.map((name) => testNameOf(name, false).name) }), ...(tests.flakyOnRerun === undefined ? {} : { flakyOnRerun: tests.flakyOnRerun.map((name) => testNameOf(name, false).name) }) } }),
       ...(coverage === undefined ? {} : { coverage: { ...coverage, files: coverage.files.map((file) => ({ ...file, path: plain(file.path, 500) })) } }),
       ...(findings === undefined ? {} : { findings: { ...findings, tool: plain(findings.tool, 60), items: findings.items.map((item) => ({ ...item, ruleId: plain(item.ruleId, 100), path: plain(item.path, 500), message: item.message === "" ? "" : plain(item.message, 300) })) } }),
       ...(extra?.migrations === undefined ? {} : { migrations: { applied: extra.migrations.applied.map((name) => plain(name, 100)), rolledBack: extra.migrations.rolledBack, schemaChanges: extra.migrations.schemaChanges.map((name) => plain(name, 200)) } }),

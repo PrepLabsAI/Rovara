@@ -263,6 +263,11 @@ export interface TaskFlowDeps {
    * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.
    */
   keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
+  /**
+   * TE-C6 (behind `ROVARA_FLAKY_RERUN`): the failed checks of a run that may be recorded as passed because every test that failed in them passed on the worker's one rerun, with those tests' ids, and the base's flaky set
+   * (undefined when it is not known: then no test is flaky on the base). Read BEFORE the verification is recorded; a fault, a missing answer or an empty one changes nothing (the check stays failed). Absent: nothing is excused.
+   */
+  flakyChecks?: (input: { task: TaskRecord; operation: OperationRecord; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<{ byCheck: ReadonlyMap<string, readonly string[]>; baseFlaky: readonly string[] | undefined } | undefined>;
   /** The design review stage. Absent: no task enters it. */
   designReview?: DesignReviewSteps;
   /**

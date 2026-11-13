@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -66,6 +66,8 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.testEnvDetect.v1",
   // Test environment (wire-testenv): a verification run that carries the environment's plan applies its test selection and round budget and reports the selection (verification/test-env-plan.ts).
   "task.testEnvironment.v1",
+  // TE-C6: the plan's `flakyRerun: true` (a failing test of a check that passed before is rerun once; verification/flaky-rerun.ts).
+  TASK_FLAKY_RERUN_FEATURE,
   // Evidence (S-2): the plan's `checks[].coveragePath` (the approved report) is read as a named coverage report (verification/evidence-raw.ts).
   "task.testEnvCoveragePath.v1",
   // N9 (INTG2): the prepare invocation's `registries` (a project's private package registries for the setup and readiness commands; registry-config.ts).
