@@ -43,18 +43,20 @@ describe("the new files are pure", () => {
   });
 });
 
-describe("no callers until part B", () => {
+describe("the only callers are part B's helper files", () => {
   const files = walk(root).filter((path) => {
     const rel = path.slice(root.length + 1);
     if (rel.startsWith("packages/contracts/src/")) return false;
     if (rel.startsWith("tests/unit/model-")) return false;
+    // part B (TE-F2): the helper program, its reply-set loader, the failure runner, and their tests and support (the worker reads the contracts through the package name)
+    if (/^packages\/worker\/src\/model-(?:helper|reply|failure)/u.test(rel) || /^tests\/(?:unit\/worker-model-|support\/model-)/u.test(rel)) return false;
     return rel.startsWith("packages/") || rel.startsWith("scripts/") || rel.startsWith("infra/") || rel.startsWith("tests/");
   });
   const SYMBOLS = [
     "serveModelRequestWithReplies", "replyCountsTowardProof", "MODEL_FAMILY_REGISTRY", "buildFailureAnswer", "FailureSpecSchema", "ModelReplySetSchema", "ModelReplySetFileSchema", "stampReplyProvenance", "selectModelReply",
     "parseModelReplySetFileBytes", "routeAnthropicRequest", "routeCohereRequest", "buildAnthropicMessage", "buildCohereChat", "buildOpenAiResponse", "readModelRequestFacts",
   ];
-  it("nothing outside packages/contracts/src and the model tests names a new file or export", () => {
+  it("nothing outside packages/contracts/src, the model tests and part B's helper files names a new file or export", () => {
     expect(files.length).toBeGreaterThan(100); // the walk really looked
     const hits: string[] = [];
     for (const path of files) {
