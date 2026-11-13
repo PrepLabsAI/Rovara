@@ -6,7 +6,7 @@
 //     re-check of the same code replaces, with the documented opt-in (`overwrite: true` in `evidence-keep.ts`: one pack per task and candidate digest).
 // It is informational: a fault or a slow store only means there is no evidence for this code. It never changes a verdict and never holds a callback longer than `EVIDENCE_KEEP_MAX_MS`.
 import { scanText } from "@agentx/verifier";
-import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, workflowSelectedChecks, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
+import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, SANDBOX_MODEL_HOSTS_ITEM_ID, workflowSelectedChecks, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
 import { keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { workspaceKey } from "../../core/task-flow/keys.js";
@@ -24,22 +24,31 @@ export interface LocalEvidence {
 }
 
 /** FIX-0518: the pack's line when the owner let a project's sandboxes reach the model hosts: the fixed sentence, and the setting named (a name, never a value from the repository). */
-export const MODEL_HOSTS_ALLOWED_ITEM: EvidenceNotTested = { kind: "environment", id: "sandbox_model_hosts", text: MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, reason: "sandboxModelHosts is allow in the Rovara config" };
+export const MODEL_HOSTS_ALLOWED_ITEM: EvidenceNotTested = { kind: "environment", id: SANDBOX_MODEL_HOSTS_ITEM_ID, text: MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, reason: "sandboxModelHosts is allow in the Rovara config" };
 
 export function createLocalEvidence(options: {
   flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">;
   blobs: ObjectStorage;
   /** FIX-0518: whether the owner let this project's sandboxes reach the model hosts. Absent: the deny stands and the pack says nothing about it. */
   sandboxModelHostsAllowed?: ((project: string) => boolean) | undefined;
+  /** FIX-0518 (L2): the state the task's worker machine was created with. Read first; the config setting above is only the answer when the machine cannot say (gone, Docker not answering, no machine on the record). */
+  sandboxModelHostsOf?: ((machineId: string) => Promise<"denied" | "allowed" | undefined>) | undefined;
 }): LocalEvidence {
   const { flow, blobs } = options;
   const log = (event: string, fields: Record<string, unknown>): void => flow.log?.({ component: "evidence", event, ...fields });
-  // The task's project is on its workspace record. Anything unreadable says nothing: the pack never claims the setting was used on a guess.
+  // What applied to this task's sandboxes: the state its MACHINE was created with (a setting changed since then has not reached it). Only when the machine cannot say does the owner's setting for the task's project stand in, so the line is never left
+  // out on a guess that it was denied; anything unreadable and no setting says nothing.
   const modelHostsAllowed = async (workspaceId: string): Promise<boolean> => {
-    if (options.sandboxModelHostsAllowed === undefined) return false;
     try {
       const record = await flow.store.get(workspaceKey(workspaceId));
-      return typeof record?.["projectName"] === "string" && options.sandboxModelHostsAllowed(record["projectName"]) === true;
+      const machine = record?.["machine"];
+      const machineId = typeof machine === "object" && machine !== null && typeof (machine as Record<string, unknown>)["machineId"] === "string" ? (machine as Record<string, string>)["machineId"] : undefined;
+      if (machineId !== undefined && options.sandboxModelHostsOf !== undefined) {
+        const state = await options.sandboxModelHostsOf(machineId).catch(() => undefined);
+        if (state === "allowed") return true;
+        if (state === "denied") return false;
+      }
+      return options.sandboxModelHostsAllowed !== undefined && typeof record?.["projectName"] === "string" && options.sandboxModelHostsAllowed(record["projectName"]) === true;
     } catch { return false; }
   };
   return {

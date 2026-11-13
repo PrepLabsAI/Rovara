@@ -12,14 +12,20 @@ import { builtinModelCatalog, type CompanyGatewayRow, type ModelCatalogRow, type
 /** The five hosts the default allow list gives the sandboxes today. Pinned here, so the deny never shrinks if the catalog changes. */
 export const SANDBOX_PINNED_MODEL_HOSTS: readonly string[] = ["api.anthropic.com", "api.openai.com", "auth.openai.com", "chatgpt.com", "openrouter.ai"];
 
+/**
+ * The pinned hosts' families as wildcards. A project's own list may allow a whole family (`*.openai.com`), which would pass `eu.api.openai.com` or `ab.chatgpt.com` although the exact names are denied; a wildcard here covers every depth below the name.
+ * Each pinned host also gets its own `*.<host>` (below), and the registrable parents of the five are named here.
+ */
+export const SANDBOX_PINNED_MODEL_PARENTS: readonly string[] = ["*.openai.com", "*.anthropic.com", "*.openrouter.ai", "*.chatgpt.com"];
+
 /** Google's token hosts: left out of this deny list (a pending owner decision removes them everywhere). */
 export const SANDBOX_DENY_LEAVES_OUT: readonly string[] = ["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"];
 
 type DenyRow = Pick<ModelCatalogRow, "hosts" | "hostSuffixes"> & { readonly authHosts?: readonly string[] | undefined };
 
 /**
- * The names a sandbox must not reach on a laptop: the five pinned hosts, every host of the built-in catalog (ALWAYS the full catalog; `rows` are ADDED, a partial list never shrinks the deny), the company's gateway hosts, and every host
- * suffix as a wildcard (`*.openai.azure.com`). Sorted, no duplicates, never Google's token hosts.
+ * The names a sandbox must not reach on a laptop: the five pinned hosts, every host of the built-in catalog (ALWAYS the full catalog; `rows` are ADDED, a partial list never shrinks the deny), the company's gateway hosts, every host
+ * suffix as a wildcard (`*.openai.azure.com`), a `*.<host>` wildcard under every one of those hosts, and the pinned families (`*.openai.com`, `*.anthropic.com`, `*.openrouter.ai`, `*.chatgpt.com`). Sorted, no duplicates, never Google's token hosts.
  */
 export function laptopSandboxDenyList(rows: readonly DenyRow[] = [], gatewayRows: readonly Pick<CompanyGatewayRow, "host">[] = []): string[] {
   const all: DenyRow[] = [...builtinModelCatalog().rows, ...rows];
@@ -27,7 +33,10 @@ export function laptopSandboxDenyList(rows: readonly DenyRow[] = [], gatewayRows
   for (const row of all) for (const host of [...row.hosts, ...(row.authHosts ?? [])]) names.add(host.toLowerCase());
   for (const row of gatewayRows) names.add(row.host.toLowerCase());
   for (const row of all) for (const suffix of row.hostSuffixes) names.add(`*.${suffix.toLowerCase()}`);
-  for (const left of SANDBOX_DENY_LEAVES_OUT) names.delete(left);
+  // Every subdomain of a denied host, and the pinned families: `*.api.openai.com`, `*.openai.com`, `*.chatgpt.com` ... (a wildcard never matches the bare name, so the exact names stay).
+  for (const name of [...names]) if (!name.startsWith("*.")) names.add(`*.${name}`);
+  for (const parent of SANDBOX_PINNED_MODEL_PARENTS) names.add(parent);
+  for (const left of SANDBOX_DENY_LEAVES_OUT) { names.delete(left); names.delete(`*.${left}`); }
   return [...names].sort();
 }
 

@@ -105,6 +105,8 @@ export function ownerWantsPiMcp(environment: NodeJS.ProcessEnv): boolean {
 
 /** FIX-0518: what the broker tells the worker about the model hosts on the sandbox network, for its evidence: `denied` (the gateway refuses them there) or `allowed` (the owner's project setting). Not set when the machine has no deny rule at all. */
 export const SANDBOX_MODEL_HOSTS_ENV = "ROVARA_SANDBOX_MODEL_HOSTS";
+/** The same word on the worker container as a label, for the broker to read back (the evidence says what the machine was created with, not what the config says now). Under the reserved `rovara.` prefix: a spec cannot set it. */
+export const SANDBOX_MODEL_HOSTS_LABEL = "rovara.local.sandbox-model-hosts";
 
 /** Names the worker sets itself: a spec's environment cannot override them (a project cannot turn on the local shell). */
 const RESERVED_ENVIRONMENT = new Set([
@@ -280,6 +282,17 @@ export class DockerWorkerMachines implements WorkerMachines {
     try { return (await reader(project)) === true; } catch { return false; }
   }
 
+  /** What a machine was created with for the model hosts on its sandbox network, from its own label: `denied`, `allowed`, or undefined (no deny rule, no such machine, a name that is not a machine's, Docker not answering). */
+  async sandboxModelHostsOf(machineId: string): Promise<"denied" | "allowed" | undefined> {
+    if (!/^rovara-worker-[a-f0-9]{24}$/.test(machineId)) return undefined;
+    try {
+      const result = await this.#docker(["inspect", "--type", "container", "--format", `{{index .Config.Labels "${SANDBOX_MODEL_HOSTS_LABEL}"}}`, machineId]);
+      if (result.exitCode !== 0) return undefined;
+      const value = result.stdout.trim();
+      return value === "denied" || value === "allowed" ? value : undefined;
+    } catch { return undefined; }
+  }
+
   /** One start at a time in this process, so the limit on running machines holds and two starts of one key do not race. */
   start(spec: MachineSpec): Promise<MachineHandle> {
     const run = this.#queue.then(() => this.#start(spec));
@@ -390,6 +403,7 @@ export class DockerWorkerMachines implements WorkerMachines {
           "--label", `${WORKSPACE_ID_LABEL}=${workspaceId}`,
           "--label", `${CONFIG_LABEL}=${digest}`,
           "--label", `${GENERATION_LABEL}=${generation}`,
+          ...(deniedByDefault.length === 0 ? [] : ["--label", `${SANDBOX_MODEL_HOSTS_LABEL}=${projectAllowed ? "allowed" : "denied"}`]),
           "--label", gatewayLabel,
           "--label", `${COMPANY_LABEL}=${spec.companyId}`,
           ...Object.entries(spec.labels ?? {}).flatMap(([key, value]) => (/^[a-z][a-z0-9.-]{0,62}$/.test(key) && !RESERVED_LABEL_PREFIXES.some((prefix) => key.startsWith(prefix)) && /^[ -~]{0,200}$/.test(value) ? ["--label", `${key}=${value}`] : [])),
