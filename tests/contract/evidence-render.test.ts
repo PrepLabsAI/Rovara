@@ -242,6 +242,35 @@ describe("inert text", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
+  it("stays linear for a large max: the largest allowed max is capped, so a million '<' finishes at once", () => {
+    const started = Date.now();
+    for (const max of [2_000, 1_000_000_000]) {
+      const out = inertEvidenceText("<".repeat(1_000_000), max);
+      expect(Array.from(out).length).toBeLessThanOrEqual(2_000);
+      expect(Array.from(inertEvidenceText("[](".repeat(400_000), max)).length).toBeLessThanOrEqual(2_000);
+    }
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("reads at most 256 KiB of raw input", () => {
+    expect(inertEvidenceText(`${"x".repeat(10)}${" ".repeat(300_000)}tail`, 300)).toBe("xxxxxxxxxx");
+    expect(inertEvidenceText(`${"x".repeat(10)} tail`, 300)).toBe("xxxxxxxxxx tail");
+  });
+
+  it("redacts a secret even when the cut would split it: no fragment of a token is ever printed", () => {
+    const token = `gh${"p"}_${"a".repeat(36)}`;
+    // Whitespace collapses, so the token ends up inside the output even though it starts past 4 x max characters of raw input.
+    const out = inertEvidenceText(`${" ".repeat(1190)}${token}`, 300);
+    expect(out).toBe("(REDACTED)");
+    expect(out).not.toContain("ghp_");
+    // Markup that is stripped afterwards shrinks the text, so the secret can start inside the working window and end outside it: it is redacted before the window is cut, not after.
+    expect(inertEvidenceText(`${"<b>".repeat(396)}${token}`, 300)).toBe("(REDACTED)");
+    // A secret that straddles the hard cap on the raw input is dropped with its whole last word, not left as a fragment.
+    const straddle = inertEvidenceText(`${" ".repeat(262_144 - 20)}${token} end`, 300);
+    expect(straddle).not.toMatch(/g(?:h(?:p(?:_a*)?)?)?$/u);
+    expect(straddle).not.toContain("ghp");
+  });
+
   it("redacts a secret-shaped token (built here at run time, never written out)", () => {
     const token = `gh${"p"}_${"a".repeat(36)}`;
     const out = inert(`token ${token} end`);
