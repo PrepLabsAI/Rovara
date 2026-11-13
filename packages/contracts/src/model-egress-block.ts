@@ -11,6 +11,8 @@ export const MODEL_HOSTS_NOT_BLOCKED_SENTENCE = "model hosts not blocked on this
  * FIX-0518: a laptop's sandbox network denies the model hosts unless the owner set `projectSettings.<project>.sandboxModelHosts: "allow"` in the Rovara config. When that setting is used, the evidence says this (fixed words, no host list).
  */
 export const MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE = "model hosts allowed in the test sandbox by project setting";
+/** The id of the pack's "not tested" item that carries the sentence above. A verdict does not read it as "details unreadable". */
+export const SANDBOX_MODEL_HOSTS_ITEM_ID = "sandbox_model_hosts";
 export const NOT_SEALED_SENTENCE = "not sealed";
 export const NOT_SEALED_BLOCKED_BY_NAME_SENTENCE = "not sealed; model hosts blocked by name only";
 export const redirectEscapeSentence = (host: string): string => `not run: client ignored the redirect (called ${host})`;

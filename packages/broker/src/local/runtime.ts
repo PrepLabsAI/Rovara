@@ -471,6 +471,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const callbackServer: { current?: CallbackServer } = {};
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
   const approvedHosts: { current?: (project: string | undefined) => Promise<string[]> } = {};
+  const sandboxDeny = laptopSandboxDenyList();
   const docker = new DockerWorkerMachines({
     image: options.workerImage,
     stateDirectory,
@@ -480,7 +481,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     },
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
     // FIX-0518 (security): the sandboxes' network may not reach a model host, unless the owner's config says so for that project. The worker's own network keeps them: the agent's model loop runs there, through the key proxy.
-    modelHostsDeniedInSandbox: laptopSandboxDenyList(),
+    modelHostsDeniedInSandbox: sandboxDeny,
     sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
     extraAllowedDomains: async (project) => (await approvedHosts.current?.(project)) ?? [],
     // The registries a project's dev container may pull from: the owner's `ROVARA_DEVCONTAINER_REGISTRIES` (`0` turns dev containers off); with none said, the default list on a Docker that runs in a virtual machine and none on a host where root in a container is root.
@@ -632,6 +633,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     setupAgent: options.environment["ROVARA_SETUP_AGENT"] !== "0",
     installDomains: () => localAllowedDomains(options.allowedDomains),
     sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
+    sandboxModelHostsOf: (machineId) => docker.sandboxModelHostsOf(machineId),
+    sandboxDenied: (project) => (sandboxModelHostsAllowed(config, project) ? [] : sandboxDeny),
   });
   approvedHosts.current = (project) => app.setupAgent.approvedHosts(project);
 

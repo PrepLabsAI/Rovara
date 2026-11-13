@@ -29,6 +29,8 @@ const QUIET = process.env.ROVARA_GW_LIBRARY === "1"; // loaded as a library by t
 // Library mode only: the tests open the 443 and 80 forwarders on a port of their own (0 for any free one). A running gateway always uses 443 and 80.
 const TLS_PORT = QUIET && process.env.ROVARA_GW_TLS_PORT !== undefined ? Number(process.env.ROVARA_GW_TLS_PORT) : 443;
 const PLAIN_PORT = QUIET && process.env.ROVARA_GW_PLAIN_PORT !== undefined ? Number(process.env.ROVARA_GW_PLAIN_PORT) : 80;
+const TEST_ADDRESSES = QUIET ? process.env.ROVARA_GW_TEST_ADDRESSES : undefined;
+const DNS_PORT = QUIET && process.env.ROVARA_GW_DNS_PORT !== undefined ? Number(process.env.ROVARA_GW_DNS_PORT) : 53;
 let logged = 0;
 let logWindow = Date.now();
 function log(event, fields) {
@@ -62,7 +64,8 @@ function listCovers(list, host) {
 }
 function hostAllowed(host, role) {
   if (!validName(host)) return false;
-  if (role === "sandbox" && listCovers(SANDBOX_DENIED, host)) return false;
+  // Fail closed: only a caller that says exactly "worker" is exempt from the sandbox deny, so a missing or odd role is a sandbox.
+  if (role !== "worker" && listCovers(SANDBOX_DENIED, host)) return false;
   for (let i = 0; i < ALLOWED.length; i++) {
     const entry = ALLOWED[i];
     if (entry.charAt(0) === "*" && entry.charAt(1) === ".") {
@@ -111,6 +114,8 @@ function peerIn(address, cidr) {
 
 // Where the interfaces are: a role per network, by the subnet the broker read from Docker.
 function localAddresses() {
+  // Library mode only: a test names the addresses (the loopback is an "internal" interface and is skipped below).
+  if (TEST_ADDRESSES) return JSON.parse(TEST_ADDRESSES);
   const found = { worker: [], sandbox: [], external: [] };
   const interfaces = os.networkInterfaces();
   Object.keys(interfaces).forEach(function (name) {
@@ -178,7 +183,7 @@ function startNameServer(ip, cidr, role) {
     if (reply !== undefined) udp.send(reply, remote.port, remote.address);
   });
   udp.on("error", function (error) { log("dns_error", { reason: error.code }); });
-  udp.bind(53, ip);
+  udp.bind(DNS_PORT, ip);
   const tcp = net.createServer(function (socket) {
     if (!peerIn(socket.remoteAddress, cidr)) return socket.destroy();
     let held = Buffer.alloc(0);
@@ -199,7 +204,8 @@ function startNameServer(ip, cidr, role) {
     });
   });
   tcp.on("error", function (error) { log("dns_error", { reason: error.code }); });
-  tcp.listen(53, ip);
+  tcp.listen(DNS_PORT, ip);
+  return { udp: udp, tcp: tcp };
 }
 
 // ---- the way out
@@ -478,22 +484,29 @@ function startIngress(ip) {
   server.listen(config.ingress.port, ip);
 }
 
+// What one network's role gets: its name server and its TLS and plain forwarders, all judged for that role.
+function startNetwork(role, ip, cidr) {
+  return { role: role, dns: startNameServer(ip, cidr, role), tls: startTlsForwarder(ip, cidr, role), plain: startPlainForwarder(ip, cidr, role) };
+}
 function main() {
   const addresses = localAddresses();
   if (addresses.worker.length === 0 || addresses.sandbox.length === 0 || addresses.external.length === 0) {
     process.stderr.write("egress gateway: the three networks are not all attached\n");
     process.exit(2);
   }
-  addresses.worker.forEach(function (ip) { startNameServer(ip, config.nets.worker, "worker"); startTlsForwarder(ip, config.nets.worker, "worker"); startPlainForwarder(ip, config.nets.worker, "worker"); startCallbackRelay(ip); });
-  addresses.sandbox.forEach(function (ip) { startNameServer(ip, config.nets.sandbox, "sandbox"); startTlsForwarder(ip, config.nets.sandbox, "sandbox"); startPlainForwarder(ip, config.nets.sandbox, "sandbox"); });
+  const started = [];
+  addresses.worker.forEach(function (ip) { started.push(startNetwork("worker", ip, config.nets.worker)); startCallbackRelay(ip); });
+  addresses.sandbox.forEach(function (ip) { started.push(startNetwork("sandbox", ip, config.nets.sandbox)); });
   addresses.external.forEach(function (ip) { startIngress(ip); });
+  if (QUIET) return started;
   process.on("uncaughtException", function (error) { log("error", { reason: String(error && error.code) }); });
   process.on("SIGTERM", function () { process.exit(0); });
   process.stdout.write(JSON.stringify({ component: "egress-gateway", event: "ready", worker: addresses.worker, sandbox: addresses.sandbox }) + "\n");
+  return started;
 }
 
 if (process.env.ROVARA_GW_LIBRARY === "1") {
-  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, startTlsForwarder: startTlsForwarder, startPlainForwarder: startPlainForwarder, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
+  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, startTlsForwarder: startTlsForwarder, startPlainForwarder: startPlainForwarder, main: main, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
 } else {
   main();
 }
