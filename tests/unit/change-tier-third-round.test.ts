@@ -286,3 +286,14 @@ describe("the head a tier is bound to", () => {
     expect(boundCommits([{ repositoryId: "a", headSha: "not a commit" }])).toEqual({});
   });
 });
+
+describe("the size of the docs route", () => {
+  it("300 changed lines are docs, 301 are not", () => {
+    const lines = (count: number) => Array.from({ length: count }, (_, index) => `Plain sentence number ${index}.`);
+    const make = (count: number) => { const e = docEdit("docs/long.md", ["# Long", ""], lines(count)); return tierFromDiff({ files: [e.file], complete: true }, { ...ctx, head: headOf([e.text]) }); };
+    expect(make(300)).toMatchObject({ level: "small", kinds: ["docs"] });
+    const over = make(301);
+    expect(over.level).toBe("standard");
+    expect(over.reasons.map((reason) => reason.code)).toContain("docs_large");
+  });
+});
