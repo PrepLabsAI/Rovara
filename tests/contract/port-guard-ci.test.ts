@@ -18,7 +18,7 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
 
   it("leaves the `local` gate waiting for exactly the jobs it waited for", async () => {
     const { jobs } = await workflow();
-    expect(jobs.local!.needs).toEqual(["scope", "checks", "test", "release", "linux-runtime"]);
+    expect(jobs.local!.needs).toEqual(["scope", "checks", "test", "release", "pack", "linux-runtime"]);
   });
 
   it("runs the guard over the commits code/next holds beyond mainline, on a push to code/next or a pull request into it, with no secret", async () => {

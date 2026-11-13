@@ -18,6 +18,11 @@
     }
   },
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "assets",
+    "!dist/**/*.map"
+  ],
   "dependencies": {
     "@e2e-dev/web": "0.14.0",
     "@rovara-code/contracts": "0.1.0",

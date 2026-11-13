@@ -15,6 +15,10 @@
     "./thinking-levels": "./dist/thinking-levels.js"
   },
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "3.1134.0",
     "@earendil-works/pi-ai": "1.5.2",

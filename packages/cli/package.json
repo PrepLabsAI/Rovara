@@ -6,6 +6,10 @@
   "bin": {
     "agentx": "./dist/bin.js"
   },
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "dependencies": {
     "@agentx/gateway": "0.1.0",
     "@agentx/mcp": "0.1.0",

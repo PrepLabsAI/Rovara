@@ -12,6 +12,8 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "pack:packages": "node scripts/pack-packages.ts",
+    "pack:stamp": "node scripts/stamp-package-versions.ts",
     "clean": "tsc -b --clean",
     "lint": "node scripts/lint-shards.ts",
     "agentx": "node packages/cli/dist/bin.js",

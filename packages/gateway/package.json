@@ -5,6 +5,10 @@
   "type": "module",
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
     "@rovara-code/contracts": "0.1.0"

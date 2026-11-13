@@ -14,6 +14,10 @@
     "./orchestrator": "./dist/orchestrator.js",
     "./turn-recorder": "./dist/turn-recorder.js"
   },
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "dependencies": {
     "@agentx/model-runtime": "0.1.0",
     "@earendil-works/pi-coding-agent": "1.5.2",

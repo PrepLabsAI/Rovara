@@ -16,6 +16,7 @@ docs/*
 !docs/learnings/
 !docs/capabilities/
 !docs/architecture/
+!docs/modular/
 .DS_Store
 Thumbs.db
 *.log

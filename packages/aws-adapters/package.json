@@ -12,6 +12,10 @@
     "./sqs": "./dist/sqs/plugin.js"
   },
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "engines": {
     "node": ">=22.19.0 <23"
   },
