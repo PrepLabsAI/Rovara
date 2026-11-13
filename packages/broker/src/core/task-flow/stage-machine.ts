@@ -53,7 +53,7 @@ import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
-import { flowIs } from "./flow-guard.js";
+import { workflowWriteOps } from "./flow-guard.js";
 import type { StepOutcome } from "./outcome.js";
 import { knowledgeCommitToStore } from "../meta-repo/prepare-meta.js";
 import { SETUP_AGENT_FEATURE } from "@agentx/contracts";
@@ -181,12 +181,13 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     },
     requester: { personId: task.developerId, provider: task.provider },
   });
+  const workflowWrite = input.workflow === undefined ? undefined : workflowWriteOps(input.workflow.current, input.workflow.next, { ownsFlow: true });
   const items: TransactItem[] = [
     {
       kind: "update",
       key: taskKey(task.taskId),
-      ops: [...(input.workflow === undefined ? [] : [change.set("workflow", toDocument(input.workflow.next))]), change.set("updatedAt", now), ...(fed === undefined ? [] : fed.ops)],
-      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), flowIs(input.workflow.current.flow)]), ...(fed === undefined ? [] : [fed.condition])),
+      ops: [...(workflowWrite === undefined ? [] : workflowWrite.ops), change.set("updatedAt", now), ...(fed === undefined ? [] : fed.ops)],
+      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), ...(workflowWrite?.guard ?? [])]), ...(fed === undefined ? [] : [fed.condition])),
     },
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
@@ -229,10 +230,11 @@ export async function acceptStepWithNotes(deps: TaskFlowDeps, input: StepInput):
 export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, extra: readonly TransactItem[] = [], taskOps: readonly ChangeOp[] = []): Promise<boolean> {
   const current = task.workflow;
   if (current === undefined) return false;
+  const write = workflowWriteOps(current, next, { ownsFlow: true });
   const result = await deps.store.transact([
     {
-      kind: "update", key: taskKey(task.taskId), ops: [change.set("workflow", toDocument(next)), ...taskOps, change.set("updatedAt", iso(deps))],
-      condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision), flowIs(current.flow)),
+      kind: "update", key: taskKey(task.taskId), ops: [...write.ops, ...taskOps, change.set("updatedAt", iso(deps))],
+      condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision), ...write.guard),
     },
     ...extra,
   ]);

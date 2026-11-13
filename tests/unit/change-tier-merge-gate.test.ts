@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ChangeRequestFilesPage, ChangeRequestRef, CodeHost, HostScope } from "../../packages/contracts/src/index.js";
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
-import { tierFromDiff } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { recordTierReview, tierFromDiff, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const AT = "2026-11-09T10:00:00.000Z";
@@ -35,6 +35,12 @@ const rejects = async (run: () => Promise<unknown>): Promise<{ code?: string; me
   }
   throw new Error("expected a refusal");
 };
+
+/** The review steps of a tier ran on the head the pull request has now (what the stage-selection lane records when they finish). */
+async function reviewed(world: MergeWorld, level: TierLevel, head = world.prs[0]!.head): Promise<void> {
+  const flow = (await world.task()).workflow.flow;
+  await world.setWorkflow({ flow: recordTierReview(flow, { level, headSha: head, findings: 0, mustFix: 0 }) });
+}
 
 async function worldAt(level: "small" | "standard" | "risky", mode: Mode = { patches: true, failing: false, calls: 0 }) {
   const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
@@ -84,13 +90,33 @@ describe("the merge recomputes the change tier from the host", () => {
     expect(flow.grewAfterBuild).toMatchObject({ from: "small", to: "risky" });
   });
 
-  it("after the raise is recorded the next request is approved at the higher tier and goes through", async () => {
+  it("a growth is sticky: a second press does not clear it, the higher tier's review on the current head does", async () => {
     const { world } = await worldAt("small");
     await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
     await rejects((await press(world)).run);
+    // The raise is recorded and the request is made at the higher tier, yet the merge is still refused: nobody has run the risky checks.
     const again = await press(world);
     expect(again.prepared.tier).toBe("risky");
-    expect((await again.run()).status).toBe("MERGED");
+    expect((await rejects(again.run)).message).toBe("This change now touches a sensitive path (src/auth/session.ts), so it needs risky checks.");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+    await reviewed(world, "risky");
+    expect((await (await press(world)).run()).status).toBe("MERGED");
+  });
+
+  it("a review of a lower tier, or of an older head, does not cover the growth; a push makes a review stale", async () => {
+    const { world } = await worldAt("small");
+    const oldHead = world.prs[0]!.head;
+    await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
+    await rejects((await press(world)).run);
+    await reviewed(world, "standard");
+    expect((await rejects((await press(world)).run)).message).toContain("needs risky checks");
+    await reviewed(world, "risky", oldHead);
+    expect((await rejects((await press(world)).run)).message).toContain("needs risky checks");
+    await reviewed(world, "risky");
+    await pushed(world, { "src/auth/other.ts": "export const other = 1;\n" });
+    expect((await rejects((await press(world)).run)).message).toContain("needs risky checks");
+    await reviewed(world, "risky");
+    expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 
   it("a push that removes the sensitive file again leaves the tier up", async () => {
@@ -100,7 +126,10 @@ describe("the merge recomputes the change tier from the host", () => {
     await pushed(world, { "src/auth/session.ts": null });
     const later = await press(world);
     expect(later.prepared.tier).toBe("risky");
-    expect((await later.run()).status).toBe("MERGED");
+    // The clean diff keeps the tier up, and the owed review is for the head the pull request has now.
+    expect((await rejects(later.run)).message).toContain("needs risky checks");
+    await reviewed(world, "risky");
+    expect((await (await press(world)).run()).status).toBe("MERGED");
     expect((await tierOf(world))?.level).toBe("risky");
   });
 
@@ -156,7 +185,8 @@ describe("the merge recomputes the change tier from the host", () => {
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
     const again = await press(world);
     expect(again.prepared.tier).toBe("risky");
-    expect((await again.run()).status).toBe("MERGED");
+    await reviewed(world, "risky");
+    expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 
   it("the merge also compares with the tier the planning steps were chosen at: steps skipped at small, a change that is standard now is refused every time", async () => {
@@ -174,8 +204,8 @@ describe("the merge recomputes the change tier from the host", () => {
     expect(first.prepared.tier).toBe("standard");
     expect((await rejects(first.run)).message).toBe("This change now touches more than 100 lines of code, so it needs standard checks.");
     expect((await rejects((await press(world)).run)).message).toContain("needs standard checks");
-    // With no step skipped the whole plan ran, and the same change merges.
-    await world.setWorkflow({ flow: { ...flow, skippedSteps: [] } });
+    // The standard checks ran on this head: nothing is owed, though the steps were skipped.
+    await reviewed(world, "standard");
     expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 

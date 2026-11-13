@@ -13,10 +13,15 @@ const CONFUSABLES: ReadonlyMap<string, string> = new Map(Object.entries({
   "Α": "a", "Β": "b", "Ε": "e", "Ζ": "z", "Η": "h", "Ι": "i", "Κ": "k", "Μ": "m", "Ν": "n", "Ο": "o", "Ρ": "p", "Τ": "t", "Υ": "y", "Χ": "x",
 }));
 
+/** A path with its letters folded to one form but its CASE kept (camelCase words are read from this form): width, script, invisible characters, separators. */
+export function foldedTierPath(path: string): string {
+  return [...path.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, "")].map((char) => CONFUSABLES.get(char) ?? char).join("")
+    .replaceAll("\\", "/").replace(/\/{2,}/gu, "/").replace(/^(?:\.\/)+/u, "");
+}
+
 /** A path as the rules read it: one form, so a case, width, script or invisible-character trick cannot step round them. */
 export function normalizedTierPath(path: string): string {
-  const plain = [...path.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, "")].map((char) => CONFUSABLES.get(char) ?? char).join("")
-    .replaceAll("\\", "/").replace(/\/{2,}/gu, "/").replace(/^(?:\.\/)+/u, "").toLowerCase();
+  const plain = foldedTierPath(path).toLowerCase();
   // A name that ends in dots or spaces opens the same file on some systems (`AGENTS.md.`, `AGENTS.md `): read it without them. A segment of only dots (`..`) is left as it is.
   return plain.split("/").map((segment) => (/^\.+$/u.test(segment) ? segment : segment.replace(/[. ]+$/u, ""))).join("/");
 }
@@ -26,26 +31,36 @@ export function hasConfusableLetter(path: string): boolean {
   return [...path.normalize("NFKC")].some((char) => CONFUSABLES.has(char));
 }
 
+/** Whether a path holds any letter outside ASCII (after width folding): no map of look-alikes is ever complete, so in a code path such a letter is risky by itself. */
+export function hasNonAsciiLetter(path: string): boolean {
+  return /[^\p{ASCII}]/u.test(path.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, ""));
+}
+
 // ---- words in names
 
-/** The words of one path segment: split on `-`, `_`, `.`, spaces and camelCase (`deleteAccount`, `user-auth`), lower case, a plural read as its singular. */
+/**
+ * The words of one path segment: split on `-`, `_`, `.`, spaces and camelCase (`deleteAccount`, `signIn`) BEFORE any lower-casing, a plural read as its singular. Two neighbouring words are also joined (`sign` and `in` give `signin`,
+ * `api` and `key` give `apikey`). Pass the segment of the case-kept form (`foldedTierPath`), not a lower-cased one.
+ */
 export function wordsOf(segment: string): string[] {
-  const plain = [...segment.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, "")].map((char) => CONFUSABLES.get(char) ?? char).join("");
-  return plain.replace(/([a-z0-9])([A-Z])/gu, "$1 $2").split(/[\s\-_.]+/u).map((word) => word.toLowerCase()).filter((word) => word.length > 0)
+  const plain = foldedTierPath(segment);
+  const words = plain.replace(/([a-z0-9])([A-Z])/gu, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2").split(/[\s\-_.]+/u).map((word) => word.toLowerCase()).filter((word) => word.length > 0)
     .map((word) => (word.length > 3 && word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word));
+  return [...words, ...words.slice(1).map((word, index) => `${words[index]!}${word}`)];
 }
 
 /** The words that make a folder or a file sensitive: auth, money, permissions, deletion and data loss, and where the code runs. Singular forms; `wordsOf` reads a plural as one. */
 const SENSITIVE_WORDS: ReadonlySet<string> = new Set([
   // auth
   "auth", "authn", "authz", "authentication", "authorization", "login", "logout", "signin", "signup", "oauth", "saml", "sso", "jwt", "mfa", "otp", "password", "passwd", "passphrase", "security", "crypto", "credential",
-  "secret", "token", "session", "cookie", "keychain", "certificate", "apikey",
+  "secret", "token", "session", "cookie", "keychain", "certificate", "apikey", "accesskey", "privatekey", "secretkey", "signin", "signup", "signout", "authorize", "authenticate", "totp", "hotp", "webauthn", "passkey", "csrf", "xsrf",
+  "signature", "verify", "impersonate", "impersonation", "sudo", "encrypt", "encryption", "decrypt", "decryption", "cipher", "pbkdf", "bcrypt", "argon", "oidc", "openid", "kerberos", "ldap",
   // permissions and IAM
   "iam", "permission", "policy", "policie", "rbac", "acl", "role", "privilege", "entitlement", "approval", "approve",
   // money
-  "payment", "billing", "money", "invoice", "checkout", "stripe", "paypal", "ledger", "wallet", "refund", "charge", "payout",
+  "payment", "billing", "money", "invoice", "checkout", "stripe", "paypal", "ledger", "wallet", "refund", "charge", "payout", "pricing", "subscription", "plan", "coupon",
   // deletion and data loss
-  "delete", "deletion", "erase", "purge", "retention", "destroy", "wipe", "truncate", "migrate", "migration",
+  "delete", "deletion", "erase", "purge", "retention", "destroy", "wipe", "truncate", "migrate", "migration", "removeuser", "removeaccount", "removemember", "removeteam", "deleteuser", "gdpr",
   // where the code runs
   "infra", "terraform", "cdk",
 ]);
@@ -63,17 +78,19 @@ const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.github\/(settings\.ya?ml|rulesets?(\/|$)|branch[-_]protection[^/]*)$/u,
   /\.sql$/u,
   /(^|\/)\.github\/(dependabot|renovate)\.(ya?ml|json)$/u,
-  /(^|\/)renovate\.json5?$/u,
+  /(^|\/)\.?renovate(rc)?(\.json5?)?$/u, /(^|\/)\.github\/renovate\.json5?$/u,
+  // What merges without a person: a change to them changes who looks at every later change.
+  /(^|\/)\.?(mergify|kodiak|bors)(\.ya?ml|\.toml)$/u, /(^|\/)\.github\/(mergify\.ya?ml|auto_merge[\w.]*|CODEOWNERS)$/u,
 ];
 
-/** Whether a path is sensitive: a sensitive word as a folder, or as a word of a file name (not of a document's name), a migration folder, or one of the named files. */
+/** Whether a path is sensitive: a sensitive word as a folder, or as a word of a file name (not of a document's name), a migration folder, or one of the named files. Words are read with their camelCase kept. */
 export function isTierSensitivePath(path: string): boolean {
   const value = normalizedTierPath(path);
   if (SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(value)) || MIGRATION_FOLDERS.some((pattern) => pattern.test(value))) return true;
-  const segments = value.split("/");
+  const segments = foldedTierPath(path).split("/");
   const name = segments.at(-1) ?? "";
   for (const folder of segments.slice(0, -1)) if (wordsOf(folder).some((word) => SENSITIVE_WORDS.has(word))) return true;
-  return !DOCUMENT_EXTENSIONS.test(name) && wordsOf(name.replace(/\.[^.]*$/u, "")).some((word) => SENSITIVE_WORDS.has(word));
+  return !DOCUMENT_EXTENSIONS.test(name.toLowerCase()) && wordsOf(name.replace(/\.[^.]*$/u, "")).some((word) => SENSITIVE_WORDS.has(word));
 }
 
 // ---- infrastructure, files that run on their own, agent configuration
@@ -85,6 +102,10 @@ const INFRA_PATTERNS: readonly RegExp[] = [
   /(^|\/)(k8s|kubernetes|helm|manifests|kustomize|ansible|pulumi|cdk\.out)(\/|$)/u, /(^|\/)(kustomization|chart)\.ya?ml$/u, /(^|\/)pulumi\.[^/]*\.ya?ml$/u,
   /(^|\/)(serverless|docker-compose[^/]*|compose|samconfig|skaffold|fly|app)\.(ya?ml|toml)$/u, /(^|\/)(cdk\.json|procfile|vercel\.json|netlify\.toml|render\.ya?ml|appspec\.ya?ml|buildspec[^/]*\.ya?ml)$/u,
   /(^|\/)(infra|infrastructure|deploy|deployment|deployments)(\/|$)/u,
+  // CDK stacks, Helm charts and values, deploy descriptors, and the rules that guard a hosted database or bucket.
+  /(^|\/)lib\/[^/]*stack[^/]*\.[cm]?[jt]s$/u, /[^/]*[-_.]stack\.[cm]?[jt]s$/u, /(^|\/)charts\//u, /(^|\/)values[\w.-]*\.ya?ml$/u,
+  /(^|\/)(firestore|storage|database)\.rules(\.json)?$/u, /\.rules$/u, /(^|\/)supabase\//u, /(^|\/)firebase\.json$/u,
+  /(^|\/)(wrangler\.(toml|jsonc?)|devfile\.ya?ml|sam\/[^/]*\.ya?ml|template\.ya?ml|stack\.ya?ml|app\.ya?ml|nixpacks\.toml|railway\.(json|toml))$/u,
 ];
 export const isInfraPath = (path: string): boolean => INFRA_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));
 
@@ -93,16 +114,17 @@ const SELF_RUNNING_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.git(\/|$)/u, /(^|\/)\.githooks\//u, /(^|\/)\.husky\//u, /(^|\/)(lefthook|\.lefthook)[^/]*\.ya?ml$/u, /(^|\/)\.pre-commit(-config|-hooks)?\.ya?ml$/u, /(^|\/)\.overcommit\.yml$/u,
   /(^|\/)\.vscode\//u, /(^|\/)\.devcontainer(\/|\.json$)/u, /(^|\/)devcontainer\.json$/u, /(^|\/)\.gitpod\.ya?ml$/u, /(^|\/)\.codespaces\//u, /(^|\/)\.idea\//u, /(^|\/)\.zed\//u,
   /(^|\/)\.lfsconfig$/u, /(^|\/)\.envrc$/u, /(^|\/)\.?mise\.toml$/u, /(^|\/)\.mise\//u, /(^|\/)\.tool-versions$/u, /(^|\/)\.devbox\//u, /(^|\/)devbox\.json$/u, /(^|\/)\.direnv\//u,
+  /(^|\/)\.(gitpod|devcontainer)\.[\w.]*$/u, /(^|\/)\.gitpod\//u, /(^|\/)\.tasks?\.json$/u, /(^|\/)\.cargo\/config(\.toml)?$/u,
   /(^|\/)gradle\/wrapper\//u, /(^|\/)gradlew(\.bat)?$/u, /(^|\/)mvnw(\.cmd)?$/u, /(^|\/)\.mvn\//u,
 ];
 export const isHookPath = (path: string): boolean => SELF_RUNNING_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));
 
 /** Files that tell an AI agent what to do, and the folders that hold prompts, skills and templates: a change to one changes what every later task is told. Any path depth. */
 const INSTRUCTION_PATTERNS: readonly RegExp[] = [
-  /(^|\/)(agents?|claude|gemini|skill|copilot-instructions|cursorrules|windsurfrules|clinerules|codex|conventions|llms(-full)?)\.(md|mdx|txt|ya?ml|json)$/u,
-  /(^|\/)\.(cursorrules|windsurfrules|clinerules|aiderignore|aider\.conf\.ya?ml|aider\.[\w.-]+)$/u,
+  /(^|\/)(agents?|claude|gemini|warp|skill|copilot-instructions|cursorrules|windsurfrules|clinerules|codex|conventions|llms(-full)?)\.(md|mdx|txt|ya?ml|json)$/u,
+  /(^|\/)\.(cursorrules|cursorignore|windsurfrules|clinerules|aiderignore|aider\.conf\.ya?ml|aider\.[\w.-]+|geminiignore|claudeignore|codeiumignore)$/u,
   /(^|\/)\.?(mcp|mcp\.[\w-]+)\.json$/u,
-  /(^|\/)\.(cursor|claude|codex|agents?|windsurf|continue|gemini|amazonq|kiro|roo|cline|aider|trae|junie|opencode|qwen|goose|augment|zed|copilot)\//u,
+  /(^|\/)\.(cursor|claude|codex|agents?|windsurf|continue|gemini|amazonq|kiro|roo|cline|clinerules|aider|trae|junie|opencode|qwen|goose|augment|zed|copilot|openhands|kilocode|warp|cody|tabnine|codeium|sourcegraph|replit|bolt|lovable|v0)\//u,
   /(^|\/)\.github\/(copilot-instructions\.md|instructions\/|prompts\/|chatmodes\/|agents\/)/u,
   /(^|\/)\.rovara\//u,
   // Prompt, skill and template folders, and prompt files by name.
@@ -112,21 +134,21 @@ const INSTRUCTION_PATTERNS: readonly RegExp[] = [
 ];
 
 /** Prose and config files that name an agent, a skill, an instruction, a prompt or an MCP server in the NAME or a folder (not code: `src/agent/runner.ts` is code). */
-const INSTRUCTION_WORDS: ReadonlySet<string> = new Set(["agent", "skill", "instruction", "prompt", "steering", "persona", "mcp", "claude", "gemini", "copilot", "llms"]);
+const INSTRUCTION_WORDS: ReadonlySet<string> = new Set(["agent", "skill", "instruction", "prompt", "steering", "persona", "mcp", "claude", "gemini", "copilot", "llms", "llm", "systemmessage", "systemprompt", "systeminstruction", "metaprompt", "preprompt", "guardrail", "openhands", "kilocode"]);
 const INSTRUCTION_LIKE_EXTENSIONS = /\.(md|mdx|markdown|rst|adoc|txt|ya?ml|json|toml)$/u;
 
 export function isInstructionPath(path: string): boolean {
   const value = normalizedTierPath(path);
   if (INSTRUCTION_PATTERNS.some((pattern) => pattern.test(value))) return true;
   if (!INSTRUCTION_LIKE_EXTENSIONS.test(value)) return false;
-  return value.split("/").some((segment) => wordsOf(segment.replace(/\.[^.]*$/u, "")).some((word) => INSTRUCTION_WORDS.has(word)));
+  return foldedTierPath(path).split("/").some((segment) => wordsOf(segment.replace(/\.[^.]*$/u, "")).some((word) => INSTRUCTION_WORDS.has(word)));
 }
 
 // ---- continuous integration
 
 /** The paths of continuous-integration configuration (and the files that run the same commands): their own kind (`ci_file`), checked by a reviewer for leaked secrets. Normalized paths. */
 export const CI_FILE_PATTERNS: readonly RegExp[] = [
-  /(^|\/)\.github\/(workflows|actions)\//u,
+  /(^|\/)\.(github|gitea|forgejo|gitee)\/(workflows|actions)\//u, /(^|\/)\.(gitea|forgejo)\/[^/]*\.ya?ml$/u, /(^|\/)action\.ya?ml$/u,
   /(^|\/)\.gitlab-ci\.ya?ml$/u,
   /(^|\/)\.circleci\//u,
   /(^|\/)buildspec[^/]*\.ya?ml$/u,
@@ -185,4 +207,17 @@ export function fileTypeOf(path: string): FileType {
   if (CODE_EXTENSIONS.has(extension)) return "code";
   if (CONFIG_EXTENSIONS.has(extension)) return "config";
   return "unknown";
+}
+
+// ---- the docs route
+
+/**
+ * The docs route (a secret scan and a person's merge, no reviewer): only README*, CHANGELOG* and CONTRIBUTING* at any depth, and everything under a top-level `docs/` or `doc/`, in Markdown, reStructuredText or AsciiDoc. A `.txt`
+ * is never on it (a server may read it), and nothing in an instruction, skill, prompt, agent, infrastructure or sensitive area is (the caller adds those checks).
+ */
+export function isDocsAllowlistPath(path: string): boolean {
+  const value = normalizedTierPath(path);
+  if (!/\.(md|markdown|rst|adoc)$/u.test(value)) return false;
+  const name = value.split("/").at(-1) ?? "";
+  return /^(readme|changelog|contributing)(?![a-z0-9])/u.test(name) || /^docs?\//u.test(value);
 }
