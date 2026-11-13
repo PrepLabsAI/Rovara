@@ -581,7 +581,8 @@ const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code ho
  * makes the record stale. The record is written under `flowIs`, so a lost race is refused, and a whole-workflow writer that read the task earlier carries the stored record forward (flow-guard.ts). A host that cannot be read
  * refuses the merge too, and records nothing. A small change to code or documents also needs the reviewer's questions on the record for the current head (`tierFloor`).
  */
-async function tierGate(
+/** Exported for the tests of its refusals (a head that cannot be bound); `pressMerge` is the one caller. */
+export async function tierGate(
   deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, shown: TierLevel | undefined,
 ): Promise<void> {
   let input: Awaited<ReturnType<typeof readTierInput>>;
