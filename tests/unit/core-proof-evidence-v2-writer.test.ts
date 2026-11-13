@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { EvidencePackSchema, EvidencePackV2Schema, readEvidencePack, readEvidencePackText, renderEvidence, type CheckEntry, type EvidencePack } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import type { ChangedFileEntry } from "../../packages/broker/src/core/proof/verification-report.js";
 import { weakeningPartsOf } from "../../packages/broker/src/core/proof/evidence-v2-lines.js";
 import { evidencePackKey, keepEvidence, loadEvidencePack, loadEvidenceRead, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { buildEvidencePack, evidenceLevelOf, evidencePackV2Of, evidenceResultOf, type EvidenceV2Writer } from "../../packages/broker/src/core/proof/evidence-pack.js";
@@ -147,7 +148,7 @@ describe("the pack the writer makes from real v1 data", () => {
   });
   it("puts the changed files' flags and weakening in the pack when the caller has the files, and nothing when it has none", () => {
     const pack = v1([entry("readiness:0", "pytest -q")], { rawText: raw });
-    const files = [{ repository: "app", path: "CLAUDE.md", added: 1, removed: 0 }, { repository: "app", path: "a/__snapshots__/x.snap", added: 1, removed: 1, snapshotChanged: true }];
+    const files: ChangedFileEntry[] = [{ repository: "app", path: "CLAUDE.md", added: 1, removed: 0 }, { repository: "app", path: "a/__snapshots__/x.snap", added: 1, removed: 1, snapshotChanged: true }];
     const flagged = evidencePackV2Of(pack, { ...sandbox, changedFiles: files })!;
     expect(flagged.flags?.instructionFiles).toEqual(["CLAUDE.md"]);
     expect(flagged.weakening?.changedSnapshots).toEqual(["a/__snapshots__/x.snap"]);
