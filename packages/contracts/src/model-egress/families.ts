@@ -90,8 +90,10 @@ export function checkEgressQuery(row: Pick<ModelEgressRow, "family" | "azure">, 
       }
       if (name.toLowerCase() === "key") continue;
       if (!allowed.has(name)) return { ok: false, refusal: "not_allowed" };
-      if (!(QUERY_VALUE.test(value) || ((name === "alt" || name === "$alt") && value === LEGACY_ALT_VALUE)) || seen.has(name)) return { ok: false, refusal: "bad_request" };
-      seen.add(name);
+      // `alt` and `$alt` are one parameter in two spellings: both together is two answers to one question.
+      const group = name === "$alt" ? "alt" : name;
+      if (!(QUERY_VALUE.test(value) || ((name === "alt" || name === "$alt") && value === LEGACY_ALT_VALUE)) || seen.has(group)) return { ok: false, refusal: "bad_request" };
+      seen.add(group);
       pairs.push([name, value]);
     }
   }

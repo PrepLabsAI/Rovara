@@ -51,6 +51,8 @@ export const ModelEgressExtraSchema = z
     azure: ModelEgressAzureSchema.optional(),
     /** What a request that names a file or cached content reserves as input (tokens). Absent: `DEFAULT_EXTERNAL_INPUT_RESERVE_TOKENS`. */
     externalInputReserveTokens: z.number().int().min(1).max(100_000_000).optional(),
+    /** The field a chat-completions maximum is written in when the proxy sets one. Absent: `max_completion_tokens` for the `openai` and `azure-openai` rows, `max_tokens` for every other (see `maxOutputFieldOf`). */
+    maxOutputField: z.enum(["max_tokens", "max_completion_tokens"]).optional(),
   })
   .strict();
 export type ModelEgressExtra = z.infer<typeof ModelEgressExtraSchema>;
@@ -59,7 +61,7 @@ export type ModelEgressExtra = z.infer<typeof ModelEgressExtraSchema>;
 export type ModelEgressCatalogPart = Pick<ModelCatalogRow, "id" | "hosts" | "hostSuffixes" | "family" | "pathPrefix">;
 export type ModelEgressRow = ModelEgressCatalogPart & ModelEgressExtra;
 
-const EXTRA_KEYS: readonly string[] = ["scheme", "defaultMaxOutputTokens", "prices", "fallbackPrice", "azure", "externalInputReserveTokens"];
+const EXTRA_KEYS: readonly string[] = ["scheme", "defaultMaxOutputTokens", "prices", "fallbackPrice", "azure", "externalInputReserveTokens", "maxOutputField"];
 
 export type ModelEgressRowParse = { readonly ok: true; readonly row: ModelEgressRow; readonly catalog: ModelCatalogRow } | { readonly ok: false; readonly reason: string };
 

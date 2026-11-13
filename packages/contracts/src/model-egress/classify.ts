@@ -30,7 +30,8 @@ const QUOTA_WORDS = /insufficient_quota|credit balance is too low|billing detail
 /** Google words its free-tier per-minute limit like its billing limit ("check your plan and billing details"): a per-minute quota id wins. */
 const PER_MINUTE = /per ?minute/iu;
 const OVERLOADED_WORDS = /overloaded/iu;
-const CREDIT_BALANCE = /credit balance is too low/iu;
+/** Anthropic words an empty balance this way, at the START of the error message (never anywhere in it: the message can echo a prompt). */
+const CREDIT_BALANCE_START = /^your credit balance is too low to access the anthropic api/iu;
 
 type Rec = Record<string, unknown>;
 const rec = (value: unknown): Rec | undefined => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Rec) : undefined);
@@ -43,9 +44,17 @@ interface ErrorFields {
   readonly code?: string;
   readonly status?: string;
   readonly reasons: readonly string[];
+  /** The body is exactly Anthropic's error envelope: `{ "type": "error", "error": { "type", "message" } }` (and an optional `request_id`), with no other key at either level. */
   readonly anthropicEnvelope: boolean;
   readonly message?: string;
 }
+function isAnthropicEnvelope(top: Rec | undefined, error: Rec | undefined): boolean {
+  if (top === undefined || error === undefined || own(top, "type") !== "error") return false;
+  if (Object.keys(top).some((key) => !["type", "error", "request_id"].includes(key))) return false;
+  const keys = Object.keys(error);
+  return str(own(error, "type")) !== undefined && str(own(error, "message")) !== undefined && keys.every((key) => key === "type" || key === "message");
+}
+
 function errorFields(text: string): ErrorFields {
   try {
     const top = rec(JSON.parse(text) as unknown);
@@ -58,7 +67,7 @@ function errorFields(text: string): ErrorFields {
       ...(typeof code === "string" ? { code } : typeof code === "number" ? { code: String(code) } : {}),
       ...(str(own(error, "status")) === undefined ? {} : { status: str(own(error, "status")) as string }),
       reasons,
-      anthropicEnvelope: own(top, "type") === "error" && str(own(error, "type")) !== undefined,
+      anthropicEnvelope: isAnthropicEnvelope(top, error),
       ...(str(own(error, "message")) === undefined ? {} : { message: str(own(error, "message")) as string }),
     };
   } catch {
@@ -91,7 +100,8 @@ export function classifyProviderResponse(args: { readonly status: number; readon
   if (fields.type === "rate_limit_error" || fields.code === "rate_limit_exceeded") return "rate_limit";
   if (fields.type === "insufficient_quota" || fields.code === "insufficient_quota") return "quota";
   if (fields.status === "RESOURCE_EXHAUSTED") return PER_MINUTE.test(fields.message ?? "") ? "rate_limit" : QUOTA_WORDS.test(fields.message ?? "") ? "quota" : "rate_limit";
-  if (status === 400 && fields.anthropicEnvelope && fields.type === "invalid_request_error" && CREDIT_BALANCE.test(fields.message ?? "")) return "quota";
+  // Anthropic's own envelope only: a `billing_error` type, or its fixed empty-balance sentence at the start of the message of a 400 `invalid_request_error`.
+  if (fields.anthropicEnvelope && (fields.type === "billing_error" || (status === 400 && fields.type === "invalid_request_error" && CREDIT_BALANCE_START.test(fields.message ?? "")))) return "quota";
   return "provider_error";
 }
 

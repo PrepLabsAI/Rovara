@@ -1,5 +1,6 @@
 // TE-F1a: what a call costs, in whole micro-dollars (never floating-point money). The meter reserves an estimate BEFORE the call and settles to the provider's reported usage AFTER; a call that is cut off keeps its reservation, so
 // the meter errs high and never low. Every number that can be printed is checked as a finite whole number first.
+import { appendMember, applyJsonEdits, scanJsonObject, type JsonEdit, type JsonObjectSpan } from "./json-splice.js";
 import type { ModelEgressFamily, ModelEgressPriceRates, ModelEgressRow } from "./schemes.js";
 
 export const MICROS_PER_USD = 1_000_000;
@@ -45,31 +46,50 @@ function parseJsonObject(body: Uint8Array | string): Record<string, unknown> | u
     return undefined;
   }
 }
-const own = (object: Record<string, unknown>, key: string): unknown => (Object.hasOwn(object, key) ? object[key] : undefined);
+const own = (object: Record<string, unknown> | undefined, key: string): unknown => (object !== undefined && Object.hasOwn(object, key) ? object[key] : undefined);
 const asRecord = (value: unknown): Record<string, unknown> | undefined => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined);
 
-/** The maximum output tokens the request names, in the family's own field, when it names a plausible one. Undefined for a body that is not a JSON object or names none. */
+/** Where a family's maximum output may be written in a request. Google's JSON accepts both spellings of the config and the field (`generationConfig.maxOutputTokens` and `generation_config.max_output_tokens`, in any mix). */
+const GEMINI_CONFIG_KEYS = ["generationConfig", "generation_config"] as const;
+const GEMINI_FIELD_KEYS = ["maxOutputTokens", "max_output_tokens"] as const;
+const OPENAI_CHAT_FIELDS = ["max_tokens", "max_completion_tokens"] as const;
+const OPENAI_RESPONSES_FIELDS = ["max_output_tokens"] as const;
+
+const isPlausibleMax = (value: unknown): value is number => isWholeNumber(value) && value > 0 && value <= MAX_REQUESTED_OUTPUT_TOKENS;
+
+/** The maximum output tokens the request names, in the family's own field, when it names a plausible one. The HIGHEST plausible figure among the fields a body names (the provider may honour any one of them), so the reservation never rests on the smallest. Undefined for a body that is not a JSON object or names none. */
 export function requestedMaxOutputTokens(family: ModelEgressFamily, body: Uint8Array | string): number | undefined {
   const parsed = parseJsonObject(body);
   if (parsed === undefined) return undefined;
-  const config = asRecord(own(parsed, "generationConfig"));
   const candidates: unknown[] =
     family === "gemini" || family === "vertex"
-      ? [config === undefined ? undefined : own(config, "maxOutputTokens")]
+      ? GEMINI_CONFIG_KEYS.flatMap((configKey) => {
+          const config = asRecord(own(parsed, configKey));
+          return config === undefined ? [] : GEMINI_FIELD_KEYS.map((field) => own(config, field));
+        })
       : family === "openai_compatible"
         ? [own(parsed, "max_completion_tokens"), own(parsed, "max_tokens"), own(parsed, "max_output_tokens")]
         : [own(parsed, "max_tokens")];
-  // The HIGHEST plausible figure among the fields a body names (conflicting fields: the provider may honour any one of them), so the reservation never rests on the smallest.
-  const plausible = candidates.filter((value): value is number => isWholeNumber(value) && value > 0 && value <= MAX_REQUESTED_OUTPUT_TOKENS);
+  const plausible = candidates.filter(isPlausibleMax);
   return plausible.length === 0 ? undefined : Math.max(...plausible);
 }
 
-/** The request keys that hand the provider input the body does not hold: an uploaded file, a cached context. Their size is unknown to the proxy, so the reservation does not rest on the body's size. */
-const EXTERNAL_INPUT_KEYS = new Set(["fileData", "file_data", "fileUri", "file_uri", "cachedContent", "cached_content", "file_id", "fileId"]);
+/** The request keys that hand the provider input the body does not hold: an uploaded file, a cached context, a stored conversation, a page to fetch. Their size is unknown to the proxy, so the reservation does not rest on the body's size. */
+const EXTERNAL_INPUT_KEYS = new Set(["fileData", "file_data", "fileUri", "file_uri", "cachedContent", "cached_content", "file_id", "fileId", "previous_response_id", "urlContext", "url_context"]);
 const EXTERNAL_SCAN_MAX_NODES = 200_000;
 const EXTERNAL_SCAN_MAX_DEPTH = 64;
 
-/** Whether a JSON request names a file or cached content anywhere in it (any depth, any spelling). False for a body that is not JSON. Bounded: a body too deep or too big to scan counts as holding one (fail high). */
+/** An `image_url` (a string or `{ url }`) that is not an inline `data:` URL: the provider fetches it. */
+function isFetchedImageUrl(value: unknown): boolean {
+  const url = typeof value === "string" ? value : str(own(asRecord(value), "url"));
+  return url !== undefined && !/^data:/iu.test(url.trim());
+}
+const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+/**
+ * Whether a JSON request hands the provider input of unknown size: a file or cached content (`fileData`, `cachedContent`, `file_id` in any spelling), a stored conversation (`previous_response_id`), the Gemini `urlContext` tool, an OpenAI
+ * `image_url` that is not an inline `data:` URL, or an Anthropic content source of `type: "url"`. Any depth. False for a body that is not JSON. Bounded: a body too deep or too big to scan counts as holding one (fail high).
+ */
 export function hasExternalInput(body: Uint8Array | string): boolean {
   const parsed = parseJsonObject(body);
   if (parsed === undefined) return false;
@@ -80,40 +100,106 @@ export function hasExternalInput(body: Uint8Array | string): boolean {
     if (Array.isArray(value)) return value.some((item) => visit(item, depth + 1));
     const object = asRecord(value);
     if (object === undefined) return false;
-    return Object.keys(object).some((key) => EXTERNAL_INPUT_KEYS.has(key) || visit(object[key], depth + 1));
+    return Object.keys(object).some((key) => {
+      if (EXTERNAL_INPUT_KEYS.has(key)) return true;
+      if (key === "image_url" && isFetchedImageUrl(object[key])) return true;
+      if (key === "source" && own(asRecord(object[key]), "type") === "url") return true;
+      return visit(object[key], depth + 1);
+    });
   };
   return visit(parsed, 0);
 }
 
-/**
- * The request with the row's default maximum output set when it names none (so the reservation and the provider's own limit are the same number). Only for operations that generate an answer: chat completions and Responses (OpenAI shape),
- * `generateContent` and its stream (Gemini, Vertex), chat (Cohere). Anthropic always sets `max_tokens`. A body that is not a JSON object is left as it is. The body that is forwarded is the re-serialised one, so what the proxy priced
- * is what the provider reads (a duplicate key cannot mean two things).
- */
-export function withDefaultMaxOutput(family: ModelEgressFamily, operation: string, body: Uint8Array, defaultMax: number): { readonly body: Uint8Array; readonly injected: boolean } {
-  const parsed = parseJsonObject(body);
-  if (parsed === undefined || !isWholeNumber(defaultMax) || defaultMax < 1) return { body, injected: false };
-  const next: Record<string, unknown> = { ...parsed };
-  const set = (object: Record<string, unknown>, key: string): boolean => {
-    if (Object.hasOwn(object, key)) return false;
-    Object.defineProperty(object, key, { value: defaultMax, enumerable: true, writable: true, configurable: true });
-    return true;
-  };
-  let injected = false;
-  if (family === "openai_compatible") {
-    const named = ["max_tokens", "max_completion_tokens", "max_output_tokens"].some((key) => Object.hasOwn(parsed, key));
-    if (operation === "chat/completions" && !named) injected = set(next, "max_tokens");
-    else if (operation === "responses" && !named) injected = set(next, "max_output_tokens");
-  } else if ((family === "gemini" || family === "vertex") && (operation === "generateContent" || operation === "streamGenerateContent")) {
-    const config = { ...(asRecord(own(parsed, "generationConfig")) ?? {}) };
-    if (set(config, "maxOutputTokens")) {
-      Object.defineProperty(next, "generationConfig", { value: config, enumerable: true, writable: true, configurable: true });
-      injected = true;
-    }
-  } else if (family === "cohere" && operation === "chat" && !Object.hasOwn(parsed, "max_tokens")) {
-    injected = set(next, "max_tokens");
+/** The field a row's chat-completions maximum is written in: `max_completion_tokens` for OpenAI and Azure OpenAI (o-series and gpt-5 reject `max_tokens`), `max_tokens` for every other OpenAI-compatible row unless the row says otherwise. */
+export function maxOutputFieldOf(row: Pick<ModelEgressRow, "id"> & { readonly maxOutputField?: "max_tokens" | "max_completion_tokens" | undefined }): "max_tokens" | "max_completion_tokens" {
+  return row.maxOutputField ?? (row.id === "openai" || row.id === "azure-openai" ? "max_completion_tokens" : "max_tokens");
+}
+
+function readNumber(text: string, member: { start: number; end: number }): unknown {
+  try {
+    return JSON.parse(text.slice(member.start, member.end)) as unknown;
+  } catch {
+    return undefined;
   }
-  return injected ? { body: new TextEncoder().encode(JSON.stringify(next)), injected } : { body, injected: false };
+}
+
+/**
+ * The edits that make `object`'s own max-output fields (`fields`) say one number: every present field whose value is not a plausible maximum is overwritten with the effective maximum (the highest plausible one named, or the default);
+ * when none is present, `appendField` is added. Returns the edits and the effective number.
+ */
+function maxEdits(text: string, object: JsonObjectSpan, fields: readonly string[], defaultMax: number, appendField: string): { readonly edits: JsonEdit[]; readonly named: number | undefined } {
+  const present = object.members.filter((member) => fields.includes(member.key));
+  const plausible = present.map((member) => readNumber(text, member)).filter(isPlausibleMax);
+  const effective = plausible.length > 0 ? Math.max(...plausible) : defaultMax;
+  const edits: JsonEdit[] = present.filter((member) => !isPlausibleMax(readNumber(text, member))).map((member) => ({ start: member.start, end: member.end, text: String(effective) }));
+  if (present.length === 0) edits.push(appendMember(object, appendField, String(defaultMax)));
+  return { edits, named: plausible.length > 0 ? effective : undefined };
+}
+
+/**
+ * The request with the row's default maximum output set when it names none, EDITED IN PLACE: the one number is spliced into the original text, so every other byte the client sent (big integers, number spelling, key order, white
+ * space) is as it was. A present but unusable maximum (null, a quoted string, a negative or huge number, or one next to a smaller usable one) is treated as unnamed and overwritten with the effective figure. Only for operations that
+ * generate an answer: chat completions (`chatField`, or `max_completion_tokens` for OpenAI itself) and Responses, `generateContent` and its stream, Cohere chat. Gemini keeps its one config object (`generationConfig` or
+ * `generation_config`, in whichever spelling the client used); a second one is never added. Anthropic always sets `max_tokens`. A body that is not UTF-8 JSON, or not an object, is left as it is.
+ */
+export function withDefaultMaxOutput(
+  family: ModelEgressFamily,
+  operation: string,
+  body: Uint8Array,
+  defaultMax: number,
+  chatField: "max_tokens" | "max_completion_tokens" = "max_tokens",
+): { readonly body: Uint8Array; readonly injected: boolean } {
+  const untouched = { body, injected: false } as const;
+  if (!isWholeNumber(defaultMax) || defaultMax < 1) return untouched;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+    if (parseJsonObject(text) === undefined) return untouched;
+  } catch {
+    return untouched;
+  }
+  const start = skipLeading(text);
+  const top = scanJsonObject(text, start);
+  if (top === undefined) return untouched;
+  let edits: JsonEdit[] = [];
+  if (family === "openai_compatible" && operation === "chat/completions") {
+    edits = maxEdits(text, top, OPENAI_CHAT_FIELDS, defaultMax, chatField).edits;
+  } else if (family === "openai_compatible" && operation === "responses") {
+    edits = maxEdits(text, top, OPENAI_RESPONSES_FIELDS, defaultMax, "max_output_tokens").edits;
+  } else if (family === "cohere" && operation === "chat") {
+    edits = maxEdits(text, top, ["max_tokens"], defaultMax, "max_tokens").edits;
+  } else if ((family === "gemini" || family === "vertex") && (operation === "generateContent" || operation === "streamGenerateContent")) {
+    edits = geminiEdits(text, top, defaultMax);
+  }
+  return edits.length === 0 ? untouched : { body: new TextEncoder().encode(applyJsonEdits(text, edits)), injected: true };
+}
+
+function skipLeading(text: string): number {
+  let index = 0;
+  while (index < text.length && /\s/u.test(text.charAt(index))) index += 1;
+  return index;
+}
+
+function geminiEdits(text: string, top: JsonObjectSpan, defaultMax: number): JsonEdit[] {
+  const configs = top.members.filter((member) => (GEMINI_CONFIG_KEYS as readonly string[]).includes(member.key));
+  if (configs.length === 0) return [appendMember(top, "generationConfig", `{"maxOutputTokens":${String(defaultMax)}}`)];
+  // The effective figure is the highest usable one named in ANY config object or spelling; every config object then says it.
+  const spans = configs.map((member) => ({ member, object: text.charAt(member.start) === "{" ? scanJsonObject(text, member.start) : undefined }));
+  const named = spans.flatMap(({ object }) => (object === undefined ? [] : object.members.filter((entry) => (GEMINI_FIELD_KEYS as readonly string[]).includes(entry.key)).map((entry) => readNumber(text, entry)))).filter(isPlausibleMax);
+  const effective = named.length > 0 ? Math.max(...named) : defaultMax;
+  const edits: JsonEdit[] = [];
+  for (const { member, object } of spans) {
+    const field = member.key === "generation_config" ? "max_output_tokens" : "maxOutputTokens";
+    if (object === undefined) {
+      // A config that is not an object (null, a string, an array) is unusable: it is replaced whole.
+      edits.push({ start: member.start, end: member.end, text: `{${JSON.stringify(field)}:${String(effective)}}` });
+      continue;
+    }
+    const present = object.members.filter((entry) => (GEMINI_FIELD_KEYS as readonly string[]).includes(entry.key));
+    for (const entry of present) if (!isPlausibleMax(readNumber(text, entry))) edits.push({ start: entry.start, end: entry.end, text: String(effective) });
+    if (present.length === 0) edits.push(appendMember(object, field, String(effective)));
+  }
+  return edits;
 }
 
 /** The model a request names in its body (every family but Gemini and Vertex, which name it in the path). */
@@ -153,12 +239,17 @@ export function reserveEstimate(args: {
   return { reserveMicros, inputTokens, outputTokens, rates, priced };
 }
 
+/** True when the spend on a meter is ABOVE its cap: the call that took it there was the one call the cap may be overrun by (DECISIONS 165), and the task takes no further call. */
+export function isOverCap(spentMicros: number, capMicros: number): boolean {
+  return isWholeNumber(spentMicros) && isWholeNumber(capMicros) && spentMicros > capMicros;
+}
+
 /** The words for the call after an overrun, fixed in code. */
 export const MODEL_EGRESS_OVERRUN_SENTENCE = "budget exceeded by one call";
 
 export interface CostSettlement {
-  /** True when the settled cost is ABOVE what was reserved: the cap was overrun by this call, and the task takes no further call. */
-  readonly overrun: boolean;
+  /** True when the settled cost is above what was reserved. Informational: the cap is overrun only when the SPEND passes the cap (`isOverCap`), not whenever one call costs more than its estimate. */
+  readonly aboveReservation: boolean;
   readonly costMicros: number;
   /** True when the cost is the reservation, not the provider's report: an unpriced model, a call with no usage, a stream that was cut off. */
   readonly estimated: boolean;
@@ -170,9 +261,9 @@ export interface CostSettlement {
  */
 export function settleCost(args: { readonly reservation: CostReservation; readonly usage: { readonly inputTokens: number; readonly outputTokens: number } | undefined; readonly complete: boolean }): CostSettlement {
   const { reservation, usage, complete } = args;
-  if (usage === undefined || !isWholeNumber(usage.inputTokens) || !isWholeNumber(usage.outputTokens) || !reservation.priced) return { costMicros: reservation.reserveMicros, estimated: true, overrun: false };
+  if (usage === undefined || !isWholeNumber(usage.inputTokens) || !isWholeNumber(usage.outputTokens) || !reservation.priced) return { costMicros: reservation.reserveMicros, estimated: true, aboveReservation: false };
   const actual = microsFor(usage.inputTokens, reservation.rates.inputMicrosPerMTok) + microsFor(usage.outputTokens, reservation.rates.outputMicrosPerMTok);
-  if (!Number.isSafeInteger(actual)) return { costMicros: reservation.reserveMicros, estimated: true, overrun: false };
-  if (!complete) return { costMicros: Math.max(actual, reservation.reserveMicros), estimated: true, overrun: actual > reservation.reserveMicros };
-  return { costMicros: actual, estimated: false, overrun: actual > reservation.reserveMicros };
+  if (!Number.isSafeInteger(actual)) return { costMicros: reservation.reserveMicros, estimated: true, aboveReservation: false };
+  if (!complete) return { costMicros: Math.max(actual, reservation.reserveMicros), estimated: true, aboveReservation: actual > reservation.reserveMicros };
+  return { costMicros: actual, estimated: false, aboveReservation: actual > reservation.reserveMicros };
 }

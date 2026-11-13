@@ -3,7 +3,7 @@
 //
 // `mutation` switches on ONE named defect, each the way a real adapter could go wrong, so the tests can show that the suite fails on it (a suite that cannot fail proves nothing).
 import {
-  buildOutboundRequest, classifyProviderResponse, classOfRefusal, createKeyEchoScanner, createUsageScanner, familyErrorBody, isRedirectStatus, modelOfBody, parseModelEgressFrame, refusalResponse,
+  buildOutboundRequest, classifyProviderResponse, classOfRefusal, createKeyEchoScanner, createUsageScanner, familyErrorBody, isOverCap, isRedirectStatus, modelOfBody, parseModelEgressFrame, refusalResponse,
   reserveEstimate, sanitizeResponseHeaders, scrubResponseBody, settleCost, usageFromBody,
   type ModelEgress, type ModelEgressConnection, type ModelEgressEvent, type ModelEgressFamily, type ModelEgressFrame, type ModelEgressRefusal, type ModelEgressRow, type ModelEgressScope, type ModelEgressSettle, type OutboundRequest,
 } from "@agentx/contracts";
@@ -26,6 +26,7 @@ export type ModelEgressMutation =
   | "unfiltered_headers" // sends every provider header back
   | "two_credentials" // adds a second credential
   | "pass_redirect" // hands a provider 3xx back to the client instead of refusing it
+  | "overrun_on_any_excess" // blocks the task after ANY call that costs more than its estimate
   | "no_overrun_block" // keeps serving a task after a call settled above its reservation
   | "default_company_on_broken_scope" // a scope it cannot read serves the first company instead of being refused
   | "wrong_row_host"; // sends a row's call (and its key) to ANOTHER row's host
@@ -299,9 +300,11 @@ export function createFakeEgress(options: FakeEgressOptions): FakeEgress {
         const cost = settleCost({ reservation, usage: args.usageBody, complete: args.complete });
         const costMicros = mutation === "reservation_released_on_cut" && !args.complete ? 0 : cost.costMicros;
         release(costMicros);
-        if (cost.overrun) meter.overrun = true;
+        // The cap is overrun only when the SPEND passes it (DECISIONS 165): one call over its estimate but under the cap is nothing.
+        const overrun = mutation === "overrun_on_any_excess" ? cost.aboveReservation : isOverCap(meter.spent, source.capMicros);
+        if (overrun) meter.overrun = true;
         logs.push(`row=${row.id} status=${String(args.status)} class=${args.cls} cost=${String(costMicros)}`);
-        return { kind: "settle", status: args.status, class: args.cls, ...(args.usageBody === undefined ? {} : { inputTokens: args.usageBody.inputTokens, outputTokens: args.usageBody.outputTokens }), costMicros, estimated: cost.estimated, ...(cost.overrun ? { overrun: true } : {}) };
+        return { kind: "settle", status: args.status, class: args.cls, ...(args.usageBody === undefined ? {} : { inputTokens: args.usageBody.inputTokens, outputTokens: args.usageBody.outputTokens }), costMicros, estimated: cost.estimated, ...(overrun ? { overrun: true } : {}) };
       };
 
       if (!streaming) {

@@ -11,3 +11,4 @@ export * from "./classify.js";
 export * from "./cost.js";
 export * from "./address.js";
 export * from "./evidence-lines.js";
+export * from "./json-splice.js";

@@ -40,7 +40,8 @@ const KILLERS: Array<[ModelEgressMutation, RegExp]> = [
   ["unfiltered_headers", /only allow-listed response headers/u],
   ["pass_redirect", /never follows or passes on a provider redirect/u],
   ["default_company_on_broken_scope", /fails closed when the company cannot be resolved/u],
-  ["no_overrun_block", /takes no further call/u],
+  ["no_overrun_block", /past the cap the task takes no further call/u],
+  ["overrun_on_any_excess", /does not block the task/u],
   ["wrong_row_host", /no host but the row's/u],
 ];
 

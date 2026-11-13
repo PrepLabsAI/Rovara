@@ -92,6 +92,14 @@ describe("query keys", () => {
     expect(route(rows.gemini, "/v1beta/models/m:streamGenerateContent", { query: "alt=json;enum-encoding=int" }).ok).toBe(true);
     expect(refusal(route(rows.azure, "/openai/deployments/fixture-small/chat/completions", { query: "api-version=2024.06.01" }))).toBe("bad_request");
   });
+  it("refuses alt and $alt together, in any order and encoding, and the legacy alt value on any other key (review L6, L7)", () => {
+    const path = "/v1beta/models/m:streamGenerateContent";
+    for (const query of ["alt=sse&%24alt=json", "$alt=json&alt=sse", "alt=sse&alt=sse", "%24alt=sse&$alt=sse"]) expect(refusal(route(rows.gemini, path, { query })), query).toBe("bad_request");
+    expect(route(rows.gemini, path, { query: "$alt=sse" }).ok).toBe(true);
+    // The legacy value is for alt and $alt only.
+    expect(refusal(route(rows.azure, "/openai/deployments/fixture-small/chat/completions", { query: "api-version=json;enum-encoding=int" }))).toBe("bad_request");
+    expect(refusal(route(rows.gemini, path, { query: "alt=json;enum-encoding=int&alt=sse" }))).toBe("bad_request");
+  });
   it("refuses a second question mark, a fragment, a duplicate allowed key, a percent value and an over-long query", () => {
     for (const query of ["alt=sse?x", "alt=sse#x", "alt=sse&alt=json", "alt=%73se", "alt=a b"]) expect(refusal(route(rows.gemini, path, { query })), query).toBe("bad_request");
     expect(refusal(route(rows.gemini, path, { query: `alt=${"a".repeat(2000)}` }))).toBe("too_large");
@@ -305,8 +313,8 @@ describe("header injection", () => {
     expect(built.ok && built.request.body).toBe(big);
   });
   it("sets the row's default maximum output in the forwarded body when the request names none, reserving on the same number", () => {
-    const sent = (row: ModelEgressRow, path: string, body: unknown) => {
-      const built = buildOutboundRequest(row, FIXTURE_VERTEX_CONNECTION, frame(row, { path, body: new TextEncoder().encode(JSON.stringify(body)) }), fixtureKey("k"));
+    const sent = (row: ModelEgressRow, path: string, body: unknown, query = "") => {
+      const built = buildOutboundRequest(row, FIXTURE_VERTEX_CONNECTION, frame(row, { path, query, body: new TextEncoder().encode(JSON.stringify(body)) }), fixtureKey("k"));
       if (!built.ok) throw new Error(built.refusal);
       return { built, body: JSON.parse(new TextDecoder().decode(built.request.body)) as Record<string, unknown> };
     };
@@ -315,13 +323,33 @@ describe("header injection", () => {
     expect((gemini.body.generationConfig as Record<string, unknown>).maxOutputTokens).toBe(rows.gemini.defaultMaxOutputTokens);
     const openai = sent(rows.openai, "/v1/chat/completions", { model: "m", messages: [] });
     expect(openai.built.maxOutputTokens).toBe(rows.openai.defaultMaxOutputTokens);
-    expect(openai.body.max_tokens).toBe(rows.openai.defaultMaxOutputTokens);
+    // OpenAI's o-series and gpt-5 reject `max_tokens`: the openai row writes `max_completion_tokens`.
+    expect(openai.body.max_completion_tokens).toBe(rows.openai.defaultMaxOutputTokens);
+    expect(openai.body.max_tokens).toBeUndefined();
+    const azure = sent(rows.azure, "/openai/deployments/fixture-small/chat/completions", { messages: [] }, "api-version=2024-06-01");
+    expect(azure.body.max_completion_tokens).toBe(rows.azure.defaultMaxOutputTokens);
+    expect(azure.body.max_tokens).toBeUndefined();
+    // Every other OpenAI-compatible row keeps `max_tokens` unless its row says otherwise.
+    const gateway = sent(rows.openrouter, "/api/v1/chat/completions", { model: "m", messages: [] });
+    expect(gateway.body.max_tokens).toBe(rows.openrouter.defaultMaxOutputTokens);
+    expect(gateway.body.max_completion_tokens).toBeUndefined();
+    const chosen = sent({ ...rows.openrouter, maxOutputField: "max_completion_tokens" }, "/api/v1/chat/completions", { model: "m", messages: [] });
+    expect(chosen.body.max_completion_tokens).toBe(rows.openrouter.defaultMaxOutputTokens);
+    expect(chosen.built.maxOutputTokens).toBe(rows.openrouter.defaultMaxOutputTokens);
     const own = sent(rows.openai, "/v1/chat/completions", { model: "m", messages: [], max_tokens: 33 });
     expect(own.built.maxOutputTokens).toBe(33);
     expect(own.body.max_tokens).toBe(33);
-    // Duplicate keys cannot mean two things: the forwarded body is the one that was priced.
-    const duplicate = buildOutboundRequest(rows.openai, {}, frame(rows.openai, { path: "/v1/chat/completions", body: new TextEncoder().encode('{"model":"fixture-small","model":"unpriced-model","messages":[]}') }), fixtureKey("k"));
-    expect(duplicate.ok && new TextDecoder().decode(duplicate.request.body).match(/"model"/gu)?.length).toBe(1);
+    expect(own.body.max_completion_tokens).toBeUndefined();
+    // The client's bytes are the client's: the forwarded body is the original text with one member spliced in.
+    const text = '{"model":"fixture-small","seed":12345678901234567890,"temperature":1.0,"messages":[]}';
+    const spliced = buildOutboundRequest(rows.openai, {}, frame(rows.openai, { path: "/v1/chat/completions", body: new TextEncoder().encode(text) }), fixtureKey("k"));
+    expect(spliced.ok && new TextDecoder().decode(spliced.request.body)).toBe(`${text.slice(0, -1)},"max_completion_tokens":${String(rows.openai.defaultMaxOutputTokens)}}`);
+    // A maximum the client named in an unusable form is overwritten, and the reservation reads the figure that is forwarded.
+    const unusable = buildOutboundRequest(rows.gemini, {}, frame(rows.gemini, { path: "/v1beta/models/x:generateContent", body: new TextEncoder().encode('{"contents":[],"generation_config":{"max_output_tokens":null}}') }), fixtureKey("k"));
+    expect(unusable.ok && new TextDecoder().decode(unusable.request.body)).toBe(`{"contents":[],"generation_config":{"max_output_tokens":${String(rows.gemini.defaultMaxOutputTokens)}}}`);
+    expect(unusable.ok && unusable.maxOutputTokens).toBe(rows.gemini.defaultMaxOutputTokens);
+    const snake = buildOutboundRequest(rows.gemini, {}, frame(rows.gemini, { path: "/v1beta/models/x:generateContent", body: new TextEncoder().encode('{"contents":[],"generation_config":{"max_output_tokens":60000}}') }), fixtureKey("k"));
+    expect(snake.ok && snake.maxOutputTokens).toBe(60000);
   });
   it("reports a file or cached-content reference so the reservation does not rest on the body's size", () => {
     const flag = (body: unknown) => {

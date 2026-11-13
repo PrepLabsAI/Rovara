@@ -7,7 +7,7 @@
 // another; that one company's calls never move another's meter; that caps refuse in the family's own error shape and send nothing; that a call is attempted once. The two-company kit (`twoCompanyChecks`) runs on top.
 import { expect } from "vitest";
 import {
-  MODEL_EGRESS_REFUSAL_HEADER, SIGV4_NOT_RUN_SENTENCE, buildOutboundRequest, countCredentials, e2eSecretSpellings, parseModelEgressFrame, type ModelEgress, type ModelEgressConnection, type ModelEgressEvent, type ModelEgressRow, type ModelEgressScope,
+  MODEL_EGRESS_REFUSAL_HEADER, SIGV4_NOT_RUN_SENTENCE, buildOutboundRequest, maxOutputFieldOf, countCredentials, e2eSecretSpellings, parseModelEgressFrame, type ModelEgress, type ModelEgressConnection, type ModelEgressEvent, type ModelEgressRow, type ModelEgressScope,
   type ModelEgressSettle,
 } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B, TWO_COMPANIES, attempt, otherCompany, twoCompanyChecks, type IsolationCompany, type IsolationSurface, type TwoCompanyIsolation } from "../isolation/two-company.js";
@@ -117,6 +117,14 @@ export function validFrame(row: ModelEgressRow, connection: ModelEgressConnectio
       body = { model: "fixture-small", messages: [{ role: "user", content: text }], ...(max === undefined ? {} : { max_tokens: max }) };
   }
   return { row: row.id, method: "POST", path, query, headers: over.headers ?? [["content-type", "application/json"]], body: enc(JSON.stringify(body)) };
+}
+
+/** A provider answer body that reports `input` input tokens and one output token, in the row's family's own shape. */
+function usageBody(row: ModelEgressRow, input: number): Record<string, unknown> {
+  return row.family === "gemini" || row.family === "vertex" ? { usageMetadata: { promptTokenCount: input, candidatesTokenCount: 1 } }
+    : row.family === "anthropic_messages" ? { usage: { input_tokens: input, output_tokens: 1 } }
+    : row.family === "cohere" ? { meta: { billed_units: { input_tokens: input, output_tokens: 1 } } }
+    : { usage: { prompt_tokens: input, completion_tokens: 1 } };
 }
 
 const served = (world: ModelEgressWorld): ModelEgressRow[] => Object.values(world.rows).filter((row) => row.family !== "bedrock");
@@ -361,7 +369,8 @@ const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
         world.provider.reset();
         await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
         const sent: unknown = JSON.parse(dec(world.provider.calls[0]!.body));
-        const limit = row.family === "gemini" || row.family === "vertex" ? at(sent, "generationConfig", "maxOutputTokens") : row.family === "anthropic_messages" ? at(sent, "max_tokens") : at(sent, "max_tokens");
+        const field = maxOutputFieldOf(row);
+        const limit = row.family === "gemini" || row.family === "vertex" ? at(sent, "generationConfig", "maxOutputTokens") : row.family === "anthropic_messages" ? at(sent, "max_tokens") : row.family === "cohere" ? at(sent, "max_tokens") : at(sent, field);
         // Anthropic's `max_tokens` is the client's own (the family requires it); every other family gets the row's default.
         expect(limit, row.id).toBe(row.family === "anthropic_messages" ? 64 : row.defaultMaxOutputTokens);
         // A limit the client set is the client's.
@@ -369,6 +378,7 @@ const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
         await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection, "hi", { maxTokens: 33 }));
         const own: unknown = JSON.parse(dec(world.provider.calls[0]!.body));
         expect(row.family === "gemini" || row.family === "vertex" ? at(own, "generationConfig", "maxOutputTokens") : at(own, "max_tokens"), row.id).toBe(33);
+        expect(at(own, "max_completion_tokens"), `${row.id}: a limit the client set is not duplicated`).toBeUndefined();
       }
     },
   },
@@ -399,17 +409,13 @@ const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
     },
   },
   {
-    name: "after a call settles above its reservation the task takes no further call: 'budget exceeded by one call'",
+    name: "after a call takes the SPEND past the cap the task takes no further call: 'budget exceeded by one call'",
     async run(world) {
       for (const row of served(world)) {
         world.provider.reset();
-        const huge = 50_000_000;
-        const usage: Record<string, unknown> =
-          row.family === "gemini" || row.family === "vertex" ? { usageMetadata: { promptTokenCount: huge, candidatesTokenCount: 1 } }
-          : row.family === "anthropic_messages" ? { usage: { input_tokens: huge, output_tokens: 1 } }
-          : row.family === "cohere" ? { meta: { billed_units: { input_tokens: huge, output_tokens: 1 } } }
-          : { usage: { prompt_tokens: huge, completion_tokens: 1 } };
-        world.provider.script({ body: JSON.stringify(usage) });
+        // A cap the reservation fits in, and a settle far above it: the one call the cap may be overrun by.
+        await world.setCap(COMPANY_A, 2_000_000);
+        world.provider.script({ body: JSON.stringify(usageBody(row, 50_000_000)) });
         const first = await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
         expect(first.settle, row.id).toMatchObject({ class: "ok", overrun: true });
         const second = await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
@@ -417,8 +423,28 @@ const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
         expect(second.settle, row.id).toMatchObject({ class: "cap", refusal: "cap", costMicros: 0 });
         expect(second.body).toContain("budget exceeded by one call");
         expect(world.provider.calls, `${row.id}: the second call must not reach the provider`).toHaveLength(1);
+        await world.setCap(COMPANY_A, 1_000_000_000);
         // Another company's task is unaffected.
         expect((await collect(world.adapter, world.scope(COMPANY_B, row.id), validFrame(row, world.connection))).settle?.class).toBe("ok");
+      }
+    },
+  },
+  {
+    name: "a call that costs more than its estimate but leaves the spend under the cap does not block the task",
+    async run(world) {
+      for (const row of served(world)) {
+        world.provider.reset();
+        await world.setCap(COMPANY_A, 50_000_000);
+        // Well above the reservation of a small request (a few hundred micro-dollars), far under a $50 cap.
+        world.provider.script({ body: JSON.stringify(usageBody(row, 20_000)) });
+        const first = await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
+        expect(first.settle?.class, row.id).toBe("ok");
+        expect(first.settle?.overrun, row.id).toBeUndefined();
+        expect(first.settle!.costMicros, `${row.id}: the call must cost more than a small estimate`).toBeGreaterThan(1_000);
+        const second = await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
+        expect(second.settle?.class, `${row.id}: the next call must be allowed`).toBe("ok");
+        expect(world.provider.calls).toHaveLength(2);
+        await world.setCap(COMPANY_A, 1_000_000_000);
       }
     },
   },

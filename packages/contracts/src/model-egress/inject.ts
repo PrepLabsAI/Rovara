@@ -1,6 +1,6 @@
 // TE-F1a: building the one outbound request. Every inbound credential is dropped FIRST (any header name that is, or could be read as, a credential, in any case, with duplicates and line folding; and the `key` query parameter),
 // then only an allow list of headers is kept, then EXACTLY ONE credential is added, as the row's scheme says. The secret arrives as an argument and is never stored here.
-import { hasExternalInput, requestedMaxOutputTokens, withDefaultMaxOutput } from "./cost.js";
+import { hasExternalInput, maxOutputFieldOf, requestedMaxOutputTokens, withDefaultMaxOutput } from "./cost.js";
 import type { ModelEgressFrame } from "./frame.js";
 import { MODEL_EGRESS_HEADER_VALUE_MAX, routeEgressRequest, type EgressRoute } from "./families.js";
 import type { ModelEgressRefusal } from "./refusals.js";
@@ -72,7 +72,7 @@ function credentialFor(scheme: ModelEgressScheme, secret: string): { readonly he
 
 /**
  * The outbound request for one frame, or the refusal. In order: route and check the frame (`families.ts`), drop every inbound credential, keep only the family's allow-listed headers (a value with a control character or over 1 KB, a
- * header written with a fold, or a duplicate allowed header refuses the call, `bad_request`), then add exactly one credential. A JSON body is re-serialised with the row's default maximum output when it names none. `secret` is the key (or the minted token) for this call; it is placed and not kept.
+ * header written with a fold, or a duplicate allowed header refuses the call, `bad_request`), then add exactly one credential. A JSON body gets the row's default maximum output spliced into its own text when it names none (every other byte is the client's). `secret` is the key (or the minted token) for this call; it is placed and not kept.
  */
 export function buildOutboundRequest(row: ModelEgressRow, connection: ModelEgressConnection, frame: ModelEgressFrame, secret: string): BuildOutcome {
   const routed = routeEgressRequest(row, connection, frame);
@@ -98,8 +98,8 @@ export function buildOutboundRequest(row: ModelEgressRow, connection: ModelEgres
   if (credential.header !== undefined) headers.push(credential.header);
   const pairs = routed.query.map(([name, value]) => `${name}=${value}`);
   if (credential.query !== undefined) pairs.push(credential.query);
-  // The row's default maximum output is set when the request names none (the reservation and the provider's limit are then the same number); the body forwarded is the one that was priced.
-  const prepared = withDefaultMaxOutput(row.family, routed.operation, frame.body, row.defaultMaxOutputTokens);
+  // The row's default maximum output is set when the request names none (the reservation and the provider's limit are then the same number); the number priced is the number the provider reads.
+  const prepared = withDefaultMaxOutput(row.family, routed.operation, frame.body, row.defaultMaxOutputTokens, maxOutputFieldOf(row));
   return {
     ok: true,
     route: routed,
