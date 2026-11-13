@@ -7,9 +7,11 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   acceptAgentReply,
   extractReplyBrief,
+  independentIntakeSentence,
   independentReplyId,
   matchForBrief,
   modelReplyEntrySha256,
+  reportIndependentIntake,
   selectModelReply,
   stampReplyProvenance,
   validateAgentOutput,
@@ -102,13 +104,29 @@ describe("through R1's store: the reply is stored as independent and served ahea
     const accepted = acceptAgentReply(brief, RESPONSE);
     if (!accepted.ok) throw new Error(accepted.reason);
     const put = await service.putIndependentOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", entries: [{ reply: accepted.reply, decision: accepted.decision }] });
-    expect(put.ok).toBe(true); // the count is whatever the store reports; nothing here assumes it equals the entries sent
+    expect(put.ok).toBe(true);
+    expect(reportIndependentIntake(1, put)).toMatchObject({ attempted: 1, stored: put.ok ? put.stored : -1, skipped: put.ok ? (put.skipped ?? []) : [], unexplained: 0 }); // the report reads the store's answer, not the number sent
     const round = await service.readRoundSet(A, { project: "proj", branch: "main", family: "openai_compatible", taskId: "task-1" });
     if (!round.ok) throw new Error("round set not read");
     expect(round.set.replies.map((reply) => `${reply.id}:${reply.provenance}`)).toEqual([`${accepted.reply.id}:independent`, "coding-agent:task_made"]);
     const picked = selectModelReply(round.set, { model: "gpt-4o", operation: "chat_completions", promptText: PROMPT }, new Map(), "openai_compatible");
     expect(picked.reply?.provenance).toBe("independent");
     expect(picked.reply?.response.text).toBe(RESPONSE.text);
+  });
+  it("an independent reply whose content the coding agent already wrote is skipped by the store, stays task_made, and is reported as not stored", async () => {
+    const A = COMPANY_A.scope;
+    const service = createReplySetStore({ store: new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE }) });
+    const accepted = acceptAgentReply(briefOf(), RESPONSE);
+    if (!accepted.ok) throw new Error(accepted.reason);
+    await service.putOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", replies: [accepted.reply] }); // the coding agent wrote exactly this
+    const put = await service.putIndependentOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", entries: [{ reply: accepted.reply, decision: accepted.decision }] });
+    const report = reportIndependentIntake(1, put);
+    expect(report.stored).toBe(0);
+    expect(report.skipped).toEqual([{ id: accepted.reply.id, reason: "already_in_overlay" }]);
+    expect(independentIntakeSentence(report)).toContain("0 of 1 independent replies stored and counted");
+    expect(independentIntakeSentence(report)).toContain("not stored again");
+    const round = await service.readRoundSet(A, { project: "proj", branch: "main", family: "openai_compatible", taskId: "task-1" });
+    expect(round.ok && round.set.replies.map((reply) => reply.provenance)).toEqual(["task_made"]);
   });
   it("the store refuses a plain-object decision for the same reply", async () => {
     const service = createReplySetStore({ store: new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE }) });
@@ -131,6 +149,19 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
 const code = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/^\s*\/\/.*$/gmu, "");
+
+describe("reportIndependentIntake", () => {
+  it("reports the store's count and skips, never the number sent; clamps nonsense; shows what is unexplained; a refusal stores nothing", () => {
+    expect(reportIndependentIntake(3, { ok: true, stored: 2, skipped: [{ id: "a", reason: "already_in_overlay" }] })).toEqual({ attempted: 3, stored: 2, skipped: [{ id: "a", reason: "already_in_overlay" }], unexplained: 0 });
+    expect(reportIndependentIntake(3, { ok: true, stored: 3, skipped: [{ id: "a", reason: "already_in_overlay" }] }).stored).toBe(3); // the store's number is shown as is (clamped to what was sent)
+    expect(reportIndependentIntake(2, { ok: true, stored: 9 }).stored).toBe(2);
+    expect(reportIndependentIntake(2, { ok: true, stored: Number.NaN }).stored).toBe(0);
+    expect(reportIndependentIntake(3, { ok: true, stored: 1, skipped: [{ id: "a", reason: "something_new" }] })).toMatchObject({ stored: 1, skipped: [], unexplained: 2 });
+    expect(reportIndependentIntake(2, { ok: false, word: "not_allowed" })).toEqual({ attempted: 2, stored: 0, skipped: [], unexplained: 0, refused: "not_allowed" });
+    expect(independentIntakeSentence(reportIndependentIntake(2, { ok: false, word: "not_allowed" }))).toContain("refused");
+    expect(independentIntakeSentence(reportIndependentIntake(3, { ok: true, stored: 1, skipped: [{ id: "a", reason: "something_new" }] }))).toContain("2 not stored and not counted");
+  });
+});
 
 describe("who may mint an independent decision", () => {
   it("createRovaraIndependentDecision( is called only in F2-A's definition, R1's rules file, this channel and the store's conformance suite", () => {
@@ -169,7 +200,7 @@ describe("part A is pure and additive", () => {
     });
   }
   it("nothing outside packages/contracts/src and the tests names a new file or export (no callers until part B)", () => {
-    const SYMBOLS = ["extractReplyBrief", "parseReplyBrief", "pickExamples", "screenBrief", "buildTaskLeakFacts", "buildAgentInput", "validateAgentOutput", "acceptAgentReply", "valueMatchesSchema", "REPLY_AGENT_ROLE_TEXT", "independentReplyId"];
+    const SYMBOLS = ["extractReplyBrief", "parseReplyBrief", "pickExamples", "screenBrief", "buildTaskLeakFacts", "buildAgentInput", "validateAgentOutput", "acceptAgentReply", "reportIndependentIntake", "valueMatchesSchema", "REPLY_AGENT_ROLE_TEXT", "independentReplyId"];
     const files = walk(join(ROOT, "packages")).filter((path) => !path.startsWith("packages/contracts/src/"));
     expect(files.length).toBeGreaterThan(100);
     const hits: string[] = [];
