@@ -105,6 +105,10 @@ describe("the health route's grants (A13)", () => {
   // Spec 025 phase 25e: pending admin changes and their audit records expire on it as well.
   it("names indexExpiresAt only where index, notice, channel-operation and admin-change items are written or read, so the TTL deletes nothing else", () => {
     const allowed = new Set([
+      // TE-F11: full probe requests expire at the caller-supplied O35 retention ceiling; erase fences hold no prompt and never expire.
+      "packages/contracts/src/model-reply-check-store.ts",
+      // Stacked TE-R1: only TASK#/JOIN# records expire (30 days); reply bodies, heads, MADE# and erase fences do not.
+      "packages/broker/src/core/test-env/reply-set-store.ts", "packages/contracts/src/model-reply-store.ts",
       "packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts",
       "packages/broker/src/aws/developer-task-notifier.ts", "packages/broker/src/aws/broker.ts",
       // The workflow dispatch row's one definition, shared by the broker and the developer task routes.

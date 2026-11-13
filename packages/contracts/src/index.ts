@@ -354,3 +354,9 @@ export * from "./task-status.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
+
+// TE-F11: additive reply health and expiring probes; no evidence or production callers.
+export * from "./model-reply-check.js";
+export * from "./model-reply-check-read.js";
+export * from "./model-reply-check-shape.js";
+export * from "./model-reply-check-store.js";
