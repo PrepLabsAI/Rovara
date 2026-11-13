@@ -163,7 +163,9 @@ it.each([
   expect(report.coverage).toBe("complete");
 });
 it.each(["SYSTEM_STATUS", "TEMPLATE_DIR", "FILESYSTEM_ROOT", "promptPath", "SYSTEM_FILE", "PROMPT_URL", "PROMPT_TIMEOUT", "PROMPT_ROOT", "prompting", "mytemplate"])("round 3 ignores incidental constant names: %s", (name) => {
-  expect(run(`import openai\nconst ${name} = 'new'`, `import openai\nconst ${name} = 'old'`).report.status).toBe("none_found");
+  const report = run(`import openai\nconst ${name} = 'new'`, `import openai\nconst ${name} = 'old'`).report;
+  expect(report.items).toEqual([]);
+  expect(report.coverage).toBe("partial"); // DEC170: unclassified AI-file constructs no longer certify completeness.
 });
 it.each(["html", "md", "mdx"])("round 3 embedded prose stays complete: %s", (extension) => {
   for (const source of ["Please create an account", "Join our chat", "the ai is cool", "We create(x) for the chat", "sdk.create is a method"]) {

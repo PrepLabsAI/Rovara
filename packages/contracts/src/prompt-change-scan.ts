@@ -9,7 +9,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { MODEL_NAME_PATTERN } from "./model-family-common.js";
 import { PROMPT_CHANGE_LIMITS, SETTING_ENUM_WORDS, type ModelSettingKey, type PromptChangeItem, type PromptChangeKind } from "./prompt-change.js";
 import { fingerprint, hash, normalizePromptText, type Work } from "./prompt-change-internal.js";
-import { CONFIG_MODEL_KEYS, knownSdk, MODEL_CALLS, MODEL_KEYS, modelFamily, promptConstantName, PROMPT_CALLS, PROMPT_KEYS, SDK_CALLS, SETTING_ALIASES, SYSTEM_KEYS, TOOL_KEYS } from "./prompt-change-rules.js";
+import { CONFIG_MODEL_KEYS, extendedKeyKind, EXTENDED_CALLS, providerSdk, knownSdk, MODEL_CALLS, MODEL_KEYS, modelFamily, promptConstantName, PROMPT_CALLS, PROMPT_KEYS, SDK_CALLS, SETTING_ALIASES, SYSTEM_KEYS, TOOL_KEYS } from "./prompt-change-rules.js";
 
 export interface ScannedValue {
   kind: PromptChangeKind; basis: PromptChangeItem["basis"]; anchor: string; fingerprint: string;
@@ -138,7 +138,7 @@ function tokenize(text: string, config: boolean, work: Work): Token[] {
       add("number", text.slice(start, i), start, i, atLine); continue;
     }
     // Indented YAML sequences/maps under schema or setting keys are opaque fingerprint values.
-    if (config && c === ":" && (TOOL_KEYS.has(tokens[tokens.length - 1]?.value ?? "") || SETTING_ALIASES.has(tokens[tokens.length - 1]?.value ?? ""))) {
+    if (config && c === ":" && (TOOL_KEYS.has(tokens[tokens.length - 1]?.value ?? "") || SETTING_ALIASES.has(tokens[tokens.length - 1]?.value ?? "") || extendedKeyKind(tokens[tokens.length - 1]?.value ?? "") !== undefined)) {
       let p = i + 1;
       while (text[p] === " " || text[p] === "\t") { p++; work.stats.steps++; }
       if (text[p] === "\n" || text[p] === "\r") {
@@ -201,33 +201,46 @@ function endpointFamily(value: string, work: Work): ModelFamily | null | undefin
   }
   return undefined;
 }
-function importSignal(tokens: Token[], work: Work): boolean {
-  // Inspect each import line once. Ordinary strings containing an SDK name are not signals.
-  let importing = false; let importLine = -1; let google = false;
+function inspectTokens(tokens: Token[], config: boolean, work: Work) {
+  const imports = new Map<number, string>();
+  const roles = new Map<number, string>();
+  let modelSignal = false;
+  let fromLine = -1;
   for (let i = 0; i < tokens.length; i++) {
     work.stats.steps++;
     const token = tokens[i]!;
-    if (token.line !== importLine || token.value === ";") { importing = false; google = false; }
-    if (token.type === "word" && (token.value === "import" || token.value === "from")) { importing = true; importLine = token.line; }
-    if (importing && token.value === "google") google = true;
-    if (importing && (knownSdk(token.value) || (google && (token.value === "genai" || token.value === "generativeai")))) return true;
-    if (token.type === "string" && knownSdk(token.value) && tokens[i - 1]?.value === "(" && tokens[i - 2]?.value === "require") return true;
+    if (token.value === "role" && tokens[i + 1]?.value === ":" && tokens[i + 2]?.type === "string") roles.set(token.parent, tokens[i + 2]!.value);
+    if ((token.type === "string" || (config && token.type === "word")) && modelFamily(token.value) !== null) modelSignal = true;
+    if (token.type !== "word") continue;
+    let start = -1;
+    if (token.value === "from") { start = i + 1; fromLine = token.line; }
+    else if (token.value === "import" && fromLine !== token.line && tokens[i + 2]?.value !== "from") start = tokens[i + 1]?.value === "(" ? i + 2 : i + 1;
+    else if (token.value === "require" && tokens[i + 1]?.value === "(") start = i + 2;
+    const module = tokens[start];
+    if (!module || (module.type !== "word" && module.type !== "string")) continue;
+    let name = module.value;
+    let end = start;
+    if (module.type === "word") {
+      const parts = [name];
+      while (tokens[end + 1]?.value === "." && tokens[end + 2]?.type === "word") {
+        parts.push(tokens[end + 2]!.value); end += 2; work.stats.steps += 2;
+      }
+      name = parts.join(".");
+      if (name === "google" && tokens[end + 1]?.value === "import" && ["genai", "generativeai"].includes(tokens[end + 2]?.value ?? "")) name += "." + tokens[end + 2]!.value;
+    }
+    work.stats.steps += name.length + 1;
+    if (knownSdk(name)) imports.set(start, name);
+    i = end;
   }
-  return false;
+  return { imports, roles, modelSignal };
 }
 export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: boolean }, text: string, work: Work): ScannedValue[] {
   const mode = info.mode;
   if (mode === "other") return [];
   const tokens = tokenize(text, mode === "config", work);
   const values: ScannedValue[] = [];
-  const roles = new Map<number, string>();
-  let signal = info.ai || importSignal(tokens, work);
-  for (let i = 0; i < tokens.length; i++) {
-    work.stats.steps++;
-    const token = tokens[i]!;
-    if (token.value === "role" && tokens[i + 1]?.value === ":" && tokens[i + 2]?.type === "string") roles.set(token.parent, tokens[i + 2]!.value);
-    if ((token.type === "string" || (mode === "config" && token.type === "word")) && modelFamily(token.value) !== null) signal = true;
-  }
+  const { imports, roles, modelSignal } = inspectTokens(tokens, mode === "config", work);
+  const signal = info.ai || imports.size > 0 || modelSignal;
   // Parent summaries are computed once, rather than walking up to 64 ancestors for every token.
   const rootContext = { system: false, sdk: false, tool: false, promptBlock: false, fromMessages: false, contents: false };
   const contexts: Array<typeof rootContext> = [];
@@ -253,11 +266,43 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     }
     values.push(item);
   };
+  // Each new region is fingerprinted once; nested regions are already represented by it.
+  let extendedEnd = -1;
+  let importing = false; let importLine = -1;
+  let importValues = 0;
+  const piecesFor = (start: number, end: number): string => {
+    const pieces: string[] = [];
+    for (let j = start; j <= end; j++) {
+      work.stats.steps++;
+      const t = tokens[j]!;
+      pieces.push(t.type === "string" ? canonicalJson(normalizePromptText(t.value, work)) : t.value);
+    }
+    return pieces.join("");
+  };
+  const expressionEnd = (start: number): number => {
+    const first = tokens[start]!;
+    let end = start;
+    for (let j = start; j < tokens.length; j++) {
+      work.stats.steps++;
+      const t = tokens[j]!;
+      if (j > start && (t.parent !== first.parent || t.line > first.line || [",", ";", ")", "]", "}"].includes(t.value))) break;
+      end = t.close >= j ? t.close : j;
+      j = end;
+    }
+    return end;
+  };
   for (let i = 0; i < tokens.length; i++) {
     work.stats.steps++;
     const token = tokens[i]!;
     const parent = tokens[token.parent];
     const previous = tokens[i - 1];
+    if (token.line !== importLine || token.value === ";") importing = false;
+    if (token.type === "word" && (token.value === "import" || token.value === "from")) { importing = true; importLine = token.line; }
+    const importedModule = imports.get(i);
+    if (importedModule !== undefined && providerSdk(importedModule)) {
+      add("provider", token, importedModule, "sdk_import", "sdk_call");
+      importValues++;
+    }
     if (previous?.value === ":" && token.type === "word" && tokens[i + 1]?.value === "=" && tokens[i - 2]?.type === "word") continue;
     // A simple TS/Python annotation sits between the declaration name and '='.
     const typedAssignment = previous?.value === "=" && tokens[i - 3]?.value === ":" && tokens[i - 4]?.type === "word";
@@ -284,7 +329,54 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     const containerNext = isContainer && token.close >= 0 ? tokens[token.close + 1] : undefined;
     const containerTail = containerNext !== undefined && ["+", ".", "?"].includes(containerNext.value);
     if (promptArgument && ((!isLiteral && !isContainer) || containerTail)) work.reasons.add("nonliteral_prompt");
-    if ((tool || (settingKey !== undefined && signal)) && (isContainer || isLiteral)) {
+    const extendedKind = signal && !(namedPrompt && isLiteral) ? extendedKeyKind(key) : undefined;
+    const messageMethod = tokens[i - 2]?.value === "." && tokens[i - 3]?.value === "messages" && ["push", "unshift", "append", "extend", "insert"].includes(token.label);
+    const callKind = signal && token.value === "(" ? messageMethod ? "context_assembly" : EXTENDED_CALLS.get(token.label) : undefined;
+    if (i > extendedEnd && (extendedKind !== undefined || callKind !== undefined)) {
+      const kind = extendedKind ?? callKind!;
+      let end = callKind !== undefined ? token.close : expressionEnd(i);
+      // Include function bodies: TS braces, Python indentation. Never execute or resolve them.
+      const definition = callKind === "context_assembly" && (tokens[i - 2]?.value === "def" || tokens[i - 2]?.value === "function");
+      if (definition && end >= i) {
+        const body = tokens[end + 1];
+        if (body?.value === "{" && body.close > end) end = body.close;
+        else if (body?.value === ":") {
+          const declaration = tokens[i - 2]!;
+          const column = declaration.start - (text.lastIndexOf("\n", declaration.start) + 1);
+          let lastLine = token.line;
+          for (let j = end + 2; j < tokens.length; j++) {
+            work.stats.steps++;
+            const t = tokens[j]!;
+            if (t.line !== lastLine) {
+              const offset = t.start - (text.lastIndexOf("\n", t.start) + 1);
+              work.stats.steps += offset + 1;
+              if (offset <= column) break;
+              lastLine = t.line;
+            }
+            end = j;
+          }
+        }
+      }
+      if (end >= i) {
+        // Provider calls fingerprint the constructor/helper name, not its model/settings arguments.
+        const value = callKind === "provider" && extendedKind === undefined ? token.label : (callKind === undefined ? "" : token.label) + piecesFor(i, end);
+        add(kind, token, value, extendedKind === undefined ? "call" : key, callKind === undefined ? "key_name" : "sdk_call");
+        if (callKind !== "provider") extendedEnd = end;
+      }
+      if (extendedKind !== undefined && !isLiteral && !isContainer) work.reasons.add("unclassified_ai");
+    }
+    // Unknown constructs in an AI file cannot certify complete coverage, including beside known ones.
+    // Nested tokens covered by an extended region have already contributed to its fingerprint.
+    if (signal && i > extendedEnd && !importing) {
+      const knownKey = extendedKind !== undefined || modelKey || settingKey !== undefined || tool || promptArgument || SYSTEM_KEYS.has(key) || PROMPT_KEYS.has(key) || ["role", "content", "contents", "parts", "text", "messages"].includes(key);
+      if ((isKey && !knownKey && (!isContainer || token.close === i + 1) && endpointFamily(token.value, work) === undefined) ||
+          (isKey && (modelKey || settingKey !== undefined) && !isLiteral && !isContainer) ||
+          (token.value === "(" && token.label !== "" && callKind === undefined && !SDK_CALLS.has(token.label)) ||
+          (token.value === "(" && SDK_CALLS.has(token.label) && next?.type === "word" && tokens[i + 2]?.value !== "=") ||
+          (token.value === "." && next?.value === ".") ||
+          (token.value === "[" && previous?.value === "{")) work.reasons.add("unclassified_ai");
+    }
+    if ((tool || (settingKey !== undefined && signal && i > extendedEnd && extendedKind === undefined)) && (isContainer || isLiteral)) {
       const end = isContainer ? token.close : i;
       if (end < i) continue;
       // Token joining removes only layout outside literals. Literal text is normalized independently.
@@ -298,7 +390,7 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
       if (family !== undefined) add("model_endpoint", token, token.value, key || "endpoint", "catalog_host", family);
     }
     if (!isLiteral) continue;
-    if ((signal && modelKey) || (parent?.value === "(" && MODEL_CALLS.has(parent.label) && previous === parent)) {
+    if (i > extendedEnd && ((signal && modelKey) || (parent?.value === "(" && MODEL_CALLS.has(parent.label) && previous === parent))) {
       if (token.type !== "number") add("model_name", token, token.value, key || parent?.label || "model", modelKey ? "key_name" : "model_table", modelFamily(token.value));
       continue;
     }
@@ -317,5 +409,6 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     if (kind === "prompt_text" && context.system) kind = "system_prompt";
     if (kind) add(kind, token, token.value, key || parent?.label || "argument", sdk ? "sdk_call" : "key_name");
   }
+  if (signal && tokens.length > 0 && values.length === importValues) work.reasons.add("unclassified_ai");
   return values;
 }

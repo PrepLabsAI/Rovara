@@ -192,12 +192,12 @@ function detect(input: PromptChangeInput, options: PromptChangeOptions, work: Wo
 function finish(items: PromptChangeItem[], options: PromptChangeOptions, work: Work): PromptChangeResult {
   // Comparison inputs are bounded (path <=512, fixed kind, SHA-256 id). Count comparisons as well as scans.
   items.sort((a, b) => { work.stats.steps += a.path.length + b.path.length + 132; return a.path < b.path ? -1 : a.path > b.path ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0; });
-  const counts = { prompt_file: 0, prompt_text: 0, system_prompt: 0, model_name: 0, model_setting: 0, tool_schema: 0, model_endpoint: 0 };
+  const counts = { prompt_file: 0, prompt_text: 0, system_prompt: 0, model_name: 0, model_setting: 0, tool_schema: 0, model_endpoint: 0, provider: 0, retrieval: 0, context_assembly: 0, output_parsing: 0 };
   for (const item of items) { work.stats.steps++; counts[item.kind]++; }
   const incompleteReasons = PROMPT_CHANGE_INCOMPLETE_REASONS.filter((reason) => work.reasons.has(reason));
   const coverage = incompleteReasons.length === 0 ? "complete" : incompleteReasons.length === 1 && incompleteReasons[0] === "hunks_only" ? "hunks_only" : "partial";
   const report: PromptChangeReport = {
-    schemaVersion: 1, status: items.length > PROMPT_CHANGE_LIMITS.items ? "changes" : coverage !== "complete" ? "incomplete" : items.length > 0 ? "changes" : "none_found", coverage, incompleteReasons, counts,
+    schemaVersion: 2, status: items.length > PROMPT_CHANGE_LIMITS.items ? "changes" : coverage !== "complete" ? "incomplete" : items.length > 0 ? "changes" : "none_found", coverage, incompleteReasons, counts,
     items: items.slice(0, PROMPT_CHANGE_LIMITS.items), itemsTruncated: items.length > PROMPT_CHANGE_LIMITS.items,
     reportDigest: hash(canonicalJson(items.map((item) => [item.id, item.fingerprintBefore, item.fingerprintAfter])), work),
   };

@@ -55,5 +55,26 @@ export function sourceMode(path: string): "code" | "config" | "other" {
 }
 export function aiPath(path: string): boolean { return /(?:^|\/)(?:prompts|models|llm|ai|agents)\//iu.test(path); }
 export function knownSdk(value: string): boolean {
-  return /^(?:openai|anthropic|@anthropic-ai\/sdk|@google\/genai|@google\/generative-ai|google\.genai|google\.generativeai|ai|cohere|litellm|ollama)(?:[/.]|$)/u.test(value) || value.startsWith("@ai-sdk/") || value.startsWith("langchain") || value.startsWith("@langchain/");
+  return /^(?:openai|anthropic|@anthropic-ai\/sdk|@google\/genai|@google\/generative-ai|google\.genai|google\.generativeai|ai|cohere|litellm|ollama)(?:[/.]|$)/u.test(value) || value.startsWith("@ai-sdk/") || /^langchain(?:[_.\x2f]|$)/u.test(value) || value.startsWith("@langchain/") || /^(?:llamaindex|llama_index)(?:[/.]|$)/u.test(value);
+}
+
+/** DEC170: whole names only, gated by a file AI signal. Values never leave as text.
+ * SDK shapes are static lexical hints, UNVERIFIED against running vendor SDKs. */
+export type ExtendedChangeKind = "provider" | "retrieval" | "context_assembly" | "output_parsing";
+const changeKeys: ReadonlyArray<readonly [ExtendedChangeKind, readonly string[]]> = [
+  ["provider", ["provider", "modelprovider", "llmprovider", "aiprovider"]],
+  ["retrieval", ["retrieval", "retriever", "retrieverconfig", "retrievalconfig", "indexname", "collectionname", "similaritytopk", "searchkwargs", "searchtype", "chunksize", "chunkoverlap", "chunking", "embeddingmodel", "embedmodel"]],
+  ["context_assembly", ["messages", "examples", "fewshot", "fewshotexamples", "examplelist", "contextassembly", "buildmessages", "buildcontext", "messagetemplate", "prompttemplate"]],
+  ["output_parsing", ["responseformat", "responseschema", "outputschema", "outputparser", "parser", "structuredoutput", "structuredoutputs", "textformat", "pydanticobject"]],
+];
+const extendedKeys = new Map(changeKeys.flatMap(([kind, keys]) => keys.map((key) => [key, kind] as const)));
+export function extendedKeyKind(key: string): ExtendedChangeKind | undefined { return extendedKeys.get(key.replaceAll("_", "").toLowerCase()); }
+export const EXTENDED_CALLS = new Map<string, ExtendedChangeKind>([
+  ...["OpenAI", "Anthropic", "AzureOpenAI", "ChatOpenAI", "ChatAnthropic", "ChatGoogleGenerativeAI", "GoogleGenAI", "createOpenAI", "createAnthropic", "createGoogleGenerativeAI", "openai", "anthropic", "google"].map((name) => [name, "provider"] as const),
+  ...["as_retriever", "asRetriever", "VectorIndexRetriever", "VectorStoreIndex", "SentenceSplitter", "RecursiveCharacterTextSplitter", "TokenTextSplitter"].map((name) => [name, "retrieval"] as const),
+  ...["build_messages", "buildMessages", "build_context", "buildContext", "from_messages", "fromMessages", "from_template", "fromTemplate", "FewShotPromptTemplate", "FewShotChatMessagePromptTemplate"].map((name) => [name, "context_assembly"] as const),
+  ...["with_structured_output", "withStructuredOutput", "PydanticOutputParser", "JsonOutputParser", "StructuredOutputParser", "zodResponseFormat", "zodTextFormat"].map((name) => [name, "output_parsing"] as const),
+]);
+export function providerSdk(value: string): boolean {
+  return /^(?:openai|anthropic|cohere|litellm|ollama|@anthropic-ai\/sdk|@google\/genai|@google\/generative-ai)(?:[/.]|$)/u.test(value) || value.startsWith("@ai-sdk/") || /^(?:langchain_|@langchain\/)(?:openai|anthropic|google_genai|google-genai|cohere|ollama)(?:[/.]|$)/u.test(value);
 }

@@ -11,13 +11,13 @@ import { sha256HexOf } from "./service-catalog-verify.js";
 import { MODEL_FAMILIES } from "./model-catalog.js";
 import { MODEL_NAME_PATTERN } from "./model-family-common.js";
 
-export const PROMPT_CHANGE_SCHEMA_VERSION = 1;
-export const PROMPT_CHANGE_KINDS = ["prompt_file", "prompt_text", "system_prompt", "model_name", "model_setting", "tool_schema", "model_endpoint"] as const;
+export const PROMPT_CHANGE_SCHEMA_VERSION = 2;
+export const PROMPT_CHANGE_KINDS = ["prompt_file", "prompt_text", "system_prompt", "model_name", "model_setting", "tool_schema", "model_endpoint", "provider", "retrieval", "context_assembly", "output_parsing"] as const;
 export const PROMPT_CHANGE_VERBS = ["added", "removed", "modified", "renamed"] as const;
 export const PROMPT_CHANGE_BASES = ["path_rule", "sdk_call", "key_name", "model_table", "catalog_host"] as const;
 export const MODEL_SETTING_KEYS = ["temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "seed", "frequency_penalty", "presence_penalty", "response_format", "reasoning_effort", "thinking_budget", "tool_choice"] as const;
 export const SETTING_ENUM_WORDS = ["auto", "none", "required", "any", "text", "json_object", "json_schema", "minimal", "low", "medium", "high", "max", "enabled", "disabled"] as const;
-export const PROMPT_CHANGE_INCOMPLETE_REASONS = ["too_many_files", "file_too_large", "total_too_large", "binary_file", "unreadable_diff", "diff_truncated", "hunks_only", "nonliteral_prompt"] as const;
+export const PROMPT_CHANGE_INCOMPLETE_REASONS = ["too_many_files", "file_too_large", "total_too_large", "binary_file", "unreadable_diff", "diff_truncated", "hunks_only", "nonliteral_prompt", "unclassified_ai"] as const;
 export type PromptChangeKind = (typeof PROMPT_CHANGE_KINDS)[number];
 export type ModelSettingKey = (typeof MODEL_SETTING_KEYS)[number];
 export type PromptChangeIncompleteReason = (typeof PROMPT_CHANGE_INCOMPLETE_REASONS)[number];
@@ -29,6 +29,7 @@ export const PROMPT_CHANGE_INCOMPLETE_SENTENCES: Record<PromptChangeIncompleteRe
   unreadable_diff: "Some source or diff text could not be read completely.",
   diff_truncated: "The workspace diff does not contain the whole change.",
   hunks_only: "Only changed hunks were available, so whole file coverage is unknown.",
+  unclassified_ai: "An AI-related construct could not be classified completely.",
   nonliteral_prompt: "A prompt expression could not be resolved statically.",
 };
 export const PROMPT_CHANGE_LIMITS = { files: 2000, fileBytes: 1024 * 1024, totalBytes: 32 * 1024 * 1024, pathChars: 512, pathBytes: 4096, items: 500, nesting: 64 } as const;
@@ -45,9 +46,10 @@ const common = {
   family: z.enum(MODEL_FAMILIES).nullable(), line: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).nullable(),
   fingerprintBefore: Hash.nullable(), fingerprintAfter: Hash.nullable(),
 };
-const fingerprintOnly = (kind: "prompt_file" | "prompt_text" | "system_prompt" | "tool_schema" | "model_endpoint") => z.object({ ...common, kind: z.literal(kind) }).strict();
+const fingerprintOnly = (kind: "prompt_file" | "prompt_text" | "system_prompt" | "tool_schema" | "model_endpoint" | "provider" | "retrieval" | "context_assembly" | "output_parsing") => z.object({ ...common, kind: z.literal(kind) }).strict();
 export const PromptChangeItemSchema = z.discriminatedUnion("kind", [
   fingerprintOnly("prompt_file"), fingerprintOnly("prompt_text"), fingerprintOnly("system_prompt"), fingerprintOnly("tool_schema"), fingerprintOnly("model_endpoint"),
+  fingerprintOnly("provider"), fingerprintOnly("retrieval"), fingerprintOnly("context_assembly"), fingerprintOnly("output_parsing"),
   z.object({ ...common, kind: z.literal("model_name"), before: z.string().max(128).regex(MODEL_NAME_PATTERN).optional(), after: z.string().max(128).regex(MODEL_NAME_PATTERN).optional() }).strict(),
   z.object({ ...common, kind: z.literal("model_setting"), settingKey: z.enum(MODEL_SETTING_KEYS), before: z.union([z.number().finite(), z.enum(SETTING_ENUM_WORDS)]).optional(), after: z.union([z.number().finite(), z.enum(SETTING_ENUM_WORDS)]).optional() }).strict(),
 ]).superRefine((item, ctx) => {
@@ -61,11 +63,12 @@ export const PromptChangeItemSchema = z.discriminatedUnion("kind", [
 export type PromptChangeItem = z.infer<typeof PromptChangeItemSchema>;
 const Count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const PromptChangeReportSchema = z.object({
-  schemaVersion: z.literal(PROMPT_CHANGE_SCHEMA_VERSION), status: z.enum(["changes", "none_found", "incomplete"]),
+  schemaVersion: z.union([z.literal(1), z.literal(PROMPT_CHANGE_SCHEMA_VERSION)]), status: z.enum(["changes", "none_found", "incomplete"]),
   coverage: z.enum(["complete", "hunks_only", "partial"]), incompleteReasons: z.array(z.enum(PROMPT_CHANGE_INCOMPLETE_REASONS)).max(PROMPT_CHANGE_INCOMPLETE_REASONS.length),
-  counts: z.object({ prompt_file: Count, prompt_text: Count, system_prompt: Count, model_name: Count, model_setting: Count, tool_schema: Count, model_endpoint: Count }).strict(),
+  counts: z.object({ prompt_file: Count, prompt_text: Count, system_prompt: Count, model_name: Count, model_setting: Count, tool_schema: Count, model_endpoint: Count, provider: Count.default(0), retrieval: Count.default(0), context_assembly: Count.default(0), output_parsing: Count.default(0) }).strict(),
   items: z.array(PromptChangeItemSchema).max(PROMPT_CHANGE_LIMITS.items), itemsTruncated: z.boolean(), reportDigest: Hash,
 }).strict().superRefine((report, ctx) => {
+  if (report.schemaVersion === 1 && (report.items.some((item) => ["provider", "retrieval", "context_assembly", "output_parsing"].includes(item.kind)) || report.incompleteReasons.includes("unclassified_ai"))) ctx.addIssue({ code: "custom", message: "new kinds need schema version 2" });
   if (report.status === "none_found" && (report.coverage !== "complete" || report.items.length > 0 || report.incompleteReasons.length > 0)) ctx.addIssue({ code: "custom", message: "no changes needs complete coverage" });
   if (report.coverage === "complete" && report.incompleteReasons.length > 0) ctx.addIssue({ code: "custom", message: "complete coverage cannot have refusals" });
   if (report.status === "changes" && report.items.length === 0) ctx.addIssue({ code: "custom", message: "changes needs an item" });
@@ -81,7 +84,7 @@ export const PromptChangeReportSchema = z.object({
   }
   // The digest includes omitted items, so a truncated report cannot be reverified from its display list.
   if (!report.itemsTruncated && report.reportDigest !== sha256HexOf(new TextEncoder().encode(canonicalJson(report.items.map((item) => [item.id, item.fingerprintBefore, item.fingerprintAfter]))))) ctx.addIssue({ code: "custom", message: "report digest mismatch" });
-  const actual = { prompt_file: 0, prompt_text: 0, system_prompt: 0, model_name: 0, model_setting: 0, tool_schema: 0, model_endpoint: 0 };
+  const actual = { prompt_file: 0, prompt_text: 0, system_prompt: 0, model_name: 0, model_setting: 0, tool_schema: 0, model_endpoint: 0, provider: 0, retrieval: 0, context_assembly: 0, output_parsing: 0 };
   for (const item of report.items) actual[item.kind]++;
   let total = 0;
   for (const kind of PROMPT_CHANGE_KINDS) {
@@ -90,7 +93,7 @@ export const PromptChangeReportSchema = z.object({
   }
   if (report.itemsTruncated && (report.items.length !== PROMPT_CHANGE_LIMITS.items || total <= PROMPT_CHANGE_LIMITS.items)) ctx.addIssue({ code: "custom", message: "invalid truncation" });
   if (report.itemsTruncated && report.status !== "changes") ctx.addIssue({ code: "custom", message: "truncated items are changes" });
-});
+}).transform((report) => ({ ...report, schemaVersion: PROMPT_CHANGE_SCHEMA_VERSION }));
 export type PromptChangeReport = z.infer<typeof PromptChangeReportSchema>;
 export interface PromptChangeDecision { needed: boolean; reason: "incomplete" | "changes" | "none_found" }
 export function promptChangesNeedEval(report: PromptChangeReport): PromptChangeDecision {
@@ -99,6 +102,6 @@ export function promptChangesNeedEval(report: PromptChangeReport): PromptChangeD
 }
 export function promptChangesNeedSideBySide(report: PromptChangeReport): PromptChangeDecision {
   if (report.status === "incomplete" || report.coverage !== "complete") return { needed: true, reason: "incomplete" };
-  const needed = report.counts.prompt_file + report.counts.prompt_text + report.counts.system_prompt + report.counts.tool_schema + report.counts.model_name > 0;
+  const needed = report.items.length > 0;
   return { needed, reason: needed ? "changes" : "none_found" };
 }

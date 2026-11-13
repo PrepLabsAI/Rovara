@@ -7,6 +7,12 @@ const MiB = 1024 * 1024;
 const source = (text: string, path = "ai/a.ts") => detectPromptChanges({ files: [{ path, before: "", after: text, wholeFile: true }] }, { stats: true });
 const repeat = (unit: string, bytes: number) => unit.repeat(Math.ceil(bytes / Buffer.byteLength(unit))).slice(0, Math.floor(bytes / (Buffer.byteLength(unit) / unit.length)));
 const corpora: Array<[string, (n: number) => () => PromptChangeResult]> = [
+  ["nested retrieval", (n) => { const text = "retrieval: {".repeat(48) + "value: '" + "a".repeat(n) + "'" + "}".repeat(48); return () => source(text); }],
+  ["retrieval config", (n) => { const text = "retrieval: {collection_name: '" + "a".repeat(n) + "'}"; return () => source(text); }],
+  ["context examples", (n) => { const text = "examples: ['" + "a".repeat(n) + "']"; return () => source(text); }],
+  ["output schema", (n) => { const text = "response_schema: {description: '" + "a".repeat(n) + "'}"; return () => source(text); }],
+  ["provider literal", (n) => { const text = "provider: '" + "a".repeat(n) + "'"; return () => source(text); }],
+  ["message builder", (n) => { const text = "function buildMessages(x) { return ['" + "a".repeat(n) + "']; }"; return () => source(text); }],
   ["minified literals", (n) => { const text = repeat('const a="abc";', n); return () => source(text); }],
   ["unterminated triples", (n) => { const text = "prompt = '''" + "a".repeat(n - 12); return () => source(text, "ai/a.py"); }],
   ["nesting", (n) => { const unit = "[{other:0}],"; const text = unit.repeat(Math.floor(n / unit.length)); return () => source(text); }],
@@ -34,7 +40,7 @@ const measurePair = (name: string, size: number, make: (n: number) => () => Prom
     workBound(result);
     for (const reason of ["file_too_large", "total_too_large", "too_many_files"]) expect(result.report.incompleteReasons).not.toContain(reason);
     expect(result.stats!.scannedFiles).toBeGreaterThan(0);
-    if (name === "nesting") expect(result.report.coverage).toBe("complete");
+    if (name === "nesting") expect(result.report.incompleteReasons).not.toContain("unreadable_diff");
   }
   expect(b.stats!.steps).toBeLessThanOrEqual(4.5 * a.stats!.steps);
   const sample = (run: () => PromptChangeResult, batches: number) => {

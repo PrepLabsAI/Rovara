@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "status": "changes",
+  "coverage": "complete",
+  "incompleteReasons": [],
+  "counts": {
+    "prompt_file": 0,
+    "prompt_text": 0,
+    "system_prompt": 0,
+    "model_name": 0,
+    "model_setting": 1,
+    "tool_schema": 0,
+    "model_endpoint": 0
+  },
+  "items": [
+    {
+      "id": "2aa8fd4f433f699d35b01938186ae36e80093ef77861cebce2c9a8b3f625d621",
+      "verb": "modified",
+      "basis": "key_name",
+      "path": "ai/legacy.ts",
+      "family": null,
+      "line": 1,
+      "fingerprintBefore": "44896b09365746b5f7167ee4d64988a38f7f4628803cbf86224e74eeb7c69e9d",
+      "fingerprintAfter": "f3e360d89952f40d3b79d0b07dd0b94f1cbf9017cba5d2a5f8128e4146d6e3c1",
+      "kind": "model_setting",
+      "settingKey": "temperature",
+      "before": 0.2,
+      "after": 0.4
+    }
+  ],
+  "itemsTruncated": false,
+  "reportDigest": "920b55dc5c6d8cffaa31500f660bfa75c147b2971fc2e71a60c4d7baf2067ce8"
+}
