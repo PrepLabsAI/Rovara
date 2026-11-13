@@ -14,6 +14,7 @@
 // Nothing here imports a Node module.
 import { z } from "zod";
 import type { DecisionRisk } from "./decision-cards.js";
+import type { EvidenceTrustClass } from "./check-kinds.js";
 import { RelativeWorkspacePathSchema, ProjectCommandSchema } from "./project.js";
 import { SageMakerEndpointBackingSchema } from "./sagemaker-endpoint.js";
 import type { TestEnvService } from "./test-environment.js";
@@ -35,7 +36,7 @@ export type TestEnvDependencyKind = z.infer<typeof TestEnvDependencyKindSchema>;
 
 export const TEST_ENV_DEPENDENCY_USED_BY = ["unit", "integration", "e2e", "app_boot"] as const;
 export const TEST_ENV_DEPENDENCY_RESETS = ["fresh_per_round", "between_checks"] as const;
-export const TEST_ENV_BACKING_KINDS = ["local", "project_image", "emulated", "test_account", "fake", "none"] as const;
+export const TEST_ENV_BACKING_KINDS = ["local", "project_image", "emulated", "test_account", "vendor_test", "fake", "none"] as const;
 export const TEST_ENV_NONE_REASONS = ["not_supported", "declined", "faked_by_tests"] as const;
 /** What a fake does with a request it has no recording for (the same words as the v1 mock's `unmatched`). */
 export const TEST_ENV_FAKE_UNMATCHED = ["fail", "schema_synth"] as const;
@@ -242,7 +243,27 @@ const EmulatedBackingSchema = z
   })
   .strict();
 const TestAccountBackingSchema = z.object({ kind: z.literal("test_account"), accountId: TestAccountIdSchema }).strict();
-const FakeBackingSchema = z.object({ kind: z.literal("fake"), fixtureSetRef: Sha256Schema, unmatched: z.enum(TEST_ENV_FAKE_UNMATCHED) }).strict();
+/** A real third party in its own test mode (TE-A3, O11), answered with a key from the test-account store. Like a test account its key exists only in sealed rounds, so it is never a working backing or a fallback, and it is a less-safe use. Rovara starts nothing for it. */
+const VendorTestBackingSchema = z.object({ kind: z.literal("vendor_test"), accountId: TestAccountIdSchema }).strict();
+
+/** Where a fake's answers came from (TE-A3, O34): the customer's own, a recording (with the day), or a mock Rovara made at setup or during a task. Rovara's mocks name the stored set (in Rovara by default, or a repo path when the project opted in). */
+export const TEST_ENV_FAKE_ORIGINS = ["customer", "recorded", "rovara_setup", "rovara_task"] as const;
+export const TEST_ENV_MOCK_STORES = ["rovara", "repo"] as const;
+export const FakeMockSetSchema = z
+  .object({ setId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/u), version: z.number().int().min(0).max(1_000_000), store: z.enum(TEST_ENV_MOCK_STORES), path: RelativeWorkspacePathSchema.optional() })
+  .strict()
+  .superRefine((set, context) => {
+    if ((set.store === "repo") !== (set.path !== undefined)) context.addIssue({ code: "custom", path: ["path"], message: "a set kept in the repo names its path, and no other set does" });
+  });
+const FakeDaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "a date");
+export const FakeProvenanceSchema = z.discriminatedUnion("origin", [
+  z.object({ origin: z.literal("customer"), mockSet: FakeMockSetSchema.optional() }).strict(),
+  z.object({ origin: z.literal("recorded"), recordedOn: FakeDaySchema, mockSet: FakeMockSetSchema.optional() }).strict(),
+  z.object({ origin: z.literal("rovara_setup"), mockSet: FakeMockSetSchema }).strict(),
+  z.object({ origin: z.literal("rovara_task"), mockSet: FakeMockSetSchema }).strict(),
+]);
+export type FakeProvenance = z.infer<typeof FakeProvenanceSchema>;
+const FakeBackingSchema = z.object({ kind: z.literal("fake"), fixtureSetRef: Sha256Schema, unmatched: z.enum(TEST_ENV_FAKE_UNMATCHED), provenance: FakeProvenanceSchema.optional() }).strict();
 const NoneBackingSchema = z.object({ kind: z.literal("none"), reason: z.enum(TEST_ENV_NONE_REASONS), excludedTests: z.array(TestSelectorSchema).min(1).max(TEST_ENV_DEPENDENCY_LIMITS.excludedTests).optional() }).strict();
 
 function backingProblems(backing: z.infer<typeof BackingUnionSchema>, context: z.RefinementCtx, path: (string | number)[]): void {
@@ -255,13 +276,13 @@ function backingProblems(backing: z.infer<typeof BackingUnionSchema>, context: z
   if (backing.kind === "none" && backing.reason === "faked_by_tests" && backing.excludedTests !== undefined) problem(["excludedTests"], "tests that fake the dependency themselves are not excluded");
 }
 
-const BackingUnionSchema = z.discriminatedUnion("kind", [LocalBackingSchema, ProjectImageBackingSchema, EmulatedBackingSchema, TestAccountBackingSchema, FakeBackingSchema, NoneBackingSchema]);
+const BackingUnionSchema = z.discriminatedUnion("kind", [LocalBackingSchema, ProjectImageBackingSchema, EmulatedBackingSchema, TestAccountBackingSchema, VendorTestBackingSchema, FakeBackingSchema, NoneBackingSchema]);
 
 /** What runs behind a dependency in check rounds, Prove and nightly. */
 export const TestEnvBackingSchema = BackingUnionSchema.superRefine((backing, context) => backingProblems(backing, context, []));
 export type TestEnvBacking = z.infer<typeof TestEnvBackingSchema>;
 
-/** What the coding agent's working sandbox gets when it differs: any backing but a test account (the secret exists only in sealed check rounds, 4.0.2). */
+/** What the coding agent's working sandbox gets when it differs: any backing but a test account or a vendor test mode (the secret exists only in sealed check rounds, 4.0.2). */
 export const TestEnvWorkingBackingSchema = z
   .discriminatedUnion("kind", [LocalBackingSchema, ProjectImageBackingSchema, EmulatedBackingSchema, FakeBackingSchema, NoneBackingSchema])
   .superRefine((backing, context) => backingProblems(backing, context, []));
@@ -332,11 +353,11 @@ export type TestEnvDependency = z.infer<typeof TestEnvDependencySchema>;
 
 // ---- the list
 
-/** How many helpers a run starts: one for each local, project-image and fake backing, one shared by all emulated ones, and one proxy when any test account is used. A fallback starts nothing until it is used. */
+/** How many helpers a run starts: one for each local, project-image and fake backing, one shared by all emulated ones, and one proxy when any test account or vendor test mode is used. A fallback starts nothing until it is used. */
 export function testEnvStartedCount(dependencies: readonly TestEnvDependency[]): number {
   const kinds = dependencies.map((dependency) => dependency.backing.kind);
   const each = kinds.filter((kind) => kind === "local" || kind === "project_image" || kind === "fake").length;
-  return each + (kinds.includes("emulated") ? 1 : 0) + (kinds.includes("test_account") ? 1 : 0);
+  return each + (kinds.includes("emulated") ? 1 : 0) + (kinds.includes("test_account") || kinds.includes("vendor_test") ? 1 : 0);
 }
 
 /** The run caps a company may set: only the number of helpers started is part of this contract. Raising it is less safe. */
@@ -385,6 +406,8 @@ function lessSafeSignatures(dependencies: readonly TestEnvDependency[], verified
       if (backing === undefined) continue;
       const where = `${dependency.id}/${slot}`;
       if (backing.kind === "test_account") add("test_account", `${where}/${backing.accountId}`);
+      // TE-A3: a vendor's test mode uses a key from the test-account store, so it is the same kind of choice as a test account (a second person approves it).
+      if (backing.kind === "vendor_test") add("test_account", `${where}/vendor/${backing.accountId}`);
       if (backing.kind === "project_image") add("project_image", `${where}/${backing.imageId}`);
       if (backing.kind === "local" && backing.substituteImage !== undefined) add("substitute_image", `${where}/${backing.substituteImage.digest}/${backing.substituteImage.approvalRef}`);
       if (backing.kind === "fake" && backing.unmatched === "schema_synth") add("schema_synth", where);
@@ -530,4 +553,30 @@ export function readTestEnvDependencies(environment: { services: readonly TestEn
     return parsed.success ? { ok: true, dependencies: parsed.data, movedPreprod: [] } : { ok: false, reason: "invalid", serviceName: "" };
   }
   return testEnvServicesToDependencies(environment.services);
+}
+
+// ---- trust classes (TE-A3, O11 and O51)
+
+/**
+ * The trust class a backing earns, under the owner's words. Real: software, an image, a test account or a vendor's test mode answered. Recorded: a fake that says it is a recording. Simulated: Rovara local AWS, the customer's
+ * fake, a fake with no stated origin, and a test that fakes the dependency itself. Made by Rovara: a fake Rovara made at setup or during a task. Nothing behind a dependency says no more than Simulated. A recording is never Real.
+ * It matches `trustClassOf(evidenceDependencyLabelFor(...))` for the same backing (a test keeps the two together).
+ */
+export function testEnvBackingTrustClass(backing: TestEnvBacking): EvidenceTrustClass {
+  switch (backing.kind) {
+    case "local":
+    case "project_image":
+    case "test_account":
+    case "vendor_test":
+      return "real";
+    case "fake": {
+      const origin = backing.provenance?.origin;
+      return origin === "recorded" ? "recorded" : origin === "rovara_setup" || origin === "rovara_task" ? "made_by_rovara" : "simulated";
+    }
+    case "emulated":
+    case "none":
+      return "simulated";
+    default:
+      return "simulated";
+  }
 }

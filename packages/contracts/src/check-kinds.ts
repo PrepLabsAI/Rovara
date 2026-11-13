@@ -91,3 +91,42 @@ export function trustLabelWords(trust: EvidenceTrustClass | undefined, proofBasi
   if (proofBasis !== undefined) return PROOF_BASIS_WORDS[proofBasis];
   return trust === undefined ? undefined : EVIDENCE_TRUST_CLASS_WORDS[trust];
 }
+
+// ---- what counts toward the proof, and the words of the first line (TE-A3; O11, O31, O51, DECISIONS 156 and 161)
+
+/** The first line's words when readiness found the project's CI running on fakes. Words only: the renderer prints them when the pack says so (the field comes with the readiness lane). */
+export const CI_USES_FAKES_WORDS = "real check: your CI (uses fakes)";
+
+/**
+ * Who wrote the scripted AI replies a proof ran against (DECISIONS 161). Only replies that were in the project's reply set before the task started, or that an independent reply agent wrote (it sees the prompt, the
+ * expected answer shape and real examples, never the code change or the tests), count. Replies the coding agent wrote or edited are allowed, but never count.
+ */
+export const SCRIPTED_REPLY_SOURCES = ["project_set", "independent_agent", "coding_agent"] as const;
+export type ScriptedReplySource = (typeof SCRIPTED_REPLY_SOURCES)[number];
+export const SCRIPTED_REPLY_SOURCE_WORDS: Record<ScriptedReplySource, string> = {
+  project_set: "scripted replies from before this task",
+  independent_agent: "scripted replies written independently in this task",
+  coding_agent: "scripted replies added in this task (not counted)",
+};
+const SCRIPTED_REPLIES_COUNTED: readonly ScriptedReplySource[] = ["project_set", "independent_agent"];
+
+/** Whether scripted replies from this source can prove a change. A source this build does not know, or none, never counts (fail closed). */
+export function scriptedRepliesCountTowardProof(source: string | undefined): boolean {
+  return source !== undefined && (SCRIPTED_REPLIES_COUNTED as readonly string[]).includes(source);
+}
+
+/** Whether an answer of this trust class can stand behind a proof. A mock Rovara made never does (O31): it is shown with its label and stays out of the proof. A class this build does not know, or none, does not count. */
+export function trustClassCountsTowardProof(trust: string | undefined): boolean {
+  return trust !== undefined && (EVIDENCE_TRUST_CLASSES as readonly string[]).includes(trust) && trust !== "made_by_rovara";
+}
+
+/**
+ * Whether a passing check counts toward the proof that the change works: its kind proves (`countsTowardProof` of its row), the trust class of what answered it counts, and a check proven with scripted AI replies names
+ * a source whose replies count. A kind this build does not know does not count; a check with no trust class is judged by its kind alone.
+ */
+export function checkCountsTowardProof(check: { kind: string; trust?: string | undefined; proofBasis?: string | undefined; scriptedReplies?: string | undefined }): boolean {
+  if (BY_ID.get(check.kind)?.countsTowardProof !== true) return false;
+  if (check.trust !== undefined && !trustClassCountsTowardProof(check.trust)) return false;
+  if (check.proofBasis !== undefined) return check.proofBasis === "scripted_ai_replies" && scriptedRepliesCountTowardProof(check.scriptedReplies);
+  return true;
+}
