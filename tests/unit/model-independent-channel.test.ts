@@ -1,0 +1,183 @@
+// TE-R2 part A: the Rovara-side channel. The match is computed by code from the brief; only this file (and R1's rules file) mints `independent`; the worker cannot import it; a look-alike brief, a bad shape or a forged decision is refused;
+// the reply it makes goes through R1's store and is served first. Part A is additive: nothing outside packages/contracts/src names the new files or functions.
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  INDEX_EXPIRY_ATTRIBUTE,
+  acceptAgentReply,
+  extractReplyBrief,
+  independentReplyId,
+  matchForBrief,
+  modelReplyEntrySha256,
+  selectModelReply,
+  stampReplyProvenance,
+  validateAgentOutput,
+  type ModelReplyFileEntry,
+  type ReplyBrief,
+} from "@agentx/contracts";
+import { COMPANY_A } from "@agentx/testing";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { createReplySetStore } from "../../packages/broker/src/core/test-env/reply-set-store.js";
+
+const ROOT = join(__dirname, "..", "..");
+const PROMPT = "Write a friendly greeting for a new customer.";
+const body = (content = PROMPT) => JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content }] });
+const briefOf = (content = PROMPT, family: "openai_compatible" | "gemini" = "openai_compatible", operation = "chat_completions"): ReplyBrief => {
+  const result = extractReplyBrief(family, operation, body(content), { model: "gpt-4o" });
+  if (!result.ok) throw new Error(result.reason);
+  return result.brief;
+};
+const RESPONSE = { text: "Welcome aboard! We are glad you are here.", finish: "stop" as const };
+
+describe("acceptAgentReply", () => {
+  it("computes the match from the brief: exact operation, model and prompt hash, and nothing else (never promptContains, never a sequence)", () => {
+    const brief = briefOf();
+    const out = acceptAgentReply(brief, RESPONSE);
+    if (!out.ok) throw new Error(out.reason);
+    expect(out.reply.match).toEqual({ operation: "chat_completions", model: "gpt-4o", promptSha256: brief.promptSha256 });
+    expect(Object.keys(out.reply.match).sort()).toEqual(["model", "operation", "promptSha256"]);
+    expect(out.reply.id).toBe(`ind-${brief.promptSha256.slice(0, 12)}`);
+    expect(matchForBrief(brief)).toEqual(out.reply.match);
+  });
+  it("leaves model out of the match when the brief has none", () => {
+    const result = extractReplyBrief("gemini", "generateContent", JSON.stringify({ contents: [{ parts: [{ text: "Say hello to the user" }] }] }));
+    if (!result.ok) throw new Error(result.reason);
+    const out = acceptAgentReply(result.brief, RESPONSE);
+    expect(out.ok && out.reply.match).toEqual({ operation: "generateContent", promptSha256: result.brief.promptSha256 });
+  });
+  it("makes a decision bound to this reply's content: the stamp says independent for it, task_made for an edited copy, task_made for a look-alike decision", () => {
+    const out = acceptAgentReply(briefOf(), RESPONSE);
+    if (!out.ok) throw new Error(out.reason);
+    const file = { version: 1 as const, family: "openai_compatible" as const, replies: [out.reply] };
+    expect(stampReplyProvenance(file, new Map([[out.reply.id, out.decision]])).replies[0]?.provenance).toBe("independent");
+    const edited: ModelReplyFileEntry = { ...out.reply, response: { ...out.reply.response, text: "edited after the fact" } };
+    expect(stampReplyProvenance({ ...file, replies: [edited] }, new Map([[edited.id, out.decision]])).replies[0]?.provenance).toBe("task_made");
+    const copy = { ...out.decision };
+    expect(stampReplyProvenance(file, new Map([[out.reply.id, copy as never]])).replies[0]?.provenance).toBe("task_made");
+    expect(out.decision.contentSha256).toBe(modelReplyEntrySha256(out.reply));
+  });
+  it("refuses a brief it did not get from extractReplyBrief (a spread copy, a literal), and an embedding brief", () => {
+    const brief = briefOf();
+    expect(acceptAgentReply({ ...brief }, RESPONSE)).toEqual({ ok: false, reason: "not_a_brief" });
+    expect(acceptAgentReply({ family: "gemini", operation: "generateContent", promptText: "x", promptSha256: "a".repeat(64), promptMasked: false, shape: { kind: "text", stream: false } }, RESPONSE)).toEqual({ ok: false, reason: "not_a_brief" });
+    const embed = extractReplyBrief("openai_compatible", "embeddings", JSON.stringify({ model: "e", input: "hello there" }));
+    expect(embed.ok && acceptAgentReply(embed.brief, RESPONSE)).toEqual({ ok: false, reason: "not_a_brief" });
+  });
+  it("re-checks the response itself and never trusts the caller: wrong shape, a failure finish, a match key, an unknown key", () => {
+    const brief = briefOf();
+    for (const bad of [{ text: "", finish: "stop" }, { text: "x", finish: "length" }, { ...RESPONSE, match: { promptContains: "x" } }, { ...RESPONSE, sequence: 1 }, "text", null, { text: "x", finish: "stop", toolCalls: [{ name: "a", args: {} }] }]) {
+      expect(acceptAgentReply(brief, bad), JSON.stringify(bad)).toEqual({ ok: false, reason: "bad_shape" });
+    }
+  });
+  it("replaces the agent's own usage with Rovara's", () => {
+    const out = acceptAgentReply(briefOf(), { ...RESPONSE, usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 } });
+    expect(out.ok && out.reply.response.usage).toEqual({ inputTokens: Math.ceil(PROMPT.length / 4), outputTokens: Math.ceil(RESPONSE.text.length / 4) });
+  });
+  it("picks a free id when the first is taken, and refuses when all are", () => {
+    const brief = briefOf();
+    const first = `ind-${brief.promptSha256.slice(0, 12)}`;
+    expect(independentReplyId(brief.promptSha256, new Set())).toBe(first);
+    expect(independentReplyId(brief.promptSha256, new Set([first]))).toBe(`${first}-2`);
+    const all = new Set([first, ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `${first}-${n}`)]);
+    expect(independentReplyId(brief.promptSha256, all)).toBeUndefined();
+    expect(acceptAgentReply(brief, RESPONSE, all)).toEqual({ ok: false, reason: "no_id" });
+    const second = acceptAgentReply(brief, RESPONSE, new Set([first]));
+    expect(second.ok && second.reply.id).toBe(`${first}-2`);
+  });
+  it("accepts what validateAgentOutput accepts (the two checks agree)", () => {
+    const brief = briefOf();
+    const checked = validateAgentOutput(brief, JSON.stringify(RESPONSE));
+    expect(checked.ok && acceptAgentReply(brief, checked.response).ok).toBe(true);
+  });
+});
+
+describe("through R1's store: the reply is stored as independent and served ahead of the coding agent's", () => {
+  it("putIndependentOverlay takes it; the round set serves it first for the same prompt, whatever the coding agent wrote", async () => {
+    const A = COMPANY_A.scope;
+    const service = createReplySetStore({ store: new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE }) });
+    const brief = briefOf();
+    const mine: ModelReplyFileEntry = { id: "coding-agent", match: { operation: "chat_completions", promptSha256: brief.promptSha256 }, response: { text: "the coding agent's own reply", finish: "stop" } };
+    await service.putOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", replies: [mine] });
+    const accepted = acceptAgentReply(brief, RESPONSE);
+    if (!accepted.ok) throw new Error(accepted.reason);
+    const put = await service.putIndependentOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", entries: [{ reply: accepted.reply, decision: accepted.decision }] });
+    expect(put.ok).toBe(true); // the count is whatever the store reports; nothing here assumes it equals the entries sent
+    const round = await service.readRoundSet(A, { project: "proj", branch: "main", family: "openai_compatible", taskId: "task-1" });
+    if (!round.ok) throw new Error("round set not read");
+    expect(round.set.replies.map((reply) => `${reply.id}:${reply.provenance}`)).toEqual([`${accepted.reply.id}:independent`, "coding-agent:task_made"]);
+    const picked = selectModelReply(round.set, { model: "gpt-4o", operation: "chat_completions", promptText: PROMPT }, new Map(), "openai_compatible");
+    expect(picked.reply?.provenance).toBe("independent");
+    expect(picked.reply?.response.text).toBe(RESPONSE.text);
+  });
+  it("the store refuses a plain-object decision for the same reply", async () => {
+    const service = createReplySetStore({ store: new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE }) });
+    const accepted = acceptAgentReply(briefOf(), RESPONSE);
+    if (!accepted.ok) throw new Error(accepted.reason);
+    const forged = { provenance: "independent", contentSha256: accepted.decision.contentSha256 } as never;
+    const put = await service.putIndependentOverlay(COMPANY_A.scope, { project: "proj", taskId: "task-1", family: "openai_compatible", entries: [{ reply: accepted.reply, decision: forged }] });
+    expect(put).toEqual({ ok: false, word: "not_allowed" });
+  });
+});
+
+function walk(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) walk(path, out);
+    else if (/\.(ts|tsx|mts|js|mjs|cjs)$/u.test(entry.name)) out.push(path.slice(ROOT.length + 1));
+  }
+  return out;
+}
+const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
+const code = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/^\s*\/\/.*$/gmu, "");
+
+describe("who may mint an independent decision", () => {
+  it("createRovaraIndependentDecision( is called only in F2-A's definition, R1's rules file, this channel and the store's conformance suite", () => {
+    const hits = walk(join(ROOT, "packages")).filter((path) => /createRovaraIndependentDecision\(/u.test(code(read(path))));
+    expect(hits.sort()).toEqual([
+      "packages/contracts/src/model-independent-channel.ts",
+      "packages/contracts/src/model-reply-set.ts",
+      "packages/contracts/src/model-reply-store-rules.ts",
+      "packages/testing/src/ports/reply-set-store-conformance.ts",
+    ]);
+    const channel = code(read("packages/contracts/src/model-independent-channel.ts")).split("\n").filter((line) => /createRovaraIndependentDecision\(/u.test(line));
+    expect(channel).toHaveLength(1);
+  });
+  it("the guard sees a violation (positive control)", () => {
+    expect(/createRovaraIndependentDecision\(/u.test(code("const d = createRovaraIndependentDecision(h);"))).toBe(true);
+    expect(/createRovaraIndependentDecision\(/u.test(code("// createRovaraIndependentDecision(h)\n"))).toBe(false);
+  });
+  it("nothing in packages/worker/src imports the channel or the function, or names acceptAgentReply", () => {
+    const files = walk(join(ROOT, "packages", "worker", "src"));
+    expect(files.length).toBeGreaterThan(5);
+    const offenders = files.filter((path) => /model-independent-channel|acceptAgentReply|createRovaraIndependentDecision|isReplyBrief/u.test(read(path)));
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe("part A is pure and additive", () => {
+  const NEW = ["model-reply-brief", "model-reply-examples", "model-reply-leak-screen", "model-reply-agent", "model-independent-channel"];
+  for (const name of NEW) {
+    it(`${name}.ts: no Node import, no network, no clock, no randomness`, () => {
+      const text = read(`packages/contracts/src/${name}.ts`);
+      const source = code(text);
+      expect(text).not.toMatch(/from\s+["']node:/u);
+      for (const forbidden of [/\bfetch\s*\(/u, /\bDate\.now\b/u, /\bnew Date\b/u, /\bMath\.random\b/u, /\bsetTimeout\b/u, /\bprocess\./u, /\brequire\s*\(/u, /\bimport\s*\(/u, /\bperformance\./u]) {
+        expect(source, `${name}.ts ${String(forbidden)}`).not.toMatch(forbidden);
+      }
+    });
+  }
+  it("nothing outside packages/contracts/src and the tests names a new file or export (no callers until part B)", () => {
+    const SYMBOLS = ["extractReplyBrief", "parseReplyBrief", "pickExamples", "screenBrief", "buildTaskLeakFacts", "buildAgentInput", "validateAgentOutput", "acceptAgentReply", "valueMatchesSchema", "REPLY_AGENT_ROLE_TEXT", "independentReplyId"];
+    const files = walk(join(ROOT, "packages")).filter((path) => !path.startsWith("packages/contracts/src/"));
+    expect(files.length).toBeGreaterThan(100);
+    const hits: string[] = [];
+    for (const path of files) {
+      const text = read(path);
+      for (const name of NEW) if (new RegExp(`/${name}(?:\\.js|\\.ts)?["']`, "u").test(text)) hits.push(`${path} imports ${name}`);
+      for (const symbol of SYMBOLS) if (new RegExp(`\\b${symbol}\\b`, "u").test(text)) hits.push(`${path} uses ${symbol}`);
+    }
+    expect(hits).toEqual([]);
+  });
+});

@@ -403,7 +403,7 @@ describe("where createRovaraIndependentDecision is called", () => {
     const rules = readFileSync(join(root, "packages/contracts/src/model-reply-store-rules.ts"), "utf8");
     expect(rules.split("\n").filter((line) => /createRovaraIndependentDecision\(/u.test(line) && !line.trim().startsWith("*") && !line.trim().startsWith("//"))).toHaveLength(1);
   });
-  it("is not called anywhere else in packages (outside F2-A's own file) except the store's tests and conformance suite", () => {
+  it("is not called anywhere else in packages (outside F2-A's own file) except R2's channel and the store's conformance suite", () => {
     const root = join(__dirname, "..", "..");
     const hits: string[] = [];
     const walk = (dir: string): void => {
@@ -416,6 +416,7 @@ describe("where createRovaraIndependentDecision is called", () => {
     };
     walk(join(root, "packages"));
     expect(hits.sort()).toEqual([
+      "packages/contracts/src/model-independent-channel.ts", // TE-R2 part A: the Rovara-side channel (R2), the second and last allowed minting place
       "packages/contracts/src/model-reply-set.ts",
       "packages/contracts/src/model-reply-store-rules.ts",
       "packages/testing/src/ports/reply-set-store-conformance.ts",
