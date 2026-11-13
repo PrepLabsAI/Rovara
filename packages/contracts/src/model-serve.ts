@@ -59,6 +59,7 @@ export const SERVE_ERROR_WORDS = {
   operation_not_built: "this operation is not served by the model helper yet",
   routes_to_local_aws_front: "this row is served by the local AWS front, not by the model helper",
   route_not_for_row: "this path does not belong to this row",
+  internal_error: "the model helper could not build this answer",
 } as const;
 export type ServeErrorCode = keyof typeof SERVE_ERROR_WORDS;
 
@@ -91,9 +92,18 @@ const MODES_OF_FAMILY: Record<string, readonly GeminiMode[]> = { gemini: ["ai_st
 
 /**
  * One request, one answer. Finds the row by the `/p/<rowId>` prefix, then routes by the row's family: Gemini and Vertex by `routeGeminiRequest`, the OpenAI-compatible family by `routeOpenAiCompatibleRequest`;
- * Anthropic and Cohere are TE-F2's, Bedrock is the local AWS front's. The body is checked for size first (1 MiB). Never throws on a request: a fixed error answer comes back instead.
+ * Anthropic and Cohere are TE-F2's, Bedrock is the local AWS front's. The body is checked for size first (1 MiB). Never throws: a fixed error answer (404, 405, 413, 421, 501, or 500 `internal_error`) comes back instead.
  */
 export function serveModelRequest(rows: readonly ServableRow[], request: ModelHelperRequest, options: ServeOptions): ModelHelperResponse {
+  try {
+    return serveUnchecked(rows, request, options);
+  } catch {
+    // A scripted reply out of bounds (a RangeError), a BigInt or a cycle in a tool call (a TypeError), a hostile request object: one fixed answer, never a throw and never the error's text.
+    return failure(500, "internal_error");
+  }
+}
+
+function serveUnchecked(rows: readonly ServableRow[], request: ModelHelperRequest, options: ServeOptions): ModelHelperResponse {
   if (bodyBytes(request.body) > MODEL_REQUEST_BODY_MAX_BYTES) return failure(413, "body_too_large");
   const matched = typeof request.path === "string" && request.path.length <= 600 ? ROW_PATH.exec(request.path) : null;
   const row = matched === null ? undefined : rows.find((candidate) => candidate.id === matched[1]);

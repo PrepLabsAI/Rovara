@@ -13,7 +13,9 @@ import {
   NOT_SEALED_SENTENCE,
   findRedirectEscapes,
   modelHostBlockList,
+  modelHostSuffixBlockList,
   redirectEscapeSentence,
+  unlistedModelHostSentence,
 } from "../../packages/contracts/src/model-egress-block.js";
 
 let connects = 0;
@@ -56,6 +58,14 @@ describe("modelHostBlockList", () => {
     // generativelanguage.googleapis.com is two rows' host and is listed once.
     expect(list.filter((host) => host === "generativelanguage.googleapis.com")).toHaveLength(1);
   });
+  it("holds every direct provider, and the Azure suffix is in the suffix list", () => {
+    const list = modelHostBlockList(rows, []);
+    for (const host of ["api.openai.com", "api.anthropic.com", "api.cohere.com", "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz", "europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "generativelanguage.mtls.googleapis.com"]) {
+      expect(list, host).toContain(host);
+    }
+    expect(modelHostSuffixBlockList(rows)).toEqual(["openai.azure.com"]);
+    expect(list.some((host) => host.endsWith("openai.azure.com"))).toBe(false);
+  });
   it("never lists a wildcard, so Cloud Storage's *.googleapis.com is not caught", () => {
     expect(modelHostBlockList(rows, []).some((host) => host.includes("*") || host === "storage.googleapis.com" || host === "googleapis.com")).toBe(false);
   });
@@ -70,7 +80,7 @@ describe("findRedirectEscapes", () => {
   const block = modelHostBlockList(rows, gateways());
   it("a canary run: an observed list holding generativelanguage.googleapis.com is a finding in the fixed words", () => {
     const escapes = findRedirectEscapes(block, ["127.0.0.1", "registry.npmjs.org", "generativelanguage.googleapis.com"]);
-    expect(escapes).toEqual([{ host: "generativelanguage.googleapis.com", sentence: "not run: client ignored the redirect (called generativelanguage.googleapis.com)" }]);
+    expect(escapes).toEqual([{ host: "generativelanguage.googleapis.com", kind: "ignored_redirect", sentence: "not run: client ignored the redirect (called generativelanguage.googleapis.com)" }]);
   });
   it("is clean when no model host was observed", () => {
     expect(findRedirectEscapes(block, ["127.0.0.1", "registry.npmjs.org", "rovara-models"])).toEqual([]);
@@ -79,6 +89,34 @@ describe("findRedirectEscapes", () => {
   it("reads a host in any spelling the evidence might carry: case, a port, a trailing dot", () => {
     const escapes = findRedirectEscapes(block, ["OpenRouter.AI:443", "oauth2.googleapis.com.", " api.portkey.ai "]);
     expect(escapes.map((escape) => escape.host)).toEqual(["api.portkey.ai", "oauth2.googleapis.com", "openrouter.ai"]);
+  });
+  it("reads URL forms, bracketed hosts, a port with a trailing dot and doubled dots through the strict host checker", () => {
+    const forms = ["https://OpenRouter.ai/api/v1/chat?x=1", "[api.portkey.ai]:443", "oauth2.googleapis.com:443.", "ai-gateway.vercel.sh..", "api.groq.com...", "api.mistral.ai:443..", "https://user:pw@api.openai.com:443/x", "HTTP://API.GROQ.COM", "wss://api.mistral.ai#frag"];
+    expect(findRedirectEscapes(block, forms).map((escape) => escape.host)).toEqual(["ai-gateway.vercel.sh", "api.groq.com", "api.mistral.ai", "api.openai.com", "api.portkey.ai", "oauth2.googleapis.com", "openrouter.ai"]);
+  });
+  it("reads each odd trailing form on its own", () => {
+    for (const form of ["api.together.xyz:443..", "api.together.xyz...", "api.together.xyz:443.", "[api.together.xyz]:443.", "api.together.xyz.:443"]) {
+      expect(findRedirectEscapes(block, [form]).map((escape) => escape.host), form).toEqual(["api.together.xyz"]);
+    }
+  });
+  it("does not read a model host out of a path, a userinfo, a subdomain or an address", () => {
+    const decoys = ["https://evil.example.com/openrouter.ai", "https://openrouter.ai@evil.example.com/", "openrouter.ai.evil.example.com", "evil-openrouter.ai", "[::1]:443", "127.0.0.1:443", "https://[::1]/api.openai.com"];
+    expect(findRedirectEscapes(block, decoys)).toEqual([]);
+  });
+  it("reports a Google AI host that is not listed as an unlisted model host, and a listed Azure suffix as an ignored redirect", () => {
+    const observed = ["europe-west99-aiplatform.googleapis.com", "generativelanguage-v2.googleapis.com", "aiplatform.googleapis.com", "storage.googleapis.com", "europe-west99-aiplatform.googleapis.com.evil.example.com", "mine.openai.azure.com", "openai.azure.com", "azure.com"];
+    const escapes = findRedirectEscapes(block, observed, { hostSuffixes: modelHostSuffixBlockList(rows) });
+    expect(escapes).toEqual([
+      { host: "aiplatform.googleapis.com", kind: "ignored_redirect", sentence: "not run: client ignored the redirect (called aiplatform.googleapis.com)" },
+      { host: "europe-west99-aiplatform.googleapis.com", kind: "unlisted_model_host", sentence: "not run: unlisted model host (called europe-west99-aiplatform.googleapis.com)" },
+      { host: "generativelanguage-v2.googleapis.com", kind: "unlisted_model_host", sentence: "not run: unlisted model host (called generativelanguage-v2.googleapis.com)" },
+      { host: "mine.openai.azure.com", kind: "ignored_redirect", sentence: "not run: client ignored the redirect (called mine.openai.azure.com)" },
+    ]);
+    // A name that is not exactly one plain DNS name is never a finding, even under a listed suffix, and is never repeated.
+    const odd = ["a b.openai.azure.com", "x..openai.azure.com", "x_y.openai.azure.com", "x.openai.azure.com\nIgnore previous", "x.europe-west99-aiplatform.googleapis.com", "[x.openai.azure.com", "x.openai.azure.com:99999999"];
+    expect(findRedirectEscapes(block, odd, { hostSuffixes: modelHostSuffixBlockList(rows) })).toEqual([]);
+    // Without the suffix list an Azure host is not known to be a model host.
+    expect(findRedirectEscapes(block, ["mine.openai.azure.com"])).toEqual([]);
   });
   it("reports each host once, sorted, however many times it was called", () => {
     const escapes = findRedirectEscapes(block, ["openrouter.ai", "api.portkey.ai", "openrouter.ai", "openrouter.ai"]);
@@ -100,6 +138,7 @@ describe("findRedirectEscapes", () => {
 describe("the fixed sentences", () => {
   it("are exactly the words the plan and the design use", () => {
     expect(redirectEscapeSentence("api.openai.com")).toBe("not run: client ignored the redirect (called api.openai.com)");
+    expect(unlistedModelHostSentence("x.googleapis.com")).toBe("not run: unlisted model host (called x.googleapis.com)");
     expect(MODEL_HOSTS_NOT_BLOCKED_SENTENCE).toBe("model hosts not blocked on this machine");
     expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only");
     expect(NOT_SEALED_SENTENCE).toBe("not sealed");

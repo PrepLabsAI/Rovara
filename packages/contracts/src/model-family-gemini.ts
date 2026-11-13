@@ -184,7 +184,7 @@ export const GCE_METADATA_HOST_VARIABLE = "GCE_METADATA_HOST";
 export const GCE_METADATA_IP_VARIABLE = "GCE_METADATA_IP";
 /** The token the emulation hands out: a fixed placeholder built at run time. The real token exists only in the egress function. */
 export const GCE_DUMMY_TOKEN = ["rovara", "dummy", "token"].join("-");
-export const GCE_PLACEHOLDER_EMAIL = "rovara-helper@rovara-test.iam.gserviceaccount.com";
+export const GCE_PLACEHOLDER_EMAIL = "rovara-helper@rovara-test.iam.gserviceaccount.invalid";
 const GCE_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"];
 
 export const GCE_METADATA_ROUTES = [

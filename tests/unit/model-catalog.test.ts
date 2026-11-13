@@ -3,6 +3,7 @@ import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   COMPANY_GATEWAY_MAX_PER_PROJECT,
+  MODEL_REDIRECT_ENV_NAMES,
   CompanyGatewayRowSchema,
   MODEL_FAMILIES,
   MODEL_STREAMING_FORMATS,
@@ -55,7 +56,7 @@ describe("the built-in rows", () => {
   });
   it("takes the Gemini facts from the redirect check", () => {
     const gemini = rowById("gemini");
-    expect(gemini.hosts).toEqual(["generativelanguage.googleapis.com"]);
+    expect(gemini.hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"]);
     expect(gemini.family).toBe("gemini");
     expect(gemini.auth).toEqual([{ scheme: "header", name: "x-goog-api-key" }]);
     expect(gemini.streaming).toEqual(["sse", "json_array"]);
@@ -82,7 +83,7 @@ describe("the built-in rows", () => {
     const row = rowById("gemini-openai");
     expect(row.family).toBe("openai_compatible");
     expect(row.pathPrefix).toBe("/v1beta/openai");
-    expect(row.hosts).toEqual(["generativelanguage.googleapis.com"]);
+    expect(row.hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"]);
     expect(row.auth).toEqual([{ scheme: "bearer" }]);
     expect(row.redirect[0]).toMatchObject({ kind: "env_var", names: ["OPENAI_BASE_URL"], verified: true });
     expect(row.streaming).toEqual(["sse"]);
@@ -99,6 +100,29 @@ describe("the built-in rows", () => {
   });
   it("gives every row the five error-shape ids F2 will fill", () => {
     for (const row of builtin()) expect(Object.keys(row.errors).sort()).toEqual(["badToolJson", "cutOffStream", "rateLimit", "refusal", "tokenLimit"]);
+  });
+  it("covers the direct providers: OpenAI, Anthropic, Cohere, Mistral, Groq, Together and Azure OpenAI (a suffix row)", () => {
+    expect(rowById("openai")).toMatchObject({ family: "openai_compatible", hosts: ["api.openai.com"] });
+    expect(rowById("anthropic")).toMatchObject({ family: "anthropic_messages", hosts: ["api.anthropic.com"], auth: [{ scheme: "header", name: "x-api-key" }] });
+    expect(rowById("cohere")).toMatchObject({ family: "cohere", hosts: ["api.cohere.ai", "api.cohere.com"] });
+    expect(rowById("mistral")).toMatchObject({ family: "openai_compatible", hosts: ["api.mistral.ai"] });
+    expect(rowById("groq")).toMatchObject({ family: "openai_compatible", hosts: ["api.groq.com"] });
+    expect(rowById("together")).toMatchObject({ family: "openai_compatible" });
+    expect(rowById("together").hosts).toEqual(expect.arrayContaining(["api.together.xyz"]) as unknown);
+    expect(rowById("azure-openai")).toMatchObject({ family: "openai_compatible", hosts: [], hostSuffixes: ["openai.azure.com"], auth: [{ scheme: "header", name: "api-key" }] });
+    // Shapes the redirect check did not cover are unverified, in the data and the notes.
+    for (const id of ["openai", "anthropic", "cohere", "mistral", "groq", "together", "azure-openai"]) {
+      expect(rowById(id).redirect.every((method) => !method.verified), id).toBe(true);
+      expect(rowById(id).notes.some((note) => note.startsWith("UNVERIFIED")), id).toBe(true);
+    }
+  });
+  it("lists the newer Vertex locations and the mtls hosts by name", () => {
+    const vertex = rowById("vertex").hosts;
+    for (const host of ["europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "europe-west10-aiplatform.mtls.googleapis.com"]) {
+      expect(vertex, host).toContain(host);
+    }
+    expect(rowById("gemini").hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"]);
+    expect(rowById("gemini-openai").hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"]);
   });
   it("keeps one row per (host, family) so routing is never ambiguous", () => {
     const pairs = builtin().flatMap((row) => row.hosts.map((host) => `${host}|${row.family}`));
@@ -159,9 +183,13 @@ describe("row schema", () => {
   });
   it("bounds the lists", () => {
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [] })).success).toBe(false);
-    const many = Array.from({ length: 65 }, (_, index) => `h${String(index)}.example.com`);
+    const many = Array.from({ length: 129 }, (_, index) => `h${String(index)}.example.com`);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many })).success).toBe(false);
-    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many.slice(0, 64) })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many.slice(0, 128) })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: [] })).success).toBe(false);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: ["openai.azure.com"] })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hostSuffixes: ["com"] })).success).toBe(false);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hostSuffixes: ["*.azure.com"] })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: ["a.example.com", "a.example.com"] })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ notes: Array.from({ length: 21 }, () => "n") })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ notes: ["x".repeat(301)] })).success).toBe(false);
@@ -178,13 +206,22 @@ describe("row schema", () => {
     const withRedirect = (redirect: unknown[]) => ModelCatalogRowSchema.safeParse(sampleRow({ redirect }));
     expect(withRedirect([{ kind: "env_var", client: "c", names: ["lower"], companion: [], verified: true }]).success).toBe(false);
     expect(withRedirect([{ kind: "env_var", client: "c", names: [], companion: [], verified: true }]).success).toBe(false);
-    expect(withRedirect([{ kind: "env_var", client: "c", names: ["A"], companion: [], verified: true }]).success).toBe(true);
+    expect(withRedirect([{ kind: "env_var", client: "c", names: ["OPENAI_BASE_URL"], companion: [], verified: true }]).success).toBe(true);
+    // An allow-list, not a pattern: a variable that changes how a process loads or runs is never a redirect variable.
+    for (const name of ["A", "LD_PRELOAD", "NODE_OPTIONS", "BASH_ENV", "PATH", "HTTPS_PROXY", "PYTHONPATH", "DYLD_INSERT_LIBRARIES"]) {
+      expect(withRedirect([{ kind: "env_var", client: "c", names: [name], companion: [], verified: true }]).success, name).toBe(false);
+      expect(withRedirect([{ kind: "env_var", client: "c", names: ["OPENAI_BASE_URL"], companion: [name], verified: true }]).success, `companion ${name}`).toBe(false);
+    }
+    for (const name of MODEL_REDIRECT_ENV_NAMES) expect(withRedirect([{ kind: "env_var", client: "c", names: [name], companion: [], verified: true }]).success, name).toBe(true);
+    for (const name of ["GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "OPENAI_BASE_URL", "GCE_METADATA_HOST", "GCE_METADATA_IP", "ANTHROPIC_BASE_URL"]) expect(MODEL_REDIRECT_ENV_NAMES).toContain(name);
+    // Every variable the built-in rows use is on the list.
+    for (const row of builtin()) for (const method of row.redirect) if (method.kind === "env_var") for (const name of [...method.names, ...method.companion]) expect(MODEL_REDIRECT_ENV_NAMES, name).toContain(name);
     expect(withRedirect([{ kind: "sdk_option", client: "c", option: "baseUrl", needsRestTransport: false, verified: true }]).success).toBe(true);
     expect(withRedirect([{ kind: "dns_in_sealed_network", client: "c", verified: false }]).success).toBe(true);
     expect(withRedirect([{ kind: "none", client: "c", verified: true }]).success).toBe(true);
     expect(withRedirect([{ kind: "proxy", client: "c", verified: true }]).success).toBe(false);
     expect(withRedirect([]).success).toBe(false);
-    for (const pathPrefix of ["v1", "/v1/", "/v1?x=1", "/../v1", "/a//b", "/v1 beta"]) expect(ModelCatalogRowSchema.safeParse(sampleRow({ pathPrefix })).success, pathPrefix).toBe(false);
+    for (const pathPrefix of ["v1", "/v1/", "/v1?x=1", "/../v1", "/a//b", "/v1 beta", "/./v1", "/v1/./x", "/.", "/v1/.", "/.."]) expect(ModelCatalogRowSchema.safeParse(sampleRow({ pathPrefix })).success, pathPrefix).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ pathPrefix: "/api/v1" })).success).toBe(true);
   });
   it("renders the 'none' redirect as 'not run: client cannot be redirected'", () => {
@@ -264,6 +301,19 @@ describe("company-gateway rows", () => {
     // The same family as a built-in row on that host is not confusable.
     expect(checkCompanyGatewayRows([gateway({ host: "openrouter.ai", family: "openai_compatible" })], builtin())).toMatchObject({ ok: true });
   });
+  it("also treats a built-in row's auth hosts and host suffixes as confusable", () => {
+    for (const host of ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) {
+      expect(checkCompanyGatewayRows([gateway({ host })], builtin()), host).toMatchObject({ ok: false, issues: [{ index: 0, code: "confusable_host" }] });
+      expect(checkCompanyGatewayRows([gateway({ host, family: "gemini" })], builtin()), host).toMatchObject({ ok: false, issues: [{ code: "confusable_host" }] });
+    }
+    expect(checkCompanyGatewayRows([gateway({ host: "mine.openai.azure.com", family: "anthropic_messages" })], builtin())).toMatchObject({ ok: false, issues: [{ code: "confusable_host" }] });
+    expect(checkCompanyGatewayRows([gateway({ host: "mine.openai.azure.com", family: "openai_compatible" })], builtin())).toMatchObject({ ok: true });
+  });
+  it("refuses hop-by-hop and spoofing header names as a gateway's auth header", () => {
+    for (const name of ["keep-alive", "content-encoding", "via", "x-real-ip", "x-http-method-override", "x-original-url", "origin", "cf-connecting-ip", "x-amz-security-token", "x-amz-anything", "host", "connection", "transfer-encoding", "authorization", "proxy-connection", "x-forwarded-host"]) {
+      expect(CompanyGatewayRowSchema.safeParse(gateway({ auth: { scheme: "header", name } })).success, name).toBe(false);
+    }
+  });
   it("refuses a repeated id, an id equal to a built-in id, and one host spoken in two shapes", () => {
     expect(checkCompanyGatewayRows([gateway(), gateway({ host: "b.example.com" })], builtin())).toMatchObject({ ok: false, issues: [{ index: 1, code: "duplicate_id" }] });
     expect(checkCompanyGatewayRows([gateway({ id: "gemini" })], builtin())).toMatchObject({ ok: false, issues: [{ code: "duplicate_id" }] });
@@ -300,6 +350,15 @@ describe("the stable digest and the unsigned parse", () => {
     changed.rows[0]!.hosts = [...changed.rows[0]!.hosts, "extra.example.com"];
     expect(modelCatalogDigest(changed)).not.toBe(modelCatalogDigest(base));
     expect(modelCatalogDigest({ ...base, revision: base.revision + 1 })).not.toBe(modelCatalogDigest(base));
+  });
+  it("pins the digest of the built-in rows: any change to a row is a conscious change here", () => {
+    expect(modelCatalogDigest(builtinModelCatalog())).toBe("77cf5f6756a7d86c0e34851a25302385d9078c2f497ab66a9da424e06fccb012");
+  });
+  it("keeps the unsigned parse out of the barrel: only builtinModelCatalog() may feed F1 and F2", async () => {
+    const barrel = (await import("../../packages/contracts/src/index.js")) as Record<string, unknown>;
+    expect(barrel.parseModelCatalogBytes).toBeUndefined();
+    expect(typeof barrel.modelCatalogDigest).toBe("function");
+    expect(typeof barrel.builtinModelCatalog).toBe("function");
   });
   it("parses bytes strictly, returns the digest and says it is unsigned", () => {
     const base = builtinModelCatalog();
