@@ -10,7 +10,7 @@ import { buildOpenAiEmbeddings, buildOpenAiResponse, openAiResponseStreamBody } 
 import { anthropicErrorBody } from "./model-family-anthropic.js";
 import { cohereErrorBody } from "./model-family-cohere.js";
 import { buildGeminiBatchEmbedContents, buildGeminiEmbedContent } from "./model-family-gemini-extra.js";
-import type { ModelReply, SseLineEnding } from "./model-family-common.js";
+import { replyUsage, seededId, sseBody, type ModelReply, type SseLineEnding } from "./model-family-common.js";
 import type { ModelRequestFacts } from "./model-request-facts.js";
 
 export const MODEL_WIRES = ["openai", "anthropic", "cohere", "gemini"] as const;
@@ -22,6 +22,8 @@ export interface ModelAnswer {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
+  /** Failure-pack dropped connection: send these partial bytes without completing HTTP framing. */
+  readonly truncated?: true;
 }
 
 export interface RenderContext {
@@ -61,7 +63,7 @@ export function renderModelReply(reply: ModelReply, context: RenderContext): Mod
     case "openai": {
       if (context.operation === "chat_completions") {
         const build = { model: context.model, seed: context.seed, created: context.created } as const;
-        return streamed ? sseAnswer(buildChatCompletionStream(reply, build, context.lineEnding)) : jsonAnswer(200, buildChatCompletion(reply, build));
+        return streamed ? sseAnswer(appendOpenAiStreamUsage(buildChatCompletionStream(reply, build, context.lineEnding), reply, context)) : jsonAnswer(200, buildChatCompletion(reply, build));
       }
       if (context.operation === "responses") {
         const build = { model: context.model, seed: context.seed, created: context.created } as const;
@@ -138,4 +140,11 @@ export function renderUtilityOperation(facts: ModelRequestFacts, requestBytes: n
   if (context.wire === "gemini" && context.operation === "embedContent") return jsonAnswer(200, buildGeminiEmbedContent({ seed: context.seed, dimensions: facts.dimensions }));
   if (context.wire === "gemini" && context.operation === "batchEmbedContents") return jsonAnswer(200, buildGeminiBatchEmbedContents({ seed: context.seed, count: facts.inputCount, dimensions: facts.dimensions }));
   return undefined;
+}
+
+/** F2 adds a usage-only chunk immediately before the stream terminator. */
+export function appendOpenAiStreamUsage(body: string, reply: ModelReply, context: Pick<RenderContext, "seed" | "model" | "created" | "lineEnding">): string {
+  const usage = replyUsage(reply);
+  const chunk = JSON.stringify({ id: `chatcmpl-${seededId(context.seed)}`, object: "chat.completion.chunk", created: context.created, model: context.model, choices: [], usage: { prompt_tokens: usage.inputTokens, completion_tokens: usage.outputTokens, total_tokens: usage.inputTokens + usage.outputTokens } });
+  return body.replace(/data: \[DONE\](?=(?:\r?\n){2}$)/u, `${sseBody([chunk], context.lineEnding)}data: [DONE]`);
 }

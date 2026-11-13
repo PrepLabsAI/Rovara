@@ -1,0 +1,62 @@
+// Load before any SDK. Never writes URLs, headers, bodies, or exception messages.
+import { appendFileSync, accessSync, constants } from 'node:fs';
+import net from 'node:net';
+import tls from 'node:tls';
+import dns from 'node:dns';
+import http from 'node:http';
+import https from 'node:https';
+import http2 from 'node:http2';
+import dgram from 'node:dgram';
+import { syncBuiltinESMExports } from 'node:module';
+const log = process.env.SDK_TRIPWIRE_LOG;
+if (!log) throw new Error('tripwire log required');
+accessSync(log, constants.W_OK);
+const local = host => ['127.0.0.1', '::1', '[::1]', 'localhost'].includes(host);
+function check(host) {
+  if (local(host)) return;
+  const safe = typeof host === 'string' && /^[a-zA-Z0-9.:[\]-]{1,253}$/.test(host) ? host : 'unreadable';
+  appendFileSync(log, JSON.stringify(safe) + '\n');
+  throw Object.assign(new Error('non-loopback connection refused'), { code: 'SDK_EGRESS_REFUSED' });
+}
+function destination(args) {
+  const a = Array.isArray(args[0]) ? args[0] : args;
+  const first = a[0];
+  if (typeof first === 'number') return typeof a[1] === 'string' ? a[1] : 'localhost';
+  if (typeof first === 'string' || first instanceof URL) {
+    try { return new URL(first).hostname; } catch { return 'unreadable'; }
+  }
+  if (first?.path && first.port === undefined && first.hostname === undefined && first.host === undefined) return 'unreadable';
+  return first?.hostname ?? first?.host ?? 'localhost';
+}
+function wrap(object, key, getHost = destination) {
+  const original = object[key];
+  if (typeof original !== 'function') return;
+  object[key] = function (...args) { check(getHost(args)); return Reflect.apply(original, this, args); };
+}
+wrap(net.Socket.prototype, 'connect');
+wrap(tls, 'connect');
+for (const object of [dns, dns.promises, dns.Resolver.prototype, dns.promises.Resolver.prototype]) {
+  for (const key of ['lookup','lookupService','resolve','resolve4','resolve6','resolveAny','resolveCname','resolveMx','resolveNs','resolveSrv','resolveTxt','resolvePtr','resolveNaptr','resolveSoa','resolveCaa','reverse']) wrap(object,key,args=>args[0]);
+}
+for (const object of [http, https]) { wrap(object,'request'); wrap(object,'get'); }
+wrap(http2,'connect');
+wrap(dgram.Socket.prototype,'connect',args=>args[1] ?? 'localhost');
+wrap(dgram.Socket.prototype,'send',args=>args.find((x,i)=>i>1 && typeof x==='string') ?? 'unreadable');
+const fetchOriginal = globalThis.fetch;
+globalThis.fetch = function (input, init) {
+  check(new URL(typeof input === 'string' || input instanceof URL ? input : input.url).hostname);
+  return fetchOriginal(input,init);
+};
+const WebSocketOriginal = globalThis.WebSocket;
+if (WebSocketOriginal) globalThis.WebSocket = class extends WebSocketOriginal {
+  constructor(url,...args) { check(new URL(url).hostname); super(url,...args); }
+};
+syncBuiltinESMExports();
+const canary = new net.Socket();
+try {
+  canary.connect(443, 'model-canary.rovara-canary.dev');
+  throw new Error('tripwire canary not refused');
+} catch (error) {
+  if (error.code !== 'SDK_EGRESS_REFUSED') throw error;
+} finally { canary.destroy(); }
+globalThis.__sdkTripwireActive = true;
