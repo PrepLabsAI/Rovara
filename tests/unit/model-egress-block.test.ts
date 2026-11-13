@@ -166,7 +166,8 @@ describe("no callers yet", () => {
       return entry.isDirectory() ? walk(full) : /\.(ts|tsx|js|mjs)$/u.test(entry.name) ? [full] : [];
     });
   it("nothing outside the new files (and their tests and the contracts barrel) imports them", () => {
-    const own = new Set(NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`));
+    // FIX-0518: the test-account model-host check is the first caller (a test account is never for a model host), and it reads the catalog's rows, so it is allowed to import them.
+    const own = new Set([...NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`), "packages/contracts/src/test-account-model-hosts.ts"]);
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
@@ -182,7 +183,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!tests/contract/test-account-model-hosts.test.ts"], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

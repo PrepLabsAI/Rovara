@@ -292,6 +292,7 @@ export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
 export * from "./model-serve.js";
 export * from "./test-account.js";
+export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
 export * from "./mcp-servers.js";
 
