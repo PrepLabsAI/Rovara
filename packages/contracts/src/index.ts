@@ -19,6 +19,7 @@ export * from "./developer-tasks-node.js";
 export * from "./task-workflow-node.js";
 export * from "./task-workflow-revise.js";
 export * from "./task-workflow-design-review.js";
+export * from "./task-flow-tier.js";
 export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
@@ -292,6 +293,7 @@ export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
 export * from "./model-serve.js";
 export * from "./test-account.js";
+export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
 export * from "./mcp-servers.js";
 

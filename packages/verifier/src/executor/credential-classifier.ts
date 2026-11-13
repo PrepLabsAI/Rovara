@@ -61,6 +61,10 @@ export function isOpaqueToken(value: string): boolean {
   return /^[A-Za-z0-9]{8,}$/.test(value) && /[0-9]/.test(value) && /[A-Za-z]/.test(value);
 }
 
+/** A piece of 12 or more letters and digits with both cases and a digit (a hex id has one case, a camel-case word no digit run): the mark of random characters inside a value cut at `-` or `_`. */
+function isRandomPiece(part: string): boolean {
+  return part.length >= 12 && /^[A-Za-z0-9]+$/.test(part) && /[a-z]/.test(part) && /[A-Z]/.test(part) && /[0-9]/.test(part);
+}
 /**
  * A slug or a path: separated by `-`, `_` or `/` into word-like parts ("projects/alpha/settings/notifications2", "my-quarterly-report-2024-final"). A random token has parts of mixed case and
  * digits that are not words. Two parts or more, and at least 60% of them words.
@@ -70,6 +74,9 @@ export function isSlugOrPath(value: string): boolean {
   const separators = value.includes("/") && /[a-z]/.test(value) && /[A-Z]/.test(value) ? /[-_]/ : /[-_/]/;
   const parts = value.split(separators).filter((part) => part.length > 0);
   if (parts.length < 2) return false;
+  // A long piece of both cases and a digit is a random run, not a word or an id: a random base64url token that its own `-` or `_` cut into short word-like pieces around one such run
+  // (`dfakcoe9_do-eLOSC0ZGdO48bORcH9QZ`, about 1 in 9,000 tokens of 32 characters) has 60% "words" by count and was read as a slug, so it was not masked. A slug has none.
+  if (parts.some(isRandomPiece)) return false;
   const words = parts.filter((part) => WORD_SEGMENT.test(part) && /[aeiouy]/i.test(part)).length;
   return words / parts.length >= 0.6;
 }
