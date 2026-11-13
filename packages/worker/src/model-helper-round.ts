@@ -137,8 +137,8 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       const started = await ensure(signal);
       if (started === undefined) return runners.runProjectCommand(command, signal);
       // The helper's variables go LAST: they win over the command's own and over the worker's (a real key in the user's shell is overridden with the dummy).
-      // The names in `unsetEnvironment` are set to `undefined` in the command's environment, which the child process does not receive (the command's own `env` is not allowed to bring one back).
-      const unset = Object.fromEntries(started.unsetEnvironment.map((name) => [name, undefined])) as unknown as Record<string, string>;
+      // Remove inherited credentials, while preserving a GOOGLE_APPLICATION_CREDENTIALS explicitly set by the project (decision 174).
+      const unset = Object.fromEntries(started.unsetEnvironment.filter((name) => name !== "GOOGLE_APPLICATION_CREDENTIALS" || !Object.hasOwn(command.env ?? {}, name)).map((name) => [name, undefined])) as unknown as Record<string, string>;
       return runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...started.commandEnvironment, ...unset } }, signal);
     },
     async runAgentCommand(replay, timeoutMs, signal) {

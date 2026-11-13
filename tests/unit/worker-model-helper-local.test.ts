@@ -85,16 +85,28 @@ describe("the variables", () => {
     expect(isCredentialVariable("openai_api_key")).toBe(true);
     expect(isCredentialVariable("DB_PASSWORD")).toBe(false);
   });
-  it("point the row's client at the helper, add the companions, and override EVERY key variable with the dummy; Vertex gets the metadata server and an emptied key-file path", () => {
+  it("point the row's client at the helper, add the companions, and override EVERY key variable with the dummy; Vertex gets the metadata server without setting a key-file path", () => {
     const gemini = laptopModelEnvironment({ rows: CATALOG, rowIds: ["gemini", "vertex"], baseUrl: "http://127.0.0.1:5555", metadataHostPort: "127.0.0.1:5556", projectId: "rovara-test-project", adc: ADC, inherited: {} });
     expect(gemini.ok).toBe(true);
     const env = gemini.ok ? gemini.environment : {};
     expect(env).toMatchObject({
       GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:5555/p/gemini", GOOGLE_VERTEX_BASE_URL: "http://127.0.0.1:5555/p/vertex", GCE_METADATA_HOST: "127.0.0.1:5556", GCE_METADATA_IP: "127.0.0.1:5556",
-      GOOGLE_CLOUD_PROJECT: "rovara-test-project", GOOGLE_CLOUD_LOCATION: "us-central1", GOOGLE_APPLICATION_CREDENTIALS: "", CLOUDSDK_CONFIG: ADC.cloudsdkConfigDir,
+      GOOGLE_CLOUD_PROJECT: "rovara-test-project", GOOGLE_CLOUD_LOCATION: "us-central1", CLOUDSDK_CONFIG: ADC.cloudsdkConfigDir,
     });
     for (const name of ["GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CO_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY"]) expect(env[name], name).toBe(MODEL_DUMMY_KEY);
     expect(modelKeyVariables(CATALOG)).toEqual(expect.arrayContaining(["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]));
+  });
+  it("an OpenAI-only round leaves Google metadata and gcloud settings untouched", () => {
+    const inherited = { GCE_METADATA_HOST: "project-metadata", GCE_METADATA_IP: "project-ip", CLOUDSDK_CONFIG: "/project/gcloud" };
+    const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai"], baseUrl: "http://h:1", metadataHostPort: "127.0.0.1:9", adc: ADC, inherited });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const name of Object.keys(inherited)) {
+      expect(result.environment).not.toHaveProperty(name);
+      expect(result.unset).not.toContain(name);
+    }
+    expect(result.environment).not.toHaveProperty("GOOGLE_APPLICATION_CREDENTIALS");
+    expect(result.environment.OPENAI_BASE_URL).toBe("http://h:1/p/openai/v1");
   });
   it("the OpenAI-compatible row's URL carries /v1, a row with its own prefix keeps it, and two rows that want one variable with different values are a conflict", () => {
     const openai = CATALOG.find((row) => row.id === "openai") as (typeof CATALOG)[number];
@@ -177,7 +189,7 @@ describe("the loopback child", () => {
     expect(out.status).toBe(200);
     expect(out.key).toBe(MODEL_DUMMY_KEY);
     expect(out.gemini).toBe(MODEL_DUMMY_KEY);
-    expect(out.creds).toBe("");
+    expect(out.creds).toBeUndefined();
     // unset (absent, not blank) in the command; a database URL is untouched
     expect(out.aws).toBeUndefined();
     // the review's probe: a vendor-prefixed KEY name never reaches the child; a bare non-vendor *_KEY name is deliberately kept
@@ -195,6 +207,36 @@ describe("the loopback child", () => {
     // the helper child and its files are gone after the round
     expect(results[0]?.summary?.trusted).toBe(true);
   }, 60_000);
+  it.each(["openai", "vertex"])("a project's own Google credentials survive a %s helper round even when the shell also sets them", async (rowId) => {
+    setEnv("AGENTX_TASK_SHELL", "local");
+    setEnv("GOOGLE_APPLICATION_CREDENTIALS", join(tmp(), "shell-credentials.json"));
+    const { root, source } = repo();
+    const projectCredentials = join(root, "project-credentials.json");
+    const plan = localModelHelperPlan({ catalogRows: CATALOG, rowIds: [rowId], source, blockList: BLOCK, entry: ENTRY, scratchRoot: tmp(), onResult: () => undefined });
+    const runners = withModelHelperRound(plan, createCheckRunners({ rootPath: root, local: true }));
+    try {
+      const result = await runners.runProjectCommand({ cwd: ".", executable: process.execPath, args: ["-e", "console.log(process.env.GOOGLE_APPLICATION_CREDENTIALS)"], env: { GOOGLE_APPLICATION_CREDENTIALS: projectCredentials }, timeoutSeconds: 30 }, new AbortController().signal);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe(projectCredentials);
+    } finally {
+      await runners.endRound?.();
+    }
+  });
+  it("a prototype credential setting cannot restore the shell's Google credential", async () => {
+    setEnv("AGENTX_TASK_SHELL", "local");
+    setEnv("GOOGLE_APPLICATION_CREDENTIALS", join(tmp(), "shell-credentials.json"));
+    const { root, source } = repo();
+    const env = Object.create({ GOOGLE_APPLICATION_CREDENTIALS: "prototype-credential.json" }) as Record<string, string>;
+    const plan = localModelHelperPlan({ catalogRows: CATALOG, rowIds: ["vertex"], source, blockList: BLOCK, entry: ENTRY, scratchRoot: tmp(), onResult: () => undefined });
+    const runners = withModelHelperRound(plan, createCheckRunners({ rootPath: root, local: true }));
+    try {
+      const result = await runners.runProjectCommand({ cwd: ".", executable: process.execPath, args: ["-e", "console.log(process.env.GOOGLE_APPLICATION_CREDENTIALS === undefined)"], env, timeoutSeconds: 30 }, new AbortController().signal);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("true");
+    } finally {
+      await runners.endRound?.();
+    }
+  });
   it("a project with no reply set starts no helper and its commands run unchanged", async () => {
     const root = tmp();
     const source = createRepoReplySetSource({ repositoryRoot: root, baseCommit: "1".repeat(40), workingRoot: root, scratchRoot: tmp() });
