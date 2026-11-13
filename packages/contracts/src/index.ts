@@ -254,6 +254,7 @@ export * from "./service-catalog-images.js";
 export * from "./catalog-trust.js";
 export * from "./service-catalog-verify.js";
 export * from "./test-account.js";
+export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
 export * from "./mcp-servers.js";
 
