@@ -1,7 +1,7 @@
 // TE-R2 part A (M2, release 0.5.19; DECISIONS 161, 166b): the Rovara-side CHANNEL, the only file besides R1's `model-reply-store-rules.ts` (`decisionForEntry`) that calls `createRovaraIndependentDecision`.
 //
 // IT IS NOT IN THE PUBLIC INDEX. `@agentx/contracts` exports neither `acceptAgentReply` nor `createRovaraIndependentDecision`; both live behind the subpath `@agentx/contracts/independent-channel` (`independent-channel.ts`), which only the
-// broker (and the reply store's own test kit) may import. A guard (`tests/support/independent-mint-guard.ts`, read with the TypeScript parser) fails on any other mention of either name or of this module, in any .ts, .mts, .cts, .tsx,
+// broker (and the reply store's own test kit) may import. A guard (`tests/unit/model-independent-mint-kit.ts`, read with the TypeScript parser) fails on any other mention of either name or of this module, in any .ts, .mts, .cts, .tsx,
 // .js, .mjs or .cjs file of packages, scripts and infra. The worker only ever receives RESOLVED sets, never a decision.
 //
 // `acceptAgentReply` turns one validated agent answer into the entry R1's `putIndependentOverlay` takes: `{reply, decision}`.

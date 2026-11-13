@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import * as publicContracts from "@agentx/contracts";
 import * as subpath from "@agentx/contracts/independent-channel";
-import { MINT_ALLOW, findMintMentions, mintOffenders, type MintFile } from "../support/independent-mint-guard.js";
+import { MINT_ALLOW, findMintMentions, mintOffenders, type MintFile } from "./model-independent-mint-kit.js";
 
 const ROOT = join(__dirname, "..", "..");
 const ID = "createRovaraIndependentDecision";
