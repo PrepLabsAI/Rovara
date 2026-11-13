@@ -1,5 +1,6 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { mkdtemp, rm, writeFile, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { proveWithMachineMeasurement } from "../../packages/worker/src/machine-measurement.js";
 import { TestEnvProveReportSchema, TEST_ENV_PROVE_MEASURE_FEATURE } from "@agentx/contracts";
 // Proof and test environment E3: the Prove run's sequence, failure words, bounds, and the report the broker re-reads.
@@ -209,9 +210,9 @@ describe("asked-for machine measurement", () => {
 });
 
 it("the single future setup entry point negotiates and reads the sandbox before release; old reports still parse", async () => {
-  const root = resolve(".tmp-te-c5"); await mkdir(root, { recursive: true });
-  const directory = await mkdtemp(join(root, "integration-"));
+  const directory = await mkdtemp(join(await realpath(tmpdir()), "te-c5-integration-"));
   try {
+    expect(dirname(directory)).toBe(await realpath(tmpdir()));
     await writeFile(join(directory, "memory.peak"), "6442450944\n");
     const environment = env(), input = { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000 };
     const old = await prove(fakes().ports); expect(TestEnvProveReportSchema.parse(old)).toEqual(old);

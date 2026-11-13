@@ -1,7 +1,8 @@
 import type * as FsPromises from "node:fs/promises";
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, rm, symlink, writeFile, open } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdtemp, mkdir, rm, symlink, writeFile, open, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { readCgroupPeakMemoryMiB } from "../../packages/worker/src/machine-measurement.js";
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof FsPromises>();
@@ -9,9 +10,10 @@ vi.mock("node:fs/promises", async importOriginal => {
 });
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
-async function directory() { const root = resolve(".tmp-te-c5"); await mkdir(root, { recursive: true }); const dir = await mkdtemp(join(root, "cgroup-")); directories.push(dir); return dir; }
+async function directory() { const dir = await mkdtemp(join(await realpath(tmpdir()), "te-c5-cgroup-")); directories.push(dir); return dir; }
 it("reads a bounded byte count, including the maximum, from a regular memory.peak file", async () => {
   const dir = await directory();
+  expect(dirname(dir)).toBe(await realpath(tmpdir()));
   for (const mib of [0, 6144, 1_048_576]) { await writeFile(join(dir, "memory.peak"), `${mib * 1048576}\n`); expect(await readCgroupPeakMemoryMiB(dir)).toBe(mib); }
 });
 it("returns unknown for missing, garbage, huge, negative or non-file input", async () => {

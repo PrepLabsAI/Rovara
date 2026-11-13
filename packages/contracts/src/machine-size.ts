@@ -34,7 +34,8 @@ export function suggestMachine(input: { peakMemoryMiB?: number | undefined; suit
 export const ARM_INCOMPATIBILITY_PATTERNS = [
   { id: "exec_format", pattern: /\bexec format error\b/iu },
   { id: "unsupported_wheel", pattern: /\bis not a supported wheel on this platform\b/iu },
-  { id: "npm_platform", pattern: /\bEBADPLATFORM\b|\bUnsupported platform for\b/u },
+  // npm WARN optional/notsup notices can accompany an unrelated failure. Only npm's error lines are evidence.
+  { id: "npm_platform", pattern: /^npm[ \t]+(?:ERR!|error)[ \t]+(?:code[ \t]+EBADPLATFORM\b|(?:notsup[ \t]+)?Unsupported platform for\b)/imu },
   { id: "manifest_arm64", pattern: /\bno matching manifest for linux\/arm64\b/iu },
   { id: "image_amd64", pattern: /image's platform \(linux\/amd64\) does not match/iu },
 ] as const;

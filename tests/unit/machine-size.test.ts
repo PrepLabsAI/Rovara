@@ -27,7 +27,7 @@ describe("machine suggestions", () => {
   });
 });
 describe("ARM evidence is fixed words", () => {
-  it.each([["exec format error", "exec_format"], ["x is not a supported wheel on this platform", "unsupported_wheel"], ["npm ERR! code EBADPLATFORM", "npm_platform"], ["Unsupported platform for x", "npm_platform"], ["no matching manifest for linux/arm64", "manifest_arm64"], ["image's platform (linux/amd64) does not match", "image_amd64"]])("%s", (tail, patternId) => { expect(armCompatibilityOf(report(tail))).toEqual({ verdict: "arm_incompatible", patternId }); });
+  it.each([["exec format error", "exec_format"], ["x is not a supported wheel on this platform", "unsupported_wheel"], ["npm ERR! code EBADPLATFORM", "npm_platform"], ["npm error notsup Unsupported platform for x", "npm_platform"], ["no matching manifest for linux/arm64", "manifest_arm64"], ["image's platform (linux/amd64) does not match", "image_amd64"]])("%s", (tail, patternId) => { expect(armCompatibilityOf(report(tail))).toEqual({ verdict: "arm_incompatible", patternId }); });
   it("requires an ARM run and a passing suite or smoke; empty and skipped reports prove nothing", () => {
     expect(armCompatibilityOf(report())).toEqual({ verdict: "arm_ok" });
     expect(armCompatibilityOf(report(undefined, "x86_64"))).toEqual({ verdict: "unknown" });
@@ -36,6 +36,20 @@ describe("ARM evidence is fixed words", () => {
     expect(armCompatibilityOf(report("exec format error", "x86_64"))).toEqual({ verdict: "unknown" });
   });
   it.each(["no matching distribution", "no matching manifest for linux/amd64", "exec formatting error", "xEBADPLATFORMx", "unsupported platform"])('near miss %s', tail => { expect(armCompatibilityOf(report(tail))).toEqual({ verdict: "unknown" }); });
+  it.each([
+    'npm WARN optional SKIPPING OPTIONAL DEPENDENCY: fsevents@2.3.3 (node_modules/fsevents):\nnpm WARN notsup SKIPPING OPTIONAL DEPENDENCY: Unsupported platform for fsevents@2.3.3: wanted {"os":"darwin"} (current: {"os":"linux","arch":"arm64"})\nnpm ERR! code ELIFECYCLE\nnpm ERR! test failed',
+    'npm WARN optional EBADPLATFORM: skipping optional dependency fsevents\nnpm error code EACCES',
+    'Unsupported platform for fsevents (optional dependency skipped)\nnpm error code EACCES',
+    'npm WARN code EBADPLATFORM\nnpm error code ELIFECYCLE',
+  ])("optional platform notices do not suggest x86: %s", tail => {
+    const arm = armCompatibilityOf(report(tail));
+    expect(arm).toEqual({ verdict: "unknown" });
+    expect(suggest(100, { armVerdict: arm.verdict }).row?.chip).toBe("arm64");
+  });
+  it.each(["npm ERR! code EBADPLATFORM", "npm error code EBADPLATFORM", "npm ERR! notsup Unsupported platform for native-binary"])("a failing npm platform error still counts: %s", error => {
+    const tail = "npm WARN optional SKIPPING OPTIONAL DEPENDENCY: Unsupported platform for fsevents\n" + error;
+    expect(armCompatibilityOf(report(tail))).toEqual({ verdict: "arm_incompatible", patternId: "npm_platform" });
+  });
   it("a megabyte of hostile markup only selects a fixed pattern", () => {
     const tail = "[x](https://evil.test) ![x][ref] @owner #123 <b> # > --- ``` ~~~ \u200b\ufe0f" + "x".repeat(1_000_000) + " exec format error";
     expect(armCompatibilityOf(report(tail))).toEqual({ verdict: "arm_incompatible", patternId: "exec_format" });
