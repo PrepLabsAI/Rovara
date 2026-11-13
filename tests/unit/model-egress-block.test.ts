@@ -157,6 +157,9 @@ describe("the fixed sentences", () => {
   });
 });
 
+// TE-F4 (prompt change detection, stacked on this lane): the four pure contract files and the one test that use these modules. Exact file names only.
+const F4_FILES: ReadonlySet<string> = new Set(["prompt-change", "prompt-change-detect", "prompt-change-rules", "prompt-change-scan"].map((name) => `packages/contracts/src/${name}.ts`).concat("tests/unit/prompt-change-detect.test.ts"));
+
 describe("no callers yet", () => {
   const NEW_MODULES = ["model-catalog", "model-catalog-rows", "model-catalog-digest", "model-family-common", "model-family-gemini", "model-family-openai", "model-egress-block", "model-serve"];
   const walk = (directory: string): string[] =>
@@ -170,7 +173,7 @@ describe("no callers yet", () => {
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || F4_FILES.has(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
@@ -182,7 +185,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!tests/unit/prompt-change-detect.test.ts"], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;
