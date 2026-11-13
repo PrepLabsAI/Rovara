@@ -48,7 +48,7 @@ export const TIER_REASON_CODES = [
   // risky
   "incomplete_diff", "no_diff_files", "too_many_files", "unreadable_content", "binary_content", "mode_or_type_change", "symlink_suspected", "submodule", "lfs_pointer",
   "sensitive_path", "instruction_file", "hook_file", "git_settings_file", "env_file", "package_source_setting", "registry_source_changed", "dependency_source", "install_script",
-  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "ci_fetch_and_run", "ci_net_send", "ci_check_removed", "invisible_character", "confusable_text", "reviewer_injection_text", "docs_build_hook",
+  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "line_break_character", "path_control_character", "ci_fetch_and_run", "ci_net_send", "ci_check_removed", "invisible_character", "confusable_text", "reviewer_injection_text", "docs_build_hook",
   // standard
   "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "test_file_deleted", "no_files_named", "request_mentions_sensitive_area",
   "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed", "script_changed", "text_data_file", "vendored_code", "check_weakened", "docs_include", "docs_not_plain", "docs_unread", "docs_site_build", "docs_large", "scanner_ignore_file", "docs_build_config",
@@ -161,7 +161,7 @@ const SCHEME_URL = /[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\]\(|^\s*\[[^\]]+\]:\s*\S/iu;
 /** Lines that a docs build, a template engine or a reader's tool treats as something other than prose. */
 const NOT_PLAIN_MARKUP = /[{}]|^\s*[<>]|<<<|>>>|--8<--|:::|\[\[\[|\$\(|\$\{|^\s*\.\.\s+\S|^\s*\{%|%\}|^\s*\{\{|\bimport\s+\S+\s+from\b|^\s*export\s/u;
 const KEY_VALUE = /(?:^|\s)[A-Za-z_][\w.-]*=\S/u;
-const CONTROL_CHAR = /[\p{Cc}\p{Cf}]/u;
+const CONTROL_CHAR = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 /** What a docs line holds that RUNS something when a build or a test reads it (risky, not merely standard). */
 const DOCS_EXECUTES = /\b(?:require|import)\s*\(|child_process|execSync|spawnSync|\beval\s*\(|new Function\(|os\.system|subprocess|__import__|program-output|__class__|__mro__|\[\[\[cog|^\s*>>>|^\s*export\s+(?:const|default|function|let|var)|<script|dangerouslySetInnerHTML|createElement\s*\(|<\?php|\bsystem\s*\(/u;
 const INLINE_CODE = /`([^`]*)`/gu;
@@ -630,6 +630,8 @@ export const ADDED_BYTES_MAX = 8_000;
 export const ADDED_BYTES_TOTAL_MAX = 20_000;
 
 /** Text that looks like a credential: a cloud key id, a platform token, a private key block. A fixture or a config that holds one is risky (a leaked credential, or a test of one that is wrongly real). */
+/** Line-ending characters other than the newline the patch is split on. */
+const LINE_BREAK_ODD = /[\r\u0085\u2028\u2029\u000B\u000C]/u;
 const SECRET_LIKE = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[pousr]_[A-Za-z0-9]{30,}|\bsk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}/u;
 /** A line that switches a check off: in a test runner's or scanner's configuration, an exclude, an ignore, a skip, an off, a lowered threshold. */
 const WEAKEN_CHECK_LINE = /\b(?:exclude|excludes|ignore|ignored|skips?|skipped|disable|disabled|select|extend-ignore|per-file-ignores|todo|allowFailure|allow_failures?|threshold|testPathIgnorePatterns|continue-on-error|coveragePathIgnorePatterns)\b|['"](?:off|0)['"]|:\s*(?:0|false)\b/iu;
@@ -667,6 +669,8 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     const reasonFor = (code: string): TierReason => ({ code, path: name.slice(0, FLOW_REASON_PATH_MAX) });
     if (hasConfusableLetter(name) || (hasNonAsciiLetter(name) && fileTypeOf(name) !== "prose")) reading.risky.push(reasonFor("confusable_path"));
     if (name.length > PATH_CHARS_MAX) reading.risky.push(reasonFor("path_too_long"));
+    // A path with a line break or any control or format character can forge a line of anything that prints it.
+    if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name)) reading.risky.push(reasonFor("path_control_character"));
     if (isHookPath(name)) reading.risky.push(reasonFor("hook_file"));
     if (isInstructionPath(name)) reading.risky.push(reasonFor("instruction_file"));
     if (isTierSensitivePath(name)) reading.risky.push(reasonFor("sensitive_path"));
@@ -820,6 +824,8 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     if (patch.added.some((line) => BIDI_CONTROL.test(line))) reading.risky.push(here("bidi_control"));
     // Any format character (zero-width, soft hyphen, the Unicode tag block models read and people do not): invisible text has no place in code.
     if (patch.added.some((line) => /\p{Cf}/u.test(line))) reading.risky.push(here("invisible_character"));
+    // Characters that end a line for some readers and not for others (a lone carriage return, next line, line and paragraph separators, vertical tab, form feed): code that reads one way and runs another.
+    if (patch.added.some((line) => LINE_BREAK_ODD.test(line))) reading.risky.push(here("line_break_character"));
     if (patch.added.some((line) => hasMixedScriptWord(line))) reading.risky.push(here("confusable_text"));
     if (patch.added.some((line) => REVIEWER_INJECTION.test(line))) reading.risky.push(here("reviewer_injection_text"));
     // A .gitignore that lets go of a secret pattern; a documentation build's hooks and plugins run code.
@@ -1039,6 +1045,7 @@ const REASON_PHRASES: Readonly<Record<string, string>> = {
   registry_source_changed: "a package source", dependency_source: "a package source", install_script: "an install script", ci_privileged: "a privileged CI setting", package_source_setting: "a package source setting",
   confusable_path: "a path with a look-alike letter", infra_file: "an infrastructure file", instruction_import: "a file an instruction file reads", ci_unpinned_action: "a CI action that is not pinned to a commit",
   path_too_long: "a path too long to list", link_kind_unknown: "a path whose kind Rovara did not check", ignore_file: "an ignore file", secret_like_text: "text that looks like a credential", script_command: "a script that runs a command", check_weakened_security: "a security check weakened",
+  line_break_character: "a line-ending character that reads differently by reader", path_control_character: "a control character in a file name",
   ci_fetch_and_run: "a CI step that fetches code and runs it", ci_net_send: "a CI step that sends data out", ci_check_removed: "a CI step that no longer runs the tests", invisible_character: "invisible text",
   docs_executes: "a document line that runs something", bidi_control: "text that reorders what is shown", confusable_text: "a word that mixes look-alike letters", reviewer_injection_text: "a line written for the reviewer", docs_build_hook: "a hook of a documentation build",
   docs_not_plain: "a document line that is not plain prose", docs_unread: "a document Rovara could not read in full", docs_site_build: "a document of a site that is built", docs_large: "more than 300 changed document lines", scanner_ignore_file: "a file that tells a scanner what to skip", docs_build_config: "the setup of a documentation build",
@@ -1093,6 +1100,9 @@ export function fitFlow(flow: WorkflowFlow): WorkflowFlow {
  * What the review steps and the reviewer floor leave on the record is bound to the FULL head, in `flow.quickChecks` (its `detail` holds the head in full: a catch-counter step is too short for one, and a prefix of a head is not
  * a head). One entry for the reviewer's questions (head and a digest of the patch the reviewer was given), and one per tier for the review steps (head). A new record of the same kind replaces the one before it.
  */
+/** The kind the records carry (the contract has no kind of its own for them): a record counts only with this kind, outcome "passed" and its prefix. */
+const RECORD_KIND = "code_config" as const;
+const isRecord = (check: { kind: string; outcome: string; detail?: string | undefined }, detail: string): boolean => check.kind === RECORD_KIND && check.outcome === "passed" && check.detail === detail;
 const QUESTIONS_PREFIX = "tier_questions ";
 const REVIEW_PREFIX = "tier_review ";
 const questionsDetail = (headSha: string, patchDigest: string): string => `${QUESTIONS_PREFIX}head=${headSha} patch=${patchDigest}`;
@@ -1100,7 +1110,7 @@ const reviewDetail = (level: TierLevel, headSha: string): string => `${REVIEW_PR
 
 function withQuickCheck(flow: WorkflowFlow | undefined, prefix: string, detail: string, at: string, replaces: (detail: string) => boolean): WorkflowFlow {
   const kept = (flow?.quickChecks ?? []).filter((check) => !(check.detail?.startsWith(prefix) === true && replaces(check.detail)));
-  return { ...(flow ?? { rulesVersion: TIER_RULES_VERSION }), rulesVersion: TIER_RULES_VERSION, quickChecks: [...kept, { kind: "code_config" as const, outcome: "passed" as const, detail, at }].slice(-10) };
+  return fitFlow({ ...(flow ?? { rulesVersion: TIER_RULES_VERSION }), rulesVersion: TIER_RULES_VERSION, quickChecks: [...kept, { kind: RECORD_KIND, outcome: "passed" as const, detail, at }].slice(-10) });
 }
 
 /** The `flow` record with the review of a tier written for the head it ran on (in full): findings, and how many must be fixed. Without a head nothing is bound, and nothing is written. */
@@ -1113,7 +1123,7 @@ export function recordTierReview(flow: WorkflowFlow | undefined, input: { level:
 /** Whether a review at `level`, or a higher one, has run on exactly this head. Without a head nothing can have. */
 export function tierReviewRecorded(flow: WorkflowFlow | undefined, level: TierLevel, headSha: string | undefined): boolean {
   if (headSha === undefined) return false;
-  return (["small", "standard", "risky"] as const).some((candidate) => RANK[candidate] >= RANK[level] && (flow?.quickChecks ?? []).some((check) => check.detail === reviewDetail(candidate, headSha)));
+  return (["small", "standard", "risky"] as const).some((candidate) => RANK[candidate] >= RANK[level] && (flow?.quickChecks ?? []).some((check) => isRecord(check, reviewDetail(candidate, headSha))));
 }
 
 /** The `flow` record with the reviewer's questions written for exactly this head and the patch the reviewer was given (a digest). */
@@ -1123,13 +1133,19 @@ export function recordQuestionsAnswered(flow: WorkflowFlow | undefined, input: {
 
 /** Whether the reviewer's questions were answered for exactly this head and exactly this patch. Without a head nothing can have been. */
 export const reviewerFloorRecorded = (flow: WorkflowFlow | undefined, headSha: string | undefined, patchDigest: string): boolean =>
-  headSha !== undefined && (flow?.quickChecks ?? []).some((check) => check.detail === questionsDetail(headSha, patchDigest));
+  headSha !== undefined && (flow?.quickChecks ?? []).some((check) => isRecord(check, questionsDetail(headSha, patchDigest)));
 
 /**
  * Whether a tier still owes the reviewer's questions: EVERY small tier, whatever it touched (code, documents, CI, dependencies). Every list of words and paths leaks, so a change that no list put higher is asked of the one
- * strongest-available reviewer before it merges (the merge gate refuses it until the answers are on the record for the current head and patch).
+ * strongest-available reviewer before it merges (the merge gate refuses it until the answers are on the record for the current head and patch), when planning steps were skipped (`skippedPlanning`).
  */
 export const needsReviewerFloor = (tier: Pick<ChangeTier, "level">): boolean => tier.level === "small";
+
+/**
+ * Whether the lighter flow actually skipped planning steps for the task (P2 writes `skippedSteps`). The reviewer's questions stand in for the review those steps would have given, so they are owed ONLY then: a task that
+ * ran the whole plan (today's flow, and the laptop's) is not asked for them, and the growth and risky-review rules apply to it as before.
+ */
+export const skippedPlanning = (flow: WorkflowFlow | undefined): boolean => (flow?.skippedSteps?.length ?? 0) > 0;
 
 /** A digest of the patch text of a change as the code host lists it, in the form the reviewer is given (`canonicalPatchText`): the floor records it and the merge gate recomputes it from the host. */
 export function patchDigestOf(patchText: string): string {
@@ -1138,8 +1154,9 @@ export function patchDigestOf(patchText: string): string {
 
 /** The patch of a change in ONE canonical form: files in repository and path order, each with its name(s) and its patch text. The floor's reviewer is given exactly this, and the gate digests exactly this. */
 export function canonicalPatchText(files: readonly TierFile[]): string {
-  return [...files].sort((left, right) => `${left.repository ?? ""}\u0000${left.path}`.localeCompare(`${right.repository ?? ""}\u0000${right.path}`))
-    .map((file) => `### ${file.repository === undefined ? "" : `${file.repository}: `}${file.previousPath === undefined ? "" : `${file.previousPath} -> `}${file.path} (${file.status})\n${file.patch ?? "(no patch text)"}`).join("\n");
+  // JSON, so no path or patch can forge a header line, and a rename is two named fields.
+  return JSON.stringify([...files].sort((left, right) => `${left.repository ?? ""}\u0000${left.path}`.localeCompare(`${right.repository ?? ""}\u0000${right.path}`))
+    .map((file) => ({ repository: file.repository ?? null, path: file.path, previousPath: file.previousPath ?? null, status: file.status, patch: file.patch ?? null })));
 }
 
 /** The `flow` record with a new tier written. The previous tier moves into `tierHistory` (oldest first, at most 20) when it is a different tier. The level never goes down (`raiseTier`). */

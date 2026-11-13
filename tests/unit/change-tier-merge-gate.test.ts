@@ -55,10 +55,11 @@ async function questioned(world: MergeWorld, head = world.prs[0]!.head, digest?:
   await world.setWorkflow({ flow: recordQuestionsAnswered(flow, { headSha: head, patchDigest: digest ?? patchDigestOf(input.patchText), at: AT }) });
 }
 
-async function worldAt(level: "small" | "standard" | "risky", mode: Mode = { patches: true, failing: false, calls: 0 }) {
+/** `skipped`: the lighter flow skipped planning steps for this task (what P2 writes in `flow.skippedSteps`), so the reviewer's questions are owed. */
+async function worldAt(level: "small" | "standard" | "risky", mode: Mode = { patches: true, failing: false, calls: 0 }, skipped = false) {
   const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
   await world.seedTracking();
-  const flow = { rulesVersion: 1, tier: { level, kinds: ["code_config"], source: "diff", reasons: [], at: AT } };
+  const flow = { rulesVersion: 1, tier: { level, kinds: ["code_config"], source: "diff", reasons: [], at: AT }, ...(skipped ? { skippedSteps: ["plan_check", "design_review"] } : {}) };
   await world.setWorkflow({ flow });
   return { world, mode };
 }
@@ -225,7 +226,7 @@ describe("the merge recomputes the change tier from the host", () => {
   });
 
   it("a small change to code is refused until the reviewer's questions are on the record for the current head", async () => {
-    const { world } = await worldAt("small");
+    const { world } = await worldAt("small", undefined, true);
     const refusal = await rejects((await press(world)).run);
     expect(refusal.message).toBe("A reviewer has not yet answered the security questions for the current version of this change, so it can't be merged yet.");
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
@@ -237,7 +238,7 @@ describe("the merge recomputes the change tier from the host", () => {
   });
 
   it("answers about another patch do not count (the patch is recomputed from the host)", async () => {
-    const { world } = await worldAt("small");
+    const { world } = await worldAt("small", undefined, true);
     await questioned(world, undefined, "0".repeat(64));
     expect((await rejects((await press(world)).run)).message).toContain("security questions");
   });
@@ -254,7 +255,7 @@ describe("the merge recomputes the change tier from the host", () => {
   });
 
   it("the questions are asked again after a push", async () => {
-    const { world } = await worldAt("small");
+    const { world } = await worldAt("small", undefined, true);
     await questioned(world);
     await pushed(world, { "src/b.ts": "export const b = 1;\n" });
     expect((await rejects((await press(world)).run)).message).toContain("security questions");
@@ -262,11 +263,27 @@ describe("the merge recomputes the change tier from the host", () => {
     expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 
-  it("an install that does not run the reviewer can switch the floor off, and the lists alone decide", async () => {
+  it("a small task that ran the whole plan merges as today, with no reviewer record (nothing was skipped)", async () => {
     const { world } = await worldAt("small");
-    const prepared = await prepareMerge({ ...world.deps, tierFloor: "off" }, { taskId: TASK_ID, requestId: world.requestId() });
-    const merged = await pressMerge({ ...world.deps, tierFloor: "off" }, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) });
-    expect(merged.status).toBe("MERGED");
+    const { run } = await press(world);
+    expect((await run()).status).toBe("MERGED");
+  });
+
+  it("a small task whose planning steps were skipped is refused until the questions are on the record", async () => {
+    const { world } = await worldAt("small", undefined, true);
+    expect((await rejects((await press(world)).run)).message).toContain("security questions");
+    await questioned(world);
+    expect((await (await press(world)).run()).status).toBe("MERGED");
+  });
+
+  it("a record of the wrong kind or outcome is not a record", async () => {
+    const { world } = await worldAt("small", undefined, true);
+    await questioned(world);
+    const flow = (await world.task()).workflow.flow!;
+    await world.setWorkflow({ flow: { ...flow, quickChecks: flow.quickChecks!.map((check) => ({ ...check, outcome: "failed" })) } });
+    expect((await rejects((await press(world)).run)).message).toContain("security questions");
+    await world.setWorkflow({ flow: { ...flow, quickChecks: flow.quickChecks!.map((check) => ({ ...check, kind: "docs" })) } });
+    expect((await rejects((await press(world)).run)).message).toContain("security questions");
   });
 
   it("a growth that another writer got in front of is written again until it is on the record", async () => {
