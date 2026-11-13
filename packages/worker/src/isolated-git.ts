@@ -5,7 +5,8 @@ import { constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { ROVARA_NEVER_COMMIT_EXCLUDE, agentXError } from "@agentx/contracts";
+import { unstageRovaraWorkingFiles } from "./never-commit-guard.js";
 import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, workTreeByDescriptor, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
 import { makeWorkerScratch } from "./worker-scratch.js";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
@@ -237,6 +238,7 @@ export async function withIsolatedGit<T>(
 
 /** Leaves a file tool's leftover temporary file (`.agentx-file-ops-*`, from a write the helper was killed in) out of every snapshot. */
 export const CANDIDATE_EXCLUDE_PATHSPEC = ":(exclude,glob)**/.agentx-file-ops-*";
+// TE-B9: every snapshot also leaves out Rovara's own working files, whatever the workspace layout (`ROVARA_NEVER_COMMIT`, contracts/src/never-commit.ts; worker/src/never-commit-guard.ts).
 /**
  * Leaves the sandbox's Python user site (`.agentx-python`, task-sandbox.ts; a drift test pins the name) out of every snapshot, at the top of the work tree only (C67). Its own `.gitignore` of
  * `*` is the first line of defence; a task that deletes that file, or force-adds the folder to the index, must not get a program of its own into the candidate that way. A task that commits
@@ -267,13 +269,17 @@ const hiddenPathspecs = (workTree: string): string[] => [...(hiddenFromCandidate
  * `write-tree`, with the nested-repository and Git LFS refusals in between. Git runs in the throwaway repository, so no filter, driver or hook of the candidate's
  * config exists for it to run. A nested repository's own config is out of that protection, so Git is kept away from every tracked gitlink: a gitlink path is
  * excluded from `add` (its entry stays as `commit` has it), because Git asks a checked-out submodule for its status by running Git inside it, under its config,
- * and a nested repository can appear at that path between the check for one and `add`. Needs Git 2.25 or later (`--pathspec-from-file`).
+ * and a nested repository can appear at that path between the check for one and `add`. Needs Git 2.25 or later (`--pathspec-from-file`). `base`, when the caller has the task's base commit, also takes
+ * Rovara's own working files that the task committed out of the tree (never-commit-guard.ts).
  */
-export async function snapshotTree(git: IsolatedGit, commit: string): Promise<string> {
+export async function snapshotTree(git: IsolatedGit, commit: string, base?: string): Promise<string> {
   await git.text(["read-tree", commit]);
   const gitlinks = await assertNoEmbeddedRepositories(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
   await assertNoLfsFiles(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
   await addWorkTree(git, "temporary", gitlinks);
+  // TE-B9 (M1): with the task's base known, a listed path the task COMMITTED (it is in `commit`, so the index started with it; the excludes above only keep new changes out) is taken out of the tree too, so it never
+  // reaches the reviewed commit. A listed path the base itself holds is left as it is. Without a base nothing says which listed path is the task's.
+  if (base !== undefined) await unstageRovaraWorkingFiles((args) => git.text(args, { index: "temporary", maxBuffer: 1024 * 1024 }), base);
   return (await git.text(["write-tree"])).trim();
 }
 
@@ -289,10 +295,10 @@ export async function addWorkTree(git: IsolatedGit, index: IndexKind, gitlinks: 
     }
   }
   const hidden = hiddenPathspecs(git.layout.workTree);
-  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...hidden], { index, maxBuffer: 1024 * 1024 });
+  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE, ...hidden], { index, maxBuffer: 1024 * 1024 });
   else {
     const pathspecs = join(git.scratch, "pathspecs");
-    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...hidden, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
+    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE, ...hidden, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
     await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { index, maxBuffer: 1024 * 1024 });
   }
 }

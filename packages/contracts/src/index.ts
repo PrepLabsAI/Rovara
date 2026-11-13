@@ -224,6 +224,8 @@ export * from "./outcomes.js";
 // Proof and evidence (W4/W5): the evidence pack, decision cards, the test environment and service mocks.
 export * from "./check-kinds.js";
 export * from "./evidence.js";
+// TE-B9: the list of Rovara working files that are never committed.
+export * from "./never-commit.js";
 export * from "./evidence-inert.js";
 export * from "./evidence-render.js";
 export * from "./api-samples.js";
