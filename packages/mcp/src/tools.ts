@@ -2,7 +2,7 @@
 // now and the hosted endpoint later use the same definitions (FR-027). Descriptions are written
 // for the AI tool that reads them: when to use the tool, and what to do next.
 import {
-  DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
+  CI_STATE_WORDS, DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
   E2ESharedViewSchema, inertName, isBranchConflictAskReason, isBranchSyncBlockReason, isBranchSyncGiveUpReason, isCiFixBlockReason, knownTaskView, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskClientView,
   TaskPeopleRoleSchema, RUN_CONTEXT_KINDS, RUN_INPUT_TEXT_MAX_BYTES, ApprovalIdSchema, RunInputSchema, type RunInput, type StartAgentSelection,
@@ -308,7 +308,15 @@ function approvalValuesText(workflow: NonNullable<DeveloperTaskClientView["workf
 }
 
 /** What the AI tool can do next with a task in this state. */
-function nextFor(shown: DeveloperTaskClientView): string {
+/** What a ready pull request's checks are said to be (TE-B2): "its checks passed" only when every tracked pull request's CI passed; no CI is said as no CI; with no tracking read, nothing is claimed about the checks. */
+function approvedChecksWords(tracked: DeveloperTaskClientView["mergeTracking"]): string {
+  if (tracked === undefined || tracked.length === 0) return "The pull request is approved and ready to merge.";
+  if (tracked.every((item) => item.ci === "passing")) return "The pull request is approved and its checks passed.";
+  if (tracked.some((item) => item.ci === "none")) return `The pull request is approved. ${CI_STATE_WORDS.none}, so no CI checked this code.`;
+  return "The pull request is approved and ready to merge.";
+}
+
+export function nextFor(shown: DeveloperTaskClientView): string {
   const task = knownTaskView(shown);
   if (task === undefined) return `This task is at a step this version of the AgentX tools doesn't know, so it can't say what to do next: ${UPGRADE_AGENTX_STEP}.`;
   // Rovara Code asked its questions before planning: only the answers route resumes the task, and neither a continue nor a message to the agent is one.
@@ -392,7 +400,7 @@ function nextFor(shown: DeveloperTaskClientView): string {
     if ((task.workflow.state === "RUNNING" || task.workflow.state === "READY") && task.workflow.branchSync !== undefined) return "Rovara is merging the latest base branch into the pull request's branch. Check again with agentx_get_task.";
     if (task.workflow.state === "RUNNING") return "AgentX is reviewing the feedback on the pull request and will propose a fix before changing any code. Check again with agentx_get_task.";
     // Rovara Code (version 2): merging is Rovara's Merge button, pressed by a person. No tool here merges (Plan 6: a person always presses Merge).
-    if (task.merge?.ready === true) return "The pull request is approved and its checks passed. A person presses Merge in Rovara (one click in the web app, after a confirm dialog; `agentx session merge <session id>` only gives a link to confirm in their browser); this tool can't merge. The task finishes when it's merged.";
+    if (task.merge?.ready === true) return `${approvedChecksWords(task.mergeTracking)} A person presses Merge in Rovara (one click in the web app, after a confirm dialog; \`agentx session merge <session id>\` only gives a link to confirm in their browser); this tool can't merge. The task finishes when it's merged.`;
     if (task.merge !== undefined) return `Waiting for the pull request to be merged. It can't be merged yet: ${task.merge.message ?? "it is not ready"} Once that is fixed, a person presses Merge in Rovara; this tool can't merge. The task finishes when it's merged.`;
     return "Waiting for the pull request to be merged. Review and merge it on GitHub; the task finishes when it's merged.";
   }

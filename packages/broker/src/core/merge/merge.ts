@@ -57,7 +57,7 @@ import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
-import { PERMISSION_LOOKUPS_MAX, readBranch, readCi, tracksMerge } from "./merge-tracking.js";
+import { DEFAULT_CI_MODE, PERMISSION_LOOKUPS_MAX, ciAllowsMerge, ciCountsAsPassing, readBranch, readCi, tracksMerge, unreadableSinceOf, type ProjectCiMode } from "./merge-tracking.js";
 import type { MergePeople } from "./people.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergeTask, SessionTimeline } from "./seams.js";
@@ -78,7 +78,7 @@ export interface MergePullRequestFacts {
   state: "open" | "closed" | "merged";
   draft: boolean;
   baseBranch: string;
-  ci: "none" | "pending" | "passing" | "failing";
+  ci: MergeTrackingItem["ci"];
   branch: "up_to_date" | "behind" | "conflicted" | "unknown";
   /** GitHub itself calls the branch behind (it does so only for a base that requires up-to-date branches). */
   behindRequired: boolean;
@@ -172,8 +172,9 @@ export function mergeReadiness(input: ReadinessInput): Readiness {
     const owner = codeOwnerRefusal(input.codeOwners?.get(key));
     const reason = pr.state !== "open" ? M.notOpen
       : input.recordedBases.get(key) !== pr.baseBranch ? M.baseChanged(pr.baseBranch)
-      : pr.draft ? M.draft
-      : pr.ci !== "passing" && pr.ci !== "none" ? M.checks
+      : pr.ci === "unreadable" ? M.ciNotReadable
+      : pr.draft ? (pr.ci === "none" ? M.draftNoCi : M.draft)
+      : !ciAllowsMerge(pr.ci) ? M.checks
       : pr.branch === "conflicted" ? M.conflicted(pr.baseBranch)
       : !approval.approved ? approvalMessage(approval.reason, pr.repositoryId, input)
       : owner !== undefined ? owner
@@ -230,6 +231,8 @@ export interface MergeDependencies {
   requirePresserAccount?: boolean;
   /** The words of a refusal while something outside the merge core holds the merge (a second review that did not run and waits for the owner). Absent: nothing waits. */
   mergeWait?(task: MergeTask): string | undefined;
+  /** TE-B2: the project's real-check mode (see `ProjectCiMode`); `DEFAULT_CI_MODE` when absent. It decides whether an approval of the head before a clean sync carries over on "No CI". */
+  ciMode?(task: MergeTask): Promise<ProjectCiMode> | ProjectCiMode;
 }
 
 const byRepository = <T extends { repositoryId: string; number: number }>(list: readonly T[]): T[] =>
@@ -256,14 +259,14 @@ export function factsFromItem(item: MergeTrackingItem, behindRequired = false): 
 /** The approval merge tracking stored for a pull request, judged by the same rules: it holds only the latest approval of a person with write access. */
 async function approvalOfItem(
   deps: MergeDependencies, orgId: OrgId, item: MergeTrackingItem, pullRequest: PullRequestEntry | undefined,
-  ctx: { requesters: string[] | "unlinked"; allowSelfApproval: boolean },
+  ctx: { requesters: string[] | "unlinked"; allowSelfApproval: boolean; ciMode: ProjectCiMode },
 ): Promise<HumanApproval> {
   if (item.review === "changes_requested") return { approved: false, reason: "changes_requested" };
   if (item.approval === undefined) return { approved: false, reason: "none" };
   const { hostUserId, login, commitId } = item.approval;
   return humanApprovalOf({
     reviews: [{ hostUserId, login, accountType: "person", state: "APPROVED", commitId, submittedAt: item.observedAt }],
-    headSha: item.headSha, syncedFrom: pullRequest?.syncedFrom, ciPassingOnHead: item.ci === "passing" || item.ci === "none",
+    headSha: item.headSha, syncedFrom: pullRequest?.syncedFrom, ciPassingOnHead: ciCountsAsPassing(item.ci, ctx.ciMode),
     permissions: new Map([[login, "write" as const]]), requesterHostUserIds: ctx.requesters, linkedHostUserIds: await linkedAmong(deps.people, orgId, [hostUserId]),
     excludedHostUserIds: await nonWritersAmong(deps.people, orgId, [hostUserId]),
     allowSelfApproval: ctx.allowSelfApproval,
@@ -289,6 +292,7 @@ async function readinessFromItems(
   const entries = requiredPullRequests(task.workflow).filter((entry) => entry.state !== "MERGED");
   const itemOf = new Map(items.map((item) => [pullRequestKey(item), item]));
   const requesters = await requesterHostIds(deps.people, task.orgId, task);
+  const ciMode = await (deps.ciMode?.(task) ?? DEFAULT_CI_MODE);
   const presser = presserOf(presserPersonId === undefined ? undefined : await presserAccountsOf(deps.people, task.orgId, presserPersonId));
   const facts: MergePullRequestFacts[] = [];
   const approvals = new Map<string, HumanApproval>();
@@ -299,7 +303,7 @@ async function readinessFromItems(
     // Tracking has not read this pull request yet: nothing is known of it.
     if (item === undefined) return { readiness: notReady(M.notTrackedYet), items: [...items], settings, entries };
     facts.push(factsFromItem(item, options.behindRequired?.get(key) ?? false));
-    approvals.set(key, await approvalOfItem(deps, task.orgId, item, entry, { requesters, allowSelfApproval: settings.allowSelfApproval }));
+    approvals.set(key, await approvalOfItem(deps, task.orgId, item, entry, { requesters, allowSelfApproval: settings.allowSelfApproval, ciMode }));
     const base = await deps.host.recordedBase(task.workspaceId, entry.repositoryId, entry.number);
     if (base !== undefined) bases.set(key, base);
   }
@@ -501,6 +505,7 @@ async function mergeableNow(
   const settings = await deps.settings.read(task.orgId, task.project);
   const scope = deps.host.scope(task.orgId);
   const requesters = await requesterHostIds(deps.people, task.orgId, task);
+  const ciMode = await (deps.ciMode?.(task) ?? DEFAULT_CI_MODE);
   const permissions = new Map<string, Promise<RepositoryPermission>>();
   const facts: MergePullRequestFacts[] = [];
   const approvals = new Map<string, HumanApproval>();
@@ -520,12 +525,12 @@ async function mergeableNow(
     if (status.id !== String(entry.number)) throw agentXError("RUNTIME_UNAVAILABLE", "The code host answered for another pull request");
     if (status.state !== "merged" && status.headRevision !== wanted[index]!.headSha) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     const item = items.get(key);
-    const ci = readCi(status, { checksEverSeen: item?.checksEverSeen ?? status.checks.length > 0, lastRovaraPushAt: item?.lastRovaraPushAt === undefined ? undefined : Date.parse(item.lastRovaraPushAt), now: deps.now() });
+    const ci = readCi(status, { checksEverSeen: item?.checksEverSeen ?? status.checks.length > 0, lastRovaraPushAt: item?.lastRovaraPushAt === undefined ? undefined : Date.parse(item.lastRovaraPushAt), now: deps.now(), unreadableSince: unreadableSinceOf(item, status.headRevision) });
     facts.push({
       repositoryId: entry.repositoryId, number: entry.number, headSha: status.headRevision, state: status.state, draft: status.draft, baseBranch: status.targetBranch,
       ci: ci.ci, branch: readBranch(status), behindRequired: status.mergeableState === "behind",
     });
-    const approval = await approvalFromStatus(deps, { home, scope, orgId: task.orgId, status, syncedFrom: entry.syncedFrom, ciPassing: ci.ci === "passing" || ci.ci === "none", requesters, allowSelfApproval: settings.allowSelfApproval, permissions });
+    const approval = await approvalFromStatus(deps, { home, scope, orgId: task.orgId, status, syncedFrom: entry.syncedFrom, ciPassing: ciCountsAsPassing(ci.ci, ciMode), requesters, allowSelfApproval: settings.allowSelfApproval, permissions });
     approvals.set(key, approval);
     // Where the repository names code owners for the changed paths, one of them has to have approved (read fresh, and only once an approval counts: the approval words come first).
     if (approval.approved && status.state === "open") codeOwners.set(key, await codeOwnersOf({ home, scope, baseBranch: status.targetBranch, number: entry.number, approval }));
