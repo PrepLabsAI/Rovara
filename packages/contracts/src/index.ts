@@ -331,3 +331,4 @@ export * from "./work-event.js";
 export * from "./work-event-node.js";
 
 export * from "./measures-file.js";
+export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
