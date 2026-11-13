@@ -176,6 +176,11 @@ export interface DockerWorkerMachinesOptions {
   /** Websites the sandboxes and the worker may reach beyond the default list (the cloud's, without its own network's names). */
   allowedDomains?: readonly string[];
   /**
+   * TE-F1c: model hosts the SANDBOXES may not reach although the shared list allows them (the worker's own network is untouched). The names come from `laptopSandboxDenyList()`. Absent or empty: the gateway is as it was, and the
+   * isolation digest is unchanged. A change re-creates an idle machine.
+   */
+  modelHostsDeniedInSandbox?: readonly string[] | undefined;
+  /**
    * Test services (dependencies on a sealed per-run network): the registry the catalog images were pulled from, the catalog environment, the full references of the images that were pulled (the only helpers the
    * guard lets start) and the run folder. Absent: the worker is not told about test services and the guard is the plain one. A change re-creates an idle machine, like any other change of its configuration.
    */
@@ -279,12 +284,13 @@ export class DockerWorkerMachines implements WorkerMachines {
     const callback = this.#options.callback();
     const buildSystems = this.#options.buildSystems === undefined ? [] : [...(await this.#options.buildSystems())];
     const allowed = await this.#allowedNow(spec.projectName);
+    const sandboxDenied = this.#options.modelHostsDeniedInSandbox ?? [];
     // Test services: the worker is told its own image as a pinned id (the resolver guard may run nothing else), and where its run folder is. The folder is outside every workspace: a sandbox never sees it.
     const services = this.#options.testServices;
     const runDirectory = services === undefined ? undefined : join(services.runDirectoryParent ?? join(resolve(this.#options.stateDirectory), "test-services"), hash);
     const imageId = services === undefined ? undefined : await this.#imageId(image);
     const environment = { ...this.#environment(spec, workspaceDirectory, image, names, buildSystems), ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : testServicesEnvironment(services, { runDirectory, workerImageId: imageId })) };
-    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, allowed, this.#devcontainerRegistries(), callback.tcpPort, callback.socketDirectory ?? null, services === undefined ? null : localTestServicesDigestPart(services, imageId)])).digest("hex");
+    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, allowed, this.#devcontainerRegistries(), callback.tcpPort, callback.socketDirectory ?? null, services === undefined ? null : localTestServicesDigestPart(services, imageId), ...(sandboxDenied.length === 0 ? [] : [sandboxDenied])])).digest("hex");
     const run: Run = dockerRun(this.#options.docker);
 
     const existing = await this.#inspect(name);
@@ -334,7 +340,7 @@ export class DockerWorkerMachines implements WorkerMachines {
       const nets = await ensureNetworks(run, names, [`${OWNER_LABEL}=${hash}`, `${STATE_LABEL}=${this.#stateKey}`]);
       const useSocket = callback.socketDirectory !== undefined;
       await createGateway(run, {
-        image, labels: baseLabels, names, nets, allowed, workspaceId, callback,
+        image, labels: baseLabels, names, nets, allowed, sandboxDenied, workspaceId, callback,
         user: useSocket && typeof process.getuid === "function" && typeof process.getgid === "function" ? `${process.getuid()}:${process.getgid()}` : "1000:1000",
       });
       const gatewayStarted = await this.#docker(["start", names.gateway]);

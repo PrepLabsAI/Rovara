@@ -303,7 +303,9 @@ describe("no callers yet (TE-F1b is additive: only task-sandbox.ts takes the blo
     } catch (error) {
       if ((error as { status?: number }).status !== 1) throw error;
     }
-    const importers = found.split("\n").filter((file) => file !== "").filter((file) => !NEW_MODULES.some((name) => file === `packages/worker/src/${name}.ts`) && !/^tests\/unit\/(?:model-helper-|model-sandbox-env|worker-model-helper-network)/u.test(file));
+    const importers = found.split("\n").filter((file) => file !== "").filter((file) => !NEW_MODULES.some((name) => file === `packages/worker/src/${name}.ts`) && !/^tests\/unit\/(?:model-helper-|model-sandbox-env|worker-model-helper-network)/u.test(file)
+      // TE-F1c reads F1-b's evidence words (the Azure sentence and the block facts) in its ledger, and its laptop test checks the token hosts against F1-b's: exact files.
+      && !["packages/worker/src/model-bridge-ledger.ts", "tests/unit/model-egress-laptop-gateway.test.ts", "tests/unit/model-bridge-ledger.test.ts"].includes(file));
     expect(importers).toEqual(["packages/worker/src/task-sandbox.ts"]);
   });
   it("the worker's entry points do not start a model helper, advertise its feature, or call the gate", () => {

@@ -187,7 +187,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!tests/unit/prompt-change-detect.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!tests/unit/prompt-change-detect.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/broker/src/local/model-egress/name-block.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts"], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;
