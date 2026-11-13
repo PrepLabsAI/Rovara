@@ -457,6 +457,8 @@ export const MergeTrackingItemSchema = z
     /** TE-B2: since when the head's checks could not be read (cleared when they read, or the head moves). Absent on every row written before: it reads as "not unreadable". */
     ciUnreadableSince: InstantSchema.optional(),
     /** TE-B5: the required checks no app has reported on this head (at most ten, plain, as the base branch's settings name them), while `ci` is `required_missing`. Absent on every row written before. */
+    /** TE-B5 (L1): since when a head a PERSON pushed has had a required check unreported (its own clock; Rovara's heads use `lastRovaraPushAt`). Absent on every row written before. */
+    ciMissingSince: InstantSchema.optional(),
     ciMissingChecks: z.array(z.string().min(1).max(120)).max(10).optional(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),

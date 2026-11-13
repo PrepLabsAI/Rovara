@@ -108,8 +108,9 @@ function entriesOf(stored: Record<string, unknown> | undefined): HistoryEntry[] 
   return out.slice(-WINDOW);
 }
 /** How many of the project's last 20 judged pull requests the rule would have held. */
-export async function readProofHoldHistory(store: Pick<DocumentStore, "get">, orgId: OrgId, project: string): Promise<ProofHoldHistory> {
-  const entries = entriesOf(await store.get(historyKey(orgId, project)));
+export async function readProofHoldHistory(store: Pick<DocumentStore, "get">, orgId: OrgId, project: string, exclude?: string): Promise<ProofHoldHistory> {
+  // `exclude`: the pull request being judged. Its own earlier verdict is not evidence about the project's hold rate, or a held draft would count itself and relax on the next sweep.
+  const entries = entriesOf(await store.get(historyKey(orgId, project))).filter((entry) => entry.k !== exclude);
   return { held: entries.filter((entry) => entry.held).length, total: entries.length };
 }
 /** Records the rule's own verdict for one pull request (the latest verdict for a pull request replaces the one before it, so a pass that runs again does not count twice). Best effort: a lost race only delays it to the next pass. */
@@ -166,8 +167,14 @@ export async function judgeProofHold(
     mode = await deps.proofHold.mode(task);
     if (mode === "off") return { kind: "proceed" };
     const facts = (await deps.proofHold.facts({ task, repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha })) ?? {};
-    const recent = await readProofHoldHistory(deps.store, task.orgId, task.project);
+    const recent = await readProofHoldHistory(deps.store, task.orgId, task.project, `${pullRequest.repositoryId}#${String(pullRequest.number)}`);
     decision = proofHolds({ facts, mode, recent });
+    // M2: unknown never releases. A draft that was held (on any head) and whose proof cannot be read now (no facts, no proof, or one that was not checked) stays held with the reasons it had.
+    const unknown = facts.proof === undefined || facts.proof.status !== "checked";
+    const before = holdRecordOf(await deps.store.get(proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number)), task.orgId, task.taskId);
+    if (mode === "hold" && unknown && !decision.holds && !decision.relaxed && before?.holds === true) {
+      decision = { ...decision, holds: true, warns: false, wouldHold: true, reasons: before.reasons.length > 0 ? before.reasons : ["proof_failed"] };
+    }
     const stored = overrideRecordOf(await deps.store.get(proofOverrideKey(task.taskId, pullRequest.repositoryId, pullRequest.number)), task.orgId, task.taskId);
     override = stored !== undefined && stored.headSha === headSha ? stored : undefined;
   } catch (error) {
@@ -229,6 +236,8 @@ export interface MarkReadyInput {
   taskId: string;
   repositoryId: string;
   number: number;
+  /** The head the person was shown when they pressed. The press is refused unless it is the head tracked now, so an override can never land on code the person did not see. */
+  expectedHeadSha: string;
   /** The person who pressed. Taken from the signed-in session by the caller, never from the request body. */
   actorId: string;
   /** Optional (O59). Untrusted text: stored without control or hidden characters, secrets redacted, cut to 300 characters. */
@@ -263,10 +272,15 @@ export async function markReadyAnyway(deps: OverrideDependencies, input: MarkRea
   const pullRequest = (task.workflow?.pullRequests ?? []).find((entry) => entry.repositoryId === input.repositoryId && entry.number === input.number);
   if (pullRequest === undefined) throw agentXError("TASK_ACCESS_DENIED", "That pull request is not on this task.");
   const tracked = await deps.store.get({ pk: `DEVTASK#${task.taskId}`, sk: `MERGE_TRACKING#${input.repositoryId}#${String(input.number)}` });
+  if (tracked !== undefined && tracked["orgId"] === orgId && tracked["taskId"] === task.taskId && tracked["state"] === "open" && tracked["draft"] === false && typeof tracked["headSha"] === "string") {
+    const earlier = overrideRecordOf(await deps.store.get(proofOverrideKey(task.taskId, input.repositoryId, input.number)), orgId, task.taskId);
+    if (earlier !== undefined && earlier.headSha === tracked["headSha"]) throw agentXError("MERGE_NOT_READY", "This pull request was already marked ready.");
+  }
   if (tracked === undefined || tracked["orgId"] !== orgId || tracked["taskId"] !== task.taskId || tracked["state"] !== "open" || tracked["draft"] !== true || typeof tracked["headSha"] !== "string") {
     throw agentXError("MERGE_NOT_READY", "This pull request is not a draft that is being held.");
   }
   const headSha = tracked["headSha"];
+  if (input.expectedHeadSha !== headSha) throw agentXError("MERGE_NOT_READY", "The pull request changed since you looked at it. Look at it again, then mark it ready.");
   const judged = holdRecordOf(await deps.store.get(proofHoldKey(task.taskId, input.repositoryId, input.number)), orgId, task.taskId);
   if (judged === undefined || judged.headSha !== headSha || !judged.holds) throw agentXError("MERGE_NOT_READY", "This pull request is not being held, so there is nothing to mark ready.");
 
@@ -275,7 +289,7 @@ export async function markReadyAnyway(deps: OverrideDependencies, input: MarkRea
   const override: ProofOverrideRecord = { orgId, taskId: task.taskId, repositoryId: input.repositoryId, number: input.number, headSha, actorId: input.actorId, at, ...(reason === undefined ? {} : { reason }) };
   const eventId = createHash("sha256").update(`proof.override\n${task.taskId}\n${input.repositoryId}\n${String(input.number)}\n${headSha}`).digest("hex");
   const staged = deps.audit.stage({
-    eventId, companyId: orgId, at, actor: { type: "person", id: input.actorId }, action: "proof.override", subject: { type: "change_request", id: `${input.repositoryId}#${String(input.number)}` },
+    eventId, companyId: orgId, at, actor: { type: "person", id: input.actorId }, action: "pull_request.proof_overridden", subject: { type: "change_request", id: `${input.repositoryId}#${String(input.number)}` },
     details: { taskId: task.taskId, repositoryId: input.repositoryId, number: input.number, headSha, reasons: judged.reasons, decidedBy: decided.reason, ...(reason === undefined ? {} : { reasonGiven: true }) },
   });
   const result = await deps.store.transact([

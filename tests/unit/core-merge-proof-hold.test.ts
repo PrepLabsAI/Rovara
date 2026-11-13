@@ -2,6 +2,7 @@
 // tracking pass and the real `markReadyAnyway` over the in-memory store and the fake host.
 import { describe, expect, it } from "vitest";
 import { type ProofHoldFacts, type ProofHoldMode, type TestProof, type TestProofItem } from "../../packages/contracts/src/index.js";
+import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
 import {
   OVERRIDE_REASON_MAX, judgeProofHold, markReadyAnyway, plainReason, proofHoldKey, proofOverrideKey, readProofHold, readProofHoldHistory, trackPullRequest, type LiveRoles, type MarkReadyInput, type ProofHoldSource,
 } from "../../packages/broker/src/core/merge/index.js";
@@ -42,7 +43,7 @@ const press = (world: MergeWorld, over: Partial<MarkReadyInput> & { actorId: str
   const pr = world.prs[0]!;
   return markReadyAnyway(
     { store: world.store, audit: world.audit, roles: table, now: () => world.now.value, loadTask: (taskId) => world.host.loadTask(taskId), nudge: async (taskId) => { nudges.push(taskId); } },
-    { companyId: ORG, taskId: TASK_ID, repositoryId: pr.repositoryId, number: pr.number, ...over },
+    { companyId: ORG, taskId: TASK_ID, repositoryId: pr.repositoryId, number: pr.number, expectedHeadSha: pr.head, ...over },
   );
 };
 
@@ -197,7 +198,7 @@ describe("mark ready anyway", () => {
     expect(done).toMatchObject({ overridden: true, already: false, override: { actorId: "owner-1", reason: "checked by hand", headSha: pr.head } });
     expect(nudges).toEqual([TASK_ID]);
     const audit = (await world.auditRows()) as Array<{ action: string; actor: string }>;
-    expect(audit.filter((row) => row.action === "proof.override")).toEqual([expect.objectContaining({ actor: "owner-1" })]);
+    expect(audit.filter((row) => row.action === "pull_request.proof_overridden")).toEqual([expect.objectContaining({ actor: "owner-1" })]);
     await trackPullRequest(tracking, TASK_ID);
     expect(draft()).toBe(false);
     const ready = world.milestones.written.find((m) => m.kind === "pr_ready");
@@ -219,13 +220,13 @@ describe("mark ready anyway", () => {
     const second = await press(world, { actorId: "maint", reason: "me too" });
     expect(second).toMatchObject({ already: true, override: { actorId: "owner-1" } });
     expect(first.already).toBe(false);
-    expect((await world.auditRows()).filter((row) => (row as { action: string }).action === "proof.override")).toHaveLength(1);
+    expect((await world.auditRows()).filter((row) => (row as { action: string }).action === "pull_request.proof_overridden")).toHaveLength(1);
     // two presses at the same time record one too
     const fresh = await heldWorld(VACUOUS);
     await trackPullRequest(fresh.tracking, TASK_ID);
     const both = await Promise.allSettled([press(fresh.world, { actorId: "owner-1" }), press(fresh.world, { actorId: "owner-1" })]);
     expect(both.every((entry) => entry.status === "fulfilled")).toBe(true);
-    expect((await fresh.world.auditRows()).filter((row) => (row as { action: string }).action === "proof.override")).toHaveLength(1);
+    expect((await fresh.world.auditRows()).filter((row) => (row as { action: string }).action === "pull_request.proof_overridden")).toHaveLength(1);
   });
   it("a maintainer and an admin may; a member who is neither, a viewer, a stranger and a non-member may not", async () => {
     for (const [actorId, allowed] of [["maint", true], ["admin", true], ["owner-1", true], ["other", false], ["viewer", false], ["stranger", false], ["nobody-at-all", false]] as const) {
@@ -236,7 +237,7 @@ describe("mark ready anyway", () => {
       if (!allowed) {
         expect(outcome).toBe("TASK_ACCESS_DENIED");
         expect(await world.store.get(proofOverrideKey(TASK_ID, world.prs[0]!.repositoryId, world.prs[0]!.number))).toBeUndefined();
-        expect((await world.auditRows()).filter((row) => (row as { action: string }).action === "proof.override")).toEqual([]);
+        expect((await world.auditRows()).filter((row) => (row as { action: string }).action === "pull_request.proof_overridden")).toEqual([]);
       }
     }
   });
@@ -298,12 +299,12 @@ describe("mark ready anyway", () => {
     const second = "b".repeat(40);
     await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, first, world.now.value);
     await world.seedTracking({ draft: true, headSha: first });
-    await press(world, { actorId: "owner-1" });
+    await press(world, { actorId: "owner-1", expectedHeadSha: first });
     expect((await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, first, world.now.value)).kind).toBe("proceed");
     expect((await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, second, world.now.value)).kind).toBe("held");
     // and a fresh press for the new head replaces the old row
     await world.seedTracking({ draft: true, headSha: second });
-    const again = await press(world, { actorId: "maint" });
+    const again = await press(world, { actorId: "maint", expectedHeadSha: second });
     expect(again).toMatchObject({ already: false, override: { actorId: "maint", headSha: second } });
     expect((await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, second, world.now.value)).kind).toBe("proceed");
   });
@@ -345,5 +346,101 @@ describe("old data keeps working", () => {
     const pr = world.prs[0]!;
     await world.store.put({ item: { ...proofHoldKey(TASK_ID, pr.repositoryId, pr.number), orgId: ORG, taskId: TASK_ID, holds: "yes" } });
     expect(await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head })).toBeUndefined();
+  });
+});
+
+describe("review fixes: a held draft cannot release itself (H1)", () => {
+  it("2 other held PRs in the window: the PR stays held on pass 2 and pass 3 (its own verdict is not in its own history)", async () => {
+    const { world, pr, tracking, draft } = await heldWorld(VACUOUS);
+    for (const number of [101, 102]) {
+      await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => VACUOUS } }, { ...(await world.task()), orgId: ORG }, { repositoryId: "x", number }, "a".repeat(40), world.now.value);
+    }
+    for (const pass of [1, 2, 3]) {
+      await trackPullRequest(tracking, TASK_ID);
+      expect(draft(), `pass ${String(pass)}`).toBe(true);
+      world.now.value += 10 * 60_000;
+    }
+    expect(world.milestones.written.filter((m) => m.kind === "pr_ready")).toEqual([]);
+    expect((await readProofHoldHistory(world.store, ORG, "web")).held).toBe(3);
+    expect(pr.number).toBeGreaterThan(0);
+  });
+});
+
+describe("review fixes: unknown never releases a held draft (M2)", () => {
+  it("held on one head, facts unknown on the next head (or unreadable on the same one): still held", async () => {
+    const { world, pr } = await heldWorld(undefined);
+    let facts: ProofHoldFacts | undefined = VACUOUS;
+    const source = { mode: () => "hold" as const, facts: async () => facts };
+    const task = { ...(await world.task()), orgId: ORG };
+    const judge = (head: string) => judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, head, world.now.value);
+    expect((await judge("a".repeat(40))).kind).toBe("held");
+    facts = undefined;
+    expect((await judge("b".repeat(40))).kind).toBe("held");
+    expect((await judge("b".repeat(40))).kind).toBe("held");
+    facts = { proof: { ...proof([item("does_not_prove", "passed_on_old")]), status: "not_checked" } };
+    expect((await judge("c".repeat(40))).kind).toBe("held");
+    facts = PROVEN;
+    expect((await judge("d".repeat(40))).kind).toBe("proceed");
+  });
+  it("a PR that was never held is not held by unknown facts", async () => {
+    const { world, pr } = await heldWorld(undefined);
+    const task = { ...(await world.task()), orgId: ORG };
+    expect((await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => undefined } }, task, pr, "a".repeat(40), world.now.value)).kind).toBe("proceed");
+  });
+});
+
+describe("review fixes: the press names the head it saw (M1)", () => {
+  it("is refused when the head differs from the tracked head, and writes nothing; the matching head records", async () => {
+    const { tracking, world, pr } = await heldWorld(VACUOUS);
+    await trackPullRequest(tracking, TASK_ID);
+    const refused = await press(world, { actorId: "owner-1", expectedHeadSha: "e".repeat(40) }).then(() => true, (error: { code?: string }) => error.code);
+    expect(refused).toBe("MERGE_NOT_READY");
+    expect(await world.store.get(proofOverrideKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+    expect((await world.auditRows()).filter((row) => (row as { action: string }).action === "pull_request.proof_overridden")).toEqual([]);
+    expect(await press(world, { actorId: "owner-1" }).then(() => true, () => false)).toBe(true);
+  });
+});
+
+describe("review fixes: a held draft is one decision item (M3)", () => {
+  it("says held with the reason and Mark ready anyway as a needs-you item; not 'waiting for checks'; gone after the override", async () => {
+    const { tracking, world } = await heldWorld(VACUOUS);
+    await trackPullRequest(tracking, TASK_ID);
+    const task = await world.task();
+    const held = await attentionOf({ store: world.store, companyId: ORG }, task as never);
+    expect(held.display).toMatchObject({ state: "needs_you" });
+    expect(held.step).toContain("Held");
+    expect(held.step).toContain("Mark ready anyway");
+    expect(held.step).toContain("the new tests pass on the old code too");
+    expect(held.view.merge?.lines.join(" ")).toContain("Mark ready anyway");
+    await press(world, { actorId: "owner-1" });
+    const released = await attentionOf({ store: world.store, companyId: ORG }, task as never);
+    expect(released.step ?? "").not.toContain("Held");
+  });
+  it("a draft that is not held is not a decision item", async () => {
+    const { tracking, world } = await heldWorld(PROVEN);
+    await trackPullRequest(tracking, TASK_ID);
+    const attention = await attentionOf({ store: world.store, companyId: ORG }, (await world.task()) as never);
+    expect(attention.step ?? "").not.toContain("Held");
+  });
+});
+
+describe("review fixes: second press and the early company guard (L6)", () => {
+  it("a press after the draft went ready says it was already marked ready", async () => {
+    const { tracking, world } = await heldWorld(VACUOUS);
+    await trackPullRequest(tracking, TASK_ID);
+    await press(world, { actorId: "owner-1" });
+    await trackPullRequest(tracking, TASK_ID);
+    const error = await press(world, { actorId: "maint" }).then(() => undefined, (caught: { code?: string; message: string }) => caught);
+    expect(error?.code).toBe("MERGE_NOT_READY");
+    expect(error?.message).toContain("already marked ready");
+  });
+  it("a task of another company is refused before any role is read", async () => {
+    const { tracking, world } = await heldWorld(VACUOUS);
+    await trackPullRequest(tracking, TASK_ID);
+    const asked: string[] = [];
+    const spy: LiveRoles = { read: async (company, _project, person) => { asked.push(`${company}:${person}`); return { orgRole: "owner" }; } };
+    const outcome = await press(world, { actorId: "owner-1", companyId: "org-other" }, spy).then(() => true, (error: { code?: string }) => error.code);
+    expect(outcome).toBe("TASK_ACCESS_DENIED");
+    expect(asked).toEqual([]);
   });
 });

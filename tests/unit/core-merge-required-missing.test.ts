@@ -39,6 +39,13 @@ describe("readCi: a required check that never reported", () => {
     expect(readCi(status(), { checksEverSeen: true, lastRovaraPushAt: undefined, now: NOW }).ci).toBe("pending");
     expect(readCi(status({ checks: [{ ...check("unit", "completed", "failure"), required: true }] }), pushedLongAgo).ci).toBe("failing");
   });
+  it("a head a person pushed starts its own clock (not Rovara's old push time), kept on the row for that head", () => {
+    const person = { checksEverSeen: true, lastRovaraPushAt: NOW - 10 * CI_REQUIRED_MISSING_AFTER_MS, now: NOW, headByRovara: false };
+    expect(readCi(status(), person)).toMatchObject({ ci: "pending", missingSince: NOW, recheckAt: NOW + CI_REQUIRED_MISSING_AFTER_MS });
+    expect(readCi(status(), { ...person, missingSince: NOW - CI_REQUIRED_MISSING_AFTER_MS + 1 }).ci).toBe("pending");
+    expect(readCi(status(), { ...person, missingSince: NOW - CI_REQUIRED_MISSING_AFTER_MS })).toMatchObject({ ci: "required_missing", missingSince: NOW - CI_REQUIRED_MISSING_AFTER_MS });
+    expect(readCi(status({ checks: [check("unit", "in_progress")] }), person)).not.toHaveProperty("missingSince");
+  });
   it("is passing when the required check has reported, and a source-named requirement is not met by another app's check", () => {
     expect(readCi(status({ checks: [check("unit", "completed", "success"), check("deploy-gate", "completed", "success")] }), pushedLongAgo).ci).toBe("passing");
     const named = status({ requiredChecks: [{ name: "deploy-gate", source: "42" }], checks: [{ ...check("deploy-gate", "completed", "success"), source: "7" }] as never });
@@ -50,6 +57,28 @@ describe("readCi: a required check that never reported", () => {
     const odd = readCi(status({ requiredChecks: [{ name: `evil‮\n[x](http://a.b) ${"y".repeat(400)}` }] }), pushedLongAgo).missingChecks![0]!;
     expect(odd).not.toMatch(/[\p{Cc}\p{Cf}]/u);
     expect(odd.length).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("tracking a head a person pushed", () => {
+  it("writes the start once for that head and says required_missing after the wait, never at once", async () => {
+    const world = await mergeWorld({
+      codeHost: (model) => {
+        const host = githubShapedHost(model);
+        const read = host.changeRequestStatus.bind(host);
+        return Object.create(host, { changeRequestStatus: { value: async (...args: Parameters<typeof read>) => ({ ...(await read(...args)), requiredChecks: [{ name: "deploy-gate" }], targetHasRequiredChecks: true }) } }) as typeof host;
+      },
+    });
+    const pr = world.prs[0]!;
+    pr.model.getChangeRequest(String(pr.number)).draft = true;
+    pr.model.commit(pr.model.getChangeRequest(String(pr.number)).sourceBranch, { "src/b.ts": "x\n" });
+    const person = { ...world.tracking, recordedHead: async () => pr.head };
+    await trackPullRequest(person, TASK_ID);
+    const first = (await world.trackingOf(pr))!;
+    expect(first).toMatchObject({ ci: "pending", headByRovara: false, ciMissingSince: new Date(world.now.value).toISOString() });
+    world.now.value += CI_REQUIRED_MISSING_AFTER_MS;
+    await trackPullRequest(person, TASK_ID);
+    expect(await world.trackingOf(pr)).toMatchObject({ ci: "required_missing", ciMissingSince: first["ciMissingSince"] });
   });
 });
 

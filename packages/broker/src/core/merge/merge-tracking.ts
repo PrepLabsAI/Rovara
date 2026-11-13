@@ -98,6 +98,12 @@ export function ciAllowsReady(ci: MergeTrackingItem["ci"], mode: ProjectCiMode):
  * only where the project's mode says it does not rely on CI (`sandbox_only`). Unreadable CI never counts.
  */
 export const ciCountsAsPassing = (ci: MergeTrackingItem["ci"], mode: ProjectCiMode): boolean => ci === "passing" || (ci === "none" && mode === "sandbox_only");
+/** The start of a person's head's missing-check wait, kept for the head it was seen on only. */
+export function missingSinceOf(item: Pick<MergeTrackingItem, "headSha" | "ciMissingSince"> | undefined, head: string): number | undefined {
+  if (item === undefined || item.headSha !== head || item.ciMissingSince === undefined) return undefined;
+  const since = Date.parse(item.ciMissingSince);
+  return Number.isFinite(since) ? since : undefined;
+}
 /** The wait for unreadable checks, kept for the head it was seen on only: a new head's checks are a new read. Shared by the tracking pass and the press. */
 export function unreadableSinceOf(item: Pick<MergeTrackingItem, "headSha" | "ciUnreadableSince"> | undefined, head: string): number | undefined {
   if (item === undefined || item.headSha !== head || item.ciUnreadableSince === undefined) return undefined;
@@ -213,6 +219,8 @@ export interface CiReading {
   recheckAt?: number;
   /** TE-B2: since when the checks could not be read, while they cannot (the row keeps it so the wait survives a pass). */
   unreadableSince?: number;
+  /** TE-B5 (L1): for a head a person pushed, since when the required check has been unreported on it (this head's own clock). */
+  missingSince?: number;
   /** TE-B5: the required checks no app has reported, while `ci` is `required_missing`: at most ten, plain and short (the names come from the repository's settings). */
   missingChecks?: string[];
 }
@@ -229,7 +237,7 @@ const missingNames = (entries: ReadonlyArray<{ name: string }>): string[] => [..
  * the head holds no workflow files: anything less is `pending`, so a slow start is never read as "nothing to wait for". Checks that cannot be read (`checksUnavailable`, or checks that exist but none can be
  * counted) are `pending` for `CI_UNREADABLE_AFTER_MS` from `unreadableSince` (the first time they were seen unreadable on this head; `now` when not given), then `unreadable`: never `pending` forever, never `passing`.
  */
-export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boolean; lastRovaraPushAt: number | undefined; now: number; unreadableSince?: number | undefined }): CiReading {
+export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boolean; lastRovaraPushAt: number | undefined; now: number; unreadableSince?: number | undefined; headByRovara?: boolean | undefined; missingSince?: number | undefined }): CiReading {
   const ciBasis = status.targetHasRequiredChecks ? "required" as const : "all_checks" as const;
   const unreadable = (): CiReading => {
     const since = input.unreadableSince !== undefined && input.unreadableSince <= input.now ? input.unreadableSince : input.now;
@@ -239,6 +247,10 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
   // Checks that could not be read are not known: nothing may say they passed.
   if (status.checksUnavailable === true) return unreadable();
   const required = status.requiredChecks;
+  // TE-B5 (L1): the clock of "a required check has not reported" starts at Rovara's push of this head; for a head a PERSON pushed it starts the first time this head was seen (kept on the row), never at an older Rovara push.
+  const person = input.headByRovara === false;
+  const missingStart = person ? (input.missingSince !== undefined && input.missingSince <= input.now ? input.missingSince : input.now) : input.lastRovaraPushAt;
+  const missingMark = person ? { missingSince: missingStart! } : {};
   // A required check is met by a check of that name, from the named source when the host's rule names one (a check with no source cannot meet a requirement that names one).
   const meets = (entry: ChangeRequestStatus["requiredChecks"][number], check: ChangeRequestStatus["checks"][number]): boolean =>
     check.name === entry.name && (entry.source === undefined || check.source === entry.source);
@@ -247,10 +259,10 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
     if (!input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && settled) return { ci: "none", ciBasis, failingChecks: [], failingDetails: [] };
     const waitEnds = !input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && input.lastRovaraPushAt !== undefined ? input.lastRovaraPushAt + NO_CI_GRACE_MS : undefined;
     // TE-B5: a required check and nothing reported at all for a whole wait after Rovara's push: a workflow that never started, or a check no app runs.
-    if (required.length > 0 && input.lastRovaraPushAt !== undefined) {
-      const missingAt = input.lastRovaraPushAt + CI_REQUIRED_MISSING_AFTER_MS;
-      if (missingAt <= input.now) return { ci: "required_missing", ciBasis, failingChecks: [], failingDetails: [], missingChecks: missingNames(required) };
-      return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], recheckAt: missingAt };
+    if (required.length > 0 && missingStart !== undefined) {
+      const missingAt = missingStart + CI_REQUIRED_MISSING_AFTER_MS;
+      if (missingAt <= input.now) return { ci: "required_missing", ciBasis, failingChecks: [], failingDetails: [], missingChecks: missingNames(required), ...missingMark };
+      return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], recheckAt: missingAt, ...missingMark };
     }
     return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], ...(waitEnds === undefined || waitEnds <= input.now ? {} : { recheckAt: waitEnds }) };
   }
@@ -270,10 +282,10 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
   if (unreported.length > 0) {
     // TE-B5: still running checks may be what the missing one waits for, so only a head with nothing running, a whole wait after Rovara's push, is told "a required check has not reported".
     const running = status.checks.some((check) => check.state !== "completed" || check.conclusion === "action_required");
-    if (!running && input.lastRovaraPushAt !== undefined) {
-      const missingAt = input.lastRovaraPushAt + CI_REQUIRED_MISSING_AFTER_MS;
-      if (missingAt <= input.now) return { ci: "required_missing", ciBasis, failingChecks: [], failingDetails: [], missingChecks: missingNames(unreported) };
-      return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], recheckAt: missingAt };
+    if (!running && missingStart !== undefined) {
+      const missingAt = missingStart + CI_REQUIRED_MISSING_AFTER_MS;
+      if (missingAt <= input.now) return { ci: "required_missing", ciBasis, failingChecks: [], failingDetails: [], missingChecks: missingNames(unreported), ...missingMark };
+      return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], recheckAt: missingAt, ...missingMark };
     }
     return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
   }
@@ -370,13 +382,13 @@ export function deriveTrackingFields(input: TrackingInputs): Omit<MergeTrackingI
     : prior?.lastRovaraPushAt === undefined ? undefined : Date.parse(prior.lastRovaraPushAt);
   const checksEverSeen = prior?.checksEverSeen === true || status.checks.length > 0;
   // The wait for unreadable checks is kept on the row, for this head only: a new head's checks are a new read.
-  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: unreadableSinceOf(prior, status.headRevision) });
+  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: unreadableSinceOf(prior, status.headRevision), headByRovara, missingSince: missingSinceOf(prior, status.headRevision) });
   const today = new Date(now).toISOString().slice(0, 10);
   const reAsked = (prior?.review === "changes_requested" || prior?.review === "approved") && input.reviews.review === "requested";
   return {
     orgId: task.orgId, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number,
     headSha: status.headRevision, draft: status.draft, state: status.state, baseBranch: status.targetBranch,
-    ci: ci.ci, ciBasis: ci.ciBasis, ...(ci.unreadableSince === undefined ? {} : { ciUnreadableSince: new Date(ci.unreadableSince).toISOString() }), ...(ci.missingChecks === undefined || ci.missingChecks.length === 0 ? {} : { ciMissingChecks: ci.missingChecks }), checksEverSeen, failingChecks: ci.failingChecks,
+    ci: ci.ci, ciBasis: ci.ciBasis, ...(ci.unreadableSince === undefined ? {} : { ciUnreadableSince: new Date(ci.unreadableSince).toISOString() }), ...(ci.missingChecks === undefined || ci.missingChecks.length === 0 ? {} : { ciMissingChecks: ci.missingChecks }), ...(ci.missingSince === undefined ? {} : { ciMissingSince: new Date(ci.missingSince).toISOString() }), checksEverSeen, failingChecks: ci.failingChecks,
     review: input.reviews.review, ...(input.reviews.approval === undefined ? {} : { approval: input.reviews.approval }),
     branch: readBranch(status), headByRovara,
     ...(lastRovaraPushAt === undefined ? {} : { lastRovaraPushAt: new Date(lastRovaraPushAt).toISOString() }),
@@ -611,6 +623,7 @@ async function trackOne(
   const ci = readCi(status, {
     checksEverSeen: early.checksEverSeen, lastRovaraPushAt: early.lastRovaraPushAt === undefined ? undefined : Date.parse(early.lastRovaraPushAt), now,
     unreadableSince: early.ciUnreadableSince === undefined ? undefined : Date.parse(early.ciUnreadableSince),
+    headByRovara: early.headByRovara, missingSince: early.ciMissingSince === undefined ? undefined : Date.parse(early.ciMissingSince),
   });
   const ciMode = await (deps.ciMode?.(task) ?? DEFAULT_CI_MODE);
 
