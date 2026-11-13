@@ -281,6 +281,9 @@ export * from "./model-catalog.js";
 export * from "./model-catalog-rows.js";
 // The unsigned parse (`parseModelCatalogBytes`) is deliberately NOT exported here: only `builtinModelCatalog()` may feed F1 and F2 until the rows are signed.
 export { MODEL_CATALOG_MAX_BYTES, modelCatalogDigest } from "./model-catalog-digest.js";
+// TE-F4: additive static prompt/model change detection; no production callers.
+export * from "./prompt-change.js";
+export * from "./prompt-change-detect.js";
 export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
