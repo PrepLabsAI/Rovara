@@ -17,10 +17,27 @@ const INCOMPLETE_NOTES = [/\[workspace diff truncated/u, /\[the commit this work
 const SKIP_MARKER = /(?:\b(?:it|test|describe|context|specify)(?:\.concurrent)?\.(?:skip|todo|only|fixme)\b|\b(?:xit|xtest|xdescribe|xcontext|fit|fdescribe)\s*\(|\.skipIf\s*\(|\bpending\s*\(|@(?:Disabled|Ignore)\b|#\[ignore\]|\[Ignore\]|\bt\.Skip(?:Now|f)?\s*\(|\bpytest\.(?:mark\.(?:skip|skipif|xfail)\b|skip\s*\(|xfail\s*\(|importorskip\s*\()|@unittest\.(?:skip|expectedFailure)|\bskipTest\s*\(|@Test\s*\([^)]{0,80}\benabled\s*=\s*false)/u;
 /** An added line that takes code out of the coverage numbers wherever it is written: a `# pragma: no cover` or an `istanbul`, `c8` or `v8` ignore comment. */
 const COVERAGE_PRAGMA = /(?:\bpragma:\s*no\s+cover\b|\/[*/]\s*(?:istanbul|c8|v8)\s+ignore\b)/iu;
-/** An added line of a test or coverage configuration file that takes tests or code out of a run: an ignore, deselect or exclude option. Only read in the files `isConfigFile` names, because `--ignore` means little elsewhere. */
-const CONFIG_EXCLUDE = /(?:\b(?:testPathIgnorePatterns|testIgnore|modulePathIgnorePatterns|coveragePathIgnorePatterns|collect_ignore(?:_glob)?|norecursedirs|exclude_lines|omit|deselect)\b|--(?:ignore|ignore-glob|deselect|exclude)(?=[\s=]|$))/iu;
-/** The files whose added lines `CONFIG_EXCLUDE` is read in: test and coverage configuration, Makefiles, conftest, and the project files that hold a runner's settings. */
-const isConfigFile = (path: string): boolean => isTestConfigPath(path) || /(?:^|\/)(?:package\.json|pyproject\.toml|setup\.cfg)$/iu.test(path);
+/** Option names of a test or coverage configuration file that take tests or code out of a run, read as keys (`omit = a.py`, `testPathIgnorePatterns: [...]`). */
+const EXCLUDE_KEY = /\b(?:testPathIgnorePatterns|testIgnore|modulePathIgnorePatterns|coveragePathIgnorePatterns|collect_ignore(?:_glob)?|norecursedirs|exclude_lines|omit|deselect)\b["']?\s*[=:]/iu;
+/** The keys a package.json holds for a jest-style runner configuration (not `omit` or `deselect`, which mean other things in a package's scripts). */
+const EXCLUDE_KEY_PACKAGE = /\b(?:testPathIgnorePatterns|testIgnore|modulePathIgnorePatterns|coveragePathIgnorePatterns)\b["']?\s*[=:]/iu;
+/** A command-line option that takes tests or code out of a run. It must end at its name (a space, `=` or the end of the line), so `--ignore-path`, `--ignore-scripts` and `--ignore-unknown` are not it. */
+const EXCLUDE_OPTION = /--(?:ignore|ignore-glob|deselect|exclude|omit)(?=[\s=]|$)/iu;
+/** A line that runs a test or coverage runner: only there do the option words above mean tests (`npm ci --omit=dev`, `tar --exclude` and `rsync --exclude` do not run tests). */
+const RUNNER_LINE = /\b(?:pytest|py\.test|jest|vitest|mocha|nyc|c8|coverage|tox|nox|karma|cypress|playwright|ava|phpunit|rspec)\b|\b(?:go|cargo|npm|yarn|pnpm|bun)\s+(?:run\s+)?test\b/iu;
+
+/**
+ * Whether an added line of `path` takes tests or code out of a run. In a test or coverage runner's own configuration file (pytest.ini, jest.config.*, .coveragerc, conftest.py ...) a key or an option counts. In package.json,
+ * pyproject.toml, setup.cfg, a Makefile or turbo.json, an option counts only on a line that runs a runner, and a key only where it is that runner's (jest's keys in package.json; any of the keys in pyproject.toml and setup.cfg).
+ */
+function excludesTests(line: string, path: string): boolean {
+  const name = path.toLowerCase().replaceAll("\\", "/").split("/").at(-1) ?? "";
+  const option = () => EXCLUDE_OPTION.test(line) && RUNNER_LINE.test(line);
+  if (name === "package.json") return EXCLUDE_KEY_PACKAGE.test(line) || option();
+  if (name === "pyproject.toml" || name === "setup.cfg") return EXCLUDE_KEY.test(line) || option();
+  if (name === "makefile" || name === "turbo.json") return option();
+  return isTestConfigPath(path) && (EXCLUDE_KEY.test(line) || EXCLUDE_OPTION.test(line));
+}
 /** A line of package.json that sets a `test` script (`test`, `test:unit`, ...), added or removed. */
 const TEST_SCRIPT_LINE = /^[+-]\s*"test(?::[\w:.-]+)?"\s*:/u;
 /** TE-B3: a line of package.json that sets another script CI runs (`pretest`, `posttest`, `ci`, `coverage`, `verify`, `check`, ...), added or removed: a flag, never the fix-mode high rule of the `test` script. */
@@ -148,7 +165,7 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
     if (line.startsWith("+")) {
       current.added = (current.added ?? 0) + 1;
       if (SKIP_MARKER.test(line)) skipped.add(current);
-      if (COVERAGE_PRAGMA.test(line) || (CONFIG_EXCLUDE.test(line) && isConfigFile(current.path))) excluded.add(current);
+      if (COVERAGE_PRAGMA.test(line) || excludesTests(line, current.path)) excluded.add(current);
     } else if (line.startsWith("-")) current.removed = (current.removed ?? 0) + 1;
     if (TEST_SCRIPT_LINE.test(line) && (current.path === "package.json" || current.path.endsWith("/package.json"))) testCommand.add(current);
     if (CI_SCRIPT_LINE.test(line) && (current.path === "package.json" || current.path.endsWith("/package.json"))) ciScript.add(current);

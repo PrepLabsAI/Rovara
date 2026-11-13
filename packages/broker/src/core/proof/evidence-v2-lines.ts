@@ -9,7 +9,7 @@ import { renderEvidence, type EvidencePackV2Read } from "@agentx/contracts";
 import type { ProofEvidenceContext } from "./evidence-lines.js";
 import { boundEvidence } from "./evidence-lines.js";
 import type { ChangedFileEntry } from "./verification-report.js";
-import { notComparedLine, weakeningFactsOf } from "./weakening-flags.js";
+import { weakeningFactsOf } from "./weakening-flags.js";
 import type { WeakeningFacts } from "@agentx/contracts";
 
 /** The heading of the block. */
@@ -79,11 +79,11 @@ function asMarkdown(lines: readonly string[]): string[] {
 }
 
 /**
- * The block's lines (heading, first line, body, then a blank line), or undefined when there is no v2 pack for this code. `level` is the description's shrink level. `notCompared` is the reason the test proof could not compare
- * the untouched tests (`notComparedReason`, given only when the description has a proof context): the block then ends with "Test weakening: could not compare (<reason>)", as the v1 flags block says it, so a missing flag
+ * The block's lines (heading, first line, body, then a blank line), or undefined when there is no v2 pack for this code. `level` is the description's shrink level. `notCompared` holds the lines for checks the test proof could not compare
+ * the untouched tests (`notComparedLines`, given only when the description has a proof context): the block keeps each line, as the v1 flags block does, so a missing flag
  * never reads as "nothing was weakened".
  */
-export function evidenceV2Lines(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined, files: readonly ChangedFileEntry[] | undefined, level: number, notCompared?: string): string[] | undefined {
+export function evidenceV2Lines(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined, files: readonly ChangedFileEntry[] | undefined, level: number, notCompared: readonly string[] = []): string[] | undefined {
   const bound = boundEvidenceV2(context, candidateDigest);
   if (bound === undefined) return undefined;
   const v1 = boundEvidence(context, candidateDigest);
@@ -91,5 +91,5 @@ export function evidenceV2Lines(context: ProofEvidenceContext | undefined, candi
   // With the description's own files the pack's weakening and flags are replaced by what those files and the pack's test parts say now; without them the pack's own are used.
   const pack = facts === undefined ? bound.pack : ({ ...withoutParts(bound.pack), ...weakeningPartsOf(facts, bound.pack.weakening?.removedTests ?? []) } as EvidencePackV2Read);
   const rendering = renderEvidence(pack, { newer: bound.newer, compact: level >= EVIDENCE_V2_COMPACT_LEVEL });
-  return [EVIDENCE_V2_HEADING, ...asMarkdown([rendering.firstLine, ...rendering.body, ...(notCompared === undefined ? [] : [notComparedLine(notCompared)])]), ""];
+  return [EVIDENCE_V2_HEADING, ...asMarkdown([rendering.firstLine, ...rendering.body, ...notCompared]), ""];
 }
