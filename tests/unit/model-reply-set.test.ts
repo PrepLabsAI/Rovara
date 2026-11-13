@@ -5,6 +5,8 @@ import {
   MODEL_REPLY_SET_MAX_REPLIES,
   ModelReplySetFileSchema,
   ModelReplySetSchema,
+  type IndependentReplyDecision,
+  type ReplyProvenanceDecision,
   createRovaraIndependentDecision,
   modelReplyContentSha256,
   modelReplyEntrySha256,
@@ -146,7 +148,7 @@ describe("stampReplyProvenance: the worker's decision is the only way a provenan
   it("applies the worker's decisions (each bound to the reply's content hash)", () => {
     const set = stampReplyProvenance(
       file,
-      new Map([
+      new Map<string, ReplyProvenanceDecision | IndependentReplyDecision>([
         ["a", { provenance: "before_task" as const, origin: "customer_written" as const, contentSha256: hashOf("a") }],
         ["b", { provenance: "task_made" as const, contentSha256: hashOf("b") }],
         ["c", createRovaraIndependentDecision(hashOf("c"))],

@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -216,12 +216,18 @@ describe("provenance from the base commit", () => {
     const target = join(root, modelReplyFilePath(FAMILY));
     writeFileSync(target, file([{ id: "a" }]));
     const other = join(root, "other.json");
+    const keep = join(root, "keep.json");
+    // Hold the ORIGINAL inode alive under another name during the swap. Without this the test depends on the OS: Linux filesystems (ext4, overlayfs, tmpfs) hand the
+    // freed inode number straight to the next file created, so the "different file" carries the very inode lstat saw and the same-inode check cannot tell it apart
+    // (ubuntu CI read the file here, macOS refused it). A pinned inode cannot be reused, so the swapped file has a different one on both systems.
     // a different file (a different inode) takes the path after lstat
-    const swapped = await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000, { beforeOpen: () => { rmSync(target); writeFileSync(other, file([{ id: "b" }])); renameSync(other, target); } });
+    const swapped = await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000, { beforeOpen: () => { linkSync(target, keep); rmSync(target); writeFileSync(other, file([{ id: "b" }])); renameSync(other, target); } });
     expect(swapped).toEqual({ kind: "unreadable" });
-    // a symlink takes the path after lstat: O_NOFOLLOW refuses it
+    // a symlink takes the path after lstat. It points at the ORIGINAL inode (pinned as keep.json), so the inode check cannot be what refuses it: only O_NOFOLLOW does
+    rmSync(target);
+    rmSync(keep);
     writeFileSync(target, file([{ id: "a" }]));
-    const linked = await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000, { beforeOpen: () => { rmSync(target); symlinkSync(other, target); } });
+    const linked = await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000, { beforeOpen: () => { linkSync(target, keep); rmSync(target); symlinkSync(keep, target); } });
     expect(linked).toEqual({ kind: "unreadable" });
     rmSync(target);
     writeFileSync(target, file([{ id: "a" }]));
