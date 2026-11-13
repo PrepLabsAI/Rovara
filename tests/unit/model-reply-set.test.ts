@@ -5,6 +5,8 @@ import {
   MODEL_REPLY_SET_MAX_REPLIES,
   ModelReplySetFileSchema,
   ModelReplySetSchema,
+  type IndependentReplyDecision,
+  type ReplyProvenanceDecision,
   createRovaraIndependentDecision,
   modelReplyContentSha256,
   modelReplyEntrySha256,
