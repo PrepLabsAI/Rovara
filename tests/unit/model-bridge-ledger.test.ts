@@ -2,7 +2,7 @@
 // evidence lines of a round (7a's condition 2: an unsealed round ALWAYS says "not sealed; model hosts blocked by name only"; a round with no block at all says so instead; Azure is never implied blocked).
 import { describe, expect, it } from "vitest";
 import { MODEL_HOSTS_NOT_BLOCKED_SENTENCE, NOT_SEALED_BLOCKED_BY_NAME_SENTENCE } from "@agentx/contracts";
-import { createModelBridgeLedger, modelBridgeEvidenceLines, parseModelRoundKind, AZURE_OPENAI_NOT_BLOCKED_SENTENCE, NOT_SEALED_NO_BLOCK_SENTENCE } from "../../packages/worker/src/model-bridge-ledger.js";
+import { createModelBridgeLedger, modelBridgeEvidenceLines, parseModelRoundKind, AZURE_OPENAI_NOT_BLOCKED_SENTENCE, GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE, NOT_SEALED_NO_BLOCK_SENTENCE } from "../../packages/worker/src/model-bridge-ledger.js";
 
 const settle = (over: Record<string, unknown> = {}) => ({ row: "gemini", status: 200, class: "ok", costMicros: 0, estimated: false, via: "real", ...over }) as never;
 
@@ -18,6 +18,10 @@ describe("the ledger holds fixed fields only", () => {
     expect(ledger.rows()[0]).toMatchObject({ atMs: 1_000, row: "gemini", status: 0, class: "provider_error", costMicros: 0 });
     expect(ledger.rows()[1]?.row).toBe("unknown");
     expect(Object.keys(ledger.rows()[0]!).sort()).toEqual(["atMs", "class", "costMicros", "estimated", "row", "status", "via"]);
+    ledger.record(settle({ execId: "check-9" }));
+    ledger.record(settle({ execId: "not a plain id\n" }));
+    expect(ledger.rows()[2]?.execId).toBe("check-9");
+    expect(ledger.rows()[3]).not.toHaveProperty("execId");
   });
   it("keeps the refusal word only when it is one of the fixed words", () => {
     const ledger = createModelBridgeLedger({ now: () => 1 });
@@ -47,7 +51,7 @@ describe("exec windows: a failed check whose window holds a provider or cap clas
       at(100);
       ledger.execStart("check-1");
       at(150);
-      ledger.record(settle({ class: cls, status: 429 }));
+      ledger.record(settle({ execId: "check-1", class: cls, status: 429 }));
       at(200);
       ledger.execEnd("check-1");
       expect(ledger.notRunFor("check-1"), cls).toBe(sentence);
@@ -57,13 +61,13 @@ describe("exec windows: a failed check whose window holds a provider or cap clas
   it("leaves a passed check alone and ignores a call outside the window", () => {
     const { ledger, at } = build();
     at(10);
-    ledger.record(settle({ class: "rate_limit", status: 429 }));
+    ledger.record(settle({ execId: "c", class: "rate_limit", status: 429 }));
     at(100);
     ledger.execStart("c");
     at(200);
     ledger.execEnd("c");
     at(300);
-    ledger.record(settle({ class: "quota", status: 429 }));
+    ledger.record(settle({ execId: "c", class: "quota", status: 429 }));
     expect(ledger.notRunFor("c")).toBeUndefined();
     expect(ledger.checkOutcome("c", "failed")).toEqual({ status: "failed" });
     expect(ledger.checkOutcome("c", "passed")).toEqual({ status: "passed" });
@@ -73,17 +77,55 @@ describe("exec windows: a failed check whose window holds a provider or cap clas
     at(100);
     ledger.execStart("open");
     at(150);
-    ledger.record(settle({ class: "overloaded", status: 503 }));
+    ledger.record(settle({ execId: "open", class: "overloaded", status: 503 }));
     at(400);
     expect(ledger.notRunFor("open")).toBe("not run: provider overloaded");
     expect(ledger.notRunFor("nope")).toBeUndefined();
+  });
+  it("another check's call, at the same moment, is not this check's (windows are per check)", () => {
+    const { ledger, at } = build();
+    at(10);
+    ledger.execStart("a");
+    ledger.execStart("b");
+    at(20);
+    ledger.record(settle({ execId: "a", class: "rate_limit", status: 429 }));
+    ledger.record(settle({ class: "quota", status: 429 }));
+    at(30);
+    ledger.execEnd("a");
+    ledger.execEnd("b");
+    expect(ledger.notRunFor("a")).toBe("not run: provider rate limit");
+    expect(ledger.notRunFor("b")).toBeUndefined();
+    expect(ledger.checkOutcome("b", "failed")).toEqual({ status: "failed" });
+  });
+  it("only a real call, or the bridge's own dollar cap, can make a check 'not run': a replay, a count or concurrency refusal, and a pre-call refusal of another class cannot", () => {
+    const { ledger, at } = build();
+    at(10);
+    ledger.execStart("c");
+    for (const entry of [
+      { via: "replayed", class: "rate_limit", status: 429 }, { via: "refused", class: "refused", refusal: "cap", status: 429 }, { via: "refused", class: "rate_limit", status: 429 },
+      { via: "refused", class: "quota", status: 429 }, { via: "refused", class: "key_refused", refusal: "key_refused", status: 401 },
+    ]) ledger.record(settle({ execId: "c", ...entry }));
+    ledger.execEnd("c");
+    expect(ledger.notRunFor("c")).toBeUndefined();
+    expect(ledger.classes()).toEqual([]);
+    ledger.execStart("d");
+    ledger.record(settle({ execId: "d", via: "refused", class: "cap", refusal: "cap", status: 429 }));
+    expect(ledger.notRunFor("d")).toMatch(/budget reached/u);
+  });
+  it("a call with no exec counts for no check", () => {
+    const { ledger, at } = build();
+    at(10);
+    ledger.execStart("c");
+    ledger.record(settle({ class: "rate_limit", status: 429 }));
+    expect(ledger.notRunFor("c")).toBeUndefined();
+    expect(ledger.classes()).toContain("rate_limit");
   });
   it("a cap outranks a rate limit in the same window", () => {
     const { ledger, at } = build();
     at(1);
     ledger.execStart("c");
-    ledger.record(settle({ class: "rate_limit", status: 429 }));
-    ledger.record(settle({ class: "cap", status: 429, via: "refused", refusal: "cap" }));
+    ledger.record(settle({ execId: "c", class: "rate_limit", status: 429 }));
+    ledger.record(settle({ execId: "c", class: "cap", status: 429, via: "refused", refusal: "cap" }));
     ledger.execEnd("c");
     expect(ledger.notRunFor("c")).toMatch(/budget reached/u);
   });
@@ -114,6 +156,15 @@ describe("evidence lines", () => {
       const lines = modelBridgeEvidenceLines({ ...base, roundKind: roundKind, blockMode: "by_name" });
       expect(lines[0], String(roundKind)).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
     }
+  });
+  it("every unsealed round also says a Google service that runs a model inside it is not blocked; the sealed round does not", () => {
+    expect(GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE).toBe("a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked");
+    for (const [roundKind, blockMode, extra] of [["working", "by_name", {}], ["check_unsealed", "by_name", {}], ["check_unsealed", "none", {}], ["check_unsealed", "none", { machineBlock: "not_blocked" }], ["nonsense", "sealed", {}]] as const) {
+      expect(modelBridgeEvidenceLines({ ...base, roundKind, blockMode, ...extra }), `${roundKind} ${blockMode}`).toContain(GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE);
+    }
+    expect(modelBridgeEvidenceLines({ ...base, roundKind: "check_sealed", blockMode: "sealed" })).not.toContain(GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE);
+    const hostile = new Proxy({}, { get: () => { throw new Error("no"); } });
+    expect(modelBridgeEvidenceLines(hostile as never)).toContain(GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE);
   });
   it("the sealed round says nothing of 'not sealed', and only the exact typed round value is sealed", () => {
     const lines = modelBridgeEvidenceLines({ ...base, roundKind: "check_sealed", blockMode: "sealed" });
@@ -153,8 +204,14 @@ describe("evidence lines", () => {
     expect(lines[0]).toBe(`not sealed; ${MODEL_HOSTS_NOT_BLOCKED_SENTENCE}`);
     expect(lines.join("\n")).not.toMatch(/blocked by name only/u);
   });
-  it("never throws on a hostile input", () => {
-    const hostile = new Proxy({}, { get: () => { throw new Error("no"); } });
-    expect(modelBridgeEvidenceLines(hostile as never)[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
+  it("never throws on a hostile input, and the residual line it falls back to claims no more than the input can show (L1)", () => {
+    const boom = (): never => { throw new Error("no"); };
+    const everything = new Proxy({}, { get: boom });
+    expect(modelBridgeEvidenceLines(everything as never)[0]).toBe(NOT_SEALED_NO_BLOCK_SENTENCE);
+    const unreadable = (fields: Record<string, unknown>) => Object.defineProperty({ ...base, roundKind: "working", ...fields }, "hostSuffixes", { get: boom, enumerable: true }) as never;
+    expect(modelBridgeEvidenceLines(unreadable({ blockMode: "none" }))[0]).toBe(NOT_SEALED_NO_BLOCK_SENTENCE);
+    expect(modelBridgeEvidenceLines(unreadable({ blockMode: "none", machineBlock: "not_blocked" }))[0]).toBe(`not sealed; ${MODEL_HOSTS_NOT_BLOCKED_SENTENCE}`);
+    expect(modelBridgeEvidenceLines(unreadable({ blockMode: "by_name" }))[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
+    for (const lines of [modelBridgeEvidenceLines(unreadable({ blockMode: "none" })), modelBridgeEvidenceLines(everything as never)]) expect(lines.join("\n")).not.toMatch(/blocked by name only/u);
   });
 });

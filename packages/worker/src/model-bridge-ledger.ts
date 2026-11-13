@@ -33,6 +33,8 @@ export interface LedgerRow {
   readonly costMicros: number;
   readonly estimated: boolean;
   readonly via: LedgerVia;
+  /** The exec (check) whose token made the call, when it had a live one. Only a call with an exec can turn THAT exec's failure into "not run". */
+  readonly execId?: string;
 }
 
 /** What `record` reads. Anything else on the object is ignored. */
@@ -46,6 +48,7 @@ export interface LedgerEntryInput {
   readonly costMicros: number;
   readonly estimated: boolean;
   readonly via: LedgerVia;
+  readonly execId?: string;
 }
 
 export interface LedgerSummary {
@@ -60,7 +63,7 @@ export interface LedgerSummary {
 export interface ModelBridgeLedger {
   record(entry: LedgerEntryInput): void;
   rows(): readonly LedgerRow[];
-  /** The classes the ledger holds (for the evidence lines). */
+  /** The not-run classes that really happened to the product's own calls (for the evidence lines): see `countsForNotRun`. */
   classes(): ModelEgressClass[];
   execStart(execId: string): void;
   execEnd(execId: string): void;
@@ -73,6 +76,13 @@ export interface ModelBridgeLedger {
 
 const whole = (value: unknown): number | undefined => (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined);
 const CLASS_PRIORITY: readonly (typeof NOT_RUN_CLASSES)[number][] = ["cap", "key_refused", "rate_limit", "quota", "overloaded"];
+
+/**
+ * Whether a row may turn a failure into "not run". Only what really happened to the product's own call: a provider class on a call that went out (`via: "real"`, the adapter's own spend-cap refusal included), or the bridge's own
+ * DOLLAR cap (`via: "refused"`, class `cap`). The bridge's call-count and concurrency refusals are class `refused` and never count, a replay never counts, and a call with no exec counts for nobody: test code cannot make
+ * its own failure read "not run" by hitting the bridge's own limits.
+ */
+const countsForNotRun = (row: LedgerRow): boolean => (row.via === "real" || (row.via === "refused" && row.class === "cap")) && (CLASS_PRIORITY as readonly string[]).includes(row.class);
 
 export function createModelBridgeLedger(options: { readonly now: () => number; readonly capMicros?: number }): ModelBridgeLedger {
   const rows: LedgerRow[] = [];
@@ -103,10 +113,11 @@ export function createModelBridgeLedger(options: { readonly now: () => number; r
         costMicros: whole(entry.costMicros) ?? 0,
         estimated: entry.estimated === true,
         via: (LEDGER_VIAS as readonly unknown[]).includes(entry.via) ? entry.via : "refused",
+        ...(typeof entry.execId === "string" && EXEC_ID.test(entry.execId) ? { execId: entry.execId } : {}),
       });
     },
     rows: () => rows.map((row) => ({ ...row })),
-    classes: () => rows.map((row) => row.class),
+    classes: () => rows.filter(countsForNotRun).map((row) => row.class),
     execStart(execId) {
       if (!EXEC_ID.test(execId) || (windows.size >= WINDOWS_MAX && !windows.has(execId))) return;
       windows.set(execId, { startMs: whole(options.now()) ?? 0, endMs: undefined });
@@ -119,7 +130,8 @@ export function createModelBridgeLedger(options: { readonly now: () => number; r
       const held = windows.get(execId);
       if (held === undefined) return undefined;
       const end = held.endMs ?? Number.POSITIVE_INFINITY;
-      const inside = new Set(rows.filter((row) => row.atMs >= held.startMs && row.atMs <= end).map((row) => row.class));
+      // Per CHECK: the call's own exec, inside that exec's window. Another check's 429, even at the same moment, is not this check's.
+      const inside = new Set(rows.filter((row) => row.execId === execId && countsForNotRun(row) && row.atMs >= held.startMs && row.atMs <= end).map((row) => row.class));
       const found = CLASS_PRIORITY.find((cls) => inside.has(cls));
       return found === undefined ? undefined : sentenceFor(found);
     },
@@ -149,6 +161,8 @@ export function parseModelRoundKind(value: unknown): ModelEgressRoundKind | unde
 
 export const NOT_SEALED_NO_BLOCK_SENTENCE = "not sealed; model hosts not blocked in this round";
 export { AZURE_OPENAI_NOT_BLOCKED_SENTENCE };
+/** Part of the unsealed residual (DECISIONS 174): the Google token hosts are never blocked, and a Google service that runs a model inside it goes out under the company's own Google access. Shown wherever the residual line is. */
+export const GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE = "a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked";
 
 export interface ModelBridgeEvidenceInput extends ModelBlockEvidenceInput {
   /** The round, as the worker's own chooser named it. Anything that is not exactly `check_sealed` is unsealed. */
@@ -164,8 +178,8 @@ export interface ModelBridgeEvidenceInput extends ModelBlockEvidenceInput {
 }
 
 /**
- * The lines for a round. Fixed order: the residual line (unsealed rounds), the Azure line, then F1-a's class lines and redirect escapes. Sealed only when the round is exactly `check_sealed` AND the block mode is `sealed`.
- * Never throws: an unreadable input still gives the residual line.
+ * The lines for a round. Fixed order: the residual line (unsealed rounds), the Google AI-service line (also unsealed only), the Azure line, then F1-a's class lines and redirect escapes. Sealed only when the round is exactly `check_sealed` AND the block mode is `sealed`.
+ * Never throws: an unreadable input still gives a residual line (the weaker one unless the block mode is readable and `by_name`).
  */
 export function modelBridgeEvidenceLines(input: ModelBridgeEvidenceInput): string[] {
   try {
@@ -184,8 +198,12 @@ export function modelBridgeEvidenceLines(input: ModelBridgeEvidenceInput): strin
     const first = input.machineBlock === "not_blocked" ? `not sealed; ${MODEL_HOSTS_NOT_BLOCKED_SENTENCE}` : input.blockMode === "none" ? NOT_SEALED_NO_BLOCK_SENTENCE : NOT_SEALED_BLOCKED_BY_NAME_SENTENCE;
     const rest = lines.slice(1);
     const azure = input.azureOpenAiNotBlocked === true || input.hostSuffixes.length > 0 ? [AZURE_OPENAI_NOT_BLOCKED_SENTENCE] : [];
-    return [first, ...azure, ...rest];
+    return [first, GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE, ...azure, ...rest];
   } catch {
-    return [NOT_SEALED_BLOCKED_BY_NAME_SENTENCE];
+    // An input that cannot be read still gets the residual line, but only the one it can honestly claim: "blocked by name only" only when the block mode is readable and says so. A `none` block, a machine that cannot block,
+    // and an input nothing can be read from all get the weaker "not blocked" words: never a claim of a block that may not exist.
+    const read = <T>(get: () => T): T | undefined => { try { return get(); } catch { return undefined; } };
+    if (read(() => input.machineBlock) === "not_blocked") return [`not sealed; ${MODEL_HOSTS_NOT_BLOCKED_SENTENCE}`, GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE];
+    return [read(() => input.blockMode) === "by_name" ? NOT_SEALED_BLOCKED_BY_NAME_SENTENCE : NOT_SEALED_NO_BLOCK_SENTENCE, GOOGLE_AI_SERVICE_NOT_BLOCKED_SENTENCE];
   }
 }

@@ -10,11 +10,10 @@ import { builtinModelCatalog } from "@agentx/contracts";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/broker/src/local/isolation/egress-gateway-source.js";
 import { gatewayConfig, type GatewayInput } from "../../packages/broker/src/local/isolation/stack.js";
 import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed } from "../../packages/broker/src/local/isolation/allow-list.js";
-import { LAPTOP_GOOGLE_TOKEN_HOSTS, laptopBlockEvidenceInput, laptopSandboxDenyList } from "../../packages/broker/src/local/model-egress/name-block.js";
+import { laptopBlockEvidenceInput, laptopSandboxDenyList } from "../../packages/broker/src/local/model-egress/name-block.js";
 import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
-import { GOOGLE_TOKEN_HOSTS } from "../../packages/worker/src/model-helper-block.js";
 
 const scratch: string[] = [];
 afterAll(async () => { while (scratch.length > 0) await rm(scratch.pop()!, { recursive: true, force: true }); });
@@ -95,19 +94,29 @@ describe("the sandbox-only deny list in the gateway program", () => {
 });
 
 describe("the list itself", () => {
-  it("holds every host of the FULL built-in catalog, the company's gateway hosts and Google's token hosts, and the Azure suffix as a wildcard", () => {
+  it("holds every host of the FULL built-in catalog and the company's gateway hosts, and the Azure suffix as a wildcard", () => {
     const list = laptopSandboxDenyList();
     for (const row of builtinModelCatalog().rows) {
-      for (const host of [...row.hosts, ...row.authHosts]) expect(list, host).toContain(host);
+      // (Google's token hosts are catalog auth hosts today and are never denied: DECISIONS 174, tested below.)
+      for (const host of [...row.hosts, ...row.authHosts].filter((entry) => !/^(?:oauth2|sts|iamcredentials)\.googleapis\.com$/u.test(entry))) expect(list, host).toContain(host);
       for (const suffix of row.hostSuffixes) expect(list).toContain(`*.${suffix}`);
     }
-    for (const host of ["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"]) expect(list).toContain(host);
     expect(list).toContain("*.openai.azure.com");
     expect(laptopSandboxDenyList([], [{ host: "llm.acme.dev" }])).toContain("llm.acme.dev");
     // extra rows are ADDED to the built-in catalog: a partial list never shrinks the block
     expect(laptopSandboxDenyList([{ hosts: ["new.example.com"], authHosts: [], hostSuffixes: [] }])).toEqual(expect.arrayContaining(["new.example.com", "api.openai.com"]));
-    expect(LAPTOP_GOOGLE_TOKEN_HOSTS).toEqual(GOOGLE_TOKEN_HOSTS);
     expect(new Set(list).size).toBe(list.length);
+  });
+});
+
+describe("Google's token hosts are never denied (DECISIONS 174)", () => {
+  it("are not on the deny list, and a sandbox still reaches them through the gateway when they are on the allow list", async () => {
+    const hosts = ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
+    const denied = laptopSandboxDenyList([], [{ host: "llm.acme.dev" }]);
+    for (const host of hosts) expect(denied, host).not.toContain(host);
+    expect(denied.some((entry) => entry.startsWith("*.") && hosts.some((host) => host.endsWith(entry.slice(1))))).toBe(false);
+    const gateway = await load({ allowed: [...LOCAL_DEFAULT_ALLOW_DOMAINS, ...hosts], sandboxDenied: denied });
+    for (const host of hosts) expect(gateway.hostAllowed(host, "sandbox"), host).toBe(true);
   });
 });
 

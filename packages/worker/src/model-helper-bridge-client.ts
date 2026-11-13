@@ -7,6 +7,7 @@
 //   response  NDJSON, one event per line: `{t:"head",status,headers}`, `{t:"chunk",b}` (base64), `{t:"settle",...}`, `{t:"scripted"}` (no recording or no changed prompt: answer from the scripted replies), `{t:"not_run",reason,sentence}`,
 //             `{t:"cut",why}` (the answer ended early: `time`, `fault`, `response_too_large`, `gone`).
 import http from "node:http";
+import { StringDecoder } from "node:string_decoder";
 import type { ModelEgressEvent, ModelEgressSettle } from "@agentx/contracts";
 
 export type ModelBridgeMode = "real" | "record" | "replay";
@@ -99,8 +100,10 @@ export async function* callModelBridge(call: ModelBridgeCall): AsyncGenerator<Mo
       throw new Error("the model bridge refused the request");
     }
     let pending = "";
+    // A character can be split between two reads: the decoder holds the half until the rest comes.
+    const decoder = new StringDecoder("utf8");
     for await (const part of response as AsyncIterable<Buffer>) {
-      pending += part.toString("utf8");
+      pending += decoder.write(part);
       for (let at = pending.indexOf("\n"); at >= 0; at = pending.indexOf("\n")) {
         const line = pending.slice(0, at);
         pending = pending.slice(at + 1);

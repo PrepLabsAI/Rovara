@@ -9,6 +9,13 @@
 // puts it in the sandbox's base URL (`/p/<row>/x/<token>`), and drops it when the exec ends. TE-B1's fresh sandbox is not built: today the final checks run in the working sandbox, so real calls read "not run: real model checks
 // need a fresh check sandbox"; the switch to real is the round kind alone ("one flag away").
 //
+// WHO CAN TALK TO THE SOCKET. The 0600 mode of the socket separates NOTHING in practice: the worker, the helper and the sandbox all run as uid 1000, so any of them could open it. The real control is that ONLY THE HELPER mounts the
+// run directory the socket is in (model-helper-launch.ts: the helper's one mount; the sandbox never gets it), plus the per-exec token below, which the sandbox's own code never sees as a bridge credential (it sits in a base URL
+// the helper reads). When this is wired, check with `docker inspect` that no sandbox mounts the run directory (DEFERRED TE-F1C-SOCKET-ACCESS).
+//
+// TOKENS carry their round. `issueToken(execId, roundKind, modes)` binds the round kind and the modes that exec may use (`real`, `record`) to the token, and every call is checked against ITS token, so one bridge can serve a working
+// exec and a fresh-sandbox exec side by side and a token can never do more than the exec it was issued for (a `record` token does not allow `real`). A call with no token is read in the bridge's default round (`roundKind`, working when absent).
+//
 // Limits (design 7): request headers 16 KB, body 5 MB, response 10 MB in all, one stream chunk 1 MB (a bigger chunk from the port is split), header read 10 s, a call 10 minutes in all.
 // The bridge logs fixed fields only (event, row, mode, status, class, refusal word). Never a body, a header value, a URL query, a token, or a provider's words; an error is never repeated.
 import { randomBytes } from "node:crypto";
@@ -16,7 +23,7 @@ import { chmod, rm } from "node:fs/promises";
 import http from "node:http";
 import type net from "node:net";
 import {
-  MODEL_EGRESS_OVERRUN_SENTENCE, classOfRefusal, familyErrorBody, parseModelEgressFrame, refusalResponse,
+  MODEL_EGRESS_OVERRUN_SENTENCE, MODEL_EGRESS_REFUSAL_HEADER, classOfRefusal, familyErrorBody, parseModelEgressFrame, refusalResponse,
   type ModelEgress, type ModelEgressEvent, type ModelEgressFamily, type ModelEgressFrame, type ModelEgressRefusal, type ModelEgressRoundKind, type ModelEgressScope, type ModelEgressSettle, type RecordReplay, type RecordReplayServe,
 } from "@agentx/contracts";
 import { parseModelRoundKind, type ModelBridgeLedger, type LedgerVia } from "./model-bridge-ledger.js";
@@ -33,8 +40,17 @@ export const MODEL_BRIDGE_LIMITS = {
   totalMs: 10 * 60 * 1000,
   concurrent: 4,
   calls: 200,
+  /** Connections open at once (the socket has one client, the helper; a few for its parallel calls). */
+  connections: 16,
+  /** A pause in a request body, or between the parts of a response the reader is not taking, longer than this ends the connection. Shorter than a whole header read. */
+  bodyIdleMs: 5_000,
+  writeStallMs: 10_000,
 } as const;
 export type ModelBridgeLimits = { -readonly [K in keyof typeof MODEL_BRIDGE_LIMITS]: number };
+
+/** The modes that may forward a real call. `replay` forwards nothing and needs no token. */
+export type ModelBridgeForwardMode = "real" | "record";
+const FORWARD_MODES: readonly ModelBridgeForwardMode[] = ["real", "record"];
 
 export const MODEL_FRESH_SANDBOX_SENTENCE = "not run: real model checks need a fresh check sandbox";
 /** The rounds that may make a real call: the fresh unsealed check round (TE-B1, not built) and the sealed round. Never the working round. */
@@ -52,8 +68,8 @@ export interface ModelBridgeOptions {
   readonly egress: ModelEgress;
   /** Opaque to the bridge: built by the same code that builds the recording scope, from the same task. */
   readonly egressScope: ModelEgressScope;
-  /** The worker's own round kind. Not read from anything the helper or the sandbox sends. */
-  readonly roundKind: unknown;
+  /** The round a call with NO token is read in (the worker's own typed value; never from the helper or the sandbox). Default and fail-closed value: the working round. A call WITH a token is read in the round its token was issued for. */
+  readonly roundKind?: unknown;
   /** The catalog row's family, or undefined for a row this task does not serve. */
   readonly familyOf: (row: string) => ModelEgressFamily | undefined;
   readonly ledger: ModelBridgeLedger;
@@ -78,8 +94,11 @@ export interface ModelBridgeStats {
 export interface ModelBridge {
   /** Listens on `socketPath` (created, then made mode 0600). The directory must exist. */
   listen(socketPath: string): Promise<void>;
-  /** A random token for one exec, for the `/x/<token>` segment of its base URL. */
-  issueToken(execId: string): string;
+  /**
+   * A random token for one exec, for the `/x/<token>` segment of its base URL. It carries the exec's round kind (anything that is not exactly a typed kind is the working round) and the modes the exec may use: `real` and
+   * `record` may forward a call, and a token allows only what it was issued for.
+   */
+  issueToken(execId: string, roundKind: unknown, modes: readonly ModelBridgeForwardMode[]): string;
   /** The exec ended: its tokens stop working. */
   dropToken(execId: string): void;
   stats(): ModelBridgeStats;
@@ -99,10 +118,9 @@ interface Answered { readonly settle?: ModelEgressSettle; readonly cut?: ModelBr
 export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
   const limits: ModelBridgeLimits = { ...MODEL_BRIDGE_LIMITS, ...Object.fromEntries(Object.entries(options.limits ?? {}).filter(([, value]) => typeof value === "number" && value > 0)) };
   // Anything that is not exactly a typed round kind is the working round.
-  const roundKind: ModelEgressRoundKind = parseModelRoundKind(options.roundKind) ?? "working";
-  const roundMayCallReal = MODEL_REAL_ROUND_KINDS.includes(roundKind);
+  const defaultRound: ModelEgressRoundKind = parseModelRoundKind(options.roundKind) ?? "working";
   const makeToken = options.randomToken ?? ((): string => randomBytes(16).toString("hex"));
-  const tokens = new Map<string, string>();
+  const tokens = new Map<string, { readonly execId: string; readonly roundKind: ModelEgressRoundKind; readonly modes: ReadonlySet<ModelBridgeForwardMode> }>();
   const sockets = new Set<net.Socket>();
   const aborts = new Set<AbortController>();
   let server: http.Server | undefined;
@@ -111,6 +129,9 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
   let inflight = 0;
   let spent = 0;
   let overrun = false;
+  /** The largest settled cost of one real call so far: the unit of "about one estimate" for the near-cap gate. */
+  let largestCost = 0;
+  const settleWaiters: Array<() => void> = [];
   const log = (fields: Readonly<Record<string, string | number>>): void => {
     try { options.log?.(fields); } catch { /* a log sink that throws is not the call's problem */ }
   };
@@ -127,17 +148,19 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
   }
 
   /** The bridge's own refusals are recorded in the ledger as `refused`. */
-  function note(row: string, mode: string, status: number, cls: ModelEgressSettle["class"], refusal: ModelEgressRefusal | undefined, via: LedgerVia): void {
+  function note(row: string, mode: string, status: number, cls: ModelEgressSettle["class"], refusal: ModelEgressRefusal | undefined, via: LedgerVia, execId?: string): void {
     const known = options.familyOf(row) !== undefined ? row : "unknown";
-    options.ledger.record({ row: known, status, class: cls, ...(refusal === undefined ? {} : { refusal }), costMicros: 0, estimated: false, via });
+    options.ledger.record({ row: known, status, class: cls, ...(refusal === undefined ? {} : { refusal }), costMicros: 0, estimated: false, via, ...(execId === undefined ? {} : { execId }) });
     log({ event: refusal === undefined ? "answer" : "refused", row: known, mode, status, class: cls, ...(refusal === undefined ? {} : { refusal }) });
   }
 
   async function writeAll(response: http.ServerResponse, text: string): Promise<boolean> {
     if (response.destroyed || response.writableEnded) return false;
     if (response.write(text)) return true;
+    // A reader that does not take what is written for this long is gone: the connection is closed and the call ends (the buffer never grows past one write).
     return new Promise<boolean>((resolve) => {
-      const done = (): void => { response.off("drain", done); response.off("close", done); resolve(!response.destroyed); };
+      const done = (): void => { clearTimeout(stall); response.off("drain", done); response.off("close", done); resolve(!response.destroyed); };
+      const stall = setTimeout(() => { response.destroy(); }, limits.writeStallMs);
       response.once("drain", done);
       response.once("close", done);
     });
@@ -160,13 +183,14 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       };
       const arm = (): void => {
         if (timer !== undefined) clearTimeout(timer);
-        timer = setTimeout(() => { request.destroy(); finish({ ok: false, reason: "slow" }); }, limits.headerReadMs);
+        timer = setTimeout(() => { request.destroy(); finish({ ok: false, reason: "slow" }); }, limits.bodyIdleMs);
       };
       const declared = Number(request.headers["content-length"]);
       if (Number.isFinite(declared) && declared > max) return finish({ ok: false, reason: "too_large" });
       const onData = (part: Buffer): void => {
         size += part.length;
-        if (size > max) return finish({ ok: false, reason: "too_large" });
+        // The bytes the connection has carried are bounded too (a request that pipelines more after its body).
+        if (size > max || request.socket.bytesRead > max + limits.headersBytes) return finish({ ok: false, reason: "too_large" });
         parts.push(part);
         arm();
       };
@@ -193,22 +217,53 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     return checked.ok ? { ok: true, frame: checked.frame } : { ok: false, refusal: checked.refusal };
   }
 
-  type Block = { readonly by: "round" } | { readonly by: "token" } | { readonly by: "cap"; readonly overrun: boolean };
-  /** Why this call may not be forwarded, if it may not. Checked in this order: the round, the token, then the caps. */
-  function blockedBy(token: string | undefined): Block | undefined {
-    if (!roundMayCallReal) return { by: "round" };
-    if (token === undefined || !TOKEN.test(token) || !tokens.has(token)) return { by: "token" };
+  /** `limit` names the bridge's OWN count and concurrency limits: those are not a spend cap and never read as "not run". */
+  type Block = { readonly by: "round" } | { readonly by: "token" } | { readonly by: "cap"; readonly overrun: boolean; readonly limit?: "calls" | "concurrent" };
+  const tokenOf = (token: string | undefined): { readonly execId: string; readonly roundKind: ModelEgressRoundKind; readonly modes: ReadonlySet<ModelBridgeForwardMode> } | undefined => (token !== undefined && TOKEN.test(token) ? tokens.get(token) : undefined);
+  /** Why this call may not be forwarded, if it may not. Checked in this order: the round (its token's, or the default one), the token and its modes, then the caps. */
+  function blockedBy(token: string | undefined, mode: ModelBridgeForwardMode): Block | undefined {
+    const held = tokenOf(token);
+    if (!MODEL_REAL_ROUND_KINDS.includes(held?.roundKind ?? defaultRound)) return { by: "round" };
+    if (held === undefined || !held.modes.has(mode)) return { by: "token" };
     if (overrun) return { by: "cap", overrun: true };
-    const capped = options.capMicros !== undefined && spent >= options.capMicros;
-    if (capped || callsStarted >= limits.calls || inflight >= limits.concurrent) return { by: "cap", overrun: false };
+    if (options.capMicros !== undefined && spent >= options.capMicros) return { by: "cap", overrun: false };
+    if (callsStarted >= limits.calls) return { by: "cap", overrun: false, limit: "calls" };
+    if (inflight >= limits.concurrent) return { by: "cap", overrun: false, limit: "concurrent" };
     return undefined;
+  }
+  /**
+   * Near the cap, calls go one at a time. Four calls in flight can each settle above its estimate, so with less than about four calls' worth of budget left the next call waits for the one in flight to SETTLE, and the task is
+   * over its cap by at most one call (DECISIONS 165). The unit is the largest settled cost seen, so the very first calls of a task (nothing settled yet) can still run together: up to four may overrun then.
+   */
+  const NEAR_CAP_CALLS = 4;
+  const nearCap = (): boolean => options.capMicros !== undefined && largestCost > 0 && options.capMicros - spent < NEAR_CAP_CALLS * largestCost;
+  /**
+   * Waits its turn near the cap, then decides and TAKES the slot in one synchronous step (no await between the check and the start: two waiters woken together must not both pass). Returns the block when the call may not be forwarded,
+   * `"started"` when the slot is taken (the caller must `endForward()`), or `"aborted"` when the helper went away while it waited.
+   */
+  async function enter(token: string | undefined, mode: ModelBridgeForwardMode, signal: AbortSignal): Promise<Block | "started" | "aborted"> {
+    for (;;) {
+      if (signal.aborted) return "aborted";
+      if (nearCap() && inflight > 0) {
+        await new Promise<void>((resolve) => {
+          settleWaiters.push(resolve);
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        continue;
+      }
+      const block = blockedBy(token, mode);
+      if (block !== undefined) return block;
+      inflight += 1;
+      callsStarted += 1;
+      return "started";
+    }
   }
 
   /**
    * Writes the events of one answer with the limits applied, records the ledger row, and counts the spend. `forwarded` answers (the port's) hold a slot and count against the caps; a replay costs nothing.
    * Never throws; a fault from the port is a fixed answer, never retried and never quoted.
    */
-  async function pump(response: http.ServerResponse, input: { row: string; family: ModelEgressFamily; mode: ModelBridgeMode; via: LedgerVia; events: AsyncIterable<ModelEgressEvent>; controller: AbortController; /** F8's `abandon()` for a forwarded stream: called whenever the answer did not run to its settle, so the one record slot is free again. */ abandon?: () => void }): Promise<void> {
+  async function pump(response: http.ServerResponse, input: { row: string; family: ModelEgressFamily; mode: ModelBridgeMode; via: LedgerVia; events: AsyncIterable<ModelEgressEvent>; controller: AbortController; execId?: string; /** F8's `abandon()` for a forwarded stream: called whenever the answer did not run to its settle, so the one record slot is free again. */ abandon?: () => void }): Promise<void> {
     const { controller } = input;
     let cut: ModelBridgeCutReason | undefined;
     let head: number | undefined;
@@ -273,6 +328,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     const answered: Answered = { ...(settle === undefined ? {} : { settle }), ...(cut === undefined ? {} : { cut }), ...(head === undefined ? {} : { status: head }) };
     if (input.via === "real") {
       spent += answered.settle?.costMicros ?? 0;
+      largestCost = Math.max(largestCost, answered.settle?.costMicros ?? 0);
       if (answered.settle?.overrun === true) overrun = true;
     }
     options.ledger.record({
@@ -285,6 +341,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       costMicros: answered.settle?.costMicros ?? 0,
       estimated: answered.settle?.estimated ?? false,
       via: input.via,
+      ...(input.execId === undefined ? {} : { execId: input.execId }),
     });
     log({ event: "call", row: options.familyOf(input.row) !== undefined ? input.row : "unknown", mode: input.mode, status: answered.settle?.status ?? answered.status ?? 0, class: answered.settle?.class ?? "provider_error", ...(answered.settle?.refusal === undefined ? {} : { refusal: answered.settle.refusal }), ...(cut === undefined ? {} : { reason: cut }) });
   }
@@ -295,9 +352,9 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       return;
     }
     response.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store", connection: "close" });
-    const refuse = async (family: ModelEgressFamily, word: ModelEgressRefusal, row = "unknown", mode = "unknown", extra: { capMicros?: number; overrun?: boolean } = {}): Promise<void> => {
+    const refuse = async (family: ModelEgressFamily, word: ModelEgressRefusal, row = "unknown", mode = "unknown", extra: { capMicros?: number; overrun?: boolean } = {}, execId?: string): Promise<void> => {
       const answer = refusalResponse(family, word, extra);
-      note(row, mode, answer.status, classOfRefusal(word), word, "refused");
+      note(row, mode, answer.status, classOfRefusal(word), word, "refused", execId);
       await writeLines(response, refusalLines(family, word, extra));
       response.end();
     };
@@ -322,10 +379,13 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     const md: ModelBridgeMode = mode;
     const tokenHeader = request.headers["x-rovara-token"];
     const token = typeof tokenHeader === "string" ? tokenHeader : undefined;
+    const execId = tokenOf(token)?.execId;
     const controller = new AbortController();
     aborts.add(controller);
+    // The helper went away while this call waited: nothing is left to answer.
+    response.once("close", () => { if (!response.writableEnded) controller.abort(); });
     const finishWith = async (lines: readonly string[], via: LedgerVia, cls: ModelEgressSettle["class"], status: number): Promise<void> => {
-      note(frame.row, mode, status, cls, undefined, via);
+      note(frame.row, mode, status, cls, undefined, via, execId);
       await writeLines(response, lines);
       response.end();
       aborts.delete(controller);
@@ -334,11 +394,22 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     const refuseBlocked = async (block: Block): Promise<void> => {
       aborts.delete(controller);
       if (block.by === "round") return finishWith(notRun(MODEL_FRESH_SANDBOX_SENTENCE, "fresh_sandbox"), "refused", "refused", 0);
-      if (block.by === "token") return refuse(family, "not_allowed", frame.row, mode);
-      return refuse(family, "cap", frame.row, mode, { ...(options.capMicros === undefined ? {} : { capMicros: options.capMicros }), ...(block.overrun ? { overrun: true } : {}) });
+      if (block.by === "token") return refuse(family, "not_allowed", frame.row, mode, {}, execId);
+      if (block.limit !== undefined) {
+        // The bridge's own count and concurrency limits: a 429 in the family's cap shape (what a client already handles), but class `refused` in the ledger, so it is never read as the provider's or the budget's "not run".
+        const status = 429;
+        const message = block.limit === "calls" ? "The test model call limit for this task was reached." : "Too many test model calls are open at once.";
+        note(frame.row, mode, status, "refused", "cap", "refused", execId);
+        await writeLines(response, [headLine(status, [["content-type", "application/json"], [MODEL_EGRESS_REFUSAL_HEADER, "cap"]]), chunkLine(familyErrorBody(family, status, message, `rovara_${block.limit}`)), settleLine({ kind: "settle", status, class: "refused", refusal: "cap", costMicros: 0, estimated: false })]);
+        response.end();
+        return;
+      }
+      return refuse(family, "cap", frame.row, mode, { ...(options.capMicros === undefined ? {} : { capMicros: options.capMicros }), ...(block.overrun ? { overrun: true } : {}) }, execId);
     };
-    const startForward = (): void => { inflight += 1; callsStarted += 1; };
-    const endForward = (): void => { inflight -= 1; };
+    const endForward = (): void => {
+      inflight -= 1;
+      for (const wake of settleWaiters.splice(0)) wake();
+    };
 
     if (mode === "replay") {
       if (options.recording === undefined) return finishWith([line({ t: "scripted" })], "refused", "refused", 0);
@@ -346,11 +417,11 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       return answerRecording(served, false);
     }
     if (mode === "real") {
-      const block = blockedBy(token);
-      if (block !== undefined) return refuseBlocked(block);
-      startForward();
+      const entered = await enter(token, "real", controller.signal);
+      if (entered === "aborted") { aborts.delete(controller); response.end(); return; }
+      if (entered !== "started") return refuseBlocked(entered);
       try {
-        await pump(response, { row: frame.row, family, mode, via: "real", events: options.egress.forward(options.egressScope, frame, { signal: controller.signal }), controller });
+        await pump(response, { row: frame.row, family, mode, via: "real", events: options.egress.forward(options.egressScope, frame, { signal: controller.signal }), controller, ...(execId === undefined ? {} : { execId }) });
       } finally {
         endForward();
         response.end();
@@ -359,8 +430,9 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     }
     // record: forwards the first call per changed prompt when a real call is allowed, otherwise only replays.
     if (options.recording === undefined) return finishWith([line({ t: "scripted" })], "refused", "refused", 0);
-    const block = blockedBy(token);
-    if (block === undefined) startForward();
+    const entered = await enter(token, "record", controller.signal);
+    if (entered === "aborted") { aborts.delete(controller); response.end(); return; }
+    const block = entered === "started" ? undefined : entered;
     const served = await (block === undefined ? options.recording.record : options.recording.replay).serve(frame, { signal: controller.signal });
     return answerRecording(served, block === undefined, block);
 
@@ -378,9 +450,9 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
         if (result.via === "forwarded" && !slotHeld) {
           // The engine must not forward when the bridge said no; it did not get here unless a mode was mixed up. Never make the call.
           result.abandon();
-          return await refuse(fam, "not_allowed", frame.row, md);
+          return await refuse(fam, "not_allowed", frame.row, md, {}, execId);
         }
-        await pump(response, { row: frame.row, family: fam, mode: md, via: result.via === "forwarded" ? "real" : "replayed", events: result.events, controller, abandon: result.abandon });
+        await pump(response, { row: frame.row, family: fam, mode: md, via: result.via === "forwarded" ? "real" : "replayed", events: result.events, controller, abandon: result.abandon, ...(execId === undefined ? {} : { execId }) });
         response.end();
       } finally {
         if (slotHeld) endForward();
@@ -398,6 +470,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       const created = http.createServer({ maxHeaderSize: limits.headersBytes, keepAlive: false } as http.ServerOptions, (request, response) => {
         handle(request, response).catch(() => { try { response.destroy(); } catch { /* gone */ } });
       });
+      created.maxConnections = limits.connections;
       created.requestTimeout = limits.totalMs;
       created.headersTimeout = limits.headerReadMs;
       created.keepAliveTimeout = 1;
@@ -418,19 +491,22 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       server = created;
       socketPath = path;
     },
-    issueToken(execId) {
+    issueToken(execId, issuedRound, modes) {
       const token = makeToken();
       if (!TOKEN.test(token)) throw new Error("the model bridge token is not plain");
-      tokens.set(token, execId);
+      // Anything that is not exactly a typed round kind is the working round; only the two forwarding modes exist.
+      const allowed = new Set(FORWARD_MODES.filter((mode) => Array.isArray(modes) && modes.includes(mode)));
+      tokens.set(token, { execId, roundKind: parseModelRoundKind(issuedRound) ?? "working", modes: allowed });
       return token;
     },
     dropToken(execId) {
-      for (const [token, owner] of tokens) if (owner === execId) tokens.delete(token);
+      for (const [token, held] of tokens) if (held.execId === execId) tokens.delete(token);
     },
     stats: () => ({ calls: callsStarted, inflight, spentMicros: spent, overrun }),
     async close() {
       tokens.clear();
       for (const controller of aborts) controller.abort();
+      for (const wake of settleWaiters.splice(0)) wake();
       aborts.clear();
       for (const socket of sockets) socket.destroy();
       const closing = server;

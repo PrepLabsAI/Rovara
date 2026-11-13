@@ -139,6 +139,39 @@ describe("the local meter", () => {
     await expect(make().reserve({ owner: "o", task: "t", estimateMicros: 1.5 })).rejects.toThrow();
     await expect(make().reserve({ owner: "o", task: "t", estimateMicros: -1 })).rejects.toThrow();
   });
+  it("pruning never deletes the current task's row, nor a task with an open reservation, whatever the size limit (L4)", async () => {
+    const meter = createLocalMeter({ directory: dir, now: () => clock.now, tasksMax: 3 });
+    const first = await meter.reserve({ owner: "o", task: "t1", estimateMicros: 500 });
+    if (!first.ok) throw new Error("expected a reservation");
+    for (const task of ["t2", "t3", "t4", "t5"]) {
+      clock.now += 1_000;
+      const held = await meter.reserve({ owner: "o", task, estimateMicros: 10 });
+      if (!held.ok) throw new Error("expected a reservation");
+      await meter.settle(held.handle, 10);
+    }
+    // t1 is the oldest and over the limit, but it is still in flight: it is kept, and it settles.
+    expect(await meter.taskSpent("o", "t1")).toBe(500);
+    expect(await meter.settle(first.handle, 100)).toEqual({ overrun: false });
+    expect(await meter.taskSpent("o", "t1")).toBe(100);
+    // once nothing is open, the oldest of the others go first and the one just written stays
+    clock.now += 1_000;
+    const last = await meter.reserve({ owner: "o", task: "t6", estimateMicros: 10 });
+    expect(last.ok).toBe(true);
+    expect(await meter.taskSpent("o", "t6")).toBe(10);
+    expect(await meter.taskSpent("o", "t1")).toBe(0);
+    clock.now = Date.UTC(2026, 10, 13, 10);
+  });
+  it("a task that is old by the clock but being written is kept", async () => {
+    const meter = createLocalMeter({ directory: dir, now: () => clock.now });
+    const held = await meter.reserve({ owner: "o", task: "long", estimateMicros: 100 });
+    if (!held.ok) throw new Error("expected a reservation");
+    clock.now += 70 * 24 * 60 * 60 * 1000;
+    const other = await meter.reserve({ owner: "o", task: "newer", estimateMicros: 1 });
+    expect(other.ok).toBe(true);
+    expect(await meter.taskSpent("o", "long")).toBe(100);
+    expect(await meter.settle(held.handle, 100)).toEqual({ overrun: false });
+    clock.now = Date.UTC(2026, 10, 13, 10);
+  });
   it("serialises concurrent reservations: two that cannot both fit never both succeed", async () => {
     const meter = make();
     await meter.setCaps("o", { taskCapMicros: 1_000 });

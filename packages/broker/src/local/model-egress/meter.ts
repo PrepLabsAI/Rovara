@@ -59,9 +59,12 @@ function parseState(text: string): State {
   return state;
 }
 
-export function createLocalMeter(options: { readonly directory: string; readonly now: () => number; readonly defaults?: Partial<MeterCaps> }): LocalMeter {
+export function createLocalMeter(options: { readonly directory: string; readonly now: () => number; readonly defaults?: Partial<MeterCaps>; /** The most task rows kept on file. Default 5000. */ readonly tasksMax?: number }): LocalMeter {
   const path = join(options.directory, METER_FILE_NAME);
   const defaults: MeterCaps = { taskCapMicros: options.defaults?.taskCapMicros ?? DEFAULT_TASK_CAP_MICROS, monthCapMicros: options.defaults?.monthCapMicros ?? DEFAULT_MONTH_CAP_MICROS };
+  const tasksMax = options.tasksMax ?? TASKS_MAX;
+  /** Tasks with a reservation that has not settled (in this process): their rows are never pruned, whatever else is. */
+  const open = new Map<string, number>();
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
     const next = queue.then(work, work);
@@ -72,9 +75,18 @@ export function createLocalMeter(options: { readonly directory: string; readonly
     const file = await readOwnerFile(path, { private: true, label: "model meter file", maxBytes: 8 * 1024 * 1024 });
     return file === undefined ? { tasks: new Map(), months: new Map(), caps: new Map() } : parseState(file.text);
   }
-  async function save(state: State): Promise<void> {
+  /** `keep`: the task keys that must stay (the one being written, and every task with a reservation still open). */
+  async function save(state: State, keep: ReadonlySet<string>): Promise<void> {
     const cutoff = options.now() - KEEP_MS;
-    for (const [key, row] of state.tasks) if (row.touchedMs < cutoff || state.tasks.size > TASKS_MAX) state.tasks.delete(key);
+    for (const [key, row] of state.tasks) if (row.touchedMs < cutoff && !keep.has(key)) state.tasks.delete(key);
+    // Over the size limit: the least recently touched go first, and never one that must stay.
+    if (state.tasks.size > tasksMax) {
+      const oldest = [...state.tasks.entries()].filter(([key]) => !keep.has(key)).sort((a, b) => a[1].touchedMs - b[1].touchedMs);
+      for (const [key] of oldest) {
+        if (state.tasks.size <= tasksMax) break;
+        state.tasks.delete(key);
+      }
+    }
     for (const [key, row] of state.months) if (row.month < monthOf(cutoff)) state.months.delete(key);
     await ensurePrivateDirectory(options.directory);
     await writeOwnerFile(path, `${JSON.stringify({ version: 1, tasks: [...state.tasks.values()], months: [...state.months.values()], caps: [...state.caps.values()] })}\n`);
@@ -103,7 +115,9 @@ export function createLocalMeter(options: { readonly directory: string; readonly
       monthRow.spent += estimateMicros;
       state.tasks.set(taskKey(owner, task), taskRow);
       state.months.set(taskKey(owner, month), monthRow);
-      await save(state);
+      const key = taskKey(owner, task);
+      open.set(key, (open.get(key) ?? 0) + 1);
+      await save(state, new Set([key, ...open.keys()]));
       return { ok: true, handle: { owner, task, month, reserveMicros: estimateMicros } } as const;
     }),
     settle: (handle, costMicros) => serial(async () => {
@@ -118,7 +132,11 @@ export function createLocalMeter(options: { readonly directory: string; readonly
       // The cap is overrun only when the SPEND passes it (DECISIONS 165): one call over its estimate but under the cap is nothing.
       if (isOverCap(taskRow.spent, caps.taskCapMicros)) taskRow.overrun = true;
       if (isOverCap(monthRow.spent, caps.monthCapMicros)) monthRow.overrun = true;
-      await save(state);
+      const key = taskKey(handle.owner, handle.task);
+      const left = (open.get(key) ?? 1) - 1;
+      if (left > 0) open.set(key, left);
+      else open.delete(key);
+      await save(state, new Set([key, ...open.keys()]));
       return { overrun: taskRow.overrun || monthRow.overrun };
     }),
     taskSpent: async (owner, task) => (await load()).tasks.get(taskKey(owner, task))?.spent ?? 0,
@@ -130,7 +148,7 @@ export function createLocalMeter(options: { readonly directory: string; readonly
       const state = await load();
       const held = capsOf(state, owner);
       state.caps.set(owner, { owner, taskCapMicros: caps.taskCapMicros ?? held.taskCapMicros, monthCapMicros: caps.monthCapMicros ?? held.monthCapMicros });
-      await save(state);
+      await save(state, new Set(open.keys()));
     }),
   };
 }
