@@ -28,22 +28,39 @@ export const TEST_CONFIG_PATH_PATTERNS: readonly RegExp[] = [
 ];
 
 /** A folder that holds tests: a test, tests, __tests__, spec, e2e or test-data folder, somewhere above the file. `snapshots/`, `golden/` and `fixtures/` mean snapshots and fixtures only under one (an app's `fixtures/seed.json`, a docs `snapshots/` page or an asset `golden/` image are not tests'). */
-const TEST_ANCESTOR = String.raw`(?:^|\/)(?:tests?|__tests__|specs?|e2e|testdata|test-data|test_data)\/(?:[^/]+\/)*`;
+const TEST_FOLDERS: ReadonlySet<string> = new Set(["test", "tests", "__tests__", "spec", "specs", "e2e", "testdata", "test-data", "test_data"]);
+const SNAPSHOT_FOLDERS: ReadonlySet<string> = new Set(["snapshot", "snapshots", "golden"]);
+const FIXTURE_FOLDERS: ReadonlySet<string> = new Set(["fixture", "fixtures"]);
+
+/** Whether a folder of `folders` (a set of names) lies below a test folder, among the folders above the file: checked on the path's segments in one pass, so the cost is the length of the path whatever it holds. */
+function underTestFolder(value: string, folders: ReadonlySet<string>): boolean {
+  const segments = value.split("/");
+  let inTests = false;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index]!;
+    if (inTests && folders.has(segment)) return true;
+    if (TEST_FOLDERS.has(segment)) inTests = true;
+  }
+  return false;
+}
+
+/** A name with an `.approved`, `.received` or `.verified` part before its last extension (`Foo.verified.txt`). Checked on the file name's parts, not by a pattern that scans to the end from every dot. */
+function approvalFile(value: string): boolean {
+  const parts = (value.split("/").at(-1) ?? "").split(".");
+  return parts.length >= 3 && parts.slice(1, -1).some((part) => part === "approved" || part === "received" || part === "verified");
+}
 
 /** Snapshot files (jest, vitest, syrupy, Verify, approval tests, Go golden files): the expected output a test compares with, so a change to one can make a failing test pass. */
 const SNAPSHOT_PATH_PATTERNS: readonly RegExp[] = [
   /\.snap$/,
   /\.ambr$/,
   /(^|\/)__snapshots__(\/|$)/,
-  new RegExp(`${TEST_ANCESTOR}(?:snapshots?|golden)\\/.+$`),
-  /\.(approved|received|verified)\.[\w.-]+$/,
   /\.golden(\.[\w-]+)?$/,
 ];
 
 /** Fixture and recorded-answer files that tests read: test data folders, mocks and recorded HTTP cassettes, and a `fixtures/` folder under a test folder. */
 const FIXTURE_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)(__fixtures__|testdata|test-data|test_data|__mocks__|cassettes)(\/|$)/,
-  new RegExp(`${TEST_ANCESTOR}fixtures?\\/.+$`),
   /\.cassette\.[\w]+$/,
 ];
 
@@ -58,6 +75,6 @@ export const isInstructionFilePath = (path: string): boolean => matches(INSTRUCT
 /** A test runner's or coverage tool's configuration, a Makefile or a `conftest.py`: files whose change can change which tests run. */
 export const isTestConfigPath = (path: string): boolean => matches(TEST_CONFIG_PATH_PATTERNS, path);
 /** A snapshot or golden file. */
-export const isSnapshotPath = (path: string): boolean => matches(SNAPSHOT_PATH_PATTERNS, path);
+export const isSnapshotPath = (path: string): boolean => matches(SNAPSHOT_PATH_PATTERNS, path) || approvalFile(normalized(path)) || underTestFolder(normalized(path), SNAPSHOT_FOLDERS);
 /** A fixture, mock or recorded-answer file. */
-export const isFixturePath = (path: string): boolean => matches(FIXTURE_PATH_PATTERNS, path);
+export const isFixturePath = (path: string): boolean => matches(FIXTURE_PATH_PATTERNS, path) || underTestFolder(normalized(path), FIXTURE_FOLDERS);

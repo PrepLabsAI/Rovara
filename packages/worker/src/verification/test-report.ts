@@ -366,8 +366,32 @@ export function untouchedCount(report: ParsedTestReport, changedTestPaths: reado
   return report.tests.filter((test) => changedPathOf(test, changedTestPaths) === undefined).length;
 }
 
-/** A command argument that stops a run at its first failure (pytest `-x` and `--maxfail`, vitest and jest `--bail`): the run on the original code then ends early on the tests it was told to keep failing. */
-const STOP_EARLY_ARGUMENT = /^(?:--exitfirst|--maxfail(?:=.*)?|--bail(?:=.*)?|-bail|-x|-[a-wyzA-Z]*x[a-zA-Z]*)$/u;
+/**
+ * Options that stop a run at its first failure (or after a few), by runner: pytest `-x`, `--exitfirst`, `--maxfail`, `--stepwise`, `--sw`; jest, vitest and mocha `--bail` and `-b`; unittest `-f` and `--failfast`; go `-failfast`;
+ * cargo `--fail-fast`; and the `--stop-on-*` and `--max-failures` family. `-b` and `-f` mean other things to a few tools: a doubtful case only means "no claim", which is the safe side.
+ */
+const STOP_EARLY_OPTION = /^(?:--exitfirst|--bail|-bail|-b|-f|--failfast|-failfast|--fail-fast|--stepwise|--stepwise-skip|--sw|--sw-skip|--stop-on-failure|--stop-on-error|--stop-on-defect|--max-failures(?:=.*)?)$/u;
+/** A pytest-style cluster of flags that take no value, one of which is `-x` (`-x`, `-xv`, `-vx`): a letter that takes a value (`-r`, `-k`, `-n`, `-m`, `-c`, `-p`) ends the cluster, so `-rx` (report letters) and `-Xmx` are not it. */
+const STOP_EARLY_CLUSTER = /^-[vqsl]*x[vqslx]*$/u;
+/** A limit on failures (`--maxfail=3`, `--bail=1`): zero means no limit. */
+const LIMIT_OPTION = /^(?:--maxfail|--bail|-bail)(?:=(.*))?$/u;
+
+function stopsEarly(args: readonly string[]): boolean {
+  for (const [index, argument] of args.entries()) {
+    if (STOP_EARLY_OPTION.test(argument) || STOP_EARLY_CLUSTER.test(argument)) return true;
+    const limit = LIMIT_OPTION.exec(argument);
+    if (limit === null) continue;
+    // `--maxfail 0` as two arguments, or `--maxfail=0`: no limit. A bare `--bail` is a limit of one.
+    const value = limit[1] ?? (argument === "--maxfail" ? args[index + 1] : undefined);
+    if (value === undefined || !/^0+$/u.test(value)) return true;
+  }
+  return false;
+}
+
+/** The ids of the tests of a report that are not in a changed test file, in report order. */
+function untouchedIds(report: ParsedTestReport, changedTestPaths: readonly string[]): string[] {
+  return report.tests.filter((test) => changedPathOf(test, changedTestPaths) === undefined).map((test) => testIdOf(test));
+}
 
 /**
  * TE-B3: whether the run on the original code looks CUT SHORT, so that a skip count or a missing test would only be the cut: the command stops at the first failure (`-x`, `--maxfail`, `--bail`), the report holds an
@@ -375,10 +399,13 @@ const STOP_EARLY_ARGUMENT = /^(?:--exitfirst|--maxfail(?:=.*)?|--bail(?:=.*)?|-b
  * (under 90%) than this code's run. In the usual test-first case the NEW test fails to load on the original code and pytest runs nothing at all: that is this rule's third line, never a claim.
  */
 export function originalRunLooksCut(before: ParsedTestReport, after: ParsedTestReport, changedTestPaths: readonly string[], args: readonly string[] = []): boolean {
-  if (args.some((argument) => STOP_EARLY_ARGUMENT.test(argument))) return true;
-  const now = new Set(after.tests.map((test) => testIdOf(test)));
-  if (before.tests.some((test) => test.status === "errored" && changedPathOf(test, changedTestPaths) === undefined && !now.has(testIdOf(test)))) return true;
-  return untouchedCount(before, changedTestPaths) * 10 < untouchedCount(after, changedTestPaths) * 9;
+  if (stopsEarly(args)) return true;
+  const known = new Set(after.tests.map((test) => testIdOf(test)));
+  if (before.tests.some((test) => test.status === "errored" && changedPathOf(test, changedTestPaths) === undefined && !known.has(testIdOf(test)))) return true;
+  const [was, later] = [untouchedIds(before, changedTestPaths), untouchedIds(after, changedTestPaths)];
+  if (was.length * 10 < later.length * 9) return true;
+  // A bail the command line does not show (a config file's): an original run that is only the FIRST part of this code's run, in the same order, stopped where it stopped.
+  return was.length < later.length && was.every((id, index) => id === later[index]);
 }
 
 /**
