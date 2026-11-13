@@ -5,7 +5,7 @@
 // A bare git repository on disk is not modelled here: the worker-side fake git server belongs to P10 (the end-to-end task), which needs a real clone.
 import { createHash } from "node:crypto";
 import {
-  agentXError, COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_WRITE_PATHS, type ChangeRequestFile, type CommitFilesInput, type CommitFilesResult, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
+  agentXError, COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_WRITE_PATHS, type FileEntryType, type ChangeRequestFile, type CommitFilesInput, type CommitFilesResult, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
 } from "@agentx/contracts";
 
 export interface FakeAccount { login: string; permission: HostPermission; accountType: HostAccountKind; hostUserId: string }
@@ -14,7 +14,7 @@ export interface FakeComment {
   path?: string; line?: number; threadId?: string; reviewState?: ReviewState;
 }
 export interface FakeThread { id: string; resolved: boolean; commentIds: string[] }
-export interface FakeRevision { sha: string; tree: string; parents: string[]; files: ReadonlyMap<string, string>; /** Paths that are symbolic links at this revision (the fake keeps no link target). */ symlinks: ReadonlySet<string> }
+export interface FakeRevision { entries: ReadonlyMap<string, FileEntryType>; sha: string; tree: string; parents: string[]; files: ReadonlyMap<string, string>; /** Paths that are symbolic links at this revision (the fake keeps no link target). */ symlinks: ReadonlySet<string> }
 export interface FakeChangeRequest {
   id: string; sourceBranch: string; targetBranch: string; title: string; body: string; draft: boolean; draftRefused: boolean;
   state: "open" | "closed" | "merged"; author: string; frozenHead?: string; mergeRevision?: string; mergedAt?: string; mergedBy?: string;
@@ -44,6 +44,8 @@ export class FakeHostModel {
   readonly defaultBranch: string;
   readonly drafts: boolean;
   readonly webBase: string;
+  /** Fixtures can model a host that cut a tree listing short. */
+  readonly incompleteTrees = new Set<string>();
   readonly revisions = new Map<string, FakeRevision>();
   readonly branches = new Map<string, string>();
   readonly accounts = new Map<string, FakeAccount>();
@@ -79,12 +81,14 @@ export class FakeHostModel {
     return new Date(this.clock).toISOString();
   }
 
-  private addRevision(parents: string[], files: Map<string, string>, symlinks: ReadonlySet<string> = new Set()): FakeRevision {
+  private addRevision(parents: string[], files: Map<string, string>, symlinks: ReadonlySet<string> = new Set(), types?: ReadonlyMap<string, FileEntryType>): FakeRevision {
+    const entries = new Map<string, FileEntryType>([...files.keys()].map(path => [path, (types?.get(path) === "symlink" ? "file" : types?.get(path)) ?? "file"]));
+    for (const path of symlinks) entries.set(path, "symlink");
     const sorted = [...files.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    const tree = sha1(`tree\n${JSON.stringify(sorted)}${symlinks.size === 0 ? "" : `\nlinks ${JSON.stringify([...symlinks].sort())}`}`);
+    const tree = sha1(`tree\n${JSON.stringify(sorted)}\ntypes ${JSON.stringify([...entries].sort(([a], [b]) => a.localeCompare(b)))}`);
     this.serial += 1;
     const sha = sha1(`commit\n${parents.join(",")}\n${tree}\n${this.serial}`);
-    const revision: FakeRevision = { sha, tree, parents, files, symlinks };
+    const revision: FakeRevision = { sha, tree, parents, files, symlinks: new Set(symlinks), entries };
     this.revisions.set(sha, revision);
     return revision;
   }
@@ -117,25 +121,80 @@ export class FakeHostModel {
   /** A new revision on `branch` (made from the default branch's head when the branch is new). A `null` value deletes a path. */
   commit(branch: string, changes: Record<string, string | null>): string {
     const parentSha = this.branches.get(branch) ?? this.headOf(this.defaultBranch);
-    const files = new Map(this.revision(parentSha).files);
+    const parent = this.revision(parentSha);
+    const files = new Map(parent.files);
+    const symlinks = new Set(parent.symlinks);
     for (const [path, content] of Object.entries(changes)) {
+      symlinks.delete(path);
       if (content === null) files.delete(path);
       else files.set(path, content);
     }
-    const made = this.addRevision([parentSha], files, this.revision(parentSha).symlinks);
+    const made = this.addRevision([parentSha], files, symlinks, parent.entries);
     this.branches.set(branch, made.sha);
     return made.sha;
   }
 
   /** A new revision on `branch` in which `path` is a symbolic link (the fake keeps no target). A path that held a file stops being one. */
   commitSymlink(branch: string, path: string): string {
+    return this.commitEntry(branch, path, "symlink", "");
+  }
+
+  commitExecutable(branch: string, path: string, content: string): string {
+    return this.commitEntry(branch, path, "executable", content);
+  }
+
+  commitSubmodule(branch: string, path: string, revision: string): string {
+    return this.commitEntry(branch, path, "submodule", revision);
+  }
+
+  commitEntry(branch: string, path: string, type: FileEntryType, content: string): string {
     const parentSha = this.branches.get(branch) ?? this.headOf(this.defaultBranch);
     const parent = this.revision(parentSha);
     const files = new Map(parent.files);
-    files.delete(path);
-    const made = this.addRevision([parentSha], files, new Set([...parent.symlinks, path]));
+    const symlinks = new Set(parent.symlinks);
+    const entries = new Map(parent.entries);
+    symlinks.delete(path);
+    if (type === "symlink") { files.delete(path); symlinks.add(path); }
+    else files.set(path, content);
+    entries.set(path, type);
+    const made = this.addRevision([parentSha], files, symlinks, entries);
     this.branches.set(branch, made.sha);
     return made.sha;
+  }
+
+  commitRename(branch: string, previousPath: string, path: string): string {
+    const parentSha = this.headOf(branch);
+    const parent = this.revision(parentSha);
+    const type = parent.entries.get(previousPath);
+    if (type === undefined) throw agentXError("CONFIG_INVALID", "the rename source is absent");
+    const files = new Map(parent.files), entries = new Map(parent.entries), symlinks = new Set(parent.symlinks);
+    const content = files.get(previousPath);
+    files.delete(previousPath); entries.delete(previousPath); symlinks.delete(previousPath);
+    entries.set(path, type);
+    if (type === "symlink") symlinks.add(path);
+    else files.set(path, content ?? "");
+    const made = this.addRevision([parentSha], files, symlinks, entries);
+    this.branches.set(branch, made.sha);
+    return made.sha;
+  }
+
+  /** A common ancestor that is not older than another common ancestor, including merge commits with shortcut parent edges. */
+  mergeBase(head: string, target: string): string {
+    const ancestors = (start: string): Set<string> => {
+      const seen = new Set<string>(), pending = [start];
+      for (let i = 0; i < pending.length; i += 1) {
+        const sha = pending[i]!;
+        if (seen.has(sha)) continue;
+        seen.add(sha); pending.push(...this.revision(sha).parents);
+      }
+      return seen;
+    };
+    const targetAncestors = ancestors(target);
+    const common = [...ancestors(head)].filter(sha => targetAncestors.has(sha));
+    const older = new Set(common.flatMap(sha => this.revision(sha).parents));
+    const best = common.find(sha => !older.has(sha));
+    if (best === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the revisions have no shared ancestor");
+    return best;
   }
 
   setAccount(login: string, permission: HostPermission, accountType: HostAccountKind = "person"): FakeAccount {
@@ -364,16 +423,36 @@ export class FakeHostModel {
 
   changedFiles(id: string): ChangeRequestFile[] {
     const cr = this.cr(id);
-    const source = this.revision(this.headRevisionOf(cr)).files;
-    const target = this.revision(cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch)).files;
+    const source = this.revision(this.headRevisionOf(cr));
+    const targetSha = cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch);
+    const target = this.revision(this.mergeBase(source.sha, targetSha));
+    const known = !this.incompleteTrees.has(source.sha) && !this.incompleteTrees.has(target.sha);
+    const directories = (revision: FakeRevision): Set<string> => {
+      const found = new Set<string>();
+      for (const path of revision.entries.keys()) {
+        let slash = path.indexOf("/");
+        while (slash !== -1) { found.add(path.slice(0, slash)); slash = path.indexOf("/", slash + 1); }
+      }
+      return found;
+    };
+    const sourceDirs = directories(source), targetDirs = directories(target);
+    const knownAt = (path: string, basePath: string) => known && !sourceDirs.has(path) && !targetDirs.has(basePath);
+    const removed = new Set([...target.entries.keys()].filter(path => !source.entries.has(path)));
     const out: ChangeRequestFile[] = [];
-    for (const [path, content] of [...source.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      const before = target.get(path);
-      if (before === content) continue;
-      out.push({ path, status: before === undefined ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before) });
+    for (const [path, type] of [...source.entries].sort(([a], [b]) => a.localeCompare(b))) {
+      const content = source.files.get(path) ?? "";
+      const before = target.files.get(path);
+      if (target.entries.get(path) === type && (before ?? "") === content) continue;
+      // Exact renames only, like a host fixture with no similarity heuristic.
+      const previousPath = target.entries.has(path) ? undefined : [...removed].find(old => target.entries.get(old) === type && (target.files.get(old) ?? "") === content);
+      if (previousPath !== undefined) removed.delete(previousPath);
+      const basePath = previousPath ?? path;
+      const baseType = target.entries.get(basePath) ?? "none";
+      out.push({ path, status: previousPath !== undefined ? "renamed" : baseType === "none" ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before),
+        ...(previousPath === undefined ? {} : { previousPath }), ...(knownAt(path, basePath) ? { entry: { head: type, base: baseType } } : {}) });
     }
-    for (const [path, content] of [...target.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      if (!source.has(path)) out.push({ path, status: "removed", additions: 0, deletions: lines(content) });
+    for (const path of [...removed].sort()) {
+      out.push({ path, status: "removed", additions: 0, deletions: lines(target.files.get(path) ?? ""), ...(knownAt(path, path) ? { entry: { head: "none", base: target.entries.get(path)! } } : {}) });
     }
     return out;
   }
@@ -399,7 +478,7 @@ export class FakeHostModel {
     if (this.headRevisionOf(cr) !== input.revision) return { outcome: "refused", reason: "head_changed" };
     if (this.mergeableState(cr) !== "clean") return { outcome: "refused", reason: "not_mergeable", hostMessage: "Required checks have not passed." };
     const files = new Map(this.revision(input.revision).files);
-    const merged = this.addRevision([this.headOf(cr.targetBranch)], files, this.revision(input.revision).symlinks);
+    const merged = this.addRevision([this.headOf(cr.targetBranch)], files, this.revision(input.revision).symlinks, this.revision(input.revision).entries);
     this.branches.set(cr.targetBranch, merged.sha);
     cr.state = "merged";
     cr.frozenHead = input.revision;

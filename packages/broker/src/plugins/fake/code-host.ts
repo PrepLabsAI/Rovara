@@ -2,7 +2,7 @@
 // a real adapter must answer what this one answers for the same state.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
-  agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
+  isAiInstructionPath, type FileEntryType, agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
   type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
   type ChangeRequestRef, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
@@ -110,6 +110,17 @@ export class FakeCodeHost implements CodeHost {
     // A directory is a path some file lives under.
     for (const name of files.keys()) if (name.startsWith(`${path}/`)) return "dir";
     return "none";
+  }
+
+  async instructionFiles(repository: RepositoryRef, revision: string, scope: HostScope, options?: { max?: number; timeoutMs?: number }): Promise<{ files: Array<{ path: string; type: FileEntryType }>; complete: boolean }> {
+    this.checkScope(scope);
+    const model = this.registered(repository);
+    this.spend(undefined);
+    const max = options?.max ?? 500;
+    if (!Number.isSafeInteger(max) || max < 0) throw agentXError("CONFIG_INVALID", "instruction file limit is invalid");
+    const at = model.revision(revision);
+    const matches = [...at.entries].filter(([path]) => isAiInstructionPath(path)).sort(([a], [b]) => a.localeCompare(b));
+    return { files: matches.slice(0, max).map(([path, type]) => ({ path, type })), complete: !model.incompleteTrees.has(revision) && matches.length <= max };
   }
 
   async tree(repository: RepositoryRef, revision: string, scope: HostScope): Promise<string> {
