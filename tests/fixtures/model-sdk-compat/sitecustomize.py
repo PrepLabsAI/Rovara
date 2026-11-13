@@ -43,6 +43,13 @@ _wrap(socket.socket, 'sendto', lambda a,k: a[-1][0] if isinstance(a[-1],tuple) e
 _wrap(ssl.SSLContext, 'wrap_socket', lambda a,k: k.get('server_hostname') or (a[5] if len(a)>5 else 'localhost'))
 _runtime = os.path.realpath(sys.base_prefix)
 _private = os.path.realpath(_private)
+# Exact paths used by pinned truststore/_macos.py; resolve framework symlinks.
+# Defence in depth only: framework handles can expose dependency symbols.
+# The mandatory sandbox-exec profile is the enforcing network layer.
+_system_frameworks = frozenset(os.path.realpath(path) for path in (
+    '/System/Library/Frameworks/Security.framework/Security',
+    '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',
+))
 
 
 def _audit(event, args):
@@ -60,10 +67,13 @@ def _audit(event, args):
     if event == 'socket.getnameinfo':
         _check(args[0][0])
     if event == 'ctypes.dlopen':
-        # No process-wide libc handle or system libraries. Only explicit venv paths.
+        # No process-wide handle, relative name, libc or other system library.
         name = args[0]
+        if not isinstance(name, str) or not os.path.isabs(name):
+            raise PermissionError('SDK_NATIVE_LIBRARY_REFUSED')
+        path = os.path.realpath(name)
         root = os.path.realpath(sys.prefix) + os.sep
-        if not isinstance(name, str) or not os.path.isabs(name) or not os.path.realpath(name).startswith(root):
+        if path not in _system_frameworks and not path.startswith(root):
             raise PermissionError('SDK_NATIVE_LIBRARY_REFUSED')
 
 
