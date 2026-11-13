@@ -131,6 +131,21 @@ Task code is a repository's code, so a local worker is built as if it were hosti
   `git clone`, `fetch` and `push` need, and which shares this list with the sandboxes) includes anyone's repository, and a CDN can host a
   different site on the same address as an allowed one. The default list therefore has no `*.amazonaws.com` (anyone's bucket), no `*.github.com`
   and no `*.githubusercontent.com`; add the exact name a project needs to `allowedDomains`.
+- **The model hosts are denied in the task sandboxes (FIX-0518), on by default.** The list above is one list for both networks, and it holds `api.openai.com`, `api.anthropic.com`, `auth.openai.com`, `openrouter.ai` and `chatgpt.com`.
+  Without a rule of its own, a test or a shell command in a sandbox could send the workspace to a model host with someone else's key, or spend on a key committed to a repository. The gateway therefore gets a second list, `sandboxDenied`
+  (`isolation/sandbox-model-deny.ts`: those five hosts, every host of the model catalog, and `*.openai.azure.com`), which only its **sandbox** side applies: the sandbox name server answers NXDOMAIN, and its port-443 and port-80 forwarders refuse
+  the server name or the `Host`, in any letter case and with a trailing dot. The **worker** network ignores it, because the agent's own model loop runs in the worker, through the broker's key proxy (`AGENTX_MODEL_PROXY_URL`), and ChatGPT sign-in
+  needs `chatgpt.com` and `auth.openai.com` there. A project's own `allowedDomains` cannot bring a model host back into its sandbox. Google's token hosts (`oauth2`, `sts` and `iamcredentials.googleapis.com`) are not on this list; that is a separate
+  decision. The worker is told the state in `ROVARA_SANDBOX_MODEL_HOSTS` (`denied`, or `allowed` when the owner's setting below is used; a project's environment cannot set it). A change re-creates an idle machine at its next start.
+  - **Turning it off for one project (owner only).** For a project whose tests really call a model with the repository's own key, put this in `~/.rovara/config.json` and restart `rovara up`:
+    ```json
+    { "version": 1, "plugins": [], "projectSettings": { "my-app": { "sandboxModelHosts": "allow" } } }
+    ```
+    Absent, `"deny"` and any other project all mean deny. Only the config file you own can set it: a repository, a project's settings page and the agent cannot. When it is used, the evidence of that project's runs lists
+    "model hosts allowed in the test sandbox by project setting".
+  - **Domain fronting, written down.** Over TLS the gateway reads the server name in the hello and does not open the encrypted request. It connects to the address of that name only, so the way to a model host is an *allowed* name whose own
+    address also serves one (a CDN, the same note as above); the HTTP `Host` check does not see inside TLS. On port 80 the `Host` header is the destination the gateway resolves, so a front cannot hide a model host there, and a second or a ported `Host`
+    is refused. Closing the TLS case needs the gateway to inspect the request, which it does not do.
 - **The socket guard** (`isolation/docker-socket-guard-source.ts`, one per machine) is the only container that holds the socket. It lets
   the worker create, start, stop, kill, restart, inspect, read the logs of, run commands in (as the sandbox user, never privileged) and
   remove its own sandboxes, and inspect its own image and sandbox network. It never forwards what the worker sent: it checks every
