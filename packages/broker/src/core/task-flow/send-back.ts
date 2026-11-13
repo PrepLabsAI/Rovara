@@ -54,6 +54,7 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
   await admitRound(deps, options, { task, caller, requestId: request.requestId });
   const committed = await commitWorkflow(deps, task, returned, [
     dispatchRowItem(deps, task.taskId, returned.revision, "IMPLEMENT", now),
+    ...(acting.items ?? []),
     ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, text: words, now: deps.now?.() ?? new Date() }),
     ...stageAudit(deps, { eventId: `task.sent_back:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.sent_back", subject: { type: "task", id: task.taskId }, details: { project: task.project, revision: workflow.revision } }),
   ]);
