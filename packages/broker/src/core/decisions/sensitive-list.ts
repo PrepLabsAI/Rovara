@@ -136,14 +136,29 @@ const INSTRUCTION_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.(cursor|claude|codex|agents?|windsurf|continue|gemini|amazonq|kiro|roo|cline|clinerules|aider|trae|junie|opencode|qwen|goose|augment|zed|copilot|openhands|kilocode|warp|cody|tabnine|codeium|sourcegraph|replit|bolt|lovable|v0)\//u,
   /(^|\/)\.github\/(copilot-instructions\.md|instructions\/|prompts\/|chatmodes\/|agents\/)/u,
   /(^|\/)\.rovara\//u,
-  // Prompt, skill and template folders, and prompt files by name.
-  /(^|\/)(prompts?|templates?|\.prompts?|skills?|steering|chatmodes?)\//u,
+  // Skill folders and agent steering: they tell an agent what to do. (Product prompt files are NOT here: they are judged by behaviour, see `isPromptHintPath`.)
+  /(^|\/)(skills?|steering|chatmodes?)\//u,
+];
+
+/**
+ * Product prompt files: a prompt or template folder, a prompt in the file name, a system message. They are NOT risky by name (owner decision: prompt files are judged by what they do, not what they are called): they follow
+ * the ordinary size rules, and the tier carries an `eval_hint` reason so that the evaluation check (TE-F4) can be run on them until it has been measured. Agent-instruction files stay risky (`isInstructionPath`).
+ */
+const PROMPT_HINT_PATTERNS: readonly RegExp[] = [
+  /(^|\/)(prompts?|templates?|\.prompts?)\//u,
   /(^|\/)[^/]*prompt[^/]*\.(md|mdx|txt|ya?ml|json|toml|jinja2?|j2|hbs|mustache|tmpl|tpl|liquid)$/u,
   /(^|\/)[^/]*\.prompt(\.[^/]*)?$/u,
 ];
+const PROMPT_HINT_WORDS: ReadonlySet<string> = new Set(["prompt", "systemmessage", "systemprompt", "systeminstruction", "metaprompt", "preprompt", "llm"]);
+export function isPromptHintPath(path: string): boolean {
+  const value = normalizedTierPath(path);
+  if (PROMPT_HINT_PATTERNS.some((pattern) => pattern.test(value))) return true;
+  if (!INSTRUCTION_LIKE_EXTENSIONS.test(value)) return false;
+  return foldedTierPath(path).split("/").some((segment) => wordsOf(segment.replace(/\.[^.]*$/u, "")).some((word) => PROMPT_HINT_WORDS.has(word)));
+}
 
-/** Prose and config files that name an agent, a skill, an instruction, a prompt or an MCP server in the NAME or a folder (not code: `src/agent/runner.ts` is code). */
-const INSTRUCTION_WORDS: ReadonlySet<string> = new Set(["agent", "skill", "instruction", "prompt", "steering", "persona", "mcp", "claude", "gemini", "copilot", "llms", "llm", "systemmessage", "systemprompt", "systeminstruction", "metaprompt", "preprompt", "guardrail", "openhands", "kilocode"]);
+/** Prose and config files that name an agent, a skill, an instruction or an MCP server in the NAME or a folder (not code: `src/agent/runner.ts` is code). */
+const INSTRUCTION_WORDS: ReadonlySet<string> = new Set(["agent", "skill", "instruction", "steering", "persona", "mcp", "claude", "gemini", "copilot", "llms", "guardrail", "openhands", "kilocode"]);
 const INSTRUCTION_LIKE_EXTENSIONS = /\.(md|mdx|markdown|rst|adoc|txt|ya?ml|json|toml)$/u;
 
 export function isInstructionPath(path: string): boolean {
