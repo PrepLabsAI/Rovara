@@ -178,7 +178,11 @@ const adapterRequestId = (requestId: string): string => `${requestId}.${randomUU
 /** The decision's request id inside the id the Approvers seam was given (a request id has no dot, so everything before the first one). */
 export const decisionRequestIdOf = (adapterRequest: string): string => adapterRequest.split(".")[0]!;
 
-/** How many partitions a company's used-proof markers are spread over (a single partition per company was a hot key on DynamoDB). */
+/**
+ * How many partitions a company's used-proof markers are spread over (a single partition per company was a hot key on DynamoDB).
+ * STORAGE FORMAT: this number and `approvalProofShard` below decide where every marker lives. Changing either (the byte, the modulus, a salt) makes a stored marker unfindable, so a used proof would be accepted again:
+ * it needs a migration that keeps reading the old placement. Golden vectors in tests/unit/core-approval-proof-shards.test.ts pin it.
+ */
 export const APPROVAL_PROOF_SHARDS = 32;
 
 /** The shard of a proof key: the first byte of the key's SHA-256, modulo the shard count. The key already holds the hash of the token and the request, so the spread is even; hashing again keeps any string safe. */
@@ -191,8 +195,9 @@ export function approvalProofMarkerKey(companyId: string, proofKey: string): Doc
 }
 
 /**
- * Where markers were written before the partition was sharded: one partition per company. Every used-proof check reads this key as well as the new one, until the old markers have expired (they carry the expiry
- * attribute); a later release drops this read (DEFERRED row APPROVAL-PROOF-LEGACY-READ-DROP). Nothing is written here any more.
+ * Where markers were written before the partition was sharded: one partition per company. Expand then contract, so a mixed fleet or a rollback never lets a proof be used twice:
+ *   this release  writes BOTH keys (each only if absent, in the decision's transaction) and checks both on replay, so a release that only knows the old key and this one block each other;
+ *   a later one   stops writing this key but keeps reading it until the old markers have expired (DEFERRED row APPROVAL-PROOF-LEGACY-READ-DROP, which also holds the release rule).
  */
 export function legacyApprovalProofMarkerKey(companyId: string, proofKey: string): DocumentKey {
   return { pk: companyScoped(companyId, "APPROVAL_PROOF"), sk: proofKey };
@@ -260,7 +265,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
   /** The marker of a one-decision credential (a comment) that names no request: it is spent once, anywhere. */
   const spentOnceKey = (companyId: string, method: string, token: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: "*" }));
-  // The same two markers as an older release wrote them (one partition per company). They are only ever read: a proof used under either key is used.
+  // The same two markers as an older release wrote them (one partition per company): written as well as read in this release (expand step), so a proof used under either key is used.
   const legacyMarkerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => legacyApprovalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
   const legacySpentOnceKey = (companyId: string, method: string, token: string): DocumentKey => legacyApprovalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: "*" }));
 
@@ -419,9 +424,17 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
           item: { ...spentOnceKey(attempt.companyId, proof.method, proof.token), entityType: "APPROVAL_PROOF_SPENT", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
           condition: when.absent(),
         })),
-        // A proof an older release used up under the old (unsharded) key is used up here too: the check is in the same transaction, so a race with either key cannot let it through.
-        ...proofs.map((proof): TransactItem => ({ kind: "check", key: legacyMarkerOf(attempt.companyId, proof.method, proof.token, bindingId), condition: when.absent() })),
-        ...proofs.filter((proof) => !reusableMethods.includes(proof.method)).map((proof): TransactItem => ({ kind: "check", key: legacySpentOnceKey(attempt.companyId, proof.method, proof.token), condition: when.absent() })),
+        // Expand step: the same markers under the old (unsharded) key, each only if absent, so a proof used here is used for an older release too and the other way round (a rolled-back or mixed fleet). Same facts as the old writer.
+        ...proofs.map((proof): TransactItem => ({
+          kind: "put",
+          item: { ...legacyMarkerOf(attempt.companyId, proof.method, proof.token, bindingId), entityType: "APPROVAL_PROOF_USED", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+          condition: when.absent(),
+        })),
+        ...proofs.filter((proof) => !reusableMethods.includes(proof.method)).map((proof): TransactItem => ({
+          kind: "put",
+          item: { ...legacySpentOnceKey(attempt.companyId, proof.method, proof.token), entityType: "APPROVAL_PROOF_SPENT", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+          condition: when.absent(),
+        })),
         ...(applied.extra ?? []),
         ...deps.audit.stage({
           eventId: `approval:${attempt.requestId}`, companyId: attempt.companyId, at: decidedAt,

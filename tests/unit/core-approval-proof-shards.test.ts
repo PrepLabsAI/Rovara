@@ -1,16 +1,16 @@
 // Lane S1 (convergence plan D4): the used-proof markers are spread over shards instead of one hot partition per company, and a proof used under the OLD key (an older release, one partition) is still a used proof.
 // This is the single-use rule of every approval, so each direction has a test, and the checks are written to fail if the old-key read is removed.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, createWorkflowSnapshot, submitWorkflowArtifact,
+  IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, createWorkflowSnapshot, submitWorkflowArtifact, when,
   type ExternalAccountRef, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import {
-  APPROVAL_PROOF_SHARDS, approvalBindingId, approvalProofMarkerKey, approvalProofMarkerKeys, createDecisionGate, legacyApprovalProofMarkerKey, type DecisionAttempt,
+  APPROVAL_PROOF_SHARDS, approvalBindingId, approvalProofMarkerKey, approvalProofMarkerKeys, createDecisionGate, legacyApprovalProofMarkerKey, type DecisionAttempt, type DecisionSubject,
 } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, waitingDocumentDigest, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { commentReads, freshComment } from "../support/comment-fakes.js";
@@ -42,20 +42,65 @@ async function world() {
     companyId: COMPANY, kind: "workflow-document", subjectId: TASK_ID, requestId: randomUUID(), outcome: "approve",
     seen: { revision: waiting().revision, artifactDigest: waitingDocumentDigest(waiting())! }, credentials: [{ method: LOCAL_SESSION_METHOD, token: SESSION }], ...overrides,
   });
+  /** A gate over the same store whose subject's applied decision is changed by `change` (to make a decision's own change lose). */
+  const subjectOver = (change: (applied: Awaited<ReturnType<DecisionSubject["apply"]>>) => Awaited<ReturnType<DecisionSubject["apply"]>>) =>
+    createDecisionGate({ store, approvers, audit: createNoopAuditSink(), now: () => NOW, subjects: [{ ...subject, apply: async (...args) => change(await subject.apply(...args)) }] });
   const revision = async () => ((await store.get(workflowTaskKey(TASK_ID)))!["workflow"] as unknown as WorkflowSnapshot).revision;
-  return { store, gate, attempt, revision };
+  return { store, gate, attempt, revision, subjectOver };
 }
 
 describe("approval proof markers: sharded, with the old key still honoured", () => {
-  it("a new marker is written in one of the shard partitions, never in the old single partition, and carries its expiry", async () => {
+  it("a new marker is written in one of the shard partitions AND under the old key (expand step), both carrying the expiry and the same facts an older release reads", async () => {
     const { store, gate, attempt } = await world();
     expect(await gate.decide(attempt())).toMatchObject({ status: "decided" });
     const marker = await store.get(approvalProofMarkerKey(COMPANY, sessionProofKey()));
     expect(marker).toMatchObject({ entityType: "APPROVAL_PROOF_USED", method: LOCAL_SESSION_METHOD });
     expect(typeof marker![INDEX_EXPIRY_ATTRIBUTE]).toBe("number");
     expect(marker!["pk"]).toMatch(/#APPROVAL_PROOF#\d\d$/u);
-    expect(await store.get(legacyApprovalProofMarkerKey(COMPANY, sessionProofKey()))).toBeUndefined();
-    expect((await store.query({ pk: legacyApprovalProofMarkerKey(COMPANY, "x").pk })).items).toHaveLength(0);
+    // An older release replays a decision by reading the old key and comparing `requestId`: the old-key marker must be what it always wrote.
+    const old = await store.get(legacyApprovalProofMarkerKey(COMPANY, sessionProofKey()));
+    expect(old).toMatchObject({ entityType: "APPROVAL_PROOF_USED", method: LOCAL_SESSION_METHOD, requestId: expect.any(String) });
+    expect(old!["requestId"]).toBe(marker!["requestId"]);
+    expect(old![INDEX_EXPIRY_ATTRIBUTE]).toBe(marker![INDEX_EXPIRY_ATTRIBUTE]);
+    expect(old!["pk"]).toMatch(/#APPROVAL_PROOF$/u);
+  });
+
+  it("an older release's own single-use put (old key, only if absent) is refused after a decision made here, so old and new code block each other", async () => {
+    const { store, gate, attempt } = await world();
+    expect(await gate.decide(attempt())).toMatchObject({ status: "decided" });
+    const older = await store.put({ item: { ...legacyApprovalProofMarkerKey(COMPANY, sessionProofKey()), entityType: "APPROVAL_PROOF_USED" }, condition: when.absent() });
+    expect(older.applied).toBe(false);
+  });
+
+  it("the shard function is a storage format: fixed proof keys land in exactly these partitions, with 32 shards", () => {
+    expect(APPROVAL_PROOF_SHARDS).toBe(32);
+    const golden: Array<[string, string]> = [["golden-proof-key-0001", "00"], ["golden-proof-key-0004", "17"], ["golden-proof-key-0008", "11"], ["golden-proof-key-0010", "13"]];
+    for (const [proofKey, shard] of golden) expect(approvalProofMarkerKey(COMPANY, proofKey)).toEqual({ pk: `ORG#${COMPANY}#APPROVAL_PROOF#${shard}`, sk: proofKey });
+    // The vectors themselves: the first byte of the key's SHA-256, modulo 32.
+    for (const [proofKey, shard] of golden) expect(createHash("sha256").update(proofKey, "utf8").digest()[0]! % 32).toBe(Number(shard));
+  });
+
+  it("a decision whose own change loses (an extra step fails) is not reported as a used proof, and leaves no marker under either key", async () => {
+    const { store, gate, attempt, revision, subjectOver } = await world();
+    const blocker = { pk: "BLOCKER", sk: "ROW" };
+    await store.put({ item: { ...blocker, entityType: "BLOCKER" } });
+    const gate2 = subjectOver((applied) => ({ ...applied, extra: [{ kind: "check", key: blocker, condition: when.absent() }] }));
+    const before = await revision();
+    const result = await gate2.decide(attempt());
+    expect(result).toMatchObject({ status: "refused" });
+    expect((result as { reason: string }).reason).not.toBe("proof_already_used");
+    expect(await revision()).toBe(before);
+    for (const key of approvalProofMarkerKeys(COMPANY, sessionProofKey())) expect(await store.get(key)).toBeUndefined();
+    expect(gate).toBeDefined();
+  });
+
+  it("the session secret is in no marker of any partition, new or old", async () => {
+    const { store, gate, attempt } = await world();
+    expect(await gate.decide(attempt())).toMatchObject({ status: "decided" });
+    const partitions = [legacyApprovalProofMarkerKey(COMPANY, "x").pk, ...Array.from({ length: APPROVAL_PROOF_SHARDS }, (_, index) => approvalProofMarkerKey(COMPANY, "x").pk.replace(/#\d\d$/u, `#${String(index).padStart(2, "0")}`))];
+    const found = (await Promise.all(partitions.map(async (pk) => (await store.query({ pk })).items))).flat();
+    expect(found).toHaveLength(2);
+    expect(JSON.stringify(found)).not.toContain(SESSION);
   });
 
   it("markers of different requests spread over many shards (no hot key), and one proof always lands in the same shard", () => {
@@ -67,14 +112,14 @@ describe("approval proof markers: sharded, with the old key still honoured", () 
     expect(approvalProofMarkerKey("other-company", sessionProofKey()).pk).not.toBe(approvalProofMarkerKey(COMPANY, sessionProofKey()).pk);
   });
 
-  it("a reader outside the gate gets both keys to ask: the sharded one and the old one, and whichever holds the marker answers", async () => {
+  it("a reader outside the gate gets both keys to ask: the sharded one and the old one, and a decision leaves a marker under each", async () => {
     const { store, gate, attempt } = await world();
     const keys = approvalProofMarkerKeys(COMPANY, sessionProofKey());
     expect(keys).toEqual([approvalProofMarkerKey(COMPANY, sessionProofKey()), legacyApprovalProofMarkerKey(COMPANY, sessionProofKey())]);
     expect(keys[0].pk).not.toBe(keys[1].pk);
     expect(await Promise.all(keys.map((key) => store.get(key)))).toEqual([undefined, undefined]);
     expect(await gate.decide(attempt())).toMatchObject({ status: "decided" });
-    expect((await Promise.all(keys.map((key) => store.get(key)))).map((found) => found !== undefined)).toEqual([true, false]);
+    expect((await Promise.all(keys.map((key) => store.get(key)))).map((found) => found !== undefined)).toEqual([true, true]);
   });
 
   it("a proof an older release used under the OLD key cannot be used again: the decision is refused and the task is untouched", async () => {
@@ -98,9 +143,10 @@ describe("approval proof markers: sharded, with the old key still honoured", () 
     const after = await revision();
     expect(await gate.decide(attempt())).toMatchObject({ status: "refused" });
     expect(await revision()).toBe(after);
-    // The marker is under the new key only; the other way round (an older release's key) is empty, so the refusal above came from the new key.
-    expect(await store.get(legacyApprovalProofMarkerKey(COMPANY, sessionProofKey()))).toBeUndefined();
-    expect(await store.get(approvalProofMarkerKey(COMPANY, sessionProofKey()))).toBeDefined();
+    // Take the old-key marker away: the refusal then comes from the new key alone.
+    await store.delete({ key: legacyApprovalProofMarkerKey(COMPANY, sessionProofKey()) });
+    expect(await gate.decide(attempt())).toMatchObject({ status: "refused" });
+    expect(await revision()).toBe(after);
   });
 
   it("a fresh proof works, and the decision an older release made under the old key is still replayed to its holder", async () => {
