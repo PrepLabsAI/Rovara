@@ -110,6 +110,11 @@ describe("routeGeminiRequest: every path form of the redirect check", () => {
     for (const path of ["/v1beta/models/../m:generateContent", "/v1beta/models/%2e%2e:generateContent", "/v1beta//models/m:generateContent", "/v1beta/models/m:generateContent/", "/v1beta/models\\m:generateContent", "/v1beta/models/m@h:generateContent", "http://x/v1beta/models/m:generateContent", "v1beta/models/m:generateContent", "/v1beta/models/m:generateContent\n", "/v1beta/models/m:generateContent;x"]) {
       expect(route(path), path).toMatchObject({ ok: false });
     }
+    // The reason is part of the guard: a traversal or an encoded character is refused as a bad path, not as some other mismatch.
+    expect(route("/v1beta/models/../m:generateContent")).toEqual({ ok: false, reason: "bad_path" });
+    expect(route("/v1beta/models/%2e%2e:generateContent")).toEqual({ ok: false, reason: "bad_path" });
+    expect(route("/v1beta/models/m%3AgenerateContent")).toEqual({ ok: false, reason: "bad_path" });
+    expect(route("/v1beta//models/m:generateContent")).toEqual({ ok: false, reason: "bad_path" });
     expect(route("/v1beta/models/a b:generateContent")).toMatchObject({ ok: false });
     expect(route(`/v1beta/models/${"m".repeat(129)}:generateContent`)).toEqual({ ok: false, reason: "bad_model" });
     expect(route(`/v1beta/models/${"m".repeat(128)}:generateContent`)).toMatchObject({ ok: true });
