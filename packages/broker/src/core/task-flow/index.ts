@@ -5,6 +5,7 @@ export * from "./accept.js";
 export * from "./admission.js";
 export * from "./check-policy.js";
 export * from "./close.js";
+export * from "./continue.js";
 export * from "./deps.js";
 export * from "./dispatch-rows.js";
 export * from "./dispatch.js";

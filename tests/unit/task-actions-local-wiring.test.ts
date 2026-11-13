@@ -71,3 +71,17 @@ describe("review findings on rovara up", () => {
     expect(other.status).toBe(400);
   });
 });
+
+describe("continue on rovara up", () => {
+  it("reaches the core move: a workflow task is told to use its approvals, a task still starting is told it is working, and another task is no such task", async () => {
+    const { owner, taskId } = await launch();
+    const workflowTask = await owner(`/v1/dev/tasks/${taskId}/continue`, "POST", { requestId: "55555555-5555-4555-8555-555555555555", instructions: "Also add a test." });
+    expect(workflowTask.body.error?.message).toContain("approval steps");
+    expect(workflowTask.body.error?.message).not.toContain("not on this install");
+    const plain = await owner("/v1/dev/tasks", "POST", { requestId: "66666666-6666-4666-8666-666666666666", project: "payments", instructions: "Just do it" });
+    const starting = await owner(`/v1/dev/tasks/${plain.body.task!.taskId}/continue`, "POST", { requestId: "55555555-5555-4555-8555-555555555555", instructions: "Also add a test." });
+    expect(starting.body.error).toMatchObject({ code: "TASK_BUSY" });
+    const other = await owner("/v1/dev/tasks/44444444-4444-4444-8444-444444444444/continue", "POST", { requestId: "55555555-5555-4555-8555-555555555555", instructions: "Also add a test." });
+    expect(other.status).toBe(404);
+  });
+});

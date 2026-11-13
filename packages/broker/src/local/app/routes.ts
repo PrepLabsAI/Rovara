@@ -71,7 +71,7 @@ const DIAGNOSES = /^\/v1\/app\/diagnoses(?:\/(dgn_[0-9a-z]{20})(?:\/(deep|propos
  * routes the MCP tools and the CLI call that have no core feature in Code yet (they wait on features not built yet: custom agents, approvals of connected systems, sharing and task people,
  * opening a pull request by hand, review of a candidate, PR feedback, parallel parts, a task's budget). Answered in plain words instead of the older handler's "route not found".
  */
-const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|continue|workflow\/(?:review|publish-retry|keep-pull-requests|feedback|feedback-decision|feedback-retry))(?:\/|$)/u;
+const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|workflow\/(?:review|publish-retry|keep-pull-requests|feedback|feedback-decision|feedback-retry))(?:\/|$)/u;
 export const NOT_ON_THIS_INSTALL_MESSAGE = "That is not on this install yet: Rovara on this computer does not do it. It comes with a later release.";
 
 /** `GET /v1/auth/.well-known/agentx-configuration`: what a client asks before it signs in. Open, like `/healthz`. */
@@ -252,6 +252,11 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         }
         if (action === "workflow/retry" && request.method === "POST") {
           await controlled(caller, taskId, "retry", bodyOf(request));
+          return json(200, { task: await viewOf(caller, taskId) });
+        }
+        if (action === "continue" && request.method === "POST") {
+          // More instructions for a task that ended its run: a new round on the same task and workspace (`core/task-flow/continue.ts`).
+          await taskActions.continue(caller, taskId, bodyOf(request));
           return json(200, { task: await viewOf(caller, taskId) });
         }
         if (action === "workflow/send-back" && request.method === "POST") {

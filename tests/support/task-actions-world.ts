@@ -5,7 +5,7 @@ import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskCaller, TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
-import { dispatchPartition, developerCharge, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { dispatchPartition, developerCharge, operationKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import type { OperationRecord, TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { COMPANY, createHarness, type Harness, type HarnessOptions } from "./task-flow-harness.js";
@@ -93,4 +93,21 @@ export async function stateOf(h: Harness): Promise<{ workflow: WorkflowSnapshot 
 export function accessWithoutOwners(): TaskFlowDeps["access"] {
   const base = createOwnerTaskAccess();
   return { ...base, canAct: async () => true, ownerActing: async () => undefined };
+}
+
+/**
+ * A task with no workflow that already ran once: its first run ended `status`, its workspace is ready (one fence on), and its pointer says nothing is pending. `running` leaves the first run live instead, `starting`
+ * leaves the first instructions not yet run.
+ */
+export async function seedPlain(options: Omit<SeedOptions, "workflow"> & { first?: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED" | "running" | "starting" } = {}): Promise<Seeded & { conversationId: string }> {
+  const first = options.first ?? "SUCCEEDED";
+  const live = first === "running";
+  const world = await seed({ ...options, workflow: null, workspace: { fence: 2, ...(live ? { status: "BUSY", activeOperationId: "op-first" } : {}), ...options.workspace } });
+  const task = await taskOf(world.h);
+  const operationId = "op-first";
+  await world.h.store.put({ item: { ...operationKey(WORKSPACE_ID, operationId), entityType: "OPERATION", companyId: COMPANY, orgId: COMPANY, id: operationId, workspaceId: WORKSPACE_ID, kind: "task", requestId: "first-request", payloadHash: "0".repeat(64), status: live ? "RUNNING" : first === "starting" ? "SUCCEEDED" : first,
+    fence: 2, eventSequence: 0, createdAt: "2026-11-09T09:00:00.000Z", updatedAt: "2026-11-09T09:30:00.000Z", dispatch: { kind: "task", projectRevision: 1, payload: { conversationId: task.conversationId, prompt: "Just do it" } } } });
+  await world.h.store.put({ item: { ...taskPointerKey(WORKSPACE_ID), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK_ID, developerId: "local-owner", requester: { kind: "developer", developerId: "local-owner", provider: "local-owner" }, conversationId: task.conversationId, firstRequestId: "first-request",
+    ...(first === "starting" ? { pendingPrompt: "Just do it" } : {}) } });
+  return { ...world, conversationId: task.conversationId };
 }

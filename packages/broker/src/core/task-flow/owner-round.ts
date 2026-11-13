@@ -28,6 +28,8 @@ export const OWNER_ROUND_ADMISSION_ACTION = "task.round";
 
 export const CLOSED_TASK = "This task is closed. Start a new one.";
 export const NEVER_STARTED_TASK = "This task never started and its workspace was released. Start a new task, and close this one.";
+/** What a free-form turn on a workflow task is refused with (Cloud's words): its steps are moved by its approvals, a send back or its findings. */
+export const GATED_TASK_TURN_REFUSAL = "This task is waiting on its own approval steps. Use its approval buttons or the task's decision tool instead of sending more instructions.";
 export const WAITING_FOR_SPEND = "This task is waiting for more spend to be approved. Sending it on cannot skip that approval.";
 export const SPEND_UNKNOWN = "Rovara cannot tell what this task has spent, so it does not start more work on it. Try again in a moment.";
 export const TASK_ARCHIVED = (project: string): string => `project \`${project}\` is archived; unarchive it to start new work`;
