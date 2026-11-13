@@ -15,8 +15,6 @@ import {
   parseModelReplySetBytes,
   selectModelReply,
   stampReplyProvenance,
-  type IndependentReplyDecision,
-  type ReplyProvenanceDecision,
 } from "../../packages/contracts/src/model-reply-set.js";
 import { REPLY_PROVENANCES } from "../../packages/contracts/src/model-reply-provenance.js";
 
