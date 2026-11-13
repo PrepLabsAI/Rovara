@@ -56,6 +56,10 @@ describe("the guard fails on each bypass the review found", () => {
     const text = `import { ${ID} as mk } from "@agentx/contracts/independent-channel";\nexport const d = mk("a".repeat(64));\n`;
     expect(mintOffenders([fake(WORKER, text)]).length).toBeGreaterThan(0);
   });
+  it("an import of the mint from F2-A's own file (no channel specifier involved) and a re-export of it", () => {
+    expect(mintOffenders([fake(WORKER, `import { ${ID} } from "../../contracts/src/model-reply-set.js";\n`)]).length).toBeGreaterThan(0);
+    expect(mintOffenders([fake(WORKER, `export { ${ID} as mint } from "../../contracts/src/model-reply-set.js";\n`)]).length).toBeGreaterThan(0);
+  });
   it("a space before the paren", () => {
     expect(mintOffenders([fake(WORKER, `const d = ${ID} ("a".repeat(64));\n`)]).length).toBeGreaterThan(0);
   });
