@@ -2491,7 +2491,7 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(flow.tier?.reasons.map((reason) => reason.code)).toContain("unreadable_content");
   });
 
-  it("a writer that read the task before the tier was written cannot write its whole older workflow back over the tier", async () => {
+  it("a writer that read the task before the tier was written is not refused for it, and does not wipe it: the stored tier is carried forward, and the revision (which a row of the step in flight waits for) did not move", async () => {
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });
     const { taskId } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
@@ -2501,11 +2501,11 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     await h.runtime.tick();
     const after = await flowOf(h, taskId);
     expect(after.tier?.source).toBe("diff");
-    // The revision did not move (the step in flight waits for it), yet a stale writer is stopped.
     expect(((await taskRecord(h, taskId)).workflow as unknown as { revision: number }).revision).toBe(before);
     // A stale writer: it holds the older workflow (no diff tier) and writes it whole, as the engine's own transitions do.
     const written = await commitWorkflow(flowDeps, stale, { ...stale.workflow!, revision: before + 1 });
-    expect(written).toBe(false);
+    expect(written).toBe(true);
+    expect(((await taskRecord(h, taskId)).workflow as unknown as { revision: number }).revision).toBe(before + 1);
     expect((await flowOf(h, taskId)).tier?.source).toBe("diff");
   });
 

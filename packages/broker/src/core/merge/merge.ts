@@ -53,7 +53,7 @@ import {
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
-import { planningLevelOf, raiseTier, recordGrowth, recordTier, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, type TierLevel } from "../decisions/change-tier.js";
+import { planningLevelOf, raiseTier, recordGrowth, recordTier, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel } from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
@@ -568,7 +568,9 @@ const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code ho
 /**
  * Recomputes the change tier at merge, from the code host's view of the change (never from the stored tier or an agent's word). The tier never goes down: the recorded tier and the new one are raised together. The merge is refused,
  * in plain words naming what grew, when the result is higher than EITHER the tier the person approved at (`shown`; none recorded counts as small) OR the tier the planning steps were chosen at (the estimate, when steps were skipped).
- * The record is written under `flowIs`, and every whole-workflow writer carries the same condition, so a writer that read the task earlier cannot write it back over the raise. A host that cannot be read refuses the merge too, and records nothing.
+ * A growth is STICKY: it is recorded (`grewAfterBuild`), and from then on the merge needs the review steps of the higher tier to have run on the CURRENT head (`tierReviewRecorded`); a second press does not clear it, and a push
+ * makes the record stale. The record is written under `flowIs`, so a lost race is refused, and a whole-workflow writer that read the task earlier carries the stored record forward (flow-guard.ts). A host that cannot be read
+ * refuses the merge too, and records nothing.
  */
 async function tierGate(
   deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, shown: TierLevel | undefined,
@@ -583,25 +585,27 @@ async function tierGate(
   }
   const at = new Date(deps.now()).toISOString();
   const bases = task.workflow.reviewBase;
-  const fresh = tierFromDiff(input.diff, {
-    ...boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: bases?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha }))), at, head: input.head,
-  });
+  const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: bases?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
+  const fresh = tierFromDiff(input.diff, { ...bound, at, head: input.head });
   const flow = task.workflow.flow;
   const raised = raiseTier(flow?.tier, fresh);
   const approvedAt: TierLevel = shown ?? "small";
   const planned = planningLevelOf(flow);
-  const grew = tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised));
+  // The checks of the higher tier have run on this very head: nothing is owed.
+  const covered = tierReviewRecorded(flow, raised.level, bound.headSha);
+  const grew = !covered && (tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised)));
+  const owed = !covered && !grew && flow?.grewAfterBuild !== undefined && !tierReviewRecorded(flow, flow.grewAfterBuild.to, bound.headSha);
   const recorded = recordTier(flow, { ...fresh, source: "merge" });
   const from: TierLevel = planned !== undefined && tierRank(planned) < tierRank(approvedAt) ? planned : approvedAt;
   const next = grew ? recordGrowth(recorded.flow, from, recorded.tier.level, at) : recorded.flow;
-  // Recorded either way (best effort: a lost race or a store failure never changes the answer), guarded by the revision this tier was computed against. A growth moves the revision.
+  // Recorded either way (best effort: a lost race or a store failure never changes the answer), under the revision and the record this tier was computed against. The revision does not move: a row of the step in flight waits for it.
   const revision = task.workflow.revision;
   await deps.store.update({
     key: taskRecordKey(task.taskId),
     ops: [change.set(["workflow", "flow"], plain(next) as never)],
     condition: when.and(when.eq(["workflow", "revision"], revision), when.notExists("closedAt"), flowIs(flow)),
   }).catch(() => undefined);
-  if (grew) throw agentXError("MERGE_NOT_READY", tierGrowthSentence(raised, (path) => inertLine(path, 80)));
+  if (grew || owed) throw agentXError("MERGE_NOT_READY", tierGrowthSentence(raised, (path) => inertLine(path, 80)));
 }
 
 /**

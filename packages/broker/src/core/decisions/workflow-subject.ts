@@ -15,7 +15,7 @@ import {
 } from "@agentx/contracts";
 import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
-import { flowIs } from "../task-flow/flow-guard.js";
+import { workflowWriteOps } from "../task-flow/flow-guard.js";
 
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
 /** What a refused decision says when the structured plan it names cannot be read back. */
@@ -87,8 +87,6 @@ export function waitingDocumentDigest(workflow: WorkflowSnapshot): string | unde
   return workflow.artifacts.filter((artifact) => artifact.type === type).at(-1)?.sha256;
 }
 
-const jsonOf = <T>(value: T): never => JSON.parse(JSON.stringify(value)) as never;
-
 /**
  * The default mapping (decision 45.3): the local owner is the owner of every task on this install and decides as the task's owner. A repository collaborator whom the Approvers seam verified (a comment from someone
  * with write access) decides as a project approver under a stable id of their own, recorded as theirs and never as the owner's. `collaboratorsMayDecide: false` makes the owner the only decider. Whatever the
@@ -132,7 +130,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       return {
         key: workflowTaskKey(taskId),
         // The revision and the wait, as the engine's own update condition holds them: a write from any other state loses.
-        guard: when.and(when.eq(["workflow", "revision"], workflow.revision), flowIs(workflow.flow), when.eq(["workflow", "state"], "WAITING"), when.eq(["workflow", "stage"], "PLAN_REVIEW"), when.notExists("closedAt")),
+        guard: when.and(when.eq(["workflow", "revision"], workflow.revision), when.eq(["workflow", "state"], "WAITING"), when.eq(["workflow", "stage"], "PLAN_REVIEW"), when.notExists("closedAt")),
         waiting,
         request: {
           kind: currentDocumentType(workflow), subject, ...(typeof task["project"] === "string" ? { projectName: task["project"] } : {}),
@@ -207,7 +205,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const taskId = loaded.request.subject.id;
       const extra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
       return {
-        ops: [change.set("workflow", jsonOf(after)), change.set("updatedAt", at)],
+        ops: [...workflowWriteOps(workflow, after).ops, change.set("updatedAt", at)],
         extra,
         result: { workflow: after },
       };

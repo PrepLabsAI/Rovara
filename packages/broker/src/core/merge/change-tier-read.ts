@@ -35,20 +35,29 @@ const DOCUMENT_READ_MAX_BYTES = 200_000;
 const DOCUMENTS_READ_MAX = 20;
 const PATH_KINDS_READ_MAX = 40;
 
-/** The paths an instruction file names: `@path` imports and Markdown link targets, resolved against the file's folder. */
+/**
+ * The paths an instruction file names, in any form: `@path` imports, Markdown inline and reference links, HTML `href` and `src`, and a path written in plain words ("read docs/rules.md"). Each is resolved against the file's
+ * folder and against the repository root (an agent may read either), and written in the normalized form.
+ */
 export function importsOf(instructionPath: string, text: string): string[] {
   const folder = instructionPath.includes("/") ? instructionPath.slice(0, instructionPath.lastIndexOf("/") + 1) : "";
-  const targets = [...text.matchAll(/(?:^|[\s(])@([\w@./-]+\.[A-Za-z0-9]{1,6})\b/gu)].map((match) => match[1]!)
-    .concat([...text.matchAll(/\]\(([^)#\s]+)(?:#[^)\s]*)?\)/gu)].map((match) => match[1]!));
-  const out: string[] = [];
+  const targets = [
+    ...[...text.matchAll(/(?:^|[\s(])@([\w@./-]+\.[A-Za-z0-9]{1,6})\b/gu)].map((match) => match[1]!),
+    ...[...text.matchAll(/\]\(<?([^)#\s>]+)(?:#[^)\s]*)?>?[^)]*\)/gu)].map((match) => match[1]!),
+    ...[...text.matchAll(/^\s*\[[^\]]+\]:\s*<?([^\s>#]+)/gmu)].map((match) => match[1]!),
+    ...[...text.matchAll(/\b(?:href|src)\s*=\s*["']([^"'#]+)/giu)].map((match) => match[1]!),
+    ...[...text.matchAll(/(?:^|[\s("'`<])((?:[\w@.-]+\/)*[\w@.-]+\.(?:md|mdx|markdown|rst|adoc|txt|ya?ml|json|toml))(?=$|[\s)"'`>,.;:])/gmu)].map((match) => match[1]!),
+  ];
+  const out = new Set<string>();
   for (const target of targets) {
     if (/^[a-z][a-z0-9+.-]*:/iu.test(target)) continue;
-    const parts = `${target.startsWith("/") ? "" : folder}${target.replace(/^\//u, "")}`.split("/");
-    const resolved: string[] = [];
-    for (const part of parts) { if (part === "..") resolved.pop(); else if (part !== "." && part !== "") resolved.push(part); }
-    out.push(normalizedTierPath(resolved.join("/")));
+    for (const base of target.startsWith("/") ? [""] : folder === "" ? [""] : [folder, ""]) {
+      const resolved: string[] = [];
+      for (const part of `${base}${target.replace(/^\//u, "")}`.split("/")) { if (part === "..") resolved.pop(); else if (part !== "." && part !== "") resolved.push(part); }
+      out.add(normalizedTierPath(resolved.join("/")));
+    }
   }
-  return out;
+  return [...out];
 }
 
 export interface TierReadInput { diff: DiffInput; head: HeadFacts }
@@ -62,6 +71,7 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
   const text = new Map<string, string>();
   const imports = new Set<string>();
   const links = new Set<string>();
+  const unchecked = new Set<string>();
   let importsKnown: boolean | undefined;
   for (const target of targets) {
     const ref = changeRequestRef(target.repositoryUrl, target.number);
@@ -93,9 +103,11 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
         const kind = await target.host.pathKind(ref.repository, file.path, target.headSha, scope);
         if (kind === "symlink") links.add(factKey(target.repositoryId, file.path));
       }
+      // Past the limit the kind is not asked: unknown is risky, never "not a link".
+      for (const file of listed.slice(PATH_KINDS_READ_MAX)) unchecked.add(factKey(target.repositoryId, file.path));
     }
   }
-  return { text, instructionImports: imports, ...(importsKnown === undefined ? {} : { importsKnown }), links };
+  return { text, instructionImports: imports, ...(importsKnown === undefined ? {} : { importsKnown }), links, unchecked };
 }
 
 /** What the tier is computed from: the files of every change request of the task (as the host lists them), and the facts of `readHeadFacts`. A host that cannot answer THROWS. */

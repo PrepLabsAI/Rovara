@@ -12,7 +12,7 @@ import { decisionRecordDocument } from "../decisions/store.js";
 import { riskTierOf } from "../decisions/risk-tier.js";
 import { workflowTaskKey } from "../decisions/workflow-subject.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
-import { flowIs } from "../task-flow/flow-guard.js";
+import { workflowWriteOps } from "../task-flow/flow-guard.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { nextLowerTier } from "./estimate.js";
 import { isHighRiskCodes } from "./risk.js";
@@ -92,7 +92,7 @@ export function createDesignChoiceSubject(options: DesignChoiceSubjectOptions): 
       const subject: PolicySubject = { type: "task", id: taskId };
       return {
         key: workflowTaskKey(taskId),
-        guard: when.and(when.eq(["workflow", "revision"], workflow.revision), flowIs(workflow.flow), when.notExists("closedAt")),
+        guard: when.and(when.eq(["workflow", "revision"], workflow.revision), when.notExists("closedAt")),
         waiting: workflow.stage === "PLAN_CRITIQUE" && workflow.state === "WAITING" && review.status === "waiting_cost" && task["closedAt"] === undefined,
         request: { kind: "design_spend", subject, projectName: project, revision: workflow.revision, artifactDigest: digest, risk },
         state: { task, workflow, allowSkip: setting?.setting.allowSkip === true },
@@ -131,7 +131,7 @@ export function createDesignChoiceSubject(options: DesignChoiceSubjectOptions): 
             : skipDesignReview(workflow, { expectedRevision, by, now: at });
         const row = next.stage === "PLAN_CRITIQUE" && next.state === "READY" ? designRowItem(deps, taskId, next.revision, "CRITIQUE", at)
           : offered.choice === "skip" && next.stage === "PLAN" && next.state === "READY" ? dispatchRowItem(deps, taskId, next.revision, "PLAN", at) : undefined;
-        return { ops: [change.set("workflow", JSON.parse(JSON.stringify(next)) as never), change.set("updatedAt", at)], extra: [decisionRow, ...(row === undefined ? [] : [row]), ...designWaitArmItems(deps, taskId, next, Date.parse(at))], result: { choice: offered.choice, workflow: next } };
+        return { ops: [...workflowWriteOps(workflow, next).ops, change.set("updatedAt", at)], extra: [decisionRow, ...(row === undefined ? [] : [row]), ...designWaitArmItems(deps, taskId, next, Date.parse(at))], result: { choice: offered.choice, workflow: next } };
       } catch (error) {
         if (error instanceof WorkflowTransitionError) throw new SubjectRefusal("invalid_outcome", error.message);
         throw error;
