@@ -31,6 +31,13 @@ export function hasConfusableLetter(path: string): boolean {
   return [...path.normalize("NFKC")].some((char) => CONFUSABLES.has(char));
 }
 
+/** Characters that reorder text on screen (Trojan Source): the code a person reads is not the code that runs. */
+export const BIDI_CONTROL = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/u;
+/** Whether a line has a word that mixes ASCII letters with a letter that merely looks like one (`isAdmіn` with a Cyrillic і): the name is not the one it seems. */
+export function hasMixedScriptWord(text: string): boolean {
+  return (text.normalize("NFKC").match(/[\p{L}\p{N}_$]+/gu) ?? []).some((word) => /[A-Za-z]/u.test(word) && [...word].some((char) => CONFUSABLES.has(char)));
+}
+
 /** Whether a path holds any letter outside ASCII (after width folding): no map of look-alikes is ever complete, so in a code path such a letter is risky by itself. */
 export function hasNonAsciiLetter(path: string): boolean {
   return /[^\p{ASCII}]/u.test(path.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, ""));
@@ -102,6 +109,8 @@ const INFRA_PATTERNS: readonly RegExp[] = [
   /(^|\/)(k8s|kubernetes|helm|manifests|kustomize|ansible|pulumi|cdk\.out)(\/|$)/u, /(^|\/)(kustomization|chart)\.ya?ml$/u, /(^|\/)pulumi\.[^/]*\.ya?ml$/u,
   /(^|\/)(serverless|docker-compose[^/]*|compose|samconfig|skaffold|fly|app)\.(ya?ml|toml)$/u, /(^|\/)(cdk\.json|procfile|vercel\.json|netlify\.toml|render\.ya?ml|appspec\.ya?ml|buildspec[^/]*\.ya?ml)$/u,
   /(^|\/)(infra|infrastructure|deploy|deployment|deployments)(\/|$)/u,
+  // Scripts that ship or provision: the name says so even when the folder does not.
+  /(^|\/)(deploy|release|publish|provision|bootstrap|rollout|rollback|ship|promote)[\w.-]*\.(sh|bash|zsh|ps1|py|rb|js|mjs|ts)$/u,
   // CDK stacks, Helm charts and values, deploy descriptors, and the rules that guard a hosted database or bucket.
   /(^|\/)lib\/[^/]*stack[^/]*\.[cm]?[jt]s$/u, /[^/]*[-_.]stack\.[cm]?[jt]s$/u, /(^|\/)charts\//u, /(^|\/)values[\w.-]*\.ya?ml$/u,
   /(^|\/)(firestore|storage|database)\.rules(\.json)?$/u, /\.rules$/u, /(^|\/)supabase\//u, /(^|\/)firebase\.json$/u,
@@ -171,6 +180,26 @@ const CHECK_CONFIG_PATTERNS: readonly RegExp[] = [
   /(^|\/)(vitest|jest|playwright|karma|cypress|mocha|ava|tap)[^/]*\.(config|workspace)\.[cm]?[jt]s(on)?$/u, /(^|\/)\.mocharc(\.[\w]+)?$/u, /(^|\/)(pytest\.ini|conftest\.py|setup\.cfg|\.coveragerc|\.nycrc[\w.]*)$/u,
   /(^|\/)(\.snyk|\.gitleaks\.toml|\.gitleaksignore|\.semgrep[\w.]*|semgrep\.ya?ml|\.trivyignore|\.codeql[\w.-]*|sonar-project\.properties|\.bandit|\.safety-policy\.ya?ml|\.secrets\.baseline|\.trufflehog[\w.]*)$/u,
   /(^|\/)\.github\/codeql\//u, /(^|\/)(\.eslintrc[\w.]*|eslint\.config\.[cm]?[jt]s)$/u,
+  // Linters and scanners for security: a rule turned off here is a hole in every later change.
+  /(^|\/)(\.golangci[\w.-]*\.ya?ml|\.bandit|bandit\.ya?ml|\.?ruff\.toml|\.semgrep[\w.-]*|semgrep[\w.-]*\.ya?ml|gosec[\w.-]*\.json|\.brakeman[\w.-]*|brakeman\.ya?ml|detekt[\w.-]*\.ya?ml|\.hadolint\.ya?ml|\.tflint\.hcl|\.checkov[\w.-]*|\.pylintrc|\.flake8|\.safety-policy\.ya?ml|trivy\.ya?ml|\.snyk)$/u,
+];
+
+/** Files that tell a linter or scanner what to skip: an addition here switches a check off for those paths. */
+export const SCANNER_IGNORE_PATTERN = /(^|\/)\.(eslint|semgrep|bandit|stylelint|hadolint|trivy|snyk|pylint|flake8|ruff|golangci|codeql|gitleaks|checkov|safety|brakeman)[\w.-]*ignore$/u;
+export const isScannerIgnorePath = (path: string): boolean => SCANNER_IGNORE_PATTERN.test(normalizedTierPath(path));
+
+/** The configuration of a documentation build: it runs code (hooks, plugins, extensions) when the site is built, so a change to it is not a document change. */
+const DOCS_BUILD_CONFIG: readonly RegExp[] = [
+  /(^|\/)docusaurus\.config\.[\w.]+$/u, /(^|\/)mkdocs\.ya?ml$/u, /(^|\/)(docs?\/)?conf\.py$/u, /(^|\/)\.vitepress\//u, /(^|\/)book\.toml$/u, /(^|\/)_config\.ya?ml$/u,
+  /(^|\/)hugo\.(toml|ya?ml|json)$/u, /(^|\/)astro\.config\.[\w.]+$/u, /(^|\/)antora(-playbook)?\.ya?ml$/u, /(^|\/)\.readthedocs\.ya?ml$/u, /(^|\/)gatsby-config\.[\w.]+$/u, /(^|\/)sidebars\.[\w.]+$/u,
+  /(^|\/)typedoc\.json$/u, /(^|\/)\.storybook\//u, /(^|\/)doxyfile$/u, /(^|\/)docs?\/[^/]*hooks?[^/]*\.py$/u,
+];
+export const isDocsBuildConfigPath = (path: string): boolean => DOCS_BUILD_CONFIG.some((pattern) => pattern.test(normalizedTierPath(path)));
+/** Paths whose existence at the head means the repository builds a documentation site: a document in it may be compiled or executed by the build. */
+export const DOCS_SITE_PROBES: readonly string[] = [
+  "docusaurus.config.js", "docusaurus.config.ts", "docusaurus.config.mjs", "mkdocs.yml", "mkdocs.yaml", "docs/conf.py", "conf.py", "docs/source/conf.py", ".vitepress/config.ts", ".vitepress/config.js", ".vitepress/config.mts", "docs/.vitepress/config.ts",
+  "docs/.vitepress/config.mts", "hugo.toml", "hugo.yaml", "astro.config.mjs", "astro.config.ts", "next.config.js", "next.config.mjs", "book.toml", "_config.yml", "antora-playbook.yml", ".readthedocs.yml", ".readthedocs.yaml",
+  "gatsby-config.js", "typedoc.json", "Doxyfile",
 ];
 export const isCheckConfigPath = (path: string): boolean => CHECK_CONFIG_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));
 

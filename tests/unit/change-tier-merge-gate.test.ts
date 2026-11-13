@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ChangeRequestFilesPage, ChangeRequestRef, CodeHost, HostScope } from "../../packages/contracts/src/index.js";
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
-import { recordTierReview, tierFromDiff, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { recordCatch, recordTierReview, tierFromDiff, tierQuestionsStep, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const AT = "2026-11-09T10:00:00.000Z";
@@ -42,6 +42,12 @@ async function reviewed(world: MergeWorld, level: TierLevel, head = world.prs[0]
   await world.setWorkflow({ flow: recordTierReview(flow, { level, headSha: head, findings: 0, mustFix: 0 }) });
 }
 
+/** The reviewer's questions were answered for the head the pull request has now (what the reviewer floor records). */
+async function questioned(world: MergeWorld, head = world.prs[0]!.head): Promise<void> {
+  const flow = (await world.task()).workflow.flow;
+  await world.setWorkflow({ flow: recordCatch(flow, { step: tierQuestionsStep(head), findings: 0, mustFix: 0 }) });
+}
+
 async function worldAt(level: "small" | "standard" | "risky", mode: Mode = { patches: true, failing: false, calls: 0 }) {
   const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
   await world.seedTracking();
@@ -67,6 +73,7 @@ async function pushed(world: MergeWorld, changes: Record<string, string | null>)
 describe("the merge recomputes the change tier from the host", () => {
   it("merges a small change that stays small, and records the tier it found at merge, bound to the head", async () => {
     const { world } = await worldAt("small");
+    await questioned(world);
     const { run, prepared } = await press(world);
     expect(prepared.tier).toBe("small");
     expect((await run()).status).toBe("MERGED");
@@ -168,6 +175,7 @@ describe("the merge recomputes the change tier from the host", () => {
     const mode: Mode = { patches: true, failing: false, calls: 0 };
     const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
     await world.seedTracking();
+    await questioned(world);
     const { run, prepared } = await press(world);
     expect(prepared.tier).toBeUndefined();
     expect((await run()).status).toBe("MERGED");
@@ -209,6 +217,56 @@ describe("the merge recomputes the change tier from the host", () => {
     expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 
+  it("a small change to code is refused until the reviewer's questions are on the record for the current head", async () => {
+    const { world } = await worldAt("small");
+    const refusal = await rejects((await press(world)).run);
+    expect(refusal.message).toBe("A reviewer has not yet answered the security questions for the current version of this change, so it can't be merged yet.");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+    // Questions answered for an older head do not count; a push makes them stale.
+    await questioned(world, "9".repeat(40));
+    expect((await rejects((await press(world)).run)).message).toContain("security questions");
+    await questioned(world);
+    expect((await (await press(world)).run()).status).toBe("MERGED");
+  });
+
+  it("the questions are asked again after a push", async () => {
+    const { world } = await worldAt("small");
+    await questioned(world);
+    await pushed(world, { "src/b.ts": "export const b = 1;\n" });
+    expect((await rejects((await press(world)).run)).message).toContain("security questions");
+    await questioned(world);
+    expect((await (await press(world)).run()).status).toBe("MERGED");
+  });
+
+  it("an install that does not run the reviewer can switch the floor off, and the lists alone decide", async () => {
+    const { world } = await worldAt("small");
+    const prepared = await prepareMerge({ ...world.deps, tierFloor: "off" }, { taskId: TASK_ID, requestId: world.requestId() });
+    const merged = await pressMerge({ ...world.deps, tierFloor: "off" }, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) });
+    expect(merged.status).toBe("MERGED");
+  });
+
+  it("a growth that another writer got in front of is written again until it is on the record", async () => {
+    const { world } = await worldAt("small");
+    await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
+    const { run } = await press(world);
+    // Another writer moves the record between the gate's read and its write, once.
+    let raced = false;
+    const store = world.deps.store as unknown as { update: (input: unknown) => Promise<{ applied: boolean }> };
+    const original = store.update.bind(store);
+    store.update = async (input) => {
+      if (!raced) {
+        raced = true;
+        await original({ key: { pk: `DEVTASK#${TASK_ID}`, sk: "META" }, ops: [{ op: "set", path: ["workflow", "flow", "rulesVersion"], value: 1 }, { op: "set", path: ["workflow", "flow", "moved"], value: 1 }] });
+      }
+      return original(input);
+    };
+    await rejects(run);
+    store.update = original;
+    expect(raced).toBe(true);
+    // The growth is on the record in spite of the other writer.
+    expect((await world.task()).workflow.flow?.grewAfterBuild).toMatchObject({ to: "risky" });
+  });
+
   it("the approval digest names the tier, so an approval given at one tier is not valid at another", async () => {
     const small = await worldAt("small");
     const risky = await worldAt("risky");
@@ -219,6 +277,7 @@ describe("the merge recomputes the change tier from the host", () => {
 
   it("agrees with the classifier on what the host shows (one rule, two entry points)", async () => {
     const { world } = await worldAt("small");
+    await questioned(world);
     const { run } = await press(world);
     await run();
     const tier = await tierOf(world);

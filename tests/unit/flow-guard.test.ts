@@ -44,7 +44,8 @@ describe("workflowWriteOps", () => {
   it("sets `flow` under a fence on the record read only when the writer owns it and changed it", () => {
     const current = { ...waiting(), flow: flowWith("a") };
     const next = { ...current, flow: flowWith("b") };
-    expect(workflowWriteOps(current, next).ops).toEqual([]);
+    // A writer that does not own the record and still carries a changed one is refused, loudly (it would lose the change).
+    expect(() => workflowWriteOps(current, next)).toThrow(/does not own the flow record/u);
     const owned = workflowWriteOps(current, next, { ownsFlow: true });
     expect(owned.ops).toHaveLength(1);
     expect(owned.guard).toEqual([flowIs(current.flow)]);

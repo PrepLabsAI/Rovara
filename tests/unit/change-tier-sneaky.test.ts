@@ -73,13 +73,13 @@ const CASES: Case[] = [
 
   // ---- documents, links and commands
   { name: "README prose only", files: [file("README.md", { before: ["We like small changes."], after: ["We love small changes."] })], level: "small", kinds: ["docs"] },
-  { name: "a long docs-only change has no line limit", files: [file("docs/guide.md", { patch: addedPatch(...Array.from({ length: 800 }, (_, index) => `Sentence number ${index}.`)), additions: 800, deletions: 0 })], level: "small", kinds: ["docs"] },
-  { name: "README install URL changed", files: [file("README.md", { before: ["Download it from https://example.test/old/download."], after: ["Download it from https://other.example/new/download."] })], level: "small", kinds: ["docs", "install_link"] },
-  { name: "README command in a fenced block changed", files: [file("README.md", { patch: ["@@ -10,5 +10,5 @@", " Install:", " ```bash", "-npm install thing", "+npm install thing-evil", " ```", " Then run it."].join("\n"), additions: 1, deletions: 1 })], level: "small", kinds: ["docs", "install_link"] },
+  { name: "a docs rewrite of 800 lines is not looked at as prose: standard", files: [file("docs/guide.md", { patch: addedPatch(...Array.from({ length: 800 }, (_, index) => `Sentence number ${index}.`)), additions: 800, deletions: 0 })], level: "standard", kinds: ["code_config"], reasons: ["docs_large"] },
+  { name: "README install URL changed", files: [file("README.md", { before: ["Download it from https://example.test/old/download."], after: ["Download it from https://other.example/new/download."] })], level: "standard", kinds: ["code_config", "install_link"], reasons: ["docs_not_plain"] },
+  { name: "README command in a fenced block changed", files: [file("README.md", { patch: ["@@ -10,5 +10,5 @@", " Install:", " ```bash", "-npm install thing", "+npm install thing-evil", " ```", " Then run it."].join("\n"), additions: 1, deletions: 1 })], level: "standard", kinds: ["code_config", "install_link"], reasons: ["docs_not_plain"] },
   { name: "README line inside a fenced block with no command word or link", files: [file("README.md", { patch: ["@@ -10,5 +10,5 @@", " Run:", " ```", "-thing --fast", "+thing --evil", " ```", " Then wait."].join("\n"), additions: 1, deletions: 1 })], level: "small", kinds: ["docs", "install_link"] },
   { name: "README line inside an Install section with no command word or link", files: [file("README.md", { patch: ["@@ -1,4 +1,4 @@", " # Project", " ## Installation", "-run the thing quickly", "+run the thing slowly"].join("\n"), additions: 1, deletions: 1 })], level: "small", kinds: ["docs", "install_link"] },
   { name: "README prose next to a bare fence cannot be cleared", files: [file("README.md", { patch: ["@@ -20,4 +20,4 @@", "-some words", "+other words", " ```", " code", " ```"].join("\n"), additions: 1, deletions: 1 })], level: "small", kinds: ["docs", "install_link"] },
-  { name: "README command line outside any block", files: [file("README.md", { before: ["$ pip install thing"], after: ["$ pip install thing-evil"] })], level: "small", kinds: ["docs", "install_link"] },
+  { name: "README command line outside any block", files: [file("README.md", { before: ["$ pip install thing"], after: ["$ pip install thing-evil"] })], level: "standard", kinds: ["code_config", "install_link"], reasons: ["docs_not_plain"] },
   { name: "a docs change with no patch text is install_link at least, and risky", files: [{ path: "README.md", status: "modified", additions: 4, deletions: 1 }], level: "risky", kinds: ["docs", "install_link"], reasons: ["unreadable_content"] },
   { name: "a .md under a sensitive folder", files: [file("auth/README.md", { before: ["a"], after: ["b"] })], level: "risky", kinds: ["code_config"], reasons: ["sensitive_path"] },
   { name: "case trick Auth/", files: [file("src/Auth/Login.ts")], level: "risky", kinds: ["code_config"], reasons: ["sensitive_path"] },
@@ -156,7 +156,7 @@ const CASES: Case[] = [
   { name: "requirements/base.txt is a dependency file, not a document", files: [file("requirements/base.txt", { patch: addedPatch("newpkg==1"), additions: 1, deletions: 0 })], level: "standard", kinds: ["dependency"], reasons: ["new_dependency"] },
   { name: "CMakeLists.txt is a text file a build reads, not a document", files: [file("CMakeLists.txt", { before: ["a"], after: ["b"] })], level: "standard", kinds: ["code_config"], reasons: ["text_data_file"] },
   { name: "README.MD in capitals is still a document", files: [file("README.MD", { before: ["old words"], after: ["new words"] })], level: "small", kinds: ["docs"] },
-  { name: "README link target changed", files: [file("README.md", { before: ["See [the guide](docs/guide.md)."], after: ["See [the guide](docs/other.md)."] })], level: "small", kinds: ["docs", "install_link"] },
+  { name: "README link target changed", files: [file("README.md", { before: ["See [the guide](docs/guide.md)."], after: ["See [the guide](docs/other.md)."] })], level: "standard", kinds: ["code_config", "install_link"], reasons: ["docs_not_plain"] },
   { name: "the host's line counts are not believed when the text shows more", files: [{ path: "src/a.ts", status: "modified", additions: 1, deletions: 0, patch: addedPatch(...Array.from({ length: 150 }, (_, index) => `line ${index}`)) }], level: "standard", kinds: ["code_config"], reasons: ["more_than_lines"] },
 
   // ---- the diff itself is not whole
@@ -458,7 +458,7 @@ const OWN: Adversarial2[] = [
   { id: "Y7", name: "packages/x/CHANGELOG.md on the docs route", files: [f("packages/x/CHANGELOG.md", added("- fixed a typo"))], atLeast: "small", kind: "docs" },
   { id: "Y8", name: "notes/plan.md is not on the docs route (small, reviewed)", files: [f("notes/design.md", chg(["a"], ["b"]))], atLeast: "small", notKind: "docs" },
   { id: "Y9", name: "an HTML tag in a README keeps it off the docs route", files: [f("README.md", added('<img src="https://badge.example/x.svg">'))], atLeast: "small", notKind: "docs" },
-  { id: "Y10", name: "an HTML comment is still docs", files: [f("README.md", added("<!-- a note for editors -->"))], atLeast: "small", kind: "docs" },
+  { id: "Y10", name: "an HTML comment is not plain prose (comment-driven tools read it)", files: [f("README.md", added("<!-- a note for editors -->"))], atLeast: "standard", notKind: "docs" },
   { id: "Y11", name: "a path that is not ASCII in a code file", files: [f("src/caf\u00E9.ts")], atLeast: "risky", reason: "confusable_path" },
   { id: "Y12", name: "a Japanese document name stays docs", files: [f("docs/\u65E5\u672C\u8A9E.md", chg(["a"], ["b"]))], atLeast: "small" },
   { id: "Y13", name: "package.json: a changed script that only adds a flag is standard", files: [f("package.json", chg(['    "test": "vitest run"'], ['    "test": "vitest run --coverage"']))], atLeast: "standard", reason: "script_changed" },
