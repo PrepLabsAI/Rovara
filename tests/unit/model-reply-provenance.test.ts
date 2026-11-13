@@ -54,6 +54,6 @@ describe("fixed labels", () => {
     for (const value of [undefined, "nope", 3, null, {}]) expect(replyLabelOf(value)).toBe(REPLY_PROVENANCE_LABELS.task_made);
   });
   it("the origins a before_task reply may carry are fixed", () => {
-    expect([...BEFORE_TASK_ORIGINS]).toEqual(["customer_written", "setup_agent_from_fakes", "real_recording_capped", "prompt_and_expected_shape"]);
+    expect([...BEFORE_TASK_ORIGINS]).toEqual(["customer_written", "setup_agent_from_fakes", "real_recording_capped", "prompt_and_expected_shape", "repo_file_at_base"]);
   });
 });

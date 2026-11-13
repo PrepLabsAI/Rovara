@@ -37,7 +37,11 @@ import {
   type ReplyStoreWord,
   type ResolvedReplySet,
 } from "./model-reply-store.js";
+import { canonicalJson } from "./canonical-json.js";
 import type { ServedModelFamily } from "./model-served-family.js";
+import { sha256HexOf } from "./service-catalog-verify.js";
+
+const REPLY_CONTENT_DIGEST_DOMAIN = "rovara-model-reply-content/v1\n";
 
 /** Reply bodies by `entrySha256` (what the `ENTRY#` rows hold). Unparsed on purpose: every body is parsed and its hash re-checked here, so a stored row that no longer says what its key says is never served. */
 export type ReplyBodies = ReadonlyMap<string, unknown>;
@@ -52,6 +56,16 @@ export interface RuleFailure {
   readonly reason: RuleReason;
 }
 const fail = (word: ReplyStoreWord, reason: RuleReason): RuleFailure => ({ ok: false, word, reason });
+
+/**
+ * A hash of a reply's `{match, response}` that ignores the id and treats an absent `toolCalls` like `toolCalls: []`: two replies that answer alike hash alike, however they are named. MADE# records it next to the entry hash,
+ * so renaming a reply, or writing an empty `toolCalls`, does not get it past the import's check.
+ */
+export function replyContentSha256(reply: Pick<ModelReplyFileEntry, "match" | "response">): string {
+  const { toolCalls, ...rest } = reply.response;
+  const response = toolCalls === undefined || toolCalls.length === 0 ? rest : { ...rest, toolCalls };
+  return sha256HexOf(new TextEncoder().encode(`${REPLY_CONTENT_DIGEST_DOMAIN}${canonicalJson({ match: reply.match, response })}`));
+}
 
 /** `<id>.edit-<first 8 hex of the content hash>`, cut so it stays a valid id (64 characters at most). */
 export function replyEditId(id: string, entrySha256: string): string {
@@ -229,6 +243,8 @@ export interface ImportOptions {
   readonly commit?: string | undefined;
   /** Content hashes of the replies a Rovara task wrote that a human merged, and of the replies in any open task's overlay: they are NOT imported and stay `task_made`. */
   readonly notImportedShas: ReadonlySet<string>;
+  /** `replyContentSha256` of every reply the coding agent wrote (it ignores the id and an empty `toolCalls`): a reply with one of these is NOT imported either. */
+  readonly notImportedContentShas?: ReadonlySet<string> | undefined;
   /** The bodies of the head's existing entries. */
   readonly bodies: ReplyBodies;
   /** For `real_recording_capped` only: how many capped recordings this (project, family) already holds. */
@@ -251,7 +267,7 @@ export function planImport(head: unknown, file: ModelReplySetFile, options: Impo
   let skipped = 0;
   for (const reply of file.replies) {
     const sha = modelReplyEntrySha256(reply);
-    if (known.has(sha) || options.notImportedShas.has(sha)) {
+    if (known.has(sha) || options.notImportedShas.has(sha) || options.notImportedContentShas?.has(replyContentSha256(reply)) === true) {
       skipped += 1;
       continue;
     }

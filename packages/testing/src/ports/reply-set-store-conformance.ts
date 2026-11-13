@@ -299,6 +299,110 @@ export function runReplySetStoreConformance(name: string, harness: ReplySetStore
       });
     });
 
+    describe("a reply the coding agent wrote is never imported as before_task (the durable MADE record, review H1)", () => {
+      const task = { project: PROJECT, taskId: "task-one", family: FAMILY };
+      const base = (service: ReplySetStoreService) => importFile(service, A, [reply("base")]);
+      const ids = async (service: ReplySetStoreService) => {
+        const read = await service.readSet(A, query());
+        return read.ok ? read.set.replies.map((entry) => `${entry.id}:${entry.provenance}`) : [];
+      };
+
+      it("expiry: 31 days after the overlay was written an import of the same content leaves it out", async () => {
+        let clock = new Date("2026-11-13T00:00:00Z");
+        await withStore(harness, async (service) => {
+          await base(service);
+          await service.putOverlay(A, { ...task, replies: [reply("hand", "agent wrote this")] });
+          clock = new Date(clock.getTime() + 31 * 86_400 * 1000);
+          expect(await importFile(service, A, [reply("base"), reply("hand", "agent wrote this")])).toMatchObject({ ok: true, added: 0, skipped: 2 });
+          expect(await ids(service)).toEqual(["base:before_task"]);
+        }, { now: () => clock });
+      });
+      it("deleteOverlay: an import of the same content leaves it out", () => withStore(harness, async (service) => {
+        await base(service);
+        await service.putOverlay(A, { ...task, replies: [reply("hand", "agent wrote this")] });
+        await service.deleteOverlay(A, task);
+        expect(await importFile(service, A, [reply("hand", "agent wrote this")])).toMatchObject({ ok: true, added: 0, skipped: 1 });
+        expect(await ids(service)).toEqual(["base:before_task"]);
+      }));
+      it("a failed join (an id clash the agent builds from public hashes): the reply never joins and is never imported", () => withStore(harness, async (service) => {
+        await importFile(service, A, [reply("a", "original")]);
+        const x = reply("a", "agent edit");
+        const y = reply(`a.edit-${sha(x).slice(0, 8)}`, "agent's decoy");
+        await service.putOverlay(A, { ...task, replies: [y, x] });
+        expect(await service.joinTask(A, { ...task, branch: BRANCH })).toEqual({ ok: false, word: "id_clash" });
+        await service.deleteOverlay(A, task);
+        expect(await importFile(service, A, [x, y])).toMatchObject({ ok: true, added: 0, skipped: 2 });
+        expect(await ids(service)).toEqual(["a:before_task"]);
+      }));
+      it("a full head (1,000 entries): the join is refused and the reply is never imported", () => withStore(harness, async (service) => {
+        await importFile(service, A, Array.from({ length: 999 }, (_, index) => reply(`r${index}`)));
+        await service.putOverlay(A, { ...task, replies: [reply("e1", "agent"), reply("e2", "agent")] });
+        expect(await service.joinTask(A, { ...task, branch: BRANCH })).toEqual({ ok: false, word: "too_many" });
+        await service.deleteOverlay(A, task);
+        expect(await importFile(service, A, [reply("e1", "agent")])).toMatchObject({ ok: true, added: 0, skipped: 1 });
+        const read = await service.readSet(A, query());
+        expect(read.ok && read.set.replies.some((entry) => entry.id === "e1")).toBe(false);
+      }));
+      it("a refused late write still marks its content: after the join marker, and over the overlay's 1,000 entries", () => withStore(harness, async (service) => {
+        await base(service);
+        await service.putOverlay(A, { ...task, replies: [reply("one")] });
+        await service.joinTask(A, { ...task, branch: BRANCH });
+        expect(await service.putOverlay(A, { ...task, replies: [reply("late", "after the join")] })).toEqual({ ok: false, word: "not_allowed" });
+        expect(await importFile(service, A, [reply("late", "after the join")])).toMatchObject({ ok: true, added: 0, skipped: 1 });
+        const many = Array.from({ length: 1_001 }, (_, index) => reply(`big${index}`));
+        expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-big", family: FAMILY, replies: many })).toEqual({ ok: false, word: "too_many" });
+        expect(await importFile(service, A, [reply("big7")])).toMatchObject({ ok: true, added: 0, skipped: 1 });
+      }));
+      it("content-equal variants are recorded too: another id, and toolCalls absent or empty", () => withStore(harness, async (service) => {
+        await base(service);
+        await service.putOverlay(A, { ...task, replies: [reply("hand", "agent wrote this")] });
+        const renamed = reply("another-id", "agent wrote this");
+        const emptyCalls: ModelReplyFileEntry = { id: "hand", match: {}, response: { text: "agent wrote this", finish: "stop", toolCalls: [] } };
+        expect(await importFile(service, A, [renamed])).toMatchObject({ ok: true, added: 0, skipped: 1 });
+        expect(await importFile(service, A, [emptyCalls])).toMatchObject({ ok: true, added: 0, skipped: 1 });
+        expect(await importFile(service, A, [reply("other", "a different answer")])).toMatchObject({ ok: true, added: 1 });
+        expect(await ids(service)).toEqual(["base:before_task", "other:before_task"]);
+      }));
+      it("independent overlay content is not recorded: an identical import counts as before_task (accepted)", () => withStore(harness, async (service) => {
+        const ind = reply("ind", "independent answer");
+        await service.putIndependentOverlay(A, { ...task, entries: [{ reply: ind, decision: createRovaraIndependentDecision(sha(ind)) }] });
+        expect(await importFile(service, A, [ind])).toMatchObject({ ok: true, added: 1 });
+        expect(await ids(service)).toEqual(["ind:before_task"]);
+      }));
+    });
+
+    describe("erase leaves a tombstone: no import into an erased project until a maintainer clears it", () => {
+      const task = { project: PROJECT, taskId: "task-one", family: FAMILY };
+      it("refuses importFromRepoFile and importRecordings with the fixed erased word, then imports after clearErasure", () => withStore(harness, async (service) => {
+        await importFile(service, A, [reply("a")]);
+        await service.putOverlay(A, { ...task, replies: [reply("hand", "agent wrote this")] });
+        expect(await service.eraseProject(A, { project: PROJECT })).toMatchObject({ ok: true });
+        expect(await importFile(service, A, [reply("a"), reply("hand", "agent wrote this")])).toEqual({ ok: false, word: "erased" });
+        expect(await service.importRecordings(A, { ...query(), replies: [reply("rec")] })).toEqual({ ok: false, word: "erased" });
+        expect(await service.readSet(A, query())).toEqual({ ok: false, word: "not_found" });
+        // overlays and joins are not blocked (they write task_made only)
+        expect(await service.putOverlay(A, { ...task, replies: [reply("x")] })).toMatchObject({ ok: true });
+        expect(await service.clearErasure(A, { project: PROJECT })).toEqual({ ok: true });
+        expect(await importFile(service, A, [reply("a")])).toMatchObject({ ok: true, added: 1 });
+      }));
+      it("an erase that deleted nothing leaves no tombstone, and a second erase keeps the first one", () => withStore(harness, async (service) => {
+        expect(await service.eraseProject(A, { project: PROJECT })).toEqual({ ok: true, deleted: 0 });
+        expect(await importFile(service, A, [reply("a")])).toMatchObject({ ok: true, added: 1 });
+        await service.eraseProject(A, { project: PROJECT });
+        expect(await service.eraseProject(A, { project: PROJECT })).toEqual({ ok: true, deleted: 0 });
+        expect(await importFile(service, A, [reply("a")])).toEqual({ ok: false, word: "erased" });
+      }));
+      it("is per company and per project: another company's erase, and another project, are not blocked", () => withStore(harness, async (service) => {
+        await importFile(service, A, [reply("a")]);
+        await importFile(service, B, [reply("a")]);
+        await service.eraseProject(A, { project: PROJECT });
+        expect(await importFile(service, B, [reply("b")])).toMatchObject({ ok: true, added: 1 });
+        expect(await importFile(service, A, [reply("a")], { project: "another-project" })).toMatchObject({ ok: true, added: 1 });
+        expect(await service.clearErasure(B, { project: PROJECT })).toEqual({ ok: true });
+        expect(await importFile(service, A, [reply("a")])).toEqual({ ok: false, word: "erased" });
+      }));
+    });
+
     describe("two companies (DECISIONS 150)", () => {
       const plantFor = async (service: ReplySetStoreService, company: IsolationCompany, extra: { taskId?: string } = {}) => {
         const scope = scopeOf(company);
@@ -366,7 +470,8 @@ export function runReplySetStoreConformance(name: string, harness: ReplySetStore
         expect(await service.eraseProject(B, { project: PROJECT })).toMatchObject({ ok: true });
         expect(await seen(service, COMPANY_A)).toEqual(before);
         expect((await seen(service, COMPANY_B)).set).toEqual({ ok: false, word: "not_found" });
-        // and A erasing leaves a new B alone
+        // and A erasing leaves a new B alone (the erase left B's project a tombstone: a maintainer clears it)
+        expect(await service.clearErasure(B, { project: PROJECT })).toEqual({ ok: true });
         await plantFor(service, COMPANY_B);
         const b = await seen(service, COMPANY_B);
         expect(await service.eraseProject(A, { project: PROJECT })).toMatchObject({ ok: true });
@@ -407,6 +512,7 @@ export function runReplySetStoreConformance(name: string, harness: ReplySetStore
             joinTask: () => service.joinTask(A, { project: PROJECT, taskId: TASK, family: FAMILY, branch: BRANCH }),
             deleteOverlay: () => service.deleteOverlay(A, { project: PROJECT, taskId: TASK, family: FAMILY }),
             eraseProject: () => service.eraseProject(A, { project: PROJECT }),
+            clearErasure: () => service.clearErasure(A, { project: PROJECT }),
           };
           const probes: FailClosedProbe[] = Object.entries(operations).map(([operation, run]) => ({
             name: operation,

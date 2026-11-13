@@ -12,8 +12,10 @@ import {
   modelReplySetDigest,
   parseModelReplySetFileBytes,
   stampReplyProvenance,
+  type IndependentReplyDecision,
   type ModelReplyFileEntry,
   type ModelReplySetFile,
+  type ReplyProvenanceDecision,
 } from "../../packages/contracts/src/model-reply-set.js";
 import {
   REAL_RECORDING_MAX_BYTES,
@@ -29,6 +31,7 @@ import {
   planImport,
   reconcileBaseDecisions,
   replyEditId,
+  replyContentSha256,
   replyHeadCounts,
   resolveHead,
   resolveRoundSet,
@@ -332,7 +335,7 @@ describe("for a project that keeps mocks in the repo: F2's decideFromBase before
   it("makes the entries the store has not seen, and one it lists as task_made, task_made", () => {
     const { head } = headWith([["before_task", [reply("a")]], ["task_made", [reply("b")]]]);
     const decided = decideFromBase(baseFile, baseFile, "customer_written");
-    const map = reconcileBaseDecisions(decided.decisions, head) as Map<string, { provenance: string }>;
+    const map = reconcileBaseDecisions(decided.decisions, head) as Map<string, ReplyProvenanceDecision | IndependentReplyDecision>;
     expect(decided.decisions.get("b")!.provenance).toBe("before_task"); // F2 alone would have counted it
     expect(map.get("b")!.provenance).toBe("task_made");
     expect(map.get("c")!.provenance).toBe("task_made");
@@ -345,13 +348,13 @@ describe("for a project that keeps mocks in the repo: F2's decideFromBase before
     const candidate = file([reply("a", "edited")]);
     const decided = decideFromBase(file([reply("a")]), candidate, "customer_written");
     expect(decided.decisions.get("a")!.provenance).toBe("task_made");
-    const map = reconcileBaseDecisions(decided.decisions, head) as Map<string, { provenance: string }>;
+    const map = reconcileBaseDecisions(decided.decisions, head) as Map<string, ReplyProvenanceDecision | IndependentReplyDecision>;
     expect(map.get("a")!.provenance).toBe("task_made");
   });
   it("reports a store-listed independent entry as independent (the one Rovara-side decision)", () => {
     const { head } = headWith([["independent", [reply("a")]]]);
     const decided = decideFromBase(file([reply("a")]), file([reply("a")]), "customer_written");
-    const map = reconcileBaseDecisions(decided.decisions, head) as Map<string, { provenance: string }>;
+    const map = reconcileBaseDecisions(decided.decisions, head) as Map<string, ReplyProvenanceDecision | IndependentReplyDecision>;
     expect(map.get("a")!.provenance).toBe("independent");
     expect(stampReplyProvenance(file([reply("a")]), map).replies[0]!.provenance).toBe("independent");
   });
@@ -436,5 +439,30 @@ describe("speed: 1,000 replies near 4 MiB", () => {
     const elapsed = performance.now() - started;
     expect(resolved.ok && joined.ok).toBe(true);
     expect(elapsed).toBeLessThan(1_500);
+  });
+});
+
+describe("replyContentSha256 (what MADE# also records)", () => {
+  const base = reply("a", "same answer", { promptContains: "p" });
+  it("ignores the id and treats an absent toolCalls like an empty one", () => {
+    const renamed = { ...base, id: "another" };
+    expect(replyContentSha256(renamed)).toBe(replyContentSha256(base));
+    expect(replyContentSha256({ ...base, response: { ...base.response, toolCalls: [] } })).toBe(replyContentSha256(base));
+    expect(sha(renamed)).not.toBe(sha(base)); // the entry hash does not
+  });
+  it("still tells different content apart: text, match, finish, a real tool call, usage", () => {
+    const seen = new Set([
+      replyContentSha256(base),
+      replyContentSha256({ ...base, response: { ...base.response, text: "other" } }),
+      replyContentSha256({ ...base, match: { promptContains: "q" } }),
+      replyContentSha256({ ...base, response: { ...base.response, finish: "length" } }),
+      replyContentSha256({ ...base, response: { ...base.response, toolCalls: [{ name: "t", args: {} }] } }),
+      replyContentSha256({ ...base, response: { ...base.response, usage: { inputTokens: 1, outputTokens: 1 } } }),
+    ]);
+    expect(seen.size).toBe(6);
+  });
+  it("is skipped by planImport when the set names it", () => {
+    const planned = planImport(emptyReplyHead("gemini", "main"), file([{ ...base, id: "renamed" }]), { origin: "customer_written", source: "repo_import", notImportedShas: new Set(), notImportedContentShas: new Set([replyContentSha256(base)]), bodies: new Map() });
+    expect(planned).toMatchObject({ ok: true, added: 0, skipped: 1 });
   });
 });

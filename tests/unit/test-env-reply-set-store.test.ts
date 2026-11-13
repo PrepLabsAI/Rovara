@@ -8,7 +8,9 @@ import {
   REPLY_OVERLAY_TTL_DAYS,
   modelReplyEntrySha256,
   queryAll,
+  replyContentSha256,
   replyEntrySortKey,
+  replyMadeContentSortKey,
   replyHeadSortKey,
   replyJoinSortKey,
   replyStorePartition,
@@ -49,7 +51,7 @@ describe("rows and keys", () => {
     await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("b")] });
     const all = await rows();
     const keys = all.map((row) => row.sk).sort();
-    expect(keys).toEqual([replyEntrySortKey(modelReplyEntrySha256(reply("a"))), replyEntrySortKey(modelReplyEntrySha256(reply("b"))), replyHeadSortKey("feature/a#b", FAMILY), replyTaskSortKey("task-1", FAMILY), `MADE#${modelReplyEntrySha256(reply("b"))}`, "MADE#version"].sort());
+    expect(keys).toEqual([replyEntrySortKey(modelReplyEntrySha256(reply("a"))), replyEntrySortKey(modelReplyEntrySha256(reply("b"))), replyHeadSortKey("feature/a#b", FAMILY), replyTaskSortKey("task-1", FAMILY), `MADE#${modelReplyEntrySha256(reply("b"))}`, replyMadeContentSortKey(replyContentSha256(reply("b"))), "MADE#version"].sort());
     expect(all.every((row) => row.pk === pk)).toBe(true);
     expect(pk).toBe(`ORG#${COMPANY_A.orgId}#MOCKSET#${PROJECT}`);
     expect(keys.some((key) => key.includes("feature"))).toBe(false);
@@ -304,7 +306,8 @@ describe("caps", () => {
     const { service, rows } = world();
     const many = (count: number, prefix: string) => Array.from({ length: count }, (_, index) => reply(`${prefix}${index}`));
     expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-big", family: FAMILY, replies: many(1_001, "x") })).toEqual({ ok: false, word: "too_many" });
-    expect(await rows()).toEqual([]);
+    // the refused write still recorded its contents (MADE#), and wrote no body, overlay or head
+    expect((await rows()).filter((row) => !row.sk.startsWith("MADE#"))).toEqual([]);
     expect((await service.readRoundSet(A, { ...q(), taskId: "task-big" })).ok).toBe(false);
     await seed(service, many(999, "b"));
     await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("e1"), reply("e2")] });

@@ -44,9 +44,12 @@ describe("the new files are pure", () => {
 });
 
 describe("no callers until part B", () => {
+  // TE-R1 part A (the reply-set store) is the one lane that builds on these files before part B: its exact files, listed one by one (no glob), may use them.
+  const R1_FILES = ["packages/broker/src/core/test-env/reply-set-store.ts"];
   const files = walk(root).filter((path) => {
     const rel = path.slice(root.length + 1);
     if (rel.startsWith("packages/contracts/src/")) return false;
+    if (R1_FILES.includes(rel)) return false;
     if (rel.startsWith("tests/unit/model-")) return false;
     return rel.startsWith("packages/") || rel.startsWith("scripts/") || rel.startsWith("infra/") || rel.startsWith("tests/");
   });
