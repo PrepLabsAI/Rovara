@@ -713,7 +713,8 @@ function evidencePackV2Schemas(mode: Mode) {
       if (entry.api !== undefined && duplicate(entry.api.map((item) => item.scenarioId))) issue(["api"], "API scenarios are unique");
       if (entry.browser !== undefined && duplicate(entry.browser.map((item) => item.scenarioId))) issue(["browser"], "browser scenarios are unique");
       // The first line is never better than where the checks ran (M4): "a real run by Rovara" is only a sealed round, and a change proven with scripted AI replies is never a real run.
-      if (entry.level.reached === "rovara_real_run" && entry.producer.isolation !== "sealed") issue(["level", "reached"], "a real run by Rovara is a sealed round");
+      // O44: the final round runs unsealed (labelled "not sealed") while TS-L is held, so a real run in the agent's sandbox is allowed and only the words change (the renderer). A laptop or another system's result is not Rovara's round.
+      if (entry.level.reached === "rovara_real_run" && (entry.producer.isolation === "developer_machine" || entry.producer.isolation === "imported")) issue(["level", "reached"], "a real run by Rovara is a round Rovara ran, not a laptop or an imported result");
       if (entry.level.reached === "rovara_real_run" && entry.checks.some((item) => item.proofBasis !== undefined)) issue(["level", "reached"], "a change proven with scripted AI replies is not a real run");
     })
     : packObject;
