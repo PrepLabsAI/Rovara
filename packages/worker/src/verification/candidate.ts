@@ -135,10 +135,9 @@ export async function readCandidateRepositories(
     try {
       const identity = await withIsolatedGit(directory, "write", async (git) => {
         const commit = (await git.text(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], { index: "none" })).trim();
-        const tree = await snapshotTree(git, commit, input.baseCommitSha);
-        if (!/^[a-f0-9]{40}$/.test(commit) || !/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid git object identity");
-        // Exit status 1: HEAD does not descend from the base (the agent rewrote history past it), which the owner is
-        // told in plain words. Any other failure (such as an unknown commit) leaves the candidate unreadable.
+        if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid git object identity");
+        // The base's ancestry is checked FIRST (TE-B9: the snapshot below reads the base too, and must not answer first with its own message). Exit status 1: HEAD does not descend from the base (the agent rewrote
+        // history past it), which the owner is told in plain words. Any other failure (such as an unknown commit) leaves the candidate unreadable.
         if (input.baseCommitSha !== undefined) {
           await git.text(["merge-base", "--is-ancestor", input.baseCommitSha, commit], { index: "none" })
             .catch((error: unknown) => {
@@ -146,6 +145,8 @@ export async function readCandidateRepositories(
               throw error;
             });
         }
+        const tree = await snapshotTree(git, commit, input.baseCommitSha);
+        if (!/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid git object identity");
         return { commit, tree };
       });
       candidates.push({
