@@ -11,6 +11,7 @@ import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
 import { withTestRule } from "../proof/verification-report.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
+import { readOwnerNote } from "../task-flow/owner-note.js";
 import { readTask } from "../task-flow/reads.js";
 import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
@@ -130,7 +131,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     approvedPlan = { markdown: shortenMarkdown(plan.text, WORKFLOW_PLAN_MAX_BYTES), sha256: plan.sha256, ownerInstructions: ownerPlanInstructions(workflow) };
     prompt = found2.length === 0
       ? implementPrompt(plan)
-      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: lastOwnerWords(workflow) });
+      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: await lastOwnerWords(deps, task, workflow) });
   }
   const startFrom = fixStartHead(workflow);
   const readiness = selectedCheckCommands(workflow).readiness;
@@ -183,10 +184,16 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   return settled(deps, row, accepted.result);
 }
 
-/** The words the owner sent the work back with, when it was the owner: the last send-back decision that is not Rovara's own. */
-function lastOwnerWords(workflow: WorkflowSnapshot): string | undefined {
-  const sent = workflow.decisions.filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && decision.source === "SEND_BACK").at(-1);
-  return sent?.reason;
+/**
+ * The words the owner sent the work back with: the note of the LAST request for changes of any kind, and only when a person made it as a send back or a findings decision. If the last one is Rovara's own (an
+ * automatic send back after failed checks), a plan review's, or any other, there are no owner's words for this round: the owner's earlier numbered notes belong to the problems of THAT round, not this one. The full
+ * words are kept beside the workflow under the decision's request id (`owner-note.ts`; the decision keeps 500 characters); a send-back from before they were kept falls back to the decision's reason. A findings
+ * decision's reason is a count ("1 accepted, 1 to fix"), not the owner's words, so without its note there are none.
+ */
+async function lastOwnerWords(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<string | undefined> {
+  const last = workflow.decisions.filter((decision) => decision.decision === "REQUEST_CHANGES").at(-1);
+  if (last === undefined || last.actorRole === "AGENTX" || (last.source !== "SEND_BACK" && last.source !== "FINDINGS")) return undefined;
+  return (await readOwnerNote(deps.store, task.taskId, last.requestId)) ?? (last.source === "SEND_BACK" ? last.reason : undefined);
 }
 
 // ---- checks again
