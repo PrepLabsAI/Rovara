@@ -10,6 +10,7 @@ import { approvedFixturesOf, fixtureDigestsOfEnvironment, fixtureDigestsOfPlan, 
 import { createFixtureStore, createMemoryFixturePorts, verifiedFixtureDecision, type FixtureStore } from "../../packages/broker/src/core/test-env/fixture-store.js";
 import { environmentUnusedReason, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
 import { testEnvPlanFor, testEnvImplementPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
+import { pinnedFakeOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { FAKE_USAGE_ITEM_ID, dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/broker/src/core/proof/dependency-evidence.js";
 import { packDependencyLines } from "../../packages/broker/src/core/proof/dependency-lines.js";
 import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
@@ -258,6 +259,26 @@ describe("what the evidence says about a fake", () => {
   it("never lets the worker set the label: a recorded set whose date is not known reads as the less trusted word, and so does a store that could not be read", () => {
     expect(dependencyEvidenceOf(pinnedFake({ origin: "recorded" }), usageOf([fakeRow()])).dependencies[1]!.label).toBe("hand_written_fake");
     expect(dependencyEvidenceOf(pinnedFake(undefined), usageOf([fakeRow()])).dependencies[1]!.label).toBe("hand_written_fake");
+  });
+  it("never shows a fake Rovara made as a recording, whatever the store says (review M3)", () => {
+    const made = dependencyEvidenceOf(pinnedFake({ origin: "recorded", revision: 5, recordedAt: "2026-10-20T08:00:00.000Z", madeByRovara: true }), usageOf([fakeRow({ synthesized: 2 })]));
+    expect(made.dependencies[1]).toMatchObject({ backing: "fake", label: "rovara_made_fake", fixtureRevision: 5, madeUpAnswers: 2 });
+    expect(made.dependencies[1]).not.toHaveProperty("recordedAt");
+    expect(packDependencyLines(packOf(made.dependencies), 0).notTested).toContain("- payments API: answers were made by Rovara, not recorded from the real service");
+    expect(dependencyEvidenceOf(pinnedFake({ origin: "hand_written", madeByRovara: true }), usageOf([fakeRow()])).dependencies[1]!.label).toBe("rovara_made_fake");
+    // a Rovara-made fake that did not start is not available, like any other
+    const down = { ...usageOf([]), dependencies: [{ id: "postgres", started: true, healthy: true, startMs: 800, resetCount: 0 }, { id: "payments", started: false, healthy: false, startMs: 0, resetCount: 0 }] } as RawUsage;
+    expect(dependencyEvidenceOf(pinnedFake({ origin: "hand_written", madeByRovara: true }), down).dependencies[1]!.label).toBe("not_available");
+  });
+  it("reads the pinned fake's origin from the approved backing's provenance, and never lets a recording that Rovara made keep its day (review M3)", () => {
+    const backing = (provenance?: Record<string, unknown>) => ({ kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail", ...(provenance === undefined ? {} : { provenance }) }) as never;
+    const set = { origin: "recorded", revision: 4, recordedAt: "2026-10-20T08:00:00.000Z" };
+    const mockSet = { setId: "m1", version: 1, store: "rovara" };
+    expect(pinnedFakeOf(backing(), set)).toEqual({ origin: "recorded", revision: 4, recordedAt: "2026-10-20T08:00:00.000Z" });
+    expect(pinnedFakeOf(backing({ origin: "customer" }), set)).toEqual({ origin: "recorded", revision: 4, recordedAt: "2026-10-20T08:00:00.000Z" });
+    for (const origin of ["rovara_setup", "rovara_task"]) expect(pinnedFakeOf(backing({ origin, mockSet }), set)).toEqual({ origin: "hand_written", revision: 4, madeByRovara: true });
+    expect(pinnedFakeOf(backing({ origin: "rovara_task", mockSet }), undefined)).toEqual({ origin: "hand_written", madeByRovara: true });
+    expect(pinnedFakeOf(backing(), undefined)).toEqual({ origin: "hand_written" });
   });
   it("counts an unmatched request, and does not show the result as a clean run", () => {
     const result = dependencyEvidenceOf(pinnedFake({ origin: "hand_written", revision: 3 }), usageOf([fakeRow({ unmatched: 2 })]));

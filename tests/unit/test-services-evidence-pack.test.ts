@@ -177,4 +177,23 @@ describe("the evidence's environment with dependencies", () => {
     expect(chosen.dependencies).toEqual([{ id: "postgres", name: "Postgres", backing: "local" }]);
     expect(chosen.environment).toEqual({ tier: "sandbox", envRevision: 1, services: [], data: "synthetic", accounts: [] });
   });
+
+  const fakeBody = TestEnvironmentBodySchema.parse({
+    ...body,
+    dependencies: [{ id: "payments", name: "Payments", kind: "http_api", family: "http:api.example-pay.com", found: ["model"], usedBy: ["integration"], backing: { kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail", provenance: { origin: "rovara_task", mockSet: { setId: "payments-mocks", version: 1, store: "rovara" } } }, connect: { env: [], hostAliases: [] }, seeds: [], reset: "fresh_per_round" }],
+  });
+
+  it("pins a fake Rovara made as made by Rovara, from the approved backing's provenance (review M3)", async () => {
+    const store = await projectStore(ORG, PROJECT);
+    const deps: TestEnvDeps = { store, now: () => Date.UTC(2026, 10, 3, 10, 0, 0), env: ON };
+    // The approved revision as the approval gate writes it (the gate itself is covered where the approval is).
+    const digest = testEnvDigest(fakeBody);
+    await store.put({ item: JSON.parse(JSON.stringify({ ...testEnvRevisionKey(ORG, PROJECT, 1), entityType: "TEST_ENV_REVISION", orgId: ORG, project: PROJECT, revision: 1, approvedAt: "2026-11-03T10:00:00.000Z", approvedBy: "dev_a", digest, requestId: "r1", lessSafe: [], environment: fakeBody })) as never });
+    await store.put({ item: { ...testEnvLatestKey(ORG, PROJECT), entityType: "TEST_ENV_LATEST", orgId: ORG, project: PROJECT, revision: 1, digest } });
+    const start = await testEnvironmentForStart(deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
+    await store.transact([start.pin!]);
+    const chosen = await evidenceEnvironmentOf(deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
+    expect(chosen.dependencies).toEqual([{ id: "payments", name: "Payments", backing: "fake", fake: { origin: "hand_written", madeByRovara: true } }]);
+    expect(chosen.environment).toEqual({ tier: "sandbox", envRevision: 1, services: [], data: "synthetic", accounts: [] });
+  });
 });

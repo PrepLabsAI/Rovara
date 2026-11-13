@@ -3,9 +3,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ServiceCatalogSchema, type ServiceCatalog } from "../../packages/contracts/src/service-catalog.js";
+import { TestEnvDependenciesSchema, readTestEnvDependencies, testEnvDependencyApprovalRisk, testEnvDependencyLessSafeChanges } from "../../packages/contracts/src/test-env-dependency.js";
+import { TestEnvServiceSchema } from "../../packages/contracts/src/test-environment.js";
 import { testAccountApprovalDigest, testAccountExternalId, testAccountSecretRef, TestAccountSchema, type TestAccount } from "../../packages/contracts/src/test-account.js";
 import {
-  BACKING_ORDER, BACKING_PLACES, BACKING_REASONS, BACKING_REASON_WORDS, DEFAULT_ALLOWED_BACKINGS, SKIP_REASONS, SKIP_REASON_WORDS, chooseBacking, effectiveAllowedBackings,
+  BACKING_ORDER, BACKING_PLACES, BACKING_REASONS, BACKING_REASON_WORDS, DEFAULT_ALLOWED_BACKINGS, LEGACY_ALLOWED_BACKINGS, SKIP_REASONS, SKIP_REASON_WORDS, chooseBacking, effectiveAllowedBackings,
   type AllowedBackings, type BackingChoiceInput, type FixtureFact,
 } from "../../packages/broker/src/core/test-env/backing-choice.js";
 
@@ -157,14 +159,16 @@ describe("allowed", () => {
     expect(chooseBacking(input({ allowed: allow({ real: false }) })).skipped[0]).toMatchObject({ step: "local", reason: "not_allowed" });
     expect(chooseBacking(dynamo({ ...withEverything, allowed: allow({ emulated: false }) })).skipped.find((each) => each.step === "emulated")?.reason).toBe("not_allowed");
   });
-  it("a fake that makes up answers needs the company to allow it", () => {
+  it("a fake that makes up answers is used by default (TE-A3, O11), and a company can switch it off", () => {
     const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];
-    expect(steps(chooseBacking(pay({ fixtures: synth })))).toContain("fake:fake_makes_up_answers_not_allowed");
-    expect(chooseBacking(pay({ fixtures: synth })).backing.kind).toBe("none");
+    const off = allow({ fakeMakesUpAnswers: false });
+    expect(steps(chooseBacking(pay({ fixtures: synth, allowed: off })))).toContain("fake:fake_makes_up_answers_not_allowed");
+    expect(chooseBacking(pay({ fixtures: synth, allowed: off })).backing.kind).toBe("none");
+    expect(chooseBacking(pay({ fixtures: synth })).backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
     expect(chooseBacking(pay({ fixtures: synth, allowed: allow({ fakeMakesUpAnswers: true }) })).backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
     // A fixture set that does not make up answers is used instead, and so is a new one made by the agent.
-    expect(chooseBacking(pay({ fixtures: [...synth, fixture(sha("7"))] })).backing).toMatchObject({ fixtureSetRef: sha("7") });
-    expect(chooseBacking(pay({ fixtures: synth, canMakeFake: true })).backing).toMatchObject({ origin: "to_make" });
+    expect(chooseBacking(pay({ fixtures: [...synth, fixture(sha("7"))], allowed: off })).backing).toMatchObject({ fixtureSetRef: sha("7") });
+    expect(chooseBacking(pay({ fixtures: synth, canMakeFake: true, allowed: off })).backing).toMatchObject({ origin: "to_make" });
   });
   it("a fake cannot stand in for a database, a cache, a queue, a stream or a search index, but can for the same service on AWS", () => {
     for (const kind of ["database", "cache", "queue", "stream", "search"]) {
@@ -223,8 +227,30 @@ describe("allowed", () => {
 
 describe("effectiveAllowedBackings: a lock can only be stricter", () => {
   const KEYS = Object.keys(DEFAULT_ALLOWED_BACKINGS) as Array<keyof AllowedBackings>;
-  it("starts from the shipped defaults", () => {
-    expect(effectiveAllowedBackings(undefined)).toEqual({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false });
+  it("starts from the shipped defaults: Rovara-made and made-up answers are allowed (O11), own images are not", () => {
+    expect(effectiveAllowedBackings(undefined)).toEqual({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: true });
+    expect(DEFAULT_ALLOWED_BACKINGS.fakeMakesUpAnswers).toBe(true);
+  });
+  it("keeps the answer a company's stored setting already gave: a stored false stays false, and a stored setting that predates the change and says nothing about made-up answers reads as before (off)", () => {
+    expect(effectiveAllowedBackings({ fakeMakesUpAnswers: false }).fakeMakesUpAnswers).toBe(false);
+    expect(effectiveAllowedBackings({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true }).fakeMakesUpAnswers).toBe(false);
+    expect(effectiveAllowedBackings({}).fakeMakesUpAnswers).toBe(false);
+    expect(effectiveAllowedBackings({ fakeMakesUpAnswers: true }).fakeMakesUpAnswers).toBe(true);
+    expect(effectiveAllowedBackings(undefined).fakeMakesUpAnswers).toBe(true);
+    // A project or a lock can still turn it off, never on.
+    expect(effectiveAllowedBackings(undefined, { fakeMakesUpAnswers: false }).fakeMakesUpAnswers).toBe(false);
+    expect(effectiveAllowedBackings({ fakeMakesUpAnswers: false }, { fakeMakesUpAnswers: true }).fakeMakesUpAnswers).toBe(false);
+  });
+  it("tells an empty stored setting from no setting at all: {} is a saved setting that says nothing, so it keeps the old answer, and undefined gets the default (review Low)", () => {
+    expect(effectiveAllowedBackings({})).toEqual(LEGACY_ALLOWED_BACKINGS);
+    expect(effectiveAllowedBackings(undefined)).toEqual(DEFAULT_ALLOWED_BACKINGS);
+    expect(effectiveAllowedBackings({})).not.toEqual(effectiveAllowedBackings(undefined));
+    // null is not a setting a caller can hold, but it must never read as the wider default.
+    expect(effectiveAllowedBackings(null as unknown as undefined).fakeMakesUpAnswers).toBe(false);
+  });
+  it("changes nothing else a setting says", () => {
+    expect(LEGACY_ALLOWED_BACKINGS).toEqual({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false });
+    expect({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false }).toEqual({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false });
   });
   it("the company layer sets any box (own images need a second admin elsewhere)", () => {
     expect(effectiveAllowedBackings({ projectImages: true, testAccounts: false })).toMatchObject({ projectImages: true, testAccounts: false, real: true });
@@ -524,5 +550,60 @@ describe("hostile and malformed facts (M1, L1, L2)", () => {
     // The old list is enough to make a list exist.
     expect(steps(chooseBacking({ ...base, prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, alsoDeny: { accountIds: [], hosts: ["*.nothing.example"], arnPrefixes: [] } }))).not.toContain("test_account:production_list_missing");
     expect(chooseBacking(base).backing.kind).toBe("test_account");
+  });
+});
+
+// TE-A3 audit: the new default is for NEW proposals. An approval that is already stored keeps working exactly as it was approved, and a company's stored setting keeps its answer.
+describe("audit: the made-up-answers default changes new approvals only", () => {
+  const preprod = { endpointArn: "arn:aws:sagemaker:us-west-2:222222222222:endpoint/partner-scorer", roleArn: "arn:aws:iam::222222222222:role/rovara-invoke", region: "us-west-2" };
+  // The approved environments of today are v1 services; each is read as dependencies the way the broker reads a stored body.
+  const stored = [
+    { name: "Partner scorer", kind: "sagemaker_runtime", match: { endpointName: "partner-scorer" }, mode: "mock", mock: { fixtureSetRef: sha("a"), schemaRef: sha("b"), unmatched: "schema_synth" } },
+    { name: "Payments API", kind: "http", match: { host: "api.example-pay.com" }, mode: "mock", mock: { fixtureSetRef: sha("c"), schemaRef: sha("d"), unmatched: "fail" } },
+    { name: "Fraud scorer", kind: "sagemaker_runtime", match: { endpointName: "fraud-scorer" }, mode: "auto", mock: { fixtureSetRef: sha("e"), schemaRef: sha("f"), unmatched: "fail" }, preprod },
+  ].map((service) => TestEnvServiceSchema.parse(service));
+  const read = () => {
+    const result = readTestEnvDependencies({ services: stored });
+    if (!result.ok) throw new Error(result.reason);
+    return result.dependencies;
+  };
+
+  it("reads every stored service as the same dependencies as before, with no provenance or other field added, so a pinned digest still matches", () => {
+    const dependencies = read();
+    expect(dependencies.map((dependency) => dependency.backing)).toEqual([
+      { kind: "fake", fixtureSetRef: sha("a"), unmatched: "schema_synth" },
+      { kind: "fake", fixtureSetRef: sha("c"), unmatched: "fail" },
+      { kind: "test_account", accountId: "legacy-fraud-scorer" },
+    ]);
+    expect(dependencies[2]?.fallback).toEqual({ kind: "fake", fixtureSetRef: sha("e"), unmatched: "fail" });
+    // What was stored round-trips through the new schema unchanged (nothing is added, nothing dropped).
+    expect(TestEnvDependenciesSchema.parse(JSON.parse(JSON.stringify(dependencies)))).toEqual(dependencies);
+    expect(JSON.stringify(dependencies)).not.toContain("provenance");
+  });
+  it("keeps the second-person approval a stored made-up-answers fake and a test account always needed", () => {
+    const dependencies = read();
+    expect(testEnvDependencyLessSafeChanges(undefined, dependencies)).toEqual(["test_account", "schema_synth"]);
+    expect(testEnvDependencyApprovalRisk(dependencies)).toBe("high");
+  });
+  it("a stored company setting keeps 'off' for the company that never turned it on, whatever it says about other boxes", () => {
+    const old = { real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false };
+    const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];
+    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(old) })).backing.kind).toBe("none");
+    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings({ fakes: true }) })).backing.kind).toBe("none");
+    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(LEGACY_ALLOWED_BACKINGS) })).backing.kind).toBe("none");
+  });
+  it("a new proposal for a company with no stored setting gets the made-up answers fake", () => {
+    const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];
+    const choice = chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(undefined) }));
+    expect(choice.backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
+    expect(steps(choice)).not.toContain("fake:fake_makes_up_answers_not_allowed");
+  });
+  it("every caller that builds a proposal still passes no stored setting, so the default is the only thing they see", () => {
+    for (const file of ["dependency-plan.ts", "dependency-proposal.ts"]) {
+      const text = readFileSync(new URL(`../../packages/broker/src/core/test-env/${file}`, import.meta.url), "utf8");
+      const calls = text.match(/effectiveAllowedBackings\([^)]*\)/gu) ?? [];
+      expect(calls.length, file).toBeGreaterThan(0);
+      for (const call of calls) expect(call, file).toBe("effectiveAllowedBackings(undefined)");
+    }
   });
 });

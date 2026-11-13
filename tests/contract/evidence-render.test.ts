@@ -217,7 +217,7 @@ describe("bounds", () => {
   it("lists exactly the capped number of checks, dependencies and not-tested rows, never more", () => {
     const lines = big().text.split("\n");
     expect(lines.filter((line) => line.startsWith("- Tests:"))).toHaveLength(EVIDENCE_RENDER_LIMITS.checksListed);
-    expect(lines.filter((line) => line.startsWith("- ") && line.includes(": Simulated"))).toHaveLength(EVIDENCE_RENDER_LIMITS.dependenciesListed);
+    expect(lines.filter((line) => line.startsWith("- ") && line.includes(": not available"))).toHaveLength(EVIDENCE_RENDER_LIMITS.dependenciesListed);
     expect(lines).toContain("- and 16 more dependencies");
     expect(lines.filter((line) => line.startsWith("- W") && line.includes("(R"))).toHaveLength(EVIDENCE_RENDER_LIMITS.notTestedListed);
   });

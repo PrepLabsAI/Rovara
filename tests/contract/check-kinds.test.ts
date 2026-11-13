@@ -18,9 +18,9 @@ describe("the registry", () => {
     }
   });
 
-  it("counts toward proof only for kinds that run tests or evals, never for lint, type checks, scans, builds or migrations", () => {
-    expect(["test", "e2e", "eval"].every((id) => checkKindInfo(id)?.countsTowardProof === true)).toBe(true);
-    for (const id of ["lint", "typecheck", "security", "build", "migration", "benchmark", "visual", "smoke", "other"]) expect(checkKindInfo(id)?.countsTowardProof, id).toBe(false);
+  it("counts toward proof only for kinds that run tests, never for evals, lint, type checks, scans, builds or migrations", () => {
+    expect(["test", "e2e"].every((id) => checkKindInfo(id)?.countsTowardProof === true)).toBe(true);
+    for (const id of ["eval", "lint", "typecheck", "security", "build", "migration", "benchmark", "visual", "smoke", "other"]) expect(checkKindInfo(id)?.countsTowardProof, id).toBe(false);
   });
 
   it("says which parts a kind may carry", () => {
