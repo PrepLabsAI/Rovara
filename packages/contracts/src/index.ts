@@ -217,6 +217,8 @@ export { formatUsdMicrodollars } from "./money-format.js";
 
 // Lane A G1: versioned project intent, preserved but not set by legacy settings writes.
 export * from "./test-proof.js";
+// TE-B5a: the one table of who may decide what (task owner, maintainer, admin).
+export * from "./can-decide.js";
 export * from "./plugins/index.js";
 export * from "./ports/index.js";
 export * from "./outcomes.js";

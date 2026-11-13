@@ -173,6 +173,7 @@ export function mergeReadiness(input: ReadinessInput): Readiness {
     const reason = pr.state !== "open" ? M.notOpen
       : input.recordedBases.get(key) !== pr.baseBranch ? M.baseChanged(pr.baseBranch)
       : pr.ci === "unreadable" ? M.ciNotReadable
+      : pr.ci === "required_missing" ? M.requiredMissing
       : pr.draft ? (pr.ci === "none" ? M.draftNoCi : M.draft)
       : !ciAllowsMerge(pr.ci) ? M.checks
       : pr.branch === "conflicted" ? M.conflicted(pr.baseBranch)

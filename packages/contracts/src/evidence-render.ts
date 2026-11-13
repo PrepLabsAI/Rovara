@@ -186,6 +186,8 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
     level,
     ...(weakest === undefined ? [] : [`weakest: ${inert(weakest.words, 100)}`]),
     ...(isolation === "sandbox" && !level.includes("not sealed") ? ["not sealed"] : []),
+    // TE-B5 (O30): an override is on the first line, so a reviewer who reads one line sees that the draft was released by a person, not by the proof. Who and why are in the body.
+    ...(pack.proof?.override === undefined ? [] : ["marked ready anyway"]),
   ].join(" · "));
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
