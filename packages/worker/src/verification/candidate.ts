@@ -135,7 +135,7 @@ export async function readCandidateRepositories(
     try {
       const identity = await withIsolatedGit(directory, "write", async (git) => {
         const commit = (await git.text(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], { index: "none" })).trim();
-        const tree = await snapshotTree(git, commit);
+        const tree = await snapshotTree(git, commit, input.baseCommitSha);
         if (!/^[a-f0-9]{40}$/.test(commit) || !/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid git object identity");
         // Exit status 1: HEAD does not descend from the base (the agent rewrote history past it), which the owner is
         // told in plain words. Any other failure (such as an unknown commit) leaves the candidate unreadable.
@@ -212,7 +212,7 @@ async function commitRepositoryIn(git: IsolatedGit, gitDirectory: HeldDirectory,
       throw error;
     });
   }
-  const tree = await snapshotTree(git, oldHead);
+  const tree = await snapshotTree(git, oldHead, input.baseCommitSha);
   if (!/^[a-f0-9]{40}$/.test(tree)) throw new Error("candidate tree is invalid");
   const oldTree = await run(["rev-parse", `${oldHead}^{tree}`], "none");
   const unmerged = await run(["ls-files", "--unmerged", "-z"], "real");
@@ -250,7 +250,7 @@ async function commitRepositoryIn(git: IsolatedGit, gitDirectory: HeldDirectory,
     if (currentHead !== oldHead || !sameOptionalBytes(indexBefore, currentIndex)) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository changed while AgentX was saving the implementation candidate");
     }
-    if (await snapshotTree(git, oldHead) !== tree) {
+    if (await snapshotTree(git, oldHead, input.baseCommitSha) !== tree) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository files changed while AgentX was saving the implementation candidate");
     }
     // The commit and trees are in the candidate's object directory before HEAD names the commit.
@@ -267,7 +267,7 @@ async function commitRepositoryIn(git: IsolatedGit, gitDirectory: HeldDirectory,
     if (!sameOptionalBytes(candidateIndex, indexAfter)) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository index changed while AgentX was saving the implementation candidate");
     }
-    const worktreeTreeAfter = await snapshotTree(git, newHead);
+    const worktreeTreeAfter = await snapshotTree(git, newHead, input.baseCommitSha);
     if (newHead !== commit || newTree !== tree) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository reference changed while AgentX was verifying its implementation snapshot");
     }

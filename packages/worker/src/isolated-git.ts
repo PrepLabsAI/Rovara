@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { ROVARA_NEVER_COMMIT_EXCLUDE, agentXError } from "@agentx/contracts";
+import { unstageRovaraWorkingFiles } from "./never-commit-guard.js";
 import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, workTreeByDescriptor, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
 import { makeWorkerScratch } from "./worker-scratch.js";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
@@ -268,13 +269,17 @@ const hiddenPathspecs = (workTree: string): string[] => [...(hiddenFromCandidate
  * `write-tree`, with the nested-repository and Git LFS refusals in between. Git runs in the throwaway repository, so no filter, driver or hook of the candidate's
  * config exists for it to run. A nested repository's own config is out of that protection, so Git is kept away from every tracked gitlink: a gitlink path is
  * excluded from `add` (its entry stays as `commit` has it), because Git asks a checked-out submodule for its status by running Git inside it, under its config,
- * and a nested repository can appear at that path between the check for one and `add`. Needs Git 2.25 or later (`--pathspec-from-file`).
+ * and a nested repository can appear at that path between the check for one and `add`. Needs Git 2.25 or later (`--pathspec-from-file`). `base`, when the caller has the task's base commit, also takes
+ * Rovara's own working files that the task committed out of the tree (never-commit-guard.ts).
  */
-export async function snapshotTree(git: IsolatedGit, commit: string): Promise<string> {
+export async function snapshotTree(git: IsolatedGit, commit: string, base?: string): Promise<string> {
   await git.text(["read-tree", commit]);
   const gitlinks = await assertNoEmbeddedRepositories(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
   await assertNoLfsFiles(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
   await addWorkTree(git, "temporary", gitlinks);
+  // TE-B9 (M1): with the task's base known, a listed path the task COMMITTED (it is in `commit`, so the index started with it; the excludes above only keep new changes out) is taken out of the tree too, so it never
+  // reaches the reviewed commit. A listed path the base itself holds is left as it is. Without a base nothing says which listed path is the task's.
+  if (base !== undefined) await unstageRovaraWorkingFiles((args) => git.text(args, { index: "temporary", maxBuffer: 1024 * 1024 }), base);
   return (await git.text(["write-tree"])).trim();
 }
 

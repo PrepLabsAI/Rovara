@@ -2,13 +2,15 @@
 // the listed paths out of every `git add`, take force-added ones out of the index, and a final check on the commit about to be pushed fails closed with a fixed sentence. Real git throughout: the list is Git pathspecs.
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ROVARA_NEVER_COMMIT, ROVARA_NEVER_COMMIT_EXCLUDE, neverCommitRefusal } from "@agentx/contracts";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { snapshotTree, withIsolatedGit } from "../../packages/worker/src/isolated-git.js";
+import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
+import { runIsolatedGit } from "../../packages/worker/src/isolated-repository.js";
 import { assertNoRovaraWorkingFiles, assertPushCarriesNoRovaraWorkingFiles, unstageRovaraWorkingFiles } from "../../packages/worker/src/never-commit-guard.js";
 
 const run = promisify(execFile);
@@ -34,37 +36,50 @@ async function repo(seed: Record<string, string> = { "README.md": "# project\n" 
   return { dir, git, put, base };
 }
 
+type RepoGit = (args: string[]) => Promise<string>;
+/** A commit of `files` (force-added, so a listed path is in it whatever any ignore file says). */
+async function commitFiles(git: RepoGit, put: (files: Record<string, string>) => Promise<void>, files: Record<string, string>, message = "task"): Promise<string> {
+  await put(files);
+  await git(["add", "-f", "-A"]);
+  await git(["commit", "-q", "-m", message]);
+  return (await git(["rev-parse", "HEAD"])).trim();
+}
+
 /** Every path a task or the verifier could leave behind, at the top and nested (a monorepo or a workspace one folder down). */
 const WORKING_FILES = [
   ".agentx/x", ".agentx/preparation-manifest.json", ".agentx-tmp/y", ".agentx-tmp/deep/z", ".agentx-stray",
   ".rovara/state.db", ".rovara/state.db-wal", ".rovara/state.db-shm", ".rovara/audit.db", ".rovara/audit.db-journal",
   "svc/.agentx/last-checks.json", "svc/.agentx-runtime/tmp/a", "svc/.rovara/state.db",
-  "target/surefire-reports/TEST-a.xml", "svc/target/failsafe-reports/TEST-b.xml", "target/site/jacoco/jacoco.xml",
-  "build/test-results/test/TEST-c.xml", "svc/build/reports/jacoco/test/jacocoTestReport.xml",
+  // Names are matched without regard to case (a case-insensitive file system, a tool that upper-cases).
+  ".AGENTX/x", ".Agentx-foo/y", ".rovara/STATE.DB", "svc/.AgEnTx-runtime/a", ".AGENTX-file",
 ];
-/** Paths that look close but are the customer's own. */
+/** Paths that look close but are the customer's own, including their build reports (Rovara does not guess at those). */
 const CUSTOMER_FILES = [
   "feature.py", ".rovara/rules/a.md", ".rovara/project.yaml", ".rovara/lessons.md", ".rovara/company-instructions.md", ".rovara/state.dbx/notes.md",
   "agentx/readme.md", "docs/agentx-notes.md", ".agentxrc", "src/target/Main.java", "build/libs/app.jar", "build/test-resources/a.txt",
+  "src/test/resources/build/test-results/test/TEST-a.xml", "docs/target/site/jacoco/jacoco.xml", "target/surefire-reports/TEST-b.xml",
+  "svc/target/failsafe-reports/TEST-c.xml", "build/test-results/test/TEST-d.xml", "build/reports/jacoco/test/jacocoTestReport.xml",
 ];
 
 describe("the list", () => {
   it("is one exported list of pathspecs, with an exclude form of every entry", () => {
-    expect(ROVARA_NEVER_COMMIT.length).toBeGreaterThan(5);
+    expect(ROVARA_NEVER_COMMIT).toHaveLength(6);
     expect(ROVARA_NEVER_COMMIT_EXCLUDE).toHaveLength(ROVARA_NEVER_COMMIT.length);
-    for (const entry of ROVARA_NEVER_COMMIT) expect(entry).toMatch(/^:\(top,(literal|glob)\)/u);
-    for (const entry of ROVARA_NEVER_COMMIT_EXCLUDE) expect(entry).toMatch(/^:\(top,exclude,(literal|glob)\)/u);
+    for (const entry of ROVARA_NEVER_COMMIT) expect(entry).toMatch(/^:\(top,icase,glob\)/u);
+    for (const entry of ROVARA_NEVER_COMMIT_EXCLUDE) expect(entry).toMatch(/^:\(top,exclude,icase,glob\)/u);
     const joined = ROVARA_NEVER_COMMIT.join("\n");
-    for (const name of [".agentx", ".agentx-*", ".rovara/state.db*", ".rovara/audit.db*", "surefire-reports", "failsafe-reports", "build/test-results"]) expect(joined).toContain(name);
+    for (const name of [".agentx", ".agentx-*", ".rovara/state.db*", ".rovara/audit.db*"]) expect(joined).toContain(name);
+    // The customer's build reports are not on the list.
+    for (const name of ["surefire", "failsafe", "jacoco", "test-results"]) expect(joined).not.toContain(name);
   });
 
   it("says the fixed sentence, with the path made safe to show", () => {
-    expect(neverCommitRefusal(".agentx/x")).toBe("Rovara stopped: its own working files were about to be committed (.agentx/x). Not your code. Next: retrying without them");
+    expect(neverCommitRefusal(".agentx/x")).toBe("Rovara stopped: its own working files were about to be committed (.agentx/x). Not your code. Nothing was pushed. Next: run the task again.");
     const shown = neverCommitRefusal(`.agentx/${"\u001b[31m"}${"a".repeat(500)}`);
     expect(shown.includes(String.fromCharCode(27))).toBe(false);
     expect(shown.length).toBeLessThan(400);
     expect(shown.startsWith("Rovara stopped: its own working files were about to be committed (")).toBe(true);
-    expect(shown.endsWith("). Not your code. Next: retrying without them")).toBe(true);
+    expect(shown.endsWith("). Not your code. Nothing was pushed. Next: run the task again.")).toBe(true);
   });
 });
 
@@ -185,6 +200,122 @@ describe("the final check on a commit", () => {
   });
 });
 
+describe("M1a: a working file the task COMMITTED never reaches the reviewed commit", () => {
+  const filesOf = async (dir: string, commit: string, base?: string): Promise<string[]> =>
+    withIsolatedGit(dir, "read", async (session) => (await session.text(["ls-tree", "-r", "--name-only", await snapshotTree(session, commit, base)])).split("\n").filter((line) => line !== ""));
+
+  it("with the base, the snapshot drops a listed path the base does not hold and keeps one it does (positive control: the customer's file and the base's own are there)", async () => {
+    const { dir, git, put, base } = await repo({ "README.md": "x\n", ".agentx-fixture/data.json": "{}\n" });
+    const head = await commitFiles(git, put, { ".agentx/x": "1\n", ".AGENTX-new/y": "2\n", "svc/.rovara/state.db": "3\n", "feature.py": "print(1)\n" });
+    expect(await filesOf(dir, head, base)).toEqual([".agentx-fixture/data.json", "README.md", "feature.py"]);
+    // Without a base nothing says which listed path is the task's (unchanged behaviour for a caller that has none).
+    expect(await filesOf(dir, head)).toContain(".agentx/x");
+  });
+
+  it("the snapshot is stable: a snapshot of a snapshot's own commit gives the same tree", async () => {
+    const { dir, git, put, base } = await repo();
+    const head = await commitFiles(git, put, { ".agentx/x": "1\n", "feature.py": "print(1)\n" });
+    // "write": the tree's objects are exported to the repository, as candidate capture does before it commits.
+    const first = await withIsolatedGit(dir, "write", async (session) => snapshotTree(session, head, base));
+    const commit = (await git(["commit-tree", first, "-p", head, "-m", "snapshot"])).trim();
+    expect(await withIsolatedGit(dir, "read", async (session) => snapshotTree(session, commit, base))).toBe(first);
+  });
+});
+
+describe("M3: Git variables that change how a pathspec is read cannot hide a listed path", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const VARIABLES = ["GIT_LITERAL_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS"] as const;
+
+  it.each(VARIABLES)("%s set in the worker's environment: the guard still flags, through the worker's own Git", async (name) => {
+    const { dir, git, put, base } = await repo();
+    const commit = await commitFiles(git, put, { "feature.py": "print(1)\n", ".agentx/x": "1\n", "svc/.rovara/audit.db": "2\n" });
+    vi.stubEnv(name, "1");
+    const workerGit: RepoGit = (args) => runIsolatedGit(dir, args);
+    await expect(assertNoRovaraWorkingFiles(workerGit, commit, base)).rejects.toThrow(neverCommitRefusal(".agentx/x"));
+    await expect(assertPushCarriesNoRovaraWorkingFiles(workerGit, commit)).rejects.toThrow(neverCommitRefusal(".agentx/x"));
+  });
+
+  it.each(VARIABLES)("%s is removed from the environment of every Git the worker runs", (name) => {
+    vi.stubEnv(name, "1");
+    expect(isolatedGitEnvironment("/work")[name]).toBeUndefined();
+  });
+
+  it.each(VARIABLES)("%s set: the candidate snapshot still leaves the listed paths out", async (name) => {
+    const { dir, put, base } = await repo();
+    await put({ ".agentx/x": "1\n", ".AGENTX-tmp/y": "2\n", "feature.py": "print(1)\n" });
+    vi.stubEnv(name, "1");
+    const files = await withIsolatedGit(dir, "read", async (session) => (await session.text(["ls-tree", "-r", "--name-only", await snapshotTree(session, base)])).split("\n").filter((line) => line !== ""));
+    expect(files).toEqual(["README.md", "feature.py"]);
+  });
+
+  it("the case rule: .AGENTX, .Agentx-foo and .rovara/STATE.DB are flagged, and the customer's near-misses are not", async () => {
+    const { git, put, base } = await repo();
+    const ok = await commitFiles(git, put, Object.fromEntries(CUSTOMER_FILES.map((path) => [path, "x\n"])));
+    await expect(assertNoRovaraWorkingFiles(git, ok, base)).resolves.toBeUndefined();
+    let before = ok;
+    for (const path of [".AGENTX/x", ".Agentx-foo/y", ".rovara/STATE.DB"]) {
+      const bad = await commitFiles(git, put, { [path]: "x\n" }, path);
+      await expect(assertNoRovaraWorkingFiles(git, bad, before)).rejects.toThrow(neverCommitRefusal(path));
+      before = bad;
+    }
+  });
+});
+
+describe("M4: the final check on every kind of change (kills the diff-filter, submodule and parent-count mutants)", () => {
+  it("flags a MODIFIED listed path the base tracks, and a TYPE-CHANGED one", async () => {
+    const { dir, git, put, base } = await repo({ "README.md": "x\n", ".agentx-fixture/data.json": "{}\n", ".agentx-fixture/other.json": "{}\n" });
+    const modified = await commitFiles(git, put, { ".agentx-fixture/data.json": "{\"a\":1}\n" });
+    await expect(assertNoRovaraWorkingFiles(git, modified, base)).rejects.toThrow(neverCommitRefusal(".agentx-fixture/data.json"));
+    await rm(join(dir, ".agentx-fixture", "other.json"));
+    await symlink("README.md", join(dir, ".agentx-fixture", "other.json"));
+    await git(["add", "-A"]);
+    await git(["commit", "-q", "-m", "type change"]);
+    const typeChanged = (await git(["rev-parse", "HEAD"])).trim();
+    expect((await git(["diff", "--name-status", modified, typeChanged])).trim()).toMatch(/^T\s+\.agentx-fixture\/other\.json$/u);
+    await expect(assertNoRovaraWorkingFiles(git, typeChanged, modified)).rejects.toThrow(neverCommitRefusal(".agentx-fixture/other.json"));
+  });
+
+  it("flags a gitlink (submodule entry) at a listed path, even when the repository's config says to ignore submodules", async () => {
+    const { git, put, base } = await repo();
+    await put({ "feature.py": "print(1)\n" });
+    await git(["add", "-A"]);
+    await git(["update-index", "--add", "--cacheinfo", `160000,${base},.agentx-sub`]);
+    await git(["commit", "-q", "-m", "gitlink"]);
+    const commit = (await git(["rev-parse", "HEAD"])).trim();
+    const ignoring: RepoGit = (args) => git(["-c", "diff.ignoreSubmodules=all", ...args]);
+    expect((await ignoring(["diff", "--name-only", base, commit])).trim()).toBe("feature.py");
+    await expect(assertNoRovaraWorkingFiles(ignoring, commit, base)).rejects.toThrow(neverCommitRefusal(".agentx-sub"));
+    await expect(assertPushCarriesNoRovaraWorkingFiles(ignoring, commit)).rejects.toThrow(neverCommitRefusal(".agentx-sub"));
+  });
+
+  it("a REAL merge commit: no flag when the base brings a listed path in, or when the branch already held one; a flag when the merge itself adds one", async () => {
+    const { git, put } = await repo();
+    await git(["checkout", "-q", "-b", "pr"]);
+    const onBranch = await commitFiles(git, put, { "feature.py": "print(1)\n", ".agentx-old/leak": "1\n" });
+    await git(["checkout", "-q", "main"]);
+    await commitFiles(git, put, { ".agentx-upstream/x": "2\n", "upstream.md": "u\n" }, "upstream");
+    await git(["checkout", "-q", "pr"]);
+    await git(["merge", "-q", "--no-ff", "-m", "merge the base", "main"]);
+    const merged = (await git(["rev-parse", "HEAD"])).trim();
+    expect((await git(["rev-list", "--parents", "-n", "1", merged])).trim().split(" ")).toHaveLength(3);
+    // The base's own listed path is not this merge's doing; the branch's earlier leak is not new either.
+    await expect(assertPushCarriesNoRovaraWorkingFiles(git, merged)).resolves.toBeUndefined();
+    await expect(assertPushCarriesNoRovaraWorkingFiles(git, onBranch)).rejects.toThrow(neverCommitRefusal(".agentx-old/leak"));
+    // A merge whose resolution adds a listed path that neither side had.
+    await git(["checkout", "-q", "-b", "pr2", "main"]);
+    await commitFiles(git, put, { "second.py": "2\n" });
+    await git(["checkout", "-q", "main"]);
+    await commitFiles(git, put, { "third.md": "3\n" }, "more upstream");
+    await git(["checkout", "-q", "pr2"]);
+    await git(["merge", "-q", "--no-commit", "--no-ff", "main"]);
+    await put({ ".agentx-resolution/z": "4\n" });
+    await git(["add", "-f", "-A"]);
+    await git(["commit", "-q", "-m", "merge with a leak"]);
+    const leaky = (await git(["rev-parse", "HEAD"])).trim();
+    await expect(assertPushCarriesNoRovaraWorkingFiles(git, leaky)).rejects.toThrow(neverCommitRefusal(".agentx-resolution/z"));
+  });
+});
+
 describe("every path that stages or pushes is wired to the rule", () => {
   const source = (file: string) => readFileSync(new URL(`../../packages/worker/src/${file}`, import.meta.url), "utf8");
 
@@ -199,11 +330,13 @@ describe("every path that stages or pushes is wired to the rule", () => {
 
   it("publication checks the commit before any check, credential or push", () => {
     const text = source("publish.ts");
-    const check = text.indexOf("await assertNoRovaraWorkingFiles(git, commit, publicationBase)");
+    const check = text.indexOf("await assertNoRovaraWorkingFiles(git, commit, neverCommitBase)");
     expect(check).toBeGreaterThan(0);
     expect(check).toBeLessThan(text.indexOf("runReadinessChecks(rootPath, invocation, manifest"));
     expect(check).toBeLessThan(text.indexOf("await pushCommitFromIsolatedRepository"));
     expect(text).toContain("await unstageRovaraWorkingFiles(input.git, input.preparationCommit)");
+    // L2: a retry of a committed publication is checked against the commit preparation checked out, not its first parent.
+    expect(text).toContain("retryingCommittedPublication ? manifestRepository.resolvedCommit : undefined");
   });
 
   it("every push of pull request maintenance goes through the one guarded function", () => {
