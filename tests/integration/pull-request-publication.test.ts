@@ -123,6 +123,27 @@ describe("pull request publication", () => {
       .rejects.toThrow();
   });
 
+  it("never publishes Rovara's own working files, even when the task force-added them (TE-B9)", async () => {
+    const fixture = await createFixture();
+    await mkdir(join(fixture.checkout, ".agentx"), { recursive: true });
+    await mkdir(join(fixture.checkout, ".agentx-tmp"), { recursive: true });
+    await mkdir(join(fixture.checkout, "svc", ".rovara"), { recursive: true });
+    await writeFile(join(fixture.checkout, ".agentx", "x"), "state\n", "utf8");
+    await writeFile(join(fixture.checkout, ".agentx-tmp", "y"), "scratch\n", "utf8");
+    await writeFile(join(fixture.checkout, "svc", ".rovara", "state.db"), "db\n", "utf8");
+    await writeFile(join(fixture.checkout, "WORK.md"), "the customer's change\n", "utf8");
+    await git(fixture.checkout, ["add", "-f", ".agentx", ".agentx-tmp", "svc/.rovara"]);
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({ number: 13, url: "https://github.com/example/demo/pull/13", reconciled: false }),
+    });
+    // Positive control: the customer's file went; the working files did not, and are still on disk.
+    expect((await git(fixture.bare, ["ls-tree", "-r", "--name-only", result.commit])).split("\n").filter((line) => line !== "")).toEqual(["README.md", "WORK.md"]);
+    expect(await readFile(join(fixture.checkout, ".agentx", "x"), "utf8")).toBe("state\n");
+  });
+
   it("publishes exactly the checked tree on the task's base and refuses a tree that changed before pushing", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");

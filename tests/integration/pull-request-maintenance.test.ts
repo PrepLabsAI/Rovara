@@ -96,6 +96,25 @@ describe("pull request maintenance", () => {
     }));
   });
 
+  it("appends the customer's change without Rovara's own working files, even when they were force-added (TE-B9)", async () => {
+    const fixture = await createFixture("append");
+    await mkdir(join(fixture.checkout, ".agentx"), { recursive: true });
+    await writeFile(join(fixture.checkout, ".agentx", "x"), "state\n", "utf8");
+    await writeFile(join(fixture.checkout, ".agentx-tmp"), "scratch\n", "utf8");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    await git(fixture.checkout, ["add", "-f", ".agentx", ".agentx-tmp"]);
+    const result = await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestUpdateSink: vi.fn(async () => ({ url: "https://github.com/example/demo/pull/7", state: "open" as const, reconciled: false })),
+    });
+    const before = (await git(fixture.bare, ["ls-tree", "-r", "--name-only", fixture.pullRequestHead])).split("\n").filter((line) => line !== "");
+    const after = (await git(fixture.bare, ["ls-tree", "-r", "--name-only", result.commit])).split("\n").filter((line) => line !== "");
+    expect(after).toEqual([...before, "APPEND.md"].sort());
+    expect(after.some((path) => path.startsWith(".agentx"))).toBe(false);
+  });
+
   it("rejects a stale recorded head before changing a remote branch", async () => {
     const fixture = await createFixture("append");
     await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");

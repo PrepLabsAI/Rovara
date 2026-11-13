@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   PullRequestResultSchema,
   PullRequestLifecycleResultSchema,
+  ROVARA_NEVER_COMMIT_EXCLUDE,
   AgentXError,
   WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE,
   agentXError,
@@ -20,6 +21,7 @@ import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, type CredentialedGitRunner } from "./git-auth.js";
 import { CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, candidateLayout, snapshotTree, withIsolatedGit } from "./isolated-git.js";
 import { assertLessonsFileUntouched } from "./lessons-file-guard.js";
+import { assertNoRovaraWorkingFiles, unstageRovaraWorkingFiles } from "./never-commit-guard.js";
 import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";
@@ -250,7 +252,10 @@ export async function publishWorkspace(
 
   // Owner decision 50.4: a task never pushes a change to the team's lessons file. Checked on the commit about to go, before any readiness check or credential. A workflow publication's commits are the task's own on its pinned
   // base; any other publication is one commit on the latest base, so its first parent is the base.
-  await assertLessonsFileUntouched(git, commit, candidateTreeSha !== undefined && invocation.payload.publicationMode === "COMMITTED_HEAD" ? (invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit) : undefined);
+  const publicationBase = candidateTreeSha !== undefined && invocation.payload.publicationMode === "COMMITTED_HEAD" ? (invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit) : undefined;
+  await assertLessonsFileUntouched(git, commit, publicationBase);
+  // TE-B9 (O38): the same moment, the same commit: none of Rovara's own working files (`ROVARA_NEVER_COMMIT`) is in what is about to go, whatever the workspace layout. Fails closed, before any check, credential or push.
+  await assertNoRovaraWorkingFiles(git, commit, publicationBase);
 
   // A workflow publication runs no project command here: its checks already ran, on this same tree, before its reviews,
   // and the tree is checked again above. Only an ordinary publication runs the project's readiness checks.
@@ -477,7 +482,9 @@ async function prepareCleanPublicationCommit(input: {
     if (error instanceof AgentXError) throw error;
     throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
   }
-  await input.git(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC]);
+  await input.git(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE]);
+  // A working file the task force-added is in the index already (an exclude keeps `add` from staging new changes; it does not remove an entry): take it out, so the pull request holds none (TE-B9).
+  await unstageRovaraWorkingFiles(input.git, input.preparationCommit);
   const workspaceTree = (await input.git(["write-tree"])).trim();
   const workspaceCommit = (await input.git([
     "-c",

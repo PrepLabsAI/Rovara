@@ -5,7 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { ROVARA_NEVER_COMMIT_EXCLUDE, agentXError } from "@agentx/contracts";
 import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, workTreeByDescriptor, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
 import { makeWorkerScratch } from "./worker-scratch.js";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
@@ -237,6 +237,7 @@ export async function withIsolatedGit<T>(
 
 /** Leaves a file tool's leftover temporary file (`.agentx-file-ops-*`, from a write the helper was killed in) out of every snapshot. */
 export const CANDIDATE_EXCLUDE_PATHSPEC = ":(exclude,glob)**/.agentx-file-ops-*";
+// TE-B9: every snapshot also leaves out Rovara's own working files, whatever the workspace layout (`ROVARA_NEVER_COMMIT`, contracts/src/never-commit.ts; worker/src/never-commit-guard.ts).
 /**
  * Leaves the sandbox's Python user site (`.agentx-python`, task-sandbox.ts; a drift test pins the name) out of every snapshot, at the top of the work tree only (C67). Its own `.gitignore` of
  * `*` is the first line of defence; a task that deletes that file, or force-adds the folder to the index, must not get a program of its own into the candidate that way. A task that commits
@@ -289,10 +290,10 @@ export async function addWorkTree(git: IsolatedGit, index: IndexKind, gitlinks: 
     }
   }
   const hidden = hiddenPathspecs(git.layout.workTree);
-  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...hidden], { index, maxBuffer: 1024 * 1024 });
+  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE, ...hidden], { index, maxBuffer: 1024 * 1024 });
   else {
     const pathspecs = join(git.scratch, "pathspecs");
-    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...hidden, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
+    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE, ...hidden, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
     await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { index, maxBuffer: 1024 * 1024 });
   }
 }
