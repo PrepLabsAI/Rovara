@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createCheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { snapshotCandidate } from "../../packages/worker/src/verification/mutation-restore.js";
 import { runMutationSpotCheck } from "../../packages/worker/src/verification/mutation-spot-check.js";
-import { fixture } from "./mutation-spot-support.js";
+import { fixture, report } from "./mutation-spot-support.js";
 
 // The existing worker image carries deployment markers that intentionally refuse local child
 // execution. These fixtures test the explicitly local runner, including when hosted in that image.
@@ -28,6 +28,7 @@ it("a real SIGTERM-resistant child writes after abort only in its disposable cop
   try {
     const script = `
       const fs = require("node:fs");
+      if (fs.readFileSync("value.ts", "utf8").includes("= true")) { fs.writeFileSync("report.json", ${JSON.stringify(report("passed"))}); process.exit(0); }
       const [ready, release, wrote] = ${JSON.stringify([ready, release, wrote])};
       process.on("SIGTERM", () => {});
       fs.writeFileSync(ready, String(process.pid));
@@ -62,7 +63,7 @@ it("a real SIGTERM-resistant child writes after abort only in its disposable cop
 it("a crashed child leaves only abandoned scratch and needs no candidate recovery writes", async () => {
   const f = await fixture(); const before = await snapshotCandidate(f.directory);
   try {
-    f.selection[0]!.command = { cwd: ".", executable: process.execPath, args: ["-e", 'require("node:fs").writeFileSync("value.ts", "crash residue"); process.kill(process.pid, "SIGKILL");', "--", "--outputFile=report.json", "--json"], timeoutSeconds: 30 };
+    f.selection[0]!.command = { cwd: ".", executable: process.execPath, args: ["-e", `const fs = require("node:fs"); if (fs.readFileSync("value.ts", "utf8").includes("= true")) { fs.writeFileSync("report.json", ${JSON.stringify(report("passed"))}); process.exit(0); } fs.writeFileSync("value.ts", "crash residue"); process.kill(process.pid, "SIGKILL");`, "--", "--outputFile=report.json", "--json"], timeoutSeconds: 30 };
     const result = await runMutationSpotCheck({ repositories: [f.repository], selection: f.selection, seed: f.repository.candidateTreeSha, scratchRoot: f.scratchRoot,
       runners: (directory) => createCheckRunners({ rootPath: directory, local: true }) });
     expect(result).toMatchObject({ trustedAfter: true, counted: 0, mutants: [{ outcome: "invalid" }] });

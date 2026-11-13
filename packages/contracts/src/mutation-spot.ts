@@ -12,19 +12,21 @@ export type MutationLimits = { [K in keyof typeof MUTATION_SPOT_LIMITS]: number 
 export type MutationOperator = "comparison" | "logical" | "boolean" | "integer" | "condition";
 export interface SpotMutant { path: string; line: number; start: number; end: number; replacement: string; operator: MutationOperator }
 export interface MutationLines { path: string; hunks: ReadonlyArray<readonly [number, number]> }
-export type MutationReason = "unsupported_language" | "path_refused" | "no_mutants" | "no_tests" | "no_results" | "unreadable" | "candidate_changed" | "timed_out";
+export type MutationReason = "unsupported_language" | "path_refused" | "no_mutants" | "no_tests" | "no_results" | "unreadable" | "candidate_changed" | "timed_out" | "partial" | "baseline_failed" | "repo_too_large";
 export type MutationOutcome = "caught" | "survived" | "invalid" | "timed_out" | "not_run";
 export type MutationMethod = "coverage_map" | "import_graph" | "affected";
 export interface MutationSpotResult {
   status: "completed" | "not_run";
   reason?: MutationReason;
   trustedAfter: boolean;
+  skippedLanguageFiles?: number;
   caught: number;
   counted: number;
   mutants: Array<{ line: number; operator: MutationOperator; outcome: MutationOutcome; method: MutationMethod }>;
   refusals: Array<{ reason: "path_refused"; fingerprint: string }>;
 }
 export interface MutationPlan {
+  skippedLanguageFiles: number;
   mutants: SpotMutant[];
   reason?: MutationReason;
   refusals: MutationSpotResult["refusals"];
@@ -100,7 +102,7 @@ function lex(text: string, python: boolean, lineLimit: number): { lines: Array<{
     } else if (!python && ch === "`") { stack.push({ kind: "template", escaped: false }); unsafe = true; }
     else if (python && ch === "#") { lineComment = true; unsafe = true; }
     else if (!python && ch === "/" && text[i + 1] === "*") { stack.push({ kind: "comment" }); unsafe = true; i += 1; steps += 1; }
-    else if (!python && ch === "/") { lineComment = true; unsafe = true; }
+    else if (!python && ch === "/") { lineComment = text[i + 1] === "/"; unsafe = true; }
     if (stack.length > 64) return { lines: [], steps };
   }
   if (stack.length > 0) return { lines: [], steps };
@@ -109,6 +111,8 @@ function lex(text: string, python: boolean, lineLimit: number): { lines: Array<{
 
 function lineMutants(path: string, text: string, start: number, line: number, python: boolean): SpotMutant[] {
   if (/^\s*(?:(?:export|default)\s+)*(?:type|interface|declare|import)\b/u.test(text) || text.includes("@")) return [];
+  // Conservatively skip annotations, object fields and assertions rather than mutate literal types.
+  if (!python && (text.includes(":") || /\b(?:as|satisfies)\b/u.test(text))) return [];
   // A generic or JSX delimiter is ambiguous. Treat the complete comparison token as one operator.
   for (const token of text.matchAll(/<=?|>=?/gu)) if (!/\s/u.test(text[token.index - 1] ?? "") || !/\s/u.test(text[token.index + token[0].length] ?? "")) return [];
   const result: SpotMutant[] = [];
@@ -125,7 +129,7 @@ function lineMutants(path: string, text: string, start: number, line: number, py
       if (python === /^[a-z]/u.test(token)) add(at, token.length, SWAPS.get(token)!, "logical");
     } else add(at, token.length, SWAPS.get(token)!, "comparison");
   }
-  const condition = python ? /^\s*if\s+(.+):/u.exec(text) : /\bif\s*\(/u.exec(text);
+  const condition = python ? /^\s*if\s+([^:]+):\s*$/u.exec(text) : /\bif\s*\(/u.exec(text);
   if (condition !== null) {
     if (python) { const value = condition[1]!; const at = text.indexOf(value); add(at, value.length, `not (${value})`, "condition"); }
     else {
@@ -140,14 +144,13 @@ function lineMutants(path: string, text: string, start: number, line: number, py
 /** Worker-supplied changed ranges only. Seeded round-robin selection spreads across files and operators. */
 export function planMutants(files: ReadonlyArray<{ path: string; text: string }>, changedLines: readonly MutationLines[], seed: string, overrides: Partial<MutationLimits> = {}): MutationPlan {
   const limits = mutationLimits(overrides);
-  const plan: MutationPlan = { mutants: [], refusals: [], steps: 0, filesScanned: 0 };
+  const plan: MutationPlan = { skippedLanguageFiles: new Set(changedLines.filter(({ path }) => mutationLanguage(path) === undefined).map(({ path }) => path)).size, mutants: [], refusals: [], steps: 0, filesScanned: 0 };
   for (const { path } of changedLines) if (mutationPathRefused(path)) plan.refusals.push({ reason: "path_refused", fingerprint: mutationPathFingerprint(path) });
   if (plan.refusals.length > 0) return { ...plan, reason: "path_refused" };
-  if (changedLines.some(({ path }) => mutationLanguage(path) === undefined)) return { ...plan, reason: "unsupported_language" };
   const changed = new Map(changedLines.map((file) => [file.path, file.hunks]));
   const rank = (value: string) => mutationPathFingerprint(`${seed}\0${value}`);
   const queues: SpotMutant[][] = [];
-  for (const file of [...files].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).slice(0, limits.maxFiles)) {
+  for (const file of files.filter(({ path }) => mutationLanguage(path) !== undefined).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).slice(0, limits.maxFiles)) {
     plan.filesScanned += 1;
     if (file.text.length > limits.maxFileBytes || Buffer.byteLength(file.text) > limits.maxFileBytes) continue;
     const ranges = changed.get(file.path) ?? [];
@@ -188,10 +191,12 @@ export function planMutants(files: ReadonlyArray<{ path: string; text: string }>
       if (choice !== undefined) plan.mutants.push(choice);
     }
   }
-  return plan.mutants.length === 0 ? { ...plan, reason: "no_mutants" } : plan;
+  return plan.mutants.length === 0 ? { ...plan, reason: plan.skippedLanguageFiles > 0 && plan.filesScanned === 0 ? "unsupported_language" : "no_mutants" } : plan;
 }
 
 export const MUTATION_NOT_RUN_WORDS: Readonly<Record<MutationReason, string>> = {
+  partial: "the mutation spot check ended before all planted changes ran",
+  baseline_failed: "not run: baseline failed", repo_too_large: "not run: repo too large",
   unsupported_language: "not run: the mutation spot check covers TypeScript, JavaScript and Python today",
   path_refused: "not run: a file path was refused", no_mutants: "not run: no safe changed-line mutations were available",
   no_tests: "not run: covering tests with a named report could not be selected",
@@ -203,7 +208,9 @@ function validCounts(result: MutationSpotResult): boolean {
     && result.counted > 0 && result.counted <= MUTATION_SPOT_LIMITS.maxMutants && result.caught >= 0 && result.caught <= result.counted;
 }
 export function mutationSentence(result: MutationSpotResult): string {
-  return validCounts(result) ? `new tests caught ${result.caught} of ${result.counted} changes` : MUTATION_NOT_RUN_WORDS[result.reason ?? "no_mutants"];
+  const sentence = validCounts(result) ? `tests caught ${result.caught} of ${result.counted} planted changes` : MUTATION_NOT_RUN_WORDS[result.reason ?? "no_mutants"];
+  const skipped = result.skippedLanguageFiles;
+  return sentence + (Number.isSafeInteger(skipped) && skipped! > 0 ? `; ${skipped} changed files not checked (language)` : "");
 }
 /** Entry only. A4's FILE source and the evidence baseline are deliberately not invented here. */
 export function mutationMeasureEntry(result: MutationSpotResult): { name: string; unit: string; value: number; count: number; direction: "up_good" } | undefined {

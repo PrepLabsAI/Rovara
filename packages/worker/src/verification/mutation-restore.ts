@@ -2,12 +2,13 @@
 // before and after; mutate a fresh, hard-link-free copy per mutant. Copies never contain .git.
 // Untracked/ignored test artifacts are copied but are NOT part of the candidate integrity comparison.
 // No recovery journal names a candidate write: a worker crash leaves only disposable scratch. A timed
-// out child may still be writing its copy; cleanup is best effort and never establishes trust.
+// out child may still be writing its copy; its owner must sweep it after writers stop.
+// Settled copies are deleted by the caller; deletion never establishes candidate integrity.
 // These filesystem guards are not a sandbox for arbitrary test programs. The injected runner must
 // mount ONLY the supplied copy as its project; never reuse a runner closed over the candidate.
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { mutationPathRefused, type SpotMutant } from "@agentx/contracts";
 import { candidateWriteStep, openDirectory, removeIn, type HeldDirectory } from "../candidate-fs.js";
@@ -16,6 +17,7 @@ import { withIsolatedRepository } from "../isolated-repository.js";
 const COPY_FILE_BYTES = 32 * 1024 * 1024;
 const COPY_TOTAL_BYTES = 512 * 1024 * 1024;
 const COPY_ENTRIES = 20_000;
+export class MutationCopyTooLarge extends Error {}
 const REFUSED = "mutation copy refused";
 export type Checkpoint = () => void;
 const noDeadline = () => undefined;
@@ -99,7 +101,8 @@ export async function snapshotCandidate(root: string, checkpoint: Checkpoint = n
   return { digest: hash.digest("hex"), status: listing.status };
 }
 
-/** Copies plain files only (including dependencies); symlinks, hard links, devices and nested Git are refused. */
+/** Copy files independently and retain only links resolving wholly inside the finished copy.
+ * Links are never traversed, so dependency aliases do not count their target entries twice. */
 export async function createMutationCopy(candidate: string, runDir: string, checkpoint: Checkpoint = noDeadline): Promise<MutationCopy> {
   checkpoint();
   const source = await realpath(candidate); const scratch = await realpath(runDir);
@@ -107,6 +110,7 @@ export async function createMutationCopy(candidate: string, runDir: string, chec
   if (rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))) throw new Error(REFUSED);
   const directory = await mkdtemp(join(scratch, "copy-"));
   let total = 0; let entries = 0;
+  const links: string[] = [];
   const walk = async (path: string, depth: number): Promise<void> => {
     checkpoint();
     if (depth > 64) throw new Error(REFUSED);
@@ -118,10 +122,14 @@ export async function createMutationCopy(candidate: string, runDir: string, chec
         const child = path === "" ? name : `${path}/${name}`;
         components(child);
         entries += 1;
-        if (entries > COPY_ENTRIES) throw new Error(REFUSED);
+        if (entries > COPY_ENTRIES) throw new MutationCopyTooLarge();
         const info = await lstat(held.entry(name));
-        if (info.isSymbolicLink()) throw new Error(REFUSED);
-        if (info.isDirectory()) { await mkdir(join(directory, child), { mode: 0o700 }); await walk(child, depth + 1); }
+        if (info.isSymbolicLink()) {
+          const target = await readlink(held.entry(name));
+          // Absolute links back to the candidate are aliases, never copied as capabilities.
+          if (isAbsolute(target)) throw new Error(REFUSED);
+          await symlink(target, join(directory, child)); links.push(child);
+        } else if (info.isDirectory()) { await mkdir(join(directory, child), { mode: 0o700 }); await walk(child, depth + 1); }
         else {
           const file = await readPlain(source, child, COPY_FILE_BYTES, checkpoint);
           total += file.bytes.length;
@@ -131,7 +139,15 @@ export async function createMutationCopy(candidate: string, runDir: string, chec
       }
     } finally { await held.close(); }
   };
-  await walk("", 0);
+  try {
+    await walk("", 0);
+    for (const link of links) {
+      checkpoint();
+      const target = await realpath(join(directory, link));
+      const rel = relative(directory, target);
+      if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error(REFUSED);
+    }
+  } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
   const copy: MutationCopy = Object.freeze({ directory }); ownedCopies.add(copy);
   return copy;
 }

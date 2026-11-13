@@ -15,8 +15,12 @@ const ok = { exitCode: 0, timedOut: false, stdout: "", stderr: "" };
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 async function run(f: Awaited<ReturnType<typeof fixture>>, body: (directory: string, command: Parameters<ReturnType<MutationSpotOptions["runners"]>["runProjectCommand"]>[0], signal: AbortSignal) => Promise<typeof ok> = async (directory) => { await writeFile(join(directory, "report.json"), report("failed")); return { ...ok, exitCode: 1 }; }, extra: Partial<MutationSpotOptions> = {}) {
+  let baseline = true;
   return runMutationSpotCheck({ repositories: [f.repository], selection: f.selection, seed: f.repository.candidateTreeSha, scratchRoot: f.scratchRoot,
-    runners: (directory) => ({ runProjectCommand: (command, signal) => body(directory, command, signal), runAgentCommand: async () => { throw new Error("no agent replays"); } }), ...extra });
+    runners: (directory) => ({ runProjectCommand: async (command, signal) => {
+      if (baseline) { baseline = false; await writeFile(join(directory, "report.json"), report("passed")); return ok; }
+      return body(directory, command, signal);
+    }, runAgentCommand: async () => { throw new Error("no agent replays"); } }), ...extra });
 }
 
 describe("disposable mutation checks", () => {
@@ -207,9 +211,10 @@ describe("disposable mutation checks", () => {
   });
 
   it("aborts at the exact per-mutant timer deadline", async () => {
-    const f = await setup(); const control = new AbortController(); let aborted = false;
+    const f = await setup(); const control = new AbortController(); let aborted = false; let baseline = true;
     let ready: () => void = () => undefined; const started = new Promise<void>((resolve) => { ready = resolve; });
-    const running = run(f, undefined, { signal: control.signal, limits: { perMutantTimeMs: 30 }, runners: () => {
+    const running = run(f, undefined, { signal: control.signal, limits: { perMutantTimeMs: 30 }, runners: (directory) => {
+      if (baseline) { baseline = false; return { runAgentCommand: async () => { throw new Error("no agent"); }, runProjectCommand: async () => { await writeFile(join(directory, "report.json"), report("passed")); return ok; } }; }
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       return { runAgentCommand: async () => { throw new Error("not used"); }, runProjectCommand: async (_command, signal) => new Promise((resolve) => {
         signal.addEventListener("abort", () => { aborted = true; resolve(ok); }, { once: true }); ready();

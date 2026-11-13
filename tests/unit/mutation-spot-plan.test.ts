@@ -29,6 +29,34 @@ describe("mutation spot planner", () => {
     expect(plan('s = f"{f\'inner {True}\'}"\nflag = True', "value.py").mutants).toEqual([]);
     expect(plan("interface T {\n flag: true;\n}\nconst yes = true;").mutants).toEqual([]);
   });
+  it.each([
+    "def f(a, b):\n    if a: b = b[1:2]\n    return b\n",
+    "def f(a):\n    if isinstance(a, int): a = {1: a}\n    return a\n",
+    "def f(x):\n    if x > 1: return lambda y: y\n",
+  ])("never negates Python inline suites or multi-colon conditions", (text) => {
+    const result = plan(text, "value.py");
+    expect(result.mutants.length).toBeGreaterThan(0);
+    expect(result.mutants.some((m) => m.operator === "condition")).toBe(false);
+    expect(plan("if ready:\n    pass\n", "value.py").mutants).toContainEqual(expect.objectContaining({ operator: "condition", replacement: "not (ready)" }));
+  });
+  it.each([
+    "const x = a / 2; /* note\n  if (a > 1) ok = true\n*/\nconst yes = true;",
+    "const x = a / 2 + `\n  x > 1 && true\n`;\nconst yes = true;",
+  ])("tracks a multiline literal opening after a division", (text) => {
+    expect(plan(text).mutants).toEqual([expect.objectContaining({ line: 4, operator: "boolean" })]);
+  });
+  it.each(["let x: 1 | 2 = 1;", "function f(x: 1 | 2): 1 | 2 { return 1; }"])("skips integer literals in TS type positions", (text) => {
+    for (const mutant of plan(text).mutants) {
+      expect(text.slice(0, mutant.start)).toMatch(/(?:=|return)\s*$/u);
+    }
+    expect(plan("const x = 1;").mutants).toHaveLength(1);
+  });
+  it("skips unsupported files individually and reports the count", () => {
+    const files = [{ path: "a.ts", text: "const yes = true;" }, { path: "a.go", text: "flag = true" }];
+    const result = planMutants(files, files.map(({ path }) => all(path)[0]!), "seed");
+    expect(result).toMatchObject({ skippedLanguageFiles: 1, mutants: [expect.objectContaining({ path: "a.ts" })] });
+    expect(mutationSentence({ status: "completed", trustedAfter: true, caught: 1, counted: 1, mutants: [], refusals: [], skippedLanguageFiles: 1 })).toBe("tests caught 1 of 1 planted changes; 1 changed files not checked (language)");
+  });
   it("spreads reproducible choices across files and operators, with 5-10 when available", () => {
     const files = Array.from({ length: 20 }, (_, n) => ({ path: `${n}.ts`, text: "const yes = true;\nif (a < b && ready) return 2;\n" }));
     const changed = files.map(({ path }) => all(path)[0]!);
@@ -61,9 +89,10 @@ describe("mutation spot planner", () => {
   });
   it("renders only finite bounded counts and accepts A4's measures entry", () => {
     const result: MutationSpotResult = { status: "completed", trustedAfter: true, caught: 7, counted: 8, mutants: [], refusals: [] };
-    expect(mutationSentence(result)).toBe("new tests caught 7 of 8 changes");
+    expect(mutationSentence(result)).toBe("tests caught 7 of 8 planted changes");
     expect(MeasuresFileEntrySchema.parse(mutationMeasureEntry(result))).toEqual({ name: "mutants caught", unit: "mutants", value: 7, count: 8, direction: "up_good" });
     expect(mutationMeasureEntry({ ...result, caught: NaN })).toBeUndefined();
+    expect(mutationSentence({ ...result, skippedLanguageFiles: Infinity })).not.toContain("Infinity");
     expect(mutationMeasureEntry({ ...result, trustedAfter: false })).toBeUndefined();
     expect(mutationSentence({ ...result, status: "not_run", reason: "no_results", caught: 0, counted: 0 })).toBe("not run: no mutation produced a usable test result");
     expect(mutationSentence({ ...result, status: "not_run", reason: "unsupported_language" })).toBe("not run: the mutation spot check covers TypeScript, JavaScript and Python today");
