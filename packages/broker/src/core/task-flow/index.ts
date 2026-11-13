@@ -18,6 +18,7 @@ export * from "./project-source.js";
 export * from "./reads.js";
 export * from "./records.js";
 export * from "./results.js";
+export * from "./review-findings.js";
 export * from "./routes.js";
 export * from "./send-back.js";
 export * from "./run-watch-rows.js";

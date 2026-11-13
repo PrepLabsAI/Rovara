@@ -80,15 +80,23 @@ export const waitingForSpend = (workflow: Pick<WorkflowSnapshot, "state" | "bloc
   workflow.state === "BLOCKED" && (workflow.blockReason === WORKFLOW_BLOCK_REASONS.budgetPaused || isRunLimitBlockReason(workflow.blockReason));
 
 /**
+ * The first two of those checks, on their own: a step the system starts for the person (the draft pull request after the findings were accepted) needs the project to take new work and the person to be allowed
+ * to have it run, but spends no model money of its own.
+ */
+export async function requireMayStartWork(deps: TaskFlowDeps, task: TaskRecord): Promise<void> {
+  const project = await deps.projects.latest(task.project);
+  if (project?.archived === true) throw agentXError("PROJECT_ARCHIVED", TASK_ARCHIVED(task.project));
+  const permitted = await deps.access.checkStep(task);
+  if (!permitted.allowed) throw agentXError("FORBIDDEN", permitted.message);
+}
+
+/**
  * The checks every round of new work passes before anything is written: the project takes new work, the person the task runs for may still have it run, the task's cap has room, and `Admission` agrees.
  * Throws the refusal otherwise; nothing has been written by then.
  */
 export async function admitRound(deps: TaskFlowDeps, options: TaskActionsOptions, input: { task: TaskRecord; caller: TaskCaller; requestId: string }): Promise<void> {
   const { task, caller } = input;
-  const project = await deps.projects.latest(task.project);
-  if (project?.archived === true) throw agentXError("PROJECT_ARCHIVED", TASK_ARCHIVED(task.project));
-  const permitted = await deps.access.checkStep(task);
-  if (!permitted.allowed) throw agentXError("FORBIDDEN", permitted.message);
+  await requireMayStartWork(deps, task);
   await requireRoomUnderCap(options, task);
   const admitted = await admit(deps, {
     idempotencyKey: `${OWNER_ROUND_ADMISSION_ACTION}:${task.taskId}:${input.requestId}`, action: OWNER_ROUND_ADMISSION_ACTION, actor: caller.principal, projectName: task.project,

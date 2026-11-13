@@ -55,3 +55,19 @@ describe("send back on rovara up", () => {
     expect(other.status).toBe(404);
   });
 });
+
+describe("review findings on rovara up", () => {
+  it("reaches the core move: a task with no blocked review is told so in plain words, and a body that is not valid is refused by field", async () => {
+    const { owner, taskId, revision } = await launch();
+    const digest = "a".repeat(64);
+    const none = await owner(`/v1/dev/tasks/${taskId}/workflow/review-findings`, "POST", { requestId: "33333333-3333-4333-8333-333333333333", expectedRevision: revision, candidateDigest: digest, resolutions: [{ findingId: digest, action: "ACCEPT", note: "Fine." }] });
+    expect(none.status).toBe(409);
+    expect(none.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(none.body.error?.message).not.toContain("not on this install");
+    const noReason = await owner(`/v1/dev/tasks/${taskId}/workflow/review-findings`, "POST", { requestId: "33333333-3333-4333-8333-333333333333", expectedRevision: revision, candidateDigest: digest, resolutions: [{ findingId: digest, action: "ACCEPT", note: "" }] });
+    expect(noReason.status).toBe(400);
+    expect(noReason.body.error?.message).toContain("give a reason");
+    const other = await owner(`/v1/dev/tasks/44444444-4444-4444-8444-444444444444/workflow/review-findings`, "POST", {});
+    expect(other.status).toBe(400);
+  });
+});
