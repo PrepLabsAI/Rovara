@@ -1900,6 +1900,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Ref": "ChannelApiStateE5478A65",
             },
             "SHARED_TASKS": "disabled",
+            "SLACK_ADAPTER_TEAM_ID": {
+              "Ref": "SlackTeamId",
+            },
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
             },
@@ -1908,6 +1911,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_THREAD_TURNS_PER_MINUTE": {
               "Ref": "SlackThreadTurnsPerMinute",
+            },
+            "SLACK_VIA_CHANNEL": {
+              "Ref": "SlackViaChannel",
             },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
