@@ -63,3 +63,14 @@ export function readerOf(schema: z.ZodType): z.ZodType {
       return schema;
   }
 }
+
+// ---- newer evidence (TE-A2): the reader rule for the evidence pack's later versions.
+
+/** What a reader prints when evidence has parts, kinds, values or a version it does not know. */
+export const NEWER_EVIDENCE_WORDS = "Newer evidence, open in Rovara";
+
+/** The keys of `value` (when it is an object) that are not in `known`. Unknown keys are kept by a forward-compatible reader and reported with this. */
+export function unknownKeysOf(value: unknown, known: readonly string[]): string[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+  return Object.keys(value).filter((key) => !known.includes(key));
+}

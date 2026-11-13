@@ -222,7 +222,9 @@ export * from "./ports/index.js";
 export * from "./outcomes.js";
 
 // Proof and evidence (W4/W5): the evidence pack, decision cards, the test environment and service mocks.
+export * from "./check-kinds.js";
 export * from "./evidence.js";
+export * from "./evidence-render.js";
 export * from "./api-samples.js";
 export * from "./media-gate.js";
 
