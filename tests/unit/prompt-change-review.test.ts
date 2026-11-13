@@ -50,7 +50,7 @@ it.each([
   expect(PromptChangeReportSchema.safeParse(report).success).toBe(true);
 });
 it.each(["html", "md", "mdx"])("embedded SDK sources cannot certify none_found in %s", (extension) => {
-  for (const source of ["<script>import OpenAI from 'openai';</script>", "generateText({prompt: value})"]) {
+  for (const source of ["<script>import OpenAI from 'openai';</script>", "sdk.generateText({prompt: value})"]) {
     const report = run(source, "", `page.${extension}`).report;
     expect(report.coverage).toBe("partial");
     expect(promptChangesNeedEval(report).needed).toBe(true);
@@ -126,4 +126,56 @@ it("charges bounded path classification work to steps", () => {
   const short = run("", "", "x.ts").stats!.steps;
   const long = run("", "", "x".repeat(3000) + ".ts").stats!.steps;
   expect(long - short).toBeGreaterThan(4 * 2999);
+});
+
+it.each([
+  ["py", 'SYSTEM_PROMPT: str = "S1"'], ["ts", 'const SYSTEM_PROMPT: string = "S1"'],
+  ["ts", 'const options = { SYSTEM_PROMPT: "S1" }'], ["py", 'options = {"greet_prompt": "S1"}'],
+  ["ts", 'const systemPrompt = "S1"'], ["ts", 'const promptTemplate = "S1"'],
+])("round 3 literal named prompts: %s %s", (extension, source) => {
+  const before = `import openai\n${source}`;
+  const report = run(before.replace("S1", "S2"), before, `main.${extension}`).report;
+  expect(report.coverage).toBe("complete");
+  expect(report.items).toMatchObject([{ kind: source.includes("systemPrompt") ? "system_prompt" : "prompt_text", verb: "modified" }]);
+  expect(JSON.stringify(report)).not.toContain("S2");
+});
+it.each([
+  ["ts", 'const SYSTEM_PROMPT = "a" + "S1"'], ["py", 'SYSTEM_PROMPT = ("a"\n "S1")'],
+  ["py", 'SYSTEM_PROMPT: str = value'], ["ts", 'const SYSTEM_PROMPT: string = value'],
+  ["py", 'ChatPromptTemplate.from_messages([("system", SYS), ("user", "S1")])'],
+  ["py", 'ChatPromptTemplate.from_messages([("user", "a" + SYS)])'],
+  ["py", 'ChatPromptTemplate.from_messages([["system", SYS]])'],
+])("round 3 nonliteral named or tuple prompts: %s %s", (extension, source) => {
+  const report = run(`import openai\n${source}`, "", `main.${extension}`).report;
+  expect(report.incompleteReasons).toContain("nonliteral_prompt");
+  expect(report.coverage).toBe("partial");
+  expect(promptChangesNeedEval(report).needed).toBe(true);
+  expect(promptChangesNeedSideBySide(report).needed).toBe(true);
+});
+it.each([
+  ["ts", "client.messages.create({system:[{type:'text',text:'S1'}]})", "system_prompt"],
+  ["py", "client.messages.create(system=[{'type':'text','text':'S1'}])", "system_prompt"],
+  ["ts", "client.messages.create({messages:[{role:'user',content:[{type:'text',text:'S1'}]}]})", "prompt_text"],
+  ["py", "client.messages.create(messages=[{'role':'system','content':[{'type':'text','text':'S1'}]}])", "system_prompt"],
+])("round 3 SDK text blocks need no file signal: %s %s", (extension, before, kind) => {
+  const report = run(before.replace("S1", "S2"), before, `main.${extension}`).report;
+  expect(report.items).toMatchObject([{ kind, verb: "modified" }]);
+  expect(report.coverage).toBe("complete");
+});
+it.each(["SYSTEM_STATUS", "TEMPLATE_DIR", "FILESYSTEM_ROOT", "promptPath", "SYSTEM_FILE", "PROMPT_URL", "PROMPT_TIMEOUT", "PROMPT_ROOT", "prompting", "mytemplate"])("round 3 ignores incidental constant names: %s", (name) => {
+  expect(run(`import openai\nconst ${name} = 'new'`, `import openai\nconst ${name} = 'old'`).report.status).toBe("none_found");
+});
+it.each(["html", "md", "mdx"])("round 3 embedded prose stays complete: %s", (extension) => {
+  for (const source of ["Please create an account", "Join our chat", "the ai is cool", "We create(x) for the chat", "sdk.create is a method"]) {
+    expect(run(source, "", `page.${extension}`).report.status).toBe("none_found");
+  }
+  for (const source of ["import { generateText } from 'ai'", "from ai import generateText", "Uses @ai-sdk/openai", "Uses @google/genai", "client.messages.create ({system: value})"]) {
+    expect(run(source, "", `page.${extension}`).report.coverage).toBe("partial");
+  }
+});
+it.each([".env", "config.yaml", "config.json", "config.toml", "config.ini"])("round 3 config model keys ignore case: %s", (path) => {
+  for (const key of ["MODEL", "Model_Name", "MODELID", "DeploymentName"]) {
+    const before = path.endsWith("json") ? `{"${key}":"gpt-4o"}` : `${key}="gpt-4o"`;
+    expect(run(before.replace("gpt-4o", "gpt-4.1"), before, path).report.items).toMatchObject([{ kind: "model_name", verb: "modified", before: "gpt-4o", after: "gpt-4.1" }]);
+  }
 });

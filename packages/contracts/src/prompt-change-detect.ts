@@ -104,10 +104,16 @@ function scan(file: PromptChangedFile, before: boolean, info: PathInfo, work: Wo
   if (info.mode === "other") {
     if (!info.documentation && text.length > 0) work.reasons.add("unreadable_diff");
     if (info.embedded) {
-      work.stats.steps += text.length * 2 + 1;
-      // Embedded grammars are not parsed. SDK names/calls make coverage partial, including inline scripts.
+      work.stats.steps += text.length * 4 + 1;
+      // Embedded grammars are not parsed. Imports, SDK packages or member calls make coverage partial.
+      // Plain prose such as 'create', 'chat' and 'ai' must not become a source-code signal.
+      if (/^[ \t]*(?:import|from)[ \t]+/mu.test(text)) work.reasons.add("unreadable_diff");
       for (const token of text.matchAll(/[A-Za-z_$@][A-Za-z0-9_$@/.-]*/gu)) {
-        if (knownSdk(token[0]) || SDK_CALLS.has(token[0]) || SDK_CALLS.has(token[0].slice(token[0].lastIndexOf(".") + 1))) { work.reasons.add("unreadable_diff"); break; }
+        const name = token[0]; const dot = name.lastIndexOf(".");
+        const memberCall = dot > 0 && SDK_CALLS.has(name.slice(dot + 1));
+        let end = token.index + name.length;
+        if (memberCall) while (end < text.length && /\s/u.test(text[end]!)) end++;
+        if ((name !== "ai" && knownSdk(name)) || (memberCall && text[end] === "(")) { work.reasons.add("unreadable_diff"); break; }
       }
     }
     return [];

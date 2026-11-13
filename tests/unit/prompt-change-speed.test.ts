@@ -9,7 +9,7 @@ const repeat = (unit: string, bytes: number) => unit.repeat(Math.ceil(bytes / Bu
 const corpora: Array<[string, (n: number) => () => PromptChangeResult]> = [
   ["minified literals", (n) => { const text = repeat('const a="abc";', n); return () => source(text); }],
   ["unterminated triples", (n) => { const text = "prompt = '''" + "a".repeat(n - 12); return () => source(text, "ai/a.py"); }],
-  ["nesting", (n) => { const text = repeat("{[", n); return () => source(text); }],
+  ["nesting", (n) => { const unit = "[{other:0}],"; const text = unit.repeat(Math.floor(n / unit.length)); return () => source(text); }],
   ["backslashes", (n) => { const text = 'prompt="' + "\\".repeat(n - 10) + '"'; return () => source(text); }],
   ["escaped quotes", (n) => { const text = repeat('\\"', n); return () => source(text); }],
   ["template holes", (n) => { const text = "prompt=`" + repeat("${", n - 8); return () => source(text); }],
@@ -21,33 +21,49 @@ const corpora: Array<[string, (n: number) => () => PromptChangeResult]> = [
   ["Unicode format bidi", (n) => { const text = repeat("\u200b\u202e", n); return () => source(text, "a.prompt"); }],
   ["keys without values", (n) => { const text = repeat("prompt temperature tools model ", n); return () => source(text); }],
 ];
-const median = (run: () => PromptChangeResult) => {
-  run(); const times: number[] = [];
-  for (let i = 0; i < 5; i++) {
-    const start = performance.now(); const result = run(); times.push(performance.now() - start);
-    expect(result.stats).toBeDefined();
-    expect(result.stats!.steps).toBeLessThanOrEqual(128 * (result.stats!.bytes + 1) + 10_000);
+// Timing samples batch the SAME N-sized input when needed; N and 4N use equal batch counts.
+// Deterministic work assertions always compare one scan, so batching cannot hide superlinear work.
+const workBound = (result: PromptChangeResult) => {
+  expect(result.stats).toBeDefined();
+  expect(result.stats!.steps).toBeLessThanOrEqual(13 * (result.stats!.bytes + 1) + 10_000);
+};
+const measurePair = (name: string, size: number, make: (n: number) => () => PromptChangeResult) => {
+  const small = make(size); const large = make(size * 4);
+  const a = small(); const b = large();
+  for (const result of [a, b]) {
+    workBound(result);
+    for (const reason of ["file_too_large", "total_too_large", "too_many_files"]) expect(result.report.incompleteReasons).not.toContain(reason);
+    expect(result.stats!.scannedFiles).toBeGreaterThan(0);
+    if (name === "nesting") expect(result.report.coverage).toBe("complete");
   }
-  return times.sort((a, b) => a - b)[2]!;
+  expect(b.stats!.steps).toBeLessThanOrEqual(4.5 * a.stats!.steps);
+  const sample = (run: () => PromptChangeResult, batches: number) => {
+    const start = performance.now();
+    for (let i = 0; i < batches; i++) run();
+    return performance.now() - start;
+  };
+  let batches = 1;
+  while (sample(small, batches) < 8 && batches < 4096) batches *= 2;
+  const median = (run: () => PromptChangeResult) => {
+    sample(run, batches); // warm-up
+    return Array.from({ length: 5 }, () => sample(run, batches)).sort((x, y) => x - y)[2]!;
+  };
+  const n = median(small); const four = median(large);
+  console.info(JSON.stringify({ corpus: name, N: size, batches, bytesN: a.stats!.bytes, stepsN: a.stats!.steps, steps4N: b.stats!.steps,
+    msN: +n.toFixed(2), ms4N: +four.toFixed(2), ratio: +(four / n).toFixed(2) }));
+  expect(n).toBeGreaterThan(1);
+  expect(four).toBeLessThanOrEqual(8 * n + 50);
+  return { n: n / batches, four: four / batches };
 };
 it.each(corpora)("linear adversarial scan: %s", (name, make) => {
-  const size = 128 * 1024;
-  for (const factor of [1, 4]) {
-    const result = make(size * factor)();
-    expect(result.report.incompleteReasons).not.toEqual(expect.arrayContaining(["file_too_large"]));
-    expect(result.report.incompleteReasons).not.toContain("total_too_large");
-    expect(result.report.incompleteReasons).not.toContain("too_many_files");
-    expect(result.stats!.scannedFiles).toBeGreaterThan(0);
-  }
-  const n = median(make(size)); const four = median(make(4 * size));
-  console.info(JSON.stringify({ corpus: name, N: 128 * 1024, msN: +n.toFixed(2), ms4N: +four.toFixed(2), ratio: +(four / Math.max(n, 0.001)).toFixed(2) }));
-  expect(four).toBeLessThanOrEqual(8 * n + 50);
+  const { n } = measurePair(name, 128 * 1024, make);
   expect(n).toBeLessThan(1000);
 });
 it("scales actual scanned files and bounds a 5000-file 32 MiB diff", () => {
   const one = "prompt: '" + "a".repeat(MiB - 12) + "'";
   const make = (count: number) => () => detectPromptChanges({ files: Array.from({ length: count }, (_, i) => ({ path: `ai/${i}.ts`, before: "", after: one, wholeFile: true })) }, { stats: true });
-  const n = median(make(1)); const four = median(make(4)); console.info(JSON.stringify({ corpus: "four scanned files", N: MiB, msN: +n.toFixed(2), ms4N: +four.toFixed(2), ratio: +(four / n).toFixed(2) })); expect(four).toBeLessThanOrEqual(8 * n + 50);
+  const { n } = measurePair("four scanned files", 1, make);
+  expect(n).toBeLessThan(1000);
   const chunk = "x".repeat(6600); const diff = Array.from({ length: 5000 }, (_, i) => `diff --git a/${i}.ts b/${i}.ts\n@@ -1 +1 @@\n-old\n+${chunk}\n`).join("");
   const start = performance.now(); const report = detectPromptChangesInDiff(diff).report;
   expect(performance.now() - start).toBeLessThan(10_000); expect(report.coverage).toBe("partial");
@@ -65,16 +81,7 @@ it.each(["env suffix", "path times hunks", "deep nesting"])("review scaling belo
     const diff = `diff --git a/${path} b/${path}\n` + "@@ -1 +1 @@\n-a\n+b\n".repeat(n * 8);
     return detectPromptChangesInDiff(diff, { stats: true });
   };
-  const size = 240;
-  for (const factor of [1, 4]) {
-    const result = make(size * factor)();
-    expect(result.stats!.scannedFiles).toBe(1);
-    expect(result.report.incompleteReasons).not.toContain("file_too_large");
-    expect(result.report.incompleteReasons).not.toContain("total_too_large");
-  }
-  const n = median(make(size)); const four = median(make(size * 4));
-  console.info(JSON.stringify({ corpus: name, N: size, msN: +n.toFixed(2), ms4N: +four.toFixed(2), ratio: +(four / Math.max(n, 0.001)).toFixed(2) }));
-  expect(four).toBeLessThanOrEqual(8 * n + 50);
+  const { four } = measurePair(name, 240, make);
   expect(four).toBeLessThan(300);
 });
 

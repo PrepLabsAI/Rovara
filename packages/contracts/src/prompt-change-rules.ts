@@ -2,6 +2,8 @@
  * AI signals: SDK import/require (openai, anthropic, @anthropic-ai/sdk, @google/genai, @google/generative-ai,
  * google.genai, google.generativeai, ai, @ai-sdk/*, langchain*, cohere, litellm, ollama), a model prefix below,
  * or a prompts/models/llm/ai/agents folder. Model/template/content/input/settings need that signal; input also needs an SDK call.
+ * Named prompts match whole underscore/camelCase parts; DIR/PATH/STATUS/TIMEOUT/ROOT/FILE/URL suffixes are excluded.
+ * SDK system/messages text blocks are recognized without a separate file-level signal.
  * Unsupported languages, variable resolution, YAML aliases/merges and computed keys are deliberately not guessed.
  */
 import type { ModelFamily } from "./model-catalog.js";
@@ -17,6 +19,11 @@ export const SETTING_ALIASES = new Map<string, ModelSettingKey>([
 export const SYSTEM_KEYS = new Set(["system", "system_prompt", "systemPrompt", "system_instruction", "system_instructions", "systemInstruction", "systemInstructions", "instructions"]);
 export const PROMPT_KEYS = new Set(["prompt", "template"]);
 export const MODEL_KEYS = new Set(["model", "model_name", "modelName", "model_id", "modelId", "deployment", "deployment_name", "deploymentName"]);
+export const CONFIG_MODEL_KEYS = new Set([...MODEL_KEYS].map((key) => key.toLowerCase()));
+export function promptConstantName(name: string): boolean {
+  const parts = name.replace(/([a-z0-9])([A-Z])/gu, "$1_$2").replace(/([A-Z])([A-Z][a-z])/gu, "$1_$2").toLowerCase();
+  return /(?:^|_)(?:system|prompt|instructions?|template)(?:_|$)/u.test(parts) && !/(?:^|_)(?:dir|path|status|timeout|root|file|url)$/u.test(parts);
+}
 export const TOOL_KEYS = new Set(["tools", "functions", "function_declarations", "functionDeclarations", "input_schema", "tool_schema", "toolSchema"]);
 export const PROMPT_CALLS = new Set(["generate_content", "generateContent", "generateText", "streamText", "generate_text", "invoke", "PromptTemplate", "from_template", "from_messages"]);
 export const MODEL_CALLS = new Set(["openai", "google", "anthropic", "init_chat_model"]);

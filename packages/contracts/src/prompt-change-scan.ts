@@ -9,7 +9,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { MODEL_NAME_PATTERN } from "./model-family-common.js";
 import { PROMPT_CHANGE_LIMITS, SETTING_ENUM_WORDS, type ModelSettingKey, type PromptChangeItem, type PromptChangeKind } from "./prompt-change.js";
 import { fingerprint, hash, normalizePromptText, type Work } from "./prompt-change-internal.js";
-import { knownSdk, MODEL_CALLS, MODEL_KEYS, modelFamily, PROMPT_CALLS, PROMPT_KEYS, SDK_CALLS, SETTING_ALIASES, SYSTEM_KEYS, TOOL_KEYS } from "./prompt-change-rules.js";
+import { CONFIG_MODEL_KEYS, knownSdk, MODEL_CALLS, MODEL_KEYS, modelFamily, promptConstantName, PROMPT_CALLS, PROMPT_KEYS, SDK_CALLS, SETTING_ALIASES, SYSTEM_KEYS, TOOL_KEYS } from "./prompt-change-rules.js";
 
 export interface ScannedValue {
   kind: PromptChangeKind; basis: PromptChangeItem["basis"]; anchor: string; fingerprint: string;
@@ -258,9 +258,15 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     const token = tokens[i]!;
     const parent = tokens[token.parent];
     const previous = tokens[i - 1];
-    const keyToken = tokens[i - 2];
+    if (previous?.value === ":" && token.type === "word" && tokens[i + 1]?.value === "=" && tokens[i - 2]?.type === "word") continue;
+    // A simple TS/Python annotation sits between the declaration name and '='.
+    const typedAssignment = previous?.value === "=" && tokens[i - 3]?.value === ":" && tokens[i - 4]?.type === "word";
+    const keyToken = tokens[i - (typedAssignment ? 4 : 2)];
     const isKey = previous?.value === ":" || previous?.value === "=";
     const key = isKey ? keyToken?.value ?? "" : "";
+    if (isKey) work.stats.steps += key.length * 4 + 1;
+    const namedPrompt = signal && isKey && promptConstantName(key);
+    const modelKey = MODEL_KEYS.has(key) || (mode === "config" && CONFIG_MODEL_KEYS.has(key.toLowerCase()));
     const settingKey = SETTING_ALIASES.get(key) ?? (mode === "config" ? SETTING_ALIASES.get(key.toLowerCase()) : undefined);
     const next = tokens[i + 1];
     const expressionTail = next !== undefined && (next.line === token.line || ["+", "-", ".", "?", "*", "/", "&", "|"].includes(next.value)) && !new Set([",", ";", ")", "]", "}", ":"]).has(next.value);
@@ -270,7 +276,8 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     const sdk = context.sdk;
     const tool = TOOL_KEYS.has(key) || (key === "parameters" && context.tool);
     const firstPromptArgument = parent?.value === "(" && PROMPT_CALLS.has(parent.label) && previous === parent;
-    const promptArgument = (sdk && (SYSTEM_KEYS.has(key) || PROMPT_KEYS.has(key) || ["messages", "content", "contents", "input", "message"].includes(key) || (key === "text" && context.promptBlock))) || firstPromptArgument;
+    const tuplePrompt = context.fromMessages && (parent?.value === "(" || parent?.value === "[") && previous?.value === "," && tokens[i - 2]?.type === "string";
+    const promptArgument = namedPrompt || tuplePrompt || (sdk && (SYSTEM_KEYS.has(key) || PROMPT_KEYS.has(key) || ["messages", "content", "contents", "input", "message"].includes(key) || (key === "text" && context.promptBlock))) || firstPromptArgument;
     const shorthand = sdk && parent?.value === "{" && token.type === "word" && (SYSTEM_KEYS.has(token.value) || PROMPT_KEYS.has(token.value) || token.value === "messages") && (previous?.value === "{" || previous?.value === ",") && (next?.value === "}" || next?.value === ",");
     const unresolvedBlock = sdk && context.promptBlock && parent?.value === "[" && token.type === "word";
     if (shorthand || unresolvedBlock) work.reasons.add("nonliteral_prompt");
@@ -291,8 +298,8 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
       if (family !== undefined) add("model_endpoint", token, token.value, key || "endpoint", "catalog_host", family);
     }
     if (!isLiteral) continue;
-    if ((signal && MODEL_KEYS.has(key)) || (parent?.value === "(" && MODEL_CALLS.has(parent.label) && previous === parent)) {
-      if (token.type !== "number") add("model_name", token, token.value, key || parent?.label || "model", MODEL_KEYS.has(key) ? "key_name" : "model_table", modelFamily(token.value));
+    if ((signal && modelKey) || (parent?.value === "(" && MODEL_CALLS.has(parent.label) && previous === parent)) {
+      if (token.type !== "number") add("model_name", token, token.value, key || parent?.label || "model", modelKey ? "key_name" : "model_table", modelFamily(token.value));
       continue;
     }
     if (token.type !== "string" && mode !== "config") continue;
@@ -300,11 +307,12 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     let kind: "prompt_text" | "system_prompt" | undefined;
     if (SYSTEM_KEYS.has(key)) kind = "system_prompt";
     else if (PROMPT_KEYS.has(key) && (key !== "template" || signal)) kind = "prompt_text";
-    else if (signal && previous?.value === "=" && keyToken?.type === "word" && /(?:PROMPT|INSTRUCTION|SYSTEM|TEMPLATE)/iu.test(key)) kind = "prompt_text";
+    else if (namedPrompt) kind = "prompt_text";
     else if (signal && key === "content" && roles.has(token.parent)) kind = roles.get(token.parent) === "system" ? "system_prompt" : "prompt_text";
-    else if (signal && sdk && (key === "input" || key === "contents" || key === "message" || (key === "text" && context.promptBlock))) kind = "prompt_text";
+    else if (sdk && key === "text" && context.promptBlock) kind = "prompt_text";
+    else if (signal && sdk && (key === "input" || key === "contents" || key === "message")) kind = "prompt_text";
     else if (parent?.value === "(" && PROMPT_CALLS.has(parent.label) && previous === parent) kind = "prompt_text";
-    else if (context.fromMessages && previous?.value === "," && tokens[i - 2]?.type === "string") kind = tokens[i - 2]!.value === "system" ? "system_prompt" : "prompt_text";
+    else if (tuplePrompt) kind = tokens[i - 2]!.value === "system" ? "system_prompt" : "prompt_text";
     else if (signal && sdk && context.contents && token.type === "string" && !isKey && tokens[i + 1]?.value !== ":") kind = "prompt_text";
     if (kind === "prompt_text" && context.system) kind = "system_prompt";
     if (kind) add(kind, token, token.value, key || parent?.label || "argument", sdk ? "sdk_call" : "key_name");
