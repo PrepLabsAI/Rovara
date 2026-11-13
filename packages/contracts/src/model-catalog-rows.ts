@@ -35,7 +35,7 @@ const GOOGLE_DUMMY_KEY_VARS = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 
 const BUILTIN_ROWS_DATA = {
   schemaVersion: 1,
-  revision: 4,
+  revision: 5,
   rows: [
     {
       id: "gemini",
@@ -211,6 +211,20 @@ const BUILTIN_ROWS_DATA = {
       streaming: ["sse"],
       errors: errorIds("openai_compatible"),
       notes: ["Azure OpenAI and Foundry resources use the documented openai.azure.com, cognitiveservices.azure.com and services.ai.azure.com suffixes. A hosts file cannot hold a pattern: the block is by DNS suffix (modelHostSuffixBlockList), and the finder reports a call to any subdomain.", "UNVERIFIED: paths look like /openai/deployments/<deployment>/chat/completions?api-version=...; the router serves them."],
+    },
+    {
+      id: "azure-ai-inference",
+      kind: "provider",
+      // Microsoft SDK endpoint forms: https://github.com/MicrosoftDocs/azure-docs-sdk-python/blob/main/docs-ref-services/preview/ai-inference-readme.md
+      hosts: ["models.inference.ai.azure.com"],
+      hostSuffixes: ["models.ai.azure.com"],
+      authHosts: [],
+      family: "openai_compatible",
+      auth: [{ scheme: "bearer" }, { scheme: "header", name: "api-key" }],
+      redirect: [{ kind: "sdk_option", client: "Azure AI Inference SDKs", option: "endpoint option of the client", needsRestTransport: false, verified: false, note: "UNVERIFIED: endpoint redirect has not been run against the helper." }],
+      streaming: ["sse"],
+      errors: errorIds("openai_compatible"),
+      notes: ["Microsoft documents models.inference.ai.azure.com for GitHub Models and <deployment>.<region>.models.ai.azure.com for serverless inference. A hosts file needs exact names; suffixes are for DNS blocking and the finder.", "UNVERIFIED: authentication, streaming and helper compatibility have not been exercised with the SDK. Inference uses /chat/completions, without Azure OpenAI's deployment prefix."],
     },
     {
       id: "openrouter",
