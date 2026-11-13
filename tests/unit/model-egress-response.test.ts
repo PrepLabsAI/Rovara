@@ -26,6 +26,22 @@ describe("response headers", () => {
   });
 });
 
+describe("response header values are scanned for the key", () => {
+  const key = fixtureKey("header-scan");
+  it("drops an allow-listed header whose value holds any spelling of the key, and keeps the others", () => {
+    const spellings = e2eSecretSpellings(key);
+    for (const spelling of spellings.slice(0, 8)) {
+      const kept = sanitizeResponseHeaders([["content-type", "application/json"], ["x-request-id", `echo-${spelling}`], ["request-id", spelling.toUpperCase()], ["retry-after", "3"]], { key });
+      expect(kept, spelling).toEqual([["content-type", "application/json"], ["retry-after", "3"]]);
+    }
+    expect(sanitizeResponseHeaders([["x-request-id", "req_123"], ["content-type", "text/event-stream"]], { key })).toEqual([["x-request-id", "req_123"], ["content-type", "text/event-stream"]]);
+    expect(sanitizeResponseHeaders([["x-request-id", `echo-${key}`]])).toEqual([["x-request-id", `echo-${key}`]]);
+  });
+  it("a key too short to scan for is refused, never skipped", () => {
+    expect(() => sanitizeResponseHeaders([["x-request-id", "a"]], { key: "short" })).toThrow(/too short/u);
+  });
+});
+
 describe("the key-echo scrub", () => {
   const key = fixtureKey("scrub");
   const spellings = e2eSecretSpellings(key);
