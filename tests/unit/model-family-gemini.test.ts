@@ -231,7 +231,7 @@ describe("the GCE metadata server emulation", () => {
   it("serves the service account as JSON and the token as a fixed dummy built at run time", () => {
     const account = JSON.parse(meta("/computeMetadata/v1/instance/service-accounts/default/", { query: "recursive=true" }).body) as { email: string; aliases: string[]; scopes: string[] };
     expect(account.aliases).toEqual(["default"]);
-    expect(account.email).toMatch(/@/u);
+    expect(account.email).toMatch(/@[a-z0-9-]+\.iam\.gserviceaccount\.invalid$/u);
     expect(account.scopes.length).toBeGreaterThan(0);
     const token = JSON.parse(meta("/computeMetadata/v1/instance/service-accounts/default/token", { query: "scopes=a" }).body) as { access_token: string; expires_in: number; token_type: string };
     expect(token).toMatchObject({ expires_in: 3600, token_type: "Bearer" });
@@ -339,6 +339,26 @@ describe("serveModelRequest: the one entry the helper calls", () => {
     const started = Date.now();
     serve("/p/gemini/" + "a".repeat(1_000_000));
     expect(Date.now() - started).toBeLessThan(250);
+  });
+  it("never throws: a BigInt in a tool call, an oversize reply or a hostile request is a fixed 500 or 4xx", () => {
+    const bigint = serve("/p/gemini/v1beta/models/m:generateContent", {}, reply({ toolCalls: [{ name: "f", args: { n: 1n } }], finish: "tool_calls" }));
+    expect(bigint.status).toBe(500);
+    expect((JSON.parse(bigint.body) as { error: { code: string } }).error.code).toBe("internal_error");
+    expect(serve("/p/gemini/v1beta/models/m:generateContent", {}, reply({ text: "x".repeat(MODEL_REPLY_MAX_CHARS + 1) })).status).toBe(500);
+    expect(serve("/p/gemini-openai/v1/chat/completions", { body: "{}" }, reply({ usage: { inputTokens: -1, outputTokens: 1 } })).status).toBe(500);
+    expect(serve("/p/gemini/v1beta/models/m:streamGenerateContent", { query: "alt=sse" }, reply({ toolCalls: [{ name: "f", args: { n: 1n } }] })).status).toBe(500);
+    const hostile = serveModelRequest(rows, { method: 5 as unknown as string, path: { toString() { throw new Error("boom"); } } as unknown as string, query: null as unknown as string, headers: null as unknown as Record<string, string> }, { reply: reply(), seed: "s" });
+    expect(hostile.status).toBeGreaterThanOrEqual(400);
+    expect(JSON.parse(hostile.body)).toHaveProperty("error.code");
+  });
+  it("serves the Cloudflare gateway path /v1/<account>/<gateway>/openai/... and Azure deployment paths", () => {
+    const cloudflare = serve("/p/cloudflare-ai-gateway/v1/acct123/my-gw/openai/chat/completions", { body: JSON.stringify({ model: "gpt-4o" }) });
+    expect(cloudflare.status).toBe(200);
+    expect(cloudflare.served).toMatchObject({ rowId: "cloudflare-ai-gateway", operation: "chat_completions" });
+    expect(serve("/p/azure-openai/openai/deployments/my-deploy/chat/completions", { query: "api-version=2024-10-21", body: "{}" }).status).toBe(200);
+    expect(serve("/p/cloudflare-ai-gateway/v1/a/b/c/d/e/f/g/chat/completions").status).toBe(404);
+    expect(serve("/p/cloudflare-ai-gateway/v1/../b/openai/chat/completions").status).toBe(404);
+    expect(serve("/p/cloudflare-ai-gateway/v1/a/b/openai/fine_tuning/jobs").status).toBe(404);
   });
   it("never echoes a credential: not the header, not the query key", () => {
     const answer = serve("/p/gemini/v1beta/models/m:generateContent", { headers: { "x-goog-api-key": fakeKey() }, query: `key=${fakeKey()}` });

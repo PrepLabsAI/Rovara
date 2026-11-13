@@ -20,11 +20,13 @@ export function openAiOperationOfTail(tail: string): OpenAiOperation | undefined
 }
 
 export type OpenAiRouteResult = { ok: true; operation: OpenAiOperation } | { ok: false; reason: "method_not_allowed" | "bad_path" | "unsupported_path" | "too_large" };
-const VERSION = /^v\d{1,3}(?:[a-z]{1,8}\d{0,3})?$/u;
+const LEADING_SEGMENT = /^[A-Za-z0-9._~-]{1,64}$/u;
+const LEADING_SEGMENTS_MAX = 6;
 
 /**
- * The operation of an OpenAI-compatible request. The row's `pathPrefix` (the provider's own, like `/v1beta/openai`) is stripped when present, then one API version segment when present: the client's base URL decides
- * which spelling arrives (the helper's address ends in `/v1`), so both are served. `models` is a GET; every other operation is a POST.
+ * The operation of an OpenAI-compatible request. The row's `pathPrefix` (the provider's own, like `/v1beta/openai`) is stripped when present. The operation is the END of the path (`chat/completions`, `embeddings`,
+ * `responses`, `models`); what comes before it (a version, a Cloudflare `/v1/<account>/<gateway>/openai`, an Azure `/openai/deployments/<name>`) is at most six plain segments and is not looked at, because the client's base
+ * URL decides it. `models` is a GET; every other operation is a POST.
  */
 export function routeOpenAiCompatibleRequest(request: { method: string; path: string; pathPrefix: string | undefined }): OpenAiRouteResult {
   const path = request.path;
@@ -34,10 +36,13 @@ export function routeOpenAiCompatibleRequest(request: { method: string; path: st
   const prefix = request.pathPrefix;
   if (prefix !== undefined && (rest === prefix || rest.startsWith(`${prefix}/`))) rest = rest.slice(prefix.length);
   const segments = rest.split("/").slice(1);
-  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return { ok: false, reason: "bad_path" };
-  const tail = (segments[0] !== undefined && VERSION.test(segments[0]) ? segments.slice(1) : segments).join("/");
-  const operation = openAiOperationOfTail(tail);
-  if (operation === undefined) return { ok: false, reason: "unsupported_path" };
+  if (segments.some((segment) => segment === "" || /^\.+$/u.test(segment))) return { ok: false, reason: "bad_path" };
+  const last = segments[segments.length - 1];
+  const chat = last === "completions" && segments[segments.length - 2] === "chat";
+  const operation = chat ? "chat_completions" : last === undefined ? undefined : openAiOperationOfTail(last);
+  if (operation === undefined || (operation === "chat_completions" && !chat)) return { ok: false, reason: "unsupported_path" };
+  const leading = segments.slice(0, segments.length - (chat ? 2 : 1));
+  if (leading.length > LEADING_SEGMENTS_MAX || leading.some((segment) => !LEADING_SEGMENT.test(segment))) return { ok: false, reason: "unsupported_path" };
   if (typeof request.method !== "string" || request.method.toUpperCase() !== (operation === "models" ? "GET" : "POST")) return { ok: false, reason: "method_not_allowed" };
   return { ok: true, operation };
 }

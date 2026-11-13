@@ -27,7 +27,7 @@ export const COMPANY_GATEWAY_FAMILIES = ["openai_compatible", "anthropic_message
 export const NONE_REDIRECT_SENTENCE = "not run: client cannot be redirected";
 
 const MODEL_ROWS_MAX = 64;
-const HOSTS_MAX = 64;
+const HOSTS_MAX = 128;
 const NOTES_MAX = 20;
 const NOTE_MAX_CHARS = 300;
 export const MODEL_HOST_MAX_CHARS = 253;
@@ -87,16 +87,30 @@ const RowId = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/u);
 /** Printable ASCII only: no control, hidden or variation-selector character can ride in a label or a note. */
 const printable = (max: number) => z.string().min(1).max(max).regex(/^[\x20-\x7e]+$/u);
 const Note = printable(NOTE_MAX_CHARS);
-const EnvName = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/u);
-const PathPrefix = z.string().max(120).regex(/^\/[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+){0,7}$/u).refine((value) => !value.split("/").includes(".."), "a plain path");
+/**
+ * The environment variables a row may name, as an allow-list: the redirect (base-URL) variables of the SDKs the rows cover, the dummy-key variables and the metadata-server variables. NOT a pattern: a variable that changes
+ * how a process loads or runs code (LD_PRELOAD, NODE_OPTIONS, BASH_ENV, PATH, a proxy variable) can never be written into the environment of a customer's test run by a row.
+ */
+export const MODEL_REDIRECT_ENV_NAMES = [
+  "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GCE_METADATA_HOST", "GCE_METADATA_IP",
+  "OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CO_API_URL", "CO_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY",
+  "GROQ_BASE_URL", "GROQ_API_KEY", "TOGETHER_BASE_URL", "TOGETHER_API_KEY", "MISTRAL_API_KEY",
+] as const;
+const EnvName = z.enum(MODEL_REDIRECT_ENV_NAMES);
+const PathPrefix = z.string().max(120).regex(/^\/[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+){0,7}$/u).refine((value) => !value.split("/").some((segment) => /^\.+$/u.test(segment)), "a plain path with no dot segment");
 const ShapeId = z.string().regex(/^[a-z][a-z0-9_.]{0,63}$/u);
 
-const FORBIDDEN_HEADERS = new Set(["authorization", "proxy-authorization", "host", "content-length", "content-type", "transfer-encoding", "connection", "upgrade", "te", "trailer", "expect", "cookie", "set-cookie", "forwarded", "accept", "user-agent"]);
+// Hop-by-hop headers (the transport owns them), and headers that spoof where a request came from or how a server should treat it. `authorization` is the `bearer` scheme, never a named header.
+const FORBIDDEN_HEADERS = new Set([
+  "authorization", "proxy-authorization", "proxy-connection", "host", "content-length", "content-type", "content-encoding", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer", "expect", "cookie", "set-cookie",
+  "forwarded", "via", "accept", "user-agent", "origin", "referer", "range", "x-real-ip", "x-client-ip", "true-client-ip", "cf-connecting-ip", "x-http-method", "x-http-method-override", "x-method-override",
+  "x-original-url", "x-rewrite-url", "x-original-host",
+]);
 /** An authentication header name: a lowercase token that is not one the transport or the proxy owns (`authorization` is the `bearer` scheme). */
 export const AuthHeaderNameSchema = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]{0,62}$/u)
-  .refine((name) => !FORBIDDEN_HEADERS.has(name) && !name.startsWith("proxy-") && !name.startsWith("x-forwarded-"), "a header the transport or the proxy owns");
+  .refine((name) => !FORBIDDEN_HEADERS.has(name) && !name.startsWith("proxy-") && !name.startsWith("x-forwarded-") && !name.startsWith("x-amz-"), "a header the transport or the proxy owns");
 
 export const ModelAuthSchema = z.discriminatedUnion("scheme", [
   z.object({ scheme: z.literal("bearer") }).strict(),
@@ -132,7 +146,9 @@ export const ModelCatalogRowSchema = z
     id: RowId,
     kind: z.enum(MODEL_ROW_KINDS),
     /** Exact lowercase host names the provider is reached at (never a wildcard: a regional host is listed by name). */
-    hosts: z.array(ModelHostSchema).min(1).max(HOSTS_MAX),
+    hosts: z.array(ModelHostSchema).max(HOSTS_MAX),
+    /** Domains whose every subdomain is this provider's (Azure OpenAI: a customer's own `<resource>.openai.azure.com`). A hosts file cannot hold a pattern, so these are for the DNS-level block and for the finder; at least two labels. */
+    hostSuffixes: z.array(ModelHostSchema).max(8).default([]),
     /** Hosts the client's own auth library calls (Google's token hosts): blocked with the rest, never served. */
     authHosts: z.array(ModelHostSchema).max(8),
     family: z.enum(MODEL_FAMILIES),
@@ -153,6 +169,8 @@ export const ModelCatalogRowSchema = z
   .superRefine((row, context) => {
     const problem = (path: (string | number)[], message: string) => context.addIssue({ code: "custom", path, message });
     if (!unique(row.hosts)) problem(["hosts"], "a host is listed once");
+    if (!unique(row.hostSuffixes)) problem(["hostSuffixes"], "a suffix is listed once");
+    if (row.hosts.length + row.hostSuffixes.length === 0) problem(["hosts"], "a row names at least one host or host suffix");
     if (!unique(row.authHosts)) problem(["authHosts"], "a host is listed once");
     if (!unique(row.streaming)) problem(["streaming"], "a format is listed once");
     if (!unique(row.auth.map((auth) => (auth.scheme === "header" ? `header:${auth.name}` : auth.scheme)))) problem(["auth"], "an auth scheme is listed once");
@@ -233,7 +251,7 @@ const issue = (index: number, code: GatewayRefusalCode): GatewayIssue => ({ inde
  * A project's gateway rows against the built-in rows: at most 20, each one valid, ids unique and never a built-in id, one host in one shape (a host equal to a built-in row's host, or to another gateway's, with a different
  * family is confusable and refused), no address, no `localhost`. Returns fixed codes and fixed words; the refused text is never echoed. Never throws.
  */
-export function checkCompanyGatewayRows(input: unknown, builtinRows: readonly Pick<ModelCatalogRow, "id" | "hosts" | "family">[]): GatewayRowsCheck {
+export function checkCompanyGatewayRows(input: unknown, builtinRows: readonly (Pick<ModelCatalogRow, "id" | "hosts" | "family"> & { readonly authHosts?: readonly string[]; readonly hostSuffixes?: readonly string[] })[]): GatewayRowsCheck {
   if (!Array.isArray(input)) return { ok: false, issues: [issue(0, "invalid_row")] };
   if (input.length > COMPANY_GATEWAY_MAX_PER_PROJECT) return { ok: false, issues: [issue(COMPANY_GATEWAY_MAX_PER_PROJECT, "too_many")] };
   const issues: GatewayIssue[] = [];
@@ -251,14 +269,23 @@ export function checkCompanyGatewayRows(input: unknown, builtinRows: readonly Pi
   const builtinIds = new Set(builtinRows.map((row) => row.id));
   const seenIds = new Set<string>();
   const familiesByHost = new Map<string, Set<string>>();
-  for (const row of builtinRows) for (const host of row.hosts) familiesByHost.set(host, new Set([...(familiesByHost.get(host) ?? []), row.family]));
+  const addFamily = (host: string, family: string): void => {
+    familiesByHost.set(host, new Set([...(familiesByHost.get(host) ?? []), family]));
+  };
+  // A built-in row's auth hosts (Google's token hosts) are in no gateway's family: a gateway there is always confusable.
+  for (const row of builtinRows) {
+    for (const host of row.hosts) addFamily(host, row.family);
+    for (const host of row.authHosts ?? []) addFamily(host, "auth");
+  }
+  const suffixFamilies = (host: string): string[] => builtinRows.filter((row) => (row.hostSuffixes ?? []).some((suffix) => host.endsWith(`.${suffix}`))).map((row) => row.family);
   rows.forEach((row, index) => {
     if (builtinIds.has(row.id) || seenIds.has(row.id)) issues.push(issue(index, "duplicate_id"));
     seenIds.add(row.id);
-    const families = familiesByHost.get(row.host);
+    const viaSuffix = suffixFamilies(row.host);
+    const families = viaSuffix.length === 0 && !familiesByHost.has(row.host) ? undefined : new Set([...(familiesByHost.get(row.host) ?? []), ...viaSuffix]);
     if (families !== undefined && !families.has(row.family)) issues.push(issue(index, "confusable_host"));
     else if (families?.has(row.family) === true && rows.slice(0, index).some((earlier) => earlier.host === row.host && earlier.family === row.family)) issues.push(issue(index, "duplicate_host"));
-    familiesByHost.set(row.host, new Set([...(families ?? []), row.family]));
+    addFamily(row.host, row.family);
   });
   return issues.length === 0 ? { ok: true, rows } : { ok: false, issues };
 }
