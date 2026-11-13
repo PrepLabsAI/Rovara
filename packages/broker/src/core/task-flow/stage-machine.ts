@@ -54,7 +54,7 @@ import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecor
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import { workflowWriteOps } from "./flow-guard.js";
-import { afterUnderstand, smallPlanRoute } from "./stage-selection.js";
+import { UNDERSTAND_SKIPS, afterUnderstand, restoredForPlanning, smallPlanRoute, toFull } from "./stage-selection.js";
 import { isExplicitPath } from "../../rovara-code/explicit-path.js";
 import type { StepOutcome } from "./outcome.js";
 import { knowledgeCommitToStore } from "../meta-repo/prepare-meta.js";
@@ -560,10 +560,27 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
       });
       // The change tier's ESTIMATE, before any code exists: from the files the plan names and the words of the request. It is replaced by the diff's tier after the build.
       // With the lighter flow on it also picks the steps: exactly small (the files of the plan, the request and Understand's reading) skips the plan check and the approval, in this same commit.
-      const routed = deps.lighterFlow === true && workflowDocumentType(submitted) === "plan"
-        ? smallPlanRoute({ submitted, plan: outcome.cites?.plan, requestText: task.requestText, noChangeNeeded: outcome.noChangeNeeded === true, at: iso(deps) }) : undefined;
-      const next = routed?.workflow ?? withTierEstimate(submitted, outcome.cites?.plan, task.requestText, iso(deps));
-      const toCode = (routed?.skipped.length ?? 0) > 0 && next.stage === "IMPLEMENT" && next.state === "READY";
+      const lighter = workflowDocumentType(submitted) === "plan" && (deps.lighterFlow === true || (workflow.flow?.skippedSteps ?? []).some((step) => UNDERSTAND_SKIPS.includes(step)));
+      const planText = lighter ? (await loadWorkflowDocument(textReaderOf(deps.artifacts), outcome.artifact, {}).catch(() => undefined))?.markdown : undefined;
+      const costHighUsd = lighter ? (await planRunEstimate(deps, task, submitted))?.highUsd : undefined;
+      const routed = lighter
+        ? smallPlanRoute({ submitted, plan: outcome.cites?.plan, requestText: task.requestText, noChangeNeeded: outcome.noChangeNeeded === true, at: iso(deps), planText, costHighUsd }) : undefined;
+      // The plan skips its own steps only with the switch on; steps Understand skipped for a change the plan shows is not small come back (whatever the switch says now).
+      const skippedHere = deps.lighterFlow === true && (routed?.skipped.length ?? 0) > 0;
+      if (lighter && !skippedHere) {
+        const restore = restoredForPlanning(workflow, routed?.workflow.flow ?? workflow.flow, iso(deps));
+        if (restore !== undefined) {
+          let ready = restore.workflow;
+          if (restore.restored.includes("design_review") && deps.designReview !== undefined && ready.intent?.assessment !== undefined) ready = await deps.designReview.afterUnderstand(deps, task, ready, ready.intent.assessment, iso(deps));
+          if (ready.designReview === undefined && restore.restored.includes("requirements_approval")) ready = toFull(ready);
+          const committedRestore = await commitWorkflow(deps, task, ready, [dispatchRowItem(deps, task.taskId, ready.revision, "PLAN", iso(deps))]);
+          log(deps, { event: "task_flow.planning_restored", taskId: task.taskId, level: ready.flow?.tier?.level, restored: restore.restored, designReview: ready.designReview !== undefined });
+          if (committedRestore) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: ready.revision, kind: "PLAN" });
+          return;
+        }
+      }
+      const next = (skippedHere || deps.lighterFlow === true ? routed?.workflow : undefined) ?? withTierEstimate(submitted, outcome.cites?.plan, task.requestText, iso(deps));
+      const toCode = skippedHere && next.stage === "IMPLEMENT" && next.state === "READY";
       // A version 2 coding plan is read by a second step before a person sees it: the check is a row like every automatic step, written with the plan.
       const toCheck = next.stage === "PLAN_CRITIQUE" && next.state === "READY";
       // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it.

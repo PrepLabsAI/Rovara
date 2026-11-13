@@ -691,9 +691,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const tickLessons = async (): Promise<void> => {
     await lessons.tick().catch(logFailure("local_app.lessons_failed"));
   };
+  // The lighter flow's reviewer calls (questions, grown reviews) can take minutes, so they have their own timer and allowance: the pull request reads never wait for them.
+  const tickTierChecks = async (): Promise<void> => {
+    await tracking.tierChecks().catch(logFailure("local_app.tier_checks_failed"));
+  };
   const tick = async (): Promise<void> => {
     await tickCore();
     await tickTracking();
+    await tickTierChecks();
     await tickLessons();
   };
   // The in-process chat adapters begin to listen. What one hears goes through the sink, which applies the checks of the channel API (bound space, linked person, a card's request); a start that fails
@@ -734,6 +739,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     const routed = scheduleRouter.start();
     nightly = { stop: async () => { await nightlyHeard.stop(); await routed.stop(); } };
     every(10_000, tickLessons);
+    every(10_000, tickTierChecks);
   }
 
   return {

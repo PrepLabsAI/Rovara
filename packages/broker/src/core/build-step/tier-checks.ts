@@ -13,9 +13,9 @@ import { codeHostForRecord } from "../../plugins/routing.js";
 import {
   DOCS_ROUTE_LINES_MAX, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
 } from "../decisions/change-tier.js";
-import { floorOwed } from "../decisions/tier-floor-state.js";
+import { floorOwed, reviewTextOf, withoutTierReviews } from "../decisions/tier-floor-state.js";
 import { applyReviewerFloor, recordReviewerFloor, type ReviewerFloorResult } from "../decisions/tier-reviewer.js";
-import { boundCommits, readHeadFacts, readReviewInput, type TierReadTarget } from "../merge/change-tier-read.js";
+import { boundCommits, readTierInput, type TierReadTarget } from "../merge/change-tier-read.js";
 import { changeRequestRef } from "../merge/host-port.js";
 import { inertLine } from "../proof/inert-text.js";
 import { SessionStore } from "../sessions/store.js";
@@ -26,7 +26,7 @@ import { readTask } from "../task-flow/reads.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { failedQuickCheck, ownQuickChecks, quickCheckEntry, withQuickChecks } from "../task-flow/stage-selection.js";
 import { iso, log } from "../task-flow/support.js";
-import { checkingModelOf, runCodeReview, runGrownReviews, tierReviewerOf, type CheckingModel, type GrownReviewResult } from "./tier-review-calls.js";
+import { checkingModelOf, runCodeReview, runGrownReviews, tierReviewerOf, type CheckingModel, type GrownReviewResult, type TierReviewPurpose } from "./tier-review-calls.js";
 import { createHash } from "node:crypto";
 
 export type TierChecksOutcome = "not_owed" | "checked" | "unavailable";
@@ -119,12 +119,17 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
     const head = bound.headSha;
     if (head === undefined) return "unavailable";
-    // The gate's own read of the change at the pinned heads: the reviewer is given exactly this patch.
-    const input = await readReviewInput(targets, scope, beforeRequest);
+    // The gate's own read of the change at the pinned heads, once: the reviewer is given exactly its patch (the form `readReviewInput` gives), and the tier reads the head facts the same read returned.
+    const read = await readTierInput(targets, scope, beforeRequest);
+    const input = { ...reviewTextOf(read.diff), diff: read.diff };
     // A head the record has no tier for (a person's push, or one the post-push writer could not read) is tiered here, from the same files.
     const flow = workflow.flow;
-    const needsTier = flow?.tier?.headSha !== head || flow.tier.source === "estimate";
-    const fresh = needsTier ? tierFromDiff(input.diff, { ...bound, at, head: await readHeadFacts(targets, input.diff.files, scope, beforeRequest) }) : undefined;
+    // A reviewer outage holds the head it happened on, not the next ones: the head of the first tier an outage raised.
+    const outageOnly = flow?.tier !== undefined && flow.tier.reasons.length > 0 && flow.tier.reasons.every((reason) => reason.code === "reviewer_unavailable");
+    const outageHead = [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])].find((tier) => tier.reasons.some((reason) => reason.code === "reviewer_unavailable"))?.headSha;
+    const outageElsewhere = outageOnly && outageHead !== head;
+    const needsTier = flow?.tier?.headSha !== head || flow.tier.source === "estimate" || outageElsewhere;
+    const fresh = needsTier ? tierFromDiff(read.diff, { ...bound, at, head: read.head }) : undefined;
     // The heads must not have moved while they were read.
     for (const target of targets) {
       beforeRequest?.();
@@ -134,6 +139,15 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const planned: TierLevel = planningLevelOf(flow) ?? "small";
     const withTier = (current: WorkflowFlow | undefined): WorkflowFlow | undefined => {
       if (fresh === undefined) return current;
+      // A reviewer outage holds the head it happened on, not the next ones: a tier raised by nothing but an outage on another head does not carry over (the new head is asked again).
+      const previous = current?.tier;
+      if (current !== undefined && previous !== undefined && outageElsewhere && previous.reasons.length > 0 && previous.reasons.every((reason) => reason.code === "reviewer_unavailable")) {
+        // The outage's raise is kept in the history (it is what happened on that head); the growth it alone caused does not stand for the new head.
+        const { grewAfterBuild: _grew, ...rest } = current;
+        void _grew;
+        const next: WorkflowFlow = { ...rest, tier: fresh, tierHistory: [...(current.tierHistory ?? []), previous].slice(-20) };
+        return tierRank(fresh.level) > tierRank(planned) ? recordGrowth(next, planned, fresh.level, at) : next;
+      }
       const recorded = recordTier(current, fresh);
       return tierRank(recorded.tier.level) > tierRank(planned) ? recordGrowth(recorded.flow, planned, recorded.tier.level, at) : recorded.flow;
     };
@@ -147,17 +161,19 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     };
     let draft = withDocsTotal(withTier(flow));
     const checking = await checkingModelOf(deps, task.workspaceId);
+    // Every reviewer call is counted against the task's spend when the install meters it; a refusal is an unavailable reviewer (fail closed).
+    const meterFor = (purpose: TierReviewPurpose) => (deps.tierReviewMeter === undefined ? undefined : () => deps.tierReviewMeter!({ taskId: task.taskId, purpose, model: checking.model, promptChars: input.patchText.length }));
     // The floor: a small change is put to the one strongest-available reviewer once per head and patch. Without a reviewer wired, nothing is asked and the gate keeps refusing.
     let floor: ReviewerFloorResult | undefined;
     if (draft?.tier !== undefined && draft.tier.level === "small" && draft.tier.headSha === head && floorOwed(draft, head, input.patchText) && call !== undefined) {
-      floor = await applyReviewerFloor({ tier: draft.tier, reviewer: tierReviewerOf({ call, model: checking.model, refused: checking.refused }), files: input.files, patchText: input.patchText });
+      floor = await applyReviewerFloor({ tier: draft.tier, reviewer: tierReviewerOf({ call, model: checking.model, refused: checking.refused, meter: meterFor("questions") }), files: input.files, patchText: input.patchText });
       draft = recordReviewerFloor(draft, floor, at) ?? draft;
     }
     // A head no review step saw (it is not the head Rovara published for the reviewed code): the small change's one code reviewer reads the same patch the floor was asked about.
     const reviewedHead = open.every((entry) => entry.candidateDigest === workflow.candidate?.digest && targets.some((target) => target.repositoryId === entry.repositoryId && target.headSha === entry.headSha));
     let unreviewed: GrownReviewResult | undefined;
     if (!reviewedHead && draft?.tier?.level === "small" && call !== undefined && !ownQuickChecks(draft).some((check) => check.detail?.includes(reviewAttempt("small", head)) === true)) {
-      unreviewed = await runCodeReview({ call, model: checking, files: input.files, patchText: input.patchText });
+      unreviewed = await runCodeReview({ call, model: checking, files: input.files, patchText: input.patchText, meter: (purpose) => meterFor(purpose)?.() ?? Promise.resolve(true) });
     }
     // The quick checks of this head, by kind.
     const tierNow = draft?.tier;
@@ -185,11 +201,19 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const attempted = level !== undefined && ownQuickChecks(draft).some((check) => check.detail?.includes(reviewAttempt(level, head)) === true);
     // A failed check of this head (a failed review included) holds it: nothing is asked again for it, and no review record is written while it stands.
     if (grew && level !== "small" && draft?.tier?.headSha === head && !tierReviewRecorded(draft, level, head) && !attempted && failedQuickCheck(draft, head) === undefined && call !== undefined) {
-      grown = { level, result: await runGrownReviews({ call, model: checking, level, files: input.files, patchText: input.patchText }) };
+      grown = { level, result: await runGrownReviews({ call, model: checking, level, files: input.files, patchText: input.patchText, meter: (purpose) => meterFor(purpose)?.() ?? Promise.resolve(true) }) };
     }
     const withReview = (current: WorkflowFlow | undefined): WorkflowFlow | undefined => {
       if (current === undefined || grown === undefined) return current;
+      // Only up: a review of this head and level that failed (in this pass or another one that ran at the same time) is never overwritten by a clean one, and takes away any review record of the head.
+      const failedBefore = ownQuickChecks(current).some((check) => check.outcome === "failed" && check.detail?.includes(reviewAttempt(grown.level, head)) === true);
+      if (failedBefore) return withoutTierReviews(current, head);
       const passed = grown.result.completed && grown.result.mustFix === 0;
+      if (!passed) {
+        const noted = withQuickChecks(current, [quickCheckEntry({ kind: "code_config", outcome: "failed", at,
+          detail: `${reviewAttempt(grown.level, head)} ${grown.result.completed ? `${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed` : `did not run (${grown.result.failure ?? "unknown"})`}` })]);
+        return withoutTierReviews(noted, head);
+      }
       const noted = withQuickChecks(current, [quickCheckEntry({ kind: "code_config", outcome: passed ? "passed" : "failed", at,
         detail: `${reviewAttempt(grown.level, head)} ${grown.result.completed ? `${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed` : `did not run (${grown.result.failure ?? "unknown"})`}` })]);
       // Only reviews that ran, both, at the grown level, on this head, with nothing to fix, are recorded as the review of that tier.
