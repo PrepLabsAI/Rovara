@@ -46,7 +46,7 @@ export function fixtureEgressRows(): Record<"gemini" | "vertex" | "openai" | "op
     openrouter: row({ ...catalogRow("openrouter"), ...egress("bearer") }),
     anthropic: row({ ...catalogRow("anthropic"), ...egress("header:x-api-key") }),
     cohere: row({ ...catalogRow("cohere"), ...egress("bearer") }),
-    azure: row({ ...catalogRow("azure-openai"), ...egress("header:api-key", { azure: { deployment: "fixture-deployment", apiVersion: "2024-06-01" } }) }),
+    azure: row({ ...catalogRow("azure-openai"), ...egress("header:api-key", { azure: { deployment: "fixture-small", apiVersion: "2024-06-01" } }) }),
     bedrock: row({
       id: "bedrock", kind: "provider", hosts: ["bedrock-runtime.us-east-1.amazonaws.com"], authHosts: [], family: "bedrock", auth: [{ scheme: "sigv4" }], routesTo: "local_aws_front",
       redirect: [{ kind: "none", client: "a fixture client", verified: false }], streaming: ["aws_event_stream"], errors: { rateLimit: "fx.rate_limit", tokenLimit: "fx.token_limit", refusal: "fx.refusal", badToolJson: "fx.bad_tool_json", cutOffStream: "fx.cut_off_stream" }, notes: [],

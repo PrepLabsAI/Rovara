@@ -84,6 +84,20 @@ describe("evidence lines", () => {
       if (kind !== "check_sealed") expect(lines[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
     }
   });
+  it("never throws: not for a null, undefined or non-object ledger, nor for a null or odd round kind", () => {
+    for (const ledger of [null, undefined, "x", 5, true, [], () => 1, { classes: null, blockList: null, observedHosts: null, hostSuffixes: null }]) {
+      for (const round of [null, undefined, "working", "check_sealed", 7, {}, "check_unsealed"]) {
+        let lines: string[] = [];
+        expect(() => { lines = evidenceLinesFor(round as never, ledger as never); }, `${String(round)} / ${JSON.stringify(ledger)}`).not.toThrow();
+        // A round that is not the sealed one always carries the residual line.
+        if (round !== "check_sealed") expect(lines[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
+        for (const line of lines) expect(UNSAID.test(line)).toBe(false);
+      }
+    }
+    // A hostile getter on the ledger cannot make it throw either.
+    const hostile = { get classes(): never { throw new Error("boom"); } };
+    expect(() => evidenceLinesFor("working", hostile as never)).not.toThrow();
+  });
   it("does not throw on a malformed ledger", () => {
     for (const ledger of [{}, { classes: "x" }, { classes: [1, null, "nope"] }, { classes: [], blockList: "a" }, { classes: [], observedHosts: 5 }, { classes: [], capMicros: "2" }]) {
       expect(() => evidenceLinesFor("working", ledger as never)).not.toThrow();

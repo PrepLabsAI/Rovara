@@ -1,5 +1,5 @@
 // TE-F1a: the refusal words, as fixed strings, and the answer a refusal becomes in each family's own error shape. The words never carry the text that was refused.
-import { formatUsdMicros } from "./cost.js";
+import { MODEL_EGRESS_OVERRUN_SENTENCE, formatUsdMicros } from "./cost.js";
 import type { ModelEgressFamily } from "./schemes.js";
 
 /** `not_found` is one word for "missing" and "another company's": nothing tells them apart. */
@@ -71,11 +71,11 @@ export interface ModelEgressRefusalResponse {
  * The answer for one of our own refusals: the fixed status, the family's error shape, the fixed sentence, and `x-rovara-refusal: <word>`. The cap refusal names the cap ("... ($2.00 per task)") when `capMicros` is given and
  * is a whole non-negative number; it is a 429 in every family.
  */
-export function refusalResponse(family: ModelEgressFamily, word: ModelEgressRefusal, options: { readonly capMicros?: number } = {}): ModelEgressRefusalResponse {
+export function refusalResponse(family: ModelEgressFamily, word: ModelEgressRefusal, options: { readonly capMicros?: number; /** The call before this one settled above its reservation: the words are the fixed overrun sentence. */ readonly overrun?: boolean } = {}): ModelEgressRefusalResponse {
   const status = MODEL_EGRESS_REFUSAL_STATUS[word];
   const cap = options.capMicros;
   const message =
-    word === "cap" && cap !== undefined && Number.isSafeInteger(cap) && cap >= 0 ? `${MODEL_EGRESS_REFUSAL_WORDS.cap.slice(0, -1)} (${formatUsdMicros(cap)} per task).` : MODEL_EGRESS_REFUSAL_WORDS[word];
+    word === "cap" && options.overrun === true ? `The Rovara test model ${MODEL_EGRESS_OVERRUN_SENTENCE}.` : word === "cap" && cap !== undefined && Number.isSafeInteger(cap) && cap >= 0 ? `${MODEL_EGRESS_REFUSAL_WORDS.cap.slice(0, -1)} (${formatUsdMicros(cap)} per task).` : MODEL_EGRESS_REFUSAL_WORDS[word];
   return {
     status,
     headers: [["content-type", "application/json"], [MODEL_EGRESS_REFUSAL_HEADER, word]],

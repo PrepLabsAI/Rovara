@@ -60,7 +60,9 @@ export interface EgressQueryOutcome {
   readonly pairs: ReadonlyArray<readonly [string, string]>;
 }
 
-const QUERY_VALUE = /^[A-Za-z0-9._;=,~:-]{0,64}$/u;
+const QUERY_VALUE = /^[A-Za-z0-9_-]{0,64}$/u;
+/** The one query value with a `;` and an `=` in it: the legacy Gemini REST clients' `$alt=json;enum-encoding=int`. Spelled exactly, for `alt` and `$alt` only. */
+const LEGACY_ALT_VALUE = "json;enum-encoding=int";
 
 /**
  * The query as the proxy will send it. The inbound `key` (any case, any percent-encoding of its name, duplicates included) is removed: it is a credential. Only `alt` and `$alt` (Gemini and Vertex) and `api-version` (an Azure row, which
@@ -88,7 +90,7 @@ export function checkEgressQuery(row: Pick<ModelEgressRow, "family" | "azure">, 
       }
       if (name.toLowerCase() === "key") continue;
       if (!allowed.has(name)) return { ok: false, refusal: "not_allowed" };
-      if (!QUERY_VALUE.test(value) || seen.has(name)) return { ok: false, refusal: "bad_request" };
+      if (!(QUERY_VALUE.test(value) || ((name === "alt" || name === "$alt") && value === LEGACY_ALT_VALUE)) || seen.has(name)) return { ok: false, refusal: "bad_request" };
       seen.add(name);
       pairs.push([name, value]);
     }

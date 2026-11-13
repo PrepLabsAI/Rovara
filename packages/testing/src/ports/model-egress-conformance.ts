@@ -23,6 +23,9 @@ export interface ModelEgressProviderWindow {
   reset(): void;
 }
 
+export type BrokenScopeMode = "throws" | "undefined" | "empty" | "no_company";
+export const BROKEN_SCOPE_MODES: readonly BrokenScopeMode[] = ["throws", "undefined", "empty", "no_company"];
+
 export interface ModelEgressWorld {
   readonly adapter: ModelEgress;
   /** One row per family the adapter serves, by id. A `bedrock` row, if present, is served by nothing. */
@@ -31,6 +34,11 @@ export interface ModelEgressWorld {
   readonly connection: ModelEgressConnection;
   /** Both companies have a source with each row's id (the SHARED raw id), each with its own key. */
   scope(company: IsolationCompany, sourceId: string): ModelEgressScope;
+  /**
+   * A scope as it is when the adapter's company resolution is broken: `throws` (reading it throws), `undefined` (no scope at all), `empty` (an object with nothing in it), `no_company` (a source but no company). REQUIRED for a world
+   * whose adapter serves more than one company: with no such hook the "fails closed" check FAILS, it does not skip.
+   */
+  brokenScope?(mode: BrokenScopeMode): ModelEgressScope;
   /** A source only `company` owns (it serves the first served row of `rows`). */
   privateSource(company: IsolationCompany): string;
   /** What the adapter must place in a request for `company` on the source named for `rowId`: its key, or the token minted for it. */
@@ -138,6 +146,32 @@ const INBOUND_CREDENTIALS: Array<[string, string]> = [
 
 const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
   {
+    name: "fails closed when the company cannot be resolved from the scope: not_found, no provider call, no company's data",
+    async run(world) {
+      // A world that serves more than one company MUST be able to break its scope: with no hook this check fails rather than skips.
+      if (world.brokenScope === undefined) {
+        expect(world.isolation, "a world that serves more than one company must supply brokenScope(mode)").toBeUndefined();
+        return;
+      }
+      const row = served(world)[0]!;
+      const missing = await collect(world.adapter, world.scope(COMPANY_A, "no-such-source"), validFrame(row, world.connection, "hello"));
+      for (const mode of BROKEN_SCOPE_MODES) {
+        world.provider.reset();
+        const answer = await collect(world.adapter, world.brokenScope(mode), validFrame(row, world.connection, `${COMPANY_A.canary} ${COMPANY_B.canary}`));
+        expect(answer.status, mode).toBe(404);
+        expect(answer.settle, mode).toMatchObject({ class: "refused", refusal: "not_found", costMicros: 0 });
+        expect(answer.body, mode).toBe(missing.body);
+        expect(world.provider.calls, `${mode}: a call reached the provider`).toHaveLength(0);
+        const seen = JSON.stringify([answer.headers, answer.body]);
+        for (const company of TWO_COMPANIES) {
+          expect(seen.includes(company.canary), mode).toBe(false);
+          expect(seen.includes(company.orgId), mode).toBe(false);
+          for (const key of world.keysOf(company)) expect(seen.includes(key), mode).toBe(false);
+        }
+      }
+    },
+  },
+  {
     name: "streams one head, then chunks, then exactly one settle: for an answer and for every kind of refusal",
     async run(world) {
       for (const row of served(world)) {
@@ -189,8 +223,9 @@ const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
   {
     name: "sends a call to no host but the row's, whatever the frame says: the destination is checked at the transport",
     async run(world) {
-      world.provider.reset();
       for (const row of served(world)) {
+        // One row at a time: every call of THIS row's frames must go to THIS row's host (a call that reaches some other row's host carries this row's key there).
+        world.provider.reset();
         const base = validFrame(row, world.connection);
         const hostile: Array<Record<string, unknown>> = [
           base,
@@ -202,18 +237,16 @@ const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
           { ...base, query: "url=https://evil.example.test" },
         ];
         for (const frame of hostile) await collect(world.adapter, world.scope(COMPANY_A, row.id), frame);
+        // Exactly two frames per row are well-formed (the plain one and the one with hostile host headers, which are dropped): nothing else got through.
+        expect(world.provider.calls, row.id).toHaveLength(2);
+        for (const call of world.provider.calls) {
+          expect(call.host, `row ${row.id} sent a call to ${call.host}`).toBe(expectedHost(row, world.connection));
+          expect(call.host).not.toContain("evil");
+          expect(JSON.stringify([call.path, call.query, call.headers])).not.toContain("evil.example.test");
+          expect(call.method).toBe("POST");
+          expect(call.path.startsWith("/")).toBe(true);
+        }
       }
-      expect(world.provider.calls.length).toBeGreaterThan(0);
-      for (const call of world.provider.calls) {
-        const owner = Object.values(world.rows).find((row) => expectedHost(row, world.connection) === call.host);
-        expect(owner, `a call went to ${call.host}, which no row serves`).toBeDefined();
-        expect(call.host).not.toContain("evil");
-        expect(JSON.stringify([call.path, call.query, call.headers])).not.toContain("evil.example.test");
-        expect(call.method).toBe("POST");
-        expect(call.path.startsWith("/")).toBe(true);
-      }
-      // Exactly two frames per row are well-formed (the plain one and the one with hostile host headers, which are dropped): nothing else got through.
-      expect(world.provider.calls).toHaveLength(served(world).length * 2);
     },
   },
   {
@@ -318,6 +351,74 @@ const ownChecks: ReadonlyArray<ContractCheck<ModelEgressWorld>> = [
         expect(answer.body).toContain("per task");
         expect(world.provider.calls).toHaveLength(0);
         await world.setCap(COMPANY_A, 1_000_000_000);
+      }
+    },
+  },
+  {
+    name: "sets the row's default maximum output when the request names none, so the provider's limit is the reserved number",
+    async run(world) {
+      for (const row of served(world)) {
+        world.provider.reset();
+        await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
+        const sent: unknown = JSON.parse(dec(world.provider.calls[0]!.body));
+        const limit = row.family === "gemini" || row.family === "vertex" ? at(sent, "generationConfig", "maxOutputTokens") : row.family === "anthropic_messages" ? at(sent, "max_tokens") : at(sent, "max_tokens");
+        // Anthropic's `max_tokens` is the client's own (the family requires it); every other family gets the row's default.
+        expect(limit, row.id).toBe(row.family === "anthropic_messages" ? 64 : row.defaultMaxOutputTokens);
+        // A limit the client set is the client's.
+        world.provider.reset();
+        await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection, "hi", { maxTokens: 33 }));
+        const own: unknown = JSON.parse(dec(world.provider.calls[0]!.body));
+        expect(row.family === "gemini" || row.family === "vertex" ? at(own, "generationConfig", "maxOutputTokens") : at(own, "max_tokens"), row.id).toBe(33);
+      }
+    },
+  },
+  {
+    name: "reserves for a request that names a file or cached content as if it were large, and refuses it when the cap cannot hold that",
+    async run(world) {
+      const row = served(world).find((candidate) => candidate.family === "gemini" || candidate.family === "vertex")!;
+      const frame = validFrame(row, world.connection);
+      const withFile = (key: "fileData" | "cachedContent"): Record<string, unknown> => {
+        const body = JSON.parse(dec(frame.body as Uint8Array)) as Record<string, unknown>;
+        const marked = key === "fileData" ? { ...body, contents: [{ parts: [{ fileData: { fileUri: "https://generativelanguage.googleapis.com/v1beta/files/abc", mimeType: "video/mp4" } }] }] } : { ...body, cachedContent: "cachedContents/abc" };
+        return { ...frame, body: enc(JSON.stringify(marked)) };
+      };
+      for (const key of ["fileData", "cachedContent"] as const) {
+        // The same request body without the file is small and cheap: only the reference makes the reservation large.
+        await world.setCap(COMPANY_A, 200_000);
+        world.provider.reset();
+        const plain = await collect(world.adapter, world.scope(COMPANY_A, row.id), frame);
+        expect(plain.settle?.class, "a small plain request fits a small cap").toBe("ok");
+        const refused = await collect(world.adapter, world.scope(COMPANY_A, row.id), withFile(key));
+        expect(refused.status, key).toBe(429);
+        expect(refused.settle, key).toMatchObject({ class: "cap", refusal: "cap", costMicros: 0 });
+        expect(world.provider.calls, `${key}: the provider must not be called`).toHaveLength(1);
+        await world.setCap(COMPANY_A, 1_000_000_000);
+        const allowed = await collect(world.adapter, world.scope(COMPANY_A, row.id), withFile(key));
+        expect(allowed.settle?.class, key).toBe("ok");
+      }
+    },
+  },
+  {
+    name: "after a call settles above its reservation the task takes no further call: 'budget exceeded by one call'",
+    async run(world) {
+      for (const row of served(world)) {
+        world.provider.reset();
+        const huge = 50_000_000;
+        const usage: Record<string, unknown> =
+          row.family === "gemini" || row.family === "vertex" ? { usageMetadata: { promptTokenCount: huge, candidatesTokenCount: 1 } }
+          : row.family === "anthropic_messages" ? { usage: { input_tokens: huge, output_tokens: 1 } }
+          : row.family === "cohere" ? { meta: { billed_units: { input_tokens: huge, output_tokens: 1 } } }
+          : { usage: { prompt_tokens: huge, completion_tokens: 1 } };
+        world.provider.script({ body: JSON.stringify(usage) });
+        const first = await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
+        expect(first.settle, row.id).toMatchObject({ class: "ok", overrun: true });
+        const second = await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
+        expect(second.status, row.id).toBe(429);
+        expect(second.settle, row.id).toMatchObject({ class: "cap", refusal: "cap", costMicros: 0 });
+        expect(second.body).toContain("budget exceeded by one call");
+        expect(world.provider.calls, `${row.id}: the second call must not reach the provider`).toHaveLength(1);
+        // Another company's task is unaffected.
+        expect((await collect(world.adapter, world.scope(COMPANY_B, row.id), validFrame(row, world.connection))).settle?.class).toBe("ok");
       }
     },
   },

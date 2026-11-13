@@ -27,16 +27,50 @@ export function capSentence(capMicros?: number): string {
 const BODY_READ_MAX = 64 * 1024;
 
 const QUOTA_WORDS = /insufficient_quota|credit balance is too low|billing details|per ?day|daily|spending cap|prepayment|out of credits/iu;
-const RATE_WORDS = /rate_limit|rate limit|per ?minute|too many requests|retry/iu;
 /** Google words its free-tier per-minute limit like its billing limit ("check your plan and billing details"): a per-minute quota id wins. */
 const PER_MINUTE = /per ?minute/iu;
-
 const OVERLOADED_WORDS = /overloaded/iu;
+const CREDIT_BALANCE = /credit balance is too low/iu;
+
+type Rec = Record<string, unknown>;
+const rec = (value: unknown): Rec | undefined => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Rec) : undefined);
+const own = (object: Rec | undefined, key: string): unknown => (object !== undefined && Object.hasOwn(object, key) ? object[key] : undefined);
+const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+/** The structured fields of a provider error body: OpenAI `error.type` and `error.code`, Anthropic's envelope (`type: "error"` and `error.type`), Google `error.status` and `error.details[].reason`. Free text is kept apart. */
+interface ErrorFields {
+  readonly type?: string;
+  readonly code?: string;
+  readonly status?: string;
+  readonly reasons: readonly string[];
+  readonly anthropicEnvelope: boolean;
+  readonly message?: string;
+}
+function errorFields(text: string): ErrorFields {
+  try {
+    const top = rec(JSON.parse(text) as unknown);
+    const error = rec(own(top, "error"));
+    const details = own(error, "details");
+    const reasons = Array.isArray(details) ? (details as unknown[]).map((detail) => str(own(rec(detail), "reason"))).filter((reason): reason is string => reason !== undefined) : [];
+    const code = own(error, "code");
+    return {
+      ...(str(own(error, "type")) === undefined ? {} : { type: str(own(error, "type")) as string }),
+      ...(typeof code === "string" ? { code } : typeof code === "number" ? { code: String(code) } : {}),
+      ...(str(own(error, "status")) === undefined ? {} : { status: str(own(error, "status")) as string }),
+      reasons,
+      anthropicEnvelope: own(top, "type") === "error" && str(own(error, "type")) !== undefined,
+      ...(str(own(error, "message")) === undefined ? {} : { message: str(own(error, "message")) as string }),
+    };
+  } catch {
+    return { reasons: [], anthropicEnvelope: false };
+  }
+}
 
 /**
- * The class of a provider's answer. 401 and 403 are the key being refused. A 429 (or a quota message on any 4xx: Anthropic answers an empty balance with a 400) is `quota` when the body says the quota or balance is used up
- * (OpenAI `insufficient_quota`, Anthropic "credit balance is too low", Google daily or billing quota) and `rate_limit` otherwise (Google `RESOURCE_EXHAUSTED` with a per-minute message, Anthropic `rate_limit_error`). 529, 503 and an
- * `overloaded_error` body are `overloaded`. Any other non-2xx is `provider_error`. The body is read as text, bounded, never parsed as trusted structure.
+ * The class of a provider's answer. 401 and 403 are the key being refused. The WORD rules (free text) apply only to 429, 503 and 529: a 429 is `quota` when the body says the quota or balance is used up (OpenAI `insufficient_quota`,
+ * Google daily or billing quota) and `rate_limit` otherwise (Google `RESOURCE_EXHAUSTED` per minute, Anthropic `rate_limit_error`); 529, 503 and an `overloaded` body on those statuses are `overloaded`. On every other status only
+ * STRUCTURED fields count: Google's `API_KEY_INVALID` reason is `key_refused`; `error.type` `overloaded_error` / `rate_limit_error`, `error.code` `insufficient_quota` / `rate_limit_exceeded`, Google `RESOURCE_EXHAUSTED`, and
+ * Anthropic's structured credit-balance error (a 400 in its `type: "error"` envelope) are read; free text in a 400, 402, 404, 413 or 500 never reclassifies a failure. Any other non-2xx is `provider_error`. The body is bounded.
  */
 export function classifyProviderResponse(args: { readonly status: number; readonly body?: Uint8Array | string }): ModelEgressClass {
   const { status } = args;
@@ -44,12 +78,20 @@ export function classifyProviderResponse(args: { readonly status: number; readon
   if (status >= 200 && status < 300) return "ok";
   if (status === 401 || status === 403) return "key_refused";
   const text = args.body === undefined ? "" : typeof args.body === "string" ? args.body.slice(0, BODY_READ_MAX) : new TextDecoder().decode(args.body.subarray(0, BODY_READ_MAX));
-  if (status === 529 || status === 503 || OVERLOADED_WORDS.test(text)) return "overloaded";
-  if (status === 429 || /RESOURCE_EXHAUSTED/u.test(text) || QUOTA_WORDS.test(text)) {
+  if (status === 529 || status === 503) return "overloaded";
+  if (status === 429) {
+    if (OVERLOADED_WORDS.test(text)) return "overloaded";
     if (PER_MINUTE.test(text)) return "rate_limit";
     if (QUOTA_WORDS.test(text)) return "quota";
-    if (status === 429 || RATE_WORDS.test(text)) return "rate_limit";
+    return "rate_limit";
   }
+  const fields = errorFields(text);
+  if (fields.reasons.includes("API_KEY_INVALID")) return "key_refused";
+  if (fields.type === "overloaded_error") return "overloaded";
+  if (fields.type === "rate_limit_error" || fields.code === "rate_limit_exceeded") return "rate_limit";
+  if (fields.type === "insufficient_quota" || fields.code === "insufficient_quota") return "quota";
+  if (fields.status === "RESOURCE_EXHAUSTED") return PER_MINUTE.test(fields.message ?? "") ? "rate_limit" : QUOTA_WORDS.test(fields.message ?? "") ? "quota" : "rate_limit";
+  if (status === 400 && fields.anthropicEnvelope && fields.type === "invalid_request_error" && CREDIT_BALANCE.test(fields.message ?? "")) return "quota";
   return "provider_error";
 }
 

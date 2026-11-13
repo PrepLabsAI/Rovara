@@ -39,6 +39,9 @@ const KILLERS: Array<[ModelEgressMutation, RegExp]> = [
   ["reservation_released_on_cut", /cut-off stream keeps its reservation/u],
   ["unfiltered_headers", /only allow-listed response headers/u],
   ["pass_redirect", /never follows or passes on a provider redirect/u],
+  ["default_company_on_broken_scope", /fails closed when the company cannot be resolved/u],
+  ["no_overrun_block", /takes no further call/u],
+  ["wrong_row_host", /no host but the row's/u],
 ];
 
 describe("the suite fails on an adapter with one defect", () => {
@@ -48,6 +51,13 @@ describe("the suite fails on an adapter with one defect", () => {
       expect(failed.some((name) => killer.test(name)), `failed checks: ${JSON.stringify(failed)}`).toBe(true);
     }, 30_000);
   }
+  it("a world that serves two companies and supplies no brokenScope FAILS the fail-closed check; a one-company world without it passes", async () => {
+    const check = modelEgressChecks.find((entry) => /fails closed when the company cannot be resolved/u.test(entry.name))!;
+    const two = { ...fakeModelEgressWorld(), brokenScope: undefined };
+    await expect(check.run(two)).rejects.toThrow(/must supply brokenScope/u);
+    const { isolation: _dropped, ...oneCompany } = { ...fakeModelEgressWorld(), brokenScope: undefined };
+    await expect(check.run(oneCompany)).resolves.toBeUndefined();
+  });
   it("passes every check on the honest adapter, so each failure above is the defect's", async () => {
     const failed: string[] = [];
     for (const check of modelEgressChecks) {

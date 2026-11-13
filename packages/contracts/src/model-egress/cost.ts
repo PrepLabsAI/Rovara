@@ -6,6 +6,8 @@ export const MICROS_PER_USD = 1_000_000;
 /** What a model with no price (and a row with no fallback) is reserved at: $100 per million tokens each way. High on purpose: an unpriced model is charged its full reservation and marked estimated. */
 export const UNPRICED_CEILING_RATES: ModelEgressPriceRates = { inputMicrosPerMTok: 100_000_000, outputMicrosPerMTok: 100_000_000 };
 /** The most output tokens a request may name before the row's default is used instead: a larger number is not a plausible limit and would only make the estimate meaningless. */
+/** What a request that names a file or cached content reserves as input when its row sets nothing: two million tokens, above the longest context a model serves today. */
+export const DEFAULT_EXTERNAL_INPUT_RESERVE_TOKENS = 2_000_000;
 export const MAX_REQUESTED_OUTPUT_TOKENS = 1_000_000_000;
 
 const isWholeNumber = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -57,8 +59,61 @@ export function requestedMaxOutputTokens(family: ModelEgressFamily, body: Uint8A
       : family === "openai_compatible"
         ? [own(parsed, "max_completion_tokens"), own(parsed, "max_tokens"), own(parsed, "max_output_tokens")]
         : [own(parsed, "max_tokens")];
-  const found = candidates.find((value) => isWholeNumber(value) && value > 0 && value <= MAX_REQUESTED_OUTPUT_TOKENS);
-  return found as number | undefined;
+  // The HIGHEST plausible figure among the fields a body names (conflicting fields: the provider may honour any one of them), so the reservation never rests on the smallest.
+  const plausible = candidates.filter((value): value is number => isWholeNumber(value) && value > 0 && value <= MAX_REQUESTED_OUTPUT_TOKENS);
+  return plausible.length === 0 ? undefined : Math.max(...plausible);
+}
+
+/** The request keys that hand the provider input the body does not hold: an uploaded file, a cached context. Their size is unknown to the proxy, so the reservation does not rest on the body's size. */
+const EXTERNAL_INPUT_KEYS = new Set(["fileData", "file_data", "fileUri", "file_uri", "cachedContent", "cached_content", "file_id", "fileId"]);
+const EXTERNAL_SCAN_MAX_NODES = 200_000;
+const EXTERNAL_SCAN_MAX_DEPTH = 64;
+
+/** Whether a JSON request names a file or cached content anywhere in it (any depth, any spelling). False for a body that is not JSON. Bounded: a body too deep or too big to scan counts as holding one (fail high). */
+export function hasExternalInput(body: Uint8Array | string): boolean {
+  const parsed = parseJsonObject(body);
+  if (parsed === undefined) return false;
+  let nodes = 0;
+  const visit = (value: unknown, depth: number): boolean => {
+    nodes += 1;
+    if (nodes > EXTERNAL_SCAN_MAX_NODES || depth > EXTERNAL_SCAN_MAX_DEPTH) return true;
+    if (Array.isArray(value)) return value.some((item) => visit(item, depth + 1));
+    const object = asRecord(value);
+    if (object === undefined) return false;
+    return Object.keys(object).some((key) => EXTERNAL_INPUT_KEYS.has(key) || visit(object[key], depth + 1));
+  };
+  return visit(parsed, 0);
+}
+
+/**
+ * The request with the row's default maximum output set when it names none (so the reservation and the provider's own limit are the same number). Only for operations that generate an answer: chat completions and Responses (OpenAI shape),
+ * `generateContent` and its stream (Gemini, Vertex), chat (Cohere). Anthropic always sets `max_tokens`. A body that is not a JSON object is left as it is. The body that is forwarded is the re-serialised one, so what the proxy priced
+ * is what the provider reads (a duplicate key cannot mean two things).
+ */
+export function withDefaultMaxOutput(family: ModelEgressFamily, operation: string, body: Uint8Array, defaultMax: number): { readonly body: Uint8Array; readonly injected: boolean } {
+  const parsed = parseJsonObject(body);
+  if (parsed === undefined || !isWholeNumber(defaultMax) || defaultMax < 1) return { body, injected: false };
+  const next: Record<string, unknown> = { ...parsed };
+  const set = (object: Record<string, unknown>, key: string): boolean => {
+    if (Object.hasOwn(object, key)) return false;
+    Object.defineProperty(object, key, { value: defaultMax, enumerable: true, writable: true, configurable: true });
+    return true;
+  };
+  let injected = false;
+  if (family === "openai_compatible") {
+    const named = ["max_tokens", "max_completion_tokens", "max_output_tokens"].some((key) => Object.hasOwn(parsed, key));
+    if (operation === "chat/completions" && !named) injected = set(next, "max_tokens");
+    else if (operation === "responses" && !named) injected = set(next, "max_output_tokens");
+  } else if ((family === "gemini" || family === "vertex") && (operation === "generateContent" || operation === "streamGenerateContent")) {
+    const config = { ...(asRecord(own(parsed, "generationConfig")) ?? {}) };
+    if (set(config, "maxOutputTokens")) {
+      Object.defineProperty(next, "generationConfig", { value: config, enumerable: true, writable: true, configurable: true });
+      injected = true;
+    }
+  } else if (family === "cohere" && operation === "chat" && !Object.hasOwn(parsed, "max_tokens")) {
+    injected = set(next, "max_tokens");
+  }
+  return injected ? { body: new TextEncoder().encode(JSON.stringify(next)), injected } : { body, injected: false };
 }
 
 /** The model a request names in its body (every family but Gemini and Vertex, which name it in the path). */
@@ -80,14 +135,17 @@ export interface CostReservation {
 
 /** The reservation for one call: input bytes / 4 (rounded up) tokens at the input rate, plus the request's maximum output tokens (or the row's default) at the output rate. */
 export function reserveEstimate(args: {
-  readonly row: Pick<ModelEgressRow, "prices" | "fallbackPrice" | "defaultMaxOutputTokens">;
+  readonly row: Pick<ModelEgressRow, "prices" | "fallbackPrice" | "defaultMaxOutputTokens"> & { readonly externalInputReserveTokens?: number | undefined };
   readonly model: string | undefined;
   readonly inputBytes: number;
   readonly maxOutputTokens: number | undefined;
+  /** The request names a file or cached content (`hasExternalInput`): its input is unknown, so the input estimate is at least the row's external-input reservation. */
+  readonly externalInput?: boolean;
 }): CostReservation {
   if (!isWholeNumber(args.inputBytes)) throw new RangeError("the input size must be a whole number");
   const { rates, priced } = priceFor(args.row, args.model);
-  const inputTokens = Math.ceil(args.inputBytes / 4);
+  const bodyTokens = Math.ceil(args.inputBytes / 4);
+  const inputTokens = args.externalInput === true ? Math.max(bodyTokens, args.row.externalInputReserveTokens ?? DEFAULT_EXTERNAL_INPUT_RESERVE_TOKENS) : bodyTokens;
   const outputTokens =
     args.maxOutputTokens !== undefined && isWholeNumber(args.maxOutputTokens) && args.maxOutputTokens > 0 && args.maxOutputTokens <= MAX_REQUESTED_OUTPUT_TOKENS ? args.maxOutputTokens : args.row.defaultMaxOutputTokens;
   const reserveMicros = microsFor(inputTokens, rates.inputMicrosPerMTok) + microsFor(outputTokens, rates.outputMicrosPerMTok);
@@ -95,7 +153,12 @@ export function reserveEstimate(args: {
   return { reserveMicros, inputTokens, outputTokens, rates, priced };
 }
 
+/** The words for the call after an overrun, fixed in code. */
+export const MODEL_EGRESS_OVERRUN_SENTENCE = "budget exceeded by one call";
+
 export interface CostSettlement {
+  /** True when the settled cost is ABOVE what was reserved: the cap was overrun by this call, and the task takes no further call. */
+  readonly overrun: boolean;
   readonly costMicros: number;
   /** True when the cost is the reservation, not the provider's report: an unpriced model, a call with no usage, a stream that was cut off. */
   readonly estimated: boolean;
@@ -107,9 +170,9 @@ export interface CostSettlement {
  */
 export function settleCost(args: { readonly reservation: CostReservation; readonly usage: { readonly inputTokens: number; readonly outputTokens: number } | undefined; readonly complete: boolean }): CostSettlement {
   const { reservation, usage, complete } = args;
-  if (usage === undefined || !isWholeNumber(usage.inputTokens) || !isWholeNumber(usage.outputTokens) || !reservation.priced) return { costMicros: reservation.reserveMicros, estimated: true };
+  if (usage === undefined || !isWholeNumber(usage.inputTokens) || !isWholeNumber(usage.outputTokens) || !reservation.priced) return { costMicros: reservation.reserveMicros, estimated: true, overrun: false };
   const actual = microsFor(usage.inputTokens, reservation.rates.inputMicrosPerMTok) + microsFor(usage.outputTokens, reservation.rates.outputMicrosPerMTok);
-  if (!Number.isSafeInteger(actual)) return { costMicros: reservation.reserveMicros, estimated: true };
-  if (!complete) return { costMicros: Math.max(actual, reservation.reserveMicros), estimated: true };
-  return { costMicros: actual, estimated: false };
+  if (!Number.isSafeInteger(actual)) return { costMicros: reservation.reserveMicros, estimated: true, overrun: false };
+  if (!complete) return { costMicros: Math.max(actual, reservation.reserveMicros), estimated: true, overrun: actual > reservation.reserveMicros };
+  return { costMicros: actual, estimated: false, overrun: actual > reservation.reserveMicros };
 }

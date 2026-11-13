@@ -1,6 +1,6 @@
 // The fake `model-egress` adapter world: two companies that share the raw ids of their sources (each row's id), each with its own key, a source only each owns, and the in-process adapter from `model-egress-fake.ts` over a fake
 // provider. Used by the conformance suite in this lane's CI; a real adapter writes its own world with the same shape.
-import type { ModelEgressRow } from "@agentx/contracts";
+import type { ModelEgressRow, ModelEgressScope } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B, TWO_COMPANIES, type IsolationCompany } from "../isolation/two-company.js";
 import { createFakeEgress, createFakeProvider, fakeMintedToken, fakeScope, type FakeSource, type ModelEgressMutation } from "./model-egress-fake.js";
 import { FIXTURE_VERTEX_CONNECTION, fixtureEgressRows, fixtureKey } from "./model-egress-fixtures.js";
@@ -29,6 +29,18 @@ export function fakeModelEgressWorld(mutation?: ModelEgressMutation): ModelEgres
     connection: FIXTURE_VERTEX_CONNECTION,
     scope: (company, sourceId) => fakeScope(company.orgId, sourceId),
     privateSource: (company) => PRIVATE[company.label],
+    brokenScope(mode) {
+      switch (mode) {
+        case "throws":
+          return Object.defineProperties({}, { company: { get: () => { throw new Error("the company resolver failed"); } }, source: { get: () => { throw new Error("the company resolver failed"); } } }) as unknown as ModelEgressScope;
+        case "undefined":
+          return undefined as unknown as ModelEgressScope;
+        case "empty":
+          return {} as unknown as ModelEgressScope;
+        case "no_company":
+          return { source: "gemini" } as unknown as ModelEgressScope;
+      }
+    },
     credentialOf(company, rowId) {
       const row = rows[rowId as keyof typeof rows] ?? rowsList.find((candidate) => candidate.id === rowId)!;
       return isToken(row) ? fakeMintedToken(company.orgId, row.id) : keyOf(company, row.id);

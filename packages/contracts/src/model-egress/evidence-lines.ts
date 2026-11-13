@@ -37,6 +37,15 @@ const CLASS_ORDER: readonly ModelEgressNotRunClass[] = ["cap", "key_refused", "r
  * Never throws; a malformed ledger gives fewer lines, never an invented one. No returned line has "sealed" without "not " before it.
  */
 export function evidenceLinesFor(roundKind: ModelEgressRoundKind, ledger: ModelEgressLedger): string[] {
+  try {
+    return linesFor(roundKind, typeof ledger === "object" && ledger !== null ? ledger : {});
+  } catch {
+    // Never throws: a ledger that cannot be read (a hostile getter) still gives the residual line for any round that is not the sealed one, and nothing invented.
+    return roundKind === "check_sealed" ? [] : [NOT_SEALED_BLOCKED_BY_NAME_SENTENCE];
+  }
+}
+
+function linesFor(roundKind: ModelEgressRoundKind, ledger: Partial<ModelEgressLedger>): string[] {
   const lines: string[] = [];
   if (roundKind !== "check_sealed") lines.push(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
   const reported: readonly unknown[] = Array.isArray(ledger.classes) ? (ledger.classes as readonly unknown[]) : [];

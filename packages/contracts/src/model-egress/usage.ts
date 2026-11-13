@@ -15,18 +15,31 @@ export const MODEL_USAGE_SCAN_MAX_CHARS = 8 * 1024 * 1024;
 type Rec = Record<string, unknown>;
 const rec = (value: unknown): Rec | undefined => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Rec) : undefined);
 const field = (object: Rec | undefined, key: string): unknown => (object !== undefined && Object.hasOwn(object, key) ? object[key] : undefined);
-const count = (value: unknown): number | undefined => (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_TOKENS ? value : undefined);
 const sum = (...values: Array<number | undefined>): number | undefined => (values.every((value) => value === undefined) ? undefined : values.reduce<number>((total, value) => total + (value ?? 0), 0));
 
 interface Partial2 {
   input?: number;
   output?: number;
+  /** A count was PRESENT but not a whole number of a plausible size (negative, fractional, over 10^10, not a number): the whole report is then not credible and settles as no usage, never as a smaller one. */
+  bad?: boolean;
 }
 
 /** The usage one parsed JSON value carries, for the family. Fields it does not carry are undefined. */
 export function usageFromJson(family: ModelEgressFamily, value: unknown): Partial2 {
   const top = rec(value);
   if (top === undefined) return {};
+  let bad = false;
+  const count = (held: unknown): number | undefined => {
+    if (held === undefined) return undefined;
+    if (typeof held === "number" && Number.isSafeInteger(held) && held >= 0 && held <= MAX_TOKENS) return held;
+    bad = true;
+    return undefined;
+  };
+  const result = usageOf(family, top, count);
+  return bad ? { ...result, bad: true } : result;
+}
+
+function usageOf(family: ModelEgressFamily, top: Rec, count: (held: unknown) => number | undefined): Partial2 {
   switch (family) {
     case "openai_compatible": {
       // Chat completions: `usage.prompt_tokens`/`completion_tokens`; Responses and embeddings: `usage.input_tokens`/`output_tokens`; a Responses stream event nests it in `response.usage`.
@@ -71,7 +84,7 @@ export function usageFromJson(family: ModelEgressFamily, value: unknown): Partia
   }
 }
 
-const complete = (partial: Partial2): ModelEgressUsage | undefined => (partial.input === undefined && partial.output === undefined ? undefined : { inputTokens: partial.input ?? 0, outputTokens: partial.output ?? 0 });
+const complete = (partial: Partial2): ModelEgressUsage | undefined => (partial.bad === true || (partial.input === undefined && partial.output === undefined) ? undefined : { inputTokens: partial.input ?? 0, outputTokens: partial.output ?? 0 });
 
 /** The usage in one whole (non-streamed) JSON body. Undefined when the body is not JSON or reports none. */
 export function usageFromBody(family: ModelEgressFamily, body: Uint8Array | string): ModelEgressUsage | undefined {
@@ -88,7 +101,7 @@ export function usageFromBody(family: ModelEgressFamily, body: Uint8Array | stri
   }
 }
 
-const definedOnly = (partial: Partial2): Partial2 => ({ ...(partial.input === undefined ? {} : { input: partial.input }), ...(partial.output === undefined ? {} : { output: partial.output }) });
+const definedOnly = (partial: Partial2): Partial2 => ({ ...(partial.input === undefined ? {} : { input: partial.input }), ...(partial.output === undefined ? {} : { output: partial.output }), ...(partial.bad === true ? { bad: true } : {}) });
 
 export interface UsageScanner {
   push(chunk: Uint8Array | string): void;

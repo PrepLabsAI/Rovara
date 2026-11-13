@@ -48,6 +48,8 @@ export interface ModelEgressSettle {
   /** Micro-dollars settled on the meter (the reservation when `estimated`). 0 for a refusal that reserved nothing. */
   readonly costMicros: number;
   readonly estimated: boolean;
+  /** This call settled above its reservation: the task takes no further call ("budget exceeded by one call"). */
+  readonly overrun?: boolean;
 }
 
 export type ModelEgressEvent = ModelEgressHead | ModelEgressChunk | ModelEgressSettle;

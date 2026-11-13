@@ -85,12 +85,19 @@ describe("query keys", () => {
     for (const query of ["foo=1", "access_token=x", "api_key=x", "apikey=x", "alt=sse&foo=1", "%256bey=x", "api-version=2024-06-01"]) expect(refusal(route(rows.gemini, path, { query })), query).toBe("not_allowed");
     expect(refusal(route(rows.openai, "/v1/chat/completions", { query: "alt=sse" }))).toBe("not_allowed");
   });
+  it("holds query values to letters, digits, underscore and hyphen (with the one legacy Gemini value spelled exactly)", () => {
+    for (const value of ["a.b", "a~b", "a,b", "a:b", "a;b", "a=b", "a/b", "a+b", "a*b", "json;enum-encoding=str", "json;enum-encoding=int;x"]) expect(refusal(route(rows.gemini, "/v1beta/models/m:streamGenerateContent", { query: `alt=${value}` })), value).toBe("bad_request");
+    for (const value of ["sse", "json", "a_b-C9", ""]) expect(route(rows.gemini, "/v1beta/models/m:streamGenerateContent", { query: `alt=${value}` }).ok, value).toBe(true);
+    expect(route(rows.gemini, "/v1beta/models/m:streamGenerateContent", { query: "%24alt=json;enum-encoding=int" }).ok).toBe(true);
+    expect(route(rows.gemini, "/v1beta/models/m:streamGenerateContent", { query: "alt=json;enum-encoding=int" }).ok).toBe(true);
+    expect(refusal(route(rows.azure, "/openai/deployments/fixture-small/chat/completions", { query: "api-version=2024.06.01" }))).toBe("bad_request");
+  });
   it("refuses a second question mark, a fragment, a duplicate allowed key, a percent value and an over-long query", () => {
     for (const query of ["alt=sse?x", "alt=sse#x", "alt=sse&alt=json", "alt=%73se", "alt=a b"]) expect(refusal(route(rows.gemini, path, { query })), query).toBe("bad_request");
     expect(refusal(route(rows.gemini, path, { query: `alt=${"a".repeat(2000)}` }))).toBe("too_large");
   });
   it("an Azure row requires its own api-version", () => {
-    const deployment = "/openai/deployments/fixture-deployment/chat/completions";
+    const deployment = "/openai/deployments/fixture-small/chat/completions";
     expect(route(rows.azure, deployment, { query: "api-version=2024-06-01" }).ok).toBe(true);
     expect(refusal(route(rows.azure, deployment))).toBe("not_allowed");
     expect(refusal(route(rows.azure, deployment, { query: "api-version=2023-01-01" }))).toBe("not_allowed");
@@ -145,7 +152,7 @@ describe("the family path allow lists", () => {
     for (const path of ["/v1/classify", "/v3/chat", "/v1/datasets"]) expect(refusal(route(rows.cohere, path)), path).toBe("not_allowed");
   });
   it("Azure: the host is the connected resource's own, under the row's suffix, and nothing else", () => {
-    const deployment = "/openai/deployments/fixture-deployment/chat/completions";
+    const deployment = "/openai/deployments/fixture-small/chat/completions";
     const frameOf = frame(rows.azure, { path: deployment, query: "api-version=2024-06-01" });
     const ok = routeEgressRequest(rows.azure, FIXTURE_VERTEX_CONNECTION, frameOf);
     expect(ok.ok && ok.host).toBe("fixture-resource.openai.azure.com");
@@ -156,7 +163,7 @@ describe("the family path allow lists", () => {
     }
   });
   it("Azure: the connected deployment path only", () => {
-    expect(route(rows.azure, "/openai/deployments/fixture-deployment/chat/completions", { query: "api-version=2024-06-01" }).ok).toBe(true);
+    expect(route(rows.azure, "/openai/deployments/fixture-small/chat/completions", { query: "api-version=2024-06-01" }).ok).toBe(true);
     expect(refusal(route(rows.azure, "/openai/deployments/another/chat/completions", { query: "api-version=2024-06-01" }))).toBe("not_allowed");
     expect(refusal(route(rows.azure, "/v1/chat/completions", { query: "api-version=2024-06-01" }))).toBe("not_allowed");
   });
@@ -205,7 +212,7 @@ describe("header injection", () => {
     ["bearer", rows.openai, "/v1/chat/completions", "authorization"],
     ["header:x-goog-api-key", rows.gemini, "/v1beta/models/m:generateContent", "x-goog-api-key"],
     ["header:x-api-key", rows.anthropic, "/v1/messages", "x-api-key"],
-    ["header:api-key", rows.azure, "/openai/deployments/fixture-deployment/chat/completions", "api-key"],
+    ["header:api-key", rows.azure, "/openai/deployments/fixture-small/chat/completions", "api-key"],
     ["gcp-oauth:federation", rows.vertex, "/v1/projects/fixture-project-1/locations/us-central1/publishers/google/models/m:generateContent", "authorization"],
     ["gcp-oauth:key-file", { ...rows.vertex, scheme: "gcp-oauth:key-file" }, "/v1/projects/fixture-project-1/locations/us-central1/publishers/google/models/m:generateContent", "authorization"],
   ];
@@ -296,5 +303,33 @@ describe("header injection", () => {
     const big = new Uint8Array(5 * 1024 * 1024);
     const built = buildOutboundRequest(rows.openai, {}, frame(rows.openai, { path: "/v1/chat/completions", body: big }), fixtureKey("k"));
     expect(built.ok && built.request.body).toBe(big);
+  });
+  it("sets the row's default maximum output in the forwarded body when the request names none, reserving on the same number", () => {
+    const sent = (row: ModelEgressRow, path: string, body: unknown) => {
+      const built = buildOutboundRequest(row, FIXTURE_VERTEX_CONNECTION, frame(row, { path, body: new TextEncoder().encode(JSON.stringify(body)) }), fixtureKey("k"));
+      if (!built.ok) throw new Error(built.refusal);
+      return { built, body: JSON.parse(new TextDecoder().decode(built.request.body)) as Record<string, unknown> };
+    };
+    const gemini = sent(rows.gemini, "/v1beta/models/x:generateContent", { contents: [] });
+    expect(gemini.built.maxOutputTokens).toBe(rows.gemini.defaultMaxOutputTokens);
+    expect((gemini.body.generationConfig as Record<string, unknown>).maxOutputTokens).toBe(rows.gemini.defaultMaxOutputTokens);
+    const openai = sent(rows.openai, "/v1/chat/completions", { model: "m", messages: [] });
+    expect(openai.built.maxOutputTokens).toBe(rows.openai.defaultMaxOutputTokens);
+    expect(openai.body.max_tokens).toBe(rows.openai.defaultMaxOutputTokens);
+    const own = sent(rows.openai, "/v1/chat/completions", { model: "m", messages: [], max_tokens: 33 });
+    expect(own.built.maxOutputTokens).toBe(33);
+    expect(own.body.max_tokens).toBe(33);
+    // Duplicate keys cannot mean two things: the forwarded body is the one that was priced.
+    const duplicate = buildOutboundRequest(rows.openai, {}, frame(rows.openai, { path: "/v1/chat/completions", body: new TextEncoder().encode('{"model":"fixture-small","model":"unpriced-model","messages":[]}') }), fixtureKey("k"));
+    expect(duplicate.ok && new TextDecoder().decode(duplicate.request.body).match(/"model"/gu)?.length).toBe(1);
+  });
+  it("reports a file or cached-content reference so the reservation does not rest on the body's size", () => {
+    const flag = (body: unknown) => {
+      const built = buildOutboundRequest(rows.gemini, {}, frame(rows.gemini, { path: "/v1beta/models/x:generateContent", body: new TextEncoder().encode(JSON.stringify(body)) }), fixtureKey("k"));
+      return built.ok && built.externalInput;
+    };
+    expect(flag({ contents: [{ parts: [{ fileData: { fileUri: "x" } }] }] })).toBe(true);
+    expect(flag({ cachedContent: "cachedContents/1", contents: [] })).toBe(true);
+    expect(flag({ contents: [{ parts: [{ text: "plain" }] }] })).toBe(false);
   });
 });

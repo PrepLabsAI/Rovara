@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   MODEL_EGRESS_REFUSALS, MODEL_EGRESS_REFUSAL_HEADER, MODEL_EGRESS_REFUSAL_WORDS, NOT_RUN_SENTENCES, UNPRICED_CEILING_RATES, capSentence, classOfRefusal, classifyOwnResponse, classifyProviderResponse, createKeyEchoScanner,
   createUsageScanner, e2eSecretSpellings, formatUsdMicros, keyEchoNeedles, microsFor, modelOfBody, refusalResponse, requestedMaxOutputTokens, reserveEstimate, sanitizeResponseHeaders, scrubResponseBody, settleCost,
-  usageFromBody, withheldBody, type ModelEgressFamily,
+  usageFromBody, withheldBody, withDefaultMaxOutput, hasExternalInput, MODEL_EGRESS_OVERRUN_SENTENCE, type ModelEgressFamily,
 } from "@agentx/contracts";
 import { fixtureKey } from "../../packages/testing/src/ports/model-egress-fixtures.js";
 
@@ -122,6 +122,20 @@ describe("the key-echo scrub", () => {
         expect(result.hit, `cut at ${String(cut)}`).toBe(true);
         expect(result.out).not.toContain(key);
         expect(result.out).not.toContain(key.slice(0, 8));
+      }
+    });
+    it("finds EVERY spelling of the key (base64, base64url, hex, percent-encoded, JSON-escaped, and the alignment-independent base64 fragments) split across two chunks at every position, and releases none of it", () => {
+      const spellings = e2eSecretSpellings(key).filter((spelling) => spelling.length >= 12);
+      expect(spellings.length).toBeGreaterThanOrEqual(6);
+      for (const spelling of spellings) {
+        const text = `data: {"echo":"${spelling}"}\n\n`;
+        // A fragment of the middle of the spelling: if any of it is released, the key left the proxy.
+        const middle = spelling.slice(Math.floor(spelling.length / 2) - 5, Math.floor(spelling.length / 2) + 5);
+        for (let cut = 1; cut < text.length; cut += 1) {
+          const result = run([text.slice(0, cut), text.slice(cut)]);
+          expect(result.hit, `${spelling}, cut at ${String(cut)}`).toBe(true);
+          expect(result.out, `${spelling}, cut at ${String(cut)}`).not.toContain(middle);
+        }
       }
     });
     it("finds a key that is followed by far more text than the hold-back window, and releases none of it", () => {
@@ -261,6 +275,36 @@ describe("evidence classes", () => {
     for (const status of [400, 404, 422, 500, 502]) expect(cls(status, "{}")).toBe("provider_error");
     for (const status of [0, 99, 600, 12.5, Number.NaN]) expect(cls(status)).toBe("provider_error");
   });
+  it("free text in a 400, 402, 404, 413 or 500 never reclassifies a failure (the word rules are for 429, 503 and 529 only)", () => {
+    const text = (message: string) => JSON.stringify({ error: { message } });
+    expect(cls(400, text("invalid value for 'daily' in prompt"))).toBe("provider_error");
+    expect(cls(400, text("Your prompt 'my server is overloaded' is invalid"))).toBe("provider_error");
+    expect(cls(500, JSON.stringify({ error: "internal; please retry" }))).toBe("provider_error");
+    expect(cls(404, text("model not found; check billing details"))).toBe("provider_error");
+    expect(cls(402, JSON.stringify({ error: "payment required" }))).toBe("provider_error");
+    expect(cls(413, "too large; retry")).toBe("provider_error");
+    expect(cls(400, text("quota exceeded, insufficient_quota, rate limit"))).toBe("provider_error");
+    expect(cls(404, text("RESOURCE_EXHAUSTED"))).toBe("provider_error");
+    expect(cls(400, JSON.stringify({ error: { code: 400, message: "User location is not supported" } }))).toBe("provider_error");
+  });
+  it("uses structured fields on other statuses: error.type, error.code, status, and Google's API_KEY_INVALID reason", () => {
+    const keyInvalid = JSON.stringify({ error: { code: 400, message: "API key not valid. Please pass a valid API key.", status: "INVALID_ARGUMENT", details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "API_KEY_INVALID" }] } });
+    expect(cls(400, keyInvalid)).toBe("key_refused");
+    expect(cls(200 + 300, JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "x" } }))).toBe("overloaded");
+    expect(cls(400, JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "x" } }))).toBe("rate_limit");
+    expect(cls(400, JSON.stringify({ error: { code: "insufficient_quota", type: "insufficient_quota", message: "x" } }))).toBe("quota");
+    expect(cls(400, JSON.stringify({ error: { code: "rate_limit_exceeded", message: "x" } }))).toBe("rate_limit");
+    expect(cls(400, JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Quota exceeded for metric GenerateRequestsPerDayPerProjectPerModel" } }))).toBe("quota");
+    expect(cls(400, JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "quotaId: GenerateRequestsPerMinutePerProjectPerModel" } }))).toBe("rate_limit");
+    expect(cls(400, JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API." } }))).toBe("quota");
+    // The credit-balance sentence outside Anthropic's structured error is only free text.
+    expect(cls(400, JSON.stringify({ error: { message: "Your credit balance is too low" } }))).toBe("provider_error");
+    expect(cls(400, "Your credit balance is too low")).toBe("provider_error");
+    expect(cls(403, JSON.stringify({ error: { status: "PERMISSION_DENIED", message: "Quota exceeded" } }))).toBe("key_refused");
+  });
+  it("a hostile __proto__ in an error body reclassifies nothing", () => {
+    expect(cls(400, `{"error":{"__proto__":{"type":"overloaded_error"}}}`)).toBe("provider_error");
+  });
   it("reads only a bounded part of a huge body", () => {
     const huge = `${" ".repeat(100_000)}insufficient_quota`;
     expect(cls(429, huge)).toBe("rate_limit");
@@ -358,7 +402,7 @@ describe("cost", () => {
   });
   it("reads the request's maximum in the family's own field", () => {
     const body = (value: unknown) => enc(JSON.stringify(value));
-    expect(requestedMaxOutputTokens("openai_compatible", body({ max_completion_tokens: 50, max_tokens: 60 }))).toBe(50);
+    expect(requestedMaxOutputTokens("openai_compatible", body({ max_completion_tokens: 50, max_tokens: 60 }))).toBe(60);
     expect(requestedMaxOutputTokens("openai_compatible", body({ max_tokens: 60 }))).toBe(60);
     expect(requestedMaxOutputTokens("openai_compatible", body({ max_output_tokens: 70 }))).toBe(70);
     expect(requestedMaxOutputTokens("anthropic_messages", body({ max_tokens: 80 }))).toBe(80);
@@ -373,25 +417,25 @@ describe("cost", () => {
   });
   it("settles to the reported usage at the rates, for a complete answer", () => {
     const reservation = reserveEstimate({ row, model: "m", inputBytes: 4_000, maxOutputTokens: 2_000 });
-    expect(settleCost({ reservation, usage: { inputTokens: 100, outputTokens: 10 }, complete: true })).toEqual({ costMicros: 300 + 150, estimated: false });
+    expect(settleCost({ reservation, usage: { inputTokens: 100, outputTokens: 10 }, complete: true })).toMatchObject({ costMicros: 300 + 150, estimated: false });
   });
   it("a cut-off stream keeps its reservation: the meter errs high, never low", () => {
     const reservation = reserveEstimate({ row, model: "m", inputBytes: 4_000, maxOutputTokens: 2_000 });
-    expect(settleCost({ reservation, usage: undefined, complete: false })).toEqual({ costMicros: 33_000, estimated: true });
-    expect(settleCost({ reservation, usage: { inputTokens: 1, outputTokens: 1 }, complete: false })).toEqual({ costMicros: 33_000, estimated: true });
+    expect(settleCost({ reservation, usage: undefined, complete: false })).toMatchObject({ costMicros: 33_000, estimated: true });
+    expect(settleCost({ reservation, usage: { inputTokens: 1, outputTokens: 1 }, complete: false })).toMatchObject({ costMicros: 33_000, estimated: true });
     // Partial usage that is higher than the reservation is kept.
     expect(settleCost({ reservation, usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 }, complete: false }).costMicros).toBe(18_000_000);
   });
   it("an answer with no usage keeps the reservation, estimated", () => {
     const reservation = reserveEstimate({ row, model: "m", inputBytes: 400, maxOutputTokens: 100 });
-    expect(settleCost({ reservation, usage: undefined, complete: true })).toEqual({ costMicros: reservation.reserveMicros, estimated: true });
+    expect(settleCost({ reservation, usage: undefined, complete: true })).toMatchObject({ costMicros: reservation.reserveMicros, estimated: true });
   });
   it("an unpriced model is charged its full reservation and marked estimated, never zero", () => {
     const reservation = reserveEstimate({ row, model: "unknown-model", inputBytes: 4_000, maxOutputTokens: 1_000 });
     expect(reservation.priced).toBe(false);
     expect(reservation.reserveMicros).toBe(microsFor(1_000, UNPRICED_CEILING_RATES.inputMicrosPerMTok) + microsFor(1_000, UNPRICED_CEILING_RATES.outputMicrosPerMTok));
     expect(reservation.reserveMicros).toBeGreaterThan(0);
-    expect(settleCost({ reservation, usage: { inputTokens: 1, outputTokens: 1 }, complete: true })).toEqual({ costMicros: reservation.reserveMicros, estimated: true });
+    expect(settleCost({ reservation, usage: { inputTokens: 1, outputTokens: 1 }, complete: true })).toMatchObject({ costMicros: reservation.reserveMicros, estimated: true });
     const noModel = reserveEstimate({ row, model: undefined, inputBytes: 4, maxOutputTokens: 1 });
     expect(noModel.priced).toBe(false);
   });
@@ -414,5 +458,95 @@ describe("cost", () => {
     expect(formatUsdMicros(50_000_000)).toBe("$50.00");
     expect(formatUsdMicros(1_234_567)).toBe("$1.24");
     for (const bad of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => formatUsdMicros(bad)).toThrow(RangeError);
+  });
+  describe("the cap cannot be overrun by one call (review M1)", () => {
+    const fileBody = enc(JSON.stringify({ contents: [{ parts: [{ fileData: { fileUri: "https://generativelanguage.googleapis.com/v1beta/files/abc", mimeType: "video/mp4" } }] }] }));
+    const probeUsage = usageFromBody("gemini", JSON.stringify({ usageMetadata: { promptTokenCount: 900_000, candidatesTokenCount: 60_000, thoughtsTokenCount: 20_000 } }));
+    const large = { prices: [{ model: "fixture-large", inputMicrosPerMTok: 3_000_000, outputMicrosPerMTok: 15_000_000 }], defaultMaxOutputTokens: 1024, fallbackPrice: undefined };
+
+    it("the reviewer's probe: a file request used to reserve 15,462 micro-dollars and settle at 3,900,000; now the reservation holds it", () => {
+      const before = reserveEstimate({ row: large, model: "fixture-large", inputBytes: fileBody.byteLength, maxOutputTokens: undefined });
+      expect(before.reserveMicros).toBeLessThan(20_000); // what a body-size estimate alone gives: far below the real cost
+      const reservation = reserveEstimate({ row: large, model: "fixture-large", inputBytes: fileBody.byteLength, maxOutputTokens: undefined, externalInput: true });
+      expect(reservation.reserveMicros).toBeGreaterThanOrEqual(3_900_000);
+      const settled = settleCost({ reservation, usage: probeUsage, complete: true });
+      expect(settled.costMicros).toBe(3_900_000);
+      expect(settled.overrun).toBe(false);
+    });
+    it("a row setting names the reservation for external input; the default is two million tokens", () => {
+      const own = reserveEstimate({ row: { ...large, externalInputReserveTokens: 500_000 }, model: "fixture-large", inputBytes: 10, maxOutputTokens: 100, externalInput: true });
+      expect(own.inputTokens).toBe(500_000);
+      expect(reserveEstimate({ row: large, model: "fixture-large", inputBytes: 10, maxOutputTokens: 100, externalInput: true }).inputTokens).toBe(2_000_000);
+      // A body bigger than the setting keeps its own size.
+      expect(reserveEstimate({ row: { ...large, externalInputReserveTokens: 10 }, model: "fixture-large", inputBytes: 4_000, maxOutputTokens: 100, externalInput: true }).inputTokens).toBe(1_000);
+    });
+    it("sees file and cached-content references anywhere in a request, in every spelling", () => {
+      const has = (value: unknown) => hasExternalInput(enc(JSON.stringify(value)));
+      expect(has({ contents: [{ parts: [{ text: "a" }, { fileData: { fileUri: "x" } }] }] })).toBe(true);
+      expect(has({ contents: [{ parts: [{ file_data: { file_uri: "x" } }] }] })).toBe(true);
+      expect(has({ cachedContent: "cachedContents/abc", contents: [] })).toBe(true);
+      expect(has({ cached_content: "cachedContents/abc" })).toBe(true);
+      expect(has({ messages: [{ content: [{ type: "input_file", file_id: "file-1" }] }] })).toBe(true);
+      expect(has({ a: { b: { c: { d: [{ fileUri: "x" }] } } } })).toBe(true);
+      expect(has({ contents: [{ parts: [{ text: "mentions fileData and cachedContent only as text" }] }] })).toBe(false);
+      expect(hasExternalInput(enc("not json"))).toBe(false);
+      expect(hasExternalInput(enc(JSON.stringify({ a: 1 })))).toBe(false);
+    });
+    it("settling above the reservation is an overrun; settling at or below it is not", () => {
+      const reservation = reserveEstimate({ row: large, model: "fixture-large", inputBytes: 400, maxOutputTokens: 100 });
+      expect(settleCost({ reservation, usage: { inputTokens: 5_000_000, outputTokens: 1 }, complete: true })).toMatchObject({ overrun: true });
+      expect(settleCost({ reservation, usage: { inputTokens: 1, outputTokens: 1 }, complete: true }).overrun).toBe(false);
+      expect(settleCost({ reservation, usage: undefined, complete: false }).overrun).toBe(false);
+      expect(MODEL_EGRESS_OVERRUN_SENTENCE).toBe("budget exceeded by one call");
+      expect(dec(refusalResponse("gemini", "cap", { capMicros: 2_000_000, overrun: true }).body)).toContain("budget exceeded by one call");
+      expect(dec(refusalResponse("gemini", "cap", { capMicros: 2_000_000 }).body)).not.toContain("exceeded by one call");
+    });
+    it("injects the row's default maximum output when the request sets none, and leaves one it set alone", () => {
+      const parse = (bytes: Uint8Array) => JSON.parse(dec(bytes)) as Record<string, any>;
+      const inject = (family: ModelEgressFamily, operation: string, body: unknown) => withDefaultMaxOutput(family, operation, enc(JSON.stringify(body)), 777);
+      expect(parse(inject("openai_compatible", "chat/completions", { model: "m", messages: [] }).body).max_tokens).toBe(777);
+      expect(parse(inject("openai_compatible", "responses", { model: "m", input: "x" }).body).max_output_tokens).toBe(777);
+      expect(parse(inject("gemini", "generateContent", { contents: [] }).body).generationConfig.maxOutputTokens).toBe(777);
+      expect(parse(inject("vertex", "streamGenerateContent", { contents: [], generationConfig: { temperature: 0.2 } }).body).generationConfig).toEqual({ temperature: 0.2, maxOutputTokens: 777 });
+      expect(parse(inject("cohere", "chat", { model: "m", messages: [] }).body).max_tokens).toBe(777);
+      for (const [family, operation, body, field] of [
+        ["openai_compatible", "chat/completions", { max_tokens: 5 }, "max_tokens"], ["openai_compatible", "chat/completions", { max_completion_tokens: 5 }, "max_completion_tokens"], ["openai_compatible", "responses", { max_output_tokens: 5 }, "max_output_tokens"],
+      ] as const) {
+        const kept = inject(family, operation, body);
+        expect(kept.injected, `${family} ${operation}`).toBe(false);
+        expect(parse(kept.body)[field]).toBe(5);
+      }
+      expect(inject("gemini", "generateContent", { generationConfig: { maxOutputTokens: 9 } }).injected).toBe(false);
+      // Operations with no generated answer, Anthropic (max_tokens is required), and a body that is not a JSON object are left alone.
+      for (const [family, operation, body] of [["openai_compatible", "embeddings", { input: "x" }], ["gemini", "countTokens", {}], ["gemini", "embedContent", {}], ["anthropic_messages", "messages", { model: "m" }], ["cohere", "embed", {}], ["cohere", "rerank", {}]] as const) {
+        expect(inject(family, operation, body).injected, `${family} ${operation}`).toBe(false);
+      }
+      const raw = enc("not json");
+      expect(withDefaultMaxOutput("openai_compatible", "chat/completions", raw, 777)).toEqual({ body: raw, injected: false });
+    });
+    it("reserves the HIGHEST plausible maximum when a body names several (duplicate or conflicting fields)", () => {
+      expect(requestedMaxOutputTokens("openai_compatible", enc('{"max_tokens":10,"max_completion_tokens":0}'))).toBe(10);
+      expect(requestedMaxOutputTokens("openai_compatible", enc('{"max_tokens":10,"max_completion_tokens":4000}'))).toBe(4000);
+      expect(requestedMaxOutputTokens("openai_compatible", enc('{"max_tokens":4000,"max_completion_tokens":10,"max_output_tokens":20}'))).toBe(4000);
+    });
+  });
+  describe("a count over 10^10 uses the reservation and never zero (review L5)", () => {
+    const row = { prices: [{ model: "m", inputMicrosPerMTok: 3_000_000, outputMicrosPerMTok: 15_000_000 }], defaultMaxOutputTokens: 1000, fallbackPrice: undefined };
+    it("an implausible reported count is not read as zero usage", () => {
+      for (const body of [{ usage: { prompt_tokens: 10, completion_tokens: 2e10 } }, { usage: { prompt_tokens: 3e10, completion_tokens: 5 } }, { usage: { prompt_tokens: -5, completion_tokens: 3 } }]) {
+        expect(usageFromBody("openai_compatible", JSON.stringify(body)), JSON.stringify(body)).toBeUndefined();
+      }
+      const reservation = reserveEstimate({ row, model: "m", inputBytes: 4_000, maxOutputTokens: 2_000 });
+      const usage = usageFromBody("openai_compatible", JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 2e10 } }));
+      expect(settleCost({ reservation, usage, complete: true })).toEqual({ costMicros: reservation.reserveMicros, estimated: true, overrun: false });
+      expect(reservation.reserveMicros).toBeGreaterThan(0);
+    });
+    it("a count over the bound in ONE field keeps the figure of the other field out of the settle too", () => {
+      const partial = usageFromBody("gemini", JSON.stringify({ usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 3e10 } }));
+      const reservation = reserveEstimate({ row, model: "m", inputBytes: 400, maxOutputTokens: 100 });
+      const settled = settleCost({ reservation, usage: partial, complete: true });
+      expect(settled.costMicros).toBe(reservation.reserveMicros);
+      expect(settled.estimated).toBe(true);
+    });
   });
 });

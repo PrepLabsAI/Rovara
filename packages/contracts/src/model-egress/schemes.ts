@@ -49,6 +49,8 @@ export const ModelEgressExtraSchema = z
     /** What a model with no price of its own is reserved at. Absent: the ceiling in `cost.ts`. */
     fallbackPrice: ModelEgressPriceRatesSchema.optional(),
     azure: ModelEgressAzureSchema.optional(),
+    /** What a request that names a file or cached content reserves as input (tokens). Absent: `DEFAULT_EXTERNAL_INPUT_RESERVE_TOKENS`. */
+    externalInputReserveTokens: z.number().int().min(1).max(100_000_000).optional(),
   })
   .strict();
 export type ModelEgressExtra = z.infer<typeof ModelEgressExtraSchema>;
@@ -57,7 +59,7 @@ export type ModelEgressExtra = z.infer<typeof ModelEgressExtraSchema>;
 export type ModelEgressCatalogPart = Pick<ModelCatalogRow, "id" | "hosts" | "hostSuffixes" | "family" | "pathPrefix">;
 export type ModelEgressRow = ModelEgressCatalogPart & ModelEgressExtra;
 
-const EXTRA_KEYS: readonly string[] = ["scheme", "defaultMaxOutputTokens", "prices", "fallbackPrice", "azure"];
+const EXTRA_KEYS: readonly string[] = ["scheme", "defaultMaxOutputTokens", "prices", "fallbackPrice", "azure", "externalInputReserveTokens"];
 
 export type ModelEgressRowParse = { readonly ok: true; readonly row: ModelEgressRow; readonly catalog: ModelCatalogRow } | { readonly ok: false; readonly reason: string };
 

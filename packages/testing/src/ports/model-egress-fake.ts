@@ -3,7 +3,7 @@
 //
 // `mutation` switches on ONE named defect, each the way a real adapter could go wrong, so the tests can show that the suite fails on it (a suite that cannot fail proves nothing).
 import {
-  buildOutboundRequest, classifyProviderResponse, classOfRefusal, createKeyEchoScanner, createUsageScanner, familyErrorBody, isRedirectStatus, modelOfBody, parseModelEgressFrame, refusalResponse, requestedMaxOutputTokens,
+  buildOutboundRequest, classifyProviderResponse, classOfRefusal, createKeyEchoScanner, createUsageScanner, familyErrorBody, isRedirectStatus, modelOfBody, parseModelEgressFrame, refusalResponse,
   reserveEstimate, sanitizeResponseHeaders, scrubResponseBody, settleCost, usageFromBody,
   type ModelEgress, type ModelEgressConnection, type ModelEgressEvent, type ModelEgressFamily, type ModelEgressFrame, type ModelEgressRefusal, type ModelEgressRow, type ModelEgressScope, type ModelEgressSettle, type OutboundRequest,
 } from "@agentx/contracts";
@@ -25,7 +25,10 @@ export type ModelEgressMutation =
   | "reservation_released_on_cut" // charges only what a cut-off stream showed
   | "unfiltered_headers" // sends every provider header back
   | "two_credentials" // adds a second credential
-  | "pass_redirect"; // hands a provider 3xx back to the client instead of refusing it
+  | "pass_redirect" // hands a provider 3xx back to the client instead of refusing it
+  | "no_overrun_block" // keeps serving a task after a call settled above its reservation
+  | "default_company_on_broken_scope" // a scope it cannot read serves the first company instead of being refused
+  | "wrong_row_host"; // sends a row's call (and its key) to ANOTHER row's host
 
 export interface FakeBehaviour {
   /** The provider's status. Default 200. */
@@ -127,8 +130,15 @@ interface FakeScope {
   readonly source: string;
 }
 const scopeOf = (value: ModelEgressScope): FakeScope | undefined => {
-  const held = value as unknown as Partial<FakeScope>;
-  return typeof held.company === "string" && typeof held.source === "string" ? { company: held.company, source: held.source } : undefined;
+  try {
+    const held = value as unknown as Partial<FakeScope> | undefined;
+    const company = held?.company;
+    const source = held?.source;
+    return typeof company === "string" && company !== "" && typeof source === "string" && source !== "" ? { company, source } : undefined;
+  } catch {
+    // A scope that cannot even be read is a scope nobody can be served under.
+    return undefined;
+  }
 };
 /** Builds the opaque scope the way a real adapter's capability would (here: a plain pair). */
 export const fakeScope = (company: string, source: string): ModelEgressScope => ({ company, source }) as unknown as ModelEgressScope;
@@ -151,14 +161,14 @@ export function createFakeEgress(options: FakeEgressOptions): FakeEgress {
   const { mutation } = options;
   const rowsById = new Map(options.rows.map((row) => [row.id, row]));
   const sources = new Map(options.sources.map((source) => [`${source.company}|${source.id}`, source]));
-  const meters = new Map<string, { spent: number; reserved: number }>();
+  const meters = new Map<string, { spent: number; reserved: number; overrun: boolean }>();
   const tokenCache = new Map<string, string>();
   const logs: string[] = [];
   const mints = new Map<string, number>();
   const meterKey = (source: FakeSource): string => (mutation === "shared_meter" ? source.id : `${source.company}|${source.id}`);
   const meterFor = (source: FakeSource) => {
     const key = meterKey(source);
-    const held = meters.get(key) ?? { spent: 0, reserved: 0 };
+    const held = meters.get(key) ?? { spent: 0, reserved: 0, overrun: false };
     meters.set(key, held);
     return held;
   };
@@ -179,7 +189,7 @@ export function createFakeEgress(options: FakeEgressOptions): FakeEgress {
     return token;
   }
 
-  async function* refuse(family: ModelEgressFamily, word: ModelEgressRefusal, extra: { capMicros?: number } = {}): AsyncGenerator<ModelEgressEvent> {
+  async function* refuse(family: ModelEgressFamily, word: ModelEgressRefusal, extra: { capMicros?: number; overrun?: boolean } = {}): AsyncGenerator<ModelEgressEvent> {
     const answer = refusalResponse(family, word, extra);
     yield { kind: "head", status: answer.status, headers: answer.headers };
     yield { kind: "chunk", bytes: answer.body };
@@ -198,7 +208,8 @@ export function createFakeEgress(options: FakeEgressOptions): FakeEgress {
         return;
       }
       const frame: ModelEgressFrame = parsed.frame;
-      const scope = scopeOf(scopeValue);
+      let scope = scopeOf(scopeValue);
+      if (scope === undefined && mutation === "default_company_on_broken_scope") scope = { company: options.sources[0]?.company ?? "", source: frame.row };
       const source = scope === undefined ? undefined : findSource(scope);
       if (source === undefined || catalogRow === undefined || source.row.id !== frame.row) {
         if (mutation === "not_found_differs" && scope !== undefined && [...sources.values()].some((other) => other.id === scope.source)) {
@@ -224,11 +235,21 @@ export function createFakeEgress(options: FakeEgressOptions): FakeEgress {
         const inbound = frame.headers.filter(([name]) => /^(authorization|x-api-key|x-goog-api-key|api-key)$/iu.test(name));
         request = { ...request, headers: [...request.headers, ...inbound] };
       }
+      if (mutation === "wrong_row_host") {
+        const other = options.rows.find((candidate) => candidate.id !== row.id && candidate.family !== "bedrock" && candidate.hosts[0] !== undefined);
+        if (other !== undefined) request = { ...request, host: other.hosts[0] as string };
+      }
       if (mutation === "two_credentials") request = { ...request, headers: [...request.headers, ["x-api-key", secret], ["authorization", `Bearer ${secret}`]] };
       if (mutation === "log_request") logs.push(JSON.stringify(request.headers));
 
       const meter = meterFor(source);
-      const reservation = reserveEstimate({ row, model: built.route.model ?? modelOfBody(frame.body), inputBytes: frame.body.byteLength, maxOutputTokens: requestedMaxOutputTokens(row.family, frame.body) });
+      if (meter.overrun && mutation !== "no_overrun_block") {
+        // A call settled above its reservation: the task takes nothing more.
+        logs.push(`row=${row.id} class=cap overrun`);
+        yield* refuse(family, "cap", { capMicros: source.capMicros, overrun: true });
+        return;
+      }
+      const reservation = reserveEstimate({ row, model: built.route.model ?? modelOfBody(built.request.body), inputBytes: built.request.body.byteLength, maxOutputTokens: built.maxOutputTokens, externalInput: built.externalInput });
       if (mutation !== "ignore_cap" && meter.spent + meter.reserved + reservation.reserveMicros > source.capMicros) {
         logs.push(`row=${row.id} class=cap`);
         yield* refuse(family, "cap", { capMicros: source.capMicros });
@@ -278,8 +299,9 @@ export function createFakeEgress(options: FakeEgressOptions): FakeEgress {
         const cost = settleCost({ reservation, usage: args.usageBody, complete: args.complete });
         const costMicros = mutation === "reservation_released_on_cut" && !args.complete ? 0 : cost.costMicros;
         release(costMicros);
+        if (cost.overrun) meter.overrun = true;
         logs.push(`row=${row.id} status=${String(args.status)} class=${args.cls} cost=${String(costMicros)}`);
-        return { kind: "settle", status: args.status, class: args.cls, ...(args.usageBody === undefined ? {} : { inputTokens: args.usageBody.inputTokens, outputTokens: args.usageBody.outputTokens }), costMicros, estimated: cost.estimated };
+        return { kind: "settle", status: args.status, class: args.cls, ...(args.usageBody === undefined ? {} : { inputTokens: args.usageBody.inputTokens, outputTokens: args.usageBody.outputTokens }), costMicros, estimated: cost.estimated, ...(cost.overrun ? { overrun: true } : {}) };
       };
 
       if (!streaming) {
