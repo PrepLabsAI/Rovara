@@ -7,7 +7,7 @@ import { evalCheckResult } from "../../packages/contracts/src/eval-check.js";
 import type { EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
 import { evalFactsAllRun } from "../../packages/contracts/src/eval-pacing.js";
 import {
-  EVAL_ROUND_KINDS, HIDDEN_EVAL_MOUNT_PATH, HIDDEN_EVAL_NEEDS_SEALED_SENTENCE, agentFeedbackFor, hiddenEvalSetFor, type HiddenEvalSetSource,
+  EVAL_ROUND_KINDS, HIDDEN_EVAL_MOUNT_PATH, HIDDEN_EVAL_NEEDS_SEALED_SENTENCE, agentFeedbackFor, evalSetHashOf, hiddenEvalSetFor, type HiddenEvalSetSource,
 } from "../../packages/contracts/src/eval-hidden-set.js";
 
 const HASH = "c".repeat(64);
@@ -65,46 +65,95 @@ describe("the hidden set is mounted only in the sealed round", () => {
 describe("what goes back to the coding agent", () => {
   const base: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }, { name: "recall", unit: "fraction", value: 0.7, direction: "up_good", spread: 0.05 }], caseCount: 40, recordedOn: "2026-11-13", roundKind: "check_sealed", runnerSchemaVersion: 1 };
   const file = (measures: Array<Record<string, unknown>>) => MeasuresFileSchema.parse({ schemaVersion: 1, measures });
+  const m = (name: string, value: number, over: Record<string, unknown> = {}) => ({ name, unit: "fraction", value, direction: "up_good", spread: 0.05, ...over });
 
-  it("is a score and a count per measure, by position, and nothing else", () => {
-    const result = evalCheckResult({ roundKind: "check_sealed", head: file([{ name: "accuracy", unit: "fraction", value: 0.8234, direction: "up_good", spread: 0.05, count: 40 }, { name: "recall", unit: "fraction", value: 0.7, direction: "up_good", spread: 0.05 }]), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
+  it("outside a hidden round: a score (two decimals) and a count of the cases that RAN, by position, and nothing else", () => {
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: file([m("accuracy", 0.8234, { count: 9999 }), m("recall", 0.7)]), base, facts: evalFactsAllRun(40) });
     const feedback = agentFeedbackFor(result);
     expect(Object.keys(feedback)).toEqual(["measures"]);
     expect(feedback.measures).toEqual([{ index: 0, score: 0.82, count: 40 }, { index: 1, score: 0.7, count: 40 }]);
     for (const entry of feedback.measures) expect(Object.keys(entry)).toEqual(["index", "score", "count"]);
   });
+  it("in a hidden round: pass or fail only, no score and no count", () => {
+    const result = evalCheckResult({ roundKind: "check_sealed", head: file([m("accuracy", 0.8234, { count: 40 }), m("recall", 0.2, { count: 40 })]), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
+    const feedback = agentFeedbackFor(result);
+    expect(feedback.measures).toEqual([{ index: 0, pass: true }, { index: 1, pass: false }]);
+    for (const entry of feedback.measures) expect(Object.keys(entry)).toEqual(["index", "pass"]);
+    expect(JSON.stringify(feedback)).not.toMatch(/0\.8|0\.2|40/u);
+  });
+  it("a hidden score far above the band reads as a pass, never as 'better' (no direction beyond no-drop)", () => {
+    const result = evalCheckResult({ roundKind: "check_sealed", head: file([m("accuracy", 0.99, { count: 40 })]), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
+    expect(result.verdicts[0]).toMatchObject({ verdict: "no_detectable_change", sentence: "no detectable drop on the hidden set" });
+    expect(agentFeedbackFor(result).measures).toEqual([{ index: 0, pass: true }]);
+  });
   it("carries no case id, input, output, name, diff or path even when the result object is hostile", () => {
     const canary = `c-${randomBytes(4).toString("hex")}`;
-    const result = evalCheckResult({ roundKind: "check_sealed", head: file([{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05, count: 40 }]), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
-    const hostile = { ...result, caseIds: [canary], verdicts: result.verdicts.map((verdict) => ({ ...verdict, caseId: canary, label: canary, input: canary, path: `/hidden/${canary}`, sentence: canary })), summary: canary };
-    const text = JSON.stringify(agentFeedbackFor(hostile));
-    expect(text).not.toContain(canary);
-    expect(text).not.toContain("/hidden");
+    for (const hiddenSetUsed of [true, false]) {
+      const result = evalCheckResult({ roundKind: "check_sealed", head: file([m("accuracy", 0.8, { count: 40 })]), base, facts: evalFactsAllRun(40), hiddenSetUsed });
+      const hostile = { ...result, caseIds: [canary], verdicts: result.verdicts.map((verdict) => ({ ...verdict, caseId: canary, label: canary, input: canary, path: `/hidden/${canary}`, sentence: canary })), summary: canary };
+      const text = JSON.stringify(agentFeedbackFor(hostile));
+      expect(text).not.toContain(canary);
+      expect(text).not.toContain("/hidden");
+    }
   });
   it("is empty when the eval did not run (no score is invented)", () => {
-    const result = evalCheckResult({ roundKind: "check_sealed", head: file([{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }]), base, facts: { total: 40, run: 10, notRun: 30, byClass: { rate_limit: 30 }, overrunStop: false }, hiddenSetUsed: true });
+    const result = evalCheckResult({ roundKind: "check_sealed", head: file([m("accuracy", 0.8)]), base, facts: { total: 40, run: 10, notRun: 30, byClass: { rate_limit: 30 }, overrunStop: false }, hiddenSetUsed: true });
     expect(agentFeedbackFor(result)).toEqual({ measures: [] });
   });
-  it("rounds the score to two decimals, so the exact value is not handed out digit by digit", () => {
-    const result = evalCheckResult({ roundKind: "check_sealed", head: file([{ name: "accuracy", unit: "fraction", value: 0.8349999, direction: "up_good", spread: 0.05, count: 40 }]), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
-    expect(agentFeedbackFor(result).measures[0]!.score).toBe(0.83);
+  it("rounds an ordinary score to two decimals, so the exact value is not handed out digit by digit", () => {
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: file([m("accuracy", 0.8349999, { count: 40 })]), base, facts: evalFactsAllRun(40) });
+    expect(agentFeedbackFor(result).measures[0]).toMatchObject({ score: 0.83 });
+  });
+  it("a hostile runner's 50 unmatched measures with huge values leave nothing beyond pass/fail: no verdict, no number, no word", () => {
+    const marker = `c-${randomBytes(4).toString("hex")}`;
+    const huge = Array.from({ length: 49 }, (_, index) => m(`${marker}${String(index)}`, 9.99e11 - index, { unit: marker, spread: 9e11, count: 99_999_999 }));
+    const result = evalCheckResult({ roundKind: "check_sealed", head: file([m("accuracy", 0.79, { count: 40 }), ...huge]), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
+    expect(result.verdicts).toHaveLength(1);
+    expect(result.measures).toEqual([]);
+    expect(agentFeedbackFor(result)).toEqual({ measures: [{ index: 0, pass: true }] });
+    const text = JSON.stringify(result);
+    expect(text).not.toContain(marker);
+    expect(text).not.toMatch(/9\.99e|99999999|999999/u);
+    // all of them unmatched: nothing but "not run"
+    const allUnmatched = evalCheckResult({ roundKind: "check_sealed", head: file(huge), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
+    expect(allUnmatched).toMatchObject({ outcome: "not_run", verdicts: [], measures: [], notRun: { reason: "no_base_score" } });
+    expect(agentFeedbackFor(allUnmatched)).toEqual({ measures: [] });
   });
 });
 
-describe("a hidden-set round never lets the runner's own words into the evidence", () => {
+describe("a hidden-set round keeps every value out of the evidence", () => {
   const base: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }], caseCount: 40, recordedOn: "2026-11-13", roundKind: "check_sealed", runnerSchemaVersion: 1 };
-  it("names and units come only from the base record; a measure the base does not know is shown anonymously with its name dropped", () => {
+  it("names and units come only from the base record; the v2 measures are empty, the verdict holds no score, and the summary has pass or fail words only", () => {
     const canary = `c-${randomBytes(4).toString("hex")}`;
-    const head = MeasuresFileSchema.parse({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }, { name: canary, unit: canary, value: 0.5, direction: "up_good", spread: 0.1 }] });
+    const head = MeasuresFileSchema.parse({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8123456, direction: "up_good", spread: 0.05 }, { name: canary, unit: canary, value: 0.5, direction: "up_good", spread: 0.1 }] });
     const result = evalCheckResult({ roundKind: "check_sealed", head, base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
-    expect(JSON.stringify(result)).not.toContain(canary);
+    const text = JSON.stringify(result);
+    expect(text).not.toContain(canary);
+    expect(text).not.toContain("0.8123456");
+    expect(result.measures).toEqual([]);
+    expect(result.verdicts.map((verdict) => verdict.head)).toEqual([undefined]);
+    expect(result.verdicts.map((verdict) => verdict.base)).toEqual([undefined]);
+    expect(result.summary).toBe("Eval (your runner): accuracy: no detectable drop on the hidden set");
     expect(JSON.stringify(agentFeedbackFor(result))).not.toContain(canary);
-    expect(result.verdicts[1]).toMatchObject({ verdict: "not_run", reason: "no_base_score", label: "eval measure 2" });
-    expect(result.measures.map((measure) => measure.name)).toEqual(["accuracy"]);
   });
   it("without a hidden set the runner's own measure name is shown (inertly), as before", () => {
     const head = MeasuresFileSchema.parse({ schemaVersion: 1, measures: [{ name: "brand-new-measure", unit: "fraction", value: 0.5, direction: "up_good", spread: 0.1 }] });
     const result = evalCheckResult({ roundKind: "check_unsealed", head, base, facts: evalFactsAllRun(40) });
     expect(result.verdicts[0]!.label).toBe("brand-new-measure");
+  });
+});
+
+describe("Rovara's own hash of an eval set", () => {
+  const file = (path: string, text: string) => ({ path, bytes: new TextEncoder().encode(text) });
+  it("depends on every path and every byte, and not on the order the files are listed in", () => {
+    const a = evalSetHashOf([file("q/1.json", "one"), file("q/2.json", "two")]);
+    expect(a).toMatch(/^[a-f0-9]{64}$/u);
+    expect(evalSetHashOf([file("q/2.json", "two"), file("q/1.json", "one")])).toBe(a);
+    expect(evalSetHashOf([file("q/1.json", "one"), file("q/2.json", "twO")])).not.toBe(a);
+    expect(evalSetHashOf([file("q/1.json", "one"), file("q/3.json", "two")])).not.toBe(a);
+    expect(evalSetHashOf([file("q/1.json", "one")])).not.toBe(a);
+  });
+  it("refuses no files, an absolute or dotted path, and a path listed twice", () => {
+    for (const bad of [[], [file("/etc/x", "a")], [file("../x", "a")], [file("a/./b", "a")], [file("a\\b", "a")], [file("a", "1"), file("a", "2")]]) expect(() => evalSetHashOf(bad as never)).toThrow(RangeError);
   });
 });
