@@ -1,5 +1,6 @@
 // TE-F3 part B: the hidden eval set's read-only mount in the sealed check sandbox's plan (check-sandbox.ts), and nowhere else. A hidden round runs on its own throwaway copy of the workspace, with the working sandbox PAUSED and the
 // pause confirmed. Pure: no Docker is started (a fake docker answers the few calls a start makes).
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -221,5 +222,116 @@ describe("a hidden round starts only with the working sandbox PAUSED and confirm
     const fake = fakeDocker();
     const detached = await detachWorkingSandbox(fake.docker, plan);
     expect(await startCheckSandbox(fake.docker, plan, detached)).toBe("container-id");
+  });
+});
+
+describe("a hidden round's cleanup and its refusals (the plan's flags are enforced, not just carried)", () => {
+  const NET = runNetworkName(RUN);
+  function fakeDocker(options: { rmFails?: boolean } = {}) {
+    let networks = [NET, "agentx-task"];
+    let paused = false;
+    const log: string[] = [];
+    const ok = (stdout = "") => Promise.resolve({ exitCode: 0, stdout, stderr: "" });
+    const docker: DockerCli = {
+      run: (args) => {
+        log.push(args[0] === "network" || args[0] === "container" ? `${args[0]} ${args[1]}` : args[0]!);
+        if (args[0] === "network" && args[1] === "disconnect") { networks = networks.filter((name) => name !== args[2]); return ok(); }
+        if (args[0] === "network" && args[1] === "connect") { networks.push(args[4]!); return ok(); }
+        if (args[0] === "pause") { paused = true; return ok(); }
+        if (args[0] === "unpause") { paused = false; return ok(); }
+        if (args[0] === "inspect" && args[2] === "{{.State.Paused}}") return ok(paused ? "true\n" : "false\n");
+        if (args[0] === "inspect") return ok(JSON.stringify(Object.fromEntries(networks.map((name) => [name, { IPAddress: "x" }]))));
+        if (args[0] === "run") return ok("container-id\n");
+        if (args[0] === "container") return Promise.resolve(options.rmFails === true ? { exitCode: 0, stdout: "cid", stderr: "" } : { exitCode: 1, stdout: "", stderr: "no such container" });
+        return ok();
+      },
+    };
+    return { docker, log, isPaused: () => paused };
+  }
+  const round = (fake: ReturnType<typeof fakeDocker>, discard: () => Promise<void>, over: Partial<Parameters<typeof withDetachedWorking>[3]> = {}) =>
+    withDetachedWorking(fake.docker, checkSandboxPlan(hiddenInput()), async (start) => { await start(); return "ok"; }, { returnTo: "none", discardWorkspaceCopy: async () => { fake.log.push("DISCARD"); await discard(); }, ...over }).then((value) => value, (error: unknown) => `ERR ${String(error)}`);
+
+  it("discards the copy BEFORE the working sandbox is unpaused, and after the check sandbox is gone", async () => {
+    const fake = fakeDocker();
+    expect(await round(fake, () => Promise.resolve())).toBe("ok");
+    const at = (name: string) => fake.log.lastIndexOf(name);
+    expect(at("rm")).toBeLessThan(at("DISCARD"));
+    expect(at("DISCARD")).toBeLessThan(at("unpause"));
+    expect(fake.isPaused()).toBe(false);
+  });
+  it("when the discard fails: the error says the copy was left on disk, and the working sandbox stays paused (fail closed)", async () => {
+    const fake = fakeDocker();
+    const result = await round(fake, () => Promise.reject(new Error("disk")));
+    expect(result).toMatch(/could not be discarded and was left on disk; the working sandbox stays paused/u);
+    expect(fake.isPaused()).toBe(true);
+    expect(fake.log).not.toContain("unpause");
+  });
+  it("when the check sandbox cannot be removed: the copy is NOT discarded (it is in use), the error says it was left on disk, and the working sandbox stays paused", async () => {
+    const fake = fakeDocker({ rmFails: true });
+    const result = await round(fake, () => Promise.resolve());
+    expect(result).toMatch(/left on disk and the working sandbox stays paused/u);
+    expect(fake.log).not.toContain("DISCARD");
+    expect(fake.isPaused()).toBe(true);
+  });
+  it("the round's own error wins over a cleanup error, and the cleanup still runs", async () => {
+    const fake = fakeDocker();
+    const result = await withDetachedWorking(fake.docker, checkSandboxPlan(hiddenInput()), () => Promise.reject(new Error("round failed")), { returnTo: "none", discardWorkspaceCopy: () => { fake.log.push("DISCARD"); return Promise.resolve(); } }).then(() => "ok", (error: unknown) => String(error));
+    expect(result).toMatch(/round failed/u);
+    expect(fake.log).toContain("DISCARD");
+    expect(fake.isPaused()).toBe(false);
+  });
+  it("refuses a hidden round with no returnTo, before it touches docker: the working sandbox never rejoins the round's network", async () => {
+    const fake = fakeDocker();
+    const result = await round(fake, () => Promise.resolve(), { returnTo: undefined } as never);
+    expect(result).toMatch(/returnTo/u);
+    expect(fake.log).toEqual([]);
+  });
+  it("enforces mustPauseWorking: a plan that mounts the set without saying so is refused by withDetachedWorking and by startCheckSandbox, and a plan that says it pauses even without a set", async () => {
+    const plan = checkSandboxPlan(hiddenInput());
+    const { mustPauseWorking: _flag, ...rest } = plan;
+    void _flag;
+    const edited = rest as typeof plan;
+    const fake = fakeDocker();
+    const refused = await withDetachedWorking(fake.docker, edited, () => Promise.resolve("x"), { returnTo: "none", discardWorkspaceCopy: () => Promise.resolve() }).then(() => "ran", (error: unknown) => String(error));
+    expect(refused).toMatch(/must say the working sandbox is paused/u);
+    expect(fake.log).toEqual([]);
+    const other = fakeDocker();
+    const detached = await detachWorkingSandbox(other.docker, plan);
+    const proof = await pauseWorkingSandbox(other.docker, plan);
+    await expect(startCheckSandbox(other.docker, edited, detached, { paused: proof })).rejects.toThrow(/must say the working sandbox is paused/u);
+    const plainButFlagged = { ...checkSandboxPlan(plain()), mustPauseWorking: true as const };
+    const third = fakeDocker();
+    await withDetachedWorking(third.docker, plainButFlagged, async (start) => { await start().catch(() => undefined); return "x"; }, { returnTo: "none", discardWorkspaceCopy: () => Promise.resolve() }).catch(() => undefined);
+    expect(third.log).toContain("pause");
+  });
+});
+
+describe("a path guard that holds on a real disk: links, trailing slashes and (on a case-insensitive disk) a case change", () => {
+  async function disk(run: (base: string) => void | Promise<void>) {
+    const base = await mkdtemp(join(tmpdir(), "te-f3-disk-"));
+    try {
+      await mkdir(join(base, "task", "sub"), { recursive: true });
+      await mkdir(join(base, "hidden"), { recursive: true });
+      await mkdir(join(base, "copy"), { recursive: true });
+      await run(base);
+    } finally { await rm(base, { recursive: true, force: true }); }
+  }
+  const make = (base: string, copy: string, task: string, hiddenPath: string) => hiddenInput({ rootPath: copy, maskedPaths: [`${copy}/.s`], hiddenEvalSetPath: hiddenPath, hiddenRoundWorkspace: { copyPath: copy, taskWorkspacePath: task } });
+  it("refuses a copy that is a link to the task workspace, or the task workspace with a trailing slash, and plans a real separate copy", async () => {
+    await disk(async (base) => {
+      await symlink(join(base, "task"), join(base, "copylink"));
+      expect(() => checkSandboxPlan(make(base, join(base, "copylink"), join(base, "task"), join(base, "hidden")))).toThrow(/task workspace|throwaway/u);
+      expect(() => checkSandboxPlan(make(base, `${join(base, "task")}/`, join(base, "task"), join(base, "hidden")))).toThrow(/task workspace|throwaway/u);
+      expect(() => checkSandboxPlan(make(base, join(base, "copy"), join(base, "task"), join(base, "hidden")))).not.toThrow();
+    });
+  });
+  it("a case change defeats nothing on a case-insensitive disk: the copy named in capitals, and a hidden path through capitals, are refused", async () => {
+    await disk(async (base) => {
+      const upper = join(base, "TASK");
+      if (!existsSync(upper)) return; // this disk tells the two spellings apart: nothing to prove here
+      expect(() => checkSandboxPlan(make(base, upper, join(base, "task"), join(base, "hidden")))).toThrow(/task workspace|throwaway/u);
+      expect(() => checkSandboxPlan(make(base, join(base, "Task", "sub"), join(base, "task"), join(base, "hidden")))).toThrow(/task workspace/u);
+      expect(() => checkSandboxPlan(make(base, join(base, "copy"), join(base, "task"), join(upper, "sub")))).toThrow(/inside a workspace/u);
+    });
   });
 });

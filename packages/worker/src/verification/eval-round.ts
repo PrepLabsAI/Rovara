@@ -15,7 +15,7 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  EVAL_BASE_ROUND_KINDS, EVAL_MIN_QUESTIONS, EVAL_NOISE_K, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalSettingsFingerprint, hiddenEvalSetFor,
+  EVAL_BASE_ROUND_KINDS, EVAL_MIN_QUESTIONS, EVAL_NOISE_K, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalSettingsFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
   type BaseScoreCache, type EvalBaseAttestation, type EvalSettings, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
@@ -204,7 +204,7 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
     base = { ok: false };
   }
   if (!base.ok) return notRun("no_base_score", "not_filled");
-  const attested = typeof base.attestation === "object" && base.attestation !== null && base.attestation.checkout === "rovara_only" && base.attestation.workingSandboxPaused === true && base.attestation.baseCommit === parts.baseCommit;
+  const attested = isEvalBaseAttestation(base.attestation) && base.attestation.baseCommit === parts.baseCommit;
   if (!attested) return notRun("base_round_unattested", "not_filled");
   if (base.facts.run < minQuestions) return notRun("too_few_questions", "not_filled");
   const baseHash = base.evalSetHash;

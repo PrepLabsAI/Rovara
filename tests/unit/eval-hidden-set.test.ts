@@ -121,6 +121,41 @@ describe("what goes back to the coding agent", () => {
   });
 });
 
+describe("a hidden round's feedback position is Rovara's, not the runner's", () => {
+  const base: EvalBaseRecord = { schemaVersion: 1, caseCount: 30, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1, measures: [{ name: "acc", unit: "fraction", direction: "up_good", value: 0.8, spread: 0.01, count: 30 }, { name: "rec", unit: "fraction", direction: "up_good", value: 0.7, spread: 0.01, count: 30 }] };
+  const pad = (index: number) => ({ name: `pad_${String(index)}`, unit: "u", direction: "up_good" as const, value: 1e9, count: 30 });
+  const matched = [{ name: "acc", unit: "fraction", direction: "up_good" as const, value: 0.81, count: 30 }, { name: "rec", unit: "fraction", direction: "up_good" as const, value: 0.1, count: 30 }];
+  const run = (positions: [number, number]) => {
+    const list: Array<Record<string, unknown>> = Array.from({ length: 50 }, (_, index) => pad(index));
+    list[positions[0]] = matched[0]!;
+    list[positions[1]] = matched[1]!;
+    return evalCheckResult({ roundKind: "check_sealed", head: MeasuresFileSchema.parse({ schemaVersion: 1, measures: list }), base, facts: evalFactsAllRun(30), hiddenSetUsed: true });
+  };
+  it("is identical wherever the runner puts a matched measure among pads, and whatever order it lists two of them in (no position channel)", () => {
+    const reference = run([0, 1]);
+    for (const positions of [[0, 49], [17, 3], [49, 0], [30, 31]] as Array<[number, number]>) {
+      const other = run(positions);
+      expect(agentFeedbackFor(other)).toEqual(agentFeedbackFor(reference));
+      expect(other).toEqual(reference);
+    }
+    expect(agentFeedbackFor(reference).measures).toEqual([{ index: 0, pass: true }, { index: 1, pass: false }]);
+    // the single matched measure, at positions 0, 17 and 49
+    const single = (position: number) => {
+      const list: Array<Record<string, unknown>> = Array.from({ length: 50 }, (_, index) => pad(index));
+      list[position] = matched[0]!;
+      return agentFeedbackFor(evalCheckResult({ roundKind: "check_sealed", head: MeasuresFileSchema.parse({ schemaVersion: 1, measures: list }), base, facts: evalFactsAllRun(30), hiddenSetUsed: true }));
+    };
+    expect(single(17)).toEqual(single(0));
+    expect(single(49)).toEqual(single(0));
+    expect(single(0)).toEqual({ measures: [{ index: 0, pass: true }] });
+  });
+  it("outside a hidden round the position is still the runner's own file position", () => {
+    const list: Array<Record<string, unknown>> = [pad(0), matched[0]!];
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: MeasuresFileSchema.parse({ schemaVersion: 1, measures: list }), base, facts: evalFactsAllRun(30) });
+    expect(result.verdicts.map((verdict) => verdict.index)).toEqual([0, 1]);
+  });
+});
+
 describe("a hidden-set round keeps every value out of the evidence", () => {
   const base: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }], caseCount: 40, recordedOn: "2026-11-13", roundKind: "check_sealed", runnerSchemaVersion: 1 };
   it("names and units come only from the base record; the v2 measures are empty, the verdict holds no score, and the summary has pass or fail words only", () => {

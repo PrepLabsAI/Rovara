@@ -106,6 +106,21 @@ export interface EvalBaseAttestation {
   readonly workingSandboxPaused: true;
   readonly baseCommit: string;
 }
+const ATTESTATIONS = new WeakSet<object>();
+/**
+ * The ONLY way to make an attestation, branded so a hand-written object is not one. It must be called by the code that makes the Rovara-only checkout of the base commit, AFTER it has checked the working sandbox is paused (the
+ * runner seam: TE-B1's fresh round is the natural home). The factory cannot verify that itself; what it prevents is a plain object (a runner's claim, a test double in production code) passing as one.
+ */
+export function attestRovaraOnlyBaseCheckout(args: { readonly baseCommit: string }): EvalBaseAttestation {
+  if (typeof args.baseCommit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(args.baseCommit)) throw new RangeError("an attestation names the base commit");
+  const proof: EvalBaseAttestation = Object.freeze({ checkout: "rovara_only", workingSandboxPaused: true, baseCommit: args.baseCommit });
+  ATTESTATIONS.add(proof);
+  return proof;
+}
+/** True for an object `attestRovaraOnlyBaseCheckout` made. */
+export function isEvalBaseAttestation(value: unknown): value is EvalBaseAttestation {
+  return typeof value === "object" && value !== null && ATTESTATIONS.has(value);
+}
 
 /** SHA-256 (hex) of an eval command's text under a fixed domain. */
 export function evalCommandFingerprint(command: string): string {
