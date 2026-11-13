@@ -93,7 +93,7 @@ export function createTaskRecordingStore(options: TaskRecordingStoreOptions): Re
       return code === "ELOOP" || code === "EMLINK" ? drop() : undefined;
     }
     let text: string | undefined;
-    let trusted = false;
+    let trusted: boolean;
     try {
       const info = await handle.stat();
       trusted = info.isFile() && (info.mode & 0o077) === 0 && info.size <= FILE_BYTES_MAX && ownedByUs(info);
@@ -220,7 +220,7 @@ export function createTaskRecordingStore(options: TaskRecordingStoreOptions): Re
       const scope = checked(scopeValue);
       const { task } = dirsOf(scope);
       const count = await countFiles(task);
-      await rm(task, { recursive: true, force: true });
+      await rm(task, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
       return count;
     },
     async eraseCompany(companyId) {
@@ -228,7 +228,7 @@ export function createTaskRecordingStore(options: TaskRecordingStoreOptions): Re
       if (scope === undefined) throw new Error("the recording scope is not usable");
       const { company } = dirsOf(scope);
       const count = await countFiles(company);
-      await rm(company, { recursive: true, force: true });
+      await rm(company, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
       return count;
     },
     async sweep() {
