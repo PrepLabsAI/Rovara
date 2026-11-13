@@ -193,6 +193,8 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
       { overwrite: true });
     // TE-C1: the words beside the pack, replaced (or removed) with every keep of the same code, so they never describe a run this keep did not compare with. Informational: a fault here is only a missing line.
     try {
+      // An abandoned call (its time has run out) writes nothing more.
+      if (deps.late?.() === true) return { kept: true, problems: built.problems, guardedParts: guarded };
       if (baselineWords === undefined) await deps.store.blobs.delete(evidenceBaselineKey(input.task, input.candidateDigest));
       else await deps.store.blobs.put(evidenceBaselineKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(EvidenceBaselineSchema.parse(baselineWords)), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-baseline" }, retention: "evidence-std" }, { overwrite: true });
     } catch (error) {

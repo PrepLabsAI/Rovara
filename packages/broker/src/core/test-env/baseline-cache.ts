@@ -9,7 +9,7 @@
 // LOOKUP (`baselineFor`): the exact (revision, branch, commit) row first; else the nearest row among the ancestors the WORKER verified (a list of `{ sha, commitsBack }`, at most 50 commits back), labelled partial. Else
 // nothing: today's behaviour (the nightly baseline). Never "the latest row". A row is used only when it parses, says the same revision, branch and commit as its key, has a whole failing set, is not from the future and
 // has not expired; a store that cannot be read is a miss, never "no failures". Age is reported, not limited: a row of last month is still the run at that commit, and the line says how old it is.
-import { BASELINE_ANCESTOR_MAX, BASELINE_CANDIDATES_MAX, BaselineRowSchema, baselineSetIsWhole, projectPk, type BaselineRow, type OrgId } from "@agentx/contracts";
+import { BASELINE_ANCESTOR_MAX, BASELINE_CANDIDATES_MAX, BaselineRowSchema, baselineSetIsWhole, projectPk, queryAll, type BaselineRow, type OrgId } from "@agentx/contracts";
 import { documentOf, expired, expiryOf, type TestEnvDeps } from "./deps.js";
 
 /** How long a row is kept: the nightly's own history rows keep 90 days. */
@@ -17,8 +17,6 @@ export const BASELINE_RETENTION_MS = 90 * 24 * 3_600_000;
 const HOUR_MS = 3_600_000;
 /** A run that claims to have finished later than this ahead of now is not believed (the nightly's own allowance). */
 const FUTURE_SKEW_MS = HOUR_MS;
-/** One revision keeps a night a day for 90 days; the candidates look at the newest page of rows only. */
-const CANDIDATE_SCAN_MAX = 100;
 const HEX40 = /^[a-f0-9]{40}$/u;
 const KEY_PREFIX = "TESTENV#BASELINE#SHA#";
 
@@ -116,9 +114,10 @@ export async function baselineFor(deps: Pick<TestEnvDeps, "store" | "now">, quer
 /** The commits a task plan offers the worker: the newest usable rows of this revision and branch (at most five), newest first. An unreadable store offers none. */
 export async function baselineCandidatesOf(deps: Pick<TestEnvDeps, "store" | "now">, query: Pick<BaselineQuery, "orgId" | "project" | "envRevision" | "branch">): Promise<string[]> {
   try {
-    const page = await deps.store.query({ pk: projectPk(query.orgId, query.project), sk: { op: "beginsWith", prefix: prefixOf(query.envRevision) }, limit: CANDIDATE_SCAN_MAX });
+    // Every row of the revision (a night a day for 90 days is a few hundred small rows, and the keys sort by commit, not by time, so the newest cannot be picked from a page).
+    const items = await queryAll(deps.store, { pk: projectPk(query.orgId, query.project), sk: { op: "beginsWith", prefix: prefixOf(query.envRevision) } });
     const rows: BaselineRow[] = [];
-    for (const item of page.items) {
+    for (const item of items) {
       const headSha = item.sk.slice(prefixOf(query.envRevision).length);
       const row = HEX40.test(headSha) ? await usableRow(deps, query, headSha, item) : undefined;
       if (row !== undefined) rows.push(row);

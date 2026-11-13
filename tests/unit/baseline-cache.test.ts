@@ -236,6 +236,26 @@ describe("the lookup", () => {
 });
 
 describe("the candidates a task plan offers", () => {
+  it("find the newest rows among more than a page of them, whatever order their commits sort in", async () => {
+    const { store, deps } = world();
+    // 130 rows; the newest five have the commits that sort LAST, so a single page of the first 100 rows by key would pick older ones.
+    for (let n = 1; n <= 130; n += 1) await keep(deps, row({ headSha: sha(1000 - n), finishedAt: new Date(NOW - (n <= 5 ? n : 100 + n) * HOUR).toISOString(), recordedAt: new Date(NOW - HOUR).toISOString() }));
+    expect((await store.query({ pk: projectPk(ORG as never, PROJECT), sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" }, limit: 100 })).cursor).toBeDefined();
+    expect(await baselineCandidatesOf(deps, { orgId: ORG as never, project: PROJECT, envRevision: 1, branch: "main" })).toEqual([999, 998, 997, 996, 995].map((n) => sha(n)));
+  });
+
+  it("a row at the stated list limits (500 failing and 500 flaky tests, 200 characters each) is stored and found", async () => {
+    const { deps } = world();
+    // (At 500 characters each the two lists exceed the document store's 400 KiB limit, as they already do for the nightly's own history row: the record then logs and the night's own rows stand.)
+    const id = (n: number) => `${"t".repeat(196)}${String(n).padStart(4, "0")}`;
+    const big = row({ headSha: sha(40), tests: { total: 1_200, passed: 200, failed: 500, skipped: 500 }, failed: Array.from({ length: 500 }, (_, n) => id(n)), flaky: Array.from({ length: 500 }, (_, n) => id(1_000 + n)) });
+    await keep(deps, big);
+    const found = await find(deps, { baseCommit: sha(40) });
+    expect(found?.row.failed).toHaveLength(500);
+    expect(found?.row.flaky).toHaveLength(500);
+    expect(knownFailingOf(found!.row)).toHaveLength(500);
+  });
+
   it("are the newest five usable rows of the revision and branch, newest first, shas only", async () => {
     const { deps } = world();
     for (let n = 1; n <= 7; n += 1) await keep(deps, row({ headSha: sha(n), finishedAt: new Date(NOW - (10 - n) * HOUR).toISOString() }));

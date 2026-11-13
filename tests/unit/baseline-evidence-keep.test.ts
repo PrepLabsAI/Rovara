@@ -147,6 +147,20 @@ describe("the claim is used only for a commit this task's plan offered", () => {
     expect(await kept(w)).toBeUndefined();
   });
 
+  it("an abandoned call (its time has run out) writes no baseline words, and the call it ran in still ends", async () => {
+    const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
+    // The keeper asks `late` before it stores the tails, before it stores the pack, and now before the words: the third answer is "late".
+    let asked = 0;
+    const late = () => { asked += 1; return asked >= 3; };
+    const result = await keepEvidence({ ...w.deps, late }, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: w.baseline([sha(1)]) });
+    expect(result).toMatchObject({ kept: true });
+    expect(asked).toBe(3);
+    expect(await kept(w)).toBeUndefined();
+    // Positive control: the same call, not late, writes them.
+    await w.keep([sha(1)]);
+    expect(await kept(w)).toBeDefined();
+  });
+
   it("is deleted with the task's evidence (erase by task or workspace prefix), and the object expires with it", async () => {
     const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
     await w.keep([sha(1)]);
