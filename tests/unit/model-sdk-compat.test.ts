@@ -34,6 +34,7 @@ describe("SDK compatibility supervisor guards", () => {
         expect(() => parseSdkResult(JSON.stringify(result, null, 2))).toThrow();
         expect(() => parseSdkResult('{"__proto__":{"polluted":true}}')).toThrow();
         expect(() => parseSdkResult("x".repeat(1024 * 1024))).toThrow();
+        expect(() => parseSdkResult(JSON.stringify(result) + " ".repeat(4096))).toThrow();
     });
     it("fails the run for any refused connection, even if the client swallowed the error", () => {
         const file = join(scratch(), "tripwire.jsonl");
@@ -118,6 +119,9 @@ it("renders the measured matrix deterministically without leaking child messages
     expect(first).toContain("PASS: 1");
     expect(first).toContain("| 1/1 | finish-stop:tools-na |");
     expect(first).not.toContain("compat-text");
+    expect(() => renderSdkMatrix([cell], "untrusted", "3.13.17", "22.23.2")).toThrow();
+    expect(() => renderSdkMatrix([cell], "a".repeat(40), "@owner", "22.23.2")).toThrow();
+    for (const bad of [{...cell,library:"unknown"},{...cell,language:"unknown"},{...cell,version:"@owner"}]) expect(() => renderSdkMatrix([bad], "a".repeat(40), "3.13.17", "22.23.2")).toThrow();
     for (const note of ["[click](https://bad)", "![x[y]](https://bad)", "[x][ref]", "@owner", "#123", "<img>", "# heading", "> quote", "---", "```", "~~~", "hidden\u200b", "hidden\ufe0f", "x".repeat(1024 * 1024)])
         expect(() => renderSdkMatrix([{ ...cell, note }], "a".repeat(40), "3.13.17", "22.23.2")).toThrow();
     expect(() => renderSdkMatrix([{ ...cell, observed: Infinity }], "a".repeat(40), "3.13.17", "22.23.2")).toThrow();
