@@ -22,6 +22,7 @@ import type {
   WorkerMachines,
   WorkflowPath,
   WorkflowIntent,
+  WorkflowOwnerAuthority,
   WorkflowReviewPhase,
   WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -86,6 +87,12 @@ export interface TaskAccess {
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
   /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
   checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
+  /**
+   * The owner moves that decide or start paid work on a task already running (send back, review findings, continue): who the engine records as acting when this principal is the task's owner or a co-owner.
+   * `authority` is what the workflow engine checks the actor against (a hosted product's co-owners). `items` are steps for the move's own transaction (a hosted product's live access fence, as `checkStep`'s `items`): a change of who may act between the check and the commit refuses the move. Undefined: not an owner, so the move is refused as a task they cannot see. Absent: Code's own rule,
+   * where the owner of the install, or the person the task runs for, acts as the task's owner (`ownerActingOf`).
+   */
+  ownerActing?(principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<{ actorId: string; authority?: WorkflowOwnerAuthority; items?: readonly TransactItem[] } | undefined>;
 }
 
 /**
