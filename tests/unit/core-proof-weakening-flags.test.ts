@@ -402,6 +402,12 @@ describe("N5: every check that was not compared is named, even when another was"
     const proof = proofOf({ items: [item("readiness:0", "unit"), item("readiness:1", "integration")], weakening: [compared], weakeningNotCompared: [{ checkId: "readiness:1", reason: "original_run_truncated" }] });
     expect(weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST })).toEqual([WEAKENING_HEADING, "- Test weakening: could not compare integration (the run on the original code looks cut short)", ""]);
   });
+  it("when no check was compared, each one is still named, not one reason for all", () => {
+    const proof = proofOf({ items: [item("readiness:0", "unit"), item("readiness:1", "integration")], weakeningNotCompared: [{ checkId: "readiness:0", reason: "no_report" }, { checkId: "readiness:1", reason: "original_run_truncated" }] });
+    expect(weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST })).toEqual([
+      WEAKENING_HEADING, "- Test weakening: could not compare unit (a test report was not available from both runs)", "- Test weakening: could not compare integration (the run on the original code looks cut short)", "",
+    ]);
+  });
   it("names each such check, bounded, with the rest counted", () => {
     const many = Array.from({ length: 8 }, (_unused, n) => ({ checkId: `readiness:${String(n + 1)}`, reason: "no_report" }));
     const lines = weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared], weakeningNotCompared: many }), candidateDigest: DIGEST });
