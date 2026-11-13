@@ -422,6 +422,23 @@ export function feedbackFixedReply(commit: string): string {
 
 // ---- merge tracking
 
+/**
+ * TE-B2 (honest CI states): the CI states a person is told in words, never silently counted as a pass. `none`: nothing ever ran on the pull request and its head defines no workflows. `unreadable`: the checks could
+ * not be read for a whole wait (a missing `checks: read`, or a list that fails). The words are shared by the task page, the milestones, the merge refusals and the pull request's first line (the evidence level
+ * `no_ci` / `ci_not_readable` says the same, see `ciEvidenceLevel`).
+ */
+export const CI_STATE_WORDS = {
+  none: "No CI on this repository",
+  unreadable: "CI not readable: grant checks read, or set this project to 'do not read CI'",
+  /** TE-B5: the base branch requires a check that no app has reported on this head, so it can never pass: the repository's settings name a check nothing runs. */
+  required_missing: "A required check has not reported",
+} as const;
+/** The evidence level (`EVIDENCE_LEVELS`) a CI state stands for on the pull request's first line: `their_ci` when checks reported, `no_ci` and `ci_not_readable` for the two honest states; `undefined` while the checks run. */
+export function ciEvidenceLevel(ci: "none" | "pending" | "passing" | "failing" | "unreadable" | "required_missing"): "their_ci" | "no_ci" | "ci_not_readable" | undefined {
+  // `required_missing` has no level of its own in the pack's closed list (TE-A2's `EVIDENCE_LEVELS`): its words come from `CI_STATE_WORDS`, and the first line says nothing better than "waiting" until the check reports.
+  return ci === "none" ? "no_ci" : ci === "unreadable" ? "ci_not_readable" : ci === "pending" || ci === "required_missing" ? undefined : "their_ci";
+}
+
 /** The separate item that holds what GitHub says about one pull request of a task (`DEVTASK#<taskId>` / `MERGE_TRACKING#<repositoryId>#<number>`). `decisionDigest` hashes every field but `observedAt`, `version` and itself. */
 export const MergeTrackingItemSchema = z
   .object({
@@ -434,9 +451,15 @@ export const MergeTrackingItemSchema = z
     draft: z.boolean(),
     state: z.enum(["open", "closed", "merged"]),
     baseBranch: z.string().min(1).max(255),
-    ci: z.enum(["none", "pending", "passing", "failing"]),
+    ci: z.enum(["none", "pending", "passing", "failing", "unreadable", "required_missing"]),
     ciBasis: z.enum(["required", "all_checks"]),
     checksEverSeen: z.boolean(),
+    /** TE-B2: since when the head's checks could not be read (cleared when they read, or the head moves). Absent on every row written before: it reads as "not unreadable". */
+    ciUnreadableSince: InstantSchema.optional(),
+    /** TE-B5: the required checks no app has reported on this head (at most ten, plain, as the base branch's settings name them), while `ci` is `required_missing`. Absent on every row written before. */
+    /** TE-B5 (L1): since when a head a PERSON pushed has had a required check unreported (its own clock; Rovara's heads use `lastRovaraPushAt`). Absent on every row written before. */
+    ciMissingSince: InstantSchema.optional(),
+    ciMissingChecks: z.array(z.string().min(1).max(120)).max(10).optional(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),
     approval: z.object({ hostUserId: z.string().min(1).max(200), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
@@ -519,6 +542,12 @@ export const MERGE_NOT_READY_MESSAGES = {
   conflicted: (base: string): string => `The branch conflicts with ${base}. I'm resolving it.`,
   baseChanged: (branch: string): string => `The pull request's base changed to ${branch}. Change it back or close the task.`,
   draft: "The pull request is still a draft.",
+  /** TE-B2: a draft that has no CI to wait for. The default mode keeps it a draft (nothing checked it); a project in sandbox_only has it marked ready. */
+  draftNoCi: `${CI_STATE_WORDS.none}, so nothing checked this code. The pull request is still a draft: mark it ready on the code host when you are happy with it.`,
+  /** TE-B2: the checks could not be read for a whole wait. */
+  ciNotReadable: `${CI_STATE_WORDS.unreadable}.`,
+  /** TE-B5: a required check has not reported. */
+  requiredMissing: `${CI_STATE_WORDS.required_missing}: the base branch requires a check that nothing has run on this code. Add it, or ask an admin to take it off the branch's required list.`,
   notOpen: "The pull request isn't open.",
   changing: "I'm still changing this pull request.",
   repository: (repository: string, reason: string): string => `${repository}'s pull request isn't ready yet: ${reason}`,
