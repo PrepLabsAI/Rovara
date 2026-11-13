@@ -753,8 +753,11 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
   };
 }
 
-/** Sign-in client changes: the only admin changes the legacy deployment takes (spec 064), confirmed in the CLI. */
-const LINKING_CHANGE_KINDS: ReadonlySet<string> = new Set(["register_sign_in_client", "remove_sign_in_client"]);
+/**
+ * The only admin changes the legacy deployment takes (spec 064), confirmed in the CLI: sign-in clients, and granting a
+ * signed-in person a project, so a service such as the Rovara Cloud web app shows them the projects they may use.
+ */
+const LINKING_CHANGE_KINDS: ReadonlySet<string> = new Set(["register_sign_in_client", "remove_sign_in_client", "grant_project_access", "revoke_project_access"]);
 
 /**
  * Spec 025 phase 25e: admin changes exist only with developer sign-in and a TurnRecords table (D14). Spec 064: the
