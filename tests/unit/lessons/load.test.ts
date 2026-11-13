@@ -1,12 +1,12 @@
 // The loader: which lessons a stage is given. Poisoning classes on the loader side, and the independence of a reviewer's lessons.
 import { describe, expect, it } from "vitest";
 import { LearnedContextSchema } from "../../../packages/contracts/src/index.js";
-import { applyLoadReport } from "../../../packages/core/src/lessons/counters.js";
-import { learnedContextForDispatch, loadLessonsForStage, scopeMatch, wilsonLower, type LoadDeps, type LoadRequest } from "../../../packages/core/src/lessons/load.js";
-import { readVisible } from "../../../packages/core/src/lessons/read-visible.js";
-import { LOAD_DEFAULT_BYTES, LOAD_DEFAULT_LESSONS } from "../../../packages/core/src/lessons/policy.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { applyLoadReport } from "../../../packages/lessons/src/counters.js";
+import { learnedContextForDispatch, loadLessonsForStage, scopeMatch, wilsonLower, type LoadDeps, type LoadRequest } from "../../../packages/lessons/src/load.js";
+import { readVisible } from "../../../packages/lessons/src/read-visible.js";
+import { LOAD_DEFAULT_BYTES, LOAD_DEFAULT_LESSONS } from "../../../packages/lessons/src/policy.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, embedder, lessonRecord, seed, settings, allowAllAccess } from "./lesson-helpers.js";
 
 const restrictedAudience = { kind: "restricted" as const, acl: { source: "slack" as const, scope: "slack:T/C9", principals: ["U-member"], capturedAt: "x", liveCheck: "none" as const } };

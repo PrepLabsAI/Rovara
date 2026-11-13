@@ -1,12 +1,12 @@
 // Renewal on a validated load for trial/stable lessons, the sweep's fresh re-check, the promotion's audit and retry rules, the trial lifetime floor
 // A stale citation blocks stable and publishing, and the read pages through every lesson., and the paged read. The nightly job's own tests are in lessons-jobs.test.ts, the task-end counting in task-end.test.ts.
 import { describe, expect, it } from "vitest";
-import { activateLesson } from "../../../packages/core/src/lessons/approve.js";
-import { applyLoadReport, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
-import { renewLesson, sweepExpired, SWEEP_PAGE } from "../../../packages/core/src/lessons/expiry.js";
-import { InMemoryLessonStore, type LessonStore } from "../../../packages/core/src/lessons/store.js";
-import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS, isPublishable, promoteIfStable, promoteStableTrials, trialIsStable } from "../../../packages/core/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { activateLesson } from "../../../packages/lessons/src/approve.js";
+import { applyLoadReport, type CounterDeps } from "../../../packages/lessons/src/counters.js";
+import { renewLesson, sweepExpired, SWEEP_PAGE } from "../../../packages/lessons/src/expiry.js";
+import { InMemoryLessonStore, type LessonStore } from "../../../packages/lessons/src/store.js";
+import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS, isPublishable, promoteIfStable, promoteStableTrials, trialIsStable } from "../../../packages/lessons/src/trial.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Audit, Clock, Judge, KEY, WS, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;

@@ -1,7 +1,7 @@
 // Which lessons may ever go into one repository's file. Every kind of input the reflector can be given, the AND of a merge, an old lesson, and the eligibility rule.
 import { describe, expect, it } from "vitest";
-import { isRepoFileEligible, mergedRepoVisibility, repoFileBlockers, repoVisibilityOf, type RepoInputSpan } from "../../../packages/core/src/lessons/repo-eligibility.js";
-import { SPAN_KINDS, type Audience } from "../../../packages/core/src/lessons/types.js";
+import { isRepoFileEligible, mergedRepoVisibility, repoFileBlockers, repoVisibilityOf, type RepoInputSpan } from "../../../packages/lessons/src/repo-eligibility.js";
+import { SPAN_KINDS, type Audience } from "../../../packages/lessons/src/types.js";
 import { lessonRecord } from "./lesson-helpers.js";
 
 const A = "github:repo/1001";

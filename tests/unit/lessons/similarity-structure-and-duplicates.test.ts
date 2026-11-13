@@ -2,14 +2,14 @@
 // word alone. Code operators are words; a call is not sent with less than 200 ms left; a judge's "same" for a pair that is not the same by structure keeps the draft apart as a possible duplicate for a person
 // ( and the rule behind it); an SDK that failed to load is "unavailable", not "loading".
 import { beforeEach, describe, expect, it } from "vitest";
-import { relate, sameByStructure, wordsOf } from "../../../packages/core/src/lessons/copy-match.js";
-import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
-import { processDraft, settleLesson, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { closeEnoughForSame, docOf, matchesRejected, resetNoEmbedderNotice } from "../../../packages/core/src/lessons/similarity.js";
-import { trialBlockers } from "../../../packages/core/src/lessons/trial.js";
-import { earnedAttention } from "../../../packages/core/src/lessons/process.js";
-import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
+import { relate, sameByStructure, wordsOf } from "../../../packages/lessons/src/copy-match.js";
+import { curateDraft, type CurateDeps } from "../../../packages/lessons/src/curate.js";
+import { processDraft, settleLesson, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { closeEnoughForSame, docOf, matchesRejected, resetNoEmbedderNotice } from "../../../packages/lessons/src/similarity.js";
+import { trialBlockers } from "../../../packages/lessons/src/trial.js";
+import { earnedAttention } from "../../../packages/lessons/src/process.js";
+import type { LessonDraft } from "../../../packages/lessons/src/reflect.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, allowAllAccess, closeEmbedder, directory, draft, embedder, facts, lessonRecord, seed, settings, uniqueDraft, verifier } from "./lesson-helpers.js";
 
 const answer = (...verdicts: string[]): string => JSON.stringify({ verdicts: verdicts.map((verdict, i) => ({ n: i + 1, verdict })) });

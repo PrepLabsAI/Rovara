@@ -1,22 +1,22 @@
 // Review and the owner's "Lesson limits" value ordering.
 import { describe, expect, it } from "vitest";
 import { isMeaningfulAnchor, locateCitation, CodeCitationSchema } from "../../../packages/contracts/src/index.js";
-import { AuditUnavailable, activateLesson, approveLesson, listQueued, listWaiting, rejectLesson, retireByPerson, rollbackLessonSet, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { applyLoadReport, recordFeedback, recordTaskOutcome, settleHelpful } from "../../../packages/core/src/lessons/counters.js";
-import { buildWeeklyDigest } from "../../../packages/core/src/lessons/digest.js";
-import { hasCommandOrUrl, touchesRiskyPath } from "../../../packages/core/src/lessons/guards.js";
-import { loadLessonsForStage } from "../../../packages/core/src/lessons/load.js";
-import { requireAudit } from "../../../packages/core/src/lessons/policy.js";
-import type { LessonAuditEvent, LessonAuditSink } from "../../../packages/core/src/lessons/ports.js";
-import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { promoteToRule, type PromoteDeps } from "../../../packages/core/src/lessons/promote.js";
-import { reflectSubject } from "../../../packages/core/src/lessons/reflect.js";
-import { InMemoryLessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
-import { type TierInput } from "../../../packages/core/src/lessons/tier.js";
-import { isCorroborated, lessonValue } from "../../../packages/core/src/lessons/value.js";
-import type { Audience, Lesson } from "../../../packages/core/src/lessons/types.js";
+import { AuditUnavailable, activateLesson, approveLesson, listQueued, listWaiting, rejectLesson, retireByPerson, rollbackLessonSet, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { applyLoadReport, recordFeedback, recordTaskOutcome, settleHelpful } from "../../../packages/lessons/src/counters.js";
+import { buildWeeklyDigest } from "../../../packages/lessons/src/digest.js";
+import { hasCommandOrUrl, touchesRiskyPath } from "../../../packages/lessons/src/guards.js";
+import { loadLessonsForStage } from "../../../packages/lessons/src/load.js";
+import { requireAudit } from "../../../packages/lessons/src/policy.js";
+import type { LessonAuditEvent, LessonAuditSink } from "../../../packages/lessons/src/ports.js";
+import { processDraft, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { promoteToRule, type PromoteDeps } from "../../../packages/lessons/src/promote.js";
+import { reflectSubject } from "../../../packages/lessons/src/reflect.js";
+import { InMemoryLessonStore, type LoadManifest } from "../../../packages/lessons/src/store.js";
+import { type TierInput } from "../../../packages/lessons/src/tier.js";
+import { isCorroborated, lessonValue } from "../../../packages/lessons/src/value.js";
+import type { Audience, Lesson } from "../../../packages/lessons/src/types.js";
 import { Alerts, Audit, Clock, Judge, KEY, MemoryVectors, PROJECT, Publisher, ScriptedModel, Spend, WS, candidateJson, codeCite, directory, draft, embedder, lessonRecord, memberSpan, reply, seed, settings, subject, verifier, classifyTier, facts, autoSettings, allSharedTasks, allowAllAccess, type FeedbackDeps } from "./lesson-helpers.js";
-import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
+import type { EvidenceSpan } from "../../../packages/lessons/src/reflect-input.js";
 
 const restricted: Audience = { kind: "restricted", acl: { source: "slack", scope: "slack:T/C9", principals: ["U-member"], capturedAt: "x", liveCheck: "none" } };
 const inACL = { principals: ["U-member"], groups: [] };

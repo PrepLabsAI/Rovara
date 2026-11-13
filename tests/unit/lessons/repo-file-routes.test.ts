@@ -1,9 +1,9 @@
 // The status, the maintainer's switches (audited first), the route layer, and the nightly job that runs the weekly pass without a new schedule.
 import { afterEach, describe, expect, it } from "vitest";
-import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
-import { lessonsRepoFileJob, type RepoFileRuntime } from "../../../packages/core/src/lessons/repo-file-job.js";
-import { repoFileAction, repoFileStatus } from "../../../packages/core/src/lessons/repo-file-routes.js";
-import { newRepoFileState } from "../../../packages/core/src/lessons/repo-file-state.js";
+import { setLearnedLessonsGate } from "../../../packages/lessons/src/policy.js";
+import { lessonsRepoFileJob, type RepoFileRuntime } from "../../../packages/lessons/src/repo-file-job.js";
+import { repoFileAction, repoFileStatus } from "../../../packages/lessons/src/repo-file-routes.js";
+import { newRepoFileState } from "../../../packages/lessons/src/repo-file-state.js";
 import { PLACE, WS, passSetup, repoLesson } from "./repo-file-helpers.js";
 
 afterEach(() => { setLearnedLessonsGate(() => true); });
@@ -185,7 +185,7 @@ describe("an erased lesson that is only in the open pull request comes out at on
     const erased = (await w.store.listAllHeads(w.key)).find((l) => l.id === "les_aaaa0002")!;
     await w.store.commit(w.key, await w.store.setVersion(w.key), [{ ...erased, version: 2, status: "withdrawn" }], 9);
     await w.store.markGone(w.key, "les_aaaa0002", "withdrawn");
-    const { closeOpenPullRequestFor } = await import("../../../packages/core/src/lessons/repo-file-routes.js");
+    const { closeOpenPullRequestFor } = await import("../../../packages/lessons/src/repo-file-routes.js");
     await closeOpenPullRequestFor(runtimeOf(w), w.key, "les_aaaa0002");
     expect(w.host.open).toHaveLength(0);
     expect(w.host.files.has(open.branch)).toBe(false);
@@ -203,7 +203,7 @@ describe("an erased lesson that is only in the open pull request comes out at on
     await w.enable();
     await w.run();
     const open = (await w.current()).open!;
-    const { closeOpenPullRequestFor } = await import("../../../packages/core/src/lessons/repo-file-routes.js");
+    const { closeOpenPullRequestFor } = await import("../../../packages/lessons/src/repo-file-routes.js");
     await closeOpenPullRequestFor(runtimeOf(w), w.key, "les_other0001");
     expect(w.host.open).toHaveLength(1);
     w.host.setFile(open.branch, "notes.txt", "a person's commit");

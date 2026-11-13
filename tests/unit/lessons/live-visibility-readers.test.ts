@@ -2,10 +2,10 @@
 // -: a reader asked for two viewers never hands one the other's answer;: a failed answer is not remembered.
 // -: ONE deadline for a whole check (the audience read and the comparison after it share it); the pull request description's two readers read each source task once.
 import { describe, expect, it } from "vitest";
-import { createLessonLiveReader } from "../../../packages/core/src/lessons/live-visibility.js";
-import { withLessonAudiences, type LessonAudiencePort, type LessonTaskAudience } from "../../../packages/core/src/lessons/task-audience.js";
-import type { TaskVisibilityPort } from "../../../packages/core/src/lessons/access-port.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { createLessonLiveReader } from "../../../packages/lessons/src/live-visibility.js";
+import { withLessonAudiences, type LessonAudiencePort, type LessonTaskAudience } from "../../../packages/lessons/src/task-audience.js";
+import type { TaskVisibilityPort } from "../../../packages/lessons/src/access-port.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { KEY, lessonRecord, wideAudience } from "./lesson-helpers.js";
 
 const team: TaskVisibilityPort = { read: async () => new Map() };

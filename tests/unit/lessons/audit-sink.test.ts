@@ -2,9 +2,9 @@
 // an unmapped action under `requireAudit` fails (so the change is refused), and the moved-citation and merge events reach the ledger.
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "../../../packages/contracts/src/index.js";
-import { BOOKKEEPING, LEDGERED, lessonAuditSink } from "../../../packages/core/src/lessons/audit-sink.js";
-import { emitAudit, requireAudit } from "../../../packages/core/src/lessons/policy.js";
-import { LESSON_AUDIT_ACTIONS, type LessonAuditAction } from "../../../packages/core/src/lessons/types.js";
+import { BOOKKEEPING, LEDGERED, lessonAuditSink } from "../../../packages/lessons/src/audit-sink.js";
+import { emitAudit, requireAudit } from "../../../packages/lessons/src/policy.js";
+import { LESSON_AUDIT_ACTIONS, type LessonAuditAction } from "../../../packages/lessons/src/types.js";
 import { PROJECT, WS } from "./lesson-helpers.js";
 
 const NOW = Date.parse("2026-11-01T00:00:00.000Z");

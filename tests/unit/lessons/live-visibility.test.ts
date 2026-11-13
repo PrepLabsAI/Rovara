@@ -2,17 +2,17 @@
 // LIVE visibility of every task the lesson was learned from (`supportTasks`, task citations, the Rovara events it cites), in one batched read, and fails closed.
 import { describe, expect, it } from "vitest";
 import { LEARNED_CONTEXT_FEATURE, OrgIdSchema, learnedRefsOf, type LearnedRefs } from "../../../packages/contracts/src/index.js";
-import { buildWeeklyDigest } from "../../../packages/core/src/lessons/digest.js";
-import { learnedContextFromRefs, type DeliveryDeps } from "../../../packages/core/src/lessons/deliver.js";
-import { createLessonLiveReader, liveVisible, lessonTaskRefs } from "../../../packages/core/src/lessons/live-visibility.js";
-import { learnedContextForDispatch, loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/core/src/lessons/load.js";
-import { readVisible, readVisibleRanked } from "../../../packages/core/src/lessons/read-visible.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { withLessonAudiences, type LessonAudiencePort, type LessonTaskAudience } from "../../../packages/core/src/lessons/task-audience.js";
-import { buildLessonsView, type LessonViewDeps } from "../../../packages/core/src/lessons/view.js";
-import type { AccessCheckPort } from "../../../packages/core/src/lessons/access-port.js";
-import type { TaskVisibilityPort } from "../../../packages/core/src/lessons/access-port.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { buildWeeklyDigest } from "../../../packages/lessons/src/digest.js";
+import { learnedContextFromRefs, type DeliveryDeps } from "../../../packages/lessons/src/deliver.js";
+import { createLessonLiveReader, liveVisible, lessonTaskRefs } from "../../../packages/lessons/src/live-visibility.js";
+import { learnedContextForDispatch, loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/lessons/src/load.js";
+import { readVisible, readVisibleRanked } from "../../../packages/lessons/src/read-visible.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { withLessonAudiences, type LessonAudiencePort, type LessonTaskAudience } from "../../../packages/lessons/src/task-audience.js";
+import { buildLessonsView, type LessonViewDeps } from "../../../packages/lessons/src/view.js";
+import type { AccessCheckPort } from "../../../packages/lessons/src/access-port.js";
+import type { TaskVisibilityPort } from "../../../packages/lessons/src/access-port.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, directory, embedder, lessonRecord, seed, settings, wideAudience, NO_VECTORS } from "./lesson-helpers.js";
 
 /** A lesson-audience port over a table (a task missing from the table, or mapped to undefined, is unknown; "throw" throws). Counts its batched reads. */

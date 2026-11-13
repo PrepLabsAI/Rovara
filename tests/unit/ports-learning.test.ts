@@ -2,8 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_POINT_CARDINALITY, lessonKey } from "@rovara-code/contracts";
 import { MemoryDocumentStore, createFixedLessonEmbedder, createMemoryLearningAdapter, createMemoryLessonVectors } from "../../packages/core/src/ports/index.js";
-import { createHashingEmbedder, createLocalLearningAdapter } from "../../packages/core/src/lessons/local-embedder.js";
-import { documentLessonVectors } from "../../packages/core/src/lessons/document-vectors.js";
+import { createHashingEmbedder, createLocalLearningAdapter } from "../../packages/lessons/src/local-embedder.js";
+import { documentLessonVectors } from "../../packages/lessons/src/document-vectors.js";
 import { runLessonEmbedderConformance, runLessonVectorsConformance } from "../support/ports/learning-conformance.js";
 
 runLessonEmbedderConformance("the fixed test embedder", { async create() { return { embedder: createFixedLessonEmbedder() }; } });

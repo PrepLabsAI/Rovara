@@ -15,15 +15,7 @@ import { changeRequestRef } from "../../core/merge/host-port.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
-import { isEvalRunMark } from "../../lessons/eval-run.js";
-import { isHumanSendBack } from "../../lessons/human-send-backs.js";
-import { cleanForLearning } from "../../lessons/guards.js";
-import type { EvidenceSpan } from "../../lessons/reflect-input.js";
-import type { RepoChangeRequest } from "../../lessons/repo-reflect.js";
-import type { OutcomeRowReader, RevertedTasksReader } from "../../lessons/task-outcome-rows.js";
-import type { TaskSubjectBase, TaskSubjectSource } from "../../lessons/task-end.js";
-import type { SendBackFact } from "../../lessons/task-subject.js";
-import { narrowestAudience, type Audience, type TrustClass } from "../../lessons/types.js";
+import { isEvalRunMark, isHumanSendBack, cleanForLearning, type EvidenceSpan, type RepoChangeRequest, type OutcomeRowReader, type RevertedTasksReader, type TaskSubjectBase, type TaskSubjectSource, type SendBackFact, narrowestAudience, type Audience, type TrustClass } from "@rovara-code/lessons";
 import type { LessonRepositories, LessonRepository } from "./lessons-repos.js";
 import { queryAll } from "@rovara-code/contracts";
 

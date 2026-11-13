@@ -2,8 +2,8 @@
 // the LESSONSET prefix the project and company erase wipe.
 import { queryAll, teamRecordPk } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { documentRepoFileStore } from "../../../packages/core/src/lessons/document-repo-file.js";
-import { InMemoryRepoFileStore, StateUnreadable, newRepoFileState } from "../../../packages/core/src/lessons/repo-file-state.js";
+import { documentRepoFileStore } from "../../../packages/lessons/src/document-repo-file.js";
+import { InMemoryRepoFileStore, StateUnreadable, newRepoFileState } from "../../../packages/lessons/src/repo-file-state.js";
 import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { KEY, PLACE, OTHER_PLACE } from "./repo-file-helpers.js";
 

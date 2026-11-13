@@ -1,11 +1,11 @@
 // The pure proposal, the pointer, the pull request words and the status lines.
 import { describe, expect, it } from "vitest";
 import { LESSON_FILE_MAX_BYTES, LESSON_FILE_MAX_LESSONS } from "@rovara-code/contracts";
-import { pointerTargets, withPointer } from "../../../packages/core/src/lessons/repo-file-pointer.js";
-import { planRepoFile, removalReasonOf, renderLesson, sectionOf, REMOVAL_REASONS, type PlanInput } from "../../../packages/core/src/lessons/repo-file-plan.js";
-import { noticesOf, prBody, prTitle, rowOf } from "../../../packages/core/src/lessons/repo-file-pr.js";
-import { newRepoFileState } from "../../../packages/core/src/lessons/repo-file-state.js";
-import { parseLessonsFile, renderLessonsFile } from "../../../packages/core/src/lessons/repo-file-format.js";
+import { pointerTargets, withPointer } from "../../../packages/lessons/src/repo-file-pointer.js";
+import { planRepoFile, removalReasonOf, renderLesson, sectionOf, REMOVAL_REASONS, type PlanInput } from "../../../packages/lessons/src/repo-file-plan.js";
+import { noticesOf, prBody, prTitle, rowOf } from "../../../packages/lessons/src/repo-file-pr.js";
+import { newRepoFileState } from "../../../packages/lessons/src/repo-file-state.js";
+import { parseLessonsFile, renderLessonsFile } from "../../../packages/lessons/src/repo-file-format.js";
 import { OTHER_PLACE, PLACE, repoLesson } from "./repo-file-helpers.js";
 
 const NOW_T = 1_000_000;

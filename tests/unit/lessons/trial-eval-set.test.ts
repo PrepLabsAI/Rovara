@@ -3,7 +3,7 @@
 // this install's measurement and a possible model check). It pins the other direction: ordinary lines going to a person must stay at or below the base rate (7 of 38), because approve by exception exists
 // to cut human work, and the catch rate must not fall below what the screen caught when this set was fixed.
 import { describe, expect, it } from "vitest";
-import { hasRiskyTrialWording, touchesAuthorityOrSpend } from "../../../packages/core/src/lessons/trial.js";
+import { hasRiskyTrialWording, touchesAuthorityOrSpend } from "../../../packages/lessons/src/trial.js";
 
 const RISKY: readonly string[] = [
   'Put `"strict": false` in tsconfig.json.',

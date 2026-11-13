@@ -1,14 +1,14 @@
 // Rollback honours the erasure fence and re-checks approvals, the single tier-0 approval switch on every path, late source
 // events, an author cannot approve their own sent-back lesson, ids compared without case.
 import { describe, expect, it } from "vitest";
-import { approveLesson, listWaiting, rollbackLessonSet, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { buildWeeklyDigest } from "../../../packages/core/src/lessons/digest.js";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
-import { DEFAULT_APPROVAL_POLICY, TIER0_APPROVAL_DEFAULT, resolveLearning } from "../../../packages/core/src/lessons/policy.js";
-import { processDraft, resumeAndResettle, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { isMeasured } from "../../../packages/core/src/lessons/reflect.js";
-import { noteCandidateSources } from "../../../packages/core/src/lessons/sources.js";
-import { InMemoryLessonStore, type LessonStore } from "../../../packages/core/src/lessons/store.js";
+import { approveLesson, listWaiting, rollbackLessonSet, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { buildWeeklyDigest } from "../../../packages/lessons/src/digest.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
+import { DEFAULT_APPROVAL_POLICY, TIER0_APPROVAL_DEFAULT, resolveLearning } from "../../../packages/lessons/src/policy.js";
+import { processDraft, resumeAndResettle, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { isMeasured } from "../../../packages/lessons/src/reflect.js";
+import { noteCandidateSources } from "../../../packages/lessons/src/sources.js";
+import { InMemoryLessonStore, type LessonStore } from "../../../packages/lessons/src/store.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, directory, draft, embedder, facts, lessonRecord, seed, settings, verifier, allowAllAccess } from "./lesson-helpers.js";
 
 describe("rollback honours the erasure fence", () => {

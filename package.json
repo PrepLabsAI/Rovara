@@ -18,6 +18,7 @@
     "lint": "node scripts/lint-shards.ts",
     "agentx": "node packages/cli/dist/bin.js",
     "port:guard": "node scripts/port-guard.ts",
+    "generate:core-entries": "node scripts/generate-core-entries.ts",
     "preflight": "tsx scripts/preflight.ts",
     "eval": "tsx scripts/eval.ts",
     "test": "vitest run",

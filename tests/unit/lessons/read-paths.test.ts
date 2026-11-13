@@ -1,4 +1,4 @@
-// Architecture guard: lesson data reaches a person or an agent only through the access check. This builds a TypeScript program over the whole broker package and resolves every call by TYPE, so
+// Architecture guard: lesson data reaches a person or an agent only through the access check. This builds a TypeScript program over the whole core package and the lessons package (the lessons engine moved out of core in phase 2b, step 5; its files keep the `lessons/` prefix below) and resolves every call by TYPE, so
 // aliases (`const s = deps.store`), destructuring (`const { list } = store`), re-exports and renamed imports cannot hide a read, and comments are not code. A call that reads the lesson store
 // must sit in a top-level function that also calls `readVisible`, or in a file listed below as an internal worker that returns nothing to a viewer, with the reason. A stale list entry fails too.
 import { readFileSync } from "node:fs";
@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = join(__dirname, "../../..");
 const BROKER = join(ROOT, "packages/core");
+const LESSONS = join(ROOT, "packages/lessons");
 
 /** Files that read the lesson store and hand nothing back to a viewer (they act on a lesson: count, curate, delete, expire, promote, process). */
 const INTERNAL_LESSON_FILES: Record<string, string> = {
@@ -34,9 +35,9 @@ interface Hit { file: string; kind: "lessons"; text: string; guarded: boolean }
 
 /** Bypass samples the guard must catch. They are served from memory (never written to disk) and analysed in the same program as the real broker. */
 const PLANTED: Record<string, string> = {
-  "alias.ts": 'import type { LessonStore } from "../lessons/store.js";\nexport const a = (deps: { store: LessonStore }) => { const st = deps.store; return st.list({ workspaceId: "w", project: "p" }); };\n',
-  "destructure.ts": 'import type { LessonStore } from "../lessons/store.js";\nexport const b = ({ store: s }: { store: LessonStore }) => { const { get } = s; return get({ workspaceId: "w", project: "p" }, "x"); };\n',
-  "comment.ts": 'import type { LessonStore } from "../lessons/store.js";\n// read-visible.js readVisible( filterVisible(\nexport const c = (s: LessonStore) => s.list({ workspaceId: "w", project: "p" });\n',
+  "alias.ts": 'import type { LessonStore } from "../../../lessons/src/store.js";\nexport const a = (deps: { store: LessonStore }) => { const st = deps.store; return st.list({ workspaceId: "w", project: "p" }); };\n',
+  "destructure.ts": 'import type { LessonStore } from "../../../lessons/src/store.js";\nexport const b = ({ store: s }: { store: LessonStore }) => { const { get } = s; return get({ workspaceId: "w", project: "p" }, "x"); };\n',
+  "comment.ts": 'import type { LessonStore } from "../../../lessons/src/store.js";\n// read-visible.js readVisible( filterVisible(\nexport const c = (s: LessonStore) => s.list({ workspaceId: "w", project: "p" });\n',
 };
 const PLANTED_DIR = "zzguard";
 
@@ -60,12 +61,16 @@ function analyse(root = BROKER): Hit[] {
     const empty = /[\\/]node_modules[\\/]/u.test(name) && !/[\\/]node_modules[\\/]typescript[\\/]lib[\\/]/u.test(name);
     return empty ? ts.createSourceFile(name, "", languageVersion) : real.getSourceFile(name, languageVersion, ...rest);
   };
-  const program = ts.createProgram({ rootNames: [...config.fileNames, ...planted.keys()], options, host });
+  const lessonsConfig = ts.getParsedCommandLineOfConfigFile(join(LESSONS, "tsconfig.json"), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => undefined });
+  if (lessonsConfig === undefined) throw new Error("no tsconfig for the lessons package");
+  const program = ts.createProgram({ rootNames: [...config.fileNames, ...lessonsConfig.fileNames, ...planted.keys()], options, host });
   const checker = program.getTypeChecker();
   const hits: Hit[] = [];
   for (const source of program.getSourceFiles()) {
-    if (source.isDeclarationFile || !source.fileName.startsWith(join(root, "src"))) continue;
-    const file = relative(join(root, "src"), source.fileName);
+    if (source.isDeclarationFile) continue;
+    const inLessons = source.fileName.startsWith(join(LESSONS, "src") + "/");
+    if (!inLessons && !source.fileName.startsWith(join(root, "src"))) continue;
+    const file = inLessons ? `lessons/${relative(join(LESSONS, "src"), source.fileName)}` : relative(join(root, "src"), source.fileName);
     const visit = (node: ts.Node, top: ts.Node | undefined): void => {
       const unit = top ?? (node.parent !== undefined && ts.isSourceFile(node.parent) ? node : undefined);
       if (ts.isCallExpression(node)) {
@@ -125,7 +130,7 @@ describe("every read path goes through the access check", () => {
   });
 
   it("the internal lists name only files that exist (a stale entry fails)", () => {
-    for (const file of Object.keys(INTERNAL_LESSON_FILES)) expect(() => readFileSync(join(BROKER, "src", file), "utf8"), file).not.toThrow();
+    for (const file of Object.keys(INTERNAL_LESSON_FILES)) expect(() => readFileSync(join(LESSONS, "src", file.replace(/^lessons\//u, "")), "utf8"), file).not.toThrow();
   });
 });
 

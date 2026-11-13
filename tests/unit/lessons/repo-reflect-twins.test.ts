@@ -1,12 +1,12 @@
 // A repo-only lesson and the task's own lesson about the same advice stay apart (a merge would cost the repo-only one its mark), linked both ways. At load, when both would
 // reach the same task, only one does: the repo-only one is preferred, never both.
 import { describe, expect, it } from "vitest";
-import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
-import { TRIAL_APPROVER } from "../../../packages/core/src/lessons/trial.js";
-import { loadLessonsForStage, toLearned, type LoadDeps, type LoadRequest } from "../../../packages/core/src/lessons/load.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
-import { LessonSchema } from "../../../packages/core/src/lessons/types.js";
+import { curateDraft, type CurateDeps } from "../../../packages/lessons/src/curate.js";
+import { TRIAL_APPROVER } from "../../../packages/lessons/src/trial.js";
+import { loadLessonsForStage, toLearned, type LoadDeps, type LoadRequest } from "../../../packages/lessons/src/load.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
+import { LessonSchema } from "../../../packages/lessons/src/types.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, draft, embedder, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
 
 const A = "github:repo/1001";

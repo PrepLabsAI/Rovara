@@ -1,12 +1,12 @@
 // Collect while off, for the outcomes judge: while the install's lessons switch is off, or cannot be read, a finished task with member comments makes NO judge call and NO model call, and no helpful mark is
 // queued. With the switch on the same task is judged as before. Two locks are tested apart: the capped mode in `recordTaskOutcome`, and the gated model inside `modelCorrectionJudge`.
 import { afterEach, describe, expect, it } from "vitest";
-import { recordTaskOutcome, REVERT_WINDOW_MS, settleHelpful, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
-import { modelCorrectionJudge } from "../../../packages/core/src/lessons/judge-model.js";
-import { LESSONS_SWITCHED_OFF } from "../../../packages/core/src/lessons/model-gate.js";
-import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
-import { InMemoryLessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
-import type { PipelineModel } from "../../../packages/core/src/lessons/ports.js";
+import { recordTaskOutcome, REVERT_WINDOW_MS, settleHelpful, type CounterDeps } from "../../../packages/lessons/src/counters.js";
+import { modelCorrectionJudge } from "../../../packages/lessons/src/judge-model.js";
+import { LESSONS_SWITCHED_OFF } from "../../../packages/lessons/src/model-gate.js";
+import { setLearnedLessonsGate } from "../../../packages/lessons/src/policy.js";
+import { InMemoryLessonStore, type LoadManifest } from "../../../packages/lessons/src/store.js";
+import type { PipelineModel } from "../../../packages/lessons/src/ports.js";
 import { Alerts, Audit, Clock, Judge, KEY, PROJECT, ScriptedModel, Spend, WS, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 afterEach(() => { setLearnedLessonsGate(() => true); });

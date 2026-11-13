@@ -2,12 +2,12 @@
 // when a call succeeds; the model's hold is sized by its own quote; a failed call counts toward the nightly budget; a CI failure from the subject source's CI path is a measured outcome.
 import { describe, expect, it } from "vitest";
 import { LESSONS_PAUSE_CODES, lessonsPauseText, teamRecordPk } from "../../../packages/contracts/src/index.js";
-import { withLearningAttempt, noteLearningFault, type LearningAttempt } from "../../../packages/core/src/lessons/learning-deadline.js";
-import { LearningRefusal, MODEL_FAILURES_BEFORE_PAUSE, documentPauseStore, noteModelFailure, pauseScopeOf, type CurrentPause, type LessonsPauseStore } from "../../../packages/core/src/lessons/pause.js";
-import type { PipelineModel } from "../../../packages/core/src/lessons/ports.js";
-import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { reflectSubject, type ReflectDeps } from "../../../packages/core/src/lessons/reflect.js";
+import { withLearningAttempt, noteLearningFault, type LearningAttempt } from "../../../packages/lessons/src/learning-deadline.js";
+import { LearningRefusal, MODEL_FAILURES_BEFORE_PAUSE, documentPauseStore, noteModelFailure, pauseScopeOf, type CurrentPause, type LessonsPauseStore } from "../../../packages/lessons/src/pause.js";
+import type { PipelineModel } from "../../../packages/lessons/src/ports.js";
+import { curateDraft, type CurateDeps } from "../../../packages/lessons/src/curate.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { reflectSubject, type ReflectDeps } from "../../../packages/lessons/src/reflect.js";
 import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, draft, embedder, memberSpan, reply, settings, subject, verifier } from "./lesson-helpers.js";
 

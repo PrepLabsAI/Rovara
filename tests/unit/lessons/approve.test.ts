@@ -1,11 +1,11 @@
 // Approvals, rejection, retire, rollback, promotion to a rule, and the weekly digest.
 import { describe, expect, it } from "vitest";
-import { approveLesson, listWaiting, rejectLesson, retireByPerson, rollbackLessonSet, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { buildWeeklyDigest } from "../../../packages/core/src/lessons/digest.js";
-import { promoteToRule, ruleParagraph, type PromoteDeps } from "../../../packages/core/src/lessons/promote.js";
-import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { withLessonAudiences } from "../../../packages/core/src/lessons/task-audience.js";
+import { approveLesson, listWaiting, rejectLesson, retireByPerson, rollbackLessonSet, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { buildWeeklyDigest } from "../../../packages/lessons/src/digest.js";
+import { promoteToRule, ruleParagraph, type PromoteDeps } from "../../../packages/lessons/src/promote.js";
+import { setLearnedLessonsGate } from "../../../packages/lessons/src/policy.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { withLessonAudiences } from "../../../packages/lessons/src/task-audience.js";
 import { Audit, Clock, KEY, Publisher, directory, lessonRecord, seed, settings, allSharedTasks, allowAllAccess, wideAudience } from "./lesson-helpers.js";
 
 const base = (over: Parameters<typeof lessonRecord>[0] = {}) => lessonRecord({ id: "les_pend0001", status: "pending", tier: 1, tierReasons: ["not_a_fact"], approvals: [], type: "convention", pendingExpiresAt: 9e15, provenance: { ...lessonRecord().provenance, authors: ["carl"] }, ...over });

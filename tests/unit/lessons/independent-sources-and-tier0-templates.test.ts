@@ -2,15 +2,15 @@
 // baseline growth cap, attribution by author, requiredGroup kept). The reviewer's probes are used as tests.
 import { describe, expect, it } from "vitest";
 import { foldForMatching } from "../../../packages/contracts/src/index.js";
-import { approveLesson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { RISKY_SAMPLES, hasEncodedBlob, touchesRiskyPath } from "../../../packages/core/src/lessons/guards.js";
-import { resolveLearning } from "../../../packages/core/src/lessons/policy.js";
-import { processDraft, resumeAndResettle, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { reflectSubject } from "../../../packages/core/src/lessons/reflect.js";
-import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
-import { BASELINE_DAILY_GROWTH, baselineOf, noteCandidateSources } from "../../../packages/core/src/lessons/sources.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { type TierInput } from "../../../packages/core/src/lessons/tier.js";
+import { approveLesson, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { RISKY_SAMPLES, hasEncodedBlob, touchesRiskyPath } from "../../../packages/lessons/src/guards.js";
+import { resolveLearning } from "../../../packages/lessons/src/policy.js";
+import { processDraft, resumeAndResettle, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { reflectSubject } from "../../../packages/lessons/src/reflect.js";
+import type { EvidenceSpan } from "../../../packages/lessons/src/reflect-input.js";
+import { BASELINE_DAILY_GROWTH, baselineOf, noteCandidateSources } from "../../../packages/lessons/src/sources.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { type TierInput } from "../../../packages/lessons/src/tier.js";
 import { Alerts, Audit, Clock, KEY, uniqueDraft, MemoryVectors, ScriptedModel, Spend, candidateJson, directory, draft, embedder, lessonRecord, memberSpan, reply, seed, settings, subject, verifier, classifyTier, facts, autoSettings, allowAllAccess } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;

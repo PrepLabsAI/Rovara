@@ -1,8 +1,8 @@
 // Tiers and the policy. Poisoning classes and, and the "classifier only raises" property.
 import { describe, expect, it } from "vitest";
-import { hasEscalationWords, requestsCapabilityChange } from "../../../packages/core/src/lessons/guards.js";
-import { DEFAULT_APPROVAL_POLICY, DEFAULT_LEARNING_MODE, approversRequired, learningCaps, modeAllows, resolveLearning } from "../../../packages/core/src/lessons/policy.js";
-import { type TierInput } from "../../../packages/core/src/lessons/tier.js";
+import { hasEscalationWords, requestsCapabilityChange } from "../../../packages/lessons/src/guards.js";
+import { DEFAULT_APPROVAL_POLICY, DEFAULT_LEARNING_MODE, approversRequired, learningCaps, modeAllows, resolveLearning } from "../../../packages/lessons/src/policy.js";
+import { type TierInput } from "../../../packages/lessons/src/tier.js";
 import { draft, lessonRecord, settings, classifyTier } from "./lesson-helpers.js";
 
 const valid = [{ index: 0, result: "valid" as const, at: 1 }];

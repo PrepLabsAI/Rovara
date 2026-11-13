@@ -4,13 +4,13 @@ import {
   COMMIT_CONFLICT_MESSAGE, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_WRITE_PATHS, agentXError,
   type ChangeRequestInput, type ChangeRequestRef, type CodeHost, type CommitFilesInput, type PathKind, type RepositoryRef,
 } from "@rovara-code/contracts";
-import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
-import type { LessonAuditEvent } from "../../../packages/core/src/lessons/ports.js";
-import { sweepDepsOf, sweepErasures } from "../../../packages/core/src/lessons/repo-file-erase.js";
-import { runRepoFilePass, type RepoFileDeps, type RepoFileTarget } from "../../../packages/core/src/lessons/repo-file-pass.js";
-import { InMemoryRepoFileStore, newRepoFileState } from "../../../packages/core/src/lessons/repo-file-state.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { setLearnedLessonsGate } from "../../../packages/lessons/src/policy.js";
+import type { LessonAuditEvent } from "../../../packages/lessons/src/ports.js";
+import { sweepDepsOf, sweepErasures } from "../../../packages/lessons/src/repo-file-erase.js";
+import { runRepoFilePass, type RepoFileDeps, type RepoFileTarget } from "../../../packages/lessons/src/repo-file-pass.js";
+import { InMemoryRepoFileStore, newRepoFileState } from "../../../packages/lessons/src/repo-file-state.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Audit, Clock, KEY, PROJECT, WS, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 export const REPO_URL = "https://github.com/acme/api";

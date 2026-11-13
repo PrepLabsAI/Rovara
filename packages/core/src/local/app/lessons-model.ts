@@ -3,9 +3,7 @@
 // recorded through the `metering` point, so a company that registers a limit there holds learning to it.
 import type { Admission, Metering } from "@rovara-code/contracts";
 import { createLocalAskModel, type LocalAskModelOptions } from "../ask-model.js";
-import { LearningRefusal } from "../../lessons/pause.js";
-import { currentLearningAttempt, learningCallMayStart, noteLearningFault } from "../../lessons/learning-deadline.js";
-import type { LearningSpend, PipelineModel } from "../../lessons/ports.js";
+import { LearningRefusal, currentLearningAttempt, learningCallMayStart, noteLearningFault, type LearningSpend, type PipelineModel } from "@rovara-code/lessons";
 
 /** The longest one learning call is waited for when no attempt of the reflection worker sets a sooner deadline. */
 export const LEARNING_CALL_TIMEOUT_MS = 90_000;

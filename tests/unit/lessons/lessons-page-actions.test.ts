@@ -2,11 +2,11 @@
 //the version a reject and a rollback were asked for.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { approveLesson, rejectLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { recordFeedback } from "../../../packages/core/src/lessons/counters.js";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { LessonSchema } from "../../../packages/core/src/lessons/types.js";
+import { approveLesson, rejectLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { recordFeedback } from "../../../packages/lessons/src/counters.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { LessonSchema } from "../../../packages/lessons/src/types.js";
 import { Alerts, Audit, Clock, Judge, KEY, MemoryVectors, WS, allowAllAccess, directory, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 const pending = (over: Parameters<typeof lessonRecord>[0] = {}) => lessonRecord({

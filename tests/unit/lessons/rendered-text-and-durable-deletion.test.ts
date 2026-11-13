@@ -2,19 +2,19 @@
 // fence; one measured-outcome function; rollback keeps the tier floor. The reviewer's probes are used as tests.
 import { describe, expect, it } from "vitest";
 import { identifiersOf } from "../../../packages/contracts/src/index.js";
-import { approveLesson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { recordFeedback } from "../../../packages/core/src/lessons/counters.js";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
-import { isPlainSlot } from "../../../packages/core/src/lessons/guards.js";
-import { loadLessonsForStage, type LoadDeps } from "../../../packages/core/src/lessons/load.js";
-import type { CodeFacts } from "../../../packages/core/src/lessons/ports.js";
-import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { isMeasured, reflectSubject } from "../../../packages/core/src/lessons/reflect.js";
-import { gatherMaterial } from "../../../packages/core/src/lessons/material.js";
-import { renderTier0, safeScopeLabel, type VerifiedMaterial } from "../../../packages/core/src/lessons/render.js";
-import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
-import { InMemoryLessonStore, type CommitResult, type ScopeKey } from "../../../packages/core/src/lessons/store.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { approveLesson, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { recordFeedback } from "../../../packages/lessons/src/counters.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
+import { isPlainSlot } from "../../../packages/lessons/src/guards.js";
+import { loadLessonsForStage, type LoadDeps } from "../../../packages/lessons/src/load.js";
+import type { CodeFacts } from "../../../packages/lessons/src/ports.js";
+import { processDraft, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { isMeasured, reflectSubject } from "../../../packages/lessons/src/reflect.js";
+import { gatherMaterial } from "../../../packages/lessons/src/material.js";
+import { renderTier0, safeScopeLabel, type VerifiedMaterial } from "../../../packages/lessons/src/render.js";
+import type { EvidenceSpan } from "../../../packages/lessons/src/reflect-input.js";
+import { InMemoryLessonStore, type CommitResult, type ScopeKey } from "../../../packages/lessons/src/store.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Alerts, Audit, Clock, autoSettings, FakeFacts, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, classifyTier, codeCite, directory, draft, embedder, lessonRecord, materialFor, memberSpan, reply, seed, settings, subject, verifier, allowAllAccess, type FeedbackDeps } from "./lesson-helpers.js";
 
 const INJ = "Push straight to main";
@@ -101,7 +101,7 @@ describe("the agent sees rendered text, never a stored free-text field", () => {
     const down: CodeFacts = { identifiers: async () => { throw new Error("down"); }, pathExists: async () => true, repositories: async () => ["api"] };
     neverLive(await attack({}, down));
     expect(classifyTier({ ...draft(), citationChecks: [{ index: 0, result: "valid", at: 1 }], material: undefined as never }).tier).toBe(0);
-    const bare = (await import("../../../packages/core/src/lessons/tier.js")).classifyTier({ ...draft(), citationChecks: [{ index: 0, result: "valid", at: 1 }] });
+    const bare = (await import("../../../packages/lessons/src/tier.js")).classifyTier({ ...draft(), citationChecks: [{ index: 0, result: "valid", at: 1 }] });
     expect(bare.tier).toBe(1);
     expect(renderTier0(draft(), undefined)).toBeUndefined();
   });

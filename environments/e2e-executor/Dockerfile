@@ -19,6 +19,7 @@ COPY packages/worker/package.json packages/worker/package.json
 COPY packages/cli/package.json packages/cli/package.json
 COPY packages/orchestrator/package.json packages/orchestrator/package.json
 COPY packages/core/package.json packages/core/package.json
+COPY packages/lessons/package.json packages/lessons/package.json
 COPY packages/local-adapters/package.json packages/local-adapters/package.json
 COPY packages/aws-adapters/package.json packages/aws-adapters/package.json
 COPY packages/testing/package.json packages/testing/package.json

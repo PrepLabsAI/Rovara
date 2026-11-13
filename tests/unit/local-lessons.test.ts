@@ -8,9 +8,9 @@ import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMe
 import { createMemoryModelKeyStore } from "../../packages/core/src/ports/model-key-stores.js";
 import { builtinModelProviderBook } from "../../packages/core/src/local/model-proxy/index.js";
 import { LESSON_LOAD_DEADLINE_MS, createLocalLessons, type LocalLessons } from "../../packages/core/src/local/app/lessons.js";
-import { resolveLearning, setLearnedLessonsGate } from "../../packages/core/src/lessons/policy.js";
-import { localLessonsEnabled } from "../../packages/core/src/lessons/switch.js";
-import { newRepoFileState } from "../../packages/core/src/lessons/repo-file-state.js";
+import { resolveLearning, setLearnedLessonsGate } from "../../packages/lessons/src/policy.js";
+import { localLessonsEnabled } from "../../packages/lessons/src/switch.js";
+import { newRepoFileState } from "../../packages/lessons/src/repo-file-state.js";
 import { taskKey } from "../../packages/core/src/core/task-flow/keys.js";
 import type { CodeMilestoneHandler } from "../../packages/core/src/core/milestones/milestones.js";
 import { COMPANY, createHarness, definition, type Harness } from "../support/task-flow-harness.js";
@@ -611,7 +611,7 @@ describe("lessons for local coding tools on a laptop (decision 46b)", () => {
     const w = await world();
     const scopes = w.lessons.repositories.scopes();
     for (const spelling of ["https://github.com/example/demo.git", "git@github.com:example/demo.git", "ssh://git@github.com/Example/Demo"]) {
-      expect(await scopes.byRemote!(COMPANY, "payments", (await import("../../packages/core/src/lessons/repo-remote.js")).normalizeRemote(spelling)!), spelling).toEqual({ name: "demo", place: "github:repo/77" });
+      expect(await scopes.byRemote!(COMPANY, "payments", (await import("../../packages/lessons/src/repo-remote.js")).normalizeRemote(spelling)!), spelling).toEqual({ name: "demo", place: "github:repo/77" });
     }
     expect(await scopes.byRemote!(COMPANY, "payments", "github.com/example/other")).toBeUndefined();
     await expect(scopes.byRemote!(COMPANY, "nope", "github.com/example/demo")).rejects.toThrow();

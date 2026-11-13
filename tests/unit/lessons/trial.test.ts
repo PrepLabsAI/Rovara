@@ -1,17 +1,17 @@
 // A low-risk lesson from a project member's own correction goes live on trial with no approval; a thumbs-down or a contradicting
 // correction retires it; it becomes stable after 14 days and 3 loads; Regulated turns all of it off; a capability ask goes to people with a fixed reason instead of being dropped.
 import { describe, expect, it } from "vitest";
-import { approveLesson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { applyLoadReport, recordFeedback, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
-import { curateDraft } from "../../../packages/core/src/lessons/curate.js";
-import { approvedForUse } from "../../../packages/core/src/lessons/load.js";
-import { DEFAULT_APPROVAL_POLICY, resolveLearning } from "../../../packages/core/src/lessons/policy.js";
-import { setLearningPreset, type PresetChange, type PresetDeps } from "../../../packages/core/src/lessons/preset-setting.js";
-import { processDraft, settleLesson, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { memberCorrectionOf, reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/core/src/lessons/reflect.js";
-import { InMemoryLessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
-import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS, isPublishable, isTrialLesson, namesAPerson, promoteStableTrials, touchesAuthorityOrSpend } from "../../../packages/core/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { approveLesson, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { applyLoadReport, recordFeedback, type CounterDeps } from "../../../packages/lessons/src/counters.js";
+import { curateDraft } from "../../../packages/lessons/src/curate.js";
+import { approvedForUse } from "../../../packages/lessons/src/load.js";
+import { DEFAULT_APPROVAL_POLICY, resolveLearning } from "../../../packages/lessons/src/policy.js";
+import { setLearningPreset, type PresetChange, type PresetDeps } from "../../../packages/lessons/src/preset-setting.js";
+import { processDraft, settleLesson, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { memberCorrectionOf, reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/lessons/src/reflect.js";
+import { InMemoryLessonStore, type LoadManifest } from "../../../packages/lessons/src/store.js";
+import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS, isPublishable, isTrialLesson, namesAPerson, promoteStableTrials, touchesAuthorityOrSpend } from "../../../packages/lessons/src/trial.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import {
   Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, candidateJson, directory, draft, embedder, facts, lessonRecord, memberSpan, reply, seed, settings, subject, verifier,
 } from "./lesson-helpers.js";
@@ -160,7 +160,7 @@ describe("trial eligibility is worked out from what the lesson CITES (a mixed-sp
 
   async function reflected(cites: (spans: string[]) => string[], spansOver?: Parameters<typeof TASK>[1]) {
     const { spans } = TASK([], spansOver);
-    const input = (await import("../../../packages/core/src/lessons/reflect-input.js")).buildReflectorInput(subject(spans));
+    const input = (await import("../../../packages/lessons/src/reflect-input.js")).buildReflectorInput(subject(spans));
     if (!input.eligible) throw new Error("ineligible");
     const ids = [...input.spans.values()].map((s) => `${s.id}:${s.kind}`);
     const find = (kind: string): string => ids.find((x) => x.endsWith(`:${kind}`))!.split(":")[0]!;

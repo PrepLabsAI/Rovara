@@ -1,9 +1,9 @@
 // The pull request description's Lessons used section: what the reader behind it may name. For a repository KNOWN to be private it lists the lessons, with a link per lesson to mark it not helpful
 // (the link opens the task page, a page that asks); for a public repository or one of unknown visibility it carries only the count and one link. A restricted lesson is never named, and no title that names a person.
 import { describe, expect, it } from "vitest";
-import { lessonsUsedForTask, lessonsUsedReaderOver, lessonsUsedSection, notHelpfulUrl, setLessonsUsedReader, visibilityOfRepositories } from "../../../packages/core/src/lessons/used-in-pr.js";
-import { InMemoryLessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
-import { withLessonAudiences, type LessonAudiencePort, type LessonTaskAudience } from "../../../packages/core/src/lessons/task-audience.js";
+import { lessonsUsedForTask, lessonsUsedReaderOver, lessonsUsedSection, notHelpfulUrl, setLessonsUsedReader, visibilityOfRepositories } from "../../../packages/lessons/src/used-in-pr.js";
+import { InMemoryLessonStore, type LoadManifest } from "../../../packages/lessons/src/store.js";
+import { withLessonAudiences, type LessonAudiencePort, type LessonTaskAudience } from "../../../packages/lessons/src/task-audience.js";
 import { PROJECT, WS, allowAllAccess, draft, lessonRecord, seed, settings, wideAudience } from "./lesson-helpers.js";
 
 const PAGE = "https://app.example.test/review/8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6/task";
