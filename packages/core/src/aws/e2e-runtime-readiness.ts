@@ -15,7 +15,15 @@ import {
   type Ec2RuntimeBinding,
 } from "@rovara-code/contracts";
 import type { z } from "zod";
-import type { TransactItems } from "./developer-task-actions.js";
+
+/**
+ * The shape of one DynamoDB `ConditionCheck` transaction step, as the broker's transaction builder takes it. It is written out here, not borrowed from
+ * `developer-task-actions.ts`, so that this file (which the engine reaches through `core/e2e/runtime-readiness.ts`) does not import the broker's action types, and
+ * through them the AWS control plane. It is assignable to the AWS SDK's `TransactWriteCommandInput["TransactItems"]` entry.
+ */
+type ConditionCheckStep = { ConditionCheck: { TableName: string; Key: { pk: string; sk: string }; ConditionExpression: string;
+  ExpressionAttributeNames: Record<string, string>; ExpressionAttributeValues: Record<string, unknown> } };
+type TransactItems = ConditionCheckStep[];
 
 /** A profile that serves more than one target kind (web and API) keeps one row per kind; without a kind the key is the profile's alone. */
 export function e2eRegisteredRuntimeKey(runtimeCatalogId: string, profileId: string, kind?: "web" | "api"): { pk: string; sk: string } {
