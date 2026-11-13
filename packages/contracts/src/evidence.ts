@@ -614,16 +614,19 @@ const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "a date");
 const MeasureNumberSchema = z.number().min(-1e12).max(1e12);
 const MoneySchema = z.number().min(0).max(1e9);
 
+/** Shared evidence measure: file adapters reuse these fields instead of defining another numeric or label shape. */
+export const EvidenceMeasureSchema = z.object({
+  name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
+  direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: z.object({ low: MeasureNumberSchema, high: MeasureNumberSchema }).strict().optional(),
+}).strict();
+
 /** The schemas of a v2 pack. The writer's (`strict`) refuses an unregistered kind and runs every cross-check; the reader's (`reader`, walked by `tolerantRead`) takes any kind id and runs none (the caller makes the few it needs). */
 function evidencePackV2Schemas(mode: Mode) {
   const obj = <S extends z.ZodRawShape>(shape: S) => z.object(shape).strict();
   const artifact = ArtifactRefSchema;
   const kind = mode === "strict" ? z.string().regex(CHECK_KIND_ID_PATTERN).refine(isRegisteredCheckKind, "a registered check kind") : line(64);
 
-  const measure = obj({
-    name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
-    direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: obj({ low: MeasureNumberSchema, high: MeasureNumberSchema }).optional(),
-  });
+  const measure = EvidenceMeasureSchema;
   const pair = obj({ id: line(80), before: artifact.optional(), after: artifact.optional(), diff: artifact.optional() });
 
   const checkObject = obj({

@@ -11,7 +11,8 @@
 //   - a suite that failed to run (jest and vitest list it with no test results and a message) counts as one errored test, so a load failure never reads as zero failures;
 //   - every name is redacted, one plain line, and cut; at most 500 names go to the evidence, the failing ones first.
 // Pure: no file is read here. The caller reads the bytes (inside the workspace, never through a link) and passes the text.
-import { ABSENT_ON_NEW_MAX, EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
+import { parseReportParts, type ReportFormatHint } from "./report-adapters.js";
+import { ABSENT_ON_NEW_MAX, EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, inertEvidenceText, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
 
 /** A report file larger than this is not read (the TESTPROOF reader's own limit). */
 export const TEST_REPORT_MAX_BYTES = 8 * 1024 * 1024;
@@ -31,9 +32,12 @@ export interface ReportedTest {
   fileGiven?: boolean;
   status: ReportedTestStatus;
   durationMs?: number;
+  /** Per-test epoch times, only when the report supplies them. */
+  startTimeMs?: number;
+  endTimeMs?: number;
 }
 export interface ParsedTestReport {
-  format: "junit" | "json" | "gotest";
+  format: "junit" | "json" | "gotest" | "trx" | "ctrf";
   total: number;
   passed: number;
   failed: number;
@@ -98,16 +102,15 @@ export function unescapeXml(text: string): string {
 export function withoutCommentsAndCdata(text: string): string | undefined {
   const pieces: string[] = [];
   let position = 0;
-  for (;;) {
-    const comment = text.indexOf("<!--", position);
-    const cdata = text.indexOf("<![CDATA[", position);
-    const start = comment === -1 ? cdata : cdata === -1 ? comment : Math.min(comment, cdata);
-    if (start === -1) break;
-    const closing = start === comment ? "-->" : "]]>";
+  const opening = /<!--|<!\[CDATA\[/g;
+  for (let match = opening.exec(text); match !== null; match = opening.exec(text)) {
+    const start = match.index;
+    const closing = match[0] === "<!--" ? "-->" : "]]>";
     const end = text.indexOf(closing, start + 4);
     if (end === -1) return undefined;
     pieces.push(text.slice(position, start));
     position = end + closing.length;
+    opening.lastIndex = position;
   }
   pieces.push(text.slice(position));
   return pieces.join("");
@@ -281,13 +284,13 @@ export function parseGoTestJson(text: string): ParsedTestReport | undefined {
   const tests: ReportedTest[] = [];
   const running = new Map<string, number>();
   const failedTestsIn = new Set<string>();
-  const failedPackages: string[] = [];
+  const failedPackages = new Set<string>();
   const key = (pkg: string, test: string): string => `${pkg}\u0000${test}`;
   for (const raw of text.split("\n")) {
     const event = goEvent(raw.trim());
     if (event === undefined) continue;
     if (event.test === undefined) {
-      if (event.action === "fail" && !failedPackages.includes(event.pkg)) failedPackages.push(event.pkg);
+      if (event.action === "fail") failedPackages.add(event.pkg);
       continue;
     }
     if (event.action === "run") { running.set(key(event.pkg, event.test), (running.get(key(event.pkg, event.test)) ?? 0) + 1); continue; }
@@ -316,14 +319,11 @@ export function parseGoTestJson(text: string): ParsedTestReport | undefined {
 }
 
 /**
- * Reads a report's text in the format its check names (`junit`, `json`) or, for `auto`, the one it looks like (JSON starts with `{`). A `go test -json` event stream is recognised by its content under `auto` and
- * `json`. Anything else, or a text over the size cap, is `undefined`: not measured.
+ * Compatibility view of the adapter table: only its tests part, never measures or an unknown measures version.
+ * Explicit legacy hints retain their meaning; auto also recognises TRX and CTRF. Unreadable or oversized input is not measured.
  */
-export function parseTestReport(text: string, format: "junit" | "json" | "auto" = "auto"): ParsedTestReport | undefined {
-  if (text.length === 0 || Buffer.byteLength(text, "utf8") > TEST_REPORT_MAX_BYTES) return undefined;
-  if (format !== "junit" && looksLikeGoTestJson(text)) return parseGoTestJson(text);
-  const kind = format === "auto" ? (text.trimStart().startsWith("{") ? "json" : "junit") : format;
-  return kind === "json" ? parseJsonReport(text) : parseJunit(text);
+export function parseTestReport(text: string, format: ReportFormatHint = "auto"): ParsedTestReport | undefined {
+  return parseReportParts(text, format)?.tests;
 }
 
 // ---- tests the change touched
@@ -460,6 +460,9 @@ export interface EvidenceTestsOptions {
  */
 export function evidenceTests(report: ParsedTestReport, options: EvidenceTestsOptions = {}): EvidenceTests {
   const changed = options.changedTestPaths ?? [];
+  const newFormat = report.format === "trx" || report.format === "ctrf";
+  // The v1 schema disallows format characters. Keep a visible prefix for a block opener when displayLine removes the shared helper's joiners.
+  const printedId = (id: string): string => newFormat ? displayLine(inertEvidenceText(id, TEST_ID_MAX).replace(/^\u200D/u, "· ")) : isValidTestId(id) ? id : displayLine(id);
   const touched = (test: ReportedTest) => changedPathOf(test, changed) !== undefined;
   const rank = (test: ReportedTest) => (test.status === "failed" || test.status === "errored" ? 0 : touched(test) ? 1 : 2);
   const ordered = report.tests.map((test, index) => ({ test, index })).sort((a, b) => rank(a.test) - rank(b.test) || a.index - b.index);
@@ -473,9 +476,11 @@ export function evidenceTests(report: ParsedTestReport, options: EvidenceTestsOp
     seen.add(id);
     const proof = touched(test) ? (options.proofByTest?.get(id) ?? options.proofByTest?.get(test.name)) : undefined;
     // An id that is not valid (hidden characters, too long, a space at an end) is shown as a plain line, cut with an ellipsis, and marked `unlisted`: it is counted, never matched against the nightly's failing set or the marks.
-    names.push({ name: isValidTestId(id) ? id : displayLine(id), ...(isValidTestId(id) ? {} : { unlisted: true as const }), status: test.status, ...(proof === undefined ? {} : { proof }), ...(test.durationMs === undefined ? {} : { durationMs: test.durationMs }) });
+    const name = printedId(id);
+    const listed = isValidTestId(id) && name === id;
+    names.push({ name, ...(listed ? {} : { unlisted: true as const }), status: test.status, ...(proof === undefined || (newFormat && !listed) ? {} : { proof }), ...(test.durationMs === undefined ? {} : { durationMs: test.durationMs }) });
   }
-  const newTests = [...new Set(report.tests.filter((test) => test.status !== "skipped" && touched(test)).map((test) => { const id = testIdOf(test); return isValidTestId(id) ? id : displayLine(id); }))].slice(0, EVIDENCE_NEW_TESTS_MAX);
+  const newTests = [...new Set(report.tests.filter((test) => test.status !== "skipped" && touched(test)).map((test) => printedId(testIdOf(test))))].slice(0, EVIDENCE_NEW_TESTS_MAX);
   return {
     total: report.total, passed: report.passed, failed: report.failed, skipped: report.skipped, errored: report.errored,
     ...(options.skippedOutside === undefined ? {} : { skippedBefore: options.skippedOutside.before, skippedAfter: options.skippedOutside.after }),

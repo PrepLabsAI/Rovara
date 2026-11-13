@@ -306,7 +306,7 @@ describe("inert text", () => {
 });
 
 describe("no callers", () => {
-  it("nothing outside packages/contracts uses any export the evidence pack v2 lane added yet", () => {
+  it("v2 readers and writers have no production callers yet; inert text is shared by B3 and A4", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
     const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
@@ -317,7 +317,7 @@ describe("no callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
+    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.filter((name) => name !== "inertEvidenceText").flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
     expect(hits.filter((file) => !file.startsWith("packages/contracts/"))).toEqual([]);
