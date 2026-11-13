@@ -8,7 +8,7 @@ import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
 import { TEST_ID_MAX } from "./test-id.js";
 import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
-import { TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
+import { ABSENT_ON_NEW_MAX, TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
 import { TestServicesUsageRecordSchema } from "./test-services-usage.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -335,8 +335,7 @@ export type EvidenceNotTested = z.infer<typeof EvidenceNotTestedSchema>;
 const SeverityCountsSchema = z.object({ critical: CountSchema, high: CountSchema, medium: CountSchema, low: CountSchema, info: CountSchema }).strict();
 
 /** The parts of a check's evidence that do not hold an artifact: the worker reports them and the broker verifies them. */
-export const EvidenceChecksTestsSchema = z
-  .object({
+const testsShape = {
     total: CountSchema,
     passed: CountSchema,
     failed: CountSchema,
@@ -347,8 +346,18 @@ export const EvidenceChecksTestsSchema = z
     skippedAfter: CountSchema.optional(),
     names: z.array(EvidenceTestSchema).max(EVIDENCE_TEST_NAMES_MAX),
     newTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_NEW_TESTS_MAX),
-  })
-  .strict();
+};
+/** What the WRITER builds and the worker's raw file holds: strict. */
+export const EvidenceChecksTestsSchema = z.object(testsShape).strict();
+/**
+ * What a v1 pack's READERS parse: the same fields, plus two optional ones a later writer sets (TE-B3: `absentOnNew`, the test ids that ran on the original code and are not in this code's report, at most `ABSENT_ON_NEW_MAX`,
+ * and `absentOnNewCount`, how many there are in all), and a key it does not know is dropped instead of refusing the whole pack. Readers ship before writers: a writer may add a part to `tests` once every reader has this schema.
+ */
+export const EvidenceChecksTestsReadSchema = z.object({
+  ...testsShape,
+  absentOnNew: z.array(line(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX).optional(),
+  absentOnNewCount: CountSchema.optional(),
+});
 export const EvidenceCoverageSchema = z
   .object({
     linesChanged: CountSchema,
@@ -386,11 +395,14 @@ function checkPartsProblems(entry: { tests?: z.infer<typeof EvidenceChecksTestsS
   if (tests !== undefined && tests.total !== tests.passed + tests.failed + tests.skipped + tests.errored) issue(["tests", "total"], "total is passed, failed, skipped and errored together");
   if (tests !== undefined && (tests.skippedBefore === undefined) !== (tests.skippedAfter === undefined)) issue(["tests", "skippedAfter"], "skippedBefore and skippedAfter come together");
   if (tests?.skippedAfter !== undefined && tests.skippedAfter > tests.skipped) issue(["tests", "skippedAfter"], "skips among untouched tests are some of the skips");
+  const absent = (tests as { absentOnNew?: unknown[]; absentOnNewCount?: number } | undefined);
+  if (absent !== undefined && (absent.absentOnNew === undefined) !== (absent.absentOnNewCount === undefined)) issue(["tests", "absentOnNewCount"], "absentOnNew and absentOnNewCount come together");
+  if (absent?.absentOnNew !== undefined && absent.absentOnNewCount !== undefined && absent.absentOnNewCount < absent.absentOnNew.length) issue(["tests", "absentOnNewCount"], "the count is at least the names listed");
   if (entry.coverage !== undefined && entry.coverage.linesCovered > entry.coverage.linesChanged) issue(["coverage", "linesCovered"], "covered lines are some of the changed lines");
   if (entry.findings !== undefined && entry.findings.newCount !== Object.values(entry.findings.bySeverity).reduce((sum, count) => sum + count, 0)) issue(["findings", "newCount"], "newCount is the severities together");
 }
 
-export function evidencePackShape<A extends z.ZodType>(artifact: A) {
+export function evidencePackShape<A extends z.ZodType>(artifact: A, reader = false) {
   const check = z
     .object({
       checkId: line(64),
@@ -401,7 +413,7 @@ export function evidencePackShape<A extends z.ZodType>(artifact: A) {
       class: z.enum(EVIDENCE_CHECK_CLASSES),
       durationMs: z.number().int().min(0),
       exitCode: z.number().int().nullable().optional(),
-      tests: EvidenceChecksTestsSchema.optional(),
+      tests: (reader ? EvidenceChecksTestsReadSchema : EvidenceChecksTestsSchema).optional(),
       coverage: EvidenceCoverageSchema.optional(),
       findings: EvidenceFindingsSchema.optional(),
       migrations: EvidenceMigrationsSchema.optional(),
@@ -461,10 +473,14 @@ export function evidencePackShape<A extends z.ZodType>(artifact: A) {
 
 /** What the broker builds from the worker's raw parts and keeps in the artifact store, next to the task's evidence (tagged evidence-std; see rovara-code/evidence-keep.ts). */
 export const EvidencePackSchema = evidencePackShape(ArtifactRefSchema);
+/** The same pack as a READER parses it: the `tests` part of a check ignores a key it does not know and accepts TE-B3's two optional ones. The writer keeps `EvidencePackSchema`. */
+export const EvidencePackReadSchema = evidencePackShape(ArtifactRefSchema, true);
 export type EvidencePack = z.infer<typeof EvidencePackSchema>;
 
 /** What the task page reads (version 2 views, full reads only): the pack with each artifact as a link, or as expired or withheld. */
 export const EvidenceViewSchema = evidencePackShape(ArtifactLinkSchema);
+/** The view as a READER parses it (the task view that the page and the CLI read): the `tests` part of a check ignores a key it does not know and accepts TE-B3's two optional parts. The broker keeps `EvidenceViewSchema` to build it. */
+export const EvidenceViewReadSchema = evidencePackShape(ArtifactLinkSchema, true);
 export type EvidenceView = z.infer<typeof EvidenceViewSchema>;
 export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
 
