@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { isValidTestId } from "@agentx/contracts";
 import { EvidencePackSchema } from "../../packages/contracts/src/evidence.js";
-import { evidenceTests, parseGoTestJson, parseJsonReport, parseJunit, parseTestReport, plainName, skipRise, skippedOutsideChanged, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
+import { absentOnNew, evidenceTests, parseGoTestJson, parseJsonReport, parseJunit, parseTestReport, plainName, skipRise, counted, skippedOutsideChanged, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
 
 // A pytest --junitxml file, as pytest 8 writes it.
 const PYTEST = `<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="5" time="0.30">
@@ -305,5 +305,38 @@ describe("go test -json", () => {
     expect(summary).toMatchObject({ total: 4, passed: 1, failed: 2, skipped: 1, newTests: [] });
     expect(summary.names.slice(0, 2).map((item) => item.status)).toEqual(["failed", "failed"]);
     expect(skippedOutsideChanged(report, ["match/match_test.go"])).toBe(1);
+  });
+});
+
+// TE-B3: tests that ran on the original code and are not in this code's report.
+describe("tests that ran before and not now (absentOnNew)", () => {
+  const report = (...tests: Array<[string, "passed" | "failed" | "skipped" | "errored"]>) => counted("json", tests.map(([name, status]) => ({ file: "t.py", name, status })));
+  it("names a test that ran before and is not in the new report, in the order of the before report", () => {
+    expect(absentOnNew(report(["a", "passed"], ["b", "failed"], ["c", "passed"]), report(["a", "passed"]))).toEqual({ ids: ["t.py::b", "t.py::c"], count: 2 });
+  });
+  it("does not name a test that was skipped before, or that is in the new report even as skipped", () => {
+    expect(absentOnNew(report(["a", "skipped"], ["b", "passed"]), report(["b", "skipped"]))).toEqual({ ids: [], count: 0 });
+  });
+  it("counts a test once, ignores ids that hold a memory address, and keeps at most 100 names while counting them all", () => {
+    expect(absentOnNew(report(["a", "passed"], ["a", "passed"], ["<Thing object at 0x7f3a2c1b9d>", "passed"]), report())).toEqual({ ids: ["t.py::a"], count: 1 });
+    const many = counted("json", Array.from({ length: 250 }, (_unused, n) => ({ file: "t.py", name: `t${String(n)}`, status: "passed" as const })));
+    const result = absentOnNew(many, report());
+    expect(result?.count).toBe(250);
+    expect(result?.ids).toHaveLength(100);
+  });
+  it("shows an id that is not valid as one plain line and still compares by the real id", () => {
+    const odd = counted("json", [{ file: "t.py", name: "bad\u0007name", status: "passed" }]);
+    expect(absentOnNew(odd, report())?.ids[0]).toBe("t.py::bad name");
+    expect(absentOnNew(odd, odd)).toEqual({ ids: [], count: 0 });
+  });
+  it("makes no claim without both reports", () => {
+    expect(absentOnNew(undefined, report())).toBeUndefined();
+    expect(absentOnNew(report(), undefined)).toBeUndefined();
+  });
+  it("reads a very large report in linear time", () => {
+    const big = counted("json", Array.from({ length: 50_000 }, (_unused, n) => ({ file: "t.py", name: `test_${String(n)}`, status: "passed" as const })));
+    const started = Date.now();
+    expect(absentOnNew(big, report())?.count).toBe(50_000);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });

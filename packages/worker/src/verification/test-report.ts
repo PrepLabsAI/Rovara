@@ -11,7 +11,7 @@
 //   - a suite that failed to run (jest and vitest list it with no test results and a message) counts as one errored test, so a load failure never reads as zero failures;
 //   - every name is redacted, one plain line, and cut; at most 500 names go to the evidence, the failing ones first.
 // Pure: no file is read here. The caller reads the bytes (inside the workspace, never through a link) and passes the text.
-import { EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
+import { ABSENT_ON_NEW_MAX, EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
 
 /** A report file larger than this is not read (the TESTPROOF reader's own limit). */
 export const TEST_REPORT_MAX_BYTES = 8 * 1024 * 1024;
@@ -353,6 +353,31 @@ export function skipRise(before: ParsedTestReport | undefined, after: ParsedTest
   const was = skippedOutsideChanged(before, changedTestPaths);
   const now = skippedOutsideChanged(after, changedTestPaths);
   return { rose: now > was, before: was, after: now };
+}
+
+/** A test id whose name holds a memory address (`<Thing object at 0x7f3a2c1b>`, a parametrize id made from an object's repr): it differs from one run to the next, so it never proves a test went missing. */
+const UNSTABLE_ID = /0x[0-9a-f]{6,}/iu;
+
+/**
+ * TE-B3: tests that RAN (passed, failed or errored) on `before`, the run on the original code, and are not in `after` at all, by test id (give both reports in id form, `withTestIds`). A test that is in `after` as skipped is
+ * not absent (`skipRise` counts it). `ids` are at most `ABSENT_ON_NEW_MAX`, in the order of the before report, each a valid id or a plain cut line; `count` is how many there are in all. Without both reports there is nothing to
+ * compare and no claim is made. The before run shows the candidate's own test files, so a test file the change deleted is absent on both sides and is not named here (the changed-files reader says it was removed). One pass over each report.
+ */
+export function absentOnNew(before: ParsedTestReport | undefined, after: ParsedTestReport | undefined): { ids: string[]; count: number } | undefined {
+  if (before === undefined || after === undefined) return undefined;
+  const now = new Set(after.tests.map((test) => testIdOf(test)));
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  let count = 0;
+  for (const test of before.tests) {
+    if (test.status === "skipped") continue;
+    const id = testIdOf(test);
+    if (now.has(id) || seen.has(id) || UNSTABLE_ID.test(id)) continue;
+    seen.add(id);
+    count += 1;
+    if (ids.length < ABSENT_ON_NEW_MAX) ids.push(isValidTestId(id) ? id : displayLine(id));
+  }
+  return { ids, count };
 }
 
 /** The `tests` part of a check in the evidence pack (`EvidencePack.checks[].tests`). */

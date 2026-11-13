@@ -45,6 +45,23 @@ export const TestProofItemSchema = z.object({
 }).strict();
 export type TestProofItem = z.infer<typeof TestProofItemSchema>;
 
+/** The most test ids one check names as "ran before, not now" (the count says the rest). */
+export const ABSENT_ON_NEW_MAX = 100;
+
+/**
+ * TE-B3: what the run on the original code shows about a check's untouched tests, per check. `skippedBefore` and `skippedAfter` are the skips among tests the change did not touch (original code, this code); `absentOnNew`
+ * names tests that ran on the original code and are not in this code's report (at most `ABSENT_ON_NEW_MAX`, as test ids), and `absentOnNewCount` is how many there are in all. Facts only: the broker words them.
+ * A broker built before this field refuses the whole proof (the schema is strict), so brokers upgrade before workers.
+ */
+export const TestProofWeakeningSchema = z.object({
+  checkId: z.string().min(1).max(64),
+  skippedBefore: z.number().int().min(0).max(100_000_000),
+  skippedAfter: z.number().int().min(0).max(100_000_000),
+  absentOnNew: z.array(z.string().min(1).max(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX),
+  absentOnNewCount: z.number().int().min(0).max(100_000_000),
+}).strict().refine((item) => item.absentOnNewCount >= item.absentOnNew.length, "the count is at least the names listed");
+export type TestProofWeakening = z.infer<typeof TestProofWeakeningSchema>;
+
 export const TestProofSchema = z.object({
   schemaVersion: z.literal(1),
   /** The candidate digest of the code the checks passed on. A proof for any other digest is ignored. */
@@ -54,6 +71,8 @@ export const TestProofSchema = z.object({
   note: z.enum(["no_changed_tests", "no_project_checks", "no_passing_checks", "no_test_checks", "budget", "completed", "timed_out", "stopped", "original_code_unavailable"]),
   changedTests: z.object({ added: z.number().int().nonnegative(), changed: z.number().int().nonnegative(), deleted: z.number().int().nonnegative() }).strict(),
   items: z.array(TestProofItemSchema).max(200),
+  /** TE-B3: per check, what the original code's run shows about tests the change did not touch. Absent when there was no before and after report to compare. */
+  weakening: z.array(TestProofWeakeningSchema).max(64).optional(),
   durationMs: z.number().int().nonnegative(),
 }).strict();
 export type TestProof = z.infer<typeof TestProofSchema>;

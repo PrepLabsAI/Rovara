@@ -3,16 +3,26 @@
 // reader keeps the real names (unquoted, both names of a rename) and leaves a count out when the diff has none to give (a new unstaged file, a binary patch, a change of mode or name only): unknown is not 0.
 import { redactText } from "@agentx/contracts";
 import { isTestPath, type ChangedFileEntry } from "./verification-report.js";
+import { isFixturePath, isSnapshotPath, isTestConfigPath } from "./weakening-paths.js";
 
 /** The most files read; a diff that names this many may name more. */
 export const CHANGED_FILES_MAX = 200;
 /** The workspace diff's own notes that its list is not the whole change (a diff cut to fit, or a base commit that is gone so only uncommitted changes show). */
 const INCOMPLETE_NOTES = [/\[workspace diff truncated/u, /\[the commit this workspace was prepared at is not in this repository/u];
 
-/** An added line that switches a test off: a skipped or pending test in the common frameworks. */
-const SKIP_MARKER = /(?:\b(?:it|test|describe|context|specify)(?:\.concurrent)?\.(?:skip|todo|only|fixme)\b|\b(?:xit|xtest|xdescribe|xcontext|fit|fdescribe)\s*\(|\.skipIf\s*\(|\bpending\s*\(|@(?:Disabled|Ignore)\b|#\[ignore\]|\bt\.Skip(?:Now)?\s*\(|\bpytest\.mark\.skip|@unittest\.skip|\bskipTest\s*\()/u;
-/** A line of package.json that sets a `test` script (`test`, `test:unit`, ...), added or removed. */
-const TEST_SCRIPT_LINE = /^[+-]\s*"test(?::[\w:.-]+)?"\s*:/u;
+/**
+ * An added line that switches a test off: a skipped, pending or expected-to-fail test in the common frameworks (`it.skip`, `xit`, `@Disabled`, `t.Skip`, `pytest.skip(` and `pytest.mark.skip`, `skipif` and `xfail`, `@unittest.skip` and
+ * `expectedFailure`, C#'s `[Ignore]`, JUnit's `enabled = false`).
+ */
+const SKIP_MARKER = /(?:\b(?:it|test|describe|context|specify)(?:\.concurrent)?\.(?:skip|todo|only|fixme)\b|\b(?:xit|xtest|xdescribe|xcontext|fit|fdescribe)\s*\(|\.skipIf\s*\(|\bpending\s*\(|@(?:Disabled|Ignore)\b|#\[ignore\]|\[Ignore\]|\bt\.Skip(?:Now|f)?\s*\(|\bpytest\.(?:mark\.(?:skip|skipif|xfail)\b|skip\s*\(|xfail\s*\(|importorskip\s*\()|@unittest\.(?:skip|expectedFailure)|\bskipTest\s*\(|@Test\s*\([^)]{0,80}\benabled\s*=\s*false)/u;
+/** An added line that takes code out of the coverage numbers wherever it is written: a `# pragma: no cover` or an `istanbul`, `c8` or `v8` ignore comment. */
+const COVERAGE_PRAGMA = /(?:\bpragma:\s*no\s+cover\b|\/[*/]\s*(?:istanbul|c8|v8)\s+ignore\b)/iu;
+/** An added line of a test or coverage configuration file that takes tests or code out of a run: an ignore, deselect or exclude option. Only read in the files `isConfigFile` names, because `--ignore` means little elsewhere. */
+const CONFIG_EXCLUDE = /(?:\b(?:testPathIgnorePatterns|testIgnore|modulePathIgnorePatterns|coveragePathIgnorePatterns|collect_ignore(?:_glob)?|norecursedirs|exclude_lines|omit|deselect)\b|--(?:ignore|ignore-glob|deselect|exclude)\b)/iu;
+/** The files whose added lines `CONFIG_EXCLUDE` is read in: test and coverage configuration, Makefiles, conftest, and the project files that hold a runner's settings. */
+const isConfigFile = (path: string): boolean => isTestConfigPath(path) || /(?:^|\/)(?:package\.json|pyproject\.toml|setup\.cfg)$/iu.test(path);
+/** A line of package.json that sets a script CI runs (`test`, `test:unit`, `pretest`, `posttest`, `ci`, `coverage`, `verify`, `check`, ...), added or removed. */
+const TEST_SCRIPT_LINE = /^[+-]\s*"(?:(?:pre|post)?test|ci|coverage|verify|check)(?::[\w:.-]+)?"\s*:/u;
 
 /**
  * An added or removed line that declares a route or a response model: a decorator or registration in the common web frameworks (FastAPI and Flask, Express and its kin, Nest, Spring, Go's routers).
@@ -95,6 +105,7 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
   const skipped = new Set<ChangedFileEntry>();
   const testCommand = new Set<ChangedFileEntry>();
   const apiRoute = new Set<ChangedFileEntry>();
+  const excluded = new Set<ChangedFileEntry>();
   for (const line of text.split("\n")) {
     const heading = /^## (\S+)$/u.exec(line);
     if (heading !== null) {
@@ -132,6 +143,7 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
     if (line.startsWith("+")) {
       current.added = (current.added ?? 0) + 1;
       if (SKIP_MARKER.test(line)) skipped.add(current);
+      if (COVERAGE_PRAGMA.test(line) || (CONFIG_EXCLUDE.test(line) && isConfigFile(current.path))) excluded.add(current);
     } else if (line.startsWith("-")) current.removed = (current.removed ?? 0) + 1;
     if (TEST_SCRIPT_LINE.test(line) && (current.path === "package.json" || current.path.endsWith("/package.json"))) testCommand.add(current);
     if ((line.startsWith("+") || line.startsWith("-")) && API_ROUTE_LINE.test(line)) apiRoute.add(current);
@@ -139,6 +151,7 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
   // What a change does to the tests it touches (Plan 6 Task 16): a test file deleted, moved out of the test paths, or losing more lines than it gains; a line added that skips or focuses a test; the test command changed.
   for (const file of tracked) {
     if (testCommand.has(file)) file.testCommandChanged = true;
+    if (excluded.has(file)) file.testsExcluded = true;
     // The public API (task P, blind test 02): a route or response model line changed, or a schema file did (not a test of one). A file in a schema folder with no changed line is only moved or re-moded.
     if (!isTestPath(file.path) && (apiRoute.has(file) || (API_SCHEMA_PATH.test(file.path.toLowerCase()) && ((file.added ?? 0) + (file.removed ?? 0) > 0)))) file.apiShapeChanged = true;
     const wasTest = file.renamedFrom !== undefined && isTestPath(file.renamedFrom);
@@ -148,6 +161,13 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
   }
   const known = new Set(tracked.map((file) => `${file.repository}\u0000${file.path}`));
   const all = [...tracked, ...untracked.filter((file) => !known.has(`${file.repository}\u0000${file.path}`))];
+  // TE-B3: what a reviewer looks at first because it can make a test pass without fixing anything, from the path alone (so a new file Git does not track yet is flagged too). Either name of a renamed file counts.
+  for (const file of all) {
+    const names = [file.path, ...(file.renamedFrom === undefined ? [] : [file.renamedFrom])];
+    if (names.some(isTestConfigPath)) file.testConfigChanged = true;
+    if (names.some(isSnapshotPath)) file.snapshotChanged = true;
+    if (names.some(isFixturePath)) file.fixtureChanged = true;
+  }
   const files = all.slice(0, CHANGED_FILES_MAX).map((file) => ({
     ...file, repository: redactText(file.repository), path: redactText(file.path),
     ...(file.renamedFrom === undefined ? {} : { renamedFrom: redactText(file.renamedFrom) }),

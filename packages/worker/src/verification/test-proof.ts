@@ -17,11 +17,11 @@
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
 import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@agentx/contracts";
+import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofWeakening } from "@agentx/contracts";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
-import { testIdResolver } from "./test-ids.js";
-import { displayLine } from "./test-report.js";
+import { testIdResolver, withTestIds, type TestIdContext } from "./test-ids.js";
+import { absentOnNew, displayLine, parseTestReport, skipRise } from "./test-report.js";
 import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
@@ -97,8 +97,8 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   const now = options.now ?? Date.now;
   const started = now();
   const empty = { added: 0, changed: 0, deleted: 0 };
-  const result = (status: TestProof["status"], note: TestProof["note"], changedTests = empty, items: TestProofItem[] = []): TestProof => ({
-    schemaVersion: 1, candidateDigest: options.candidateDigest, status, note, changedTests, items, durationMs: Math.max(0, Math.round(now() - started)),
+  const result = (status: TestProof["status"], note: TestProof["note"], changedTests = empty, items: TestProofItem[] = [], weakening: TestProofWeakening[] = []): TestProof => ({
+    schemaVersion: 1, candidateDigest: options.candidateDigest, status, note, changedTests, items, ...(weakening.length === 0 ? {} : { weakening: weakening.slice(0, 64) }), durationMs: Math.max(0, Math.round(now() - started)),
   });
 
   // Showing the original code in only some repositories would mix two states: every repository needs a usable start commit (as defaultOriginalCode requires).
@@ -192,6 +192,12 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
       ? await perTestItems(base, reports.get(index), ran.oldReports.get(index), changedPresent, entry.after === "passed", testIdResolver({ root: options.rootPath, cwd: commands[index]!.cwd })) : undefined;
     if (tests !== undefined) perTest.set(base.checkId, tests);
   }
+  // TE-B3: what the run on the original code shows about the tests the change did not touch (skips that rose, tests that ran before and are gone now), from the same two reports.
+  const weakening: TestProofWeakening[] = [];
+  for (const { index, base, entry } of pending) {
+    const found = await weakeningOf(base.checkId, entry, reports.get(index), ran.oldReports.get(index), changedPresent, { root: options.rootPath, cwd: commands[index]!.cwd });
+    if (found !== undefined) weakening.push(found);
+  }
   // Per test where a report allows it; past the item limit, one summary item per check instead (never dropped).
   const testCount = [...perTest.values()].reduce((total, tests) => total + tests.length, 0);
   const useTests = items.length + perCheck.length - perTest.size + testCount <= ITEMS_MAX;
@@ -201,7 +207,24 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     : final.some((item) => item.reason === "timed_out" || item.reason === "budget") ? "timed_out" as const : "completed" as const;
   const verdicts = final.filter((item) => item.verdict !== "not_applicable");
   const status = stopped || verdicts.every((item) => item.verdict === "not_checked") ? "not_checked" as const : "checked" as const;
-  return result(status, note, changedTests, final.slice(0, ITEMS_MAX));
+  return result(status, note, changedTests, final.slice(0, ITEMS_MAX), weakening);
+}
+
+/**
+ * TE-B3: one check's skips among untouched tests (the original code's run, this code's run) and the tests that ran on the original code and are not in this code's report. Only from two real reports: the run on the original
+ * code must have ended (passed or failed: a timed-out run leaves a partial report, which would name every test it did not reach) and written a report of its own (not the very bytes the candidate's run wrote).
+ */
+async function weakeningOf(checkId: string, oldEntry: CheckEntry, report: ReportFile | undefined, old: ReadResult | undefined, changedPaths: readonly string[], context: TestIdContext): Promise<TestProofWeakening | undefined> {
+  if (report === undefined || report.before.state !== "ok" || old === undefined || old.state !== "ok" || old.bytes.equals(report.before.bytes)) return undefined;
+  if (oldEntry.after !== "passed" && oldEntry.after !== "failed") return undefined;
+  const was = parseTestReport(old.bytes.toString("utf8"), report.spec.kind);
+  const now = parseTestReport(report.before.bytes.toString("utf8"), report.spec.kind);
+  if (was === undefined || now === undefined) return undefined;
+  const [before, after] = [await withTestIds(was, context), await withTestIds(now, context)];
+  const rise = skipRise(before, after, changedPaths);
+  const absent = absentOnNew(before, after);
+  if (rise === undefined || absent === undefined) return undefined;
+  return { checkId, skippedBefore: rise.before, skippedAfter: rise.after, absentOnNew: absent.ids, absentOnNewCount: absent.count };
 }
 
 /**
@@ -212,7 +235,10 @@ export function serializeTestProof(proof: TestProof): string {
   let current = proof;
   const fits = () => Buffer.byteLength(JSON.stringify(current)) <= PROOF_MAX_BYTES;
   if (fits()) return JSON.stringify(current);
-  current = { ...proof, items: proof.items.map((item) => ({ ...item, label: item.label.slice(0, 120) || "check", ...(item.test === undefined ? {} : { test: item.test.slice(0, 80) }) })) };
+  // The weakening names go first (the counts stay), then the labels and test names.
+  if (proof.weakening !== undefined) current = { ...proof, weakening: proof.weakening.map((item) => ({ ...item, absentOnNew: item.absentOnNew.slice(0, 10).map((id) => id.slice(0, 120)) })) };
+  if (fits()) return JSON.stringify(current);
+  current = { ...current, items: proof.items.map((item) => ({ ...item, label: item.label.slice(0, 120) || "check", ...(item.test === undefined ? {} : { test: item.test.slice(0, 80) }) })) };
   while (!fits() && current.items.length > 0) current = { ...current, items: current.items.slice(0, Math.floor(current.items.length / 2)) };
   return JSON.stringify(current);
 }

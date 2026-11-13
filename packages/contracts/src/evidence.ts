@@ -8,7 +8,7 @@ import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
 import { TEST_ID_MAX } from "./test-id.js";
 import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
-import { TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
+import { ABSENT_ON_NEW_MAX, TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
 import { TestServicesUsageRecordSchema } from "./test-services-usage.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -345,6 +345,9 @@ export const EvidenceChecksTestsSchema = z
     /** Skips among tests the change did not touch, on the run before (the original code or the baseline) and on this run: a rise is shown as a not-tested reason. Both or neither. */
     skippedBefore: CountSchema.optional(),
     skippedAfter: CountSchema.optional(),
+    /** TE-B3: tests that ran on the original code and are not in this code's report (test ids, at most `ABSENT_ON_NEW_MAX`), and how many there are in all. Both or neither; absent on every pack built before TE-B3. A reader built before this field refuses a pack that has it: upgrade readers first. */
+    absentOnNew: z.array(line(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX).optional(),
+    absentOnNewCount: CountSchema.optional(),
     names: z.array(EvidenceTestSchema).max(EVIDENCE_TEST_NAMES_MAX),
     newTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_NEW_TESTS_MAX),
   })
@@ -386,6 +389,8 @@ function checkPartsProblems(entry: { tests?: z.infer<typeof EvidenceChecksTestsS
   if (tests !== undefined && tests.total !== tests.passed + tests.failed + tests.skipped + tests.errored) issue(["tests", "total"], "total is passed, failed, skipped and errored together");
   if (tests !== undefined && (tests.skippedBefore === undefined) !== (tests.skippedAfter === undefined)) issue(["tests", "skippedAfter"], "skippedBefore and skippedAfter come together");
   if (tests?.skippedAfter !== undefined && tests.skippedAfter > tests.skipped) issue(["tests", "skippedAfter"], "skips among untouched tests are some of the skips");
+  if (tests !== undefined && (tests.absentOnNew === undefined) !== (tests.absentOnNewCount === undefined)) issue(["tests", "absentOnNewCount"], "absentOnNew and absentOnNewCount come together");
+  if (tests?.absentOnNew !== undefined && tests.absentOnNewCount !== undefined && tests.absentOnNewCount < tests.absentOnNew.length) issue(["tests", "absentOnNewCount"], "the count is at least the names listed");
   if (entry.coverage !== undefined && entry.coverage.linesCovered > entry.coverage.linesChanged) issue(["coverage", "linesCovered"], "covered lines are some of the changed lines");
   if (entry.findings !== undefined && entry.findings.newCount !== Object.values(entry.findings.bySeverity).reduce((sum, count) => sum + count, 0)) issue(["findings", "newCount"], "newCount is the severities together");
 }
@@ -678,10 +683,14 @@ function evidencePackV2Schemas(mode: Mode) {
       skipRise: obj({ before: CountSchema, after: CountSchema }).optional(),
       removedTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
       absentOnNew: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
+      /** TE-B3: how many tests ran before and are not in the new report, in all (`absentOnNew` lists at most 200). Absent: the list is the whole count. */
+      absentOnNewCount: CountSchema.optional(),
       changedTestConfig: z.array(line(500)).max(100),
       changedSnapshots: z.array(line(500)).max(100),
       changedFixtures: z.array(line(500)).max(100),
     }).optional(),
+    /** TE-B3 (O39): files whose change a reviewer should look at first. Flags, never approvals. `instructionFiles`: Rovara instruction files (AGENTS.md, CLAUDE.md, .rovara rules, project and playbook files). `ciExecutedFiles`: files CI runs (test commands, test configuration, Makefile, conftest.py, package scripts). */
+    flags: obj({ instructionFiles: z.array(line(500)).max(100), ciExecutedFiles: z.array(line(500)).max(100) }).optional(),
     dependencies: z.array(dependencyChecked).max(EVIDENCE_DEPENDENCIES_MAX).optional(),
     tests: TestAnswerRecordsSchema.optional(),
     meters: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9), machineUsd: MoneySchema, caps: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9) }) }).optional(),

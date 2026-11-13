@@ -122,6 +122,8 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
       // The tests in ID form (contracts `test-id.ts`), the same strings the nightly run and the known-failing marks use.
       const parsed = reported === undefined ? undefined : await withTestIds(reported, { root: input.rootPath, cwd: command.cwd });
       const partial: CheckParts = { index, entry };
+      // The skips among untouched tests before and now, and the tests that ran before and are gone (TE-B3), need the run on the ORIGINAL code, which comes after this file is written: they come from test-proof.json
+      // (`weakening`, test-proof.ts) and the broker joins them to this part when it keeps the pack (evidence-keep.ts), so `skippedOutside` is not given here.
       if (parsed !== undefined) { partial.tests = evidenceTests(parsed, { changedTestPaths }); measured += parsed.total; }
       if (entry.after === "failed") { const tail = outputTailOf(entry.output); if (tail !== undefined) partial.outputTail = tail; }
       // A timed-out, stopped or never-run check may have left an older report on disk: only a check that ended is read.
