@@ -1,0 +1,94 @@
+// Customer-style calls; output is bounded facts, never prompts or exception messages.
+import { readFileSync } from 'node:fs';
+if (!globalThis.__sdkTripwireActive) throw new Error('tripwire must load first');
+const LIB=process.env.LIBRARY, SCENARIO=process.env.SCENARIO, BASE=process.env.BASE_URL, KEY=process.env.MODEL_DUMMY_KEY, MODE=process.env.MODE;
+const STREAM=SCENARIO==='stream', TOOL=SCENARIO==='tool'||MODE==='bad_tool_json';
+const prompt=TOOL?'compat-tool':'compat-text';
+const schema={type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false};
+const pins=JSON.parse(readFileSync(new URL('./pins.json',import.meta.url),'utf8'));
+const version=pins.node[LIB.startsWith('ai-')?'ai':LIB];
+const r={library:LIB,version,scenario:SCENARIO,outcome:'parsed',errorClass:'none',raisedIn:'none',finish:'none',toolArgsParse:'na',textSeen:false,usageSeen:false,vectorLength:0,status:0,secondTurn:false,messageSeen:false};
+const finish=v=>{if(v!=null) r.finish=/^[A-Za-z0-9_:-]{1,60}$/.test(String(v))?String(v):'other';};
+function args(value) { if(typeof value==='string') { try{value=JSON.parse(value);}catch{r.toolArgsParse='invalid';return;} } r.toolArgsParse=value&&typeof value.city==='string'?'valid':'schema_invalid'; }
+function vector(v) { if(!v.every(Number.isFinite)) throw new Error('vector invalid'); r.vectorLength=v.length; }
+async function openai() {
+ const {default:OpenAI}=await import('openai'); const client=new OpenAI({apiKey:KEY,baseURL:BASE,timeout:20000});
+ if(SCENARIO==='embeddings'){const v=await client.embeddings.create({model:'embed-test',input:['compat-text'],dimensions:8,encoding_format:'float'}); vector(v.data[0].embedding); r.usageSeen=v.usage.total_tokens>=0;return;}
+ const kw={model:'gpt-test',messages:[{role:'user',content:prompt}],...(TOOL?{tools:[{type:'function',function:{name:'weather',parameters:schema}}]}:{})};
+ if(STREAM){
+  // Official stream helper also exercises its accumulated final completion.
+  const stream=client.chat.completions.stream({...kw,stream_options:{include_usage:true}});
+  stream.on('content',text=>{r.textSeen ||= Boolean(text);});
+  let accumulated='';
+  for await(const chunk of stream){if(chunk.usage)r.usageSeen=true;for(const c of chunk.choices){finish(c.finish_reason);r.textSeen ||= Boolean(c.delta.content||c.delta.refusal);for(const t of c.delta.tool_calls??[])accumulated+=t.function?.arguments??'';}}
+  if(TOOL)args(accumulated);
+  const final=await stream.finalChatCompletion(); r.usageSeen ||= Boolean(final.usage);
+ } else {
+  const value=await client.chat.completions.create(kw); const c=value.choices[0];finish(c.finish_reason);r.textSeen=Boolean(c.message.content||c.message.refusal);r.usageSeen=Boolean(value.usage);
+  if(TOOL){const tc=c.message.tool_calls[0];args(tc.function.arguments);if(SCENARIO==='tool'){kw.messages.push(c.message,{role:'tool',tool_call_id:tc.id,content:'sunny'});const next=await client.chat.completions.create(kw);r.secondTurn=Boolean(next.choices[0].message.content);}}
+ }
+}
+async function anthropic(){
+ const {default:Anthropic}=await import('@anthropic-ai/sdk');const client=new Anthropic({apiKey:KEY,baseURL:BASE.replace(/\/v1$/,''),timeout:20000});
+ const kw={model:'claude-test',max_tokens:100,messages:[{role:'user',content:prompt}],...(TOOL?{tools:[{name:'weather',input_schema:schema}]}:{})};
+ let value;
+ if(STREAM){const stream=client.messages.stream(kw);stream.on('text',text=>{r.textSeen ||= Boolean(text);});for await(const event of stream){if(event.type==='message_delta')finish(event.delta.stop_reason);}value=await stream.finalMessage();}
+ else value=await client.messages.create(kw);
+ finish(value.stop_reason);r.usageSeen=Number.isFinite(value.usage.input_tokens)&&Number.isFinite(value.usage.output_tokens);
+ for(const block of value.content){if(block.type==='text')r.textSeen ||= Boolean(block.text);if(block.type==='tool_use')args(block.input);}
+ if(TOOL&&SCENARIO==='tool'){const tc=value.content.find(b=>b.type==='tool_use');kw.messages.push({role:'assistant',content:value.content},{role:'user',content:[{type:'tool_result',tool_use_id:tc.id,content:'sunny'}]});const next=await client.messages.create(kw);r.secondTurn=next.content.some(b=>b.type==='text'&&b.text);}
+}
+async function genai(){
+ const {GoogleGenAI}=await import('@google/genai');const vertex=process.env.ROW==='vertex';
+ const client=new GoogleGenAI({...(vertex?{vertexai:true,project:'rovara-test-project',location:'us-central1'}:{apiKey:KEY}),httpOptions:{baseUrl:BASE,timeout:20000}});
+ if(SCENARIO==='embeddings'){const value=await client.models.embedContent({model:'gemini-embedding-001',contents:'compat-text',config:{outputDimensionality:8}});vector(value.embeddings[0].values);return;}
+ const kw={model:'gemini-test',contents:prompt,...(TOOL?{config:{tools:[{functionDeclarations:[{name:'weather',parameters:schema}]}]}}:{})};
+ const consume=value=>{r.textSeen ||= Boolean(value.text);r.usageSeen ||= Boolean(value.usageMetadata);for(const c of value.candidates??[])finish(c.finishReason);if(value.promptFeedback?.blockReason)finish(value.promptFeedback.blockReason);for(const fc of value.functionCalls??[])args(fc.args);};
+ if(STREAM){for await(const v of await client.models.generateContentStream(kw))consume(v);}
+ else{const value=await client.models.generateContent(kw);consume(value);if(TOOL&&SCENARIO==='tool'){kw.contents=[{role:'user',parts:[{text:prompt}]},value.candidates[0].content,{role:'user',parts:[{functionResponse:{name:'weather',response:{weather:'sunny'}}}]}];const next=await client.models.generateContent(kw);r.secondTurn=Boolean(next.text);}}
+}
+async function legacy(){
+ const {GoogleGenerativeAI}=await import('@google/generative-ai');const client=new GoogleGenerativeAI(KEY);
+ const model=client.getGenerativeModel({model:'gemini-test',...(TOOL?{tools:[{functionDeclarations:[{name:'weather',parameters:schema}]}]}:{})},{baseUrl:BASE});
+ if(SCENARIO==='embeddings'){const v=await model.embedContent({content:{role:'user',parts:[{text:'compat-text'}]},outputDimensionality:8});vector(v.embedding.values);return;}
+ let value;
+ if(STREAM){const streaming=await model.generateContentStream(prompt);void streaming.response.catch(()=>{});for await(const chunk of streaming.stream){for(const c of chunk.candidates??[]){r.textSeen ||= c.content?.parts?.some(p=>p.text)??false;finish(c.finishReason);}}value=await streaming.response;}
+ else value=(await model.generateContent(prompt)).response;
+ for(const c of value.candidates??[]){finish(c.finishReason);r.textSeen ||= c.content?.parts?.some(p=>p.text)??false;}
+ if(value.promptFeedback?.blockReason)finish(value.promptFeedback.blockReason);
+ r.usageSeen=Boolean(value.usageMetadata);if(TOOL)for(const fc of value.functionCalls()??[])args(fc.args);
+ if(TOOL&&SCENARIO==='tool'){const next=await model.generateContent({contents:[{role:'user',parts:[{text:prompt}]},value.candidates[0].content,{role:'user',parts:[{functionResponse:{name:'weather',response:{weather:'sunny'}}}]}]});r.secondTurn=Boolean(next.response.text());}
+}
+async function cohere(){
+ const {CohereClientV2}=await import('cohere-ai');const client=new CohereClientV2({token:KEY,environment:BASE});
+ if(SCENARIO==='embeddings'){const v=await client.embed({model:'embed-test',texts:['compat-text'],inputType:'search_document',embeddingTypes:['float']});vector(v.embeddings.float[0]);return;}
+ const kw={model:'command-test',messages:[{role:'user',content:prompt}],...(TOOL?{tools:[{type:'function',function:{name:'weather',parameters:schema}}]}:{})};
+ if(STREAM){let raw='';for await(const e of await client.chatStream(kw)){
+  if(e.type==='content-delta')r.textSeen ||= Boolean(e.delta.message.content.text);
+  if(e.type==='tool-call-start'||e.type==='tool-call-delta')raw+=e.delta.message.toolCalls.function.arguments??'';
+  if(e.type==='message-end'){finish(e.delta.finishReason);r.usageSeen=Boolean(e.delta.usage);}
+ }if(TOOL)args(raw);}
+ else{const v=await client.chat(kw);finish(v.finishReason);r.textSeen=(v.message.content??[]).some(c=>c.text);r.usageSeen=Boolean(v.usage);if(TOOL){const tc=v.message.toolCalls[0];args(tc.function.arguments);if(SCENARIO==='tool'){kw.messages.push(v.message,{role:'tool',toolCallId:tc.id,content:'sunny'});const next=await client.chat(kw);r.secondTurn=(next.message.content??[]).some(c=>c.text);}}}
+}
+async function ai(){
+ const {generateText,streamText,embed,tool,jsonSchema}=await import('ai');
+ const provider=LIB==='ai-openai'?(await import('@ai-sdk/openai')).createOpenAI({apiKey:KEY,baseURL:BASE}):(await import('@ai-sdk/google')).createGoogleGenerativeAI({apiKey:KEY,baseURL:BASE+'/v1beta'});
+ if(SCENARIO==='embeddings'){const v=await embed({model:provider.embeddingModel('embed-test'),value:'compat-text',dimensions:8});vector(v.embedding);return;}
+ const model=LIB==='ai-openai'?provider.chat('gpt-test'):provider('gemini-test');
+ const kw={model,prompt,...(TOOL?{tools:{weather:tool({description:'weather lookup',inputSchema:jsonSchema(schema)})}}:{})};
+ let value;
+ if(STREAM){value=streamText(kw);for await(const part of value.fullStream){if(part.type==='error')throw part.error;if(part.type==='text-delta')r.textSeen ||= Boolean(part.text);if(part.type==='finish')finish(part.finishReason);if(part.type==='tool-call')args(part.input);}finish(await value.finishReason);r.usageSeen=Boolean(await value.usage);}
+ else{value=await generateText(kw);r.textSeen=Boolean(value.text);finish(value.finishReason);r.usageSeen=Boolean(value.usage);for(const tc of value.toolCalls)args(tc.input);if(TOOL&&SCENARIO==='tool'){const tc=value.toolCalls[0];const next=await generateText({model,tools:kw.tools,messages:[{role:'user',content:prompt},...value.response.messages,{role:'tool',content:[{type:'tool-result',toolCallId:tc.toolCallId,toolName:'weather',output:{type:'text',value:'sunny'}}]}]});r.secondTurn=Boolean(next.text);}}
+}
+try {await ({openai, '@anthropic-ai/sdk':anthropic,'@google/genai':genai,'@google/generative-ai':legacy,'cohere-ai':cohere,'ai-openai':ai,'ai-google':ai})[LIB]();}
+catch(error){
+ const className=error.constructor?.name??error.name;
+ r.outcome='error';r.errorClass=/^[A-Za-z0-9_]{1,100}$/.test(className??'')?className:'UnknownError';
+ const status=error.status??error.statusCode??error.code??error.lastError?.statusCode;
+ if(Number.isInteger(status)&&status>=100&&status<=599)r.status=status;
+ r.messageSeen=Boolean(error.message);
+ let transport=false;for(let e=error,i=0;e&&i<8;i++,e=e.cause??e.lastError){if(['UND_ERR_SOCKET','ECONNRESET','ERR_STREAM_PREMATURE_CLOSE'].includes(e.code))transport=true;}
+ if(className==='GoogleGenerativeAIError'&&error.message==='[GoogleGenerativeAI Error]: Error reading from the stream')transport=true;
+ r.raisedIn=r.errorClass==='InvalidToolInputError'?'customer':transport?'transport':r.status>0||/APIError|RateLimit|BadRequest|CohereError|GoogleGenerativeAIFetchError|RetryError|APICallError/.test(r.errorClass)?'api':/APIConnectionError|AbortError|APIUserAbortError/.test(r.errorClass)?'transport':'parser';
+}
+console.log(JSON.stringify(r));
