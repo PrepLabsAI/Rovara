@@ -1,17 +1,17 @@
-import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import ts from "typescript";
-import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { resolvePolicy } from "../../packages/contracts/src/policy.js";
 
-const BASE = "c93edabcba4b9ae45cc3e0390d55fca62105222b";
+// The approved base c93edabcb's git blob id for packages/contracts/src/ports/policy.ts. Hashing the file in-process (git's blob format) works in CI's shallow checkout, where the base commit is not fetched.
+const BASE_POLICY_PORT_BLOB = "a2e7075fe49e2436ef10476ee1abe356349a566c";
 it("keeps the existing policy port byte-identical to the approved base", () => {
-  const base = spawnSync("git", ["show", `${BASE}:packages/contracts/src/ports/policy.ts`], { env: isolatedGitEnvironment(process.cwd()), encoding: "utf8" });
-  expect(base.status, base.stderr).toBe(0);
-  expect(readFileSync("packages/contracts/src/ports/policy.ts", "utf8")).toBe(base.stdout);
+  const bytes = readFileSync("packages/contracts/src/ports/policy.ts");
+  const blob = createHash("sha1").update(`blob ${String(bytes.length)}\0`).update(bytes).digest("hex");
+  expect(blob).toBe(BASE_POLICY_PORT_BLOB);
 });
 function policyCallers(root: string): string[] {
   const api = /\b(resolvePolicy|createDefaultPolicySource|createRowsPolicySource|PolicySource|PolicySourceScope|POLICY_PRESETS|POLICY_FIELDS|matchPolicyGlob|PolicyRowsSchema|DEFAULT_POLICY_PRESET)\b/u;
