@@ -185,14 +185,15 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
 }
 
 /**
- * The words the owner sent the work back with, when it was the owner: the last send-back (or review-findings) decision that is not Rovara's own. The full words are kept beside the workflow under the decision's request id
- * (`owner-note.ts`; the decision keeps only 500 characters); a send-back from before they were kept falls back to the decision's reason. A findings decision's reason is a count ("1 accepted, 1 to fix"), not the owner's words,
- * so without its note there are none.
+ * The words the owner sent the work back with: the note of the LAST request for changes of any kind, and only when a person made it as a send back or a findings decision. If the last one is Rovara's own (an
+ * automatic send back after failed checks), a plan review's, or any other, there are no owner's words for this round: the owner's earlier numbered notes belong to the problems of THAT round, not this one. The full
+ * words are kept beside the workflow under the decision's request id (`owner-note.ts`; the decision keeps 500 characters); a send-back from before they were kept falls back to the decision's reason. A findings
+ * decision's reason is a count ("1 accepted, 1 to fix"), not the owner's words, so without its note there are none.
  */
 async function lastOwnerWords(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<string | undefined> {
-  const sent = workflow.decisions.filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && (decision.source === "SEND_BACK" || decision.source === "FINDINGS")).at(-1);
-  if (sent === undefined) return undefined;
-  return (await readOwnerNote(deps.store, task.taskId, sent.requestId)) ?? (sent.source === "SEND_BACK" ? sent.reason : undefined);
+  const last = workflow.decisions.filter((decision) => decision.decision === "REQUEST_CHANGES").at(-1);
+  if (last === undefined || last.actorRole === "AGENTX" || (last.source !== "SEND_BACK" && last.source !== "FINDINGS")) return undefined;
+  return (await readOwnerNote(deps.store, task.taskId, last.requestId)) ?? (last.source === "SEND_BACK" ? last.reason : undefined);
 }
 
 // ---- checks again

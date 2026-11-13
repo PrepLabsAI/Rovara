@@ -47,6 +47,8 @@ export interface PullRequestBodyContext {
   proofLines?: readonly string[] | undefined;
   /** The reviews of this code ran on the build's own model (`reviewSameModelOf`): the Reviews section says so. */
   reviewSameModel?: boolean | undefined;
+  /** Who accepted each accepted review finding and by what way (`acceptedByOf`, keyed by the finding's fingerprint): "<name> via <method>". Shown beside the finding's reason. */
+  acceptedBy?: Readonly<Record<string, string>> | undefined;
   /** SH34: the second review's lines (`secondReviewPullRequestLines`: already inert, none for a shadow opinion), listed at the end of the Reviews section. */
   secondReviewLines?: readonly string[] | undefined;
   /** The approved plan, the browser/API rows and the test proof for the Proof section (Playbook P1). Absent, or without a plan with claims: the description has no Proof section. */

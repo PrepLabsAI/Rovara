@@ -6,14 +6,20 @@
 //   4. the money: a fix is a round of paid coding (cap, admission, access); accepting everything starts only the draft pull request, which needs access but no model money;
 //   5. the same request id once.
 import { describe, expect, it } from "vitest";
-import { WorkflowSnapshotSchema, queryAll } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll, redactText, returnWorkflowToImplementationAutomatically, when, wholeTaskSpendUsd, type WorkflowSnapshot } from "@agentx/contracts";
 import type { Admission } from "@agentx/contracts";
+import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
+import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
+import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
+import { acceptedByOf } from "../../packages/broker/src/core/task-flow/finding-accept.js";
+import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import {
-  PARSER, REQUEST_A, REQUEST_B, TASK_ID, TOKEN, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, operationsOf, parserId, promptOf, report, seed, stateOf, taskOf, tokenId,
+  NOW, OWNER_KEY, PARSER, REQUEST_A, REQUEST_B, TASK_ID, TOKEN, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, operationsOf, parserId, promptOf, report, seed, stateOf, taskOf, tokenId,
 } from "../support/task-actions-world.js";
 
 const both = () => blockedReview({}, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]);
@@ -201,6 +207,110 @@ describe("review findings", () => {
     const { h, caller } = await seed({ workflow: WorkflowSnapshotSchema.parse({ ...both(), flow }) });
     await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
     expect((await taskOf(h)).workflow!.flow).toEqual(flow);
+  });
+});
+
+describe("who accepted, and by what way (DECISIONS 201)", () => {
+  it("records the person and the way for each accepted finding, and the pull request says so; a fix records none", async () => {
+    const { h, caller } = await seed({ workflow: both() });
+    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, acceptAll());
+    const record = await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` });
+    expect(record).toMatchObject({ personId: "local-owner", method: "api-token", fingerprints: [parserId, tokenId] });
+    expect(h.audit[0]!.details).toMatchObject({ method: "api-token", securityAccepted: 1 });
+    expect(h.audit[0]!.actor).toMatchObject({ id: "local-owner" });
+    const by = await acceptedByOf(h.store, TASK_ID);
+    expect(by).toEqual({ [parserId]: expect.stringContaining("via the API token") as string, [tokenId]: expect.stringContaining("via the API token") as string });
+    const workflow = (await taskOf(h)).workflow!;
+    const body = workflowPullRequestBody({ title: "Add a retry flag" }, workflow, "# Plan\n\n1. Add the retry flag.\n", undefined, { acceptedBy: by! });
+    expect(body).toMatch(/\[security\] A token is written to the log\. \u2014 accepted: Test token only\. \(by .+ via the API token \(a tool\)\)/u);
+    expect(body).toMatch(/\[code\] New parser drops the last line\. \u2014 accepted: A footer we drop on purpose\. \(by /u);
+    // Nothing recorded: the line is as it was, with the reason alone.
+    expect(workflowPullRequestBody({ title: "Add a retry flag" }, workflow, "# Plan\n\n1. Add the retry flag.\n", undefined, {})).not.toContain("via the API token");
+    const fixOnly = await seed({ workflow: both() });
+    await createTaskActions(fixOnly.h.deps).resolveFindings(fixOnly.caller, TASK_ID, request([answer(parserId, "FIX", "Keep it."), answer(tokenId, "FIX", "")]));
+    expect(await fixOnly.h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toBeUndefined();
+  });
+
+  it("records only the findings that were accepted, and the page as the way when the page asks", async () => {
+    const { h, caller } = await seed({ workflow: both() });
+    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed(), "page");
+    expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ method: "page", fingerprints: [tokenId] });
+    expect(await acceptedByOf(h.store, TASK_ID)).toEqual({ [tokenId]: expect.stringContaining("via the task page") as string });
+  });
+
+  it("an AI tool holding the API token may accept a finding (a security one too) with a reason, over the laptop's route, as the person", async () => {
+    const { h } = await seed({ workflow: both() });
+    const routes = createOwnerRoutes({ flow: h.flow, blobs: {} as never, openPage: async () => undefined, version: "0.0.0-test" });
+    const post = async (payload: unknown) => (await routes({ method: "POST", path: `/v1/dev/tasks/${TASK_ID}/workflow/review-findings`, headers: {}, body: JSON.stringify(payload) }, h.owner))!;
+    // No reason: refused, even for a security finding, and nothing is recorded.
+    const noReason = await post(request([answer(parserId, "ACCEPT"), answer(tokenId, "ACCEPT", "  ")]));
+    expect(noReason.statusCode).toBe(400);
+    expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toBeUndefined();
+    const ok = await post(acceptAll());
+    expect(ok.statusCode).toBe(200);
+    expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ personId: "local-owner", method: "api-token" });
+    expect((await taskOf(h)).workflow!.acceptedFindings).toHaveLength(2);
+  });
+});
+
+describe("the coder's notes belong to the round they were written for", () => {
+  const NOTE_TEXT = "Fix only the problems listed. The owner's instructions for them, numbered in the order the problems are listed:\n1. SENTINEL-OWNER-NOTE";
+  const ownerFindingsDecision = { requestId: REQUEST_B, workflowRevision: 5, decision: "REQUEST_CHANGES", actorId: OWNER_KEY, actorRole: "TASK_OWNER", reason: "1 accepted, 1 to fix", source: "FINDINGS", at: "2026-11-10T09:00:00.000Z" };
+  const failingChecks = { candidateDigest: code.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-11-10T10:00:00.000Z", results: [{ checkId: "unit", status: "FAILED" }] };
+  const roundPrompt = async (workflow: WorkflowSnapshot) => {
+    const { h } = await seed({ workflow });
+    // The note is kept under the owner's decision, and (as a trap) under Rovara's own decision too: a note is used only when a person made the last decision.
+    await h.store.transact([ownerNoteItem({ taskId: TASK_ID, requestId: REQUEST_B, text: NOTE_TEXT, now: new Date(NOW) }), ownerNoteItem({ taskId: TASK_ID, requestId: workflow.decisions.at(-1)!.requestId, text: NOTE_TEXT, now: new Date(NOW) })].filter((item, index, all) => index === 0 || (item as { item: { sk: string } }).item.sk !== (all[0] as { item: { sk: string } }).item.sk));
+    expect(await startImplementation(h.deps, { taskId: TASK_ID, workflowRevision: workflow.revision })).toBe("STARTED");
+    return promptOf((await codingOperations(h))[0]!);
+  };
+
+  it("a Rovara auto-fix round after the owner's findings decision gets none of the owner's notes; a round the owner sent back gets them", async () => {
+    const clear = [report("CRITIC", "PASS", []), report("SECURITY", "PASS", [])];
+    const failed = WorkflowSnapshotSchema.parse({ ...blockedReview({ decisions: [ownerFindingsDecision] }, clear), stage: "VERIFY", blockReason: "a selected check failed", verification: failingChecks });
+    const auto = returnWorkflowToImplementationAutomatically(failed, { expectedRevision: failed.revision, reason: "A selected check failed.", spend: { spentUsd: wholeTaskSpendUsd(0), roundEstimateUsd: 1, capUsd: 15 }, now: NOW });
+    expect(auto.decisions.at(-1)).toMatchObject({ source: "AUTO_FIX", actorRole: "AGENTX" });
+    const automatic = await roundPrompt(auto);
+    expect(automatic).toContain("Unit failed");
+    expect(automatic).not.toContain("SENTINEL-OWNER-NOTE");
+    expect(automatic).not.toContain("Owner note");
+    // The same workflow with the owner's findings decision last: the notes are the round's.
+    const sentBack = WorkflowSnapshotSchema.parse({ ...auto, decisions: [ownerFindingsDecision] });
+    expect(await roundPrompt(sentBack)).toContain("SENTINEL-OWNER-NOTE");
+  });
+});
+
+describe("what the owner writes is redacted and fenced", () => {
+  it("a key-shaped string in a fix instruction does not reach the coder; the words around it do", async () => {
+    // Built at runtime: no key-shaped text is written in the source.
+    const fake = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
+    expect(redactText(fake)).not.toBe(fake);
+    const { h, caller } = await seed({ workflow: both() });
+    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", `Keep the footer line, the key ${fake} is fake.`), answer(tokenId, "ACCEPT", "Test token only.")]));
+    const prompt = promptOf((await codingOperations(h))[0]!);
+    expect(prompt).not.toContain(fake);
+    expect(prompt).toContain("Keep the footer line, the key");
+  });
+
+  it("a person's move never skips an approval of more spend: a review blocked on a budget pause is refused, and nothing is written", async () => {
+    for (const blockReason of [WORKFLOW_BLOCK_REASONS.budgetPaused, "This plan's run limit is $12, which needs a project maintainer's approval."]) {
+      const { h, caller } = await seed({ workflow: blockedReview({ blockReason }, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]) });
+      const before = await stateOf(h);
+      await expect(createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("more spend") as string });
+      expect(await stateOf(h)).toEqual(before);
+    }
+  });
+
+  it("commits the steps the access seam asks for with the decision, and a fence that no longer holds refuses it with nothing written", async () => {
+    const fence = (): TaskFlowDeps["access"] => ({ ...createOwnerTaskAccess(), ownerActing: async (_principal, task) => ({ actorId: task.ownerKey, items: [{ kind: "put", item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" }, condition: when.absent() }] }) });
+    const holds = await seed({ workflow: both(), access: fence() });
+    await createTaskActions(holds.h.deps).resolveFindings(holds.caller, TASK_ID, mixed());
+    expect(await holds.h.store.get({ pk: "ACCESS_FENCE#payments", sk: "META" })).toBeDefined();
+    const broken = await seed({ workflow: both(), access: fence() });
+    await broken.h.store.put({ item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" } });
+    await expect(createTaskActions(broken.h.deps).resolveFindings(broken.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect((await taskOf(broken.h)).workflow!.acceptedFindings).toBeUndefined();
+    expect(await codingOperations(broken.h)).toHaveLength(0);
   });
 });
 
