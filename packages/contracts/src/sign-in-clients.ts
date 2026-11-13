@@ -110,6 +110,15 @@ export type SignInClientsResponse =
 
 // ---- Spec 065: a sign-in client's routes, /v1/dev/client/*, each acting as the signed-in person ----
 
+/** `GET /v1/dev/client/projects/{project}`: a project the signed-in person may use; needs no scope. */
+export interface ClientProjectResponse {
+  name: string;
+  latestRevision: number;
+  access: AccessCheckResponse["projects"][number]["access"];
+  /** `fullName` is `owner/name` for a GitHub repository. */
+  repositories: Array<{ name: string; url: string; defaultBranch: string; fullName?: string }>;
+}
+
 /** `GET /v1/dev/client/projects/{project}/members` (projects:members). */
 export interface ClientProjectMembersResponse {
   project: string;

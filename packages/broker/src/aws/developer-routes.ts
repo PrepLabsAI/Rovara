@@ -12,6 +12,7 @@ import {
   scopesOf,
   type ClientProjectMemberChangeResponse,
   type ClientProjectMembersResponse,
+  type ClientProjectResponse,
   type ClientScope,
   CHANNEL_MEMBERS_MAX_CHANNELS,
   DEVELOPER_TOKEN_AUDIENCE,
@@ -657,27 +658,61 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     if (parsed.data.developerId !== undefined) throw refused();
     ({ developerId, administrator } = await authenticateClientToken(deps, authorization, nowSeconds));
   }
+  const access = await projectsAPersonUses(deps, developerId);
+  if (access === undefined) throw refused();
+  return { developerId, displayName: access.displayName, administrator, projects: access.projects, notices: access.notices };
+}
+
+/**
+ * The projects a person may use now, as the access check answers them: task access (developer grants and channels),
+ * then (spec 065) the registered projects they administer. Undefined for an unknown or revoked developer.
+ */
+async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId: string): Promise<{ displayName: string; projects: AccessCheckResponse["projects"]; notices: string[] } | undefined> {
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
-  if (developer === undefined || developer.revoked) throw refused();
+  if (developer === undefined || developer.revoked) return undefined;
   const listed = await listProjects(deps, {
     developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
   });
-  // Spec 065: the projects they administer too, which task access (developer grants and channels) leaves out, so a
-  // service shows an administrator their own projects. Only a registered one.
   const usable = new Set(listed.projects.map((project) => project.name));
   const administered = (await queryAll<{ projectName?: unknown; role?: unknown }>(deps, `MEMBER#${developerId}`, "PROJECT#"))
     .filter((membership) => membership.role === "administrator" && typeof membership.projectName === "string" && !usable.has(membership.projectName))
     .map((membership) => membership.projectName as string);
   const registered = await projectsWithPolicy(deps, administered);
   return {
-    developerId, displayName: developer.displayName, administrator,
+    displayName: developer.displayName,
     projects: [
       ...listed.projects.map((project) => ({ name: project.name, access: project.access })),
       ...administered.filter((name) => registered.has(name)).sort().map((name) => ({ name, access: "administrator" as const })),
     ],
     notices: listed.notices,
   };
+}
+
+/** A repository's `owner/name` on GitHub, or undefined for another host. */
+function githubFullName(url: string): string | undefined {
+  return /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1];
+}
+
+/** Spec 065: `GET /v1/dev/client/projects/{project}`, for a person who may use it (no scope: it shows only what they may use). */
+async function readClientProject(deps: DeveloperRouteDependencies, developerId: string, project: string): Promise<ClientProjectResponse> {
+  const access = await projectsAPersonUses(deps, developerId);
+  if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const mine = access.projects.find((entry) => entry.name === project);
+  if (mine === undefined) throw agentXError("NOT_FOUND", "project not found");
+  const response = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
+  const definition = response.Items?.[0]?.definition;
+  if (definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
+  const repositories = (Array.isArray(definition.repositories) ? definition.repositories : []).flatMap((entry: unknown) => {
+    const repository = entry as { name?: unknown; url?: unknown; defaultBranch?: unknown };
+    if (typeof repository.name !== "string" || typeof repository.url !== "string" || typeof repository.defaultBranch !== "string") return [];
+    const fullName = githubFullName(repository.url);
+    return [{ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, ...(fullName === undefined ? {} : { fullName }) }];
+  });
+  return { name: project, latestRevision: definition.revision, access: mine.access, repositories };
 }
 
 /**
@@ -715,6 +750,7 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   return { client, developerId: session.developerId, administrator: amr === "oidc" && session.administrator === true, scopes };
 }
 
+const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
 /**
@@ -722,6 +758,13 @@ const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]
  * project's members, which only the project's administrators or a Rovara administrator may see and change.
  */
 export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const read = CLIENT_PROJECT.exec(url.pathname);
+  if (read !== null && request.method === "GET") {
+    const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    const project = decodeURIComponent(read[1]!);
+    if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+    return readClientProject(deps, reader.developerId, project);
+  }
   const members = CLIENT_MEMBERS.exec(url.pathname);
   if (members === null) throw agentXError("NOT_FOUND", "route not found");
   const caller = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));

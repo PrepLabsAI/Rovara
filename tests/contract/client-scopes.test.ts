@@ -151,3 +151,23 @@ describe("a project's members, as the signed-in person (FR-003 to FR-005)", () =
     expect((await call("GET", "/v1/dev/client/projects/ledger/members", await token())).status).toBe(404);
   });
 });
+
+describe("a project the signed-in person may use (spec 065)", () => {
+  it("answers its revision, their access and its repositories, with no scope needed", async () => {
+    db.set({ pk: "PROJECT#payments", sk: "REV#000000000002", entityType: "PROJECT", definition: { name: "payments", revision: 2, repositories: [
+      { name: "api", url: "https://github.com/acme/payments-api.git", path: "repo/api", defaultBranch: "main", credentialRef: "github-app" },
+      { name: "docs", url: "https://git.example.com/docs", path: "repo/docs", defaultBranch: "trunk", credentialRef: "github-app" },
+    ] } });
+    db.set({ pk: `MEMBER#${ADA}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: ADA, projectName: "payments", role: "administrator" });
+    const read = await call("GET", "/v1/dev/client/projects/payments", await token({ scope: undefined }));
+    expect(read).toEqual({ status: 200, body: { requestId: "r", name: "payments", latestRevision: 2, access: "administrator", repositories: [
+      { name: "api", url: "https://github.com/acme/payments-api.git", defaultBranch: "main", fullName: "acme/payments-api" },
+      { name: "docs", url: "https://git.example.com/docs", defaultBranch: "trunk" },
+    ] } });
+  });
+
+  it("answers 404 for a project they may not use, and refuses another token with 401", async () => {
+    expect((await call("GET", "/v1/dev/client/projects/payments", await token({ sub: BO, sid: "s-bo" }))).status).toBe(404);
+    expect((await call("GET", "/v1/dev/client/projects/payments", await token({ aud: "agentx-developer", azp: undefined }))).status).toBe(401);
+  });
+});
