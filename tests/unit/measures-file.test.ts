@@ -8,7 +8,7 @@ const file = (over: Record<string, unknown> = {}) => ({ schemaVersion: 1, measur
 describe("measures file", () => {
   it("shares the evidence measure constraints and reads head-side values without inventing a baseline", () => {
     const read = readMeasuresFile(file({ eval_set_hash: "a".repeat(64), measures: [{ ...entry, spread: 0.01, count: 10 }] }));
-    expect(read).toEqual({ status: "ok", file: { schemaVersion: 1, eval_set_hash: "a".repeat(64), measures: [{ ...entry, spread: 0.01, count: 10 }] } });
+    expect(read).toEqual({ status: "ok", file: { schemaVersion: 1, source: "project_runner", eval_set_hash: "a".repeat(64), measures: [{ ...entry, spread: 0.01, count: 10 }] } });
     expect(EvidenceMeasureSchema.safeParse({ name: entry.name, unit: entry.unit, base: 0.8, head: entry.value, direction: entry.direction }).success).toBe(true);
     expect(readMeasuresFileText(`\uFEFF${JSON.stringify(file())}\r\n`).status).toBe("ok");
   });
@@ -38,4 +38,14 @@ describe("measures file", () => {
     expect(readMeasuresFileText("not json").status).toBe("unreadable");
     expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false);
   });
+});
+
+it("rejects duplicate measure names with exact case-sensitive matching", () => {
+  expect(MeasuresFileSchema.safeParse(file({ measures: [entry, { ...entry, unit: "ms", value: 5 }] })).success).toBe(false);
+  expect(readMeasuresFile(file({ measures: [entry, { ...entry, name: "Accuracy" }] })).status).toBe("ok");
+});
+it("labels runner measures and refuses a forged measurement source", () => {
+  expect(readMeasuresFile(file())).toMatchObject({ status: "ok", file: { source: "project_runner" } });
+  expect(readMeasuresFile(file({ source: "project_runner" })).status).toBe("ok");
+  expect(readMeasuresFile(file({ source: "rovara" })).status).toBe("unreadable");
 });

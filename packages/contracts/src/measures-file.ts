@@ -11,10 +11,12 @@ export const MeasuresFileEntrySchema = EvidenceMeasureSchema.pick({ name: true, 
 }).strict();
 export const MeasuresFileSchema = z.object({
   schemaVersion: z.literal(1),
+  /** A runner reports these values; Rovara does not independently measure them. */
+  source: z.literal("project_runner").default("project_runner"),
   /** SHA-256 of the eval set, when this file describes an eval. No baseline is implied. */
   eval_set_hash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   measures: z.array(MeasuresFileEntrySchema).min(1).max(EVIDENCE_MEASURES_MAX),
-}).strict();
+}).strict().refine((file) => new Set(file.measures.map((measure) => measure.name)).size === file.measures.length, "duplicate measure names");
 export type MeasuresFile = z.infer<typeof MeasuresFileSchema>;
 export type MeasuresFileRead = { status: "ok"; file: MeasuresFile } | { status: "newer" } | { status: "unreadable" };
 

@@ -427,7 +427,7 @@ export function absentOnNew(before: ParsedTestReport | undefined, after: ParsedT
     if (now.has(id) || seen.has(id) || UNSTABLE_ID.test(id)) continue;
     seen.add(id);
     count += 1;
-    if (ids.length < ABSENT_ON_NEW_MAX) ids.push(isValidTestId(id) ? id : displayLine(id));
+    if (ids.length < ABSENT_ON_NEW_MAX) ids.push(printedTestId(before.format, id));
   }
   return { ids, count };
 }
@@ -454,6 +454,11 @@ export interface EvidenceTestsOptions {
   skippedOutside?: { before: number; after: number };
 }
 
+function printedTestId(format: ParsedTestReport["format"], id: string): string {
+  // The v1 schema disallows format characters. Preserve a visible prefix for a block opener after removing joiners.
+  return format === "trx" || format === "ctrf" ? displayLine(inertEvidenceText(id, TEST_ID_MAX).replace(/^\u200D/u, "· ")) : isValidTestId(id) ? id : displayLine(id);
+}
+
 /**
  * The evidence's view of a report: the totals, at most 500 names (failing and errored tests first, then the tests the change touched, then the rest in report order) and at most 100 new tests (a passing
  * or failing test in an added or changed test file). A name the evidence keeps is never a different test's: a duplicate name in one file keeps its first.
@@ -461,8 +466,7 @@ export interface EvidenceTestsOptions {
 export function evidenceTests(report: ParsedTestReport, options: EvidenceTestsOptions = {}): EvidenceTests {
   const changed = options.changedTestPaths ?? [];
   const newFormat = report.format === "trx" || report.format === "ctrf";
-  // The v1 schema disallows format characters. Keep a visible prefix for a block opener when displayLine removes the shared helper's joiners.
-  const printedId = (id: string): string => newFormat ? displayLine(inertEvidenceText(id, TEST_ID_MAX).replace(/^\u200D/u, "· ")) : isValidTestId(id) ? id : displayLine(id);
+  const printedId = (id: string): string => printedTestId(report.format, id);
   const touched = (test: ReportedTest) => changedPathOf(test, changed) !== undefined;
   const rank = (test: ReportedTest) => (test.status === "failed" || test.status === "errored" ? 0 : touched(test) ? 1 : 2);
   const ordered = report.tests.map((test, index) => ({ test, index })).sort((a, b) => rank(a.test) - rank(b.test) || a.index - b.index);

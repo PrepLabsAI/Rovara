@@ -6,7 +6,7 @@ import { displayLine, evidenceTests, parseTestReport, testText, TEST_REPORT_MAX_
 import { inertEvidenceText } from "../../packages/contracts/src/evidence-inert.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../fixtures/report-adapters/${name}`, import.meta.url), "utf8");
-const ctrf = (tests: unknown[]) => JSON.stringify({ results: { tests } });
+const ctrf = (tests: unknown[]) => JSON.stringify({ reportFormat: "CTRF", results: { tests } });
 const trx = (content: string) => `<TestRun><Results>${content}</Results></TestRun>`;
 const result = '<UnitTestResult testName="real" outcome="Passed"/>';
 
@@ -22,7 +22,8 @@ describe("adapter boundaries", () => {
     expect(parseReportParts(fixture("trx.xml"), "trx")?.format).toBe("trx");
     expect(parseReportParts(fixture("trx.xml"), "junit")).toBeUndefined();
     expect(parseReportParts(fixture("jest.json"), "trx")).toBeUndefined();
-    expect(parseReportParts('{"results":{"tests":[]},"testResults":[{"assertionResults":[{"status":"passed"}]}]}')).toBeUndefined();
+    expect(parseReportParts('{"results":{"tests":[]},"testResults":[{"assertionResults":[{"status":"passed"}]}]}')?.tests).toMatchObject({ format: "json", passed: 1 });
+    expect(parseReportParts('{"reportFormat":"CTRF","results":{"tests":[]}}')).toBeUndefined();
   });
   it.each(["junit.xml", "jest.json", "go.jsonl", "trx.xml", "ctrf.json", "measures.json"])("refuses oversized %s before parsing", (file) => {
     const text = fixture(file);
@@ -38,8 +39,8 @@ describe("adapter boundaries", () => {
     expect(parseReportParts(fixture("trx.xml"))?.tests?.tests[0]).toMatchObject({ durationMs: 12, startTimeMs: 1767225600000, endTimeMs: 1767225600012 });
   });
   it("refuses deep JSON without recursive traversal; prototype metadata never changes test counts", () => {
-    expect(parseReportParts(`{"extra":${"[".repeat(65)}0${"]".repeat(65)},"results":{"tests":[{"name":"x","status":"passed"}]}}`)).toBeUndefined();
-    expect(parseReportParts('{"__proto__":{"polluted":true},"results":{"tests":[{"name":"x","status":"passed"}]}}')?.tests?.passed).toBe(1);
+    expect(parseReportParts(`{"reportFormat":"CTRF","extra":${"[".repeat(65)}0${"]".repeat(65)},"results":{"tests":[{"name":"x","status":"passed"}]}}`)).toBeUndefined();
+    expect(parseReportParts('{"reportFormat":"CTRF","__proto__":{"polluted":true},"results":{"tests":[{"name":"x","status":"passed"}]}}')?.tests?.passed).toBe(1);
     expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false);
   });
   it("keeps unknown status errored and refuses malformed rows, empty reports and excessive test counts", () => {
@@ -115,7 +116,7 @@ it.each(["junit", "gotest"])("handles an adversarial 8 MiB %s scan in linear tim
 
 it.each([
   ["json", '{"testResults":[{"assertionResults":[{"fullName":"', '","status":"passed"}]}]}', true],
-  ["ctrf", '{"results":{"tests":[{"name":"', '","status":"passed"}]}}', true],
+  ["ctrf", '{"reportFormat":"CTRF","results":{"tests":[{"name":"', '","status":"passed"}]}}', true],
   ["trx", '<TestRun><Results><UnitTestResult testName="', '" outcome="Passed"/></Results></TestRun>', false],
   ["measures", '{"schemaVersion":1,"measures":[{"name":"', '","unit":"B","value":1,"direction":"down_good"}]}', false],
 ] as const)("bounds an 8 MiB single-line %s field", (_format, prefix, suffix, readable) => {

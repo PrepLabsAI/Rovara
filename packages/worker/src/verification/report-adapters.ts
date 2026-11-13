@@ -197,13 +197,51 @@ function parseMeasures(text: string): ReportParts | undefined {
   return read.status === "unreadable" ? undefined : read.status === "newer" ? { format: "measures", newer: true } : { format: "measures", measures: read.file };
 }
 
+/** Skip only the XML preamble in a forward scan. DTD contents are never resolved or expanded. */
+function xmlRootName(text: string): string | undefined {
+  let position = 0;
+  for (;;) {
+    const start = text.indexOf("<", position);
+    if (start === -1) return undefined;
+    if (text.startsWith("<!--", start) || text.startsWith("<?", start)) {
+      const close = text.startsWith("<!--", start) ? "-->" : "?>";
+      const end = text.indexOf(close, start + 2);
+      if (end === -1) return undefined;
+      position = end + close.length;
+      continue;
+    }
+    if (text.startsWith("<!DOCTYPE", start)) {
+      let quote = "";
+      let subset = 0;
+      let end = start + 9;
+      for (; end < text.length; end += 1) {
+        const char = text[end]!;
+        if (quote !== "") { if (char === quote) quote = ""; }
+        else if (text.startsWith("<!--", end) || text.startsWith("<?", end)) {
+          const close = text.startsWith("<!--", end) ? "-->" : "?>";
+          const markupEnd = text.indexOf(close, end + 2);
+          if (markupEnd === -1) return undefined;
+          end = markupEnd + close.length - 1;
+        } else if (char === '"' || char === "'") quote = char;
+        else if (char === "[") subset += 1;
+        else if (char === "]") subset -= 1;
+        else if (char === ">" && subset === 0) break;
+      }
+      if (end === text.length) return undefined;
+      position = end + 1;
+      continue;
+    }
+    return /^<([\w:.-]+)(?=[\s/>])/u.exec(text.slice(start))?.[1]?.split(":").at(-1);
+  }
+}
+
 /** Specific JSON formats precede the generic Jest/Vitest row. A recognised but unreadable format never falls through. */
 export const REPORT_ADAPTERS: readonly ReportAdapter[] = [
   { format: "gotest", family: "json", parts: ["tests"], sniff: (text) => looksLikeGoTestJson(text), parse: parseGoParts },
-  { format: "measures", family: "json", parts: ["measures"], sniff: (text) => { const root = jsonObject(text); return root !== undefined && Object.hasOwn(root, "schemaVersion") && Object.hasOwn(root, "measures"); }, parse: parseMeasures },
-  { format: "ctrf", family: "json", parts: ["tests"], sniff: (text) => { const root = jsonObject(text); return root !== undefined && (root.reportFormat === "CTRF" || (object(root.results) && Object.hasOwn(root.results, "tests"))); }, parse: parseCtrf },
+  { format: "measures", family: "json", parts: ["measures"], sniff: (text) => { const root = jsonObject(text); return root !== undefined && !Object.hasOwn(root, "testResults") && Object.hasOwn(root, "schemaVersion") && Object.hasOwn(root, "measures"); }, parse: parseMeasures },
+  { format: "ctrf", family: "json", parts: ["tests"], sniff: (text) => { const root = jsonObject(text); return root !== undefined && !Object.hasOwn(root, "testResults") && (root.reportFormat === "CTRF" || (object(root.results) && object(root.results.tool) && Object.hasOwn(root.results, "tests"))); }, parse: parseCtrf },
   { format: "json", family: "json", parts: ["tests"], sniff: () => true, parse: parseJestParts },
-  { format: "trx", family: "xml", parts: ["tests"], sniff: (text) => /<(?:[\w.-]+:)?TestRun[\s/>]/u.test(text), parse: parseTrx },
+  { format: "trx", family: "xml", parts: ["tests"], sniff: (text) => xmlRootName(text) === "TestRun", parse: parseTrx },
   { format: "junit", family: "xml", parts: ["tests"], sniff: () => true, parse: (text) => testsPart(parseJunit(text)) },
 ];
 
@@ -211,6 +249,6 @@ export const REPORT_ADAPTERS: readonly ReportAdapter[] = [
 export function parseReportParts(text: string, hint: ReportFormatHint = "auto"): ReportParts | undefined {
   if (text.length === 0 || text.length > TEST_REPORT_MAX_BYTES || Buffer.byteLength(text, "utf8") > TEST_REPORT_MAX_BYTES) return undefined;
   const family = text.trimStart().startsWith("{") || text.trimStart().startsWith("[") ? "json" : "xml";
-  const adapter = REPORT_ADAPTERS.find((row) => row.family === family && (hint === "auto" || hint === row.format || (hint === "json" && family === "json")) && row.sniff(text));
+  const adapter = REPORT_ADAPTERS.find((row) => row.family === family && (hint === "auto" || hint === row.format || (hint === "json" && (row.format === "gotest" || row.format === "ctrf"))) && row.sniff(text));
   return adapter?.parse(text);
 }
