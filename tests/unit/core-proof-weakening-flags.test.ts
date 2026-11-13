@@ -88,6 +88,31 @@ describe("the changed-files reader flags weakening", () => {
   });
 });
 
+describe("worst-case input to the new readers (8 MiB, linear time)", () => {
+  const MIB8 = 8 * 1_048_576;
+  it.each([
+    ["one line of @Test( openers", "@Test(", "tests/ATest.java"],
+    ["one line of 'pytest.' prefixes", "pytest.mark.", "tests/test_a.py"],
+    ["one line of coverage-pragma prefixes", "# pragma: no ", "src/a.py"],
+    ["one line of ignore-option prefixes", "--ignor --deselec omi ", "pytest.ini"],
+    ["one line of script-key prefixes", '"test" ', "package.json"],
+  ])("%s", (_name, unit, path) => {
+    const line = unit.repeat(Math.ceil(MIB8 / unit.length));
+    const started = Date.now();
+    const files = read(hunk(path, [line]));
+    expect(files).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+  it("many short lines and many files", () => {
+    const started = Date.now();
+    const diff = Array.from({ length: 20_000 }, (_unused, n) => hunk(`tests/__snapshots__/s${String(n)}.snap`)).flat();
+    const files = parseChangedFiles(section(diff)).files;
+    expect(files.length).toBe(200);
+    expect(files.every((file) => file.snapshotChanged === true)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
 describe("the risk reads the flags (medium at most, words only)", () => {
   const digest = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]).digest;
   const clean: VerificationReport = { reviewOnly: false, passed: [{ label: "Unit tests" }], failed: [], notChecked: [], testsAdded: [] };
