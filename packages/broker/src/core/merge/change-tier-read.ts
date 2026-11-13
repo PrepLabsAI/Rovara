@@ -110,9 +110,9 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
           return true; // it could not be asked: it may be there
         }
       };
-      const read = async (path: string): Promise<string | undefined | "failed"> => {
+      const read = async (path: string): Promise<{ body: string | undefined } | undefined> => {
         beforeRequest?.();
-        try { return await target.host.fileAtRevision(ref.repository, path, target.headSha, scope, { maxBytes: INSTRUCTION_READ_MAX_BYTES }); } catch { return "failed"; }
+        try { return { body: await target.host.fileAtRevision(ref.repository, path, target.headSha, scope, { maxBytes: INSTRUCTION_READ_MAX_BYTES }) }; } catch { return undefined; }
       };
       // Instruction files: the roots, the ones in the folders of the changed files, then what each of them imports, to a depth of five.
       const folders = [...new Set(all.flatMap((file) => [file.path, ...(file.previousPath === undefined ? [] : [file.previousPath])]).flatMap((path) => {
@@ -129,8 +129,9 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
         if (seen.has(path)) continue;
         seen.add(path);
         if (depth > 0 && ++followed > IMPORTED_FILES_MAX) { importsKnown = false; break; }
-        const body = await read(path);
-        if (body === "failed") { importsKnown = false; continue; }
+        const got = await read(path);
+        if (got === undefined) { importsKnown = false; continue; }
+        const body = got.body;
         if (body === undefined) continue;
         for (const imported of importsOf(path, body)) {
           imports.add(factKey(target.repositoryId, imported));
