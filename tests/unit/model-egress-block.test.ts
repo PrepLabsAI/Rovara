@@ -127,11 +127,23 @@ describe("findRedirectEscapes", () => {
     expect(findRedirectEscapes(block, hostile)).toEqual([]);
     expect(findRedirectEscapes(block, [...hostile, "openrouter.ai"]).map((escape) => escape.sentence)).toEqual([redirectEscapeSentence("openrouter.ai")]);
   });
-  it("is fast on a million observations", () => {
-    const observed = Array.from({ length: 1_000_000 }, (_, index) => (index % 1000 === 0 ? "openrouter.ai" : "a.example.com"));
-    const started = Date.now();
-    expect(findRedirectEscapes(block, observed)).toHaveLength(1);
-    expect(Date.now() - started).toBeLessThan(2000);
+  it("is fast on a million observations, and its time grows linearly with the input", () => {
+    const make = (length: number): string[] => Array.from({ length }, (_, index) => (index % 1000 === 0 ? "openrouter.ai" : "a.example.com"));
+    // Best of three runs: a wall-clock limit alone flaked on a loaded machine (2013 ms and 2524 ms against 2000 ms), so the limit is generous and the real check is the scaling.
+    const best = (observed: string[]): number => {
+      let fastest = Number.POSITIVE_INFINITY;
+      for (let run = 0; run < 3; run += 1) {
+        const started = performance.now();
+        expect(findRedirectEscapes(block, observed)).toHaveLength(1);
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      return fastest;
+    };
+    const small = best(make(250_000));
+    const large = best(make(1_000_000));
+    expect(large).toBeLessThan(10_000);
+    // 4x the input may cost at most 6x the time (a quadratic scan would cost 16x). The 5 ms floor keeps a near-zero small run from making the ratio meaningless.
+    expect(large).toBeLessThanOrEqual(6 * Math.max(small, 5));
   });
 });
 

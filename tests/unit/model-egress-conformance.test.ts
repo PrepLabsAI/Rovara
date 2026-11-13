@@ -1,7 +1,7 @@
 // TE-F1a: the model-egress conformance suite on the fake adapter, and the proof that it can fail: each mutant is the fake adapter with ONE defect switched on, and the check that guards that defect must catch it.
 import { describe, expect, it } from "vitest";
 import { runContract } from "../../packages/testing/src/ports/plugin-contract-kit.js";
-import { modelEgressChecks } from "../../packages/testing/src/ports/model-egress-conformance.js";
+import { modelEgressChecks, type ModelEgressWorld } from "../../packages/testing/src/ports/model-egress-conformance.js";
 import { fakeModelEgressWorld } from "../../packages/testing/src/ports/model-egress-world.js";
 import type { ModelEgressMutation } from "../../packages/testing/src/ports/model-egress-fake.js";
 
@@ -54,9 +54,12 @@ describe("the suite fails on an adapter with one defect", () => {
   }
   it("a world that serves two companies and supplies no brokenScope FAILS the fail-closed check; a one-company world without it passes", async () => {
     const check = modelEgressChecks.find((entry) => /fails closed when the company cannot be resolved/u.test(entry.name))!;
-    const two = { ...fakeModelEgressWorld(), brokenScope: undefined };
+    const two: ModelEgressWorld = fakeModelEgressWorld();
+    delete two.brokenScope;
     await expect(check.run(two)).rejects.toThrow(/must supply brokenScope/u);
-    const oneCompany = { ...fakeModelEgressWorld(), brokenScope: undefined, isolation: undefined };
+    const oneCompany: ModelEgressWorld = fakeModelEgressWorld();
+    delete oneCompany.brokenScope;
+    delete oneCompany.isolation;
     await expect(check.run(oneCompany)).resolves.toBeUndefined();
   });
   it("passes every check on the honest adapter, so each failure above is the defect's", async () => {
