@@ -1,7 +1,6 @@
 // The generator of the AWS emulator service table (scripts/aws-emulator/gen-service-table.ts): the score formula, the rules it refuses on, determinism, and that the committed files are what its renderer writes.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
@@ -12,7 +11,7 @@ import { awsServiceKeyOrSelf, awsServicesForSigningName } from "../../packages/c
 
 const roots: string[] = [];
 afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
-const temp = (): string => { const root = mkdtempSync(join(tmpdir(), "gen-service-table-")); roots.push(root); return root; };
+const temp = (): string => { const root = mkdtempSync(join(process.env["TMPDIR"] ?? process.env["RUNNER_TEMP"] ?? "node_modules/.cache", "gen-service-table-")); roots.push(root); return root; };
 
 const SCRIPT = new URL("../../scripts/aws-emulator/gen-service-table.ts", import.meta.url).pathname;
 const SHA = "b".repeat(64);
@@ -185,11 +184,11 @@ describe("determinism", () => {
   it("writes a table of valid JSON and a TypeScript file that names the engine, its commit and the scores", () => {
     const output = build();
     const table = JSON.parse(renderTableJson(output)) as { engine: string; engineCommit: string; scoresSha256: string; services: unknown[] };
-    expect(table).toMatchObject({ engine: "aws-emulator@1.0.337", engineCommit: ENGINE_COMMIT, scoresSha256: SHA });
+    expect(table).toMatchObject({ engine: "aws-emulator@1.0.343", engineCommit: ENGINE_COMMIT, scoresSha256: SHA });
     expect(table.services).toHaveLength(3);
     JSON.parse(renderNotImplementedJson(output));
     const text = renderTypeScript(output);
-    expect(text).toContain("Engine: aws-emulator@1.0.337");
+    expect(text).toContain("Engine: aws-emulator@1.0.343");
     expect(text).toContain(`Engine commit: ${ENGINE_COMMIT}`);
     expect(text).toContain(`Scores sha256: ${SHA}`);
     expect(text).toContain("passed / (passed + failed)");
@@ -241,6 +240,35 @@ describe("reading the engine's source tree", () => {
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({ dir: "service-com-amazonaws-alpha-alphaservice", scaffoldedOps: ["PutA"], unwiredOps: ["Skipped"] });
     expect(build(found, scores([]), { legacyKeys: {}, boto3Names: {} }).rows[0]).toMatchObject({ key: "alpha", opCount: 4, notImplementedCount: 1, unwiredCount: 1 });
+  });
+
+  it("ignores only local-additions.json beside the real model", () => {
+    const root = temp();
+    const directory = join(root, "services", "service-workspaces", "smithy-model");
+    mkdirSync(directory, { recursive: true });
+    const real = model({ namespace: "workspaces", name: "Workspaces", sdkId: "WorkSpaces", operations: ["DescribeWorkspaces"] });
+    writeFileSync(join(directory, "workspaces.json"), JSON.stringify(real));
+    expect(readServiceSources(root)[0]?.model).toEqual(real);
+    writeFileSync(join(directory, "local-additions.json"), "not a standalone model");
+    expect(readServiceSources(root)).toEqual([source("service-workspaces", real)]);
+  });
+
+  it.each(["other.json", "local-additions-extra.json"])("refuses an unexpected second model %s", (name) => {
+    const root = temp();
+    const directory = join(root, "services", "service-workspaces", "smithy-model");
+    mkdirSync(directory, { recursive: true });
+    const real = model({ namespace: "workspaces", name: "Workspaces", sdkId: "WorkSpaces" });
+    writeFileSync(join(directory, "workspaces.json"), JSON.stringify(real));
+    writeFileSync(join(directory, name), JSON.stringify(real));
+    expect(() => readServiceSources(root)).toThrow("expected one model file, found 2");
+  });
+
+  it("refuses local additions without a real model", () => {
+    const root = temp();
+    const directory = join(root, "services", "service-workspaces", "smithy-model");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "local-additions.json"), "{}");
+    expect(() => readServiceSources(root)).toThrow("expected one model file, found 0");
   });
 
   it("refuses an operation file with no @op line", () => {
