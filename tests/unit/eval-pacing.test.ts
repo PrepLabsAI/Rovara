@@ -136,12 +136,29 @@ describe("a provider limit is 'not run', per class, through the fake adapter", (
     const { result } = await run([{ status: 500, body: "{}" }, ok_body()]);
     expect(result.facts).toMatchObject({ total: 2, run: 1, notRun: 1, byClass: { provider_error: 1 } });
   });
+  it("every refusal by the adapter is not run: not_found, too_large and ssrf, each decided explicitly", async () => {
+    const world = fakeModelEgressWorld();
+    const row = world.rows.gemini!;
+    // not_found: a source nobody has
+    const lost = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, "no-such-source") as never, () => validFrame(row, world.connection) as never);
+    expect(await lost(0)).toMatchObject({ class: "refused" });
+    // too_large: a body over the frame's bound
+    const huge = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, row.id) as never, () => validFrame(row, world.connection, "x".repeat(5 * 1024 * 1024 + 1)) as never);
+    expect(await huge(0)).toMatchObject({ class: "refused" });
+    // ssrf: the provider answers with a redirect
+    world.provider.script({ status: 302, headers: [["location", "http://169.254.169.254/"]], body: "" });
+    const redirected = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, row.id) as never, () => validFrame(row, world.connection) as never);
+    expect(await redirected(0)).toMatchObject({ class: "refused" });
+    const result = await runEvalCasesPaced({ cases: 2, clock: fakeClock(), limits: { spacingMs: 0, maxInFlight: 1 }, call: lost });
+    expect(result.facts).toMatchObject({ run: 0, notRun: 2, byClass: { refused: 2 } });
+  });
   it("makes exactly one attempt per case: no retry after a 429", async () => {
     const { world } = await run([{ status: 429, body: "{}" }, { status: 429, body: "{}" }]);
     expect(world.provider.calls).toHaveLength(2);
   });
   it("an unknown class word is read as a run case, so a score is never hidden by a word nobody knows", () => {
-    expect(evalFactsFromClasses(["ok", "something_new", "refused"])).toMatchObject({ run: 3, notRun: 0 });
+    expect(evalFactsFromClasses(["ok", "something_new", "ok"])).toMatchObject({ run: 3, notRun: 0 });
+    expect(evalFactsFromClasses(["ok", "refused"])).toMatchObject({ run: 1, notRun: 1, byClass: { refused: 1 } });
     expect(evalFactsFromClasses(["ok", "provider_error"])).toMatchObject({ run: 1, notRun: 1 });
   });
 });

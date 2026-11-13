@@ -1,16 +1,16 @@
 // TE-F3 part B: the worker's eval round. It reads `rovara-measures.json` through A4's reader, looks up or fills the base cache (only from Rovara's own base round), keeps the hidden set to the sealed round, and returns the eval check
 // for the evidence writer through a typed seam. No model call: the round is handed the facts of the calls that were made (the pacing module and the fake adapter produce them in eval-pacing.test.ts).
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentBaseScoreCache, evalCommandFingerprint, type BaseScoreCache, type EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
+import { createDocumentBaseScoreCache, evalCommandFingerprint, type BaseScoreCache, type EvalBaseAttestation, type EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
 import { MeasuresFileSchema } from "../../packages/contracts/src/measures-file.js";
 import { evalFactsAllRun, evalFactsFromClasses } from "../../packages/contracts/src/eval-pacing.js";
 import type { HiddenEvalSetSource } from "../../packages/contracts/src/eval-hidden-set.js";
-import { runEvalRound, readEvalMeasures, type EvalRoundInput } from "../../packages/worker/src/verification/eval-round.js";
+import { hashEvalDirectory, planEvalRound, runEvalRound, readEvalMeasures, type EvalRoundInput } from "../../packages/worker/src/verification/eval-round.js";
 import { installNetworkTripwire, type NetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 
 let tripwire: NetworkTripwire;
@@ -22,7 +22,6 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { 
 async function workspace(): Promise<string> { const dir = await mkdtemp(join(tmpdir(), "te-f3-round-")); dirs.push(dir); return dir; }
 
 const SET_HASH = "b".repeat(64);
-const HIDDEN_HASH = "d".repeat(64);
 const COMMIT = "a".repeat(40);
 const measuresText = (over: Record<string, unknown> = {}, extra: Array<Record<string, unknown>> = []) => JSON.stringify({ schemaVersion: 1, eval_set_hash: SET_HASH, measures: [{ name: "accuracy", unit: "fraction", value: 0.82, direction: "up_good", spread: 0.05, count: 50, ...over }, ...extra] });
 const baseFile = (value = 0.8, hash = SET_HASH) => MeasuresFileSchema.parse({ schemaVersion: 1, eval_set_hash: hash, measures: [{ name: "accuracy", unit: "fraction", value, direction: "up_good", spread: 0.05, count: 50 }] });
@@ -32,7 +31,7 @@ const cacheFor = (held: MemoryDocumentStore, company: string): BaseScoreCache =>
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 interface Setup { root: string; input: Mutable<EvalRoundInput>; baseRuns: { count: number }; cache: BaseScoreCache; held: MemoryDocumentStore }
-async function setup(over: Partial<EvalRoundInput> = {}, options: { head?: string; company?: string; held?: MemoryDocumentStore; baseFile?: ReturnType<typeof baseFile> | undefined; baseFacts?: ReturnType<typeof evalFactsAllRun> } = {}): Promise<Setup> {
+async function setup(over: Partial<EvalRoundInput> = {}, options: { head?: string; company?: string; held?: MemoryDocumentStore; baseFile?: ReturnType<typeof baseFile> | undefined; baseFacts?: ReturnType<typeof evalFactsAllRun>; attestation?: EvalBaseAttestation | undefined; baseEvalSetHash?: string } = {}): Promise<Setup> {
   const root = await workspace();
   await writeFile(join(root, "rovara-measures.json"), options.head ?? measuresText());
   const held = options.held ?? store();
@@ -44,8 +43,10 @@ async function setup(over: Partial<EvalRoundInput> = {}, options: { head?: strin
     roundKind: "check_unsealed",
     report: { root, cwd: ".", argument: "rovara-measures.json", notBeforeMs: Date.now() - 1_000 },
     key: { company, project: "project-1", baseCommit: COMMIT, commandFingerprint: evalCommandFingerprint("npm run eval"), catalogRowId: "gemini", model: "gemini-small", modelVersion: "gemini-small-2026-10-01" },
+    settings: { runs: 3, seed: "seed-1", repeats: 5, imageDigest: `registry.example/worker@sha256:${"c".repeat(64)}`, route: "gemini" },
+    evalSetHash: SET_HASH,
     cache,
-    runBaseRound: () => { baseRuns.count += 1; return Promise.resolve(options.baseFile === undefined && "baseFile" in options ? { ok: false as const } : { ok: true as const, measures: options.baseFile ?? baseFile(), caseCount: 50, facts: options.baseFacts ?? evalFactsAllRun(50) }); },
+    runBaseRound: () => { baseRuns.count += 1; return Promise.resolve(options.baseFile === undefined && "baseFile" in options ? { ok: false as const } : { ok: true as const, measures: options.baseFile ?? baseFile(), caseCount: 50, facts: options.baseFacts ?? evalFactsAllRun(50), evalSetHash: options.baseEvalSetHash ?? options.baseFile?.eval_set_hash ?? SET_HASH, attestation: "attestation" in options ? (options.attestation as EvalBaseAttestation) : { checkout: "rovara_only" as const, workingSandboxPaused: true as const, baseCommit: input.key.baseCommit } }); },
     facts: evalFactsAllRun(50),
     today: () => "2026-11-13",
     ...over,
@@ -96,13 +97,15 @@ describe("the base score cache in the round", () => {
   it("is a fresh base run when the commit, eval set, hidden set, command, model or catalog row changes", async () => {
     const first = await setup();
     await runEvalRound(first.input);
-    for (const change of [{ baseCommit: "c".repeat(40) }, { commandFingerprint: evalCommandFingerprint("other") }, { model: "m2" }, { modelVersion: "gemini-small-2026-11-01" }, { catalogRowId: "openai" }, { project: "p2" }]) {
+    for (const change of [{ baseCommit: "c".repeat(40) }, { commandFingerprint: evalCommandFingerprint("other") }, { model: "m2" }, { modelVersion: "gemini-small-2026-11-01" }, { catalogRowId: "openai" }, { project: "p2" }, { settings: { runs: 4 } }]) {
       const next = await setup({}, { held: first.held });
-      next.input.key = { ...next.input.key, ...change };
+      if ("settings" in change) next.input.settings = { ...next.input.settings, ...change.settings };
+      else next.input.key = { ...next.input.key, ...change };
       expect(await runEvalRound(next.input), JSON.stringify(change)).toMatchObject({ status: "done", cache: "filled" });
       expect(next.baseRuns.count, JSON.stringify(change)).toBe(1);
     }
-    const changedSet = await setup({}, { held: first.held, head: measuresText().replace(SET_HASH, "e".repeat(64)) });
+    // a different eval set (Rovara's own hash of the eval files) is a different key: a fresh base run, which here ran the old set
+    const changedSet = await setup({ evalSetHash: "e".repeat(64) }, { held: first.held, head: measuresText().replace(SET_HASH, "e".repeat(64)) });
     expect(await runEvalRound(changedSet.input)).toMatchObject({ status: "done", result: { notRun: { reason: "eval_set_changed" } } });
     expect(changedSet.baseRuns.count).toBe(1);
   });
@@ -130,7 +133,7 @@ describe("the base score cache in the round", () => {
     expect(await runEvalRound(partial.input)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "not_run", notRun: { reason: "no_base_score" }, measures: [] } });
     expect((await partial.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
     const working = await setup({ roundKind: "working" });
-    expect(await runEvalRound(working.input)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "passed" } });
+    expect(await runEvalRound(working.input)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "ran" } });
     expect((await working.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
   });
   it("refuses to compare when the base round ran another eval set than the head, but still caches that base under its own hash", async () => {
@@ -139,10 +142,45 @@ describe("the base score cache in the round", () => {
     expect(out).toMatchObject({ status: "done", cache: "filled", result: { outcome: "not_run", notRun: { reason: "eval_set_changed" } } });
     expect((await odd.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(1);
   });
-  it("judges nothing when the head did not say which eval set it ran", async () => {
-    const { input, baseRuns } = await setup({}, { head: JSON.stringify({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.82, direction: "up_good", spread: 0.05 }] }) });
+  it("refuses to compare when Rovara has no hash of its own for the eval files, even when the runner's file names one", async () => {
+    const { input, baseRuns } = await setup({ evalSetHash: undefined } as never);
     expect(await runEvalRound(input)).toMatchObject({ status: "done", cache: "not_used", result: { notRun: { reason: "eval_set_unknown" } } });
     expect(baseRuns.count).toBe(0);
+  });
+  it("treats a hash in the runner's file that is not Rovara's as a changed eval set, and runs no base round", async () => {
+    const { input, baseRuns } = await setup({}, { head: measuresText().replace(SET_HASH, "e".repeat(64)) });
+    expect(await runEvalRound(input)).toMatchObject({ status: "done", cache: "not_used", result: { notRun: { reason: "eval_set_changed" } } });
+    expect(baseRuns.count).toBe(0);
+  });
+  it("compares a runner file that names no hash, because Rovara's own hash is the evidence", async () => {
+    const { input } = await setup({}, { head: JSON.stringify({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.82, direction: "up_good", spread: 0.05, count: 50 }] }) });
+    expect(await runEvalRound(input)).toMatchObject({ status: "done", result: { verdicts: [{ verdict: "no_detectable_change" }] } });
+  });
+  it("accepts a base round only with the runner's attestation of a Rovara-only checkout and a paused working sandbox for THAT commit: otherwise nothing is cached or compared", async () => {
+    const good = { checkout: "rovara_only" as const, workingSandboxPaused: true as const, baseCommit: COMMIT };
+    for (const bad of [undefined, { ...good, checkout: "shared_workspace" }, { ...good, workingSandboxPaused: false }, { ...good, baseCommit: "c".repeat(40) }, null, {}] as unknown[]) {
+      const round = await setup({}, { attestation: bad as never });
+      expect(await runEvalRound(round.input), JSON.stringify(bad)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "not_run", notRun: { reason: "base_round_unattested" }, measures: [] } });
+      expect((await round.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
+    }
+  });
+  it("applies the minimum to the base round too: a base round with too few cases is neither cached nor compared", async () => {
+    const small = await setup({}, { baseFacts: evalFactsAllRun(19) });
+    expect(await runEvalRound(small.input)).toMatchObject({ status: "done", cache: "not_filled", result: { notRun: { reason: "too_few_questions" } } });
+    expect((await small.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
+  });
+  it("is a fresh base run for every setting that changes how the eval ran (the settings fingerprint is in the key)", async () => {
+    const first = await setup();
+    await runEvalRound(first.input);
+    for (const change of [{ runs: 4 }, { seed: "seed-2" }, { repeats: 6 }, { route: "openai" }, { imageDigest: `registry.example/worker@sha256:${"d".repeat(64)}` }]) {
+      const next = await setup({}, { held: first.held });
+      next.input.settings = { ...next.input.settings, ...change };
+      await runEvalRound(next.input);
+      expect(next.baseRuns.count, JSON.stringify(change)).toBe(1);
+    }
+    const lower = await setup({ minQuestions: 25 }, { held: first.held });
+    await runEvalRound(lower.input);
+    expect(lower.baseRuns.count).toBe(1);
   });
   it("a cache that fails to read is a miss and the round still completes", async () => {
     const broken: BaseScoreCache = { read: () => Promise.reject(new Error("down")), write: () => Promise.reject(new Error("down")) };
@@ -172,13 +210,18 @@ describe("the eval check for the evidence writer", () => {
 
 describe("the hidden eval set", () => {
   const canary = () => `c-${randomBytes(4).toString("hex")}`;
-  function hidden(): { source: HiddenEvalSetSource; calls: { exists: number; open: number } } {
+  /** A hidden set on disk (a real directory, outside every workspace), with a canary in a file name and in its contents. */
+  async function hidden(marker = "c-none", over: { hash?: string } = {}): Promise<{ source: HiddenEvalSetSource; calls: { exists: number; open: number }; dir: string; hash: string }> {
+    const dir = await workspace();
+    await mkdir(join(dir, "cases"));
+    await writeFile(join(dir, "cases", `${marker}.json`), JSON.stringify({ question: marker, answer: marker }));
+    const hash = await hashEvalDirectory(dir);
     const calls = { exists: 0, open: 0 };
-    return { calls, source: { exists: () => { calls.exists += 1; return Promise.resolve(true); }, open: () => { calls.open += 1; return Promise.resolve({ hostPath: "/var/lib/rovara/hidden/project-1", hash: HIDDEN_HASH }); } } };
+    return { calls, dir, hash, source: { exists: () => { calls.exists += 1; return Promise.resolve(true); }, open: () => { calls.open += 1; return Promise.resolve({ hostPath: dir, hash: over.hash ?? hash }); } } };
   }
   it("round matrix: the working and unsealed rounds are told to use the sealed round, never open the set, never read the runner's file, never run a base round, and mount nothing", async () => {
     for (const roundKind of ["working", "check_unsealed"] as const) {
-      const { source, calls } = hidden();
+      const { source, calls } = await hidden();
       const { input, baseRuns } = await setup({ roundKind, hiddenSet: source });
       input.report = { ...input.report, argument: "does-not-exist.json" };
       const out = await runEvalRound(input);
@@ -188,19 +231,46 @@ describe("the hidden eval set", () => {
       expect(baseRuns.count).toBe(0);
     }
   });
-  it("the sealed round opens the set once and hands back a read-only mount for the sealed plan, only there", async () => {
-    const { source, calls } = hidden();
+  it("the sealed round opens the set once and hands back a read-only mount of its REAL path for the sealed plan, only there", async () => {
+    const { source, calls, dir } = await hidden();
     const { input } = await setup({ roundKind: "check_sealed", hiddenSet: source });
     const out = await runEvalRound(input);
     expect(calls.open).toBe(1);
-    expect(out).toMatchObject({ status: "done", hiddenMount: { hostPath: "/var/lib/rovara/hidden/project-1", containerPath: "/rovara/hidden-eval", readOnly: true } });
+    const { realpath } = await import("node:fs/promises");
+    expect(out).toMatchObject({ status: "done", hiddenMount: { hostPath: await realpath(dir), containerPath: "/rovara/hidden-eval", readOnly: true } });
+  });
+  it("hands docker the real path: a link to the set is resolved at the plan, so it cannot be swapped between the check and the mount", async () => {
+    const { source, dir } = await hidden();
+    const linkDir = await workspace();
+    await symlink(dir, join(linkDir, "link"));
+    const viaLink: HiddenEvalSetSource = { exists: () => Promise.resolve(true), open: async () => ({ hostPath: join(linkDir, "link"), hash: (await source.open()).hash }) };
+    const plan = await planEvalRound({ trigger: { needed: true, reason: "changes" }, roundKind: "check_sealed", hiddenSet: viaLink });
+    const { realpath } = await import("node:fs/promises");
+    expect(plan).toMatchObject({ status: "ready", hiddenMount: { hostPath: await realpath(dir) } });
+  });
+  it("mounts nothing unless Rovara's own hash of the directory equals the hash the source gave", async () => {
+    const wrong = await hidden("c-none", { hash: "e".repeat(64) });
+    const plan = await planEvalRound({ trigger: { needed: true, reason: "changes" }, roundKind: "check_sealed", hiddenSet: wrong.source });
+    expect(plan).toMatchObject({ status: "stopped", output: { status: "done", result: { notRun: { reason: "hidden_set_unavailable" } } } });
+    expect(JSON.stringify(plan)).not.toContain(wrong.dir);
+    const { source, dir } = await hidden();
+    await writeFile(join(dir, "cases", "added-after-hashing.json"), "{}");
+    const changed = await planEvalRound({ trigger: { needed: true, reason: "changes" }, roundKind: "check_sealed", hiddenSet: source });
+    expect(changed).toMatchObject({ status: "stopped" });
+  });
+  it("refuses to hash a directory that holds a link, and one with no files", async () => {
+    const dir = await workspace();
+    await expect(hashEvalDirectory(dir)).rejects.toThrow();
+    await writeFile(join(dir, "a.json"), "{}");
+    await symlink("/etc/hostname", join(dir, "link"));
+    await expect(hashEvalDirectory(dir)).rejects.toThrow(/plain files/u);
   });
   it("keys the cache by the hidden set's hash too: a different hidden set is a fresh base run", async () => {
-    const first = hidden();
+    const first = await hidden("c-one");
     const a = await setup({ roundKind: "check_sealed", hiddenSet: first.source });
     await runEvalRound(a.input);
-    const other: HiddenEvalSetSource = { exists: () => Promise.resolve(true), open: () => Promise.resolve({ hostPath: "/var/lib/rovara/hidden/project-1", hash: "e".repeat(64) }) };
-    const b = await setup({ roundKind: "check_sealed", hiddenSet: other }, { held: a.held });
+    const other = await hidden("c-two");
+    const b = await setup({ roundKind: "check_sealed", hiddenSet: other.source }, { held: a.held });
     await runEvalRound(b.input);
     expect(b.baseRuns.count).toBe(1);
     const same = await setup({ roundKind: "check_sealed", hiddenSet: first.source }, { held: a.held });
@@ -215,7 +285,7 @@ describe("the hidden eval set", () => {
   });
   it("a canary in the runner's own words (name, unit, an extra measure) never reaches the feedback, the evidence measures, the summary, the cache or anything the round returns", async () => {
     const marker = canary();
-    const { source } = hidden();
+    const { source } = await hidden();
     const head = measuresText({}, [{ name: marker, unit: marker, value: 0.4, direction: "up_good", spread: 0.1, count: 50 }]);
     const { input, held } = await setup({ roundKind: "check_sealed", hiddenSet: source }, { head });
     const out = await runEvalRound(input);
@@ -223,15 +293,28 @@ describe("the hidden eval set", () => {
     const stored = (await held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items;
     expect(JSON.stringify(stored)).not.toContain(marker);
     if (out.status !== "done") throw new Error("expected done");
-    expect(out.feedback.measures.map((entry) => Object.keys(entry))).toEqual([["index", "score", "count"], ["index", "score", "count"]]);
+    // pass or fail only, and only for the measure Rovara's base round knows
+    expect(out.feedback.measures).toEqual([{ index: 0, pass: true }]);
+    expect(out.result.measures).toEqual([]);
   });
-  it("the round holds no log of its own: a canary in the hidden set's path never appears in what it returns beyond the one mount path", async () => {
+  it("a canary in the hidden set's file names and contents never appears in anything the round returns (the round never reads the set's cases, only hashes the directory)", async () => {
     const marker = canary();
-    const source: HiddenEvalSetSource = { exists: () => Promise.resolve(true), open: () => Promise.resolve({ hostPath: "/var/lib/rovara/hidden/project-1", hash: HIDDEN_HASH }) };
+    const { source, dir } = await hidden(marker);
+    const { input, held } = await setup({ roundKind: "check_sealed", hiddenSet: source });
+    const out = await runEvalRound(input);
+    expect(out).toMatchObject({ status: "done", hiddenMount: { readOnly: true } });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain(marker);
+    expect(JSON.stringify((await held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items)).not.toContain(marker);
+    // the only place the hidden set's location appears is the mount for the sealed plan
+    const { realpath } = await import("node:fs/promises");
+    expect(JSON.stringify(out.status === "done" ? { ...out, hiddenMount: undefined } : out)).not.toContain(await realpath(dir));
+  });
+  it("returns no runner output at all: the round's output has a fixed set of keys, with no stdout or stderr", async () => {
+    const { source } = await hidden();
     const { input } = await setup({ roundKind: "check_sealed", hiddenSet: source });
     const out = await runEvalRound(input);
-    expect(JSON.stringify(out)).not.toContain(marker);
-    expect(JSON.stringify(out.status === "done" ? { ...out, hiddenMount: undefined } : out)).not.toContain("/var/lib/rovara/hidden");
+    expect(Object.keys(out).sort()).toEqual(["cache", "feedback", "hiddenMount", "result", "status"]);
   });
 });
 
