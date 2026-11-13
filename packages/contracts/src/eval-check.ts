@@ -5,7 +5,8 @@
 // `direction`. Inside it, or on its edge, nothing changed ("no detectable change"). With no spread at all (the runner gave none and the base round had none, or both are zero) there is no noise estimate, and the difference is
 // not judged ("difference not judged: no noise estimate"): nothing but a measured difference outside a measured band ever reads as a change. The spread used is the WIDER of the head's and the base's.
 //
-// An eval verdict is a quality signal reported as measures, NOT a change proof: `countsTowardProof` is false here whatever the check-kind registry says for the `eval` row (the registry is another lane's file).
+// This layer assigns NO label. DECISIONS 170 has three: "Proven", "No regression measured (eval)" and "Improved on eval"; the last two need more than a measure outside a band (a pre-fixed minimum detectable drop, paired per-question noise, a rotating
+// holdout, coverage, categories). That is the next lane (F3-b). A `better` here is a measure beyond the band, never "Improved on eval", and nothing here is "Proven".
 //
 // Words from the runner (measure names, units) reach every printed sentence only through `inertEvidenceText`. In a round that used a hidden eval set they do not reach the evidence at all: the label comes from the base record
 // (Rovara's own base round of main), or is "eval measure N" (eval-hidden-set.ts rule 3).
@@ -20,6 +21,8 @@ import { NOT_RUN_SENTENCES, capSentence } from "./model-egress/classify.js";
 
 /** k in "base +/- k x spread". */
 export const EVAL_NOISE_K = 2;
+/** Fewer cases than this run: the eval cannot detect a change (DECISIONS 170: "too few questions gives not run"). A data default for the owner to confirm. */
+export const EVAL_MIN_QUESTIONS = 20;
 /** The largest magnitude a printed or stored score may have (the evidence measure's own bound). */
 const SCORE_LIMIT = 1e12;
 /** The most measures one summary line lists; the rest are counted. */
@@ -37,7 +40,7 @@ export const EVAL_VERDICT_WORDS: Readonly<Record<Exclude<EvalVerdict, "not_run">
 };
 
 export const EVAL_NOT_RUN_REASONS = [
-  ...EVAL_NOT_RUN_CLASSES, "too_many_not_run", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown",
+  ...EVAL_NOT_RUN_CLASSES, "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
@@ -48,7 +51,9 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   overloaded: NOT_RUN_SENTENCES.overloaded,
   key_refused: NOT_RUN_SENTENCES.key_refused,
   cap: capSentence(),
+  provider_error: "not run: provider error",
   too_many_not_run: "not run: too many cases hit a limit",
+  too_few_questions: "not run: too few eval questions to detect a change",
   hidden_set_needs_sealed_round: HIDDEN_EVAL_NEEDS_SEALED_SENTENCE,
   hidden_set_unavailable: "not run: the hidden eval set could not be opened",
   no_base_score: "not run: no base score for this commit",
@@ -122,8 +127,6 @@ export interface EvalMeasureResult {
 
 export interface EvalCheckResult {
   readonly kind: "eval";
-  /** An eval verdict is a quality signal, never a change proof. */
-  readonly countsTowardProof: false;
   readonly roundKind: EvalRoundKind;
   /** `passed`: the eval ran. `not_run`: it did not, or no measure could be compared. Never `failed`: a difference is a measure, not a failure. */
   readonly outcome: "passed" | "not_run";
@@ -150,16 +153,18 @@ export interface EvalCheckInput {
   readonly hiddenSetUsed?: boolean;
   /** The task's cap in micro-dollars, for the cap sentence. */
   readonly capMicros?: number;
+  /** The fewest cases that ran for the eval to count (default `EVAL_MIN_QUESTIONS`). */
+  readonly minQuestions?: number;
 }
 
 const SUMMARY_PREFIX = "Eval (your runner): ";
-const CLASS_ORDER: readonly EvalNotRunClass[] = ["cap", "key_refused", "rate_limit", "quota", "overloaded"];
+const CLASS_ORDER: readonly EvalNotRunClass[] = ["cap", "key_refused", "rate_limit", "quota", "overloaded", "provider_error"];
 const round2 = (value: number): string => String(Number(value.toFixed(2)));
 const inert = (text: string, max: number): string => inertEvidenceText(typeof text === "string" ? text : "", max);
 
 /** The sentence for a not-run class, with the cap amount when there is one. */
 function classSentence(word: EvalNotRunClass, capMicros: number | undefined): string {
-  return word === "cap" ? capSentence(capMicros) : NOT_RUN_SENTENCES[word];
+  return word === "cap" ? capSentence(capMicros) : word === "provider_error" ? EVAL_NOT_RUN_SENTENCES.provider_error : NOT_RUN_SENTENCES[word];
 }
 /** The class that stopped the most cases (ties: the order cap, key refused, rate limit, quota, overloaded). */
 function dominantClass(facts: EvalRoundFacts): EvalNotRunClass | undefined {
@@ -172,7 +177,7 @@ function dominantClass(facts: EvalRoundFacts): EvalNotRunClass | undefined {
 export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly sentence?: string; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean }): EvalCheckResult {
   const sentence = args.sentence ?? (args.reason === "cap" ? capSentence(args.capMicros) : EVAL_NOT_RUN_SENTENCES[args.reason]);
   return {
-    kind: "eval", countsTowardProof: false, roundKind: args.roundKind, outcome: "not_run", notRun: { reason: args.reason, sentence },
+    kind: "eval", roundKind: args.roundKind, outcome: "not_run", notRun: { reason: args.reason, sentence },
     casesRun: args.facts?.run ?? 0, casesTotal: args.facts?.total ?? 0, usedHiddenSet: args.hiddenSetUsed === true, measures: [], verdicts: [], summary: `${SUMMARY_PREFIX}${sentence}`,
   };
 }
@@ -189,6 +194,8 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
     const word = dominantClass(facts);
     return evalNotRunResult({ roundKind, reason: "too_many_not_run", sentence: word === undefined ? EVAL_NOT_RUN_SENTENCES.too_many_not_run : classSentence(word, input.capMicros), facts, ...(hidden ? { hiddenSetUsed: true } : {}) });
   }
+  // Too few cases ran for the eval to detect a change: not run, never a pass.
+  if (facts.run < (input.minQuestions ?? EVAL_MIN_QUESTIONS)) return evalNotRunResult({ roundKind, reason: "too_few_questions", facts, ...(hidden ? { hiddenSetUsed: true } : {}) });
   const verdicts: EvalMeasureResult[] = [];
   const measures: EvalEvidenceMeasure[] = [];
   input.head.measures.forEach((entry, index) => {
@@ -219,7 +226,7 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
   if (verdicts.length > SUMMARY_MEASURES_LISTED) lines.push(`and ${String(verdicts.length - SUMMARY_MEASURES_LISTED)} more measures`);
   const partial = facts.notRun > 0 ? ` (${String(facts.run)} of ${String(facts.total)} run)` : "";
   return {
-    kind: "eval", countsTowardProof: false, roundKind, outcome: verdicts.some((verdict) => verdict.verdict !== "not_run") ? "passed" : "not_run",
+    kind: "eval", roundKind, outcome: verdicts.some((verdict) => verdict.verdict !== "not_run") ? "passed" : "not_run",
     casesRun: facts.run, casesTotal: facts.total, usedHiddenSet: hidden, measures, verdicts, summary: `${SUMMARY_PREFIX}${lines.join("; ")}${partial}`,
   };
 }

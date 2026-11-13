@@ -92,9 +92,9 @@ describe("the call and cost budget", () => {
     expect(calls).toBe(1);
     expect(result.facts.byClass).toEqual({ cap: 5 });
   });
-  it("a call that throws is one answered with a provider error: the case ran, the round goes on", async () => {
+  it("a call that throws is one answered with a provider error: not run, and the round goes on", async () => {
     const result = await runEvalCasesPaced({ cases: 3, clock: fakeClock(), limits: { spacingMs: 0 }, call: () => Promise.reject(new Error("boom")) });
-    expect(result.facts).toMatchObject({ total: 3, run: 3, notRun: 0 });
+    expect(result.facts).toMatchObject({ total: 3, run: 0, notRun: 3, byClass: { provider_error: 3 } });
   });
   it("holds no case identity: a case is its position, and nothing else is kept", async () => {
     const result = await runEvalCasesPaced({ cases: 3, clock: fakeClock(), limits: { spacingMs: 0 }, call: () => Promise.resolve(ok()) });
@@ -103,12 +103,12 @@ describe("the call and cost budget", () => {
 });
 
 describe("a provider limit is 'not run', per class, through the fake adapter", () => {
-  const rowOf = (world: ReturnType<typeof fakeModelEgressWorld>) => world.rows.gemini;
+  const rowOf = (world: ReturnType<typeof fakeModelEgressWorld>) => world.rows.gemini!;
   const run = async (script: Array<Record<string, unknown>>, cases = script.length) => {
     const world = fakeModelEgressWorld();
     const row = rowOf(world);
     world.provider.script(...(script as never[]));
-    const call = evalCaseCallVia(world.adapter, world.scope(COMPANY_A, row.id), (index) => validFrame(row, world.connection, `case ${String(index)}`) as never);
+    const call = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, row.id) as never, (index) => validFrame(row, world.connection, `case ${String(index)}`) as never);
     const result = await runEvalCasesPaced({ cases, clock: fakeClock(), limits: { spacingMs: 0, maxInFlight: 1 }, call });
     return { world, result };
   };
@@ -118,7 +118,7 @@ describe("a provider limit is 'not run', per class, through the fake adapter", (
     ["overloaded", { status: 503, body: "{}" }],
     ["key_refused", { status: 401, body: "{}" }],
   ])("%s: the case is not run with the provider sentence, and the score is over the run cases", async (klass, behaviour) => {
-    const { result } = await run([ok_body(), behaviour as never, ok_body()]);
+    const { result } = await run([ok_body(), behaviour, ok_body()]);
     expect(result.facts).toMatchObject({ total: 3, run: 2, notRun: 1, byClass: { [klass]: 1 } });
     expect(result.cases[1]).toEqual({ index: 1, state: "not_run", class: klass });
     expect(NOT_RUN_SENTENCES[klass as keyof typeof NOT_RUN_SENTENCES]).toMatch(/^not run: /u);
@@ -127,14 +127,14 @@ describe("a provider limit is 'not run', per class, through the fake adapter", (
     const world = fakeModelEgressWorld();
     const row = rowOf(world);
     await world.setCap(COMPANY_A, 1);
-    const call = evalCaseCallVia(world.adapter, world.scope(COMPANY_A, row.id), () => validFrame(row, world.connection) as never);
+    const call = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, row.id) as never, () => validFrame(row, world.connection) as never);
     const result = await runEvalCasesPaced({ cases: 2, clock: fakeClock(), limits: { spacingMs: 0, maxInFlight: 1 }, call });
     expect(result.facts.byClass).toEqual({ cap: 2 });
     expect(world.provider.calls).toHaveLength(0);
   });
-  it("a provider error (500) is not one of the five: the case ran", async () => {
+  it("a provider error (500, an outage) is not run too: there is no answer to score", async () => {
     const { result } = await run([{ status: 500, body: "{}" }, ok_body()]);
-    expect(result.facts).toMatchObject({ total: 2, run: 2, notRun: 0 });
+    expect(result.facts).toMatchObject({ total: 2, run: 1, notRun: 1, byClass: { provider_error: 1 } });
   });
   it("makes exactly one attempt per case: no retry after a 429", async () => {
     const { world } = await run([{ status: 429, body: "{}" }, { status: 429, body: "{}" }]);
@@ -142,6 +142,7 @@ describe("a provider limit is 'not run', per class, through the fake adapter", (
   });
   it("an unknown class word is read as a run case, so a score is never hidden by a word nobody knows", () => {
     expect(evalFactsFromClasses(["ok", "something_new", "refused"])).toMatchObject({ run: 3, notRun: 0 });
+    expect(evalFactsFromClasses(["ok", "provider_error"])).toMatchObject({ run: 1, notRun: 1 });
   });
 });
 
@@ -152,11 +153,11 @@ function ok_body(): Record<string, unknown> {
 describe("the cap overrun (DECISIONS 165/165a): no call is started after the one that went over", () => {
   it("stops after the call that took the spend past the cap, and says 'budget exceeded by one call'", async () => {
     const world = fakeModelEgressWorld();
-    const row = world.rows.gemini;
+    const row = world.rows.gemini!;
     await world.setCap(COMPANY_A, 2_000_000);
     // The first call's answer reports far more usage than any cap: that is the one call the cap may be overrun by.
     world.provider.script({ body: JSON.stringify({ usageMetadata: { promptTokenCount: 50_000_000, candidatesTokenCount: 1 } }) });
-    const call = evalCaseCallVia(world.adapter, world.scope(COMPANY_A, row.id), (index) => validFrame(row, world.connection, `c${String(index)}`) as never);
+    const call = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, row.id) as never, (index) => validFrame(row, world.connection, `c${String(index)}`) as never);
     const result = await runEvalCasesPaced({ cases: 8, clock: fakeClock(), limits: { spacingMs: 0, maxInFlight: 1 }, call });
     expect(world.provider.calls).toHaveLength(1);
     expect(result.facts).toEqual({ total: 8, run: 1, notRun: 7, byClass: { cap: 7 }, overrunStop: true });
@@ -180,21 +181,21 @@ describe("the cap overrun (DECISIONS 165/165a): no call is started after the one
   });
   it("with one call at a time, at most one call in the whole round settles over the cap", async () => {
     const world = fakeModelEgressWorld();
-    const row = world.rows.gemini;
+    const row = world.rows.gemini!;
     await world.setCap(COMPANY_A, 2_000_000);
     world.provider.script({ body: JSON.stringify({ usageMetadata: { promptTokenCount: 50_000_000, candidatesTokenCount: 1 } }) });
     const overruns: boolean[] = [];
-    const inner = evalCaseCallVia(world.adapter, world.scope(COMPANY_A, row.id), () => validFrame(row, world.connection) as never);
+    const inner = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, row.id) as never, () => validFrame(row, world.connection) as never);
     await runEvalCasesPaced({ cases: 6, clock: fakeClock(), limits: { spacingMs: 0, maxInFlight: 1 }, call: async (index) => { const settle = await inner(index); overruns.push(settle.overrun === true); return settle; } });
     expect(overruns.filter(Boolean)).toHaveLength(1);
   });
   it("the adapter itself refuses the call after an overrun (the second line of defence): a direct call is a cap refusal that never reaches the provider", async () => {
     const world = fakeModelEgressWorld();
-    const row = world.rows.gemini;
+    const row = world.rows.gemini!;
     await world.setCap(COMPANY_A, 2_000_000);
     world.provider.script({ body: JSON.stringify({ usageMetadata: { promptTokenCount: 50_000_000, candidatesTokenCount: 1 } }) });
     await collect(world.adapter, world.scope(COMPANY_A, row.id), validFrame(row, world.connection));
-    const call = evalCaseCallVia(world.adapter, world.scope(COMPANY_A, row.id), () => validFrame(row, world.connection) as never);
+    const call = evalCaseCallVia(world.adapter as never, world.scope(COMPANY_A, row.id) as never, () => validFrame(row, world.connection) as never);
     expect(await call(0)).toMatchObject({ class: "cap" });
     expect(world.provider.calls).toHaveLength(1);
   });

@@ -56,7 +56,7 @@ describe("the hidden set is mounted only in the sealed round", () => {
     }
   });
   it("never lets the answer carry the set's contents, only a hash and a path", async () => {
-    const canary = `c-${randomBytes(6).toString("hex")}`;
+    const canary = `c-${randomBytes(4).toString("hex")}`;
     const held: HiddenEvalSetSource = { exists: () => Promise.resolve(true), open: () => Promise.resolve({ hostPath: "/var/lib/rovara/hidden/p1", hash: HASH, cases: [canary] } as never) };
     expect(JSON.stringify(await hiddenEvalSetFor("check_sealed", held))).not.toContain(canary);
   });
@@ -74,10 +74,10 @@ describe("what goes back to the coding agent", () => {
     for (const entry of feedback.measures) expect(Object.keys(entry)).toEqual(["index", "score", "count"]);
   });
   it("carries no case id, input, output, name, diff or path even when the result object is hostile", () => {
-    const canary = `c-${randomBytes(6).toString("hex")}`;
+    const canary = `c-${randomBytes(4).toString("hex")}`;
     const result = evalCheckResult({ roundKind: "check_sealed", head: file([{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05, count: 40 }]), base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
     const hostile = { ...result, caseIds: [canary], verdicts: result.verdicts.map((verdict) => ({ ...verdict, caseId: canary, label: canary, input: canary, path: `/hidden/${canary}`, sentence: canary })), summary: canary };
-    const text = JSON.stringify(agentFeedbackFor(hostile as never));
+    const text = JSON.stringify(agentFeedbackFor(hostile));
     expect(text).not.toContain(canary);
     expect(text).not.toContain("/hidden");
   });
@@ -94,7 +94,7 @@ describe("what goes back to the coding agent", () => {
 describe("a hidden-set round never lets the runner's own words into the evidence", () => {
   const base: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }], caseCount: 40, recordedOn: "2026-11-13", roundKind: "check_sealed", runnerSchemaVersion: 1 };
   it("names and units come only from the base record; a measure the base does not know is shown anonymously with its name dropped", () => {
-    const canary = `c-${randomBytes(6).toString("hex")}`;
+    const canary = `c-${randomBytes(4).toString("hex")}`;
     const head = MeasuresFileSchema.parse({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }, { name: canary, unit: canary, value: 0.5, direction: "up_good", spread: 0.1 }] });
     const result = evalCheckResult({ roundKind: "check_sealed", head, base, facts: evalFactsAllRun(40), hiddenSetUsed: true });
     expect(JSON.stringify(result)).not.toContain(canary);

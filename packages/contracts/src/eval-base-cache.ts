@@ -17,6 +17,7 @@ import { companyScoped } from "./ports/company-scope.js";
 import { DOCUMENT_STORE_LIMITS, type DocumentStore, type StoredDocument } from "./ports/document-store.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 
+/** The longest a cached base score is used (DECISIONS 170: "a maximum age"). A project may set it lower (`maxAgeDays`), never higher. */
 export const EVAL_BASE_CACHE_TTL_DAYS = 30;
 const DAY_SECONDS = 86_400;
 const PARTITION = "EVALBASE";
@@ -52,6 +53,8 @@ export interface EvalBaseCacheKeyParts {
   /** The catalog row id of the model the eval called. */
   readonly catalogRowId: string;
   readonly model: string;
+  /** The EXACT model version the eval called (the provider's snapshot or version id, not the family name). A new version is a new key: the old code is re-run only then (DECISIONS 170). */
+  readonly modelVersion: string;
 }
 
 const PART_RULES: ReadonlyArray<readonly [keyof EvalBaseCacheKeyParts, RegExp]> = [
@@ -63,6 +66,7 @@ const PART_RULES: ReadonlyArray<readonly [keyof EvalBaseCacheKeyParts, RegExp]> 
   ["commandFingerprint", /^[a-f0-9]{64}$/u],
   ["catalogRowId", /^[a-z][a-z0-9-]{0,39}$/u],
   ["model", /^[A-Za-z0-9._:/@+-]{1,200}$/u],
+  ["modelVersion", /^[A-Za-z0-9._:/@+-]{1,200}$/u],
 ];
 
 /** SHA-256 (hex) of an eval command's text under a fixed domain. */
@@ -98,7 +102,8 @@ export interface BaseScoreCache {
 }
 
 /** The cache over the document store, for one company. */
-export function createDocumentBaseScoreCache(store: Pick<DocumentStore, "get" | "put" | "ttlAttribute">, options: { companyId: string; now?: () => number }): BaseScoreCache {
+export function createDocumentBaseScoreCache(store: Pick<DocumentStore, "get" | "put" | "ttlAttribute">, options: { companyId: string; now?: () => number; /** A shorter maximum age than the default, in whole days (1 to 30). */ maxAgeDays?: number }): BaseScoreCache {
+  const maxAgeDays = Number.isSafeInteger(options.maxAgeDays) && (options.maxAgeDays as number) >= 1 ? Math.min(EVAL_BASE_CACHE_TTL_DAYS, options.maxAgeDays as number) : EVAL_BASE_CACHE_TTL_DAYS;
   const pk = companyScoped(options.companyId, PARTITION);
   const now = options.now ?? Date.now;
   // The attribute the store sweeps, when it sweeps one. The record also keeps its own `expiresAt`, which `read` tests itself (a document past its time may be read until it is swept).
@@ -119,7 +124,10 @@ export function createDocumentBaseScoreCache(store: Pick<DocumentStore, "get" | 
         const found = await store.get({ pk, sk: `K#${key}` });
         if (found === undefined || found["kind"] !== "evalbase" || found["company"] !== options.companyId || found["key"] !== key || found.sk !== `K#${key}` || found.pk !== pk) return undefined;
         const expiresAt = found["expiresAt"];
+        const writtenAt = found["writtenAt"];
         if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt <= now() / 1000) return undefined;
+        // The reader's own maximum age too: a record written under a longer one is not used past this one.
+        if (typeof writtenAt !== "number" || !Number.isFinite(writtenAt) || writtenAt + maxAgeDays * DAY_SECONDS <= now() / 1000) return undefined;
         const parsed = EvalBaseRecordSchema.safeParse(found["record"]);
         return parsed.success ? parsed.data : undefined;
       } catch {
@@ -132,8 +140,9 @@ export function createDocumentBaseScoreCache(store: Pick<DocumentStore, "get" | 
       if (key === undefined) return "refused";
       const parsed = EvalBaseRecordSchema.safeParse(record);
       if (!parsed.success) return "refused";
-      const expiresAt = Math.floor(now() / 1000) + EVAL_BASE_CACHE_TTL_DAYS * DAY_SECONDS;
-      const item = { pk, sk: `K#${key}`, kind: "evalbase", company: options.companyId, key, expiresAt, ...(ttlAttribute === undefined ? {} : { [ttlAttribute]: expiresAt }), record: parsed.data } as unknown as StoredDocument;
+      const writtenAt = Math.floor(now() / 1000);
+      const expiresAt = writtenAt + maxAgeDays * DAY_SECONDS;
+      const item = { pk, sk: `K#${key}`, kind: "evalbase", company: options.companyId, key, writtenAt, expiresAt, ...(ttlAttribute === undefined ? {} : { [ttlAttribute]: expiresAt }), record: parsed.data } as unknown as StoredDocument;
       if (new TextEncoder().encode(JSON.stringify(item)).length > DOCUMENT_STORE_LIMITS.maxDocumentBytes) return "refused";
       try {
         const written = await store.put({ item });

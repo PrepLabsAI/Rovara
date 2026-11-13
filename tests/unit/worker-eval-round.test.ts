@@ -30,7 +30,8 @@ const baseFile = (value = 0.8, hash = SET_HASH) => MeasuresFileSchema.parse({ sc
 function store() { return new MemoryDocumentStore({ ttlAttribute: "expiresAtSeconds" }); }
 const cacheFor = (held: MemoryDocumentStore, company: string): BaseScoreCache => createDocumentBaseScoreCache(held, { companyId: company });
 
-interface Setup { root: string; input: EvalRoundInput; baseRuns: { count: number }; cache: BaseScoreCache; held: MemoryDocumentStore }
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+interface Setup { root: string; input: Mutable<EvalRoundInput>; baseRuns: { count: number }; cache: BaseScoreCache; held: MemoryDocumentStore }
 async function setup(over: Partial<EvalRoundInput> = {}, options: { head?: string; company?: string; held?: MemoryDocumentStore; baseFile?: ReturnType<typeof baseFile> | undefined; baseFacts?: ReturnType<typeof evalFactsAllRun> } = {}): Promise<Setup> {
   const root = await workspace();
   await writeFile(join(root, "rovara-measures.json"), options.head ?? measuresText());
@@ -38,11 +39,11 @@ async function setup(over: Partial<EvalRoundInput> = {}, options: { head?: strin
   const company = options.company ?? "org_aaaaaaaaaaaaaaaaaaaa";
   const cache = cacheFor(held, company);
   const baseRuns = { count: 0 };
-  const input: EvalRoundInput = {
+  const input: Mutable<EvalRoundInput> = {
     trigger: { needed: true, reason: "changes" },
     roundKind: "check_unsealed",
     report: { root, cwd: ".", argument: "rovara-measures.json", notBeforeMs: Date.now() - 1_000 },
-    key: { company, project: "project-1", baseCommit: COMMIT, commandFingerprint: evalCommandFingerprint("npm run eval"), catalogRowId: "gemini", model: "gemini-small" },
+    key: { company, project: "project-1", baseCommit: COMMIT, commandFingerprint: evalCommandFingerprint("npm run eval"), catalogRowId: "gemini", model: "gemini-small", modelVersion: "gemini-small-2026-10-01" },
     cache,
     runBaseRound: () => { baseRuns.count += 1; return Promise.resolve(options.baseFile === undefined && "baseFile" in options ? { ok: false as const } : { ok: true as const, measures: options.baseFile ?? baseFile(), caseCount: 50, facts: options.baseFacts ?? evalFactsAllRun(50) }); },
     facts: evalFactsAllRun(50),
@@ -95,7 +96,7 @@ describe("the base score cache in the round", () => {
   it("is a fresh base run when the commit, eval set, hidden set, command, model or catalog row changes", async () => {
     const first = await setup();
     await runEvalRound(first.input);
-    for (const change of [{ baseCommit: "c".repeat(40) }, { commandFingerprint: evalCommandFingerprint("other") }, { model: "m2" }, { catalogRowId: "openai" }, { project: "p2" }]) {
+    for (const change of [{ baseCommit: "c".repeat(40) }, { commandFingerprint: evalCommandFingerprint("other") }, { model: "m2" }, { modelVersion: "gemini-small-2026-11-01" }, { catalogRowId: "openai" }, { project: "p2" }]) {
       const next = await setup({}, { held: first.held });
       next.input.key = { ...next.input.key, ...change };
       expect(await runEvalRound(next.input), JSON.stringify(change)).toMatchObject({ status: "done", cache: "filled" });
@@ -126,10 +127,10 @@ describe("the base score cache in the round", () => {
     expect(await runEvalRound(failed.input)).toMatchObject({ status: "done", cache: "not_filled", result: { notRun: { reason: "no_base_score" } } });
     expect((await failed.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
     const partial = await setup({}, { baseFacts: evalFactsFromClasses(["rate_limit", ...Array.from({ length: 49 }, () => "ok")]) });
-    expect(await runEvalRound(partial.input)).toMatchObject({ status: "done", cache: "not_filled" });
+    expect(await runEvalRound(partial.input)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "not_run", notRun: { reason: "no_base_score" }, measures: [] } });
     expect((await partial.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
     const working = await setup({ roundKind: "working" });
-    expect(await runEvalRound(working.input)).toMatchObject({ status: "done", cache: "not_filled" });
+    expect(await runEvalRound(working.input)).toMatchObject({ status: "done", cache: "not_filled", result: { outcome: "passed" } });
     expect((await working.held.query({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#EVALBASE" })).items).toHaveLength(0);
   });
   it("refuses to compare when the base round ran another eval set than the head, but still caches that base under its own hash", async () => {
@@ -157,7 +158,7 @@ describe("the eval check for the evidence writer", () => {
     if (out.status !== "done") throw new Error("expected a done round");
     expect(out.result.summary).toBe("Eval (your runner): accuracy 0.99 fraction (main 0.8 fraction) · better than main beyond the noise band");
     expect(out.result.measures[0]).toMatchObject({ base: 0.8, head: 0.99, band: { low: 0.7, high: 0.9 } });
-    expect(out.result.countsTowardProof).toBe(false);
+    expect("countsTowardProof" in out.result).toBe(false);
   });
   it("429s in the round are 'not run': a score over the run cases only, and not-run cases never lower it", async () => {
     const facts = evalFactsFromClasses([...Array.from({ length: 3 }, () => "rate_limit"), ...Array.from({ length: 47 }, () => "ok")]);
@@ -170,7 +171,7 @@ describe("the eval check for the evidence writer", () => {
 });
 
 describe("the hidden eval set", () => {
-  const canary = () => `c-${randomBytes(6).toString("hex")}`;
+  const canary = () => `c-${randomBytes(4).toString("hex")}`;
   function hidden(): { source: HiddenEvalSetSource; calls: { exists: number; open: number } } {
     const calls = { exists: 0, open: 0 };
     return { calls, source: { exists: () => { calls.exists += 1; return Promise.resolve(true); }, open: () => { calls.open += 1; return Promise.resolve({ hostPath: "/var/lib/rovara/hidden/project-1", hash: HIDDEN_HASH }); } } };

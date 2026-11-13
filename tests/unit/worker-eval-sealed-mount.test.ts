@@ -96,7 +96,8 @@ describe("the sealed sandbox is started only from a plan that says what it mount
   });
   it("refuses a hand-edited plan whose arguments carry a hidden mount the plan does not name, or name one the arguments lack, and starts nothing", async () => {
     const withMount = checkSandboxPlan(input({ hiddenEvalSetPath: HIDDEN }));
-    const { hiddenEvalSetPath: _dropped, ...forgotten } = withMount;
+    const forgotten: { hiddenEvalSetPath?: string } = { ...withMount };
+    delete forgotten.hiddenEvalSetPath;
     const smuggled = await start(forgotten as typeof withMount);
     expect(String(smuggled.result)).toMatch(/unsound/u);
     expect(smuggled.runs).toEqual([]);

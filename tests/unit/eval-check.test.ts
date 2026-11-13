@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { EvidenceMeasureSchema } from "../../packages/contracts/src/evidence.js";
 import { MeasuresFileSchema } from "../../packages/contracts/src/measures-file.js";
 import { NOT_RUN_SENTENCES, capSentence } from "../../packages/contracts/src/model-egress/classify.js";
-import { EVAL_NOISE_K, EVAL_NOT_RUN_SENTENCES, EVAL_VERDICT_WORDS, evalCheckResult, evalNotRunResult, evalVerdictFor, type EvalVerdictInput } from "../../packages/contracts/src/eval-check.js";
+import { EVAL_MIN_QUESTIONS, EVAL_NOISE_K, EVAL_NOT_RUN_SENTENCES, EVAL_VERDICT_WORDS, evalCheckResult, evalNotRunResult, evalVerdictFor, type EvalVerdictInput } from "../../packages/contracts/src/eval-check.js";
 import { EVAL_NOT_RUN_FRACTION_MAX, evalFactsAllRun, evalFactsFromClasses } from "../../packages/contracts/src/eval-pacing.js";
 import type { EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
 
@@ -82,10 +82,11 @@ describe("the check result", () => {
     expect(result.outcome).toBe("passed");
     expect(result.casesRun).toBe(50);
   });
-  it("is a quality signal and never a change proof", () => {
+  it("assigns no label: a measure beyond the band is not 'Improved on eval' and nothing here is 'Proven' (DECISIONS 170 labels come from the next lane)", () => {
     const result = evalCheckResult({ roundKind: "check_sealed", head: file([accuracy({ value: 0.99 })]), base: baseRecord(), facts });
     expect(result.verdicts[0]!.verdict).toBe("better");
-    expect(result.countsTowardProof).toBe(false);
+    expect(Object.keys(result).some((key) => /proof|label|proven|improved/iu.test(key))).toBe(false);
+    expect(JSON.stringify(result)).not.toMatch(/Proven|Improved on eval|No regression measured/u);
     expect(result.outcome).toBe("passed");
     expect(evalCheckResult({ roundKind: "check_sealed", head: file([accuracy({ value: 0.2 })]), base: baseRecord(), facts }).outcome).toBe("passed");
   });
@@ -130,6 +131,17 @@ describe("the check result", () => {
     expect(result.measures).toEqual([]);
     expect(result.summary).not.toMatch(/fail/iu);
   });
+  it("is not run with too few questions, never a pass: fewer than 20 cases ran", () => {
+    expect(EVAL_MIN_QUESTIONS).toBe(20);
+    const few = evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy({ count: 19 })]), base: baseRecord(), facts: evalFactsAllRun(19) });
+    expect(few).toMatchObject({ outcome: "not_run", notRun: { reason: "too_few_questions", sentence: "not run: too few eval questions to detect a change" }, measures: [] });
+    expect(evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy()]), base: baseRecord(), facts: evalFactsAllRun(20) }).outcome).toBe("passed");
+    expect(evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy()]), base: baseRecord(), facts: evalFactsAllRun(5), minQuestions: 5 }).outcome).toBe("passed");
+  });
+  it("a provider error (an outage) is not run too, never a pass", () => {
+    const outage = evalFactsFromClasses([...Array.from({ length: 30 }, () => "provider_error"), ...Array.from({ length: 20 }, () => "ok")]);
+    expect(evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy()]), base: baseRecord(), facts: outage })).toMatchObject({ outcome: "not_run", notRun: { sentence: "not run: provider error" } });
+  });
   it("exactly at the fraction is still a run; one case over is not", () => {
     const atLimit = evalFactsFromClasses([...Array.from({ length: 6 }, () => "rate_limit"), ...Array.from({ length: 24 }, () => "ok")]);
     expect(evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy({ count: 24 })]), base: baseRecord(), facts: atLimit }).notRun).toBeUndefined();
@@ -168,7 +180,7 @@ describe("untrusted text from the runner", () => {
   const hostile = "[score](https://evil.example/x) @octocat #123 ENG-42 <b>x</b> ![i](https://e/x)";
   const hostileUnit = "[u](https://x.ex)";
   it("reaches the summary and the verdict sentences only through the inert-text function", () => {
-    const result = evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy({ name: hostile, unit: hostileUnit })]), base: baseRecord([{ name: hostile, unit: hostileUnit, value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(10) });
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy({ name: hostile, unit: hostileUnit })]), base: baseRecord([{ name: hostile, unit: hostileUnit, value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(50) });
     const printed = [result.summary, ...result.verdicts.map((verdict) => `${verdict.label} ${verdict.sentence}`)].join("\n");
     expect(printed).not.toMatch(/https:\/\/(?!‍)/u);
     expect(printed).not.toMatch(/@octocat/u);
@@ -182,29 +194,29 @@ describe("untrusted text from the runner", () => {
   it("holds even for names that bypass the file schema: line breaks, a bidi override, a heading", () => {
     const raw = "line one\n# heading \u202e [x](https://evil.example)";
     const head = { schemaVersion: 1, source: "project_runner", measures: [{ name: raw, unit: raw, value: 0.8, direction: "up_good", spread: 0.05 }] } as const;
-    const result = evalCheckResult({ roundKind: "check_unsealed", head: head as never, base: baseRecord([{ name: raw, unit: raw, value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(10) });
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: head as never, base: baseRecord([{ name: raw, unit: raw, value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(50) });
     expect(result.summary).not.toMatch(/\n|\u202e|https:\/\/(?!\u200d)/u);
     expect(result.measures).toEqual([]);
   });
   it("holds even for names that bypass the file schema: line breaks, a bidi override, a heading", () => {
     const raw = "line one\n# heading \u202e [x](https://evil.example)";
     const head = { schemaVersion: 1, source: "project_runner", measures: [{ name: raw, unit: raw, value: 0.8, direction: "up_good", spread: 0.05 }] };
-    const result = evalCheckResult({ roundKind: "check_unsealed", head: head as never, base: baseRecord([{ name: raw, unit: raw, value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(10) });
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: head as never, base: baseRecord([{ name: raw, unit: raw, value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(50) });
     expect(result.summary).not.toMatch(/\n|\u202e|https:\/\/(?!\u200d)/u);
     expect(result.measures).toEqual([]);
   });
   it("prints a measure named with a prototype key as plain text, never as an object key", () => {
-    const result = evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy({ name: "__proto__" })]), base: baseRecord([{ name: "__proto__", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(10) });
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: file([accuracy({ name: "__proto__" })]), base: baseRecord([{ name: "__proto__", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.05 }]), facts: evalFactsAllRun(50) });
     expect(result.summary).toContain("__proto__");
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
   it("caps the listed measures and handles 50 measures with one-megabyte names quickly", () => {
     const names = Array.from({ length: 50 }, (_, index) => ({ name: `m${String(index)}`, unit: "u", value: 1, direction: "up_good" as const, spread: 0.1 }));
-    const result = evalCheckResult({ roundKind: "check_unsealed", head: file(names), base: baseRecord(names), facts: evalFactsAllRun(10) });
+    const result = evalCheckResult({ roundKind: "check_unsealed", head: file(names), base: baseRecord(names), facts: evalFactsAllRun(50) });
     expect(result.summary).toContain("and 45 more measures");
     const big = "x".repeat(1_048_576);
     const started = Date.now();
-    const huge = evalCheckResult({ roundKind: "check_unsealed", head: { schemaVersion: 1, source: "project_runner", measures: [{ name: big, unit: big, value: 1, direction: "up_good", spread: 0.1 }] }, base: baseRecord([{ name: big, unit: big, value: 1, direction: "up_good", spread: 0.1 }]), facts: evalFactsAllRun(10) });
+    const huge = evalCheckResult({ roundKind: "check_unsealed", head: { schemaVersion: 1, source: "project_runner", measures: [{ name: big, unit: big, value: 1, direction: "up_good", spread: 0.1 }] }, base: baseRecord([{ name: big, unit: big, value: 1, direction: "up_good", spread: 0.1 }]), facts: evalFactsAllRun(50) });
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(huge.summary.length).toBeLessThan(2_000);
   });

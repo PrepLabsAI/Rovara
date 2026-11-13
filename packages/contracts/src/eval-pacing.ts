@@ -2,7 +2,7 @@
 //
 // The rules (the plan block TE-F3, DECISIONS 157, 165 and 165a):
 //   - at most four calls at once (a ceiling the settings cannot raise), the task's call budget (default 200) and cost budget (default $2.00), with spacing between starts;
-//   - a case whose call settled with a provider limit (`rate_limit`, `quota`, `overloaded`, `key_refused`) or the task's own cap is NOT RUN: never a failed case and never a lower score. The facts say "n of N run";
+//   - a case whose call settled with a provider limit (`rate_limit`, `quota`, `overloaded`, `key_refused`), a provider error or the task's own cap is NOT RUN: never a failed case and never a lower score. The facts say "n of N run";
 //   - after a settle with `overrun: true` NO further call is started in the task ("budget exceeded by one call"). Calls already in flight were reserved on the meter before the overrun, so the adapter (not this planner) is what
 //     bounds them; with one call at a time exactly one call can be over;
 //   - a case is its position and nothing else. No case id, input or output is ever held here.
@@ -12,8 +12,9 @@ import { MODEL_EGRESS_OVERRUN_SENTENCE } from "./model-egress/cost.js";
 import type { ModelEgress, ModelEgressScope } from "./ports/model-egress.js";
 import type { ModelEgressFrame } from "./model-egress/frame.js";
 
-export type EvalNotRunClass = ModelEgressNotRunClass;
-export const EVAL_NOT_RUN_CLASSES: readonly EvalNotRunClass[] = NOT_RUN_CLASSES;
+/** The five classes the model-call ledger calls "not run", plus a provider error: an eval case whose call got no usable answer (an outage, a 5xx, a dropped connection) has no answer to score (DECISIONS 170: "a provider outage gives not run, never a pass"). */
+export type EvalNotRunClass = ModelEgressNotRunClass | "provider_error";
+export const EVAL_NOT_RUN_CLASSES: readonly EvalNotRunClass[] = [...NOT_RUN_CLASSES, "provider_error"];
 
 /** Above this share of cases not run, the whole eval is not run (a score over too few cases says nothing). */
 export const EVAL_NOT_RUN_FRACTION_MAX = 0.2;
@@ -58,7 +59,7 @@ export interface EvalRoundFacts {
   readonly overrunStop: boolean;
 }
 
-const isNotRunClass = (value: string): value is EvalNotRunClass => (NOT_RUN_CLASSES as readonly string[]).includes(value);
+const isNotRunClass = (value: string): value is EvalNotRunClass => (EVAL_NOT_RUN_CLASSES as readonly string[]).includes(value);
 
 /** The facts for a round whose cases each settled with one class word. A word that is not one of the five is a case that ran. */
 export function evalFactsFromClasses(classes: readonly string[], overrunStop = false): EvalRoundFacts {
