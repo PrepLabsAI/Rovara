@@ -9,7 +9,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
 
-interface Statement { Action: string | string[]; Resource: unknown }
+interface Statement { Action: string | string[]; Resource: unknown; Condition?: unknown }
 
 function statementsForRole(template: Template, prefix: string): Statement[] {
   return (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
