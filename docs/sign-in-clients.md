@@ -109,6 +109,7 @@ With such a token, the `/v1/dev/client/*` routes act as the signed-in person, wi
 
 | Scope | Route | Does |
 | --- | --- | --- |
+| (none) | `GET /v1/dev/client/projects/{project}` | A project the person may use: its latest revision, their access, and its repositories |
 | `projects:members` | `GET /v1/dev/client/projects/{project}/members` | Lists the people granted the project |
 | `projects:members` | `PUT /v1/dev/client/projects/{project}/members/{who}` | Grants the project, as `agentx admin project grant` does; `who` is an email address or a developer ID |
 | `projects:members` | `DELETE /v1/dev/client/projects/{project}/members/{who}` | Revokes a grant |
