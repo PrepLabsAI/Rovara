@@ -300,6 +300,8 @@ export * from "./model-failure-pack.js";
 export * from "./model-families.js";
 export * from "./model-reply-provenance.js";
 export * from "./model-reply-set.js";
+export * from "./model-reply-store.js";
+export * from "./model-reply-store-rules.js";
 export * from "./model-serve-replies.js";
 export * from "./test-account.js";
 export * from "./context-sources.js";
