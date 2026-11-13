@@ -371,9 +371,16 @@ function enterableByOthers(directory: string): boolean {
  * needs no user tools. The checkout is handed to that account for the run and back to root afterwards, pass or fail,
  * because later steps run git as root and git refuses a repository another user owns.
  */
+/**
+ * At most this many test files at once in a release. On CodeBuild's 32-vCPU build, Vitest's default (31) made two
+ * workflow suites fail at REVIEW that pass at 8; capped while that is found (the suite still takes about 10 minutes).
+ */
+export const RELEASE_TEST_WORKERS = 16;
+
 export function runTests(runner: Runner, uid: number | undefined = typeof process.getuid === "function" ? process.getuid() : undefined): void {
+  const args = ["test", "--", `--maxWorkers=${String(RELEASE_TEST_WORKERS)}`];
   if (uid !== 0) {
-    runner.run("npm", ["test"]);
+    runner.run("npm", args);
     return;
   }
   const { uid: testUid, gid, home } = RELEASE_TEST_ACCOUNT;
@@ -382,7 +389,7 @@ export function runTests(runner: Runner, uid: number | undefined = typeof proces
   runner.run("mkdir", ["-p", home]);
   runner.run("chown", ["-R", owner, directory, home]);
   try {
-    runner.runAs({ uid: testUid, gid, env: testEnvironment(process.env, home) }, "npm", ["test"]);
+    runner.runAs({ uid: testUid, gid, env: testEnvironment(process.env, home) }, "npm", args);
   } finally {
     runner.run("chown", ["-R", "0:0", directory]);
   }
