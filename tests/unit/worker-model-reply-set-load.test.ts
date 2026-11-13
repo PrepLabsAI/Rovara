@@ -134,53 +134,66 @@ describe("provenance from the base commit", () => {
     expect(await withSeam(forged)).toBe("task_made");
     expect(modelReplyEntrySha256(reply)).toMatch(/^[0-9a-f]{64}$/u);
   });
-  // H1: the blob id comes from the tree; the bytes must hash to it (a swapped loose or packed object under the base id is refused)
+  // H1 and the chain: EVERY object on the way (the commit, the root tree, each subtree, the blob) must hash to its id. A swapped object of any level, loose or packed, makes the file unreadable: the agent's replies are task_made.
   const forged = file([{ id: "a", response: { text: "FORGED", finish: "stop" } }]);
-  const blobIdOf = (root: string): string => git(root, "rev-parse", `HEAD:${modelReplyFilePath(FAMILY)}`);
-  it("a swapped LOOSE blob under the base id is refused: the agent's identical replies are task_made, never before_task", async () => {
-    const r = repoWithBase(file([{ id: "a", response: { text: "original", finish: "stop" } }]));
-    const id = blobIdOf(r.root);
-    // the object store now holds the FORGED bytes under the base blob's id (valid zlib, valid header, wrong hash)
-    const loose = join(r.root, ".git/objects", id.slice(0, 2), id.slice(2));
+  const objectOf = (type: string, body: Buffer): Buffer => Buffer.concat([Buffer.from(`${type} ${String(body.length)}\0`), body]);
+  const treeEntry = (mode: string, name: string, id: string): Buffer => Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(id, "hex")]);
+  const mktree = (root: string, line: string): string => execFileSync("git", ["mktree"], { cwd: root, env: GIT_ENV, input: line, encoding: "utf8" }).trim();
+  const hashObject = (root: string, text: string): string => execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: root, env: GIT_ENV, input: text, encoding: "utf8" }).trim();
+  /** Puts `body` in the object store under `id` (valid zlib, valid header, WRONG hash): as a loose object, or as the only object of a pack named for it (the real loose object is removed). */
+  function forgeObject(root: string, id: string, type: "commit" | "tree" | "blob", body: Buffer, how: "loose" | "packed"): void {
+    const loose = join(root, ".git/objects", id.slice(0, 2), id.slice(2));
     rmSync(loose, { force: true });
-    writeFileSync(loose, deflateSync(Buffer.concat([Buffer.from(`blob ${String(Buffer.byteLength(forged))}\0`), Buffer.from(forged)])), { mode: 0o444 });
-    // the candidate (working tree) carries the same forged reply: only the swapped base would make it before_task
-    write(r.root, forged);
-    expect(await readFileAtCommit({ repositoryRoot: r.root, commitSha: r.base, path: modelReplyFilePath(FAMILY), scratchRoot: r.scratch, maxBytes: 1_000_000, signal })).toEqual({ kind: "unreadable" });
-    expect(await counts(sourceOf(r))).toEqual({ before_task: 0, independent: 0, task_made: 1 });
-  });
-  it("a swapped PACKED blob under the base id is refused too", async () => {
-    const r = repoWithBase(file([{ id: "a", response: { text: "original", finish: "stop" } }]));
-    const id = blobIdOf(r.root);
-    // the commit and the tree stay as they are; only the blob's own loose object is replaced by a pack that holds the forged bytes under the same id
-    const packDir = join(r.root, ".git/objects/pack");
+    if (how === "loose") {
+      mkdirSync(join(root, ".git/objects", id.slice(0, 2)), { recursive: true });
+      writeFileSync(loose, deflateSync(objectOf(type, body)), { mode: 0o444 });
+      return;
+    }
+    const packDir = join(root, ".git/objects/pack");
     mkdirSync(packDir, { recursive: true });
-    rmSync(join(r.root, ".git/objects", id.slice(0, 2), id.slice(2)), { force: true });
-    const body = deflateSync(Buffer.from(forged));
-    const size = Buffer.byteLength(forged);
-    const head: number[] = [(3 << 4) | (size & 15)];
-    let rest = size >> 4;
+    const code = { commit: 1, tree: 2, blob: 3 }[type];
+    const head: number[] = [(code << 4) | (body.length & 15)];
+    let rest = body.length >> 4;
     while (rest > 0) { head[head.length - 1] = (head.at(-1) as number) | 0x80; head.push(rest & 0x7f); rest >>= 7; }
-    const objects = Buffer.concat([Buffer.from(head), body]);
     const packHead = Buffer.alloc(12);
     packHead.write("PACK", 0);
     packHead.writeUInt32BE(2, 4);
     packHead.writeUInt32BE(1, 8);
-    const packNoSum = Buffer.concat([packHead, objects]);
+    const packNoSum = Buffer.concat([packHead, Buffer.from(head), deflateSync(body)]);
     const packSum = createHash("sha1").update(packNoSum).digest();
     const fan = Buffer.alloc(256 * 4);
-    const first = Number.parseInt(id.slice(0, 2), 16);
-    for (let i = first; i < 256; i += 1) fan.writeUInt32BE(1, i * 4);
+    for (let i = Number.parseInt(id.slice(0, 2), 16); i < 256; i += 1) fan.writeUInt32BE(1, i * 4);
     const idxBody = Buffer.concat([Buffer.from([0xff, 0x74, 0x4f, 0x63, 0, 0, 0, 2]), fan, Buffer.from(id, "hex"), Buffer.alloc(4), Buffer.from([0, 0, 0, 12]), packSum]);
-    const idx = Buffer.concat([idxBody, createHash("sha1").update(idxBody).digest()]);
-    writeFileSync(join(packDir, "pack-forged.pack"), Buffer.concat([packNoSum, packSum]));
-    writeFileSync(join(packDir, "pack-forged.idx"), idx);
-    // the forged pack really answers for the base id (a control: git itself returns the forged bytes), and the reader still refuses it
-    expect(git(r.root, "cat-file", "blob", id)).toContain("FORGED");
-    write(r.root, forged);
-    expect(await readFileAtCommit({ repositoryRoot: r.root, commitSha: r.base, path: modelReplyFilePath(FAMILY), scratchRoot: r.scratch, maxBytes: 1_000_000, signal })).toEqual({ kind: "unreadable" });
-    expect(await counts(sourceOf(r))).toEqual({ before_task: 0, independent: 0, task_made: 1 });
-  });
+    writeFileSync(join(packDir, `pack-forged-${id.slice(0, 8)}.pack`), Buffer.concat([packNoSum, packSum]));
+    writeFileSync(join(packDir, `pack-forged-${id.slice(0, 8)}.idx`), Buffer.concat([idxBody, createHash("sha1").update(idxBody).digest()]));
+  }
+  const LEVELS = ["blob", "tree (.rovara/mocks/model)", "tree (.rovara/mocks)", "tree (.rovara)", "root tree", "commit"] as const;
+  for (const how of ["loose", "packed"] as const) {
+    for (const level of LEVELS) {
+      it(`a swapped ${how} ${level} under its id is refused: the agent's identical replies are task_made, never before_task`, async () => {
+        const r = repoWithBase(file([{ id: "a", response: { text: "original", finish: "stop" } }]));
+        const id = (path: string): string => git(r.root, "rev-parse", `HEAD:${path}`);
+        const attackerBlob = hashObject(r.root, forged);
+        const modelTree = mktree(r.root, `100644 blob ${attackerBlob}\topenai_compatible.json\n`);
+        const mocksTree = mktree(r.root, `040000 tree ${modelTree}\tmodel\n`);
+        const rovaraTree = mktree(r.root, `040000 tree ${mocksTree}\tmocks\n`);
+        const rootTree = mktree(r.root, `040000 tree ${rovaraTree}\t.rovara\n`);
+        // the working tree carries the same forged reply: only a swapped base would make it before_task
+        write(r.root, forged);
+        const targets = {
+          blob: () => forgeObject(r.root, id(modelReplyFilePath(FAMILY)), "blob", Buffer.from(forged), how),
+          "tree (.rovara/mocks/model)": () => forgeObject(r.root, id(".rovara/mocks/model"), "tree", treeEntry("100644", "openai_compatible.json", attackerBlob), how),
+          "tree (.rovara/mocks)": () => forgeObject(r.root, id(".rovara/mocks"), "tree", treeEntry("40000", "model", modelTree), how),
+          "tree (.rovara)": () => forgeObject(r.root, id(".rovara"), "tree", treeEntry("40000", "mocks", mocksTree), how),
+          "root tree": () => forgeObject(r.root, git(r.root, "rev-parse", "HEAD^{tree}"), "tree", treeEntry("40000", ".rovara", rovaraTree), how),
+          commit: () => forgeObject(r.root, r.base, "commit", Buffer.from(`tree ${rootTree}\nauthor t <t@t.invalid> 0 +0000\ncommitter t <t@t.invalid> 0 +0000\n\nbase\n`), how),
+        } as const;
+        targets[level]();
+        expect(await readFileAtCommit({ repositoryRoot: r.root, commitSha: r.base, path: modelReplyFilePath(FAMILY), scratchRoot: r.scratch, maxBytes: 1_000_000, signal })).toEqual({ kind: "unreadable" });
+        expect(await counts(sourceOf(r))).toEqual({ before_task: 0, independent: 0, task_made: 1 });
+      });
+    }
+  }
   it("an honest object still reads (the recomputed id matches)", async () => {
     const r = repoWithBase(file([{ id: "a" }]));
     expect((await sourceOf(r).readBase(FAMILY, signal)).kind).toBe("file");

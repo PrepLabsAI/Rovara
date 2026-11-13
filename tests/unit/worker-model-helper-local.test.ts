@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { builtinModelCatalog, modelHostBlockList } from "../../packages/contracts/src/index.js";
 import { createCheckRunners } from "../../packages/worker/src/verification/checks.js";
-import { MODEL_DUMMY_KEY, laptopModelEnvironment, modelFailureBaseUrl, modelKeyVariables, modelRowBaseUrl, isSecretShapedVariable } from "../../packages/worker/src/model-helper-env.js";
+import { MODEL_DUMMY_KEY, laptopModelEnvironment, modelFailureBaseUrl, modelKeyVariables, modelRowBaseUrl, isCredentialVariable } from "../../packages/worker/src/model-helper-env.js";
 import { LOCAL_HELPER_CHILD_ENVIRONMENT, localModelHelperPlan, type SpawnSeam } from "../../packages/worker/src/model-helper-local.js";
 import { withModelHelperRound, type ModelHelperRoundResult } from "../../packages/worker/src/model-helper-round.js";
 import { createRepoReplySetSource } from "../../packages/worker/src/model-reply-set-load.js";
@@ -17,7 +17,7 @@ import { createRepoReplySetSource } from "../../packages/worker/src/model-reply-
 const CATALOG = builtinModelCatalog().rows;
 const BLOCK = modelHostBlockList(CATALOG, []);
 const ENTRY = join(dirname(fileURLToPath(import.meta.url)), "../../packages/worker/dist/model-helper.js");
-const ADC = { credentialsFile: "/run/adc.json", cloudsdkConfigDir: "/run/cloudsdk" };
+const ADC = { cloudsdkConfigDir: "/run/cloudsdk" };
 const dirs: string[] = [];
 const saved: Record<string, string | undefined> = {};
 afterEach(() => {
@@ -40,21 +40,42 @@ const setEnv = (name: string, value: string): void => {
 const realLookingKey = (): string => ["sk", "proj", "A1b2C3d4E5f6G7h8", String(Date.now()), "Zq9Xw8Vu7Ts6"].join("-");
 
 describe("the variables", () => {
-  it("M2: every credential-shaped variable the user's shell holds is blanked or replaced, by a rule and by an explicit list", () => {
+  it("M2: AI-provider and cloud credentials are UNSET (case-insensitively, by name rule and explicit list); database, ssh and monitoring variables are deliberately kept; the dummy goes in the model key variables", () => {
     const secret = realLookingKey();
-    const inherited: Record<string, string> = {
-      ANTHROPIC_AUTH_TOKEN: secret, AZURE_OPENAI_AD_TOKEN: secret, OPENAI_ADMIN_KEY: secret, HF_TOKEN: secret, AWS_ACCESS_KEY_ID: secret, AWS_SECRET_ACCESS_KEY: secret, AWS_SESSION_TOKEN: secret, AWS_PROFILE: "prod",
-      SOME_NEW_VENDOR_KEY: secret, ACME_SERVICE_TOKEN: secret, DB_SECRET: secret, MY_CREDENTIALS: secret, UNRELATED: "keep", PATH: "/usr/bin",
-    };
-    const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai"], baseUrl: "http://h:1", adc: ADC, inherited });
-    const env = result.ok ? result.environment : {};
-    for (const name of ["ANTHROPIC_AUTH_TOKEN", "AZURE_OPENAI_AD_TOKEN", "OPENAI_ADMIN_KEY", "HF_TOKEN"]) expect(env[name], name).toBe(MODEL_DUMMY_KEY);
-    for (const name of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "SOME_NEW_VENDOR_KEY", "ACME_SERVICE_TOKEN", "DB_SECRET", "MY_CREDENTIALS"]) expect(env[name], name).toBe("");
-    expect(env.UNRELATED).toBeUndefined();
-    expect(env.PATH).toBeUndefined();
-    expect(JSON.stringify(env)).not.toContain(secret);
-    expect(["X_KEY", "X_TOKEN", "X_SECRET", "X_CREDENTIALS", "X_API_KEY", "X_PASSWORD"].every(isSecretShapedVariable)).toBe(true);
-    expect(["KEYBOARD", "TOKENIZER", "PATH", "HOME", "X_KEYS"].some(isSecretShapedVariable)).toBe(false);
+    // [name, expectation]: "unset" (removed from the command's environment), "dummy" (model key variable set to the dummy), "kept" (not touched: absent from the set and the unset list)
+    const TABLE: Array<[string, "unset" | "dummy" | "kept"]> = [
+      ["ANTHROPIC_AUTH_TOKEN", "dummy"], ["AZURE_OPENAI_AD_TOKEN", "dummy"], ["OPENAI_ADMIN_KEY", "dummy"], ["HF_TOKEN", "dummy"], ["OPENAI_API_KEY", "dummy"],
+      ["AWS_ACCESS_KEY_ID", "unset"], ["AWS_SECRET_ACCESS_KEY", "unset"], ["AWS_SESSION_TOKEN", "unset"], ["AWS_PROFILE", "unset"], ["AWS_BEARER_TOKEN_BEDROCK", "unset"], ["AWS_SHARED_CREDENTIALS_FILE", "unset"],
+      ["openai_api_key", "unset"], ["github_token", "unset"], ["npm_token", "unset"], ["NPM_TOKEN", "unset"], ["NODE_AUTH_TOKEN", "unset"], ["GITHUB_TOKEN", "unset"], ["GH_TOKEN", "unset"], ["STRIPE_APIKEY", "unset"],
+      ["APIKEY", "unset"], ["API_KEY", "unset"], ["OPENAI_APIKEY", "unset"], ["SECRETKEY", "unset"], ["SECRET_KEY", "unset"], ["CREDENTIALS", "unset"], ["TOKEN", "unset"], ["AZURE_CLIENT_SECRET", "unset"],
+      ["npm_config__authToken", "unset"], ["VAULT_TOKEN", "unset"], ["SNYK_TOKEN", "unset"], ["PASSPHRASE", "unset"], ["GPG_PASSPHRASE", "unset"], ["Some_Vendor_ApiKey", "unset"], ["MY_CREDENTIALS", "unset"], ["TOKENIZER", "unset"],
+      ["DATABASE_URL", "kept"], ["REDIS_URL", "kept"], ["DB_PASSWORD", "kept"], ["DB_PASS", "kept"], ["DB_PWD", "kept"], ["MYSQL_PWD", "kept"], ["PGPASSWORD", "kept"], ["POSTGRES_PASSWORD", "kept"], ["SSH_AUTH_SOCK", "kept"], ["SENTRY_DSN", "kept"],
+      ["GCLOUD_PROJECT", "kept"], ["GOOGLE_CLOUD_QUOTA_PROJECT", "kept"], ["TOKENIZERS_PARALLELISM", "kept"], ["SERVICE_AUTH", "kept"], ["BASIC_AUTH", "kept"], ["SLACK_WEBHOOK_URL", "kept"], ["SESSIONKEY", "kept"], ["DOCKER_CONFIG", "kept"], ["KUBECONFIG", "kept"],
+      ["GOOGLE_CLOUD_PROJECT", "kept"], ["NPM_CONFIG__AUTH", "kept"], ["SIGNING_KEY", "kept"], ["KEYBOARD", "kept"], ["MONKEY", "kept"], ["PRIMARY_KEY", "kept"], ["SORT_KEY", "kept"], ["TURNKEY", "kept"], ["SSH_KEY", "kept"], ["CONFIG_KEY_PATH", "kept"],
+      ["PATH", "kept"], ["HOME", "kept"], ["UNRELATED", "kept"],
+    ];
+    const inherited = Object.fromEntries(TABLE.map(([name]) => [name, secret]));
+    const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai"], baseUrl: "http://h:1", metadataHostPort: "127.0.0.1:9", adc: ADC, inherited });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const [name, expectation] of TABLE) {
+      if (expectation === "unset") {
+        expect(result.unset, name).toContain(name);
+        expect(result.environment[name], name).toBeUndefined();
+      } else if (expectation === "dummy") {
+        expect(result.environment[name], name).toBe(MODEL_DUMMY_KEY);
+        expect(result.unset, name).not.toContain(name);
+      } else {
+        expect(result.environment[name], name).toBeUndefined();
+        expect(result.unset, name).not.toContain(name);
+      }
+    }
+    // the explicit list is unset even when the shell does not hold the name (a profile file may set it later)
+    const empty = laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai"], baseUrl: "http://h:1", metadataHostPort: "127.0.0.1:9", adc: ADC, inherited: {} });
+    for (const name of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_BEARER_TOKEN_BEDROCK"]) expect(empty.ok ? empty.unset : [], name).toContain(name);
+    expect(JSON.stringify(result.environment)).not.toContain(secret);
+    expect(isCredentialVariable("openai_api_key")).toBe(true);
+    expect(isCredentialVariable("DB_PASSWORD")).toBe(false);
   });
   it("point the row's client at the helper, add the companions, and override EVERY key variable with the dummy; Vertex gets the metadata server and an emptied key-file path", () => {
     const gemini = laptopModelEnvironment({ rows: CATALOG, rowIds: ["gemini", "vertex"], baseUrl: "http://127.0.0.1:5555", metadataHostPort: "127.0.0.1:5556", projectId: "rovara-test-project", adc: ADC, inherited: {} });
@@ -62,7 +83,7 @@ describe("the variables", () => {
     const env = gemini.ok ? gemini.environment : {};
     expect(env).toMatchObject({
       GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:5555/p/gemini", GOOGLE_VERTEX_BASE_URL: "http://127.0.0.1:5555/p/vertex", GCE_METADATA_HOST: "127.0.0.1:5556", GCE_METADATA_IP: "127.0.0.1:5556",
-      GOOGLE_CLOUD_PROJECT: "rovara-test-project", GOOGLE_CLOUD_LOCATION: "us-central1", GOOGLE_APPLICATION_CREDENTIALS: ADC.credentialsFile, CLOUDSDK_CONFIG: ADC.cloudsdkConfigDir,
+      GOOGLE_CLOUD_PROJECT: "rovara-test-project", GOOGLE_CLOUD_LOCATION: "us-central1", GOOGLE_APPLICATION_CREDENTIALS: "", CLOUDSDK_CONFIG: ADC.cloudsdkConfigDir,
     });
     for (const name of ["GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CO_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY"]) expect(env[name], name).toBe(MODEL_DUMMY_KEY);
     expect(modelKeyVariables(CATALOG)).toEqual(expect.arrayContaining(["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]));
@@ -72,8 +93,8 @@ describe("the variables", () => {
     const viaGoogle = CATALOG.find((row) => row.id === "gemini-openai") as (typeof CATALOG)[number];
     expect(modelRowBaseUrl(openai, "http://h:1/")).toBe("http://h:1/p/openai/v1");
     expect(modelRowBaseUrl(viaGoogle, "http://h:1")).toBe("http://h:1/p/gemini-openai/v1beta/openai");
-    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai", "gemini-openai"], baseUrl: "http://h:1", adc: ADC, inherited: {} })).toEqual({ ok: false, reason: "conflict" });
-    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["nope"], baseUrl: "http://h:1", adc: ADC, inherited: {} })).toEqual({ ok: false, reason: "unknown_row" });
+    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai", "gemini-openai"], baseUrl: "http://h:1", metadataHostPort: "127.0.0.1:9", adc: ADC, inherited: {} })).toEqual({ ok: false, reason: "conflict" });
+    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["nope"], baseUrl: "http://h:1", metadataHostPort: "127.0.0.1:9", adc: ADC, inherited: {} })).toEqual({ ok: false, reason: "unknown_row" });
   });
   it("the failure base URL is a pure function of the row, the mode and afterCalls", () => {
     const openai = CATALOG.find((row) => row.id === "openai") as (typeof CATALOG)[number];
@@ -124,6 +145,9 @@ describe("the loopback child", () => {
     setEnv("OPENAI_API_KEY", key);
     setEnv("GEMINI_API_KEY", key);
     setEnv("AGENTX_TASK_SHELL", "local");
+    setEnv("AWS_SECRET_ACCESS_KEY", key);
+    setEnv("NPM_TOKEN", key);
+    setEnv("DATABASE_URL", "postgres://local/test");
     const { root, source } = repo();
     const results: ModelHelperRoundResult[] = [];
     const plan = localModelHelperPlan({ catalogRows: CATALOG, rowIds: ["openai"], source, blockList: BLOCK, entry: ENTRY, scratchRoot: tmp(), onResult: (result) => results.push(result) });
@@ -133,17 +157,21 @@ describe("the loopback child", () => {
       const url = new URL(process.env.OPENAI_BASE_URL + "/chat/completions");
       const body = JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "hi" }] });
       const req = http.request(url, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + process.env.OPENAI_API_KEY } }, (res) => {
-        let text = ""; res.on("data", (c) => (text += c)); res.on("end", () => console.log(JSON.stringify({ status: res.statusCode, key: process.env.OPENAI_API_KEY, gemini: process.env.GEMINI_API_KEY, creds: process.env.GOOGLE_APPLICATION_CREDENTIALS, text })));
+        let text = ""; res.on("data", (c) => (text += c)); res.on("end", () => console.log(JSON.stringify({ status: res.statusCode, key: process.env.OPENAI_API_KEY, gemini: process.env.GEMINI_API_KEY, creds: process.env.GOOGLE_APPLICATION_CREDENTIALS, aws: process.env.AWS_SECRET_ACCESS_KEY, npm: process.env.NPM_TOKEN, db: process.env.DATABASE_URL, text })));
       });
       req.end(body);`;
     const result = await runners.runProjectCommand({ cwd: ".", executable: process.execPath, args: ["-e", script], timeoutSeconds: 30 }, new AbortController().signal);
     await runners.endRound?.();
     expect(result.exitCode, result.stderr).toBe(0);
-    const out = JSON.parse(result.stdout) as { status: number; key: string; gemini: string; creds: string; text: string };
+    const out = JSON.parse(result.stdout) as { status: number; key: string; gemini: string; creds: string; aws?: string; npm?: string; db?: string; text: string };
     expect(out.status).toBe(200);
     expect(out.key).toBe(MODEL_DUMMY_KEY);
     expect(out.gemini).toBe(MODEL_DUMMY_KEY);
-    expect(out.creds).toMatch(/adc\.json$/u);
+    expect(out.creds).toBe("");
+    // unset (absent, not blank) in the command; a database URL is untouched
+    expect(out.aws).toBeUndefined();
+    expect(out.npm).toBeUndefined();
+    expect(out.db).toBe("postgres://local/test");
     expect(out.text).toContain("Hello from the laptop script.");
     expect(result.stdout).not.toContain(key);
     expect(results).toHaveLength(1);

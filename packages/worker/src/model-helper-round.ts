@@ -87,6 +87,8 @@ export interface StartedModelHelper {
   readonly pinnedDigest: string;
   /** Variables the round's project commands get (the laptop's: the redirect, the dummy keys). Empty for a hosted helper, whose variables reach the sandbox through F1-b's env file. */
   readonly commandEnvironment: Readonly<Record<string, string>>;
+  /** Variables REMOVED from the round's project commands (the user's AI and cloud credentials on a laptop). Empty for a hosted helper. */
+  readonly unsetEnvironment: readonly string[];
   /** The summary, or undefined when it cannot be read: never "no calls". */
   readSummary(): Promise<ModelHelperSummary | undefined>;
   /** Stops the helper and removes its files (idempotent, never throws). */
@@ -135,12 +137,14 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       const started = await ensure(signal);
       if (started === undefined) return runners.runProjectCommand(command, signal);
       // The helper's variables go LAST: they win over the command's own and over the worker's (a real key in the user's shell is overridden with the dummy).
-      return runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...started.commandEnvironment } }, signal);
+      // The names in `unsetEnvironment` are set to `undefined` in the command's environment, which the child process does not receive (the command's own `env` is not allowed to bring one back).
+      const unset = Object.fromEntries(started.unsetEnvironment.map((name) => [name, undefined])) as unknown as Record<string, string>;
+      return runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...started.commandEnvironment, ...unset } }, signal);
     },
     async runAgentCommand(replay, timeoutMs, signal) {
       const started = await ensure(signal);
       // A replayed agent command runs with the worker's own environment, which on a laptop holds the user's real keys and no redirect: fail closed rather than let it call a real model.
-      if (started !== undefined && Object.keys(started.commandEnvironment).length > 0) throw new CheckNotRunError(MODEL_HELPER_AGENT_COMMAND_SENTENCE);
+      if (started !== undefined && (Object.keys(started.commandEnvironment).length > 0 || started.unsetEnvironment.length > 0)) throw new CheckNotRunError(MODEL_HELPER_AGENT_COMMAND_SENTENCE);
       return runners.runAgentCommand(replay, timeoutMs, signal);
     },
     async endRound() {

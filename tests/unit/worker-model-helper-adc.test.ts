@@ -6,9 +6,8 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 import { builtinModelCatalog } from "../../packages/contracts/src/index.js";
-import { writeDummyAdc } from "../../packages/worker/src/model-helper-adc.js";
 import { laptopModelEnvironment } from "../../packages/worker/src/model-helper-env.js";
-import { cleanupWorlds, request, startWorld } from "../support/model-helper-world.js";
+import { cleanupWorlds, startWorld } from "../support/model-helper-world.js";
 import { installModelNetworkTripwire } from "../support/model-network-tripwire.js";
 
 const require = createRequire(import.meta.url);
@@ -58,41 +57,41 @@ describe("Application Default Credentials in a laptop round", () => {
     const client = await clientOf();
     expect(client._refreshToken).toBe(refresh);
   });
-  it("with the round's variables google-auth finds only the dummy service account; the real refresh token is never used, never in the environment, never in a file the round made", async () => {
-    const { refresh, keyFile } = usersMachine();
+  it("with the round's variables google-auth takes the METADATA path and gets only the dummy token: the real refresh token is never used, never in the environment, and nothing leaves loopback", async () => {
+    const { refresh, keyFile, home } = usersMachine();
     setEnv("GOOGLE_APPLICATION_CREDENTIALS", keyFile); // the shell names a real key file too
-    const run = tmp();
-    const adc = await writeDummyAdc({ dir: run, tokenUri: "http://127.0.0.1:1/token", projectId: "rovara-test-project" });
-    const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["vertex"], baseUrl: "http://127.0.0.1:5555", metadataHostPort: "127.0.0.1:5556", projectId: "rovara-test-project", adc, inherited: process.env });
-    expect(result.ok).toBe(true);
-    const env = result.ok ? result.environment : {};
-    for (const [name, value] of Object.entries(env)) setEnv(name, value);
-    const tripwire = installModelNetworkTripwire({ resolver: new Set(), ports: { 443: 1, 80: 1 } });
-    let client: Record<string, unknown>;
-    try {
-      client = await clientOf();
-    } finally {
-      tripwire.restore();
-    }
-    expect(client.email).toBe("rovara-helper@rovara-test.iam.gserviceaccount.invalid");
-    expect(client._refreshToken).toBeUndefined();
-    expect(tripwire.refused).toEqual([]);
-    expect(JSON.stringify(env)).not.toContain(refresh);
-    expect(readdirSync(adc.cloudsdkConfigDir)).toEqual([]);
-    expect(readFileSync(adc.credentialsFile, "utf8")).not.toContain(refresh);
-    expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe(adc.credentialsFile);
-    expect(env.CLOUDSDK_CONFIG).toBe(adc.cloudsdkConfigDir);
-    expect(JSON.parse(readFileSync(adc.credentialsFile, "utf8"))).toMatchObject({ type: "service_account", token_uri: "http://127.0.0.1:1/token" });
-  });
-  it("the dummy file's token route is the helper's: POST /token answers the dummy token and echoes nothing", async () => {
     const w = await startWorld();
     try {
-      const body = `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${realRefreshToken()}`;
-      const reply = await request(`${w.meta as string}/token`, { method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded" } });
-      expect(JSON.parse(reply.body)).toEqual({ access_token: ["rovara", "dummy", "token"].join("-"), expires_in: 3600, token_type: "Bearer" });
-      expect(reply.body).not.toContain("assertion");
-      expect(w.ledgerText()).not.toContain("assertion");
-      expect((await request(`${w.meta as string}/token`, { method: "GET" })).status).toBe(403);
+      const run = tmp();
+      const cloudsdk = join(run, "cloudsdk");
+      mkdirSync(cloudsdk);
+      const metaHost = `127.0.0.1:${String(w.loop.metaPort)}`;
+      const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["vertex"], baseUrl: "http://127.0.0.1:5555", metadataHostPort: metaHost, projectId: "rovara-test-project", adc: { cloudsdkConfigDir: cloudsdk }, inherited: process.env });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const env = result.environment;
+      expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe("");
+      expect(env.CLOUDSDK_CONFIG).toBe(cloudsdk);
+      expect(env.GCE_METADATA_HOST).toBe(metaHost);
+      for (const [name, value] of Object.entries(env)) setEnv(name, value);
+      for (const name of result.unset) setEnv(name, undefined);
+      const tripwire = installModelNetworkTripwire({ resolver: new Set(), ports: { 443: 1, 80: 1 } });
+      let token: string | undefined;
+      let client: Record<string, unknown>;
+      try {
+        client = await clientOf();
+        token = ((await (client as unknown as { getAccessToken(): Promise<{ token?: string | null }> }).getAccessToken()).token) ?? undefined;
+      } finally {
+        tripwire.restore();
+      }
+      expect(token).toBe(["rovara", "dummy", "token"].join("-"));
+      expect(client._refreshToken).toBeUndefined();
+      expect(client.email).not.toBe("real@real.example");
+      expect(tripwire.refused).toEqual([]);
+      expect(JSON.stringify(env)).not.toContain(refresh);
+      expect(readdirSync(cloudsdk)).toEqual([]);
+      // the user's real file under HOME is still there, untouched and unread by the round
+      expect(readFileSync(join(home, ".config/gcloud/application_default_credentials.json"), "utf8")).toContain(refresh);
     } finally {
       await w.close();
     }

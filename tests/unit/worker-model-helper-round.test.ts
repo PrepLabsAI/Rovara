@@ -95,7 +95,7 @@ describe("withModelHelperRound", () => {
   });
   it("L2: a summary whose reply-set digest is not the one the worker pinned is untrusted: the round is not run", async () => {
     const results: ModelHelperRoundResult[] = [];
-    const helper: StartedModelHelper = { pinnedDigest: PINNED, commandEnvironment: {}, readSummary: () => Promise.resolve(summary({ replySetDigest: "b".repeat(64), scripted: { before_task: 3, independent: 0, task_made: 0 }, countsTowardProof: 3 })), stop: () => Promise.resolve() };
+    const helper: StartedModelHelper = { pinnedDigest: PINNED, unsetEnvironment: [], commandEnvironment: {}, readSummary: () => Promise.resolve(summary({ replySetDigest: "b".repeat(64), scripted: { before_task: 3, independent: 0, task_made: 0 }, countsTowardProof: 3 })), stop: () => Promise.resolve() };
     const wrapped = withModelHelperRound({ blockList: BLOCK, start: () => Promise.resolve(helper), onResult: (result) => results.push(result) }, fakeRunners([]));
     await wrapped.runProjectCommand(COMMAND, signal);
     await wrapped.endRound?.();
@@ -117,6 +117,7 @@ describe("withModelHelperRound", () => {
     const results: ModelHelperRoundResult[] = [];
     const helper: StartedModelHelper = {
       pinnedDigest: PINNED,
+      unsetEnvironment: ["AWS_SECRET_ACCESS_KEY"],
       commandEnvironment: { GEMINI_API_KEY: "rovara-test-key", GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:1/p/gemini" },
       readSummary: () => { log.push("summary"); return Promise.resolve(summary({ blockState: "not_blocked_here" })); },
       stop: () => { log.push("stop"); return Promise.resolve(); },
@@ -129,6 +130,9 @@ describe("withModelHelperRound", () => {
     await wrapped.runProjectCommand(COMMAND, signal);
     expect(starts).toBe(1);
     expect(base.seen[0]).toMatchObject({ env: { KEEP: "1", GEMINI_API_KEY: "rovara-test-key", GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:1/p/gemini" } });
+    // an unset name is present in the env object as undefined (the child does not receive it), and the command cannot bring it back
+    const env = (base.seen[0] as { env: Record<string, string | undefined> }).env;
+    expect("AWS_SECRET_ACCESS_KEY" in env && env.AWS_SECRET_ACCESS_KEY === undefined).toBe(true);
     await wrapped.freshServices?.(signal);
     await wrapped.endRound?.();
     expect(log).toEqual(["fresh", "summary", "stop", "base-endRound"]);
@@ -140,7 +144,7 @@ describe("withModelHelperRound", () => {
   });
   it("tears down and ends the base round even when the summary cannot be read or the sink throws", async () => {
     const log: string[] = [];
-    const helper: StartedModelHelper = { pinnedDigest: PINNED, commandEnvironment: {}, readSummary: () => Promise.reject(new Error("gone")), stop: () => { log.push("stop"); return Promise.resolve(); } };
+    const helper: StartedModelHelper = { pinnedDigest: PINNED, unsetEnvironment: [], commandEnvironment: {}, readSummary: () => Promise.reject(new Error("gone")), stop: () => { log.push("stop"); return Promise.resolve(); } };
     const results: ModelHelperRoundResult[] = [];
     const wrapped = withModelHelperRound({ blockList: BLOCK, start: () => Promise.resolve(helper), onResult: (result) => { results.push(result); throw new Error("sink"); } }, fakeRunners(log));
     await wrapped.runProjectCommand(COMMAND, signal);
@@ -157,11 +161,11 @@ describe("withModelHelperRound", () => {
     expect(none.seen[0]).toBe(COMMAND);
   });
   it("a replayed agent command on a machine whose variables are injected here fails closed (it would run with the user's real keys and no redirect); a hosted helper (no variables here) delegates", async () => {
-    const laptop = withModelHelperRound({ blockList: BLOCK, onResult: SINK, start: () => Promise.resolve({ pinnedDigest: PINNED, commandEnvironment: { A: "b" }, readSummary: () => Promise.resolve(undefined), stop: () => Promise.resolve() }) }, fakeRunners([]));
+    const laptop = withModelHelperRound({ blockList: BLOCK, onResult: SINK, start: () => Promise.resolve({ pinnedDigest: PINNED, unsetEnvironment: [], commandEnvironment: { A: "b" }, readSummary: () => Promise.resolve(undefined), stop: () => Promise.resolve() }) }, fakeRunners([]));
     await expect(laptop.runAgentCommand("npm test", 1000, signal)).rejects.toThrow(CheckNotRunError);
     await expect(laptop.runAgentCommand("npm test", 1000, signal)).rejects.toThrow(MODEL_HELPER_AGENT_COMMAND_SENTENCE);
     const log: string[] = [];
-    const hosted = withModelHelperRound({ blockList: BLOCK, onResult: SINK, start: () => Promise.resolve({ pinnedDigest: PINNED, commandEnvironment: {}, readSummary: () => Promise.resolve(undefined), stop: () => Promise.resolve() }) }, fakeRunners(log));
+    const hosted = withModelHelperRound({ blockList: BLOCK, onResult: SINK, start: () => Promise.resolve({ pinnedDigest: PINNED, unsetEnvironment: [], commandEnvironment: {}, readSummary: () => Promise.resolve(undefined), stop: () => Promise.resolve() }) }, fakeRunners(log));
     await hosted.runAgentCommand("npm test", 1000, signal);
     expect(log).toEqual(["agent:npm test"]);
   });

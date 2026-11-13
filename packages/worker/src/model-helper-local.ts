@@ -7,12 +7,12 @@
 //   3. Nothing blocks model hosts on a laptop (the egress gateway's list is a separate matter: default-allow-domains.ts), so the block state is `not_blocked_here` and the evidence says exactly "model hosts not blocked on this
 //      machine". A client that ignores the redirect can still reach a real host there; the dummy key is all it sends. This is said in the PR body and in the evidence, never hidden.
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelCatalogRow, ServableRow } from "@agentx/contracts";
 import { modelHelperArgs } from "./model-helper-args.js";
-import { writeDummyAdc } from "./model-helper-adc.js";
 import { laptopModelEnvironment } from "./model-helper-env.js";
 import { summarizeModelLedgerFile } from "./model-helper-ledger.js";
 import { removeModelHelperRunFiles, writeModelHelperRunFiles, type ModelHelperRoundPlan, type ModelHelperRoundResult, type StartedModelHelper } from "./model-helper-round.js";
@@ -71,15 +71,18 @@ export function localModelHelperPlan(input: LocalModelHelperInput): ModelHelperR
         const listening = await readListeningLine(child, signal);
         const baseUrl = `http://127.0.0.1:${String(listening.port)}`;
         if (listening.metaPort === null) throw new Error("the model helper has no metadata port");
-        const adc = await writeDummyAdc({ dir: files.dir, tokenUri: `http://127.0.0.1:${String(listening.metaPort)}/token`, projectId: input.projectId });
+        // An EMPTY worker-owned directory: `CLOUDSDK_CONFIG` points at it, so the user's real gcloud config is never found.
+        const cloudsdkConfigDir = join(files.dir, "cloudsdk");
+        await mkdir(cloudsdkConfigDir, { mode: 0o700 });
         const environment = laptopModelEnvironment({
           rows: input.catalogRows, rowIds: input.rowIds, baseUrl, projectId: input.projectId,
-          metadataHostPort: `127.0.0.1:${String(listening.metaPort)}`, adc,
+          metadataHostPort: `127.0.0.1:${String(listening.metaPort)}`, adc: { cloudsdkConfigDir },
         });
         if (!environment.ok) throw new Error("the model rows cannot be pointed at one helper");
         const started: StartedModelHelper = {
           pinnedDigest: files.digest,
           commandEnvironment: environment.environment,
+          unsetEnvironment: environment.unset,
           readSummary: () => Promise.resolve(summarizeModelLedgerFile(ledger)),
           stop,
         };

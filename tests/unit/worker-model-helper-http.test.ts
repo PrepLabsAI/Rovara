@@ -203,6 +203,18 @@ describe("refusals", () => {
     expect(alive).toBeLessThanOrEqual(4);
     expect(MODEL_HELPER_LIMITS.maxConnections).toBeGreaterThanOrEqual(16);
   });
+  it("L4: the metadata server and the 443/80 escape listeners hold at most maxConnections sockets too", async () => {
+    const w = await world({ sets: [OPENAI_SET], limits: { maxConnections: 3 }, escapes: { recorder: { observe: () => ({ host: undefined }) }, ports: { tls: 0, plain: 0 } } });
+    const ports = [w.loop.metaPort as number, (w.loop.escapePorts as { tls: number }).tls, (w.loop.escapePorts as { plain: number }).plain];
+    for (const port of ports) {
+      const sockets = await Promise.all(Array.from({ length: 9 }, () => new Promise<net.Socket>((done) => { const socket = net.connect(port, "127.0.0.1"); socket.on("error", () => undefined); socket.on("connect", () => done(socket)); })));
+      await new Promise((done) => setTimeout(done, 300));
+      const alive = sockets.filter((socket) => !socket.destroyed).length;
+      for (const socket of sockets) socket.destroy();
+      expect(alive, String(port)).toBeLessThanOrEqual(3);
+    }
+    expect(MODEL_HELPER_LIMITS.sideMaxConnections).toBeGreaterThanOrEqual(16);
+  });
   it("a client that sends no complete header block in 10 s is dropped (limit configured)", async () => {
     const w = await world({ sets: [OPENAI_SET] });
     expect(MODEL_HELPER_LIMITS).toMatchObject({ headerBytes: 16384, bodyBytes: 5 * 1024 * 1024, headerReadMs: 10_000, totalMs: 600_000, chunkBytes: 1024 * 1024 });

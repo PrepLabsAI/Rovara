@@ -46,6 +46,8 @@ export const MODEL_HELPER_LIMITS = {
   bodyReadMs: 30_000,
   /** Sockets the main listener holds at once (one sandbox is the only caller; a flood is dropped, not queued). */
   maxConnections: 256,
+  /** The same bound for the metadata server and each of the 443/80 escape listeners. */
+  sideMaxConnections: 64,
 } as const;
 
 /** What the helper says when real, record or replay is asked and no backend is wired (F1-c's `ModelBackend` is not there yet, or the round is not a fresh check sandbox). */
@@ -378,7 +380,7 @@ export async function startModelHelperLoop(options: ModelHelperLoopOptions): Pro
 
   let metaPort: number | undefined;
   if (options.metaPort !== undefined) {
-    const meta = createModelMetadataServer({ caller: options.caller, projectId: options.projectId });
+    const meta = createModelMetadataServer({ caller: options.caller, projectId: options.projectId, maxConnections: options.limits?.maxConnections ?? MODEL_HELPER_LIMITS.sideMaxConnections });
     servers.push(meta);
     metaPort = await listenOn(meta, options.metaPort, options.listen).catch(async (error: unknown) => {
       await Promise.all(servers.map(closeServer));
@@ -431,6 +433,8 @@ export async function startModelHelperLoop(options: ModelHelperLoopOptions): Pro
       });
     const tlsServer = open(443);
     const plainServer = open(80);
+    tlsServer.maxConnections = options.limits?.maxConnections ?? MODEL_HELPER_LIMITS.sideMaxConnections;
+    plainServer.maxConnections = options.limits?.maxConnections ?? MODEL_HELPER_LIMITS.sideMaxConnections;
     servers.push(tlsServer, plainServer);
     try {
       const tlsPort = await listenOn(tlsServer, options.escapes.ports?.tls ?? 443, options.listen);

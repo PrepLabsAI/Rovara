@@ -144,6 +144,9 @@ function runGit(args: readonly string[], options: { cwd: string; signal: AbortSi
 /**
  * The object directory of a repository: a plain `.git` directory, or a LINKED WORKTREE (`.git` is a file `gitdir: <path>`, whose `commondir` names the main repository's git directory, where the objects live). Every directory
  * on the way must be a real directory (no symlink). Undefined when it is neither.
+ *
+ * Following a `.git` file's `gitdir` and `commondir` into a place the agent controls is acceptable ONLY because every object read from there is hash-verified (`readFileAtCommit` recomputes the id of the commit, every tree on
+ * the path and the blob): an agent-controlled object store can withhold an object (the file is then unreadable) but cannot make a different one pass as the base commit's.
  */
 async function objectsDirectoryOf(repositoryRoot: string): Promise<string | undefined> {
   const realRepository = await realpath(repositoryRoot);
@@ -167,6 +170,22 @@ async function objectsDirectoryOf(repositoryRoot: string): Promise<string | unde
   return objects.includes("\n") ? undefined : objects;
 }
 
+/** One entry of a raw tree object (`<mode> <name>\0<20 raw bytes>`, repeated), found by name; `malformed` for a tree that does not parse. */
+function findTreeEntry(tree: Buffer, name: string): { mode: string; id: string } | "malformed" | undefined {
+  let at = 0;
+  while (at < tree.length) {
+    const space = tree.indexOf(0x20, at);
+    const nul = space < 0 ? -1 : tree.indexOf(0, space);
+    if (space < 0 || nul < 0 || nul + 21 > tree.length) return "malformed";
+    const mode = tree.subarray(at, space).toString("latin1");
+    const entryName = tree.subarray(space + 1, nul).toString("utf8");
+    if (!/^\d{5,6}$/u.test(mode)) return "malformed";
+    if (entryName === name) return { mode, id: tree.subarray(nul + 1, nul + 21).toString("hex") };
+    at = nul + 21;
+  }
+  return undefined;
+}
+
 /**
  * One file of a commit, read from the git OBJECT in a throwaway bare repository this worker owns (empty template, no refs, `objects/info/alternates` naming only the repository's object directory): nothing of the repository
  * except its objects is read by git. A path that is not a regular file in the commit's tree (a symlink, a directory, a submodule) is `unreadable`; a path that is not in the tree is `absent`.
@@ -183,16 +202,30 @@ export async function readFileAtCommit(input: { repositoryRoot: string; commitSh
       await runGit(["init", "--bare", "--quiet", "--template=", gitDir], { cwd: work, signal: input.signal, maxBytes: 4096 });
       await mkdir(join(gitDir, "objects", "info"), { recursive: true });
       await writeFile(join(gitDir, "objects", "info", "alternates"), `${objects}\n`, { mode: 0o600 });
-      const listing = (await runGit([`--git-dir=${gitDir}`, "ls-tree", "-z", "--full-tree", `${input.commitSha}^{tree}`, "--", input.path], { cwd: work, signal: input.signal, maxBytes: 65_536 })).toString("utf8");
-      if (listing === "") return { kind: "absent" };
-      const entry = /^(\d{6}) (blob|tree|commit) ([0-9a-f]{40})\t(.+)\0$/su.exec(listing);
-      if (entry === null || entry[4] !== input.path || entry[2] !== "blob" || (entry[1] !== "100644" && entry[1] !== "100755")) return { kind: "unreadable" };
-      const sha = entry[3] as string;
-      const size = Number((await runGit([`--git-dir=${gitDir}`, "cat-file", "-s", sha], { cwd: work, signal: input.signal, maxBytes: 64 })).toString("utf8").trim());
-      if (!Number.isSafeInteger(size) || size < 0 || size > input.maxBytes) return { kind: "unreadable" };
-      const bytes = await runGit([`--git-dir=${gitDir}`, "cat-file", "blob", sha], { cwd: work, signal: input.signal, maxBytes: input.maxBytes });
-      // The object database answered for this id; the id is RECOMPUTED, so a loose or packed object swapped in under the base id cannot pass (as e2e-candidate-source.ts does for the candidate's blobs).
-      if (bytes.length !== size || createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${String(bytes.length)}\0`), bytes])).digest("hex") !== sha) return { kind: "unreadable" };
+      // THE WHOLE CHAIN IS VERIFIED, not read from `ls-tree`: git checks the hash of the object a command names, but not of the subtrees it walks into, so a tree swapped in under its id (loose or packed) would point the path at
+      // another valid blob. Every object on the way (the commit, the root tree, each subtree, then the blob) is read RAW with `cat-file` and its id RECOMPUTED here; the tree entries are parsed here too.
+      const verified = async (type: "commit" | "tree" | "blob", id: string, limit: number): Promise<Buffer | undefined> => {
+        const bytes = await runGit([`--git-dir=${gitDir}`, "cat-file", type, id], { cwd: work, signal: input.signal, maxBytes: limit });
+        return createHash("sha1").update(Buffer.concat([Buffer.from(`${type} ${String(bytes.length)}\0`), bytes])).digest("hex") === id ? bytes : undefined;
+      };
+      const commit = await verified("commit", input.commitSha, 65_536);
+      const rootId = commit === undefined ? null : /^tree ([0-9a-f]{40})\n/u.exec(commit.toString("latin1"))?.[1];
+      if (rootId === null || rootId === undefined) return { kind: "unreadable" };
+      let treeId = rootId;
+      const parts = input.path.split("/");
+      for (const [index, part] of parts.entries()) {
+        const tree = await verified("tree", treeId, 1024 * 1024);
+        if (tree === undefined) return { kind: "unreadable" };
+        const entry = findTreeEntry(tree, part);
+        if (entry === "malformed") return { kind: "unreadable" };
+        if (entry === undefined) return { kind: "absent" };
+        const last = index === parts.length - 1;
+        // a folder on the way is a tree; the leaf is a regular file (a symlink, a submodule or a folder is not)
+        if (last ? entry.mode !== "100644" && entry.mode !== "100755" : entry.mode !== "40000") return { kind: "unreadable" };
+        treeId = entry.id;
+      }
+      const bytes = await verified("blob", treeId, input.maxBytes);
+      if (bytes === undefined) return { kind: "unreadable" };
       return { kind: "file", bytes };
     } finally {
       await rm(work, { recursive: true, force: true });

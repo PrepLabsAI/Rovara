@@ -2,13 +2,17 @@
 // dummy key, `GCE_METADATA_*`); it was not pushed when this was written, so the LAPTOP path builds its own map here from the catalog rows (F1-b's builder replaces it for the hosted run), and this file adds the `/f/<mode>`
 // failure base URL as a pure function (F1-b asked for that one).
 //
-// The dummy key is a fixed, non-secret string that matches no real key shape. On the laptop the worker inherits the user's shell, which may hold REAL credentials. Three layers, all in `commandEnvironment` (the commands' whole
-// credential surface):
-//   1. every model key and token variable the catalog or this file knows is OVERRIDDEN with the dummy (`MODEL_DUMMY_KEY`);
-//   2. EVERY other variable of the user's shell whose name ends `_KEY`, `_TOKEN`, `_SECRET`, `_CREDENTIALS` or `_PASSWORD`, and an explicit list (AWS, Hugging Face, Google OAuth), is BLANKED, so a real secret the rule did not
-//      foresee still does not reach a customer's test (a project test that needs one of these on a laptop in a helper round must be given it by the readiness run, never inherited);
-//   3. Google Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS` points at a DUMMY service-account file built at run time (its token URI is the helper's `/token` route) and `CLOUDSDK_CONFIG` at an EMPTY
-//      worker-owned directory, so the user's real `application_default_credentials.json` (a real refresh token) is never found, never used and never sent.
+// The dummy key is a fixed, non-secret string that matches no real key shape. On the laptop the worker inherits the user's shell, which may hold REAL AI-provider and cloud credentials. The GOAL: none of them reaches a model host
+// from a customer's test in a helper round. Three layers, all returned from `laptopModelEnvironment` (`environment` is SET in the commands, `unset` is REMOVED from them):
+//   1. SET: every model key and token variable the catalog or this file knows (`modelKeyVariables`) gets the dummy; the redirect variables point at the helper.
+//   2. UNSET (removed, not blanked, so a client sees no credential at all): every variable of the user's shell whose name, case-insensitively, CONTAINS `APIKEY`, `API_KEY`, `TOKEN`, `SECRET`, `CREDENTIALS` or `PASSPHRASE`
+//      (`AUTH_TOKEN` is covered by `TOKEN`), and an explicit list of cloud and AI names even when the shell does not hold them now (AWS keys, profile and bearer token, Google OAuth, Hugging Face). KEPT on purpose, because
+//      blanking them breaks ordinary local tests and protects no AI key: `DATABASE_URL`, `REDIS_URL`, every `*_PASSWORD`/`*_PASS`/`*_PWD` and `PGPASSWORD` database variable, `SSH_AUTH_SOCK`, `SENTRY_DSN`,
+//      `GCLOUD_PROJECT`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `TOKENIZERS_PARALLELISM`. The rule and the kept list are `isCredentialVariable` and `KEPT_VARIABLES` below; the PR body and the release notes repeat them.
+//      A project test that needs one of the unset names in a helper round on a laptop must be given it by the readiness run, never inherited from the shell.
+//   3. Google Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS` is empty, `CLOUDSDK_CONFIG` is an EMPTY worker-owned directory (the user's real `application_default_credentials.json`, a real refresh token, is
+//      never found) and `GCE_METADATA_HOST` is the helper's metadata server, so google-auth (JS: verified by the reviewer) takes the metadata path, gets the dummy token and never calls `oauth2.googleapis.com`.
+//      Python google-auth against this is UNVERIFIED.
 // A client that ignores the redirect can still reach a real host on a laptop (nothing blocks model hosts there), and the dummy is all it sends.
 import { MODEL_REDIRECT_ENV_NAMES, isServedModelFamily, type ModelCatalogRow } from "@agentx/contracts";
 
@@ -22,14 +26,20 @@ export function modelKeyVariables(rows: readonly Pick<ModelCatalogRow, "redirect
   return [...names].sort();
 }
 
-/** Names of a user's shell that carry a secret by their shape. */
-export function isSecretShapedVariable(name: string): boolean {
-  return /(?:^|_)(?:KEY|TOKEN|SECRET|CREDENTIALS|PASSWORD|PASSWD)$/u.test(name);
+const CREDENTIAL_WORD = /APIKEY|API_KEY|TOKEN|SECRET|CREDENTIALS|PASSPHRASE/iu;
+/** Variables the rule never unsets: databases, ssh, monitoring and the two Google project names. Matched case-insensitively. */
+export const KEPT_VARIABLES: readonly string[] = ["DATABASE_URL", "REDIS_URL", "SSH_AUTH_SOCK", "SENTRY_DSN", "GCLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT", "PGPASSWORD", "TOKENIZERS_PARALLELISM"];
+const KEPT_SET: ReadonlySet<string> = new Set(KEPT_VARIABLES.map((name) => name.toUpperCase()));
+const DATABASE_PASSWORD = /(?:_PASSWORD|_PASS|_PWD)$/iu;
+/** Whether a name of the user's shell is an AI-provider or cloud credential by the rule above (and not on the kept list). */
+export function isCredentialVariable(name: string): boolean {
+  if (KEPT_SET.has(name.toUpperCase()) || DATABASE_PASSWORD.test(name)) return false;
+  return CREDENTIAL_WORD.test(name);
 }
-/** Credentials a client reads that the shape rule would miss (cloud profiles, key-file paths, OAuth tokens): blanked. */
-export const EXPLICIT_BLANKED_VARIABLES = [
-  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
-  "GOOGLE_CLOUD_QUOTA_PROJECT", "GCLOUD_PROJECT",
+/** Cloud and AI credential names unset even when the shell does not hold them now (a profile file may set them later): AWS, Google OAuth, Hugging Face. */
+export const EXPLICIT_UNSET_VARIABLES = [
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "HUGGING_FACE_HUB_TOKEN",
 ] as const;
 
 /** The row's base URL on the helper: `<base>/p/<row>[/f/<mode>[.variant][/n/<n>]]<prefix>`; `prefix` is the row's own (`/v1beta/openai`), or `/v1` for an OpenAI-compatible row that has none. */
@@ -48,20 +58,20 @@ export interface LaptopModelEnvironmentInput {
   readonly rowIds: readonly string[];
   /** `http://127.0.0.1:<port>`. */
   readonly baseUrl: string;
-  /** `127.0.0.1:<meta port>` for a Vertex row. */
-  readonly metadataHostPort?: string | undefined;
+  /** `127.0.0.1:<meta port>`: always set, so a Google client's credential search ends at the helper's metadata server. */
+  readonly metadataHostPort: string;
   readonly projectId?: string | undefined;
   readonly location?: string | undefined;
-  /** The dummy ADC the round made (model-helper-adc.ts): a service-account file and an EMPTY config directory. */
-  readonly adc: { readonly credentialsFile: string; readonly cloudsdkConfigDir: string };
-  /** The user's shell (default `process.env`): every secret-shaped name in it is blanked. */
+  /** An EMPTY worker-owned directory for `CLOUDSDK_CONFIG` (the user's real gcloud config is never found). */
+  readonly adc: { readonly cloudsdkConfigDir: string };
+  /** The user's shell (default `process.env`): every credential-shaped name in it is unset. */
   readonly inherited?: Readonly<Record<string, string | undefined>>;
 }
-export type LaptopModelEnvironment = { readonly ok: true; readonly environment: Readonly<Record<string, string>> } | { readonly ok: false; readonly reason: "unknown_row" | "not_served" | "conflict" };
+export type LaptopModelEnvironment = { readonly ok: true; readonly environment: Readonly<Record<string, string>>; readonly unset: readonly string[] } | { readonly ok: false; readonly reason: "unknown_row" | "not_served" | "conflict" };
 
 /**
- * The variables a laptop run's commands get: each selected row's base-URL variables pointed at the helper, its companion variables (a project, a location, the metadata server), the dummy key in EVERY key variable the
- * user's shell might hold, and an emptied `GOOGLE_APPLICATION_CREDENTIALS`. Two rows that want one variable with different values are a conflict, refused (never a silent last-wins).
+ * The variables a laptop run's commands get (`environment`, set) and lose (`unset`): each selected row's base-URL variables pointed at the helper, its companion variables, the dummy key in EVERY model key variable, the
+ * Google credential search ended at the helper's metadata server, and every AI-provider or cloud credential of the user's shell removed. Two rows that want one variable with different values are a conflict, refused.
  */
 export function laptopModelEnvironment(input: LaptopModelEnvironmentInput): LaptopModelEnvironment {
   const environment: Record<string, string> = Object.create(null) as Record<string, string>;
@@ -82,17 +92,18 @@ export function laptopModelEnvironment(input: LaptopModelEnvironmentInput): Lapt
       if (name.endsWith("_KEY")) continue;
       if (name === "GOOGLE_CLOUD_PROJECT" && input.projectId !== undefined) set(name, input.projectId);
       else if (name === "GOOGLE_CLOUD_LOCATION") set(name, input.location ?? "us-central1");
-      else if ((name === "GCE_METADATA_HOST" || name === "GCE_METADATA_IP") && input.metadataHostPort !== undefined) set(name, input.metadataHostPort);
     }
   }
   if (conflict) return { ok: false, reason: "conflict" };
   for (const name of modelKeyVariables(input.rows)) if (environment[name] === undefined) environment[name] = MODEL_DUMMY_KEY;
-  // Layer 2: whatever else the shell holds that looks like a secret, and the explicit list, is blanked.
-  const inherited = input.inherited ?? process.env;
-  for (const name of Object.keys(inherited)) if (environment[name] === undefined && isSecretShapedVariable(name)) environment[name] = "";
-  for (const name of EXPLICIT_BLANKED_VARIABLES) if (environment[name] === undefined) environment[name] = "";
-  // Layer 3: the dummy ADC; the user's real one is never found.
-  environment.GOOGLE_APPLICATION_CREDENTIALS = input.adc.credentialsFile;
+  // Layer 3: no Google credential is found by the search; it ends at the helper's metadata server.
+  environment.GOOGLE_APPLICATION_CREDENTIALS = "";
   environment.CLOUDSDK_CONFIG = input.adc.cloudsdkConfigDir;
-  return { ok: true, environment };
+  environment.GCE_METADATA_HOST = input.metadataHostPort;
+  environment.GCE_METADATA_IP = input.metadataHostPort;
+  // Layer 2: everything else of the shell that is an AI or cloud credential is UNSET (never blanked).
+  const unset = new Set<string>(EXPLICIT_UNSET_VARIABLES);
+  for (const name of Object.keys(input.inherited ?? process.env)) if (isCredentialVariable(name)) unset.add(name);
+  for (const name of Object.keys(environment)) unset.delete(name);
+  return { ok: true, environment, unset: [...unset].sort() };
 }
