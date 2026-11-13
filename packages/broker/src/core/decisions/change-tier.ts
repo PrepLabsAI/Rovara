@@ -9,6 +9,7 @@
 // the plan names) and the DIFF tier after it; the diff tier is recomputed on every push and at merge. The tier of a change never goes down (`raiseTier`): a later, smaller diff keeps the higher tier.
 //
 // This file is pure: no store, no host, no clock (the caller passes `at`). The thresholds are named settings with these defaults; changing them is an admin action that is out of scope here.
+import { createHash } from "node:crypto";
 import { type FlowTier, type FlowTierKind, type FlowTierLevel, type WorkflowFlow, FLOW_CATCH_COUNTERS_MAX, FLOW_MAX_BYTES, FLOW_REASON_PATH_MAX, FLOW_TIER_HISTORY_MAX, FLOW_TIER_REASONS_MAX, flowRecordBytes } from "@agentx/contracts";
 import { CHANGED_FILES_MAX } from "../proof/changed-files.js";
 import { isTestPath } from "../proof/verification-report.js";
@@ -47,7 +48,7 @@ export const TIER_REASON_CODES = [
   // risky
   "incomplete_diff", "no_diff_files", "too_many_files", "unreadable_content", "binary_content", "mode_or_type_change", "symlink_suspected", "submodule", "lfs_pointer",
   "sensitive_path", "instruction_file", "hook_file", "git_settings_file", "env_file", "package_source_setting", "registry_source_changed", "dependency_source", "install_script",
-  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "confusable_text", "reviewer_injection_text", "docs_build_hook",
+  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "ci_fetch_and_run", "ci_net_send", "ci_check_removed", "invisible_character", "confusable_text", "reviewer_injection_text", "docs_build_hook",
   // standard
   "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "test_file_deleted", "no_files_named", "request_mentions_sensitive_area",
   "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed", "script_changed", "text_data_file", "vendored_code", "check_weakened", "docs_include", "docs_not_plain", "docs_unread", "docs_site_build", "docs_large", "scanner_ignore_file", "docs_build_config",
@@ -579,6 +580,21 @@ function readDependencies(file: TierFile, patch: PatchLines): DependencyReading 
 // ---- continuous integration files
 
 const CI_PRIVILEGED = /(?:pull_request_target|workflow_run|issue_comment|pull_request_review(?:_comment)?|\bsecrets\s*\.|\bsecrets\s*\[|\bsecrets\s*:\s*inherit|\$\{\{\s*secrets\b|toJSON\(\s*secrets|github\.token|id-token|\bGITHUB_TOKEN\b|permissions\s*:\s*write-all|:\s*write\b|runs-on\s*:.*self-hosted|\$\{\{\s*(?:github\.event\.(?:comment|issue|pull_request|review|head_commit|pages|commits|discussion)|github\.head_ref)|\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b)/iu;
+/** Code fetched and run in CI: a download piped into a shell or an interpreter, process substitution, a registry package run at a moving tag. */
+const CI_FETCH_AND_RUN = /\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k|fi)?sh|python[\d.]*|perl|ruby|node|php|pwsh|powershell)\b|<\(\s*(?:curl|wget)\b|\beval\s+"?\$\(\s*(?:curl|wget)|\b(?:iex|Invoke-Expression)\b.*\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b/iu;
+const CI_RUNS_REGISTRY_CODE = /\b(?:npx|bunx|pnpx|uvx|pipx\s+run|yarn\s+dlx|pnpm\s+dlx|npm\s+exec)\s+(?:-\S+\s+)*[\w@./-]*@(?:latest|next|canary|beta|alpha|rc|dev|\*|[a-z][\w.-]*)\b/iu;
+/** Data sent out of the job: a raw socket, an upload with curl or wget. */
+const CI_NET_EXFIL = /\b(?:nc|ncat|netcat|socat)\s+\S+|\/dev\/(?:tcp|udp)\/|\bcurl\b[^\n]*\s(?:-d|--data(?:-\w+)?|-F|--form|-T|--upload-file|-X\s*(?:POST|PUT))\b|\bwget\b[^\n]*--(?:post-data|post-file|body-data)/iu;
+/** A command that runs the project's tests. */
+const TEST_COMMAND = /\b(?:npm\s+(?:run\s+)?test|yarn\s+test|pnpm\s+(?:run\s+)?test|vitest|jest|mocha|pytest|py\.test|tox|nox|go\s+test|cargo\s+(?:test|nextest)|mvn\s+(?:\S+\s+)*test|gradlew?\s+(?:\S+\s+)*test|make\s+(?:test|check)|rspec|phpunit|dotnet\s+test|ctest)\b/iu;
+/** What a CI change does that no line of it says plainly: fetches and runs code, sends data out, or takes a test command away. */
+function ciDangerous(added: readonly string[], removed: readonly string[]): string | undefined {
+  if (added.some((line) => CI_FETCH_AND_RUN.test(line) || CI_RUNS_REGISTRY_CODE.test(line))) return "ci_fetch_and_run";
+  if (added.some((line) => CI_NET_EXFIL.test(line))) return "ci_net_send";
+  if (removed.filter((line) => TEST_COMMAND.test(line)).length > added.filter((line) => TEST_COMMAND.test(line)).length) return "ci_check_removed";
+  return undefined;
+}
+
 /** A step that uses an action from someone else, pinned to a branch or a tag (both can be moved) instead of a commit. The owner `actions` and `github` are the platform's own. */
 function movingActions(added: readonly string[], removed: readonly string[]): boolean {
   const removedTrimmed = new Set(removed.map((line) => line.trim()));
@@ -629,7 +645,7 @@ const SECURITY_LINE = /\b(?:auth\w*|token\w*|secret\w*|password\w*|crypto\w*|sec
 const TOOL_SECTION = /\[(?:tool\.(?:bandit|ruff|pylint|flake8|mypy|semgrep|coverage|pytest|isort)|bandit|flake8|pylint|coverage|mypy|tool:pytest|testenv)\b/u;
 const TOOL_SETTINGS_FILE = /^(?:pyproject\.toml|setup\.cfg|tox\.ini|\.coveragerc)$/u;
 /** Words in an added line that address whoever (or whatever) reviews the change: a line written for the reviewer is not code. */
-const REVIEWER_INJECTION = /\b(?:note|attention|message|instructions?|hey|hi|dear)\s+(?:for|to)\s+(?:the\s+)?(?:automated\s+|ai\s+|llm\s+|code\s+)?(?:reviewers?|agents?|assistants?|models?|bots?|ai)\b|\b(?:ai|llm|automated)\s+(?:code\s+)?(?:reviewers?|agents?)\b|\bignore\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|rules?)|\banswer\s+(?:no|yes)\s+to\s+(?:every|all|each)\b|\bdo\s+not\s+(?:flag|report|mention)\s+this\b|\bsystem\s+prompt\b/iu;
+const REVIEWER_INJECTION = /\b(?:note|attention|message|instructions?|hey|hi|dear)\s+(?:for|to)\s+(?:the\s+)?(?:automated\s+|ai\s+|llm\s+|code\s+)?(?:reviewers?|agents?|assistants?|models?|bots?|ai)\b|\b(?:ai|llm|automated)\s+(?:code\s+)?(?:reviewers?|agents?)\b|\bignore\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|rules?)|\banswer\s+(?:no|yes)\s+to\s+(?:every|all|each)\b|\bdo\s+not\s+(?:flag|report|mention)\s+this\b|\bsystem\s+prompt\b|\breviewers?\s*[:,\-]|\bevery\s+(?:question|answer)\b|\ball\s+(?:\w+\s+)?answers\b|\b(?:end|begin|start)\s+of\s+(?:the\s+)?untrusted\b|-{2,}\s*(?:begin|end)\b.*\b(?:data|patch|files)\b|\buntrusted\s+data\b/iu;
 /** Lines of a .gitignore that keep secrets out: taking one away exposes them. */
 const SECRET_IGNORE = /\.env|secret|credential|\.pem|\.key\b|id_rsa|\.npmrc|token|\.aws|\.ssh|\.p12|\.pfx|\.kube/iu;
 const TSCONFIG_NAME = /^tsconfig[\w.-]*\.json$/u;
@@ -723,6 +739,11 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
   // The docs route is an allowlist on content: plain prose only, in a repository that builds no documentation site, in a document no instruction file reads (`prose`), and not a rewrite. Anything else is not docs.
   let routed = false;
   if (prose && patch !== undefined) {
+    // Text written for whoever reviews it, a credential, a word of mixed scripts: none of these is documentation, whatever route the lines take.
+    if (patch.added.some((line) => REVIEWER_INJECTION.test(line))) reading.risky.push(here("reviewer_injection_text"));
+    if (patch.added.some((line) => SECRET_LIKE.test(line))) reading.risky.push(here("secret_like_text"));
+    if (patch.added.some((line) => hasMixedScriptWord(line))) reading.risky.push(here("confusable_text"));
+    reading.addedBytes = patch.added.reduce((total, line) => total + Buffer.byteLength(line) + 1, 0);
     const problem = docsContentProblem(file.patch!, head?.text?.get(factKey(file.repository, file.path)), head !== undefined);
     if (problem?.problem === "executes") reading.risky.push(here("docs_executes"));
     else if (problem?.problem === "include") reading.standard.push(here("docs_include"));
@@ -779,6 +800,8 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     if (!manifest && !lock && patch.added.some((line) => INSTALL_GUARD_WORDS.test(line)) && inConfig) reading.risky.push(here("install_script"));
     if (ci && patch.added.some((line) => CI_PRIVILEGED.test(line))) reading.risky.push(here("ci_privileged"));
     if (ci && movingActions(patch.added, patch.removed)) reading.risky.push(here("ci_unpinned_action"));
+    const ciCode = ci ? ciDangerous(patch.added, patch.removed) : undefined;
+    if (ciCode !== undefined) reading.risky.push(here(ciCode));
     // A check weakened without a deletion: an exclude or an off in a runner's or scanner's configuration, a silenced linter, a skipped test, a remapped module. Standard; risky when the line is about a security rule or test.
     const toolSettings = TOOL_SETTINGS_FILE.test(baseName(normalPath)) && TOOL_SECTION.test(file.patch!);
     const removedSecurity = isCheckConfigPath(file.path) ? patch.removed.filter((line) => SECURITY_LINE.test(line) && !patch.added.includes(line)) : [];
@@ -795,6 +818,8 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     }
     // Content that is not what it looks like: reordering controls, a word that mixes scripts, a line written for the reviewer. None has a place in code or configuration.
     if (patch.added.some((line) => BIDI_CONTROL.test(line))) reading.risky.push(here("bidi_control"));
+    // Any format character (zero-width, soft hyphen, the Unicode tag block models read and people do not): invisible text has no place in code.
+    if (patch.added.some((line) => /\p{Cf}/u.test(line))) reading.risky.push(here("invisible_character"));
     if (patch.added.some((line) => hasMixedScriptWord(line))) reading.risky.push(here("confusable_text"));
     if (patch.added.some((line) => REVIEWER_INJECTION.test(line))) reading.risky.push(here("reviewer_injection_text"));
     // A .gitignore that lets go of a secret pattern; a documentation build's hooks and plugins run code.
@@ -1014,6 +1039,7 @@ const REASON_PHRASES: Readonly<Record<string, string>> = {
   registry_source_changed: "a package source", dependency_source: "a package source", install_script: "an install script", ci_privileged: "a privileged CI setting", package_source_setting: "a package source setting",
   confusable_path: "a path with a look-alike letter", infra_file: "an infrastructure file", instruction_import: "a file an instruction file reads", ci_unpinned_action: "a CI action that is not pinned to a commit",
   path_too_long: "a path too long to list", link_kind_unknown: "a path whose kind Rovara did not check", ignore_file: "an ignore file", secret_like_text: "text that looks like a credential", script_command: "a script that runs a command", check_weakened_security: "a security check weakened",
+  ci_fetch_and_run: "a CI step that fetches code and runs it", ci_net_send: "a CI step that sends data out", ci_check_removed: "a CI step that no longer runs the tests", invisible_character: "invisible text",
   docs_executes: "a document line that runs something", bidi_control: "text that reorders what is shown", confusable_text: "a word that mixes look-alike letters", reviewer_injection_text: "a line written for the reviewer", docs_build_hook: "a hook of a documentation build",
   docs_not_plain: "a document line that is not plain prose", docs_unread: "a document Rovara could not read in full", docs_site_build: "a document of a site that is built", docs_large: "more than 300 changed document lines", scanner_ignore_file: "a file that tells a scanner what to skip", docs_build_config: "the setup of a documentation build",
   script_changed: "a changed script", text_data_file: "a text file a program may read", vendored_code: "vendored code", check_weakened: "a check switched off", docs_include: "a document that includes another file",
@@ -1061,34 +1087,60 @@ export function fitFlow(flow: WorkflowFlow): WorkflowFlow {
   return next;
 }
 
-/**
- * The catch-counter step that says a review at `level` ran on the code at `headSha`: the review steps of that tier (the caller's, P2) write it with `recordTierReview` when they finish. The step name carries the level and the
- * first characters of the head, so a push makes the record stale.
- */
-export const tierReviewStep = (level: TierLevel, headSha: string | undefined): string => `tier_review_${level}_${(headSha ?? "unbound").slice(0, 10)}`;
+// ---- the records the review steps and the reviewer floor leave
 
-/** The `flow` record with the review of a tier written for the head it ran on: findings, and how many must be fixed. */
-export function recordTierReview(flow: WorkflowFlow | undefined, input: { level: TierLevel; headSha: string | undefined; findings: number; mustFix: number }): WorkflowFlow {
-  return recordCatch(flow, { step: tierReviewStep(input.level, input.headSha), findings: input.findings, mustFix: input.mustFix });
+/**
+ * What the review steps and the reviewer floor leave on the record is bound to the FULL head, in `flow.quickChecks` (its `detail` holds the head in full: a catch-counter step is too short for one, and a prefix of a head is not
+ * a head). One entry for the reviewer's questions (head and a digest of the patch the reviewer was given), and one per tier for the review steps (head). A new record of the same kind replaces the one before it.
+ */
+const QUESTIONS_PREFIX = "tier_questions ";
+const REVIEW_PREFIX = "tier_review ";
+const questionsDetail = (headSha: string, patchDigest: string): string => `${QUESTIONS_PREFIX}head=${headSha} patch=${patchDigest}`;
+const reviewDetail = (level: TierLevel, headSha: string): string => `${REVIEW_PREFIX}level=${level} head=${headSha}`;
+
+function withQuickCheck(flow: WorkflowFlow | undefined, prefix: string, detail: string, at: string, replaces: (detail: string) => boolean): WorkflowFlow {
+  const kept = (flow?.quickChecks ?? []).filter((check) => !(check.detail?.startsWith(prefix) === true && replaces(check.detail)));
+  return { ...(flow ?? { rulesVersion: TIER_RULES_VERSION }), rulesVersion: TIER_RULES_VERSION, quickChecks: [...kept, { kind: "code_config" as const, outcome: "passed" as const, detail, at }].slice(-10) };
 }
 
-/** Whether a review at `level`, or a higher one, has run on this head. */
+/** The `flow` record with the review of a tier written for the head it ran on (in full): findings, and how many must be fixed. Without a head nothing is bound, and nothing is written. */
+export function recordTierReview(flow: WorkflowFlow | undefined, input: { level: TierLevel; headSha: string | undefined; findings: number; mustFix: number; at?: string }): WorkflowFlow {
+  const counted = recordCatch(flow, { step: `tier_review_${input.level}`, findings: input.findings, mustFix: input.mustFix });
+  if (input.headSha === undefined) return counted;
+  return withQuickCheck(counted, REVIEW_PREFIX, reviewDetail(input.level, input.headSha), input.at ?? new Date().toISOString(), (detail) => detail.startsWith(`${REVIEW_PREFIX}level=${input.level} `));
+}
+
+/** Whether a review at `level`, or a higher one, has run on exactly this head. Without a head nothing can have. */
 export function tierReviewRecorded(flow: WorkflowFlow | undefined, level: TierLevel, headSha: string | undefined): boolean {
-  const suffix = `_${(headSha ?? "unbound").slice(0, 10)}`;
-  return (["small", "standard", "risky"] as const).some((candidate) => RANK[candidate] >= RANK[level] && (flow?.catchCounters ?? []).some((counter) => counter.step === `tier_review_${candidate}${suffix}`));
+  if (headSha === undefined) return false;
+  return (["small", "standard", "risky"] as const).some((candidate) => RANK[candidate] >= RANK[level] && (flow?.quickChecks ?? []).some((check) => check.detail === reviewDetail(candidate, headSha)));
 }
 
-/** The catch-counter step that says the reviewer's questions were answered for the code at `headSha` (the head is part of the name: a push makes the record stale). */
-export const tierQuestionsStep = (headSha: string | undefined): string => `tier_questions_${(headSha ?? "unbound").slice(0, 10)}`;
+/** The `flow` record with the reviewer's questions written for exactly this head and the patch the reviewer was given (a digest). */
+export function recordQuestionsAnswered(flow: WorkflowFlow | undefined, input: { headSha: string; patchDigest: string; at: string }): WorkflowFlow {
+  return withQuickCheck(flow, QUESTIONS_PREFIX, questionsDetail(input.headSha, input.patchDigest), input.at, () => true);
+}
 
-/** Whether the reviewer's questions were answered for the code at this head. */
-export const reviewerFloorRecorded = (flow: WorkflowFlow | undefined, headSha: string | undefined): boolean => (flow?.catchCounters ?? []).some((counter) => counter.step === tierQuestionsStep(headSha));
+/** Whether the reviewer's questions were answered for exactly this head and exactly this patch. Without a head nothing can have been. */
+export const reviewerFloorRecorded = (flow: WorkflowFlow | undefined, headSha: string | undefined, patchDigest: string): boolean =>
+  headSha !== undefined && (flow?.quickChecks ?? []).some((check) => check.detail === questionsDetail(headSha, patchDigest));
 
 /**
- * Whether a tier still owes the reviewer's questions: a small change to code or documents. Every list of words and paths leaks, so a change that no list put higher is asked of the one strongest-available reviewer before it
- * merges (the merge gate refuses it until the answers are on the record for the current head). Other small kinds (dependency, CI, install link) are already read by their own checks.
+ * Whether a tier still owes the reviewer's questions: EVERY small tier, whatever it touched (code, documents, CI, dependencies). Every list of words and paths leaks, so a change that no list put higher is asked of the one
+ * strongest-available reviewer before it merges (the merge gate refuses it until the answers are on the record for the current head and patch).
  */
-export const needsReviewerFloor = (tier: Pick<ChangeTier, "level" | "kinds">): boolean => tier.level === "small" && (tier.kinds.includes("code_config") || tier.kinds.includes("docs"));
+export const needsReviewerFloor = (tier: Pick<ChangeTier, "level">): boolean => tier.level === "small";
+
+/** A digest of the patch text of a change as the code host lists it, in the form the reviewer is given (`canonicalPatchText`): the floor records it and the merge gate recomputes it from the host. */
+export function patchDigestOf(patchText: string): string {
+  return createHash("sha256").update(patchText).digest("hex");
+}
+
+/** The patch of a change in ONE canonical form: files in repository and path order, each with its name(s) and its patch text. The floor's reviewer is given exactly this, and the gate digests exactly this. */
+export function canonicalPatchText(files: readonly TierFile[]): string {
+  return [...files].sort((left, right) => `${left.repository ?? ""}\u0000${left.path}`.localeCompare(`${right.repository ?? ""}\u0000${right.path}`))
+    .map((file) => `### ${file.repository === undefined ? "" : `${file.repository}: `}${file.previousPath === undefined ? "" : `${file.previousPath} -> `}${file.path} (${file.status})\n${file.patch ?? "(no patch text)"}`).join("\n");
+}
 
 /** The `flow` record with a new tier written. The previous tier moves into `tierHistory` (oldest first, at most 20) when it is a different tier. The level never goes down (`raiseTier`). */
 export function recordTier(flow: WorkflowFlow | undefined, next: ChangeTier): { flow: WorkflowFlow; tier: ChangeTier; grew: boolean } {

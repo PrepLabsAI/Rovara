@@ -124,6 +124,12 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
     }
     // What the host knows of the code at the heads (the text of the documents, what the instruction files import, symbolic links). A host that cannot say leaves the tier unwritten and the risk high.
     headFacts = await readHeadFacts(tierTargets, tierFiles, { orgId: deps.companyId }, beforeRequest);
+    // The head must not have moved while the files and the facts were read: the tier is for the code Rovara checked.
+    for (const target of tierTargets) {
+      beforeRequest?.();
+      const again = await target.host.getChangeRequest(changeRequestRef(target.repositoryUrl, target.number), { orgId: deps.companyId });
+      if (again.state === "open" && again.headRevision !== target.headSha) return "unavailable";
+    }
   } catch (error) {
     // A host that cannot answer (a rate limit included) leaves the risk high; the caller's pause logic sees the rate limit again on its own read.
     if (error instanceof Error && error.name === "HostRateLimitError") throw error;
