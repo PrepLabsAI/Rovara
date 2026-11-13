@@ -169,6 +169,15 @@ describe("the lookup", () => {
     expect(await find(deps, { branch: "release", baseCommit: sha(4) })).toMatchObject({ commitsBack: 0 });
   });
 
+  it("two environment revisions that ran at the same commit each keep their own row (the revision is in the key)", async () => {
+    const { store, deps } = world();
+    await keep(deps, row({ envRevision: 1, headSha: sha(6), failed: ["rev1::x"], tests: { total: 3, passed: 2, failed: 1, skipped: 0 }, flaky: [] }));
+    await keep(deps, row({ envRevision: 2, headSha: sha(6), failed: ["rev2::y"], tests: { total: 3, passed: 2, failed: 1, skipped: 0 }, flaky: [] }));
+    expect(knownFailingOf((await find(deps, { envRevision: 1, baseCommit: sha(6) }))!.row)).toEqual(["rev1::x"]);
+    expect(knownFailingOf((await find(deps, { envRevision: 2, baseCommit: sha(6) }))!.row)).toEqual(["rev2::y"]);
+    expect((await store.query({ pk: projectPk(ORG as never, PROJECT), sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" } })).items).toHaveLength(2);
+  });
+
   it("a baseline of another company is never used, with the same project name and the same commit", async () => {
     const { deps } = world();
     await keep(deps, row({ headSha: sha(5), failed: ["only.a::x"], tests: { total: 3, passed: 2, failed: 1, skipped: 0 }, flaky: [] }), COMPANY_A_ID, SHARED_RAW_IDS.project);
