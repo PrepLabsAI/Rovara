@@ -21,7 +21,7 @@ import { buildChatCompletion } from "./model-family-openai.js";
 import { buildOpenAiResponse, openAiResponseStreamBody } from "./model-family-openai-ops.js";
 import { anthropicErrorBody } from "./model-family-anthropic.js";
 import { cohereErrorBody } from "./model-family-cohere.js";
-import { JSON_CONTENT_TYPE, SSE_CONTENT_TYPE, isChatOperation, jsonAnswer, renderModelReply, type ModelAnswer, type ModelStreamKind, type ModelWire, type RenderContext } from "./model-render.js";
+import { appendOpenAiStreamUsage, JSON_CONTENT_TYPE, SSE_CONTENT_TYPE, isChatOperation, jsonAnswer, renderModelReply, type ModelAnswer, type ModelStreamKind, type ModelWire, type RenderContext } from "./model-render.js";
 import type { ServedModelFamily } from "./model-served-family.js";
 import { UNMATCHED_SENTENCE } from "./model-served-family.js";
 
@@ -168,7 +168,7 @@ function openAiChatRefusal(spec: FailureSpec, context: FailureContext): ModelAns
   const payloads = filter
     ? [chunk({ role: "assistant", content: "" }, null), chunk({}, "content_filter"), "[DONE]"]
     : [chunk({ role: "assistant", content: null }, null), chunk({ refusal: FAILURE_REFUSAL_TEXT }, null), chunk({}, "stop"), "[DONE]"];
-  return { status: 200, headers: { "content-type": SSE_CONTENT_TYPE }, body: sseBody(payloads, context.lineEnding) };
+  return { status: 200, headers: { "content-type": SSE_CONTENT_TYPE }, body: appendOpenAiStreamUsage(sseBody(payloads, context.lineEnding), { text: "", finish: "stop", usage: { inputTokens: 12, outputTokens: 8 } }, context) };
 }
 
 function refusal(spec: FailureSpec, context: FailureContext): ModelAnswer {
