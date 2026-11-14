@@ -104,14 +104,14 @@ describe("the built-in rows", () => {
     for (const row of builtin()) expect(Object.keys(row.errors).sort()).toEqual(["badToolJson", "cutOffStream", "rateLimit", "refusal", "tokenLimit"]);
   });
   it("covers the direct providers: OpenAI, Anthropic, Cohere, Mistral, Groq, Together and Azure OpenAI (a suffix row)", () => {
-    expect(rowById("openai")).toMatchObject({ family: "openai_compatible", hosts: ["api.openai.com"] });
+    expect(rowById("openai")).toMatchObject({ family: "openai_compatible", hosts: ["api.openai.com", "eu.api.openai.com", "us.api.openai.com"] });
     expect(rowById("anthropic")).toMatchObject({ family: "anthropic_messages", hosts: ["api.anthropic.com"], auth: [{ scheme: "header", name: "x-api-key" }] });
     expect(rowById("cohere")).toMatchObject({ family: "cohere", hosts: ["api.cohere.ai", "api.cohere.com"] });
-    expect(rowById("mistral")).toMatchObject({ family: "openai_compatible", hosts: ["api.mistral.ai"] });
+    expect(rowById("mistral")).toMatchObject({ family: "openai_compatible", hosts: ["api.mistral.ai", "codestral.mistral.ai"] });
     expect(rowById("groq")).toMatchObject({ family: "openai_compatible", hosts: ["api.groq.com"] });
     expect(rowById("together")).toMatchObject({ family: "openai_compatible" });
     expect(rowById("together").hosts).toEqual(expect.arrayContaining(["api.together.xyz"]) as unknown);
-    expect(rowById("azure-openai")).toMatchObject({ family: "openai_compatible", hosts: [], hostSuffixes: ["openai.azure.com"], auth: [{ scheme: "header", name: "api-key" }] });
+    expect(rowById("azure-openai")).toMatchObject({ family: "openai_compatible", hosts: [], hostSuffixes: ["openai.azure.com", "cognitiveservices.azure.com", "services.ai.azure.com"], auth: [{ scheme: "header", name: "api-key" }] });
     // Shapes the redirect check did not cover are unverified, in the data and the notes.
     for (const id of ["openai", "anthropic", "cohere", "mistral", "groq", "together", "azure-openai"]) {
       expect(rowById(id).redirect.every((method) => !method.verified), id).toBe(true);
@@ -133,6 +133,17 @@ describe("the built-in rows", () => {
 });
 
 describe("row schema", () => {
+  it("accepts only the three DEC 174 token hosts as authHosts", () => {
+    const authHosts = ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts: [] })).success).toBe(true);
+    for (const host of authHosts) expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts: [host] })).success, host).toBe(true);
+    for (const host of ["eu.api.openai.com", "models.inference.ai.azure.com", "storage.googleapis.com", "auth.example.com", "x.oauth2.googleapis.com", "oauth2.googleapis.com.evil.example.com", "OAUTH2.googleapis.com", "oauth2.googleapis.com."]) {
+      const row = sampleRow({ authHosts: [host] });
+      expect(ModelCatalogRowSchema.safeParse(row).success, host).toBe(false);
+      expect(parseModelCatalogBytes(new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, revision: 1, rows: [row] }))).ok, host).toBe(false);
+    }
+  });
   it("accepts a built-in row round-tripped through JSON", () => {
     expect(ModelCatalogRowSchema.safeParse(sampleRow()).success).toBe(true);
   });
@@ -189,7 +200,7 @@ describe("row schema", () => {
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many.slice(0, 256) })).success).toBe(true);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: [] })).success).toBe(false);
-    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: ["openai.azure.com"] })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: ["openai.azure.com", "cognitiveservices.azure.com", "services.ai.azure.com"] })).success).toBe(true);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hostSuffixes: ["com"] })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hostSuffixes: ["*.azure.com"] })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: ["a.example.com", "a.example.com"] })).success).toBe(false);
@@ -354,7 +365,7 @@ describe("the stable digest and the unsigned parse", () => {
     expect(modelCatalogDigest({ ...base, revision: base.revision + 1 })).not.toBe(modelCatalogDigest(base));
   });
   it("pins the digest of the built-in rows: any change to a row is a conscious change here", () => {
-    expect(modelCatalogDigest(builtinModelCatalog())).toBe("934db377a69c21f5d044a099742ea2a9948a5a696062d942211fe76d3c3f8e09");
+    expect(modelCatalogDigest(builtinModelCatalog())).toBe("c8327551ff3ec7156387c3c2b7d594f678bcd223b7fc9caea69dd2ffaae01d69");
   });
   it("keeps the unsigned parse out of the barrel: only builtinModelCatalog() may feed F1 and F2", async () => {
     const barrel = (await import("../../packages/contracts/src/index.js")) as Record<string, unknown>;

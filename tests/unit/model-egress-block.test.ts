@@ -47,6 +47,53 @@ const gateways = (): CompanyGatewayRow[] => {
 };
 
 describe("modelHostBlockList", () => {
+  it("blocks documented Azure AI inference hosts and finds serverless calls at DNS label boundaries", () => {
+    const block = modelHostBlockList(rows, []);
+    const hostSuffixes = modelHostSuffixBlockList(rows);
+    expect(block).toContain("models.inference.ai.azure.com");
+    expect(hostSuffixes).toContain("models.ai.azure.com");
+    for (const host of ["models.inference.ai.azure.com", "deployment.eastus2.models.ai.azure.com", "deployment.models.ai.azure.com"]) {
+      expect(findRedirectEscapes(block, [host], { hostSuffixes })).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+    expect(findRedirectEscapes(block, ["notmodels.ai.azure.com", "models.ai.azure.com.example.com", "models.inference.ai.azure.com.example.com", "login.microsoftonline.com"], { hostSuffixes })).toEqual([]);
+  });
+  it.each([
+    ["OpenAI residency", ["eu.api.openai.com", "us.api.openai.com"]],
+    ["Codestral", ["codestral.mistral.ai"]],
+    ["Vertex location", ["us-west8-aiplatform.googleapis.com", "us-west8-aiplatform.mtls.googleapis.com"]],
+  ])("blocks every verified Round 2 %s host", (_group, hosts) => {
+    const block = modelHostBlockList(rows, []);
+    for (const host of hosts) {
+      expect(block, host).toContain(host);
+      expect(findRedirectEscapes(block, [host])).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+  });
+  it("blocks all documented Vertex REP names without expanding to other Google APIs", () => {
+    // Independent provider-doc inventory; northamerica-south1 REP is not documented.
+    const locations = "africa-south1 asia-east1 asia-east2 asia-northeast1 asia-northeast2 asia-northeast3 asia-south1 asia-south2 asia-southeast1 asia-southeast2 australia-southeast1 australia-southeast2 eu europe-central2 europe-north1 europe-north2 europe-southwest1 europe-west1 europe-west10 europe-west12 europe-west2 europe-west3 europe-west4 europe-west6 europe-west8 europe-west9 me-central1 me-central2 me-west1 northamerica-northeast1 northamerica-northeast2 southamerica-east1 southamerica-west1 us us-central1 us-east1 us-east4 us-east5 us-south1 us-west1 us-west2 us-west3 us-west4 us-west8".split(" ");
+    const block = modelHostBlockList(rows, []);
+    for (const location of locations) {
+      for (const domain of ["googleapis.com", "mtls.googleapis.com"]) {
+        const host = `aiplatform.${location}.rep.${domain}`;
+        expect(block, host).toContain(host);
+        expect(findRedirectEscapes(block, [host])).toMatchObject([{ host, kind: "ignored_redirect" }]);
+      }
+    }
+    const allowed = ["storage.googleapis.com", "bigquery.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com", "storage.us-central1.rep.googleapis.com", "bigquery.us-central1.rep.googleapis.com"];
+    for (const host of allowed) expect(block).not.toContain(host);
+    expect(findRedirectEscapes(block, allowed, { hostSuffixes: modelHostSuffixBlockList(rows) })).toEqual([]);
+    expect(modelHostSuffixBlockList(rows).some((suffix) => suffix.endsWith("googleapis.com"))).toBe(false);
+  });
+  it.each(["cognitiveservices.azure.com", "services.ai.azure.com"])("blocks the Azure %s suffix with DNS label boundaries", (suffix) => {
+    const block = modelHostBlockList(rows, []);
+    const suffixes = modelHostSuffixBlockList(rows);
+    expect(suffixes).toContain(suffix);
+    for (const host of [`resource.${suffix}`, `nested.resource.${suffix}`]) {
+      expect(findRedirectEscapes(block, [host], { hostSuffixes: suffixes })).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+    expect(findRedirectEscapes(block, [`not${suffix}`, `${suffix}.example.com`], { hostSuffixes: suffixes })).toEqual([]);
+  });
+
   it("holds every model host and every company gateway host, sorted and without duplicates", () => {
     const list = modelHostBlockList(rows, gateways());
     expect([...list]).toEqual([...new Set(list)].sort());
@@ -73,7 +120,7 @@ describe("modelHostBlockList", () => {
     for (const host of ["api.openai.com", "api.anthropic.com", "api.cohere.com", "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz", "europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "generativelanguage.mtls.googleapis.com"]) {
       expect(list, host).toContain(host);
     }
-    expect(modelHostSuffixBlockList(rows)).toEqual(["openai.azure.com"]);
+    expect(modelHostSuffixBlockList(rows)).toEqual(["cognitiveservices.azure.com", "models.ai.azure.com", "openai.azure.com", "services.ai.azure.com"]);
     expect(list.some((host) => host.endsWith("openai.azure.com"))).toBe(false);
   });
   it("never lists a wildcard, so Cloud Storage's *.googleapis.com is not caught", () => {
@@ -144,23 +191,37 @@ describe("findRedirectEscapes", () => {
     expect(findRedirectEscapes(block, hostile)).toEqual([]);
     expect(findRedirectEscapes(block, [...hostile, "openrouter.ai"]).map((escape) => escape.sentence)).toEqual([redirectEscapeSentence("openrouter.ai")]);
   });
-  it("is fast on a million observations, and its time grows linearly with the input", () => {
-    const make = (length: number): string[] => Array.from({ length }, (_, index) => (index % 1000 === 0 ? "openrouter.ai" : "a.example.com"));
-    // Best of three runs: a wall-clock limit alone flaked on a loaded machine (2013 ms and 2524 ms against 2000 ms), so the limit is generous and the real check is the scaling.
-    const best = (observed: string[]): number => {
-      let fastest = Number.POSITIVE_INFINITY;
-      for (let run = 0; run < 3; run += 1) {
-        const started = performance.now();
-        expect(findRedirectEscapes(block, observed)).toHaveLength(1);
-        fastest = Math.min(fastest, performance.now() - started);
-      }
-      return fastest;
+  it("counts rejected observations too, without changing findings", () => {
+    const observed = [null, 42, "x".repeat(2049), "bad host", "openrouter.ai", "mine.openai.azure.com", "openrouter.ai"];
+    const options = { hostSuffixes: modelHostSuffixBlockList(rows) };
+    let steps = 0;
+    const counted = findRedirectEscapes(block, observed, options, () => { steps += 1; });
+    expect(counted).toEqual(findRedirectEscapes(block, observed, options));
+    expect(steps).toBe(observed.length);
+    expect(counted.map((escape) => escape.host)).toEqual(["mine.openai.azure.com", "openrouter.ai"]);
+  });
+  it("uses linear normalization work on a million observations", () => {
+    const measure = (length: number): number => {
+      const observed = Array.from({ length }, (_, index) => (index % 1000 === 0 ? "openrouter.ai" : "a.example.com"));
+      let steps = 0;
+      const countWork = (): void => {
+        steps += 1;
+        // Abort excessive work immediately: a quadratic mutant must fail without doing a trillion operations.
+        if (steps > 2 * length) throw new Error("normalization work exceeded two steps per observation");
+      };
+      const started = performance.now();
+      expect(findRedirectEscapes(block, observed, {}, countWork)).toEqual([
+        { host: "openrouter.ai", kind: "ignored_redirect", sentence: redirectEscapeSentence("openrouter.ai") },
+      ]);
+      expect(performance.now() - started).toBeLessThan(10_000);
+      // A missing/disconnected counter must not make the scaling check vacuously pass.
+      expect(steps).toBeGreaterThanOrEqual(length);
+      expect(steps).toBeLessThanOrEqual(2 * length);
+      return steps;
     };
-    const small = best(make(250_000));
-    const large = best(make(1_000_000));
-    expect(large).toBeLessThan(10_000);
-    // 4x the input may cost at most 6x the time (a quadratic scan would cost 16x). The 5 ms floor keeps a near-zero small run from making the ratio meaningless.
-    expect(large).toBeLessThanOrEqual(6 * Math.max(small, 5));
+    const small = measure(250_000);
+    const large = measure(1_000_000);
+    expect(large).toBeLessThanOrEqual(4.5 * small);
   });
 });
 
@@ -186,7 +247,8 @@ describe("no callers yet", () => {
       return entry.isDirectory() ? walk(full) : /\.(ts|tsx|js|mjs)$/u.test(entry.name) ? [full] : [];
     });
   it("nothing outside the new files (and their tests and the contracts barrel) imports them", () => {
-    const own = new Set(NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`));
+    // FIX-0518: the test-account model-host check is the first caller (a test account is never for a model host), and it reads the catalog's rows, so it is allowed to import them.
+    const own = new Set([...NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`), "packages/contracts/src/test-account-model-hosts.ts"]);
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
@@ -204,7 +266,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!tests/unit/prompt-change-detect.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!tests/unit/prompt-change-detect.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts", ":!tests/contract/test-account-model-hosts.test.ts"], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

@@ -7,6 +7,7 @@
 //
 // Decision 51: nothing here names a provider; it asks the registry for `storage`, `queue`, `worker-machines`, `admission`, `audit-sink`, `approvers`, `identity` and `metering`.
 // Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
+import type { TierReviewCall } from "../../core/build-step/tier-review-calls.js";
 import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type Metering, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
@@ -105,6 +106,8 @@ const ATTENTION_FOOTER = "Open it on the computer where Rovara runs: `rovara ope
 const LOCAL_OWNER_PERSON_ID = "local-owner";
 
 export interface LocalAppOptions {
+  /** The lighter flow and its reviewer call (`LocalRuntimeOptions.lighterFlow`). Absent: off, as Code's laptop is. */
+  lighterFlow?: { on: boolean; tierReviewCall?: TierReviewCall | undefined } | undefined;
   /** Tells the model proxy an operation ended (it frees the operation's tokens and spend record). Set by the runtime, which makes the proxy after the servers. */
   operationEnded?: (operationId: string) => void;
   /** What one operation has spent through the model proxy so far in this process (the runtime reads it from the proxy). A re-minted token starts from the task's spend less this, so an operation's own spend is counted once. */
@@ -421,6 +424,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     modelAccess: { route: modelRoute },
     stepModels: modelSelection,
     usableModels,
+    // The lighter flow: off on the laptop unless the caller switches it on with a reviewer call (construction refuses it without one).
+    ...(options.lighterFlow === undefined ? {} : { lighterFlow: options.lighterFlow.on, ...(options.lighterFlow.tierReviewCall === undefined ? {} : { tierReviewCall: options.lighterFlow.tierReviewCall }) }),
     // A closed task's cost (what its model calls cost, from the ledger) is kept for the estimate of the next runs of the project; a run with a call that had no price is marked, and never teaches the estimator.
     onTaskClosed: async (task, closedAt) => {
       const outcome = await recordRunCost({ store }, {
@@ -686,9 +691,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const tickLessons = async (): Promise<void> => {
     await lessons.tick().catch(logFailure("local_app.lessons_failed"));
   };
+  // The lighter flow's reviewer calls (questions, grown reviews) can take minutes, so they have their own timer and allowance: the pull request reads never wait for them.
+  const tickTierChecks = async (): Promise<void> => {
+    await tracking.tierChecks().catch(logFailure("local_app.tier_checks_failed"));
+  };
   const tick = async (): Promise<void> => {
     await tickCore();
     await tickTracking();
+    await tickTierChecks();
     await tickLessons();
   };
   // The in-process chat adapters begin to listen. What one hears goes through the sink, which applies the checks of the channel API (bound space, linked person, a card's request); a start that fails
@@ -729,6 +739,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     const routed = scheduleRouter.start();
     nightly = { stop: async () => { await nightlyHeard.stop(); await routed.stop(); } };
     every(10_000, tickLessons);
+    every(10_000, tickTierChecks);
   }
 
   return {

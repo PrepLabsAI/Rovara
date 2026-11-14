@@ -7,12 +7,16 @@ import { ModelCatalogSchema, type ModelCatalog } from "./model-catalog.js";
 
 const errorIds = (family: string) => ({ rateLimit: `${family}.rate_limit`, tokenLimit: `${family}.token_limit`, refusal: `${family}.refusal`, badToolJson: `${family}.bad_tool_json`, cutOffStream: `${family}.cut_off_stream` });
 
-/** Vertex locations listed by name (never `*.googleapis.com`, which includes Cloud Storage; F1 design 3.1). UNVERIFIED against Google's list: a catalog release adds one. */
+/** Exact names only (never *.googleapis.com). Compared 2026-11-13 with
+ * https://docs.cloud.google.com/vertex-ai/docs/general/locations and
+ * https://docs.cloud.google.com/docs/security/compliance/restrict-endpoint-usage (also verifies us-west8/mTLS).
+ * Retain the existing northamerica-south1 entries; that location is not verified by these lists.
+ */
 const VERTEX_LOCATIONS = [
   "us", "eu", "us-central1", "us-east1", "us-east4", "us-east5", "us-south1", "us-west1", "us-west2", "us-west3", "us-west4", "northamerica-northeast1", "northamerica-northeast2", "southamerica-east1",
   "southamerica-west1", "europe-central2", "europe-north1", "europe-southwest1", "europe-west1", "europe-west2", "europe-west3", "europe-west4", "europe-west6", "europe-west8", "europe-west9", "europe-west12",
   "asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3", "asia-south1", "asia-southeast1", "asia-southeast2", "australia-southeast1", "australia-southeast2", "me-central1",
-  "me-central2", "me-west1", "africa-south1", "europe-west10", "asia-south2", "northamerica-south1", "europe-north2",
+  "me-central2", "me-west1", "africa-south1", "europe-west10", "asia-south2", "northamerica-south1", "europe-north2", "us-west8",
 ] as const;
 
 /** Exact REP locations verified 2026-11-13: https://docs.cloud.google.com/docs/security/compliance/restrict-endpoint-usage */
@@ -31,7 +35,7 @@ const GOOGLE_DUMMY_KEY_VARS = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 
 const BUILTIN_ROWS_DATA = {
   schemaVersion: 1,
-  revision: 3,
+  revision: 5,
   rows: [
     {
       id: "gemini",
@@ -86,7 +90,7 @@ const BUILTIN_ROWS_DATA = {
         "Paths seen: /v1beta1/publishers/google/models/<m>:generateContent (express), /v1beta1/projects/<p>/locations/<l>/publishers/google/models/<m>:generateContent, /v1/projects/... (vertexai REST). Any version prefix.",
         "Express mode sends x-goog-api-key; project and location mode sends Authorization: Bearer <token>, plus x-goog-user-project only when the credentials carry a quota project.",
         "Google's token hosts (oauth2, sts, iamcredentials) are authHosts, NOT blocked: they serve every Google API; the helper drops any bearer. Only Vertex rounds without a project credential use the metadata stand-in.",
-        "UNVERIFIED: the list of Vertex locations, and the mtls hosts (aiplatform.mtls.googleapis.com and the regional ones), are not checked against Google's current list. Hosts are listed by name, never as *.googleapis.com; a catalog release adds a location.",
+        "UNVERIFIED: the retained northamerica-south1 location is absent from the checked Google endpoint lists; no REP name is inferred for it. Other locational and REP/mTLS names were checked against the documented endpoint inventory. Hosts are listed by name, never as *.googleapis.com.",
         "A client that calls a Google AI host that is not listed is reported 'unlisted model host' by findRedirectEscapes, never silently let through.",
         "UNVERIFIED: enum-as-int answers for the ?$alt=json;enum-encoding=int clients (same as the gemini row).",
         "Vertex's OpenAI-compatible endpoint is .../endpoints/openapi (the router serves it); its key is a short-lived OAuth token the customer's code fetches.",
@@ -114,7 +118,8 @@ const BUILTIN_ROWS_DATA = {
     {
       id: "openai",
       kind: "provider",
-      hosts: ["api.openai.com"],
+      // Residency endpoints: https://developers.openai.com/api/docs/guides/your-data#data-residency
+      hosts: ["api.openai.com", "eu.api.openai.com", "us.api.openai.com"],
       authHosts: [],
       family: "openai_compatible",
       pathPrefix: "/v1",
@@ -152,7 +157,8 @@ const BUILTIN_ROWS_DATA = {
     {
       id: "mistral",
       kind: "provider",
-      hosts: ["api.mistral.ai"],
+      // Dedicated code-model endpoint: https://mistral.ai/news/codestral
+      hosts: ["api.mistral.ai", "codestral.mistral.ai"],
       authHosts: [],
       family: "openai_compatible",
       pathPrefix: "/v1",
@@ -195,7 +201,8 @@ const BUILTIN_ROWS_DATA = {
       id: "azure-openai",
       kind: "provider",
       hosts: [],
-      hostSuffixes: ["openai.azure.com"],
+      // Foundry public DNS zones: https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-dns
+      hostSuffixes: ["openai.azure.com", "cognitiveservices.azure.com", "services.ai.azure.com"],
       authHosts: [],
       family: "openai_compatible",
       pathPrefix: "/openai",
@@ -203,7 +210,21 @@ const BUILTIN_ROWS_DATA = {
       redirect: [{ kind: "env_var", client: "Azure OpenAI SDKs", names: ["AZURE_OPENAI_ENDPOINT"], companion: ["AZURE_OPENAI_API_KEY"], verified: false, note: "UNVERIFIED: not in the redirect check. The deployment path and api-version query are the customer's." }],
       streaming: ["sse"],
       errors: errorIds("openai_compatible"),
-      notes: ["UNVERIFIED: every Azure OpenAI resource is its own <resource>.openai.azure.com, so this row names a host SUFFIX. A hosts file cannot hold a pattern: the block is by DNS suffix (modelHostSuffixBlockList), and the finder reports a call to any subdomain.", "UNVERIFIED: paths look like /openai/deployments/<deployment>/chat/completions?api-version=...; the router serves them."],
+      notes: ["Azure OpenAI and Foundry resources use the documented openai.azure.com, cognitiveservices.azure.com and services.ai.azure.com suffixes. A hosts file cannot hold a pattern: the block is by DNS suffix (modelHostSuffixBlockList), and the finder reports a call to any subdomain.", "UNVERIFIED: paths look like /openai/deployments/<deployment>/chat/completions?api-version=...; the router serves them."],
+    },
+    {
+      id: "azure-ai-inference",
+      kind: "provider",
+      // Microsoft SDK endpoint forms: https://github.com/MicrosoftDocs/azure-docs-sdk-python/blob/main/docs-ref-services/preview/ai-inference-readme.md
+      hosts: ["models.inference.ai.azure.com"],
+      hostSuffixes: ["models.ai.azure.com"],
+      authHosts: [],
+      family: "openai_compatible",
+      auth: [{ scheme: "bearer" }, { scheme: "header", name: "api-key" }],
+      redirect: [{ kind: "sdk_option", client: "Azure AI Inference SDKs", option: "endpoint option of the client", needsRestTransport: false, verified: false, note: "UNVERIFIED: endpoint redirect has not been run against the helper." }],
+      streaming: ["sse"],
+      errors: errorIds("openai_compatible"),
+      notes: ["Microsoft documents models.inference.ai.azure.com for GitHub Models and <deployment>.<region>.models.ai.azure.com for serverless inference. A hosts file needs exact names; suffixes are for DNS blocking and the finder.", "UNVERIFIED: authentication, streaming and helper compatibility have not been exercised with the SDK. Inference uses /chat/completions, without Azure OpenAI's deployment prefix."],
     },
     {
       id: "openrouter",
