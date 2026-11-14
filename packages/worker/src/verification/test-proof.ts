@@ -153,7 +153,7 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
 
   const subPlan: CheckPlan = { source: "project", readiness: runIndexes.map((index) => commands[index]!), projectBefore: runIndexes.map(() => "unknown" as const) };
   // Every repository shows its original tree (an empty overlay when it has no changed test), so old and new code are never mixed across repositories.
-  const originalCode = (options.originalCode ?? gitOriginalCode)(perRepository
+  const originalCode = (options.originalCode ?? options.runners.originalCode ?? gitOriginalCode)(perRepository
     .map(({ repository, changed }) => ({ directory: repository.directory, commit: repository.startCommit, overlay: changed.paths })));
   const budgetMs = Math.max(0, Math.min(options.capMs ?? TEST_PROOF_CAP_MS, options.budgetMs));
   let ran: { entries: CheckEntry[]; oldReports: Map<number, ReadResult> };

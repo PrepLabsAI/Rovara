@@ -59,7 +59,7 @@ export async function runBaselineScans(scans: readonly BaselineScan[], run: Base
   const now = run.now ?? Date.now;
   if (scans.length === 0 || run.signal.aborted || run.budgetMs < MIN_BASELINE_BUDGET_MS || run.repositories.length === 0) return found;
   const subPlan: CheckPlan = { source: "project", readiness: scans.map((scan) => scan.command), projectBefore: scans.map(() => "unknown" as const) };
-  const originalCode = (run.originalCode ?? gitOriginalCode)(run.repositories.map((repository) => ({ directory: repository.directory, commit: repository.commit })));
+  const originalCode = (run.originalCode ?? run.runners.originalCode ?? gitOriginalCode)(run.repositories.map((repository) => ({ directory: repository.directory, commit: repository.commit })));
   // A stop that could not be confirmed: the scan files are not put back either, because a command that may still be running would write over them.
   let unconfirmedStop = false;
   try {
