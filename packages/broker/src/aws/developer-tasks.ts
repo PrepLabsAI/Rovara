@@ -204,6 +204,7 @@ import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/p
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
+import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader, type TaskReaderPerson } from "./task-readers.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
 import { operationKey } from "./cancellation.js";
@@ -260,6 +261,8 @@ export interface DeveloperTaskRouteDependencies {
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string };
   checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
+  /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
+  taskReaderPerson?(developerId: string, project: string): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
   boundChannels?(channelIds: readonly string[]): Promise<BoundChannel[]>;
   /**
@@ -556,6 +559,34 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
     throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
   return task;
+}
+
+/**
+ * Spec 067: the task for a read, and who reads it: its owner, or a reader it is shared with who is still a member of its project.
+ * Anyone else gets the owner check's own TASK_NOT_FOUND, so a shared task reads like any other task that isn't theirs.
+ */
+async function loadReadableTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ task: DeveloperTaskRecord; actor: "owner" | "viewer" }> {
+  try {
+    return { task: await loadOwnedTask(deps, caller, taskId), actor: "owner" };
+  } catch (error) {
+    if (!TASK_ID.test(taskId) || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
+    const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+    if (task !== undefined && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
+    throw error;
+  }
+}
+
+/** Spec 067: the task's owner shares it, unshares it and lists who reads it. A reader is told only the owner may; anyone else reads not found. */
+async function routeTaskReaders(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, taskId: string, developerId: string | undefined): Promise<unknown> {
+  const { task, actor } = await loadReadableTask(deps, caller, taskId);
+  if (actor !== "owner") throw agentXError("FORBIDDEN", "only the task's owner can share it");
+  if (developerId === undefined) {
+    if (request.method === "GET") return listTaskReaders(deps, task);
+    throw agentXError("NOT_FOUND", "route not found");
+  }
+  if (request.method === "PUT") return grantTaskReader(deps, task, caller.developerId, developerId, body(request));
+  if (request.method === "DELETE") return revokeTaskReader(deps, task, caller.developerId, developerId);
+  throw agentXError("NOT_FOUND", "route not found");
 }
 
 interface AuthorizedTask extends TaskAccess {
@@ -1617,7 +1648,10 @@ const whole = (value: string | null, fallback: number, min: number, max: number,
 async function readTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ task: DeveloperTaskView }> {
   // R8, R11: the owner always reads their own task; access is not checked again.
   const events = whole(url.searchParams.get("events"), DEVELOPER_EVENTS_DEFAULT, 0, DEVELOPER_EVENTS_MAX, "events");
-  let task = await loadOwnedTask(deps, caller, taskId);
+  const readable = await loadReadableTask(deps, caller, taskId);
+  // Spec 067: a reader's read writes nothing (no close completion, no index update) and sees the task page's viewer view.
+  if (readable.actor === "viewer") return { task: await taskView(deps, readable.task, { events, details: true, actor: "viewer" }) };
+  let task = readable.task;
   let loaded: WorkspaceReads | undefined = await workspaceReads(deps, task);
   // R15: a safe close whose completion did not land is finished by the next read. The view reuses
   // the reads unless the close landed and changed them.
@@ -1719,8 +1753,8 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
 }
 
 async function taskEvents(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ events: DeveloperTaskView["events"] }> {
-  const task = await loadOwnedTask(deps, caller, taskId);
-  return { events: (await taskView(deps, task, { events: whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit"), details: false })).events };
+  const { task, actor } = await loadReadableTask(deps, caller, taskId);
+  return { events: (await taskView(deps, task, { events: whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit"), details: false, actor })).events };
 }
 
 const CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
@@ -6249,6 +6283,8 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
     const requestId = safeDecode(proposalRoute[2]!);
     return { change: await getTaskPeopleProposal(deps, caller, taskId, requestId) };
   }
+  const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
+  if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
   const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);

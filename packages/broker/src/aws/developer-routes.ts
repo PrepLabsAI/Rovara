@@ -786,6 +786,22 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
   };
 }
 
+/** What the project member reads and changes (spec 065) need. */
+function memberActions(deps: DeveloperRouteDependencies) {
+  return {
+    documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName,
+    ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
+    limitDefaults: { member: 0, organization: 0 }, now: deps.now,
+  };
+}
+
+/** Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. */
+async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string): Promise<{ name: string; projectMember: boolean } | undefined> {
+  const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${developerId}`);
+  if (person === undefined || person.revoked === true) return undefined;
+  return { name: person.displayName ?? "Unknown", projectMember: await projectGrant(memberActions(deps), project, developerId) !== undefined };
+}
+
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
@@ -826,11 +842,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   const project = decodeURIComponent(members[1]!);
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
-  const actions = {
-    documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName,
-    ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
-    limitDefaults: { member: 0, organization: 0 }, now: deps.now,
-  };
+  const actions = memberActions(deps);
   // FR-004: as the person: they administer the project, or they are a Rovara administrator.
   const own = await projectGrant(actions, project, caller.developerId);
   if (!caller.administrator && own?.role !== "administrator") throw agentXError("FORBIDDEN", `you don't administer ${project}; ask one of its administrators`);
@@ -1114,6 +1126,7 @@ export function developerTaskRouteDependencies(
     ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
     checkAccess: (project) => checkProjectAccess(deps, caller, project),
+    taskReaderPerson: (developerId, project) => taskReaderPerson(deps, developerId, project),
     channelMember: async (slackUserId, channelId) => {
       const answer = await safeChannelMembers(deps)({ kind: "channel-members", slackUserId, channelIds: [channelId] });
       if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your membership of that channel; try again shortly");

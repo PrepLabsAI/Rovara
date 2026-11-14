@@ -126,6 +126,7 @@ export * from "./checks-reply.js";
 export * from "./cancel-callback-key.js";
 export * from "./task-comments.js";
 export * from "./task-people.js";
+export * from "./task-readers.js";
 export * from "./e2e-openapi-fixture.js";
 export * from "./e2e-executor.js";
 export * from "./e2e-model-channel.js";
