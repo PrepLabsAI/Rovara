@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EvidenceRawSchema, type CheckEntry, type ProjectCommand } from "../../packages/contracts/src/index.js";
 import { collectEvidenceRaw, saveEvidenceRaw } from "../../packages/worker/src/verification/evidence-raw.js";
 import { SARIF_MAX_RESULTS, SARIF_REPORT_MAX_BYTES, findingsPart, newFindings, parseSarif, plainMessage, readsPrebuiltState, repositoryPathOf, sameFindings, sarifPathOf } from "../../packages/worker/src/verification/sarif.js";
+import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
 import { BASELINE_CAP_MS, MIN_BASELINE_BUDGET_MS, runBaselineScans, type BaselineScan } from "../../packages/worker/src/verification/sarif-baseline.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
@@ -293,6 +294,17 @@ describe("the baseline run on the original code", () => {
     expect([...found]).toEqual([[0, "baseline sarif"]]);
     expect(events).toEqual(["original shown", "agent files back"]);
     expect(Buffer.compare(await readFile(join(root, "bandit.sarif")), CANDIDATE)).toBe(0);
+  });
+
+  it("a stop that could not be confirmed is rethrown and the candidate's file is NOT put back (a command that may still run would overwrite it) (FIX-RUNNER-ABORT-JOIN)", async () => {
+    const stuck: CheckRunners = {
+      async runProjectCommand() { throw new RunnerKillUnconfirmedError({ kind: "local" }); },
+      async runAgentCommand() { throw new Error("not used"); },
+    };
+    const target = await scan();
+    await expect(runBaselineScans([target], run({ runners: stuck, originalCode: passthrough([]) }))).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
+    // The file was removed before the run and is still gone: nothing wrote the workspace after the stop.
+    await expect(readFile(join(root, "bandit.sarif"))).rejects.toThrow(/ENOENT/);
   });
 
   it("does not read a file the baseline run did not write (the candidate's file is removed first), a run that timed out, or one that never ran", async () => {
