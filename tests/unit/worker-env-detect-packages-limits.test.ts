@@ -77,11 +77,12 @@ describe("workspace call limits", () => {
   it("ends the whole call while discovery is waiting on a loader", async () => {
     const started = performance.now();
     const reads: string[] = [];
-    const result = await detectWorkspacePackages(["pnpm-workspace.yaml"], (path) => { reads.push(path); return new Promise(() => {}); }, "repo", { entry, timeoutMs: 2000 });
+    // The deadline must outlast detector-thread start-up on a loaded CI runner (2 s did not), so the loader is reached and then the call ends.
+    const result = await detectWorkspacePackages(["pnpm-workspace.yaml"], (path) => { reads.push(path); return new Promise(() => {}); }, "repo", { entry, timeoutMs: 6000 });
     expect(result).toMatchObject({ kind: "unavailable", units: [] });
     expect(reads).toEqual(["pnpm-workspace.yaml"]);
-    expect(performance.now() - started).toBeLessThan(5000);
-  }, 8000);
+    expect(performance.now() - started).toBeLessThan(10_000);
+  }, 20_000);
 
   it("stops uncached loads inside a detector after the shared budget is exhausted", async () => {
     const files: Files = { "pnpm-workspace.yaml": "packages: ['a']", "a/package.json": node };
