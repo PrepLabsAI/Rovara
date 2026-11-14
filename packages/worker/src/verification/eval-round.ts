@@ -82,6 +82,8 @@ export interface EvalRoundInput {
   /** Hashes the hidden set's directory (default `hashEvalDirectory`); the round mounts the set only when this equals the hash the source gave. */
   readonly hashHiddenSet?: (hostPath: string) => Promise<string>;
   readonly cache: BaseScoreCache;
+  /** F3d trusted setup/merge coordinator. On a miss only; never grants spending authority itself. */
+  readonly prepareBaseline?: (key: EvalBaseCacheKeyParts) => Promise<"ready" | "measuring" | "unavailable">;
   /** The project's hidden eval set, when it keeps one. */
   readonly hiddenSet?: HiddenEvalSetSource;
   /** @deprecated F3d owns initial measurement and background refresh; never called during a task. */
@@ -212,6 +214,13 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
     settingsFingerprint: evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: input.settings.imageDigest, route: input.settings.route, judgePin: config.judgePin })) };
   let base: EvalBaseRecord | undefined;
   try { evalBaseCacheKey(parts); base = await input.cache.read(parts); } catch { return refuse("no_base_score"); }
+  if (base?.questions === undefined && input.prepareBaseline !== undefined) {
+    try {
+      const state = await input.prepareBaseline(parts);
+      if (state === "measuring") return finish({ ...evalNotRunResult({ roundKind: input.roundKind, reason: "no_base_score", hiddenSetUsed: hidden }), notices: hidden ? [] : ["baseline still being measured"] });
+      if (state === "ready") base = await input.cache.read(parts);
+    } catch { return refuse("no_base_score"); }
+  }
   const parsedBase = EvalBaseRecordSchema.safeParse(base);
   if (!parsedBase.success || parsedBase.data.questions === undefined) return refuse("no_base_score");
   base = parsedBase.data;

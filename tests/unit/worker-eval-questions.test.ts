@@ -1,7 +1,9 @@
-import { attestRovaraOnlyBaseCheckout, ModelEgressFrameSchema, evalCaseCallVia, runEvalCasesPaced } from "@agentx/contracts";
+import { attestRovaraOnlyBaseCheckout, createDocumentBaseScoreCache, ModelEgressFrameSchema, evalCaseCallVia, runEvalCasesPaced } from "@agentx/contracts";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { runEvalHealth } from "../../packages/worker/src/verification/eval-health.js";
 import { runEvalRound, type EvalRoundInput } from "../../packages/worker/src/verification/eval-round.js";
 import { evalFactsAllRun } from "../../packages/contracts/src/eval-pacing.js";
 import { evalCommandFingerprint, type EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
@@ -241,4 +243,35 @@ it.each(["calls", "coverage_negative", "coverage_excess", "report_hash", "report
   });
   expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: mode === "report_hash" ? "eval_set_changed" : mode === "report_missing" ? "no_measures_file" : "invalid_question_data" } } });
   expect(requests).toHaveLength(mode === "baseline_ids" ? 0 : 1);
+});
+
+it("says baseline still being measured without waiting or making task calls", async () => {
+  const { input, requests } = await setup();
+  const result = await runEvalRound({ ...input, cache: { ...input.cache, read: async () => undefined }, prepareBaseline: async () => "measuring" });
+  expect(result).toMatchObject({ result: { label: "Not run", notices: ["baseline still being measured"] } });
+  expect(requests).toHaveLength(0);
+});
+it("takes a fresh baseline in-task only on a cache miss and reads it again before comparing", async () => {
+  const { input, record, requests } = await setup(); let fresh = false; let refreshes = 0;
+  const prepared = { ...input, cache: { ...input.cache, read: async () => fresh ? record : undefined }, prepareBaseline: async () => { refreshes++; fresh = true; return "ready" as const; } };
+  expect(await runEvalRound(prepared)).toMatchObject({ result: { label: "Worse on eval" } });
+  expect(refreshes).toBe(1); expect(requests.length).toBeGreaterThan(0);
+  await runEvalRound(prepared); expect(refreshes).toBe(1);
+});
+it("compares a task against the actual dependency-keyed three-run setup baseline", async () => {
+  const { input, record } = await setup(3); const plan = input.questionPlan!;
+  const key = { ...input.key, codeHash: "e".repeat(64), judgePin: plan.judgePin, evalSetHash: hash, hiddenSetHash: "none", settingsFingerprint: evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: input.settings.imageDigest, route: input.settings.route, judgePin: plan.judgePin })) };
+  const cache = createDocumentBaseScoreCache(new MemoryDocumentStore(), { companyId: key.company });
+  const measured = await runEvalHealth({ key, selection: "eval", cache, questionIds: plan.questions.map(q => q.id), maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
+    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "admin", provider: "customer", connected: true, maxCalls: 200, maxCostMicros: 2_000_000 }) },
+    meter: { reserve: async () => ({ call: async () => ({ class: "ok" as const, calls: 1, costMicros: 10 }), close: async () => {} }) },
+    run: async ({ call }) => {
+      const world = fakeModelEgressWorld();
+      for (let i = 0; i < plan.questions.length; i++) await call(ModelEgressFrameSchema.parse(validFrame(world.rows.gemini!, world.connection)));
+      return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: key.baseCommit }), seconds: 1,
+        measures: { schemaVersion: 1, source: "project_runner", eval_set_hash: hash, measures: record.measures, questions: record.questions!.map(q => ({ id: q.id, samples: [q.samples[0]!] })) } };
+    },
+  });
+  expect(measured.status).toBe("measured");
+  expect(await runEvalRound({ ...input, key, cache })).toMatchObject({ cache: "hit", result: { label: "Worse on eval" } });
 });

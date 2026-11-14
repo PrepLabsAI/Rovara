@@ -1,4 +1,4 @@
-// TE-F3 (part A): the base score cache. An eval's score on the base commit is expensive (model calls), so Rovara keeps the last one it measured, keyed by everything the score depends on. This is NOT TE-C1's baseline: C1 (a
+// TE-F3/F3d: the base score cache. An eval's score on the base commit is expensive (model calls), so Rovara keeps the last one it measured, keyed by everything the score depends on. This is NOT TE-C1's baseline: C1 (a
 // baseline per base commit, nearest trusted ancestor, trusted writers) will implement the same `BaseScoreCache` seam and reuse `evalBaseCacheKey`; switching is one constructor change, and old records are a cache, so they are
 // dropped, not migrated (DECISIONS 152a: nothing to read first).
 //
@@ -45,8 +45,12 @@ export type EvalBaseRecord = z.infer<typeof EvalBaseRecordSchema>;
 export interface EvalBaseCacheKeyParts {
   readonly company: string;
   readonly project: string;
-  /** The base commit: 40 hex (SHA-1) or 64 hex (SHA-256 repositories). */
+  /** Writer attestation commit (40/64 hex). V1 keys include it; dependency-keyed V2 reads do not. */
   readonly baseCommit: string;
+  /** Trusted hash of ALL code files at this revision; omit only for legacy per-commit records. */
+  readonly codeHash?: string;
+  /** Pinned scorer/judge, required together with codeHash. */
+  readonly judgePin?: string;
   readonly evalSetHash: string;
   readonly hiddenSetHash: string;
   /** `evalCommandFingerprint` of the eval command. */
@@ -139,6 +143,13 @@ export function evalBaseCacheKey(parts: EvalBaseCacheKeyParts): string {
   }
   const named: Record<string, string> = {};
   for (const [name] of PART_RULES) named[name] = held[name] as string;
+  if (parts.codeHash !== undefined || parts.judgePin !== undefined) {
+    if (typeof parts.codeHash !== "string" || !/^[a-f0-9]{64}$/u.test(parts.codeHash) || typeof parts.judgePin !== "string" || !/^[a-f0-9]{64}$/u.test(parts.judgePin)) throw new RangeError("the code hash and judge pin are required together");
+    delete named["baseCommit"];
+    named["codeHash"] = parts.codeHash;
+    named["judgePin"] = parts.judgePin;
+    return sha256HexOf(new TextEncoder().encode(`rovara-eval-base/v2\n${canonicalJson(named)}`));
+  }
   return sha256HexOf(new TextEncoder().encode(`${KEY_DOMAIN}${canonicalJson(named)}`));
 }
 

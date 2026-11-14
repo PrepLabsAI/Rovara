@@ -348,3 +348,4 @@ export * from "./eval-hidden-set.js";
 export * from "./eval-pacing.js";
 export * from "./eval-base-cache.js";
 export * from "./eval-check.js";
+export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter } from "./ports/eval-health.js";

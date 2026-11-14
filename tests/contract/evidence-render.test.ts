@@ -308,7 +308,7 @@ describe("inert text", () => {
 });
 
 describe("no callers", () => {
-  it("v2 readers and writers have no production callers yet; inert text is shared by B3 and A4", () => {
+  it("v2 readers and writers have no production callers yet; inert text is shared by B3, A4 and eval health", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
     const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
@@ -325,9 +325,9 @@ describe("no callers", () => {
       expect([0, 1]).toContain(found.status);
       return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
     };
-    const inertCallers = new Set(["packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/test-report.ts"]);
+    const inertCallers = new Set(["packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/test-report.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts"]);
     expect(callers(names).filter((file) => !inertCallers.has(file))).toEqual([]);
-    // These two files may share only inert text; every other v2 export remains forbidden in both.
+    // These files may share only inert text; every other v2 export remains forbidden in both.
     expect(callers(names.filter((name) => name !== "inertEvidenceText"))).toEqual([]);
   });
 });
