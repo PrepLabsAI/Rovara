@@ -18,7 +18,7 @@ async function docsChange() {
   return { model, head, number: Number(cr.id), branch: "feature" };
 }
 const tierOf = async (host: CodeHost, number: number, headSha: string): Promise<{ tier: ChangeTier; entries: unknown[] }> => {
-  const read = await readTierInput([{ host, repositoryId: "app", repositoryUrl: repository.url, number, headSha }], scope as HostScope);
+  const read = await readTierInput([{ host, repositoryId: "app", repositoryUrl: repository.url, number, headSha }], scope);
   return { tier: tierFromDiff(read.diff, { headSha, mergeBase: "b".repeat(40), at: AT, head: read.head }), entries: read.diff.files.map((file) => file.entry) };
 };
 
