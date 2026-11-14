@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvalSpendGrant, EvalMeterCall, EvalMeterReservation, MonthlyMeter } from "@agentx/contracts";
-import { realModelCheckLine, realModelPassed } from "../../packages/contracts/src/real-model-check.js";
+import { RealModelCheckSchema, RealModelCheckWriteSchema, realModelCheckLine, realModelPassed } from "../../packages/contracts/src/real-model-check.js";
 import { runRealModelTests, selectChangedAiTests, type RealModelTestsInput, type ScriptedAiTest } from "../../packages/worker/src/verification/real-model-tests.js";
 
 const test = (name = "one", calls: number | "unknown" = 1): ScriptedAiTest => ({ checkId: "unit", test: `tests/ai.test.ts::${name}`, modelCalls: calls, modelFiles: ["src/model.ts"] });
@@ -60,13 +60,22 @@ describe("real model spend and runs", () => {
     expect(realModelCheckLine(r)).not.toContain("unknown");
   });
   it.each([
-    ["company", { company: "company-b" }], ["project", { project: "project-b" }], ["selection", { selection: "eval" }],
-    ["provider", { provider: "rovara" }], ["role", { role: "member" }], ["connected", { connected: false }],
-    ["calls", { maxCalls: 1 }], ["cost", { maxCostMicros: 1 }], ["numeric", { maxCalls: NaN }], ["digest", { inputsDigest: "bad" }],
-  ])("refuses invalid grant %s with zero calls", async (_name, patch) => {
+    ["company", { company: "company-b" }, "approval_invalid", "product key approval does not cover these tests"],
+    ["project", { project: "project-b" }, "approval_invalid", "product key approval does not cover these tests"],
+    ["selection", { selection: "eval" }, "approval_invalid", "product key approval does not cover these tests"],
+    ["provider", { provider: "rovara" }, "approval_invalid", "product key approval does not cover these tests"],
+    ["role", { role: "member" }, "approval_invalid", "product key approval does not cover these tests"],
+    ["connected", { connected: false }, "no_product_key", "no product AI key is connected"],
+    ["calls", { maxCalls: 1 }, "grant_cap", "the approved call or cost ceiling cannot fit these tests"],
+    ["cost", { maxCostMicros: 1 }, "grant_cap", "the approved call or cost ceiling cannot fit these tests"],
+    ["numeric", { maxCalls: NaN }, "approval_invalid", "product key approval does not cover these tests"],
+    ["digest", { inputsDigest: "bad" }, "approval_invalid", "product key approval does not cover these tests"],
+  ])("refuses invalid grant %s with zero calls", async (_name, patch, reason, words) => {
     const w = world(); Object.assign(w.grant, patch);
     const r = await runRealModelTests(w.input);
-    expect(r.status).toBe("not_run"); expect(w.call).not.toHaveBeenCalled(); expect(w.reserve).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ status: "not_run", reason });
+    expect(realModelCheckLine(r)).toBe(`Real model check: not run: ${words}.`);
+    expect(w.call).not.toHaveBeenCalled(); expect(w.reserve).not.toHaveBeenCalled(); expect(w.run).not.toHaveBeenCalled();
     expect(realModelCheckLine(r)).not.toMatch(/company-b|project-b|rovara|member|NaN/);
   });
   it("refuses absent or throwing approval and denied monthly reservation", async () => {
@@ -370,4 +379,43 @@ it("emits test-level evidence without attesting the whole check", async () => {
   expect(realModelPassed(r, "unit", test().test)).toBe(true);
   expect(realModelPassed(r, "unit")).toBe(false);
   expect(realModelPassed(r, "other", test().test)).toBe(false);
+});
+
+// REVIEW-1's two-test probe: 192a preserves run totals when inspecting one item.
+it("192a re-wrap confirms each readiness:0 test from a two-test worker artifact", async () => {
+  const w = world();
+  w.input.selection.tests = [test("one"), test("two")].map(row => ({ ...row, checkId: "readiness:0" }));
+  const written = RealModelCheckWriteSchema.parse(await runRealModelTests(w.input));
+  expect(written.candidateDigest).toBe(w.input.candidateDigest);
+  expect(written.totals).toEqual({ selected: 2, passed: 2, passedOnRerun: 0, failed: 0, notRun: 0 });
+  const run = RealModelCheckSchema.parse(written);
+  for (const item of run.items) {
+    expect(item.checkId).toBe("readiness:0");
+    expect(realModelPassed(written, "readiness:0", item.test)).toBe(true);
+    expect(realModelPassed({ ...run, items: [item] }, "readiness:0", item.test)).toBe(true);
+    expect(realModelPassed({ ...run, items: [item] }, "readiness:0")).toBe(false);
+  }
+  expect(realModelPassed(written, "readiness:0")).toBe(false);
+  // A whole-check pass needs its own explicit attestation; selected tests cannot supply it.
+  const whole = RealModelCheckWriteSchema.parse({ ...written, items: [{ checkId: "readiness:0", result: "passed" }], totals: { selected: 1, passed: 1, passedOnRerun: 0, failed: 0, notRun: 0 } });
+  expect(realModelPassed(whole, "readiness:0")).toBe(true);
+  expect(realModelPassed(whole, "readiness:0", test("one").test)).toBe(false);
+});
+
+it("stops dispatch exactly at the $2 task cap even when the grant is larger", async () => {
+  const w = world();
+  Object.assign(w.grant, { maxCostMicros: 10_000_000 });
+  w.input.costAlreadyUsedMicros = 1_999_000;
+  w.input.maxCostMicrosPerCall = 500; // Both reserved calls fit before the first settles at $2.
+  w.call.mockResolvedValue({ class: "ok", calls: 1, costMicros: 1000 });
+  w.run.mockImplementation(async ({ ids, call }) => {
+    await call({} as Parameters<typeof call>[0]);
+    await expect(call({} as Parameters<typeof call>[0])).rejects.toThrow("real model call unavailable");
+    return { model: "model", items: ids.map(id => ({ ...id, result: "passed" as const })) };
+  });
+  const r = await runRealModelTests(w.input);
+  expect(w.reserve).toHaveBeenCalledWith({ approval: w.grant, calls: 2, costMicros: 1000 });
+  expect(w.call).toHaveBeenCalledOnce(); expect(w.close).toHaveBeenCalledOnce();
+  expect(r).toMatchObject({ reason: "task_cap", calls: 1, costMicros: 1000, totals: { passed: 1 } });
+  expect(realModelCheckLine(r)).toContain("not run: test model budget reached ($2.00 per task).");
 });

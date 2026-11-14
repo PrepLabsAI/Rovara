@@ -3,7 +3,7 @@ import { z } from "zod";
 import {
   EVAL_NOT_RUN_CLASSES, EVAL_PACING_DEFAULTS, REAL_MODEL_NOT_RUN, TEST_ID_MAX, isRerunnableTestId,
   type EvalMeterReservation, type EvalSpendApproval, type EvalSpendGrant, type MonthlyMeter,
-  type RealModelCheck, type RealModelNotRunReason, type EvalRoundKind,
+  type RealModelCheckWriteSchema, type RealModelNotRunReason, type EvalRoundKind,
 } from "@agentx/contracts";
 import { withStepTimeout } from "../agent-step.js";
 import { tierRequestsEval, type EvalTrigger, type EvalRoundInput } from "./eval-round.js";
@@ -65,6 +65,7 @@ export function selectChangedAiTests(raw: unknown): ChangedAiTests {
 }
 
 type TestIdentity = Pick<ScriptedAiTest, "checkId" | "test">;
+type WrittenCheck = z.infer<typeof RealModelCheckWriteSchema>;
 export interface RealModelTestsInput {
   candidateDigest: string; company: string; project: string;
   trigger: EvalTrigger; tier?: EvalRoundInput["tier"]; roundKind: EvalRoundKind;
@@ -91,11 +92,11 @@ const outputSchema = z.object({ model: z.string().min(1).max(160), items: z.arra
 const identity = (item: TestIdentity): string => JSON.stringify([item.checkId, item.test]);
 
 /** Run once and re-run just failures once. The stage holds only its own estimate; task use is cumulative. */
-export async function runRealModelTests(raw: RealModelTestsInput): Promise<RealModelCheck> {
+export async function runRealModelTests(raw: RealModelTestsInput): Promise<WrittenCheck> {
   const valid = headerSchema.safeParse(raw);
   const candidateDigest = valid.success ? valid.data.candidateDigest : "0".repeat(64);
-  let items: Array<RealModelCheck["items"][number] & TestIdentity> = []; let calls = 0; let costMicros = 0; let model: string | null = null;
-  const finish = (reason?: RealModelNotRunReason, tooManyCount?: number, skipped = false): RealModelCheck => {
+  let items: Array<WrittenCheck["items"][number] & TestIdentity> = []; let calls = 0; let costMicros = 0; let model: string | null = null;
+  const finish = (reason?: RealModelNotRunReason, tooManyCount?: number, skipped = false): WrittenCheck => {
     const totals = { selected: items.length, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 };
     for (const item of items) totals[item.result === "passed_on_rerun" ? "passedOnRerun" : item.result === "not_run" ? "notRun" : item.result] += 1;
     const status = skipped ? "skipped" : totals.selected === totals.notRun ? "not_run" : reason !== undefined || totals.notRun > 0 || items.some(i => i.result === "failed" && i.reason !== undefined) ? "partly_run" : "completed";

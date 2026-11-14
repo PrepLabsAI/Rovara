@@ -80,7 +80,11 @@ function consistent(r: Result): boolean {
 }
 /** Strict worker writer; tolerant readers strip additional fields, never discard malformed items. */
 export const RealModelCheckWriteSchema = z.object({ ...shape, items: z.array(z.object(itemShape).strict()).max(REAL_MODEL_CHECK_ITEMS_MAX), totals: z.object(totalsShape).strict() }).strict().refine(consistent);
-export const RealModelCheckSchema = reader.refine(consistent);
+// TE-192a reads minimal evidence and re-wraps single items with the original run's accounting.
+// Accounting remains validated when present, but is not needed to confirm an exact result.
+export const RealModelCheckSchema = reader.partial({ status: true, calls: true, costMicros: true, model: true, totals: true })
+  .refine(r => new Set(r.items.map(item => JSON.stringify([item.checkId, item.test]))).size === r.items.length);
+const summaryReader = reader.refine(consistent);
 export type RealModelCheck = z.infer<typeof RealModelCheckSchema>;
 
 /** Exact check/test match only; neither level implies the other. Callers also match candidateDigest. */
@@ -92,7 +96,7 @@ export function realModelPassed(raw: unknown, checkId: string, testId?: string):
 }
 
 export function realModelCheckLine(raw: unknown): string | undefined {
-  const parsed = RealModelCheckSchema.safeParse(raw);
+  const parsed = summaryReader.safeParse(raw);
   if (!parsed.success) return `Real model check: ${REAL_MODEL_NOT_RUN.invalid_results}.`;
   const r = parsed.data;
   if (r.status === "skipped") return undefined;

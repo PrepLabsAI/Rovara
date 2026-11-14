@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { REAL_MODEL_CHECK_ARTIFACT, RealModelCheckSchema, RealModelCheckWriteSchema, realModelCheckLine, realModelPassed, type RealModelCheck } from "../../packages/contracts/src/real-model-check.js";
+import type { z } from "zod";
+import { REAL_MODEL_CHECK_ARTIFACT, RealModelCheckSchema, RealModelCheckWriteSchema, realModelCheckLine, realModelPassed } from "../../packages/contracts/src/real-model-check.js";
 
-function result(): RealModelCheck {
+function result(): z.infer<typeof RealModelCheckWriteSchema> {
   return { schemaVersion: 1, candidateDigest: "a".repeat(64), status: "completed", items: [{ checkId: "unit", test: "test_refund", result: "passed" }], totals: { selected: 1, passed: 1, passedOnRerun: 0, failed: 0, notRun: 0 }, calls: 3, costMicros: 40_000, model: "gemini-2.5-flash" };
 }
 describe("real model artifact", () => {
@@ -17,8 +18,7 @@ describe("real model artifact", () => {
     { items: [{ checkId: "unit", test: "x", result: "unknown" }] }, { items: [{ checkId: "unit", test: "x" }] },
     { items: [{ checkId: "unit", test: "x".repeat(501), result: "passed" }] },
     { items: [{ checkId: "unit", test: "x", result: "passed", reason: "secret cause" }] },
-    { items: Array.from({ length: 201 }, () => result().items[0]) }, { totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 } },
-    { model: null }, { calls: 0 }, { items: [{ checkId: "unit", test: "x", result: "not_run" }], status: "not_run", reason: "run_unavailable", totals: { selected: 1, passed: 0, passedOnRerun: 0, failed: 0, notRun: 1 } },
+    { items: Array.from({ length: 201 }, () => result().items[0]) },
   ])("refuses malformed whole artifacts without leaking %j", patch => {
     const raw = { ...result(), ...patch };
     expect(RealModelCheckSchema.safeParse(raw).success).toBe(false);
@@ -50,6 +50,64 @@ describe("real model artifact", () => {
     const start = performance.now();
     expect(realModelCheckLine({ ...result(), model: "x".repeat(1_000_000) })).toBe("Real model check: not run: real model results could not be read.");
     expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe("TE-192a reference reader", () => {
+  // Exact minimal fixture shape from TE-192a's real-model-check contract tests.
+  const item = { checkId: "readiness:0", test: "a", result: "passed" };
+  const run = (items: unknown[] = [item]) => ({ schemaVersion: 1, candidateDigest: "1".repeat(64), items });
+  it.each(["passed", "passed_on_rerun", "failed", "not_run"])("reads minimal reference %s at both levels", state => {
+    for (const entry of [{ ...item, result: state }, { checkId: item.checkId, result: state }]) {
+      const raw = run([entry]);
+      expect(RealModelCheckSchema.parse(raw)).toEqual(raw);
+      const testId = "test" in entry ? entry.test : undefined;
+      expect(realModelPassed(raw, item.checkId, testId)).toBe(state.startsWith("passed"));
+      expect(realModelPassed(raw, "other", testId)).toBe(false);
+      expect(realModelPassed(raw, item.checkId, testId === undefined ? "a" : undefined)).toBe(false);
+      expect(RealModelCheckWriteSchema.safeParse(raw).success).toBe(false);
+      expect(realModelCheckLine(raw)).toBe("Real model check: not run: real model results could not be read.");
+    }
+  });
+  it("strips reference future fields and preserves the candidate binding", () => {
+    expect(RealModelCheckSchema.parse({ ...run([{ ...item, future: true }]), future: true })).toEqual(run());
+    for (const candidateDigest of [undefined, "x", "A".repeat(64), "a".repeat(63)]) {
+      expect(realModelPassed({ ...run(), candidateDigest }, item.checkId, "a")).toBe(false);
+    }
+  });
+  it("refuses every malformed reference item and duplicate without dropping valid siblings", () => {
+    const badItems = [{ ...item, result: "private-cause" }, { ...item, checkId: 1 }, { ...item, test: "" }, { ...item, test: "x".repeat(501) }, { ...item, result: "failed" }];
+    for (const bad of badItems) {
+      const raw = run([item, bad]);
+      expect(RealModelCheckSchema.safeParse(raw).success).toBe(false);
+      expect(realModelPassed(raw, item.checkId, "a")).toBe(false);
+    }
+  });
+  it("accepts maximum reference field lengths and refuses huge arrays before traversal", () => {
+    const items = Array.from({ length: 200 }, (_, i) => ({ checkId: "c".repeat(64), test: String(i).padEnd(500, "x"), result: "passed" }));
+    expect(RealModelCheckSchema.safeParse(run(items)).success).toBe(true);
+    expect(realModelPassed(run(items), items[0]!.checkId, items[0]!.test)).toBe(true);
+    const oversized = Array.from({ length: 100_000 }, () => item);
+    Object.defineProperty(oversized, 0, { get: () => { throw new Error("must not visit"); } });
+    const start = performance.now();
+    expect(RealModelCheckSchema.safeParse(run(oversized)).success).toBe(false);
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+  it.each([
+    { totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 } },
+    { model: null }, { calls: 0 }, { status: "skipped" },
+  ])("reads evidence independently of accounting, but the writer and summary refuse %j", patch => {
+    const raw = { ...result(), ...patch };
+    expect(RealModelCheckSchema.safeParse(raw).success).toBe(true);
+    expect(realModelPassed(raw, "unit", "test_refund")).toBe(true);
+    expect(RealModelCheckWriteSchema.safeParse(raw).success).toBe(false);
+    expect(realModelCheckLine(raw)).toBe("Real model check: not run: real model results could not be read.");
+  });
+  it("keeps the writer's per-item reason consistency", () => {
+    const raw = { ...result(), items: [{ checkId: "unit", test: "x", result: "not_run" }], status: "not_run", reason: "run_unavailable", totals: { selected: 1, passed: 0, passedOnRerun: 0, failed: 0, notRun: 1 } };
+    expect(RealModelCheckSchema.safeParse(raw).success).toBe(true);
+    expect(RealModelCheckWriteSchema.safeParse(raw).success).toBe(false);
+    expect(realModelCheckLine(raw)).toBe("Real model check: not run: real model results could not be read.");
   });
 });
 
