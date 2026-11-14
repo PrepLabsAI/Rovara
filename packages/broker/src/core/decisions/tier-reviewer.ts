@@ -5,7 +5,7 @@
 // This file is the hook and the record. The reviewer itself (a model call) is supplied by the caller through `TierReviewer`; nothing here calls a model, so it is testable with a fake.
 import { randomUUID } from "node:crypto";
 import { FLOW_REASON_PATH_MAX, type WorkflowFlow } from "@agentx/contracts";
-import { patchDigestOf, recordCatch, recordGrowth, recordQuestionsAnswered, recordTier, tierRank, type ChangeTier, type TierReason } from "./change-tier.js";
+import { capReasons, patchDigestOf, recordCatch, recordGrowth, recordQuestionsAnswered, recordTier, tierRank, type ChangeTier, type TierReason } from "./change-tier.js";
 
 /** The questions, in the words the reviewer is given. Fixed: a reviewer's own sense of "sensitive" is never the rule. */
 export const TIER_QUESTIONS: ReadonlyArray<{ id: string; text: string }> = [
@@ -91,7 +91,7 @@ export interface ReviewerFloorResult {
 const raisedBy = (tier: ChangeTier, reasons: TierReason[], yes: string[]): ReviewerFloorResult => {
   const level = tierRank(tier.level) >= tierRank("risky") ? tier.level : "risky";
   const seen = new Set<string>();
-  const merged = [...reasons, ...tier.reasons].filter((reason) => { const key = `${reason.code}\u0000${reason.path ?? ""}`; if (seen.has(key)) return false; seen.add(key); return true; }).slice(0, 50);
+  const merged = capReasons([...reasons, ...tier.reasons].filter((reason) => { const key = `${reason.code}\u0000${reason.path ?? ""}`; if (seen.has(key)) return false; seen.add(key); return true; }), 50);
   return { ran: true, tier: { ...tier, level, reasons: merged }, raised: tierRank(level) > tierRank(tier.level), yes };
 };
 

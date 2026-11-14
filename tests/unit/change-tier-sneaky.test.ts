@@ -2,9 +2,10 @@
 // A case that cannot pass blocks production: never delete or weaken one to go green.
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_TIER_THRESHOLDS, estimateTier, plannedPathsExceeded, raiseTier, recordTier, tierFromDiff, tierGrowthSentence,
+  DEFAULT_TIER_THRESHOLDS, capReasons, estimateTier, plannedPathsExceeded, raiseTier, recordTier, tierFromDiff, tierGrowthSentence,
   type ChangeTier, type HeadFacts, type TierFile, type TierKind, type TierLevel, factKey,
 } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { FLOW_MAX_BYTES, flowRecordBytes } from "../../packages/contracts/src/index.js";
 import { importsOf, readHeadFacts, tierFilesOfRead } from "../../packages/broker/src/core/merge/change-tier-read.js";
 import type { CodeHost } from "../../packages/contracts/src/index.js";
 
@@ -504,6 +505,42 @@ describe("the controller's additions", () => {
     // A host that cannot tell kinds at all leaves nothing unchecked: the port's own read is optional.
     const blind = await readHeadFacts([{ host: { fileAtRevision: async () => undefined } as unknown as CodeHost, repositoryId: "app", repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], files, { orgId: "org" });
     expect(blind.unchecked!.size).toBe(0);
+  });
+});
+
+describe("the eval hint survives a busy tier", () => {
+  const busy = (extra: TierFile[] = []) => tierFromDiff({ files: [...Array.from({ length: 70 }, (_unused, index) => file(`src/auth/area${index}/session.ts`)), ...extra, file("src/prompts/review.md", { before: ["a"], after: ["b"] })], complete: true }, context);
+  const codes = (tier: ChangeTier): string[] => tier.reasons.map((reason) => reason.code);
+
+  it("a tier with more reasons than the cap still carries the hint, within the cap", () => {
+    const tier = busy();
+    expect(tier.reasons.length).toBeLessThanOrEqual(50);
+    expect(tier.reasons.filter((reason) => reason.code === "sensitive_path").length).toBeGreaterThan(40);
+    expect(codes(tier)).toContain("eval_hint");
+  });
+  it("the hint is kept when a later tier is raised over this one, and when the record is compacted to fit", () => {
+    const first = recordTier(undefined, busy());
+    expect(codes(first.tier)).toContain("eval_hint");
+    const second = recordTier(first.flow, busy([file("src/payments/charge.ts")]));
+    expect(codes(second.tier)).toContain("eval_hint");
+    let flow = second.flow;
+    for (let index = 0; index < 25; index += 1) flow = recordTier(flow, { ...busy(), headSha: index.toString(16).padStart(40, "0") }).flow;
+    expect(flow.tier!.reasons.map((reason) => reason.code)).toContain("eval_hint");
+    expect(flowRecordBytes(flow)).toBeLessThanOrEqual(FLOW_MAX_BYTES);
+  });
+  it("a record too big for its limit is compacted, and the compacted tier still carries the hint", () => {
+    const heavy = tierFromDiff({ files: [...Array.from({ length: 70 }, (_unused, index) => file(`src/auth/${"x".repeat(380)}${index}/session.ts`)), file("src/prompts/review.md", { before: ["a"], after: ["b"] })], complete: true }, context);
+    expect(flowRecordBytes({ rulesVersion: 1, tier: heavy })).toBeGreaterThan(FLOW_MAX_BYTES);
+    const recorded = recordTier(undefined, heavy).flow;
+    expect(flowRecordBytes(recorded)).toBeLessThanOrEqual(FLOW_MAX_BYTES);
+    expect(recorded.tier!.reasons.map((reason) => reason.code)).toContain("eval_hint");
+    expect(recorded.tier!.level).toBe("risky");
+  });
+  it("capReasons keeps the first hint last and the others in order", () => {
+    const reasons = [{ code: "a" }, { code: "eval_hint", path: "x" }, { code: "b" }, { code: "c" }];
+    expect(capReasons(reasons, 2).map((reason) => reason.code)).toEqual(["a", "eval_hint"]);
+    expect(capReasons(reasons, 10).map((reason) => reason.code)).toEqual(["a", "b", "c", "eval_hint"]);
+    expect(capReasons([{ code: "a" }, { code: "b" }], 1).map((reason) => reason.code)).toEqual(["a"]);
   });
 });
 

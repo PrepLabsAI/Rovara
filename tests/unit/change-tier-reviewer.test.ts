@@ -53,6 +53,14 @@ describe("the reviewer floor", () => {
     expect(extra.tier.level).toBe("small");
   });
 
+  it("the eval hint survives the reviewer's raise on a tier that is already at the reasons cap", async () => {
+    const busy = tierFromDiff({ files: [...Array.from({ length: 70 }, (_unused, index) => file(`src/auth/area${index}/session.ts`)), file("src/prompts/review.md")], complete: true }, { headSha: "a".repeat(40), at: AT });
+    expect(busy.reasons.map((reason) => reason.code)).toContain("eval_hint");
+    const result = await ask(reviewer(() => answers({ money: "price list" })), busy);
+    expect(result.tier.reasons.length).toBeLessThanOrEqual(50);
+    expect(result.tier.reasons.map((reason) => reason.code)).toContain("eval_hint");
+  });
+
   it("only goes up: a risky tier stays risky whatever the reviewer says, and the reasons are kept", async () => {
     const risky = tierFromDiff({ files: [file("src/auth/session.ts")], complete: true }, { headSha: "a".repeat(40), at: AT });
     const result = await ask(reviewer(() => answers()), risky);
