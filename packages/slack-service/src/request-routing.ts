@@ -1,15 +1,19 @@
 // Task 21: a plain top-level @AgentX request, which the Slack ingress queued with the routing mark once Slack had its
-// answer. The classifier model sorts it: a question is answered by the chat agent, like any chat request; anything
+// answer. Small talk gets a fixed reply first (smart intake, no model). Otherwise the classifier model sorts it: a question is answered by the chat agent, like any chat request; anything
 // else gets a card suggesting Quick or Full (or, unclear, offering all three), and nothing starts until its requester
 // presses a button there, which the Slack ingress Lambda answers.
 import { DeleteCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  quickAutoStartedMessage,
   routedChoiceId,
   slackThreadSubject,
+  smallTalkOf,
+  smallTalkReply,
   suggestionCardMessage,
   workflowChoiceKey,
   workflowChoicePut,
   workflowChoiceQuestionUpdate,
+  type QuickAutoStartResult,
   type RequestSuggestion,
   type SlackRequestMessage,
   type SlackThread,
@@ -33,8 +37,14 @@ export interface RequestRoutingDependencies {
   route?: RequestRouter;
   /** Saves the request for its requester's choice and posts its card. */
   offer(input: ChoiceOffer): Promise<void>;
-  /** Posts a plain line in the thread: the card-failed notice when the card could not be saved or posted. */
-  notify(thread: SlackThread, text: string): Promise<void>;
+  /** Posts in the thread: the small-talk reply, the auto-started notice (with its Stop button), or the card-failed notice. */
+  notify(thread: SlackThread, text: string, blocks?: Array<Record<string, unknown>>): Promise<void>;
+  /**
+   * Decision 134: asks the broker to start Quick on a request the classifier read as a clear small change. The broker
+   * checks the text itself and starts it as the requester's Start press would; `started: false` (or a throw) means the
+   * card with Start is posted instead. Absent: every change gets the card.
+   */
+  autoStart?(input: { message: SlackRequestMessage; requestId: string }): Promise<QuickAutoStartResult>;
   /** Answers the request as the chat agent does any chat request. */
   answer(message: SlackRequestMessage): Promise<void>;
   /** Tells the thread's queued-request count that this request is done (the chat agent's path does so itself). */
@@ -50,6 +60,16 @@ export interface RequestRoutingDependencies {
 export async function routeSlackRequest(message: SlackRequestMessage, deps: RequestRoutingDependencies): Promise<void> {
   const now = deps.now ?? Date.now;
   const startedAt = now();
+  // Smart intake: small talk ("hello", "thanks", "what can you do?") gets its fixed reply at once: no model call, no
+  // spend, no card. It works when the classifier is down too.
+  const smallTalk = smallTalkOf(message.text);
+  if (smallTalk !== undefined) {
+    deps.log("route.small_talk", { eventId: message.eventId, kind: smallTalk });
+    await deps.notify(message.thread, smallTalkReply(smallTalk))
+      .catch((error: unknown) => deps.log("route.small_talk_reply_failed", { eventId: message.eventId, errorName: errorName(error) }));
+    await finishQuietly(message, deps);
+    return;
+  }
   let route: RequestRoute;
   if (deps.route === undefined) {
     route = { kind: "unclear", outcome: "unavailable" };
@@ -66,6 +86,24 @@ export async function routeSlackRequest(message: SlackRequestMessage, deps: Requ
     await deps.answer(message);
     return;
   }
+  // Decision 134: only a usable "small change" answer is tried on its own; unclear, large, or any classifier failure never is.
+  if (route.kind === "small_change" && route.outcome === "ok" && deps.autoStart !== undefined) {
+    let result: QuickAutoStartResult | undefined;
+    try {
+      result = await deps.autoStart({ message, requestId: choiceId });
+    } catch (error) {
+      deps.log("route.auto_start_failed", { eventId: message.eventId, choiceId, errorName: errorName(error) });
+    }
+    if (result?.started === true) {
+      deps.log("route.auto_started", { eventId: message.eventId, choiceId, taskId: result.taskId });
+      const started = quickAutoStartedMessage({ requesterId: message.userId, taskId: result.taskId });
+      await deps.notify(message.thread, started.text, started.blocks)
+        .catch((error: unknown) => deps.log("route.auto_started_notice_failed", { eventId: message.eventId, errorName: errorName(error) }));
+      await finishQuietly(message, deps);
+      return;
+    }
+    if (result !== undefined) deps.log("route.auto_start_skipped", { eventId: message.eventId, choiceId, reason: result.reason, ...(result.code === undefined ? {} : { code: result.code }) });
+  }
   try {
     await deps.offer({ thread: message.thread, userId: message.userId, instructions: message.text, choiceId, suggestion: route.kind });
   } catch (error) {
@@ -75,10 +113,14 @@ export async function routeSlackRequest(message: SlackRequestMessage, deps: Requ
     await deps.notify(message.thread, ROUTE_CARD_FAILED_TEXT)
       .catch((postError: unknown) => deps.log("route.card_failed_notice_failed", { eventId: message.eventId, errorName: errorName(postError) }));
   }
+  await finishQuietly(message, deps);
+}
+
+async function finishQuietly(message: SlackRequestMessage, deps: RequestRoutingDependencies): Promise<void> {
   try {
     await deps.finish(slackThreadSubject(message.thread));
   } catch (error) {
-    // The card is posted; a count left one high only says "queued behind" once too often.
+    // The reply or card is posted; a count left one high only says "queued behind" once too often.
     deps.log("route.finish_failed", { eventId: message.eventId, errorName: errorName(error) });
   }
 }
