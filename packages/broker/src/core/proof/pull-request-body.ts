@@ -17,6 +17,8 @@ import { verificationReport, type ChangedFileEntry, type VerificationProject } f
 export { ROVARA_STATUS_START, ROVARA_STATUS_END };
 
 export const ROVARA_PULL_REQUEST_CLOSING = "Opened by Rovara after the approved plan, checks and reviews. A person must approve it and a person merges it.";
+/** The closing of a small change whose plan went to coding with no approval (the lighter flow). */
+export const ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL = "Opened by Rovara after the plan (no approval needed: small change), checks and reviews. A person must approve it and a person merges it.";
 
 /** The most bytes a description holds. */
 export const PULL_REQUEST_BODY_MAX_BYTES = 30_000;
