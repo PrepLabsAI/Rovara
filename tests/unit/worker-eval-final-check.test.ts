@@ -1,7 +1,8 @@
 import { createEvalFinalCheckWorld } from "../support/eval-final-check.js";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { evalResultFromArtifact, type EvalBaseRecord, type EvalRequest } from "@agentx/contracts";
+import { createDocumentBaseScoreCache, evalResultFromArtifact, type EvalRequest } from "@agentx/contracts";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import type { ModelEgressFrame } from "../../packages/contracts/src/model-egress/frame.js";
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "../../packages/worker/src/verification/eval-final-check.js";
 const roots: string[] = [];
@@ -87,8 +88,9 @@ describe("metered eval round", () => {
 
 it("charges a cold baseline and task comparison to one total call budget", async () => {
   const { createEvalBaselines } = await import("../../packages/worker/src/verification/eval-baseline-refresh.js");
-  const w = await world(true, 1); let saved: EvalBaseRecord | undefined;
-  w.ports.cache = { read: async () => saved, write: async (_key, value) => { saved = value; return "stored"; } };
+  const w = await world(true, 1);
+  // 192e: baseline refresh claims a measuring mark first, so the cache must be the real document cache.
+  w.ports.cache = createDocumentBaseScoreCache(new MemoryDocumentStore(), { companyId: "company-a" });
   w.ports.baselines = createEvalBaselines();
   const a = await runFinalCheckEval(request, w.ports, facts());
   expect(w.calls).toHaveLength(4); expect(a).toMatchObject({ outcome: "done", usage: { calls: 4, costMicros: 40 } });

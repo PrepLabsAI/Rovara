@@ -215,3 +215,155 @@ describe("dependency-keyed baseline", () => {
     }
   });
 });
+
+it("validates measuring documents, clock values and scope without leaking stored text", async () => {
+  const { store, cache } = world(); const mine = cache(parts().company);
+  const started = await mine.startMeasurement!(parts()); expect(started.status).toBe("started");
+  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
+  const good = (await store.get(address))!;
+  expect(await mine.readMeasurement!(parts())).toBe("measuring");
+  for (const over of [{ state: "private canary" }, { startedAt: "private canary" }, { expiresAt: "private canary" }, { startedAt: 1_800_000_001 }, { expiresAt: 1_800_003_601 }, { company: "private canary" }, { key: "private canary" }]) {
+    await store.put({ item: { ...good, ...over } });
+    expect(await mine.readMeasurement!(parts())).toBe("unavailable");
+    expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+  }
+  expect(await mine.readMeasurement!(parts({ company: "org_other" }))).toBe("unavailable");
+  expect(await mine.startMeasurement!(parts({ company: "org_other" }))).toEqual({ status: "unavailable" });
+  expect(await mine.readMeasurement!(null as never)).toBe("unavailable");
+  const brokenClock = createDocumentBaseScoreCache(store, { companyId: parts().company, now: () => NaN });
+  expect(await brokenClock.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+});
+it("refuses unavailable measuring storage instead of treating it as a cache miss", async () => {
+  const cache = createDocumentBaseScoreCache({ get: async () => { throw new Error("private canary"); }, put: async () => { throw new Error("private canary"); } }, { companyId: parts().company });
+  expect(await cache.readMeasurement!(parts())).toBe("unavailable");
+  expect(await cache.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+});
+it.each(["finished", "measuring"])("refuses malformed %s marks instead of overwriting them", async state => {
+  const { store, cache } = world(); const mine = cache(parts().company);
+  await mine.startMeasurement!(parts());
+  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
+  const good = (await store.get(address))!;
+  for (const over of [{ startedAt: "private canary" }, { expiresAt: 0 }, { expiresAt: null }]) {
+    const broken = { ...good, state, ...over };
+    await store.put({ item: broken });
+    expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+    expect(await store.get(address)).toEqual(broken);
+  }
+});
+it("finishes only named fields and keeps errors fixed", async () => {
+  const { store, cache } = world(); const mine = cache(parts().company); const claim = await mine.startMeasurement!(parts());
+  if (claim.status !== "started") throw new Error("missing mark");
+  await mine.finishMeasurement!(parts(), { ...claim.mark, extra: "private canary" } as never);
+  const docs = (await store.query({ pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE` })).items;
+  expect(JSON.stringify(docs)).not.toContain("private canary");
+  await expect(mine.finishMeasurement!(parts(), { ...claim.mark, state: "private canary" } as never)).rejects.toThrow("baseline mark could not be finished");
+});
+it("does not let a retried finish clear a same-second successor's measuring mark", async () => {
+  const backing = new MemoryDocumentStore();
+  let release!: () => void; let applied!: () => void; let retry = true;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const firstApplied = new Promise<void>(resolve => { applied = resolve; });
+  const store: Pick<MemoryDocumentStore, "get" | "put"> = {
+    get: address => backing.get(address),
+    put: async request => {
+      const result = await backing.put(request);
+      if (retry && request.item["state"] === "finished") {
+        retry = false; applied(); await gate;
+        // A successful write whose response was lost can be retried by the adapter.
+        await backing.put(request);
+      }
+      return result;
+    },
+  };
+  const a = createDocumentBaseScoreCache(store, { companyId: parts().company, now: () => 1_800_000_000_000 });
+  const b = createDocumentBaseScoreCache(store, { companyId: parts().company, now: () => 1_800_000_000_000 });
+  const first = await a.startMeasurement!(parts());
+  if (first.status !== "started") throw new Error("missing first mark");
+  const finishing = a.finishMeasurement!(parts(), first.mark); await firstApplied;
+  try { expect((await b.startMeasurement!(parts())).status).toBe("started"); }
+  finally { release(); await finishing; }
+  expect(await b.readMeasurement!(parts())).toBe("measuring");
+});
+
+it("persists a fresh host claim identity even for same-second starts", async () => {
+  const { store, cache } = world(); const mine = cache(parts().company);
+  const first = await mine.startMeasurement!(parts());
+  if (first.status !== "started") throw new Error("missing first mark");
+  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
+  const before = (await store.get(address))!;
+  expect(before["claimId"]).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u);
+  await mine.finishMeasurement!(parts(), first.mark);
+  expect((await store.get(address))!["claimId"]).toBe(before["claimId"]);
+  const second = await cache(parts().company).startMeasurement!(parts());
+  expect(second.status).toBe("started");
+  const after = (await store.get(address))!;
+  expect(after["startedAt"]).toBe(before["startedAt"]);
+  expect(after["claimId"]).not.toBe(before["claimId"]);
+});
+
+it.each(["measuring", "finished"])("treats a %s mark without a claim identity as expired and reclaims it once", async state => {
+  const { store, cache } = world(); const mine = cache(parts().company);
+  await mine.startMeasurement!(parts());
+  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
+  const legacy: StoredDocument = { ...(await store.get(address))!, state }; delete legacy["claimId"];
+  await store.put({ item: legacy });
+  expect(await mine.readMeasurement!(parts())).toBe("idle");
+  const starts = await Promise.all([mine.startMeasurement!(parts()), cache(parts().company).startMeasurement!(parts())]);
+  expect(starts.map(result => result.status).sort()).toEqual(["measuring", "started"]);
+  expect(await mine.readMeasurement!(parts())).toBe("measuring");
+});
+
+it("refuses malformed claim identities with fixed words and leaves their marks intact", async () => {
+  const { store, cache } = world(); const mine = cache(parts().company);
+  const first = await mine.startMeasurement!(parts());
+  if (first.status !== "started") throw new Error("missing first mark");
+  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
+  const good = (await store.get(address))!;
+  for (const claimId of [null, 42, {}, [], "", "private canary"]) {
+    const malformed = { ...good, claimId };
+    await store.put({ item: malformed });
+    expect(await mine.readMeasurement!(parts())).toBe("unavailable");
+    expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+    await expect(mine.finishMeasurement!(parts(), { ...first.mark, claimId } as never)).rejects.toEqual(new Error("baseline mark could not be finished"));
+    expect(await store.get(address)).toEqual(malformed);
+  }
+}, 2_000);
+
+it("bounds malformed large claim reads and never calls the writer", async () => {
+  const { store, cache } = world(); await cache(parts().company).startMeasurement!(parts());
+  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
+  const malformed = { ...(await store.get(address))!, claimId: "x".repeat(1_000_000) };
+  let reads = 0; let writes = 0;
+  // Inject a corrupt read directly: the real DocumentStore rejects oversized writes.
+  const mine = createDocumentBaseScoreCache({
+    get: async () => { reads++; return malformed; },
+    put: async () => { writes++; return { applied: true }; },
+  }, { companyId: parts().company, now: () => 1_800_000_000_000 });
+  const start = performance.now();
+  expect(await mine.readMeasurement!(parts())).toBe("unavailable");
+  expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+  expect(reads).toBe(2); expect(writes).toBe(0);
+  expect(performance.now() - start).toBeLessThan(1_000);
+}, 1_000);
+
+it("does not classify a lost claim against an identity-less mark as measuring", async () => {
+  const { store, cache } = world(); await cache(parts().company).startMeasurement!(parts());
+  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
+  const legacy = (await store.get(address))!; delete legacy["claimId"];
+  const mine = createDocumentBaseScoreCache({ get: async () => legacy, put: async () => ({ applied: false, reason: "condition_failed" }) }, { companyId: parts().company, now: () => 1_800_000_000_000 });
+  expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+});
+
+it("refuses a finish without claim identity and hides finish-store errors", async () => {
+  const { store, cache } = world(); const mine = cache(parts().company);
+  const first = await mine.startMeasurement!(parts());
+  if (first.status !== "started") throw new Error("missing first mark");
+  const put = store.put.bind(store); let writes = 0;
+  store.put = request => { writes++; return put(request); };
+  const legacy = { ...first.mark } as Record<string, unknown>; delete legacy["claimId"];
+  await expect(mine.finishMeasurement!(parts(), legacy as never)).rejects.toEqual(new Error("baseline mark could not be finished"));
+  expect(writes).toBe(0);
+  expect(await mine.readMeasurement!(parts())).toBe("measuring");
+  store.put = async () => { throw new Error("private canary"); };
+  await expect(mine.finishMeasurement!(parts(), first.mark)).rejects.toEqual(new Error("baseline mark could not be finished"));
+});
