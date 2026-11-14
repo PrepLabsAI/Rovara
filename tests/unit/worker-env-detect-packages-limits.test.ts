@@ -31,9 +31,15 @@ describe("workspace call limits", () => {
   });
 
   it("keeps a unit reader from reading files owned by nested units", async () => {
-    const files: Files = { "package.json": '{"workspaces":["a","a/nested"]}', "a/package.json": node, "a/nested/package.json": node };
-    const result = await detectWorkspacePackagesInThread(boundedReader(Object.keys(files), (path) => Promise.resolve(files[path])).reader, "repo", { only: ["ownership"], extraDetectors: [{ name: "ownership", run: async ({ repo, cwd }) => ({ notes: [cwd === "repo/a" && await repo.read("nested/package.json") !== undefined ? "leaked" : "isolated"] }) }] });
-    expect(result.units.find((unit) => unit.root === "a")!.detection.notes).toEqual(["isolated"]);
+    // On code/next this probes with a plug-in detector (step 5's build-system plug-ins, not on mainline yet). Here the built-in
+    // compose detector, which reads every compose file its reader lists, shows the same thing: a file owned by a nested unit is
+    // seen by that unit only, never by the unit around it.
+    const files: Files = { "package.json": '{"workspaces":["a","a/nested"]}', "a/package.json": node, "a/nested/package.json": node, "a/nested/docker-compose.yml": "services:\n  db:\n    image: postgres:16\n" };
+    const result = await detectWorkspacePackagesInThread(boundedReader(Object.keys(files), (path) => Promise.resolve(files[path])).reader, "repo", { only: ["compose"] });
+    const unit = (root: string) => result.units.find((entry) => entry.root === root)!;
+    expect(unit("a/nested").detection.dependencies?.length ?? 0).toBeGreaterThan(0);
+    expect(unit("a").detection.dependencies ?? []).toEqual([]);
+    expect(unit(".").detection.dependencies ?? []).toEqual([]);
   });
 
   it("accepts exactly 5000 inventory paths", async () => {
