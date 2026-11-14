@@ -33,11 +33,10 @@ describe("SWE-Bench Pro in the command (spec 044 FR-001)", () => {
     expect(swebenchAgentLimits("verified")).toEqual({ timeLimitSeconds: 3_600, toolCallLimit: 200 });
   });
 
-  it("stops the tool-loop guard at its configured backstop", () => {
+  it("refuses the call past the tool-loop guard's configured backstop", () => {
     const guard = new ToolLoopGuard(3);
-    const start = (id: number) => guard.observe({ type: "tool_execution_start", toolCallId: `c${id}`, toolName: "bash", args: { command: `echo ${id}` } });
-    expect([1, 2, 3].map(start).every((action) => action.kind === "none")).toBe(true);
-    expect(start(4)).toMatchObject({ kind: "stop", error: { message: expect.stringContaining("more than 3 tool calls") as unknown } });
+    expect([1, 2, 3].map(() => guard.beforeToolCall()).every((verdict) => verdict === undefined)).toBe(true);
+    expect(guard.beforeToolCall()).toMatchObject({ block: true, reason: expect.stringContaining("more than 3 tool calls") as unknown });
   });
 });
 
