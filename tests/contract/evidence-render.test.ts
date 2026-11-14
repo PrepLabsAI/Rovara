@@ -7,6 +7,7 @@ import {
   EVIDENCE_ISOLATIONS, EVIDENCE_LEVELS, EVIDENCE_RENDER_LIMITS, NEWER_EVIDENCE_WORDS, evidencePackV1ToV2, inertEvidenceText, readEvidencePack, renderEvidence, renderEvidenceRead, type EvidencePackV2,
 } from "../../packages/contracts/src/index.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
+import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const withLevel = (reached: string, isolation = "sealed", result = "verified"): EvidencePackV2 => v2Pack({ level: { reached, required: [] }, producer: { edition: "cloud", isolation }, result });
@@ -94,6 +95,7 @@ describe("the full text of a complete pack", () => {
       "Verified · Real run by Rovara",
       "Checked in a sealed round",
       "Checks: 2 (2 passed)",
+      "Measures: reported by the project's test runner, not measured by Rovara",
       "- Tests: pytest -q: passed, 3 tests (1 new), 90% of changed lines covered",
       "- Benchmark: render time: passed, p95 118 ms (was 120 ms)",
       "Change proof: 1 proven",
@@ -306,7 +308,7 @@ describe("inert text", () => {
 });
 
 describe("no callers", () => {
-  it("only the proof table uses the trust type and inert label helper; other evidence pack v2 exports have no callers yet", () => {
+  it("v2 readers and writers have no production callers yet; the trust type is used by the proof table, and inert text is shared by the proof table, B3 and A4", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
     const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
@@ -317,15 +319,30 @@ describe("no callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const callers = (exports: string[]) => {
-      const found = spawnSync("git", ["grep", "--untracked", "-lw", ...exports.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
+    const callers = (symbols: string[]) => {
+      const env = isolatedGitEnvironment(root, { GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "0", GIT_NOGLOB_PATHSPECS: "0", GIT_ICASE_PATHSPECS: "0" });
+      const found = spawnSync("git", ["grep", "--untracked", "-lw", ...symbols.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env });
       expect([0, 1]).toContain(found.status);
       return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
     };
-    // MOCK-PROVENANCE-IN-PROOF consumes two shared definitions in proof-table.ts; TE-B3 shares only inert text in weakening-flags.ts. Neither switches on evidence v2 readers or writers.
-    const proofExports = ["EvidenceTrustClass", "inertEvidenceText"];
-    expect(callers(names.filter((name) => !proofExports.includes(name)))).toEqual([]);
+    // MOCK-PROVENANCE-IN-PROOF uses the trust type and inert text in proof-table.ts; TE-B3 (weakening-flags.ts) and TE-A4 (test-report.ts) share only inert text. Every other v2 export stays forbidden.
+    const shared = ["EvidenceTrustClass", "inertEvidenceText"];
+    expect(callers(names.filter((name) => !shared.includes(name)))).toEqual([]);
     expect(callers(["EvidenceTrustClass"])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
-    expect(callers(["inertEvidenceText"]).sort()).toEqual(["packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts"]);
+    expect(callers(["inertEvidenceText"]).sort()).toEqual(["packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/test-report.ts"]);
   });
+});
+
+it("keeps runner-measure provenance visible even with long check labels and inert measure names", () => {
+  const pack = clone(v2Pack());
+  const check = pack.checks[1]!;
+  check.label = "L".repeat(200);
+  check.measures = [{ name: "[score](https://example.com) @owner #123", unit: "ms", base: 1, head: 2, direction: "down_good" }];
+  const out = renderEvidence(pack);
+  expect(out.body).toContain("Measures: reported by the project's test runner, not measured by Rovara");
+  expect(out.text).not.toMatch(/https:\/\/|@owner|#123/u);
+  check.label = "eval";
+  expect(renderEvidence(pack).text).toContain("score");
+  for (const row of pack.checks) delete row.measures;
+  expect(renderEvidence(pack).text).not.toContain("reported by the project's test runner");
 });

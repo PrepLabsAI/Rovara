@@ -230,7 +230,7 @@ describe("the fixed sentences", () => {
     expect(redirectEscapeSentence("api.openai.com")).toBe("not run: client ignored the redirect (called api.openai.com)");
     expect(unlistedModelHostSentence("x.googleapis.com")).toBe("not run: unlisted model host (called x.googleapis.com)");
     expect(MODEL_HOSTS_NOT_BLOCKED_SENTENCE).toBe("model hosts not blocked on this machine");
-    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only");
+    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked");
     expect(NOT_SEALED_SENTENCE).toBe("not sealed");
   });
 });
@@ -254,6 +254,7 @@ describe("no callers yet", () => {
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
+        // TE-F1b (the helper network and the by-name block, packages/worker/src/model-helper-*.ts and model-sandbox-env.ts) is the second caller, by design, and the guard below excludes its files and tests.
         // TE-F1a (the first caller, by design: it is built on F0a) lives in `packages/contracts/src/model-egress/`, `packages/testing/` and its own tests.
         // TE-F2 part A stacks on F0a too: exactly its F2A_FILES may import F0a's modules (its guard model-replies-contracts-guard.test.ts proves nothing else calls them).
         if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
@@ -268,7 +269,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

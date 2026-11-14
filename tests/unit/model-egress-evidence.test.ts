@@ -8,13 +8,21 @@ const BLOCK = ["generativelanguage.googleapis.com", "api.openai.com", "sealed.ga
 const UNSAID = /(?<!not )sealed/iu;
 
 describe("evidence lines", () => {
+  it("states the Google embedded-model residual only for unsealed rounds, including unreadable ledgers", () => {
+    const residual = "a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked";
+    const unreadable = Object.defineProperty({}, "classes", { get() { throw new Error("unreadable"); } }) as ModelEgressLedger;
+    for (const ledger of [{ classes: [] }, unreadable]) {
+      for (const round of ["working", "check_unsealed"] as const) expect(evidenceLinesFor(round, ledger).join("\n")).toContain(residual);
+      expect(evidenceLinesFor("check_sealed", ledger).join("\n")).not.toContain(residual);
+    }
+  });
   it("reuses F0a's residual sentence exactly", () => {
-    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only");
+    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked");
   });
   it("always starts an unsealed round with the residual line, whatever else is in the ledger", () => {
     for (const round of ["working", "check_unsealed"] as const) {
-      expect(evidenceLinesFor(round, { classes: [] })[0]).toBe("not sealed; model hosts blocked by name only");
-      expect(evidenceLinesFor(round, { classes: ["rate_limit", "cap"], capMicros: 2_000_000, blockList: BLOCK, observedHosts: ["api.openai.com"] })[0]).toBe("not sealed; model hosts blocked by name only");
+      expect(evidenceLinesFor(round, { classes: [] })[0]).toBe("not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked");
+      expect(evidenceLinesFor(round, { classes: ["rate_limit", "cap"], capMicros: 2_000_000, blockList: BLOCK, observedHosts: ["api.openai.com"] })[0]).toBe("not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked");
     }
   });
   it("treats an unknown round kind as unsealed", () => {
