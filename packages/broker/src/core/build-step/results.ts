@@ -16,6 +16,7 @@ import {
   blockingFindings, change, secondReviewBlockFinding, type CandidateRepository, type TransactItem, type UpdateOp, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
+import { recordCatch, recordCodeChanged } from "../decisions/change-tier.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { isReapprovalStop, liveSteerChangeItems, liveSteerCodingStop, settleLiveSteerReapproval } from "../sessions/live-steer-reapproval.js";
 import { DISPATCH_EXHAUSTED_ERROR } from "../task-flow/dispatch.js";
@@ -258,6 +259,11 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
       now,
       ...(e2eQualification === undefined ? {} : { e2eQualification }),
     });
+    // Other code than the task held before: every review that already ran has seen code change after it (the catch counters' third number).
+    if (workflow.candidate !== undefined && workflow.candidate.digest !== candidate.digest) {
+      const changed = recordCodeChanged(next.flow);
+      if (changed !== undefined) next = { ...next, flow: changed };
+    }
     // Proof and evidence (lane L12): the verification is recorded, so the run's evidence is assembled for this code. Informational and bounded; a fault changes nothing.
     await deps.keepEvidence?.({ task, operation, workflow, candidateDigest: candidate.digest, checks: checks.data.checks }).catch((error: unknown) => log(deps, { event: "build_step.evidence_not_kept", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
   } catch (error) {
@@ -341,6 +347,16 @@ export async function recordReviewed(deps: TaskFlowDeps, task: TaskRecord, opera
     }
     next = base;
     for (const review of kept) next = submitWorkflowReview(next, review, now, { secondReviewBlocks: secondBlocks });
+    // The catch counters: what each review step found, and how much of it must be fixed (a finding the change introduced that the reviewer did not mark advisory). Written with the review, in the same commit.
+    let flow = next.flow;
+    for (const review of kept) {
+      const findings = Array.isArray(review["findings"]) ? (review["findings"] as Array<Record<string, unknown>>) : [];
+      flow = recordCatch(flow, {
+        step: review["role"] === "SECURITY" ? "security_review" : "code_review", findings: findings.length,
+        mustFix: findings.filter((finding) => finding["origin"] !== "PRE_EXISTING" && finding["advisory"] !== true).length,
+      });
+    }
+    if (flow !== undefined) next = { ...next, flow };
     const blockedReport = opinion?.opinion.blocked === true ? opinion.opinion.report : undefined;
     if (blockedReport !== undefined) {
       // The block is kept IN the workflow (secondReviewBlock), so accepting the first review's findings can never clear it.

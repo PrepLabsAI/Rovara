@@ -10,6 +10,7 @@ import { containerBashOperations, runContainerCommand, type ContainerCommandOpti
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import type { CommandResult } from "./readiness.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
+import { containerGone, type QuarantinedSandbox } from "./workspace-quarantine.js";
 import { createDockerCli, taskContainerExec, type DockerCli } from "./swebench/containers.js";
 
 /**
@@ -91,7 +92,7 @@ export const SANDBOX_PYTHON_USER_BASE_DIRECTORY = ".agentx-python";
  */
 export function sandboxCommandOptions(rootPath: string): ContainerCommandOptions {
   const base = join(resolve(rootPath), SANDBOX_PYTHON_USER_BASE_DIRECTORY);
-  return { unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base }, pathSuffix: [join(base, "bin")] };
+  return { target: "sandbox", unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base }, pathSuffix: [join(base, "bin")] };
 }
 /**
  * The environment variable that names a network the sandboxes join, made and walled by whoever starts the worker (`rovara up`, lane
@@ -350,6 +351,18 @@ export class TaskSandbox {
     await this.starting.catch(() => undefined);
     this.removedCleanly = await this.remove();
     return this.removedCleanly;
+  }
+
+  /**
+   * A command in this sandbox could not be confirmed stopped (RunnerKillUnconfirmedError): the container is killed, removed, and checked gone or not running, so nothing in it can write the workspace
+   * it mounts. Safe to call again. True when that is verified; false means it may still run, and the workspace stays marked unsafe.
+   */
+  async quarantine(): Promise<QuarantinedSandbox> {
+    if (this.starting === undefined) return { name: this.name, verified: true };
+    await this.starting.catch(() => undefined);
+    await this.docker.run(["kill", this.name], { timeoutMs: DOCKER_CALL_TIMEOUT_MS }).catch(() => undefined);
+    await this.remove();
+    return { name: this.name, verified: await containerGone(this.docker, this.name) };
   }
 
   /** Whether the last `dispose` found the container gone (true also when nothing was started); false when `docker rm` failed, so processes in it may still run (S4-L2). */

@@ -21,3 +21,4 @@ export * from "./scheduler-conformance.js";
 export * from "./secret-store-conformance.js";
 export * from "./tracker-conformance.js";
 export * from "./worker-machines-conformance.js";
+export * from "./policy-source-conformance.js";
