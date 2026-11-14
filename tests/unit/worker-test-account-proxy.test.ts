@@ -160,6 +160,31 @@ describe("the proxy", () => {
     expect(refused.not_allowed).toBe(5);
   });
 
+  // FIX-0518: a test account is never for an AI model service. The proxy resolves names itself, outside the sandbox's hosts file, so a model host here would carry real model calls past the model helper.
+  it("is never made for a list that holds an AI model host, whatever its spelling, and fails before it listens", async () => {
+    const base: TestAccountProxyOptions = { hosts: ["api.example-pay.com"], isDenied: () => false, maxConnections: 10, listenAddress: "127.0.0.1", listenPort: 0, allowedSources: ["127.0.0.1"] };
+    for (const host of ["api.openai.com", "generativelanguage.googleapis.com", "us-central1-aiplatform.googleapis.com", "my-resource.openai.azure.com", "API.OPENAI.COM", "api.openai.com.", "My-Resource.OpenAI.Azure.com."]) {
+      await expect(startTestAccountProxy({ ...base, hosts: ["api.example-pay.com", host] }), host).rejects.toThrow("AI model service");
+    }
+    await expect(startTestAccountProxy({ ...base, hosts: ["llm.corp-gateway.example.com"], modelGatewayHosts: ["llm.corp-gateway.example.com"] })).rejects.toThrow("AI model service");
+    // Google storage and BigQuery are not model hosts.
+    for (const host of ["storage.googleapis.com", "bigquery.googleapis.com"]) {
+      const proxy = await startTestAccountProxy({ ...base, hosts: [host] });
+      await proxy.close();
+    }
+  });
+
+  it("refuses a CONNECT to an AI model host as denied, before the list and before any lookup", async () => {
+    const { proxy, connects, resolved } = await rig({ modelGatewayHosts: ["llm.corp-gateway.example.com"] });
+    for (const target of ["api.openai.com:443", "API.OPENAI.COM.:443", "generativelanguage.googleapis.com:443", "x.openai.azure.com:443", "llm.corp-gateway.example.com:443"]) {
+      expect((await connectTo(proxy, target)).status, target).toBe(403);
+    }
+    expect(connects).toEqual([]);
+    expect(resolved).toEqual([]);
+    expect(proxy.snapshot().refused.denied).toBe(5);
+    expect(proxy.snapshot().refused.not_allowed).toBe(0);
+  });
+
   it("matches the name in any case and with a trailing dot", async () => {
     const { proxy } = await rig();
     expect((await connectTo(proxy, "API.EXAMPLE-PAY.COM.:443")).status).toBe(200);

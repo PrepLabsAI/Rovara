@@ -16,7 +16,8 @@ import { codeHostForRecord } from "../../plugins/routing.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { operationKey, taskKey, workspaceKey } from "../task-flow/keys.js";
 import { readTask } from "../task-flow/reads.js";
-import { fromDocument, toDocument, type OperationRecord, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
+import { workflowWriteOps } from "../task-flow/flow-guard.js";
+import { fromDocument, type OperationRecord, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
 import { iso } from "../task-flow/support.js";
 import { parallelStartTrees } from "./parallel-parts.js";
 
@@ -145,7 +146,7 @@ export async function recordWorkItemProgress(deps: TaskFlowDeps, operation: Oper
     const now = iso(deps);
     const items: TransactItem[] = [
       {
-        kind: "update", key: taskKey(task.taskId), ops: [change.set("workflow", toDocument(next)), change.set("updatedAt", now)],
+        kind: "update", key: taskKey(task.taskId), ops: [...workflowWriteOps(task.workflow, next).ops, change.set("updatedAt", now)],
         condition: when.and(
           when.notExists("closedAt"), when.eq(["workflow", "revision"], task.workflow.revision), when.eq(["workflow", "stage"], "IMPLEMENT"), when.eq(["workflow", "state"], "RUNNING"),
           when.eq(["workflow", "workflowDependenciesApproval", "graphDigest"], approval.graphDigest), when.eq(["workflow", "workflowDependenciesApproval", "runId"], approval.runId),

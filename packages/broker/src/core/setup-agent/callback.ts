@@ -24,6 +24,8 @@ export interface SetupAgentCallbackDeps {
   installDomains?: (() => readonly string[]) | undefined;
   /** The production deny list that refuses a website without a card. A list that cannot be read does not stop the ask. */
   prodDeny?: ((project: string) => Promise<TestEnvProdDeny | undefined>) | undefined;
+  /** FIX-0518: the names this project's test sandbox is denied (the laptop's model hosts; empty when the owner allowed them for the project). A website ask for one is refused as a model host. */
+  sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** Whether the person who typed a command may still have it run (the owner, read live at hand-over). Absent: nothing is handed over. */
   mayStillRun?: ((by: string) => Promise<boolean>) | undefined;
 }
@@ -78,7 +80,7 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
       // Who typed the command that hit the website, from the broker's own stored command of THIS run (a place that is not this run's, or a command not yet handed over, names nobody).
       const via = body.viaCommandSeq === undefined ? undefined : await readSetupCommand(table, run, body.viaCommandSeq);
       const typedBy = via !== undefined && via.state !== "queued" ? via.by : undefined;
-      const outcome = await requestHostAsk(table, { ...run, host: body.host, projectDomains, ...(prodDeny === undefined ? {} : { prodDeny }), ...(typedBy === undefined ? {} : { typedBy }), ...(body.journalN === undefined ? {} : { journalN: body.journalN }), ...(body.from === undefined ? {} : { from: body.from }) });
+      const outcome = await requestHostAsk(table, { ...run, host: body.host, projectDomains, ...(prodDeny === undefined ? {} : { prodDeny }), ...(deps.sandboxDenied === undefined ? {} : { sandboxDenied: deps.sandboxDenied(run.project) }), ...(typedBy === undefined ? {} : { typedBy }), ...(body.journalN === undefined ? {} : { journalN: body.journalN }), ...(body.from === undefined ? {} : { from: body.from }) });
       // A fixed word and nothing else: the worker learns whether it may wait for an answer, never why in words of its own.
       return { outcome: outcome.outcome, ...(outcome.outcome === "refused" ? { reason: outcome.reason } : {}) };
     }

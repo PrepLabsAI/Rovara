@@ -8,7 +8,7 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackSchema, EvidenceRawSchema, evidenceIsFor,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, evidenceIsFor,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidenceRaw, type TestEnvProdDeny,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
@@ -49,6 +49,8 @@ export interface KeepEvidenceInput {
   environmentNote?: EvidenceNotTested | undefined;
   /** Test services: the dependencies the broker pinned for the run (see `PinnedDependency`). */
   dependencies?: readonly PinnedDependency[] | undefined;
+  /** FIX-0518: fixed items the broker adds to the pack's "not tested" list as they are (the laptop's "model hosts allowed in the test sandbox by project setting"). Words from code, never from a repository. */
+  extraNotTested?: readonly EvidenceNotTested[] | undefined;
 }
 
 export interface KeepEvidenceDeps {
@@ -107,7 +109,7 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     const environment = input.environment ?? DEFAULT_EVIDENCE_ENVIRONMENT;
     const built = buildEvidencePack({
       candidateDigest: input.candidateDigest, rawText, checks: input.checks, checkKinds: kinds, environment, ...(input.dependencies === undefined ? {} : { dependencies: input.dependencies }),
-      notTested: [...(environment.envRevision === 0 ? [input.environmentNote ?? NO_ENVIRONMENT_ITEM] : []), ...(rawText === undefined ? [NOT_CAPTURED_ITEM] : []), ...(guarded > 0 ? [WITHHELD_ITEM] : [])], storedArtifacts: new Map(),
+      notTested: [...(input.extraNotTested ?? []), ...(environment.envRevision === 0 ? [input.environmentNote ?? NO_ENVIRONMENT_ITEM] : []), ...(rawText === undefined ? [NOT_CAPTURED_ITEM] : []), ...(guarded > 0 ? [WITHHELD_ITEM] : [])], storedArtifacts: new Map(),
     });
     if (built.pack === undefined) return { kept: false, reason: "invalid" };
     const guardedPack = guardPack(built.pack, built.newArtifacts, deny, deps.scan);
@@ -149,7 +151,7 @@ export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, ta
   try {
     const bytes = await blobs.get(evidencePackKey(task, candidateDigest), PACK_READ_BYTES);
     if (bytes === undefined) return undefined;
-    const parsed = EvidencePackSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
+    const parsed = EvidencePackReadSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
     return parsed.success && evidenceIsFor(parsed.data, candidateDigest) ? parsed.data : undefined;
   } catch {
     return undefined;
