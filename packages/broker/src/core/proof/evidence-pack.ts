@@ -6,12 +6,16 @@
 // Pure apart from hashing: the caller reads the raw file (bounded), lists the stored artifacts, stores `newArtifacts` and persists the pack. The wiring into the task view is one hot-file hunk (see the report).
 import { createHash } from "node:crypto";
 import { dependencyEvidenceOf, type PinnedDependency } from "./dependency-evidence.js";
+import type { ChangedFileEntry } from "./verification-report.js";
+import { weakeningFactsOf } from "./weakening-flags.js";
+import { weakeningPartsOf } from "./evidence-v2-lines.js";
 import {
   ArtifactLinkSchema, ArtifactRefSchema, EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_ARTIFACT_RETENTION, EVIDENCE_CHECKS_MAX, EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_MAX_BYTES, EvidencePackSchema, EvidenceRawSchema, EvidenceViewSchema,
+  EvidencePackV2Schema, evidencePackV1ToV2, evidenceAiFromArtifact, type EvidenceAiInputs,
   redactText,
   TEST_ID_MAX,
   isValidTestId,
-  type ArtifactLink, type ArtifactRef, type CheckEntry, type CheckKind, type EvidenceArtifactKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidenceWithheldReason, type EvidenceRaw, type EvidenceView,
+  type ArtifactLink, type ArtifactRef, type CheckEntry, type CheckKind, type EvidenceArtifactKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackV2, type EvidenceWithheldReason, type EvidenceRaw, type EvidenceView,
 } from "@agentx/contracts";
 
 /** Why part of the raw evidence was dropped or ignored. Fixed codes only: never the worker's text. */
@@ -330,4 +334,76 @@ export function evidenceViewOf(pack: EvidencePack, taskId: string, stateOf: (ref
 /** The environment's words for a service, as the pull request and the page say them. */
 export function serviceModeWords(mode: EvidenceEnvironment["services"][number]["mode"]): string {
   return SERVICE_WORDS[mode];
+}
+
+// ---- the writer's version (TE-A2b)
+
+/**
+ * What a version 2 pack needs that the broker's own pack does not say: who ran the checks and how the CI reads. `ciLevel` is TE-B2's `ciEvidenceLevel(ci)` (`none` -> `no_ci`, `unreadable` -> `ci_not_readable`,
+ * `pending` -> undefined, otherwise `their_ci`); it is a parameter so this lane needs nothing from TE-B2 until it merges, and the caller passes the mapping's result. `changedFiles` (the diff's files) fill the pack's
+ * `flags` and `weakening` parts when the caller has them; a pull request description re-reads them from its own files anyway.
+ */
+export interface EvidenceV2Writer extends EvidenceAiInputs {
+  /** Bound eval-wire artifact, loaded once by the caller under its existing read guard. */
+  evalArtifact?: unknown;
+  version: 2;
+  producer: EvidencePackV2["producer"];
+  ciLevel?: "their_ci" | "no_ci" | "ci_not_readable" | undefined;
+  /** The run could not finish because of the test environment, not the code (the v1 axis `blocked_by_environment`). */
+  blockedByEnvironment?: boolean | undefined;
+  repositories?: EvidencePackV2["candidate"]["repositories"] | undefined;
+  changedFiles?: readonly ChangedFileEntry[] | undefined;
+  proof?: EvidencePackV2["proof"] | undefined;
+  meters?: EvidencePackV2["meters"] | undefined;
+}
+/** Which version of the pack the broker writes. Version 1 is the default: it is what every strict reader of today reads. */
+export type EvidenceWriter = { version: 1 } | EvidenceV2Writer;
+
+/** The words for the CI part when a Rovara run is the level reached: the weakest link, named so the first line never hides that CI said nothing. */
+const CI_WEAKEST_WORDS = { no_ci: "No CI on this repository", ci_not_readable: "CI not readable" } as const;
+
+/** The result axis from the broker's own outcomes: only a check that passed and has nothing failing counts as verified; a regression or a failing check with no earlier result is the code's. */
+export function evidenceResultOf(pack: Pick<EvidencePack, "checks">, blockedByEnvironment: boolean): EvidencePackV2["result"] {
+  if (blockedByEnvironment) return "blocked_by_environment";
+  if (pack.checks.some((entry) => entry.after === "failed" && entry.class !== "already_failing")) return "code_failed";
+  if (pack.checks.length === 0 || pack.checks.some((entry) => entry.after !== "passed")) return "partially_verified";
+  return "verified";
+}
+
+/**
+ * The level reached and its weakest link. A Rovara run counts only when Rovara ran at least one check itself (a sealed round or the agent's sandbox, never a developer machine or an imported result): that is `rovara_real_run`,
+ * and the renderer words a sandbox run "not sealed". When the CI said nothing (no CI, not readable) the run is still the level, and the CI is named as the weakest link. Without a Rovara run the level is the CI's, or
+ * `sandbox_only` while the CI is still running.
+ */
+export function evidenceLevelOf(pack: Pick<EvidencePack, "checks">, writer: Pick<EvidenceV2Writer, "producer" | "ciLevel">): EvidencePackV2["level"] {
+  const ran = (writer.producer.isolation === "sealed" || writer.producer.isolation === "sandbox") && pack.checks.some((entry) => entry.after === "passed" || entry.after === "failed");
+  const ci = writer.ciLevel;
+  if (ran) {
+    return { reached: "rovara_real_run", required: [], ...(ci === "no_ci" || ci === "ci_not_readable" ? { weakest: { stageId: "ci", words: CI_WEAKEST_WORDS[ci] } } : {}) };
+  }
+  return { reached: ci ?? "sandbox_only", required: [] };
+}
+
+/**
+ * The broker's pack as a version 2 pack, every v1 part kept (`evidencePackV2ToV1` gives the v1 pack back). Undefined when the result does not fit the strict v2 schema: nothing is written then, never a pack a reader would
+ * have to guess about.
+ */
+export function evidencePackV2Of(pack: EvidencePack, writer: EvidenceV2Writer, report?: { droppedPaths: number }): EvidencePackV2 | undefined {
+  const base = evidencePackV1ToV2(pack, {
+    producer: writer.producer,
+    level: evidenceLevelOf(pack, writer),
+    result: evidenceResultOf(pack, writer.blockedByEnvironment === true),
+    ...(writer.repositories === undefined ? {} : { repositories: writer.repositories }),
+  });
+  const parts = writer.changedFiles === undefined ? {} : weakeningPartsOf(weakeningFactsOf(writer.changedFiles, pack), [], report);
+  const ai = evidenceAiFromArtifact(writer.evalArtifact, pack.candidateDigest, writer);
+  const v2 = {
+    ...base,
+    ...(ai === undefined ? {} : { ai }),
+    ...parts,
+    ...(writer.proof === undefined ? {} : { proof: writer.proof }),
+    ...(writer.meters === undefined ? {} : { meters: writer.meters }),
+  };
+  const parsed = EvidencePackV2Schema.safeParse(v2);
+  return parsed.success ? parsed.data : undefined;
 }

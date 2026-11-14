@@ -3,6 +3,7 @@
 // text and checks every count against the files, so a worker's own summary is never taken as truth. Every list and string is bounded, every text is one plain line
 // (no control or format characters) that readers escape for their own markup, and a pack for any other candidate digest is ignored by the broker.
 import { z } from "zod";
+import { EvidenceAiSchema, readEvidenceAi } from "./evidence-ai.js";
 import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES, isRegisteredCheckKind, partsOutsideKind } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
@@ -684,6 +685,7 @@ function evidencePackV2Schemas(mode: Mode) {
     : dependency;
 
   const sections = {
+    ai: EvidenceAiSchema.optional(),
     proof: obj({
       verdicts: z.array(obj({ checkId: line(64).optional(), testId: line(TEST_ID_MAX).optional(), verdict: TestProofVerdictSchema, reason: TestProofReasonSchema.optional() })).max(EVIDENCE_PROOF_VERDICTS_MAX),
       provenCount: CountSchema,
@@ -852,6 +854,12 @@ export function readEvidencePack(input: unknown): EvidencePackRead {
     const raw = own(key);
     if (raw === undefined) {
       if (key === "notTested") setOwnProperty(out, key, []);
+      continue;
+    }
+    if (key === "ai") {
+      const ai = readEvidenceAi(raw);
+      setOwnProperty(out, key, ai ?? {});
+      if (ai === undefined) notePath(key);
       continue;
     }
     const read = tolerantRead((V2_READER.sections as Record<string, z.ZodType>)[key]!, raw, key, report);

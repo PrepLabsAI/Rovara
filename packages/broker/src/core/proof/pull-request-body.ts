@@ -6,7 +6,8 @@ import { attributionBodyLines, hideEmailAddresses, TESTING_RESULT_LABELS, type A
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import { inertLine } from "./inert-text.js";
 import { boundEvidence } from "./evidence-lines.js";
-import { weakeningBlock } from "./weakening-flags.js";
+import { notComparedLines, weakeningBlock } from "./weakening-flags.js";
+import { evidencePublicAiLines, evidenceV2Lines } from "./evidence-v2-lines.js";
 import { reviewModelLines } from "./review-model-lines.js";
 import { testingSectionLines } from "./testing-section.js";
 import { linearCloseLine, neutralizeLinearWords, normalizeIssueKey, sealLinearText } from "./linear-close.js";
@@ -69,6 +70,17 @@ export interface PullRequestBodyContext {
    * with one row per check instead of the `## Tests` lists, and the Proof table starts with the result. Absent, the description is exactly what it was.
    */
   testing?: TestingView | undefined;
+  /**
+   * TE-A2b: which version of the evidence the description prints. Absent or 1 (the default): exactly what it was, a v2 pack in `proof.evidence.read` changes nothing. 2: when `proof.evidence.read` is a v2 pack for this code,
+   * the description starts with an Evidence block from the shared renderer (first line, where the checks ran, the flags, the checks, what was not tested), which takes the place of the flags block below; with any other
+   * pack it is the v1 description. The caller chooses the version (in Cloud, by the TE-A1 company gate).
+   */
+  evidenceWriter?: 1 | 2 | undefined;
+  /**
+   * TE-A2b (B12 review M2): the repository is KNOWN to be private. The Evidence block carries check labels, test names and not-tested reasons, which a repository's own words and an address can reach, and a description
+   * is read by everyone who can see the repository, so, like the lessons' titles, the block is printed only when this is true. Absent (unknown) or false (public): no block, the v1 lines. The caller sets it from the code host.
+   */
+  repositoryKnownPrivate?: boolean | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -241,16 +253,20 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
   const proof = proofSection(workflow, context.proof, context.testing === undefined ? undefined : TESTING_RESULT_LABELS[context.testing.result]);
   const testing = context.testing;
   // TE-B3: the flags a reviewer reads first (instruction files, files CI runs, tests that ran before and not now, more skips, changed snapshots). Words only; nothing when there is none, so a description without flags is what it was.
-  const flags = weakeningBlock(context.changedFiles?.files ?? [], boundEvidence(context.proof?.evidence, workflow.candidate?.digest),
-    // Only when the description has a proof to speak of (a test proof or an approved plan with claims): a task with neither reads as it did.
-    context.proof === undefined || (context.proof.testProof === undefined && (context.proof.plan?.claims?.length ?? 0) === 0) ? undefined : { testProof: context.proof.testProof, candidateDigest: workflow.candidate?.digest });
+  // Only when the description has a proof to speak of (a test proof or an approved plan with claims): a task with neither reads as it did.
+  const weakeningProof = context.proof === undefined || (context.proof.testProof === undefined && (context.proof.plan?.claims?.length ?? 0) === 0) ? undefined : { testProof: context.proof.testProof, candidateDigest: workflow.candidate?.digest };
+  const flags = weakeningBlock(context.changedFiles?.files ?? [], boundEvidence(context.proof?.evidence, workflow.candidate?.digest), weakeningProof);
+  // TE-A2b: with the v2 writer and a v2 pack for this code, the shared renderer's block comes first and carries the same flags (once) and the same "could not compare" lines. It shrinks to its compact form with the lists.
+  const notCompared = weakeningProof === undefined ? [] : notComparedLines(weakeningProof.testProof, weakeningProof.candidateDigest);
+  const evidenceBlock = (level: number): string[] | undefined => (context.evidenceWriter !== 2 ? undefined : context.repositoryKnownPrivate === true ? evidenceV2Lines(context.proof?.evidence, workflow.candidate?.digest, context.changedFiles?.files, level, notCompared) : evidencePublicAiLines(context.proof?.evidence, workflow.candidate?.digest));
   // The Proof section shrinks with the lists: its evidence text first, then its proven and passed rows, never a failed row or a not-tested item. One more step after the lists are empty shortens it again.
   const steps = [...LIST_LIMITS.map((limit, index) => ({ limit, proofLevel: Math.min(index, 3) })), { limit: 0, proofLevel: PROOF_LEVEL_LAST }];
   for (const [level, { limit, proofLevel }] of steps.entries()) {
     // The last guard: whatever a path let through, no line has a Linear magic word before a key but Rovara's own Fixes line.
     // S3: no email address on GitHub; hidden before the size is checked, so the block still fits the budget it is given.
+    const block = evidenceBlock(level);
     lines = sealLinearText([
-      ...flags,
+      ...(block ?? flags),
       "## What changed", ...changedLines(context, limit), "",
       ...(testing === undefined ? ["## Tests", ...testLines(workflow, context, limit)] : testingSectionLines(testing, level, testingExtraLines(workflow, context, limit))), "",
       ...(proof === undefined ? [] : [...proof(proofLevel), ""]),

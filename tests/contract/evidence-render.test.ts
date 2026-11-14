@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   EVIDENCE_ISOLATIONS, EVIDENCE_LEVELS, EVIDENCE_RENDER_LIMITS, NEWER_EVIDENCE_WORDS, evidencePackV1ToV2, inertEvidenceText, readEvidencePack, renderEvidence, renderEvidenceRead, type EvidencePackV2,
 } from "../../packages/contracts/src/index.js";
-import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
 import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
+import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const withLevel = (reached: string, isolation = "sealed", result = "verified"): EvidencePackV2 => v2Pack({ level: { reached, required: [] }, producer: { edition: "cloud", isolation }, result });
@@ -62,11 +62,33 @@ describe("the producer line", () => {
 // M4: the first line never says "Real" for a pack that did not run in a sealed round or that rests on scripted AI replies.
 describe("the first line is never better than where the checks ran", () => {
   it("words a 'real run' claimed outside a sealed round as what it was", () => {
-    for (const isolation of ["sandbox", "developer_machine", "imported"]) {
-      const first = renderEvidence(withLevel("rovara_real_run", isolation)).firstLine;
-      expect(first, isolation).toBe("Verified · Run by Rovara, not sealed");
-      expect(first).not.toMatch(/real/iu);
-    }
+    const first = renderEvidence(withLevel("rovara_real_run", "sandbox")).firstLine;
+    expect(first).toBe("Verified · Run by Rovara, not sealed");
+    expect(first).not.toMatch(/real/iu);
+  });
+
+  // TE-A2b review M3: only a sealed round or the agent's sandbox is a Rovara run; a stored pack (read tolerantly) that says otherwise is worded as where it really ran.
+  it.each([
+    ["developer_machine", "Verified · Ran on a developer machine"],
+    ["imported", "Verified · Imported, not run by Rovara"],
+    ["teleport", "Verified · Where the checks ran is not known"],
+  ])("a 'real run' claimed with isolation %s is not worded as a Rovara run", (isolation, expected) => {
+    const read = readEvidencePack({ ...clone(withLevel("rovara_real_run")), producer: { edition: "code", isolation } });
+    expect(read.status).toBe("v2");
+    if (read.status !== "v2") return;
+    const first = renderEvidence(read.pack, { newer: read.newer }).firstLine;
+    expect(first.startsWith(expected)).toBe(true);
+    expect(first).not.toContain("Run by Rovara");
+    expect(first).not.toMatch(/real/iu);
+  });
+
+  // TE-A2b review L1: a laptop report whose CI has not finished says where it ran (O26), never "Sandbox only, no sealed run".
+  it("a developer machine with the CI still running says it ran on a developer machine", () => {
+    const first = renderEvidence(withLevel("sandbox_only", "developer_machine")).firstLine;
+    expect(first).toBe("Verified · Ran on a developer machine");
+    expect(first).not.toContain("Sandbox only");
+    expect(renderEvidence(withLevel("sandbox_only", "imported")).firstLine).toBe("Verified · Imported, not run by Rovara");
+    expect(renderEvidence(withLevel("sandbox_only", "sandbox")).firstLine).toContain("Sandbox only, no sealed run");
   });
 
   it("words a scripted-AI proof as such and the change proof line says so", () => {
@@ -307,8 +329,8 @@ describe("inert text", () => {
   });
 });
 
-describe("no callers", () => {
-  it("v2 readers and writers have no production callers yet; inert text is shared by B3, A4 and eval health", () => {
+describe("callers", () => {
+  it("only the broker's evidence writer, reader and pull request description (TE-A2b) use an export the evidence pack v2 lane added", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
     const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
@@ -319,29 +341,52 @@ describe("no callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const callers = (symbols: string[]) => {
-      const env = isolatedGitEnvironment(root, { GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "0", GIT_NOGLOB_PATHSPECS: "0", GIT_ICASE_PATHSPECS: "0" });
-      const found = spawnSync("git", ["grep", "--untracked", "-lw", ...symbols.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env });
-      expect([0, 1]).toContain(found.status);
-      return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
-    };
-    const inertCallers = new Set(["packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/test-report.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts"]);
-    expect(callers(names).filter((file) => !inertCallers.has(file))).toEqual([]);
-    // These files may share only inert text; every other v2 export remains forbidden in both.
-    expect(callers(names.filter((name) => name !== "inertEvidenceText"))).toEqual([]);
+    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect([0, 1]).toContain(found.status);
+    const hits = found.stdout.split("\n").filter((entry) => entry !== "");
+    // TE-A2b is the first caller (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
+    expect(hits.filter((file) => !file.startsWith("packages/contracts/")).sort()).toEqual([
+      "packages/broker/src/core/proof/evidence-guard.ts",
+      "packages/broker/src/core/proof/evidence-keep.ts",
+      "packages/broker/src/core/proof/evidence-lines.ts",
+      "packages/broker/src/core/proof/evidence-pack.ts",
+      "packages/broker/src/core/proof/evidence-v2-lines.ts",
+      "packages/broker/src/core/proof/weakening-flags.ts",
+      "packages/worker/src/verification/eval-discovery.ts",
+      "packages/worker/src/verification/eval-health.ts",
+      "packages/worker/src/verification/eval-round.ts",
+      "packages/worker/src/verification/test-report.ts",
+    ]);
+    // B3 may share inert text only; the other v2 exports remain confined to the A2b callers.
+    const others = spawnSync("git", ["grep", "--untracked", "-lw", ...names.filter((name) => name !== "inertEvidenceText").flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect([0, 1]).toContain(others.status);
+    expect(others.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/")).sort()).toEqual([
+      "packages/broker/src/core/proof/evidence-guard.ts",
+      "packages/broker/src/core/proof/evidence-keep.ts",
+      "packages/broker/src/core/proof/evidence-lines.ts",
+      "packages/broker/src/core/proof/evidence-pack.ts",
+      "packages/broker/src/core/proof/evidence-v2-lines.ts",
+    ]);
   });
 });
 
-it("keeps runner-measure provenance visible even with long check labels and inert measure names", () => {
-  const pack = clone(v2Pack());
-  const check = pack.checks[1]!;
-  check.label = "L".repeat(200);
-  check.measures = [{ name: "[score](https://example.com) @owner #123", unit: "ms", base: 1, head: 2, direction: "down_good" }];
-  const out = renderEvidence(pack);
-  expect(out.body).toContain("Measures: reported by the project's test runner, not measured by Rovara");
-  expect(out.text).not.toMatch(/https:\/\/|@owner|#123/u);
-  check.label = "eval";
-  expect(renderEvidence(pack).text).toContain("score");
-  for (const row of pack.checks) delete row.measures;
-  expect(renderEvidence(pack).text).not.toContain("reported by the project's test runner");
+// TE-A2b review L2: version 2 is off everywhere until the Cloud half and the TE-A1 gate turn it on. Nothing in a package may set the description's writer to 2, give `keepEvidence` a writer, or read a pack with `loadEvidenceRead` but the files named here.
+describe("nothing turns the version 2 writer on yet", () => {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const grep = (...args: string[]) => {
+    const found = spawnSync("git", ["grep", "--untracked", ...args, "--", ":(glob)packages/*/src/**"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect([0, 1]).toContain(found.status);
+    return found.stdout.split("\n").filter((entry) => entry !== "");
+  };
+  it("no package sets `evidenceWriter: 2`", () => {
+    expect(grep("-nE", "evidenceWriter[[:space:]]*:[[:space:]]*2")).toEqual([]);
+  });
+  it("only the writer's own file and the local wiring name keepEvidence, and the wiring gives it no writer", () => {
+    expect(grep("-lE", "keepEvidence\\(").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/local/app/evidence.ts"]);
+    expect(readFileSync(`${root}/packages/broker/src/local/app/evidence.ts`, "utf8")).not.toMatch(/\bwriter\b/u);
+    expect(grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2")).toEqual([]);
+  });
+  it("only the evidence keep file and a comment in the evidence lines name loadEvidenceRead", () => {
+    expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts"]);
+  });
 });

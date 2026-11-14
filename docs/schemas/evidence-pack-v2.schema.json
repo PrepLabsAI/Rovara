@@ -850,6 +850,285 @@
         "additionalProperties": false
       }
     },
+    "ai": {
+      "type": "object",
+      "properties": {
+        "eval": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string",
+              "enum": [
+                "Worse on eval",
+                "No drop found",
+                "Improved on eval",
+                "Not run"
+              ]
+            },
+            "notRunReason": {
+              "type": "string",
+              "enum": [
+                "rate_limit",
+                "quota",
+                "overloaded",
+                "cap",
+                "key_refused",
+                "provider_error",
+                "refused",
+                "too_many_not_run",
+                "too_few_questions",
+                "hidden_set_needs_sealed_round",
+                "hidden_set_unavailable",
+                "no_base_score",
+                "partial_run",
+                "unreadable_score",
+                "no_measures_file",
+                "eval_set_changed",
+                "eval_set_unknown",
+                "base_round_unattested",
+                "question_data_missing",
+                "no_changed_prompt_call",
+                "judge_changed",
+                "round_limit",
+                "invalid_question_data",
+                "no_product_key",
+                "no_eval_configured",
+                "not_connected",
+                "spend_not_approved",
+                "needs_fresh_sandbox",
+                "checks_failed",
+                "stopped"
+              ]
+            },
+            "privateSet": {
+              "type": "boolean"
+            },
+            "counts": {
+              "type": "object",
+              "properties": {
+                "questions": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "broke": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "newlyFail": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "newlyPass": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "flaky": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "unchanged": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "excluded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                }
+              },
+              "required": [
+                "questions",
+                "broke",
+                "newlyFail",
+                "newlyPass",
+                "flaky",
+                "unchanged",
+                "excluded"
+              ],
+              "additionalProperties": false
+            },
+            "catchableDrop": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "fixRound": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "const": 0
+                },
+                {
+                  "type": "number",
+                  "const": 1
+                }
+              ]
+            },
+            "notices": {
+              "maxItems": 4,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "details_withheld",
+                  "baseline_measuring",
+                  "subset_unsupported",
+                  "same_judge_family"
+                ]
+              }
+            },
+            "questions": {
+              "maxItems": 10,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 320
+                  },
+                  "change": {
+                    "type": "string",
+                    "enum": [
+                      "broke",
+                      "newly_fail",
+                      "newly_pass",
+                      "flaky"
+                    ]
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "ordinary",
+                      "safety",
+                      "refusal"
+                    ]
+                  },
+                  "old": {
+                    "maxItems": 3,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 600
+                    }
+                  },
+                  "new": {
+                    "maxItems": 3,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 600
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "change",
+                  "old",
+                  "new"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "label",
+            "privateSet",
+            "notices",
+            "questions"
+          ],
+          "additionalProperties": false
+        },
+        "realModelRun": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "const": "ran"
+                },
+                "passed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "rerunFailures": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "trust": {
+                  "type": "string",
+                  "const": "real"
+                }
+              },
+              "required": [
+                "status",
+                "passed",
+                "total",
+                "rerunFailures",
+                "trust"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "const": "not_run"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not_available",
+                    "invalid_result",
+                    "no_product_key",
+                    "not_connected",
+                    "stopped",
+                    "provider_error"
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "promptWithoutEval": {
+          "type": "boolean"
+        },
+        "oldNewLines": {
+          "maxItems": 10,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 600
+          }
+        }
+      },
+      "required": [
+        "eval",
+        "realModelRun",
+        "promptWithoutEval"
+      ],
+      "additionalProperties": false
+    },
     "proof": {
       "type": "object",
       "properties": {
