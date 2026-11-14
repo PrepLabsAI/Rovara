@@ -293,6 +293,21 @@ export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
 export * from "./model-serve.js";
+// TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
+export * from "./model-sse-named.js";
+export * from "./model-family-vectors.js";
+export * from "./model-family-openai-ops.js";
+export * from "./model-family-gemini-extra.js";
+export * from "./model-family-anthropic.js";
+export * from "./model-family-cohere.js";
+export * from "./model-served-family.js";
+export * from "./model-request-facts.js";
+export * from "./model-render.js";
+export * from "./model-failure-pack.js";
+export * from "./model-families.js";
+export * from "./model-reply-provenance.js";
+export * from "./model-reply-set.js";
+export * from "./model-serve-replies.js";
 export * from "./test-account.js";
 export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
@@ -347,3 +362,4 @@ export * from "./policy.js";
 export * from "./presets.js";
 
 export * from "./measures-file.js";
+export * from "./machine-size.js";
