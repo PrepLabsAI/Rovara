@@ -147,7 +147,9 @@ export interface GitHubCodeHostProvider {
   listWorkingBranches(repositoryUrl: string, expected: { installationId: number; repositoryId: number }, scope: GitHubTokenScope, page?: number): Promise<WorkingBranchPage>;
   getCommitParents(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string[]>;
   /** Optional (DEC 213): one commit's own changes, its parents, and whether GitHub gave the whole list. A client without it leaves the adapter without `commitChanges`. */
-  getCommitChanges?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }>;
+  getCommitChanges?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }>;
+  /** Optional (DEC 213): a commit's changes against a commit it builds on (a merge against its second parent), and whether GitHub gave the whole list. A client without it leaves the adapter without `compareChanges`. */
+  getCompareChanges?(repositoryUrl: string, baseSha: string, headSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean }>;
   getDefaultBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
   getPullRequestMergeObservation(repositoryUrl: string, number: number, budget: ReadBudget, scope: GitHubTokenScope): Promise<GitHubPullRequestDetails & { headTreeSha: string }>;
   installationForRepository(owner: string, name: string, options?: { fresh?: boolean }): Promise<{ installationId: number } | undefined>;

@@ -136,6 +136,16 @@ export function withUnseenCommits(tier: ChangeTier, unseen: Pick<UnseenCommitsRe
   return { ...next, level: "risky", reasons: capReasons([{ code: "unscanned_commits", path }, ...next.reasons], 50) };
 }
 
+/**
+ * The head's tier with the walk's reasons its recorded tier holds (a head tiered on an earlier pass is not walked again): the commits flagged between checks, and the ones not scanned, so the scope question still
+ * names them. Only up.
+ */
+export function withRecordedUnseen(tier: ChangeTier, recorded: Pick<ChangeTier, "reasons"> | undefined): ChangeTier {
+  const carried = (recorded?.reasons ?? []).filter((reason) => reason.code === "unseen_commit_flagged" || reason.code === "unscanned_commits");
+  if (carried.length === 0) return tier;
+  return { ...tier, level: "risky", reasons: capReasons([...carried, ...tier.reasons.filter((reason) => !carried.some((kept) => kept.code === reason.code && kept.path === reason.path))], 50) };
+}
+
 /** One pass of the lighter flow's checks for a task. Never throws for a host or a model that cannot answer: the record then stays as it was (the merge gate refuses what is owed). */
 export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, beforeRequest?: () => void): Promise<TierChecksOutcome> {
   const workflow = task.workflow;
@@ -165,9 +175,6 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // The gate's own read of the change at the pinned heads, once: the reviewer is given exactly its patch (the form `readReviewInput` gives), and the tier reads the head facts the same read returned.
     const read = await readTierInput(targets, scope, beforeRequest);
     const input = { ...reviewTextOf(read.diff), diff: read.diff };
-    // Versions pushed between two passes (a credential added in one push and taken out in the next leaves a clean final diff): each is scanned on its own diff, and a flagged one, or one that could not be scanned, makes the head risky (only up, so it stays).
-    const unseen = await unseenCommits(targets, seenHeadsOf(workflow), scope, beforeRequest, baseCommitsOf(workflow));
-    const headTierOf = (): ChangeTier => withUnseenCommits(tierFromDiff(read.diff, { ...bound, at, head: read.head }), unseen);
     // A head the record has no tier for (a person's push, or one the post-push writer could not read) is tiered here, from the same files.
     const flow = workflow.flow;
     // A reviewer outage holds the head it happened on, not the next ones: the head of the first tier an outage raised.
@@ -175,6 +182,13 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const outageHead = [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])].find((tier) => tier.reasons.some((reason) => reason.code === "reviewer_unavailable"))?.headSha;
     const outageElsewhere = outageOnly && outageHead !== head;
     const needsTier = flow?.tier?.headSha !== head || flow.tier.source === "estimate" || outageElsewhere;
+    // Versions pushed between two passes (a credential added in one push and taken out in the next leaves a clean final diff): each is scanned on its own diff, and a flagged one, or one that could not be scanned, makes the
+    // head risky (only up, so it stays). Walked only when this head is tiered here: a head already tiered keeps what its tier recorded (its walk's reasons are on that tier), and nothing is read again.
+    const unseen = needsTier ? await unseenCommits(targets, seenHeadsOf(workflow), scope, beforeRequest, baseCommitsOf(workflow)) : undefined;
+    const headTierOf = (): ChangeTier => {
+      const own = tierFromDiff(read.diff, { ...bound, at, head: read.head });
+      return unseen !== undefined ? withUnseenCommits(own, unseen) : withRecordedUnseen(own, flow?.tier?.headSha === head ? flow.tier : undefined);
+    };
     const fresh = needsTier ? headTierOf() : undefined;
     // The heads must not have moved while they were read.
     for (const target of targets) {

@@ -396,6 +396,24 @@ export class FakeHostModel {
     return diffOfFiles(parent === undefined ? new Map() : this.revision(parent).files, revision.files);
   }
 
+  /** DEC 213: `head`'s files against `base`, a revision `head` builds on (a merge against its second parent), as GitHub's compare read lists them. Throws when `base` is not an ancestor of `head` (or is `head`). */
+  compareChangedFiles(base: string, head: string): ChangeRequestFile[] {
+    const from = this.revision(base);
+    const to = this.revision(head);
+    const queue = [...to.parents];
+    const visited = new Set<string>();
+    let found = false;
+    while (queue.length > 0 && !found) {
+      const next = queue.shift()!;
+      if (visited.has(next)) continue;
+      visited.add(next);
+      if (next === from.sha) found = true;
+      else queue.push(...this.revision(next).parents);
+    }
+    if (!found) throw new Error("the base is not a revision the head builds on");
+    return diffOfFiles(from.files, to.files);
+  }
+
   /** The host's word on whether the change request can merge: draft, conflicts, a required check failing or pending, else clean. */
   mergeableState(cr: FakeChangeRequest): "clean" | "conflicted" | "blocked" | "draft" {
     if (cr.draft) return "draft";

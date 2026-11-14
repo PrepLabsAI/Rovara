@@ -1772,8 +1772,9 @@ export class GitHubAppCredentialProvider {
   /**
    * DEC 213: one commit's own changes (`GET /repos/<owner>/<name>/commits/<sha>`, its files against its first parent, 100 a page), read with a contents-read token. `complete` is false when GitHub cut anything: more
    * pages than `COMMIT_FILES_PAGES_MAX`, a changed file it gave no patch for (too large, or binary), or file counts that do not add up to the commit's own totals (GitHub's 3,000-file limit). Throws when GitHub cannot answer.
+   * `beforePage` is called before EVERY page is asked for (one unit of the pass's allowance a page; it throws when the allowance or the pass's time is used up, and the read stops with it).
    */
-  async getCommitChanges(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }> {
+  async getCommitChanges(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }> {
     if (!/^[a-f0-9]{40}$/u.test(commitSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
     const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
     const token = await this.readTokenFor(repository, scope);
@@ -1783,6 +1784,7 @@ export class GitHubAppCredentialProvider {
     let stats: { additions: number; deletions: number } | undefined;
     for (let page = 1; ; page += 1) {
       if (page > COMMIT_FILES_PAGES_MAX) { complete = false; break; }
+      beforePage?.();
       const response = await this.fetchImplementation(
         `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/commits/${commitSha}?per_page=100&page=${page}`,
         { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" },
@@ -1810,6 +1812,32 @@ export class GitHubAppCredentialProvider {
     // The files must add up to the commit's own totals: GitHub lists at most 3,000 files of a commit and says nothing else about the rest.
     if (complete && stats !== undefined && (files.reduce((total, file) => total + file.additions, 0) !== stats.additions || files.reduce((total, file) => total + file.deletions, 0) !== stats.deletions)) complete = false;
     return { files, complete, parents: parents ?? [] };
+  }
+
+  /**
+   * DEC 213: the changes of `headSha` against `baseSha`, a commit it builds on (a merge against its second parent): `GET /repos/<owner>/<name>/compare/<base>...<head>`, read with a contents-read token, ONE page (GitHub
+   * lists the changed files of the whole comparison on the first page only). Throws when GitHub cannot answer, or when `baseSha` is not a commit `headSha` builds on (GitHub's merge base is then another commit, or
+   * `headSha` is behind). `complete` is false when GitHub may have cut the list: `COMPARE_FILES_MAX` files or more (GitHub lists at most 300 files of a comparison and says nothing of the rest), a full page with
+   * another page after it, or a changed file it gave no patch for (too large, or binary). A comparison has no totals of its own to add up. `beforePage` is called before the page is asked for.
+   */
+  async getCompareChanges(repositoryUrl: string, baseSha: string, headSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean }> {
+    if (!/^[a-f0-9]{40}$/u.test(baseSha) || !/^[a-f0-9]{40}$/u.test(headSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.readTokenFor(repository, scope);
+    beforePage?.();
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/compare/${baseSha}...${headSha}?per_page=100&page=1`,
+      { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" },
+    );
+    if (!response.ok) { await response.body?.cancel(); throw agentXError("RUNTIME_UNAVAILABLE", `GitHub compare read failed with HTTP ${response.status}`); }
+    const value = feedbackRecord(await response.json());
+    // Only the comparison asked for: head is at or ahead of base, and base is the merge base (so the files are head's own against base).
+    if (feedbackRecord(value.merge_base_commit).sha !== baseSha || value.behind_by !== 0 || !Array.isArray(value.files) || value.files.length > COMPARE_FILES_MAX) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid compare read.");
+    const files = value.files.map(changedFileOfGitHub);
+    const hasNext = (response.headers.get("link") ?? "").split(",").some((link) => /;\s*rel="next"/u.test(link));
+    const complete = files.length < COMPARE_FILES_MAX && !(files.length >= 100 && hasNext)
+      && !files.some((file) => file.patch === undefined && file.status !== "removed" && file.additions + file.deletions > 0);
+    return { files, complete };
   }
 
   /** The commit a branch points at now, as GitHub says; throws when the branch does not exist. */
@@ -3002,6 +3030,8 @@ async function workingBranchPageJson(response: Response): Promise<unknown> {
 
 /** DEC 213: the most pages of one commit's files read (100 a page); past them the commit's list is cut. */
 const COMMIT_FILES_PAGES_MAX = 3;
+/** DEC 213: GitHub lists at most 300 changed files of a comparison; a list that long may have been cut. */
+const COMPARE_FILES_MAX = 300;
 
 /** One changed file as GitHub lists it (a pull request's files, or one commit's), checked. */
 function changedFileOfGitHub(entry: unknown): GitHubPullRequestChangedFile & { previous_filename?: string } {
