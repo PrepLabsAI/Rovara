@@ -23,8 +23,8 @@ import { readSetupJournal } from "../../core/setup-agent/journal.js";
 import type { DecisionSubject } from "../../core/decisions/approval-gate.js";
 
 /** The subjects the approval gate must know for the setup agent: a website a run asked for, and a project's waiting setup. */
-export function setupDecisionSubjects(flow: TaskFlowDeps): DecisionSubject[] {
-  return [createSetupHostSubject({ store: flow.store }), createSetupProposalSubject({ flow })];
+export function setupDecisionSubjects(flow: TaskFlowDeps, sandboxDenied?: (project: string) => readonly string[]): DecisionSubject[] {
+  return [createSetupHostSubject({ store: flow.store, ...(sandboxDenied === undefined ? {} : { sandboxDenied }) }), createSetupProposalSubject({ flow })];
 }
 import { createSessionControlHost } from "./host.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
@@ -53,6 +53,8 @@ export interface LocalSetupAgentOptions {
   modelAccessConfigured: () => Promise<boolean>;
   /** The websites the install's machines reach by their own list. */
   installDomains?: (() => readonly string[]) | undefined;
+  /** FIX-0518: the names a project's test sandbox is denied (empty when the owner allowed model hosts for it). A website ask for one is refused as a model host and can never be approved. */
+  sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** `ROVARA_SETUP_AGENT=0`: the feature is off and every route and the worker's callback answer as an unknown path. */
   enabled: boolean;
 }
@@ -256,6 +258,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     enabled: options.enabled,
     callback: {
       installDomains: options.installDomains,
+      sandboxDenied: options.sandboxDenied,
       // The owner is the only person who may type a command (read live at hand-over).
       mayStillRun: async (by) => by === ownerDeveloperId,
     },

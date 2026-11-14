@@ -131,6 +131,24 @@ Task code is a repository's code, so a local worker is built as if it were hosti
   `git clone`, `fetch` and `push` need, and which shares this list with the sandboxes) includes anyone's repository, and a CDN can host a
   different site on the same address as an allowed one. The default list therefore has no `*.amazonaws.com` (anyone's bucket), no `*.github.com`
   and no `*.githubusercontent.com`; add the exact name a project needs to `allowedDomains`.
+- **The model hosts are denied in the task sandboxes (FIX-0518), on by default.** This closes one exfiltration route and one spend route: a test or a shell command in a sandbox sending the workspace to a model host with someone else's key, or spending on a
+  key committed to a repository. It is not a general block on leaving the sandbox: `github.com`, Slack, the package registries and every other allowed name stay reachable from it. The list above is one list for both networks, and it holds
+  `api.openai.com`, `api.anthropic.com`, `auth.openai.com`, `openrouter.ai` and `chatgpt.com`. The gateway therefore gets a second list, `sandboxDenied` (`isolation/sandbox-model-deny.ts`: those five hosts, every host of the model catalog,
+  `*.openai.azure.com`, a `*.<host>` wildcard under each of them, and the families `*.openai.com`, `*.anthropic.com`, `*.openrouter.ai`, `*.chatgpt.com`), which only its **sandbox** side applies: the sandbox name server answers NXDOMAIN, and its port-443 and
+  port-80 forwarders refuse the server name or the `Host`, in any letter case and with a trailing dot. A caller that names no role is a sandbox: only the exact role `worker` is exempt. The **worker** network ignores the list, because the agent's own
+  model loop runs in the worker, through the broker's key proxy (`AGENTX_MODEL_PROXY_URL`), and ChatGPT sign-in needs `chatgpt.com` and `auth.openai.com` there. A project's own `allowedDomains` (even `*.openai.com`) cannot bring a model host back into its
+  sandbox, and neither can a setup run's website ask: the broker refuses it as a model host (never "already allowed") and refuses the owner's approval of one. Google's token hosts (`oauth2`, `sts` and `iamcredentials.googleapis.com`) are not on this list; that is a
+  separate decision. The worker is told the state in `ROVARA_SANDBOX_MODEL_HOSTS` (`denied`, or `allowed` when the owner's setting below is used; a project's environment cannot set it), and the machine carries the same word as a label, which the evidence reads
+  back. A change re-creates an idle machine at its next start.
+  - **Turning it off for one project (owner only).** For a project whose tests really call a model with the repository's own key, put this in `~/.rovara/config.json` and restart `rovara up`:
+    ```json
+    { "version": 1, "plugins": [], "projectSettings": { "my-app": { "sandboxModelHosts": "allow" } } }
+    ```
+    Absent, `"deny"` and any other project all mean deny. Only the config file you own can set it: a repository, a project's settings page and the agent cannot. When the project's machine was created with it, the evidence of that project's runs lists
+    "model hosts allowed in the test sandbox by project setting" (a note about where the tests ran; it does not lower the verdict).
+  - **Domain fronting, written down.** Over TLS the gateway reads the server name in the hello and does not open the encrypted request. It connects to the address of that name only, so the way to a model host is an *allowed* name whose own
+    address also serves one (a CDN, the same note as above); the HTTP `Host` check does not see inside TLS. On port 80 the `Host` header is the destination the gateway resolves, so a front cannot hide a model host there, and a second or a ported `Host`
+    is refused. Closing the TLS case needs the gateway to inspect the request, which it does not do.
 - **The socket guard** (`isolation/docker-socket-guard-source.ts`, one per machine) is the only container that holds the socket. It lets
   the worker create, start, stop, kill, restart, inspect, read the logs of, run commands in (as the sandbox user, never privileged) and
   remove its own sandboxes, and inspect its own image and sandbox network. It never forwards what the worker sent: it checks every
