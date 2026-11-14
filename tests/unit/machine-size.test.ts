@@ -21,7 +21,7 @@ describe("machine suggestions", () => {
     expect(suggest(MAX_PEAK_MEMORY_MIB).reasons).toContain("no available size meets the measured memory requirement");
   });
   it("prints only bounded facts; time does not size the machine", () => {
-    expect(suggest(1024, { suiteMs: 60_000 }).reasons).toEqual(["peak memory 1024 MiB", "memory headroom 1.5x", "suite 1 min", "current chip retained"]);
+    expect(suggest(1024, { suiteMs: 60_000 }).reasons).toEqual(["peak memory 1024 MiB", "memory headroom 1.5x", "peak memory includes file cache", "suite 1 min", "current chip retained", "an ARM run does not prove x86 compatibility"]);
     for (const suiteMs of [NaN, Infinity, -1, MAX_SUITE_MS + 1]) expect(suggest(1024, { suiteMs }).reasons.some(reason => reason.startsWith("suite "))).toBe(false);
     expect(suggest(1024, { suiteMs: MAX_SUITE_MS }).row).toEqual(suggest(1024).row);
   });

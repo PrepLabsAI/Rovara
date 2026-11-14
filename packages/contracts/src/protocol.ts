@@ -1,3 +1,4 @@
+import { PrepareSetupProveSchema } from "./setup-prove.js";
 import { TEST_ENV_PROVE_MEASURE_FEATURE } from "./machine-size.js";
 export { TEST_ENV_PROVE_MEASURE_FEATURE } from "./machine-size.js";
 import {StageIdSchema} from "./stage-model-shared.js";
@@ -351,12 +352,22 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
       pins: PreparePinsSchema.optional(),
       /** Saved project images (switch `sv`): a rebuild of the project's image. The preparation is read only and pinned (`pins` are the job's commits); after it the worker proves the approved environment in a fresh sandbox and builds and pushes the image (saved-env/rebuild.ts). The lease token is added by the dispatcher at delivery. Sent only to a worker that lists `prepare.savedEnvBuild.v1`; never dropped. */
       savedEnvBuild: PrepareSavedEnvBuildSchema.optional(),
+      /** A proposal Prove on its own read-only, pinned preparation. Unadvertised until the broker result route lands. */
+      setupProve: PrepareSetupProveSchema.optional(),
       /**
        * Test services (slice 1, Prove): a test environment's CANDIDATE check starts these dependencies (pinned by digest; no secret), runs the proposal's readiness commands against them with the sealed check runners and
        * reports a usage record under `testServicesUsage` in its result. Sent only with the switch `tx` on and only to a worker whose /ping lists `task.testServices.v1`; never dropped (delivery refuses an older worker).
        */
       testServices: z.object({ dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX) }).strict().optional(),
-    }).strict(),
+    }).strict().superRefine((payload, context) => {
+      if (payload.setupProve === undefined) return;
+      const commits = new Map(Object.entries(payload.setupProve.commits));
+      if (payload.readOnly !== true || payload.pins === undefined || payload.pins.length !== commits.size
+        || payload.pins.some(pin => commits.get(pin.repository) !== pin.commit)
+        || payload.checkout !== undefined || payload.savedEnvBuild !== undefined || payload.savedEnv !== undefined || payload.testServices !== undefined) {
+        context.addIssue({ code: "custom", path: ["setupProve"], message: "setup prove requires its own read-only pinned preparation" });
+      }
+    }),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("task"),

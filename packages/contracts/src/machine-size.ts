@@ -24,9 +24,10 @@ export function suggestMachine(input: { peakMemoryMiB?: number | undefined; suit
   if (!validPeakMemory(input.peakMemoryMiB)) return { reasons: ["peak memory not measured"] };
   const chip = input.armVerdict === "arm_incompatible" ? "x86_64" : (MACHINE_SIZE_ROWS.find(row => row.id === input.currentRowId)?.chip ?? "arm64");
   const row = MACHINE_SIZE_ROWS.find(row => row.chip === chip && input.available.includes(row.id) && row.memoryGiB * 1024 >= input.peakMemoryMiB! * MACHINE_MEMORY_HEADROOM);
-  const reasons = [`peak memory ${String(Math.ceil(input.peakMemoryMiB))} MiB`, "memory headroom 1.5x"];
+  const reasons = [`peak memory ${String(Math.ceil(input.peakMemoryMiB))} MiB`, "memory headroom 1.5x", "peak memory includes file cache"];
   if (typeof input.suiteMs === "number" && Number.isFinite(input.suiteMs) && input.suiteMs >= 0 && input.suiteMs <= MAX_SUITE_MS) reasons.push(`suite ${String(Math.ceil(input.suiteMs / 60000))} min`);
   reasons.push(input.armVerdict === "arm_incompatible" ? "ARM incompatible; x86 required" : "current chip retained");
+  reasons.push("an ARM run does not prove x86 compatibility");
   if (row === undefined) reasons.push("no available size meets the measured memory requirement");
   return { ...(row === undefined ? {} : { row: { ...row } }), reasons };
 }
