@@ -869,17 +869,25 @@ export function moduleOf(path: string): string {
 
 // ---- reasons
 
+/**
+ * The reasons cut to a limit, keeping the `eval_hint` whatever the limit does to the rest: the evaluation check relies on it, and a busy tier (many risky reasons) must still carry it. The hint goes last; the others keep their order.
+ */
+export function capReasons(reasons: readonly TierReason[], limit: number): TierReason[] {
+  const hint = reasons.find((reason) => reason.code === "eval_hint");
+  if (hint === undefined) return reasons.slice(0, Math.max(0, limit));
+  return [...reasons.filter((reason) => reason.code !== "eval_hint").slice(0, Math.max(0, limit - 1)), hint];
+}
+
 function collect(reasons: readonly TierReason[]): TierReason[] {
   const seen = new Set<string>();
-  const out: TierReason[] = [];
+  const unique: TierReason[] = [];
   for (const reason of reasons) {
     const key = `${reason.code}\u0000${reason.path ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(reason);
-    if (out.length >= FLOW_TIER_REASONS_MAX) break;
+    unique.push(reason);
   }
-  return out;
+  return capReasons(unique, FLOW_TIER_REASONS_MAX);
 }
 const withoutPath = (code: string): TierReason => ({ code });
 
@@ -1079,7 +1087,7 @@ export function tierGrowthSentence(tier: Pick<ChangeTier, "level" | "reasons">, 
 
 
 const compactTier = (tier: ChangeTier, reasons: number, pathMax: number): ChangeTier => ({
-  ...tier, reasons: tier.reasons.slice(0, reasons).map((reason) => (reason.path === undefined ? reason : { ...reason, path: reason.path.slice(0, pathMax) })),
+  ...tier, reasons: capReasons(tier.reasons, Math.max(reasons, tier.reasons.some((reason) => reason.code === "eval_hint") ? 1 : 0)).map((reason) => (reason.path === undefined ? reason : { ...reason, path: reason.path.slice(0, pathMax) })),
 });
 
 /**
