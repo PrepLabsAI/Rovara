@@ -46,6 +46,10 @@ export class GitHubFixtureApi {
   readonly tokens: Array<{ token: string; permissions: Record<string, string>; repositories?: string[] }> = [];
   /** Every request served, in order: method and path. */
   readonly requests: Array<{ method: string; path: string }> = [];
+  /** DEC 213: how the commit read (`GET /repos/../commits/<sha>`) answers: files a page (GitHub's is 100), a file whose patch GitHub leaves out, totals that do not add up (GitHub's 3,000-file limit). */
+  readonly commitReads: { pageSize: number; withoutPatch?: string; extraAdditions?: number; answerSha?: string; parentsAfterFirstPage?: string[] } = { pageSize: 100 };
+  /** DEC 213: how the compare read (`GET /repos/../compare/<base>...<head>`) answers: at most `filesMax` files (GitHub's is 300), a file whose patch GitHub leaves out, another merge base, a "next" link. */
+  readonly compareReads: { filesMax: number; withoutPatch?: string; mergeBase?: string; nextLink?: boolean } = { filesMax: 300 };
 
   constructor(private readonly model: FakeHostModel, private readonly options: GitHubFixtureOptions = {}) {}
 
@@ -134,6 +138,19 @@ export class GitHubFixtureApi {
         : NOT_FOUND();
     }
     if (method === "GET" && new RegExp(`^${ROOT}/rules/branches/`).test(path)) return json(200, []);
+    match = new RegExp(`^${ROOT}/compare/([0-9a-f]{40})\\.\\.\\.([0-9a-f]{40})$`).exec(path);
+    if (method === "GET" && match) {
+      let changed: ReturnType<FakeHostModel["compareChangedFiles"]> | undefined;
+      try { changed = this.model.compareChangedFiles(match[1]!, match[2]!); } catch { changed = undefined; }
+      // A base the head does not build on: the older answer below (no merge base given, so a reader of the files refuses it).
+      if (changed !== undefined) {
+        const files = changed.slice(0, this.compareReads.filesMax).map((file) => ({
+          filename: file.path, status: file.status, additions: file.additions, deletions: file.deletions, ...(file.patch === undefined || file.path === this.compareReads.withoutPatch ? {} : { patch: file.patch }),
+        }));
+        return json(200, { status: "ahead", ahead_by: 1, behind_by: 0, base_commit: { sha: match[1] }, merge_base_commit: { sha: this.compareReads.mergeBase ?? match[1] }, commits: [], files },
+          this.compareReads.nextLink === true ? { link: `<${API}${ROOT}/compare/${match[1]!}...${match[2]!}?per_page=100&page=2>; rel="next"` } : {});
+      }
+    }
     match = new RegExp(`^${ROOT}/compare/(.+)\\.\\.\\.([0-9a-f]{40})$`).exec(path);
     if (method === "GET" && match) {
       const target = this.model.branches.get(match[1]!) ?? match[1]!;
@@ -185,6 +202,20 @@ export class GitHubFixtureApi {
     if (method === "GET" && match) {
       const head = this.model.branches.get(match[1]!);
       return head === undefined ? NOT_FOUND() : json(200, { ref: `refs/heads/${match[1]}`, object: { type: "commit", sha: head } });
+    }
+    match = new RegExp(`^${ROOT}/commits/([0-9a-f]{40})$`).exec(path);
+    if (method === "GET" && match) {
+      const revision = this.model.revisions.get(match[1]!);
+      if (revision === undefined) return json(422, { message: "No commit found for SHA" });
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const size = this.commitReads.pageSize;
+      const all = this.model.commitChangedFiles(revision.sha).map((file) => ({
+        filename: file.path, status: file.status, additions: file.additions, deletions: file.deletions, ...(file.patch === undefined || file.path === this.commitReads.withoutPatch ? {} : { patch: file.patch }),
+      }));
+      const stats = { additions: all.reduce((total, file) => total + file.additions, 0) + (this.commitReads.extraAdditions ?? 0), deletions: all.reduce((total, file) => total + file.deletions, 0) };
+      const parents = page > 1 && this.commitReads.parentsAfterFirstPage !== undefined ? this.commitReads.parentsAfterFirstPage : revision.parents;
+      return json(200, { sha: this.commitReads.answerSha ?? revision.sha, parents: parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size) },
+        all.length > page * size ? { link: `<${API}${ROOT}/commits/${revision.sha}?per_page=100&page=${page + 1}>; rel="next"` } : {});
     }
     match = new RegExp(`^${ROOT}/git/commits/([0-9a-f]{40})$`).exec(path);
     if (method === "GET" && match) {

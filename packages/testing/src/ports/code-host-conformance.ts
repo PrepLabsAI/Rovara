@@ -279,6 +279,53 @@ const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
     },
   },
   {
+    name: "gives one commit's own changes: its files against its first parent (with patches), whether the list is whole, and its parents",
+    needs: ({ host }) => host.commitChanges !== undefined,
+    async run({ host, model, repository, unregistered, scope }) {
+      const branch = "feature/one-commit";
+      const first = model.commit(branch, { "src/a.ts": "export const a = 1;\n", "README.md": "Hello.\n" });
+      const second = model.commit(branch, { "src/a.ts": "export const a = 2;\n", "README.md": null, "src/b.ts": "export const b = 1;\n" });
+      const read = await host.commitChanges!(repository, second, scope);
+      expect(read.complete).toBe(true);
+      expect(read.parents).toEqual([first]);
+      const byPath = new Map(read.files.map((file) => [file.path, file]));
+      expect([...byPath.keys()].sort()).toEqual(["README.md", "src/a.ts", "src/b.ts"]);
+      expect(byPath.get("src/a.ts")).toMatchObject({ status: "modified" });
+      expect(byPath.get("src/a.ts")!.additions).toBeGreaterThan(0);
+      expect(byPath.get("src/a.ts")!.deletions).toBeGreaterThan(0);
+      expect(byPath.get("src/a.ts")!.patch).toContain("+export const a = 2;");
+      expect(byPath.get("src/b.ts")).toMatchObject({ status: "added", deletions: 0 });
+      expect(byPath.get("README.md")).toMatchObject({ status: "removed" });
+      // Only that commit's own diff: the first commit's README is not in the second's list as added.
+      expect((await host.commitChanges!(repository, first, scope)).files.map((file) => file.path).sort()).toEqual(["README.md", "src/a.ts"]);
+      expect(await rejection(() => host.commitChanges!(repository, "f".repeat(40), scope))).toBeDefined();
+      expect(await rejection(() => host.commitChanges!(unregistered, second, scope))).toBeDefined();
+    },
+  },
+  {
+    name: "gives a merge's changes against its second parent (what the merge holds that the second parent does not), and refuses a base the head does not build on",
+    needs: ({ host }) => host.compareChanges !== undefined && host.commitChanges !== undefined,
+    async run({ host, model, repository, unregistered, scope }) {
+      const mine = model.commit("feature/compare-mine", { "src/mine.ts": "export const mine = 1;\n" });
+      const side = model.commit("feature/compare-side", { "docs/side.md": "Side.\n" });
+      const files = new Map(model.revision(mine).files);
+      files.set("docs/side.md", "Side.\n");
+      files.set("src/merge.ts", "export const merged = 1;\n");
+      const merge = model.makeRevision([mine, side], files).sha;
+      const read = await host.compareChanges!(repository, side, merge, scope);
+      expect(read.complete).toBe(true);
+      const byPath = new Map(read.files.map((file) => [file.path, file]));
+      expect([...byPath.keys()].sort()).toEqual(["src/merge.ts", "src/mine.ts"]);
+      expect(byPath.get("src/merge.ts")).toMatchObject({ status: "added", deletions: 0 });
+      expect(byPath.get("src/merge.ts")!.patch).toContain("+export const merged = 1;");
+      // Against the first parent the side's document is listed instead of the task's file.
+      expect((await host.commitChanges!(repository, merge, scope)).files.map((file) => file.path).sort()).toEqual(["docs/side.md", "src/merge.ts"]);
+      const other = model.commit("feature/compare-other", { "src/other.ts": "export const other = 1;\n" });
+      expect(await rejection(() => host.compareChanges!(repository, other, merge, scope))).toBeDefined();
+      expect(await rejection(() => host.compareChanges!(unregistered, side, merge, scope))).toBeDefined();
+    },
+  },
+  {
     name: "writes the lessons file on a branch Rovara owns: idempotent, never the base branch, never another path or branch name",
     needs: ({ host }) => host.commitFiles !== undefined,
     async run({ host, model, repository, scope }) {
