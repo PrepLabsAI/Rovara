@@ -1745,3 +1745,48 @@ describe("AgentX measures the before result on the original code (spec 051 D-16,
     expect(progress(run.events).some((message) => message.includes("refs/agentx/agent-files"))).toBe(true);
   });
 });
+
+describe("a stop that could not be confirmed ends the run and touches nothing (FIX-RUNNER-ABORT-JOIN, review H1)", () => {
+  const touched = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.map((artifact) => artifact.name).filter((name) => name === "workspace.diff" || name === "test-and-tool-evidence.json");
+
+  it("(b) the agent's own shell: Pi turns the thrown error into a tool result, but the run still fails and reads and writes nothing in the workspace", async () => {
+    const rootPath = await gitWorkspaceRoot();
+    const shell = { commands: [] as string[], operations: { exec: async () => { throw new RunnerKillUnconfirmedError({ kind: "devcontainer" }); } } satisfies BashOperations };
+    const run = await runTask({ steps: [bash("make test", "b1"), fauxAssistantMessage(`Ran it.\n${DONE}`), fauxAssistantMessage(`Ran it.\n${DONE}`)], shell, rootPath });
+    expect(run.failure).toBeInstanceOf(RunnerKillUnconfirmedError);
+    // The ending did not read the workspace (no diff, no evidence) and did not write the check history into it.
+    expect(touched(run)).toEqual([]);
+    await expect(readFile(join(rootPath, ".agentx/last-checks.json"), "utf8")).rejects.toThrow(/ENOENT/u);
+    // The workspace is marked unsafe for the next task: a devcontainer-kind stop is not cleared by anything but an operator.
+    expect(JSON.parse(await readFile(join(rootPath, ".agentx/workspace-unsafe.json"), "utf8"))).toMatchObject({ stops: [{ kind: "devcontainer" }] });
+    const next = await runTask({ steps: CHANGED_ONE_FILE, rootPath });
+    expect(String((next.failure as Error | undefined)?.message)).toMatch(/could not be confirmed stopped/u);
+  });
+
+  it("(a) the verification hook: its catch used to settle 'error' and let the run go on to read the workspace; now the run fails and reads nothing", async () => {
+    const rootPath = await gitWorkspaceRoot();
+    const runners: CheckRunners = {
+      runAgentCommand: async () => { throw new Error("not used"); },
+      runProjectCommand: async () => { throw new RunnerKillUnconfirmedError({ kind: "local", pgid: 2_000_000_000 }); },
+    };
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners, rootPath });
+    expect(run.failure).toBeInstanceOf(RunnerKillUnconfirmedError);
+    expect(touched(run)).toEqual([]);
+    await expect(readFile(join(rootPath, ".agentx/last-checks.json"), "utf8")).rejects.toThrow(/ENOENT/u);
+    // A host stop whose group is gone clears itself at the next task.
+    const next = await runTask({ steps: CHANGED_ONE_FILE, rootPath });
+    expect(next.failure).toBeUndefined();
+  });
+
+  it("(L-2) a latch set during the ending stops the check-history write, and the run does not report success past it", async () => {
+    const control = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners: fakeRunners().runners, rootPath: await gitWorkspaceRoot() });
+    expect(control.failure).toBeUndefined();
+    // Positive control: without the late latch the ending does write the history.
+    await expect(readFile(join(control.rootPath, ".agentx/last-checks.json"), "utf8")).resolves.toContain("outcomes");
+    const rootPath = await gitWorkspaceRoot();
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners: fakeRunners().runners, rootPath,
+      onArtifact: (name) => { if (name === "checks.json") markWorkspaceUnsafe({ kind: "local" }); } });
+    expect(run.failure).toBeDefined();
+    await expect(readFile(join(rootPath, ".agentx/last-checks.json"), "utf8")).rejects.toThrow(/ENOENT/u);
+  });
+});
