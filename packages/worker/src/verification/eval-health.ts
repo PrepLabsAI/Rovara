@@ -15,11 +15,13 @@ export interface EvalHealthInput {
   cache: BaseScoreCache;
   run(request: { run: number; call: EvalMeterReservation["call"] }): Promise<{ measures: MeasuresFile; attestation: EvalBaseAttestation; seconds: number }>;
 }
+export type EvalHealthRefusal = "not_connected" | "invalid_questions" | "over_cap" | "invalid_identity" | "not_confirmed" | "monthly_cap" | "provider_incomplete" | "invalid_results" | "incomplete_questions" | "unavailable";
 export type EvalHealthResult =
-  | { status: "not_run"; message: string }
+  | { status: "not_run"; reason: EvalHealthRefusal; message: string }
   | { status: "measured"; questionCount: number; passRate: number; flaky: string[]; callsPerRun: number[]; secondsPerRun: number[]; perQuestion: true; baseline: "stored" | "refused"; sensitivity: EvalHealthSensitivity; summary: string };
+const isArrayInventory = (value: unknown): boolean => Array.isArray(value);
 const whole = (n: number): boolean => Number.isSafeInteger(n) && n >= 0;
-const refused = (message: string): EvalHealthResult => ({ status: "not_run", message: `Not run: ${message}.` });
+const refused = (reason: EvalHealthRefusal, message: string): EvalHealthResult => ({ status: "not_run", reason, message: `Not run: ${message}.` });
 
 /** Derive the same identity for cache reads, in-flight refreshes and measured writes. */
 export function evalHealthKey(input: Pick<EvalHealthInput, "key" | "settings">): EvalBaseCacheKeyParts {
@@ -28,22 +30,23 @@ export function evalHealthKey(input: Pick<EvalHealthInput, "key" | "settings">):
 
 /** Trusted adapters only. The repository can supply results, never selection, approval or payer. */
 export async function runEvalHealth(input: EvalHealthInput): Promise<EvalHealthResult> {
-  if (input.approval === undefined || input.meter === undefined) return refused("eval approval and monthly meter are not connected");
-  const ids = input.questionIds;
-  const calls = 3 * ids.length * input.maxCallsPerQuestion;
-  const costMicros = 3 * ids.length * input.maxCostMicrosPerQuestion;
-  const maxCalls = input.limits?.maxCalls ?? EVAL_DEFAULT_CALL_BUDGET;
-  const maxCost = input.limits?.maxCostMicros ?? EVAL_DEFAULT_COST_BUDGET_MICROS;
-  if (ids.length === 0 || ids.length > EVAL_QUESTION_LIMIT || new Set(ids).size !== ids.length || ids.some(id => typeof id !== "string" || id.length === 0 || id.length > 160)) return refused("question inventory is incomplete");
-  if (![calls, costMicros, maxCalls, maxCost, input.maxCallsPerQuestion, input.maxCostMicrosPerQuestion].every(whole) || input.maxCallsPerQuestion < 1 || input.maxCostMicrosPerQuestion < 1 || calls > maxCalls || costMicros > maxCost) return refused("the three runs exceed the call or cost cap");
   try {
+    if (input.approval === undefined || input.meter === undefined) return refused("not_connected", "eval approval and monthly meter are not connected");
+    const ids = input.questionIds;
+    if (!isArrayInventory(ids)) return refused("invalid_questions", "question inventory is incomplete");
+    const calls = 3 * ids.length * input.maxCallsPerQuestion;
+    const costMicros = 3 * ids.length * input.maxCostMicrosPerQuestion;
+    const maxCalls = input.limits?.maxCalls ?? EVAL_DEFAULT_CALL_BUDGET;
+    const maxCost = input.limits?.maxCostMicros ?? EVAL_DEFAULT_COST_BUDGET_MICROS;
+    if (ids.length === 0 || ids.length > EVAL_QUESTION_LIMIT || new Set(ids).size !== ids.length || ids.some(id => typeof id !== "string" || id.length === 0 || id.length > 160)) return refused("invalid_questions", "question inventory is incomplete");
+    if (![calls, costMicros, maxCalls, maxCost, input.maxCallsPerQuestion, input.maxCostMicrosPerQuestion].every(whole) || input.maxCallsPerQuestion < 1 || input.maxCostMicrosPerQuestion < 1 || calls > maxCalls || costMicros > maxCost) return refused("over_cap", "the three runs exceed the call or cost cap");
     const key = evalHealthKey(input);
     evalBaseCacheKey(key);
-    if (input.key.codeHash === undefined || input.key.judgePin === undefined || input.key.hiddenSetHash !== "none") return refused("a public eval needs its code hash and judge pin");
+    if (input.key.codeHash === undefined || input.key.judgePin === undefined || input.key.hiddenSetHash !== "none") return refused("invalid_identity", "a public eval needs its code hash and judge pin");
     const grant = await input.approval.read();
-    if (grant === undefined || !["owner", "maintainer", "admin"].includes(grant.role) || grant.company !== input.key.company || grant.project !== input.key.project || grant.selection !== input.selection || grant.inputsDigest !== evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: input.key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: key.settingsFingerprint }) || grant.provider !== "customer" || grant.connected !== true || !whole(grant.maxCalls) || !whole(grant.maxCostMicros) || grant.maxCalls < calls || grant.maxCostMicros < costMicros) return refused("an owner, maintainer or admin must confirm the connected customer's call estimate");
+    if (grant === undefined || !["owner", "maintainer", "admin"].includes(grant.role) || grant.company !== input.key.company || grant.project !== input.key.project || grant.selection !== input.selection || grant.inputsDigest !== evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: input.key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: key.settingsFingerprint }) || grant.provider !== "customer" || grant.connected !== true || !whole(grant.maxCalls) || !whole(grant.maxCostMicros) || grant.maxCalls < calls || grant.maxCostMicros < costMicros) return refused("not_confirmed", "an owner, maintainer or admin must confirm the connected customer's call estimate");
     const reservation = await input.meter.reserve({ approval: grant, calls, costMicros });
-    if (reservation === undefined) return refused("the monthly cap cannot fit these runs");
+    if (reservation === undefined) return refused("monthly_cap", "the monthly cap cannot fit these runs");
     let usedCalls = 0; let usedCost = 0; let dispatched = 0; let closed = false; let failed = false;
     const pending = new Set<Promise<unknown>>();
     const call: EvalMeterReservation["call"] = frame => {
@@ -68,12 +71,12 @@ export async function runEvalHealth(input: EvalHealthInput): Promise<EvalHealthR
         const before = usedCalls;
         const output = await input.run({ run, call });
         await Promise.allSettled([...pending]);
-        if (failed || usedCalls - before < 1) return refused("the provider did not complete the run");
+        if (failed || usedCalls - before < 1) return refused("provider_incomplete", "the provider did not complete the run");
         const parsed = MeasuresFileSchema.safeParse(output.measures);
-        if (!parsed.success || parsed.data.questions === undefined || parsed.data.eval_set_hash !== input.key.evalSetHash || !isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit || !Number.isFinite(output.seconds) || output.seconds < 0) return refused("the main-branch run has no complete attested question results");
+        if (!parsed.success || parsed.data.questions === undefined || parsed.data.eval_set_hash !== input.key.evalSetHash || !isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit || !Number.isFinite(output.seconds) || output.seconds < 0) return refused("invalid_results", "the main-branch run has no complete attested question results");
         measures = parsed.data;
         const rows = measures.questions!;
-        if (rows.length !== ids.length || rows.some(q => !saved.has(q.id) || q.samples.length !== 1)) return refused("some questions were missing or repeated");
+        if (rows.length !== ids.length || rows.some(q => !saved.has(q.id) || q.samples.length !== 1)) return refused("incomplete_questions", "some questions were missing or repeated");
         for (const row of rows) saved.get(row.id)!.samples.push(row.samples[0]!);
         callsPerRun.push(usedCalls - before); secondsPerRun.push(output.seconds);
       }
@@ -89,5 +92,5 @@ export async function runEvalHealth(input: EvalHealthInput): Promise<EvalHealthR
     const sensitivity = evalHealthSensitivity(questions);
     return { status: "measured", sensitivity, questionCount: ids.length, passRate, flaky, callsPerRun, secondsPerRun, perQuestion: true, baseline,
       summary: `${ids.length} questions; ${(passRate * 100).toFixed(1)}% passed; ${flaky.length} gave different answers across three runs. ${sensitivity.smallestDropPoints === null ? "No tested drop reached 80% catch probability." : `Simulation estimate: the smallest tested drop caught at least 80% of the time was ${sensitivity.smallestDropPoints} points.`} ${sensitivity.additionalQuestionsFor20 === null ? "A 20-point catch was not reached within 1,000 comparable questions." : `${sensitivity.additionalQuestionsFor20} more comparable questions reach a 20-point catch in the simulation.`} Calls per run: ${callsPerRun.join(", ")}; seconds per run: ${secondsPerRun.join(", ")}. Per-question results are available for re-asks. ${baseline === "stored" ? "The three runs are saved as the old-code baseline." : "The baseline could not be saved."}` };
-  } catch { return refused("the eval or its trusted setup capabilities could not be read"); }
+  } catch { return refused("unavailable", "the eval or its trusted setup capabilities could not be read"); }
 }
