@@ -385,3 +385,17 @@ describe("nothing turns the version 2 writer on yet", () => {
     expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts"]);
   });
 });
+
+it("keeps runner-measure provenance visible even with long check labels and inert measure names", () => {
+  const pack = clone(v2Pack());
+  const check = pack.checks[1]!;
+  check.label = "L".repeat(200);
+  check.measures = [{ name: "[score](https://example.com) @owner #123", unit: "ms", base: 1, head: 2, direction: "down_good" }];
+  const out = renderEvidence(pack);
+  expect(out.body).toContain("Measures: reported by the project's test runner, not measured by Rovara");
+  expect(out.text).not.toMatch(/https:\/\/|@owner|#123/u);
+  check.label = "eval";
+  expect(renderEvidence(pack).text).toContain("score");
+  for (const row of pack.checks) delete row.measures;
+  expect(renderEvidence(pack).text).not.toContain("reported by the project's test runner");
+});
