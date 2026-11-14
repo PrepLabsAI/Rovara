@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
-import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   ChannelIdSchema,
   channelBindingKey,
@@ -24,9 +24,12 @@ import {
   type ChannelSpaceRef,
   type ConversationRef,
   type ChannelAction,
+  type ConversationState,
   type InboundMessage,
+  ConversationStateRequestSchema,
 } from "@agentx/contracts";
 import { adapterForChannel, builtInAdapterFromEnvironment } from "./channel-adapters.js";
+import { readConversationState } from "./channel-conversation-state.js";
 import { issueLinkCode, linkedDeveloper } from "./channel-links.js";
 
 /**
@@ -70,6 +73,8 @@ export interface ChannelIngressDependencies {
    * does not (undefined) is queued for the orchestrator as before.
    */
   actionSurfaces?: Readonly<Record<string, ChannelActionSurface>>;
+  /** Issue #437: a conversation's current state; without it the read route answers 404. */
+  conversationState?(conversation: ConversationRef): Promise<ConversationState>;
   now(): number;
   log?(entry: Record<string, unknown>): void;
 }
@@ -112,10 +117,10 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
 
   return async (event: ChannelIngressEvent): Promise<ChannelIngressResponse> => {
     if (event.requestContext?.http?.method !== "POST") return refuse(405, "method_not_allowed");
-    const route = /^\/v1\/channels\/([^/]+)\/(messages|decisions|actions)$/.exec(event.rawPath ?? "");
+    const route = /^\/v1\/channels\/([^/]+)\/(messages|decisions|actions|conversation-state)$/.exec(event.rawPath ?? "");
     const channel = route === null ? undefined : ChannelIdSchema.safeParse(route[1]);
     if (route === null || channel === undefined || !channel.success) return refuse(404, "not_found");
-    const kind = route[2] as "messages" | "decisions" | "actions";
+    const kind = route[2] as "messages" | "decisions" | "actions" | "conversation-state";
 
     const body = event.isBase64Encoded === true ? Buffer.from(event.body ?? "", "base64").toString("utf8") : event.body ?? "";
     if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) return refuse(413, "too_large");
@@ -133,6 +138,30 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
     if (!verified.ok) {
       log({ event: "refused", channel: adapter.channel, reason: verified.reason });
       return refuse(401, verified.reason);
+    }
+
+    // Issue #437: a read, so nothing is claimed or queued; it is checked as the other routes are, signature to binding.
+    if (kind === "conversation-state") {
+      if (deps.conversationState === undefined) return refuse(404, "not_found");
+      let json: unknown;
+      try { json = JSON.parse(body); } catch { return refuse(400, "invalid_json"); }
+      const parsed = ConversationStateRequestSchema.safeParse(json);
+      if (!parsed.success) return refuse(400, "invalid_body");
+      const { conversation } = parsed.data;
+      if (conversation.channel !== adapter.channel) return refuse(403, "channel_mismatch");
+      try {
+        const binding = await deps.getBinding({ channel: conversation.channel, tenant: conversation.tenant, space: conversation.space });
+        if (binding === undefined || (adapter.builtIn !== true && !adapter.projects.includes(binding.projectName))) {
+          log({ event: "refused", channel: adapter.channel, reason: "space_not_bound" });
+          return refuse(403, "space_not_bound");
+        }
+        const state = await deps.conversationState(conversation);
+        log({ event: "state_read", channel: adapter.channel });
+        return respond(200, state as unknown as Record<string, unknown>);
+      } catch (error) {
+        log({ event: "failed", channel: adapter.channel, errorName: error instanceof Error ? error.name : "UnknownError" });
+        return refuse(500, "try_again");
+      }
     }
 
     // Every claim this request makes; released if it fails transiently, so the adapter's retry is not taken as a replay.
@@ -310,8 +339,37 @@ export function createAwsChannelIngressHandler(surfaces: Readonly<Record<string,
     },
     surfaces,
     actionSurfaces,
+    conversationState: (conversation) => readConversationState({
+      getState: async (key, attributes) => (await documentClient.send(new GetCommand({ TableName: stateTableName, Key: key, ConsistentRead: true, ...projection(attributes) }))).Item as Record<string, unknown> | undefined,
+      async queryState(pk, prefix, attributes) {
+        const items: Array<Record<string, unknown>> = [];
+        let start: Record<string, unknown> | undefined;
+        const { ProjectionExpression, ExpressionAttributeNames } = projection(attributes);
+        do {
+          const page = await documentClient.send(new QueryCommand({
+            TableName: stateTableName, KeyConditionExpression: "#k0 = :pk AND begins_with(#k1, :prefix)", ProjectionExpression,
+            ExpressionAttributeNames: { ...ExpressionAttributeNames, "#k0": "pk", "#k1": "sk" },
+            ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix }, ConsistentRead: true, ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+          }));
+          items.push(...((page.Items ?? []) as Array<Record<string, unknown>>));
+          start = page.LastEvaluatedKey;
+        } while (start !== undefined);
+        return items;
+      },
+      getThread: async (key) => (await documentClient.send(new GetCommand({ TableName: requiredEnvironment("SLACK_THREADS_TABLE_NAME"), Key: key, ConsistentRead: true }))).Item as Record<string, unknown> | undefined,
+      getChannelState: async (key) => (await documentClient.send(new GetCommand({ TableName: channelTableName, Key: key, ConsistentRead: true }))).Item as Record<string, unknown> | undefined,
+      now: Date.now,
+    }, conversation),
     now: Date.now,
   });
+}
+
+/** Issue #437: only the named attributes, each by a placeholder, since several are DynamoDB reserved words. */
+function projection(attributes: readonly string[]): { ProjectionExpression: string; ExpressionAttributeNames: Record<string, string> } {
+  return {
+    ProjectionExpression: attributes.map((_name, index) => `#a${index}`).join(", "),
+    ExpressionAttributeNames: Object.fromEntries(attributes.map((name, index) => [`#a${index}`, name])),
+  };
 }
 
 /** The channel, kind and adapter event ID a queued item is dropped as a duplicate by. */

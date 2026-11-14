@@ -16,14 +16,15 @@ import {
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
 /** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string }
+/** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[] }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[] }
 
 /** What a code carries into its session. */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true }
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[] }
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
 export function methodSince(text: string | undefined): number | undefined {
@@ -254,6 +255,7 @@ export class DeveloperSignInStore {
       ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }),
       ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
       ...(record.administrator === true ? { administrator: true as const } : {}),
+      ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
     };
   }
 

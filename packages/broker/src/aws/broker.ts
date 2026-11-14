@@ -118,6 +118,8 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  type ClientRepositoriesResponse,
+  type Ec2RuntimeBinding,
   ProjectModelOptionsSchema,
   OPERATION_PROMPT_MAX_BYTES,
   ProjectModelSelectionRequestSchema,
@@ -359,12 +361,13 @@ import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, unt
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
-import { developerIdForSlackUser } from "./admin-actions.js";
+import { developerIdForSlackUser, projectMemberKey } from "./admin-actions.js";
+import { workerBindingFromPairs } from "./worker-binding.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -589,6 +592,22 @@ interface AwsBrokerDependencies {
   channelAdapters?: ChannelAdapterConfiguration;
   /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
   developer?: DeveloperApiConfiguration;
+  /**
+   * Spec 065b: what a project a sign-in client creates is built from: the GitHub App's credential and its view of a
+   * repository, and the foundation's worker binding. Absent, POST /v1/dev/client/projects answers NOT_FOUND.
+   */
+  clientProjects?: {
+    credentialRef: string;
+    repositoryDefaults(url: string): Promise<{ owner: string; name: string; defaultBranch: string }>;
+    /** The repositories the GitHub App can reach, for GET /v1/dev/client/repositories. */
+    repositories(): Promise<ClientRepositoriesResponse["installations"]>;
+    workerBinding(): Promise<Ec2RuntimeBinding>;
+  };
+  /**
+   * Spec 064: the legacy deployment's sign-in, for account linking only. Set instead of `developer`, so developer
+   * tasks, sharing and admin changes stay off; /v1/dev/* and /review/* serve linking alone (routeLinkingRequest).
+   */
+  linking?: DeveloperApiConfiguration;
   /** Sign in with ChatGPT (#338): each developer's ChatGPT connection; absent without its key. */
   chatgpt?: ChatGptConnections;
   githubMcp?: GitHubMcpDependencies;
@@ -732,16 +751,18 @@ export function createPlanDependencies(input: AwsBrokerInput): PlanDependencies 
 
 function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies {
   const developer = dependencies.developer;
+  // Spec 064: the legacy deployment's linking sign-in serves the sign-in client changes, its only kinds.
+  const signIn = developer ?? dependencies.linking;
   const registry = dependencies.credentialRegistry;
   return {
     reads: adminReadDependencies(dependencies),
     actions: {
       documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-      ...(developer === undefined ? {} : { signInTableName: developer.signInTableName }),
+      ...(signIn === undefined ? {} : { signInTableName: signIn.signInTableName }),
       ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
       limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
       ...(developer?.endDeveloperSessions === undefined ? {} : { endDeveloperSessions: developer.endDeveloperSessions }),
-      ...(developer?.signInClients === undefined ? {} : { signInClients: developer.signInClients }),
+      ...(signIn?.signInClients === undefined ? {} : { signInClients: signIn.signInClients }),
       now: Date.now,
     },
     handlers: adminChangeHandlers(dependencies),
@@ -752,9 +773,19 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
   };
 }
 
-/** Spec 025 phase 25e: admin changes exist only with developer sign-in and a TurnRecords table (D14). */
+/**
+ * The only admin changes the legacy deployment takes (spec 064), confirmed in the CLI: sign-in clients, and granting a
+ * signed-in person a project, so a service such as the web app shows them the projects they may use.
+ */
+const LINKING_CHANGE_KINDS: ReadonlySet<string> = new Set(["register_sign_in_client", "remove_sign_in_client", "grant_project_access", "revoke_project_access"]);
+
+/**
+ * Spec 025 phase 25e: admin changes exist only with developer sign-in and a TurnRecords table (D14). Spec 064: the
+ * legacy deployment's linking sign-in serves them too, for the sign-in client kinds alone.
+ */
 function adminChangeDependencies(dependencies: AwsBrokerDependencies, reads: AdminReadDependencies): AdminChangeDependencies | undefined {
-  const developer = dependencies.developer;
+  const linkingOnly = dependencies.developer === undefined && dependencies.linking !== undefined;
+  const developer = dependencies.developer ?? dependencies.linking;
   if (developer === undefined || dependencies.turnRecordsTableName === undefined) return undefined;
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry }));
   const reader = adminReader(reads);
@@ -771,7 +802,9 @@ function adminChangeDependencies(dependencies: AwsBrokerDependencies, reads: Adm
     ...(developer.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
     // E16: the environment's pop-up switch. R5: Slack is a method wherever a Slack team is set up,
     // whatever Slack sign-in says; each change still needs the admin's own linked Slack user (FR-041).
-    confirm: dependencies.adminChanges?.confirm ?? { elicitation: process.env.MCP_CONFIRM_ELICITATION !== "disabled", slack: developer.slackTeamId !== undefined },
+    // The legacy deployment has no AI-tool pop-up (no MCP server there): the CLI, or Slack where a team is set.
+    confirm: dependencies.adminChanges?.confirm ?? { elicitation: !linkingOnly && process.env.MCP_CONFIRM_ELICITATION !== "disabled", slack: developer.slackTeamId !== undefined },
+    ...(linkingOnly ? { kinds: LINKING_CHANGE_KINDS } : {}),
     now,
     newId: randomUUID,
     log,
@@ -1074,9 +1107,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // The browser page uses its own opaque revocable session cookie and reauthorizes each
       // request. Only API Gateway's exact public review route may reach this branch.
       if (event.routeKey === FEEDBACK_REVIEW_ROUTE_KEY) {
+        if (url.pathname.startsWith("/review/") && !dependencies.developer && dependencies.linking) {
+          return await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url) as { statusCode: number; headers: Record<string, string>; body: string };
+        }
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
+          ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           ...workflowApplicationRouteDependencies(dependencies) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
@@ -1255,9 +1292,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // Spec 025: the developer API. /v1/dev/* has no API Gateway authorizer (D17): the broker
       // verifies the developer token, then checks the method and session (FR-009).
       if (url.pathname.startsWith("/v1/dev/")) {
+        if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
+          ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           ...workflowApplicationRouteDependencies(dependencies) }, request, url), request.requestId);
       }
@@ -1476,7 +1515,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // Spec 063: the registered sign-in clients, never a secret's hash.
       if (request.method === "GET" && url.pathname === "/v1/admin/sign-in-clients") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        const registry = dependencies.developer?.signInClients;
+        // Spec 064: the legacy deployment's linking-only sign-in keeps the same registry.
+        const registry = (dependencies.developer ?? dependencies.linking)?.signInClients;
         if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json({ clients: await registry.list() }, request.requestId);
       }
@@ -2086,7 +2126,9 @@ async function registerProject(
       ...(authority === "administrator"
         ? [{ ConditionCheck: { TableName: dependencies.tableName, Key: membershipKey, ConditionExpression: "#role = :administrator",
           ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator" } } }]
-        : [{ Put: { TableName: dependencies.tableName, Item: membership } }]),
+        : [{ Put: { TableName: dependencies.tableName, Item: membership } },
+          // Spec 065: the project's side of the membership, so its members can be listed.
+          { Put: { TableName: dependencies.tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }]),
       ...(authority === "takeover" && takeover !== undefined ? [{ Put: { TableName: dependencies.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
         pk: `PROJECT_TAKEOVER#${definition.name}`, sk: `AT#${now}#${randomUUID()}`, entityType: "PROJECT_OWNERSHIP_TAKEOVER",
         projectName: definition.name, revision: definition.revision, takenBy: identity.ownerKey, subject: identity.subject, reason: takeover.reason, at: now,
@@ -3812,7 +3854,7 @@ function threadCharging(dependencies: AwsBrokerDependencies, identity: Authentic
   }
   const channel = identity.channel;
   if (!channel) throw agentXError("FORBIDDEN", "a conversation identity is required");
-  const charge = channelCharge(channel, dependencies.developer?.slackTeamId);
+  const charge = channelCharge(channel, (dependencies.developer ?? dependencies.linking)?.slackTeamId);
   const limitsOf = (effective: SlackServiceConfiguration) => ({ member: effective.memberWorkspaceLimit, organization: effective.organizationWorkspaceLimit });
   return {
     heal: (effective) => healMemberSlots(dependencies, charge.member, effective),
@@ -14121,6 +14163,47 @@ async function publicationProject(
 }
 
 /** Spec 062: the link store the developer routes use, when the deployment has channel adapters. */
+/** Spec 064: what the legacy deployment's linking routes need: sign-in and the links, never developer tasks. */
+function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: DeveloperApiConfiguration) {
+  return { documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: linking, now: Date.now, ...channelLinkRouteDependencies(dependencies), ...clientProjectRouteDependencies(dependencies) };
+}
+
+/** What a chat agent is told about a project a sign-in client created; the project's administrators refine it later. */
+const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
+
+/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. */
+function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "clientRepositories"> {
+  const clientProjects = dependencies.clientProjects;
+  if (clientProjects === undefined) return {};
+  return {
+    clientRepositories: () => clientProjects.repositories(),
+    async createClientProject(developerId, input) {
+      const url = `https://github.com/${input.repository}.git`;
+      const found = await clientProjects.repositoryDefaults(url);
+      const repositoryName = found.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/^([^a-z])/, "r-$1").slice(0, 63) || "repository";
+      const name = input.name ?? repositoryName;
+      const existing = await dependencies.documentClient.send(new QueryCommand({
+        TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+        ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
+      })) as { Items?: unknown[] };
+      if ((existing.Items ?? []).length > 0) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
+      const cwd = `repo/${repositoryName}`;
+      // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
+      const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
+      const definition = ProjectDefinitionSchema.parse({
+        name, revision: 1,
+        repositories: [{ name: repositoryName, url, path: cwd, defaultBranch: found.defaultBranch, credentialRef: clientProjects.credentialRef }],
+        setup: (input.setupCommands ?? []).map(command), readiness: (input.testCommands ?? []).map(command),
+        orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
+      });
+      // As the person: their developer ID owns the project, so they administer it and it is listed for them.
+      const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
+      await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false });
+      return { name, latestRevision: 1 };
+    },
+  };
+}
+
 function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): { channelLinks?: ChannelLinkDependencies } {
   const channelAdapters = dependencies.channelAdapters;
   return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
@@ -14133,7 +14216,7 @@ function channelConversationDependencies(dependencies: AwsBrokerDependencies): C
     getBinding: (ref) => getChannelBinding(dependencies, ref),
     linkedDeveloper: (actor) => linkedDeveloper({ documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now }, actor),
     getDeveloper: async (developerId) => {
-      const signInTableName = dependencies.developer?.signInTableName;
+      const signInTableName = (dependencies.developer ?? dependencies.linking)?.signInTableName;
       if (signInTableName === undefined) return undefined;
       const response = await dependencies.documentClient.send(new GetCommand({ TableName: signInTableName, Key: { pk: `DEVELOPER#${developerId}`, sk: "META" }, ConsistentRead: true }));
       const item = response.Item as Partial<DeveloperRecord> | undefined;
@@ -14876,6 +14959,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     endDeveloperSessions: endDeveloperSessionsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
+    ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
     channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({
@@ -14896,7 +14981,11 @@ function slackRequestQueue(queueUrl: string): SlackRequestQueue {
     },
   };
 }
-const developer = developerConfiguration();
+// Spec 064: the legacy deployment's sign-in is for account linking only (DEVELOPER_API_SCOPE=linking, set by infra).
+const signIn = developerConfiguration();
+const linkingOnly = process.env.DEVELOPER_API_SCOPE === "linking";
+const developer = linkingOnly ? undefined : signIn;
+const linking = linkingOnly ? signIn : undefined;
 
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;
@@ -14922,6 +15011,13 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  // Spec 065b: where the foundation's worker settings are given, a sign-in client may create projects.
+  ...(process.env.EC2_WORKER_SUBNETS && process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID ? { clientProjects: {
+    credentialRef: githubCredentials.credentialRef,
+    repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
+    repositories: () => githubCredentials.installedRepositories(),
+    workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
+  } } : {}),
   projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
   ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
     ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }
@@ -14948,6 +15044,7 @@ export const handler = createAwsBrokerHandler({
       } }
     : {}),
   ...(developer ? { developer } : {}),
+  ...(linking ? { linking } : {}),
   ...(chatgpt ? { chatgpt } : {}),
   // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
   ...(process.env.CHANNEL_ADAPTERS === "enabled"

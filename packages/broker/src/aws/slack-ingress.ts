@@ -1205,6 +1205,10 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
   const stateTableName = requiredEnvironment("STATE_TABLE_NAME");
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
+  // Slack tasks (starting one, its Quick or Full choice, and its thread's notes) exist only where task threads can be
+  // read, which SHARED_TASKS says. Elsewhere (the legacy deployment) a plain mention is the chat agent's, as it always
+  // was: without this, every top-level mention there was refused with the task-threads-off notice.
+  const slackTasks = brokerFunctionName !== undefined && process.env.SHARED_TASKS === "enabled";
   const settings = slackIngressSettings(process.env);
   const checkMember = (userId: string) => transport.checkMember(userId);
   /** A direct broker invoke: the broker's answer, or a throw when the broker itself failed. */
@@ -1275,7 +1279,7 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
     async releaseEvent(eventId) {
       await documentClient.send(new DeleteCommand({ TableName: threadsTableName, Key: { pk: `EVENT#${eventId}`, sk: "META" } }));
     },
-    ...(brokerFunctionName === undefined ? {} : {
+    ...(!slackTasks ? {} : {
       async requestWorkflowChoice(input: { thread: SlackThread; userId: string; instructions: string; requestId: string }) {
         await offerWorkflowChoice({ store: choices, postMessage: (message) => transport.postMessage(message) }, input);
       },
@@ -1330,23 +1334,25 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
       async stopTask(thread: SlackThread, userId: string) {
         return stopTaskThroughBroker(invokeBroker, thread, userId);
       },
-      async captureFeedbackNote(input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string }) {
-        return captureFeedbackNoteThroughBroker(invokeBroker, input);
-      },
-      async startWorkflow(input: SlackWorkflowStartInput) {
-        await invokeWorkflow(input);
-      },
-      async recordThreadNote(input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true }) {
-        return recordThreadNoteThroughBroker(invokeBroker, input);
-      },
       // Decision 147: the Slack service's record of whom AgentX answered in each thread, on the Slack threads table.
       async threadContinuation(thread: SlackThread, userId: string, nowSeconds: number) {
         return threadContinuationOf(async (key) => ((await documentClient.send(new GetCommand({ TableName: threadsTableName, Key: key }))) as { Item?: Record<string, unknown> }).Item,
           thread, userId, nowSeconds);
       },
-      async recordIntake(input: SlackIntakeRecordInput) {
-        await recordIntakeThroughBroker(invokeBroker, input);
-      },
+      ...(!slackTasks ? {} : {
+        async captureFeedbackNote(input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string }) {
+          return captureFeedbackNoteThroughBroker(invokeBroker, input);
+        },
+        async startWorkflow(input: SlackWorkflowStartInput) {
+          await invokeWorkflow(input);
+        },
+        async recordThreadNote(input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true }) {
+          return recordThreadNoteThroughBroker(invokeBroker, input);
+        },
+        async recordIntake(input: SlackIntakeRecordInput) {
+          await recordIntakeThroughBroker(invokeBroker, input);
+        },
+      }),
       async chatgpt(input: { command: ChatGptSlackCommand; teamId: string; userId: string }) {
         return invokeBroker({ source: "agentx.slack-ingress", action: "chatgpt-command", ...input });
       },

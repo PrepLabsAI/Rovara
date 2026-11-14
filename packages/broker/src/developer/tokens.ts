@@ -58,7 +58,7 @@ const base64url = (value: unknown) => Buffer.from(JSON.stringify(value)).toStrin
 export async function issueAccessToken(signer: TokenSigner, input: {
   issuer: string; subject: string; amr: DeveloperSignInMethod; env: string; sessionId: string; now: number;
   /** Spec 063 FR-002: a registered client's own audience and ID (azp); absent, the token is the CLI's, for Rovara. */
-  client?: { clientId: string; audience: string };
+  client?: { clientId: string; audience: string; scopes?: readonly string[] };
 }): Promise<{ token: string; expiresIn: number }> {
   const { kid } = await signer.publicJwk();
   const iat = Math.floor(input.now / 1000);
@@ -67,6 +67,8 @@ export async function issueAccessToken(signer: TokenSigner, input: {
     iss: input.issuer,
     aud: input.client?.audience ?? DEVELOPER_TOKEN_AUDIENCE,
     ...(input.client === undefined ? {} : { azp: input.client.clientId }),
+    // Spec 065 FR-002: what the client may do as this person; space-separated, as OAuth writes it.
+    ...(input.client?.scopes === undefined || input.client.scopes.length === 0 ? {} : { scope: input.client.scopes.join(" ") }),
     sub: input.subject,
     amr: input.amr,
     env: input.env,

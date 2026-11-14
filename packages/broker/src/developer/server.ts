@@ -42,6 +42,7 @@ import {
   type ListSignInClientsRequest,
   type PutSignInClientRequest,
   type RemoveSignInClientRequest,
+  type ClientScope,
   type SignInClientRecord,
   type SignInClientsResponse,
   type EndDeveloperSessionsResponse,
@@ -136,6 +137,12 @@ function toClient(redirectUri: string, params: Record<string, string>): HttpResu
 const CLIENT_AUTH_METHODS = ["none", "client_secret_basic", "client_secret_post"];
 
 /** RFC 6749 2.3.1: HTTP Basic with the form-encoded client ID and secret; undefined without the header. */
+/** Spec 065: the scopes a client asked for (space-separated) that its registration allows, unique and in order. */
+function grantedScopes(requested: string | null, client: SignInClientRecord): { scopes?: string[] } {
+  const scopes = [...new Set((requested ?? "").split(" "))].filter((scope) => client.scopes?.includes(scope as ClientScope) === true);
+  return scopes.length === 0 ? {} : { scopes };
+}
+
 function basicCredentials(authorization: string | undefined): { clientId: string; secret: string } | "malformed" | undefined {
   if (authorization === undefined) return undefined;
   const match = /^Basic ([A-Za-z0-9+/=]+)$/i.exec(authorization.trim());
@@ -175,10 +182,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   };
 
   /** Spec 063 FR-002: a registered client's session gets tokens addressed to that client, which Rovara's API refuses. */
+  // Spec 065 FR-002: the scopes asked for at sign-in that the client's registration still allows, so removing one from
+  // the registration ends it at the next refresh.
   const accessToken = (session: SessionRecord, client?: SignInClientRecord) =>
     issueAccessToken(deps.signer, {
       issuer: config.issuer, subject: session.developerId, amr: session.amr, env: config.env, sessionId: session.sessionId, now: deps.now(),
-      ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience } }),
+      ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience, scopes: (session.scopes ?? []).filter((scope) => client.scopes?.includes(scope as ClientScope) === true) } }),
     });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
@@ -259,6 +268,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       request = await store.createAuthRequest({
         clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url"),
         ...(client === undefined ? {} : { clientId: client.clientId }),
+        // Spec 065 FR-002: a scope the registration does not allow is dropped, not refused.
+        ...(client === undefined ? {} : grantedScopes(query.get("scope"), client)),
       });
       if (methods.length === 1) {
         const method = methods[0]!;
@@ -420,6 +431,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const agentxCode = await store.issueCode({
       developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
       ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
+      ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       // FR-005: only a company sign-in can make an administrator.
       ...(method === "oidc" && identity.administrator === true ? { administrator: true as const } : {}),
     });
@@ -600,7 +612,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        await store.putClient(parsed.data.client);
+        let client = parsed.data.client;
+        // An update that keeps the secret: only this server holds the hash, so it carries it over.
+        if (parsed.data.keepSecret === true) {
+          const current = await store.getClient(client.clientId);
+          if (current?.secretHash === undefined) return { ok: false, error: "no_secret" };
+          client = { ...client, secretHash: current.secretHash };
+        }
+        await store.putClient(client);
         deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId });
         return { ok: true };
       }

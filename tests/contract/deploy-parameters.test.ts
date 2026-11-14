@@ -41,7 +41,7 @@ const outputs = {
   foundation: {
     VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2",
     SessionManagerSecurityGroupId: "sg-0123456789abcdef0", DispatcherSecurityGroupId: "sg-0fedcba9876543210", WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k",
-    Ec2WorkerInstanceRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/worker", Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
+    Ec2WorkerInstanceRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/worker", Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c",
   },
   identity: { Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", Audience: "client123" },
   "control-plane": { ApiEndpoint: "https://abc.execute-api.us-east-1.amazonaws.com", SlackOrchestratorTaskRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-control-plane-SlackTask", SlackRequestQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/q.fifo", SlackThreadsTableName: "t", TurnRecordsTableName: "tr", SlackThreadSessionBucketName: "b", SlackSecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:SlackSecret-x", OperatorAlertsTopicArn: "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts" },
