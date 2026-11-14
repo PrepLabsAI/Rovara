@@ -20,11 +20,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 
 export const ENGINE_NAME = "aws-emulator";
-export const ENGINE_VERSION = "1.0.337";
-export const ENGINE_COMMIT = "7394251eefd071b8c239bc91125495753c22c75a";
+export const ENGINE_VERSION = "1.0.343";
+export const ENGINE_COMMIT = "a9f10fef3b8215b13ffc390ace27bdd58f2aac00";
 /** sha256 of the scores file as released (gzip) and of the same file unzipped. */
-export const SCORES_SHA256_GZ = "f893b4eda831a79dd453a255e21acdb5498e1e462e2f42fac589d1ffdd038084";
-export const SCORES_SHA256_JSON = "dec0869018a5a88030f37934a76fdf54ffe2134bb040bceb7faff55fb756adbb";
+export const SCORES_SHA256_GZ = "1ac2acbc408d2c8abfb024337ea51a8cac31c4a27cc6309d68207021c04142bc";
+export const SCORES_SHA256_JSON = "f3653b9ba011aa4930344697035c5c00b25808abb37c02945560b822f96ceb23";
 export const SCORES_SCHEMA_VERSION = 1;
 
 const SERVICE_KEY = /^[a-z][a-z0-9-]{1,39}$/u;
@@ -353,8 +353,8 @@ export function readServiceSources(engineSrc: string): ServiceSource[] {
   for (const dir of readdirSync(servicesDir).filter((name) => name.startsWith("service-")).sort()) {
     const modelDir = join(servicesDir, dir, "smithy-model");
     if (!existsSync(modelDir)) continue;
-    // The folder may also hold a "local-reported" profile file: not the service's model.
-    const models = readdirSync(modelDir).filter((name) => name.endsWith(".json") && !name.startsWith("local-reported"));
+    // Profiles and the known local-additions.json overlay are not standalone service models.
+    const models = readdirSync(modelDir).filter((name) => name.endsWith(".json") && !name.startsWith("local-reported") && name !== "local-additions.json");
     if (models.length !== 1) fail(`${dir}: expected one model file, found ${String(models.length)}`);
     const model = JSON.parse(readFileSync(join(modelDir, models[0]!), "utf8")) as SmithyModel;
     const opsDir = join(servicesDir, dir, "src", "ops");

@@ -19,8 +19,8 @@ const byKey = (key: string) => awsEmulatorServiceRow(key)!;
 
 describe("the generated table", () => {
   it("names the engine, its commit and the scores it was made from", () => {
-    expect(AWS_EMULATOR_ENGINE).toBe("aws-emulator@1.0.337");
-    expect(AWS_EMULATOR_ENGINE_VERSION).toBe("1.0.337");
+    expect(AWS_EMULATOR_ENGINE).toBe("aws-emulator@1.0.343");
+    expect(AWS_EMULATOR_ENGINE_VERSION).toBe("1.0.343");
     expect(AWS_EMULATOR_ENGINE_COMMIT).toMatch(/^[0-9a-f]{40}$/u);
     expect(AWS_EMULATOR_SCORES_SHA256).toMatch(/^[0-9a-f]{64}$/u);
     const text = readFileSync(new URL("../../packages/contracts/src/generated/aws-emulator-services.ts", import.meta.url), "utf8");
@@ -93,8 +93,8 @@ describe("the generated table", () => {
     }
     expect(rows.filter((row) => row.behavioralScore !== null)).toHaveLength(352);
     // The units that name one service alone are the figure comparable to a per-suite score.
-    expect(byKey("s3").behavioralOwnScore).toBeCloseTo(0.866, 3);
-    expect(byKey("sqs").behavioralOwnScore).toBeCloseTo(0.935, 3);
+    expect(byKey("s3").behavioralOwnScore).toBeCloseTo(0.875, 3);
+    expect(byKey("sqs").behavioralOwnScore).toBeCloseTo(0.938, 3);
     expect(byKey("s3").behavioralScore!).toBeLessThan(byKey("s3").behavioralOwnScore!);
   });
 });
@@ -236,9 +236,9 @@ describe("the engine pin", () => {
   });
 
   it("refuses an entry whose engine version differs, and one that does not say", () => {
-    expect(checkEmulatorEngine(entry("1.0.321"))).toEqual({ ok: false, reason: "engine_mismatch", expected: "1.0.337", actual: "1.0.321" });
-    expect(checkEmulatorEngine(entry("1.0.3370"))).toMatchObject({ ok: false, reason: "engine_mismatch" });
-    expect(checkEmulatorEngine(entry())).toEqual({ ok: false, reason: "engine_not_pinned", expected: "1.0.337" });
+    expect(checkEmulatorEngine(entry("1.0.321"))).toEqual({ ok: false, reason: "engine_mismatch", expected: "1.0.343", actual: "1.0.321" });
+    expect(checkEmulatorEngine(entry("1.0.3430"))).toMatchObject({ ok: false, reason: "engine_mismatch" });
+    expect(checkEmulatorEngine(entry())).toEqual({ ok: false, reason: "engine_not_pinned", expected: "1.0.343" });
     expect(checkEmulatorEngine({ backing: "emulated" })).toMatchObject({ ok: false, reason: "engine_not_pinned" });
   });
 
