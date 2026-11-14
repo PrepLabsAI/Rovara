@@ -56,6 +56,8 @@ export const TIER_CHECKS_MAX_REQUESTS = 256;
 export const TIER_CHECKS_MAX_MS = 4 * 60_000;
 /** One tier pass, all tasks together: the rest wait for the next pass (they are taken oldest run first). */
 export const TIER_PASS_MAX_MS = 10 * 60_000;
+/** How long a task may wait for a tier pass before the install says loudly that none runs. */
+export const TIER_STALL_MS = 30 * 60_000;
 /** What the task says when its pull request ended at a head Rovara did not check. */
 export const MERGED_OUTSIDE = "The pull request was merged with commits Rovara did not check, so this is not a merge of the code Rovara checked. Look at what was merged, then close this task.";
 export const CLOSED_OUTSIDE = "The pull request was closed on the code host with commits Rovara did not check. Look at it there, then close this task.";
@@ -298,7 +300,16 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const tierDueKey = (taskId: string) => ({ pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` });
   const markTierDue = async (taskId: string): Promise<void> => {
     await store.put({ item: { ...tierDueKey(taskId), entityType: "TIER_CHECKS_DUE", taskId, lastRunAt: 0, dueAt: now() }, condition: when.absent() }).catch(() => undefined);
+    // A host that sweeps but never runs the tier pass (`tierChecks`) leaves every lighter-flow task held: say so loudly, once per task and hour.
+    const row = await store.get(tierDueKey(taskId)).catch(() => undefined);
+    const dueAt = typeof row?.["dueAt"] === "number" ? row["dueAt"] : now();
+    const lastRunAt = typeof row?.["lastRunAt"] === "number" ? row["lastRunAt"] : 0;
+    if (now() - Math.max(dueAt, lastRunAt) > TIER_STALL_MS && (stallLogged.get(taskId) ?? 0) + 3_600_000 < now()) {
+      stallLogged.set(taskId, now());
+      console.error(JSON.stringify({ component: "merge_tracking", event: "tier_checks.not_running", level: "error", taskId, waitingMs: now() - Math.max(dueAt, lastRunAt), words: "No tier pass has run for this task: its pull request stays held. Call MergeTrackingService.tierChecks() on a schedule." }));
+    }
   };
+  const stallLogged = new Map<string, number>();
   let tierRunning: Promise<number> | undefined;
   const runTierPass = async (): Promise<number> => {
     const rows = (await queryAll(store, { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
