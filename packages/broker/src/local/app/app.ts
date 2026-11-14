@@ -7,6 +7,7 @@
 //
 // Decision 51: nothing here names a provider; it asks the registry for `storage`, `queue`, `worker-machines`, `admission`, `audit-sink`, `approvers`, `identity` and `metering`.
 // Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
+import type { TierReviewCall } from "../../core/build-step/tier-review-calls.js";
 import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type Metering, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
@@ -105,6 +106,8 @@ const ATTENTION_FOOTER = "Open it on the computer where Rovara runs: `rovara ope
 const LOCAL_OWNER_PERSON_ID = "local-owner";
 
 export interface LocalAppOptions {
+  /** The lighter flow and its reviewer call (`LocalRuntimeOptions.lighterFlow`). Absent: off, as Code's laptop is. */
+  lighterFlow?: { on: boolean; tierReviewCall?: TierReviewCall | undefined } | undefined;
   /** Tells the model proxy an operation ended (it frees the operation's tokens and spend record). Set by the runtime, which makes the proxy after the servers. */
   operationEnded?: (operationId: string) => void;
   /** What one operation has spent through the model proxy so far in this process (the runtime reads it from the proxy). A re-minted token starts from the task's spend less this, so an operation's own spend is counted once. */
@@ -157,6 +160,12 @@ export interface LocalAppOptions {
   setupAgent?: boolean;
   /** The websites this install's machines reach by their own list, so a setup run's ask for one of them is "already allowed". */
   installDomains?: () => readonly string[];
+  /** FIX-0518: whether the owner let this project's sandboxes reach the model hosts (the owner's config). True puts the fixed sentence in the evidence of the project's runs. Absent: never. */
+  sandboxModelHostsAllowed?: (project: string) => boolean;
+  /** FIX-0518: the state a task's worker machine was created with (`denied` or `allowed`; undefined when it cannot say). The evidence reads this first, so it says what really applied, not what the config says now. */
+  sandboxModelHostsOf?: (machineId: string) => Promise<"denied" | "allowed" | undefined>;
+  /** FIX-0518: the names a project's test sandbox is denied (empty when the owner allowed model hosts for it): a setup run's website ask for one is refused, and an owner's approval of one is refused. */
+  sandboxDenied?: (project: string) => readonly string[];
   /** For tests: the fetch under a connection's check, and the check that refuses an address that must not be called. */
   connectionsFetch?: typeof fetch;
   connectionsCheckEndpoint?: (url: string) => Promise<void>;
@@ -333,7 +342,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
-  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
+  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs, ...(options.sandboxModelHostsAllowed === undefined ? {} : { sandboxModelHostsAllowed: options.sandboxModelHostsAllowed }), ...(options.sandboxModelHostsOf === undefined ? {} : { sandboxModelHostsOf: options.sandboxModelHostsOf }) });
   // The project's approved test environment: tasks pin it when they start, a coding or verification run is told its plan, and the owner approves a change on a page (the gate decides it).
   // `pages` and `gate` are made below; the module asks for them when it is used, never when it is built.
   const pagesServer: { current?: LocalPagesServer } = {};
@@ -415,6 +424,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     modelAccess: { route: modelRoute },
     stepModels: modelSelection,
     usableModels,
+    // The lighter flow: off on the laptop unless the caller switches it on with a reviewer call (construction refuses it without one).
+    ...(options.lighterFlow === undefined ? {} : { lighterFlow: options.lighterFlow.on, ...(options.lighterFlow.tierReviewCall === undefined ? {} : { tierReviewCall: options.lighterFlow.tierReviewCall }) }),
     // A closed task's cost (what its model calls cost, from the ledger) is kept for the estimate of the next runs of the project; a run with a call that had no price is marked, and never teaches the estimator.
     onTaskClosed: async (task, closedAt) => {
       const outcome = await recordRunCost({ store }, {
@@ -530,7 +541,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // for who decides is the service's default: the one owner decides as the task's owner, and a verified collaborator as a project approver.
   const decisions = createDecisionService({
     flow: flow.deps, blobs, store, approvers: registry.require("approvers"), audit: registry.require("audit-sink"), companyId,
-    subjects: [testEnvironment.subject, ...setupDecisionSubjects(flow.deps), designReview.choiceSubject],
+    subjects: [testEnvironment.subject, ...setupDecisionSubjects(flow.deps, options.sandboxDenied), designReview.choiceSubject],
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const gate = decisions.gate;
@@ -560,6 +571,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     flow: flow.deps, registry, gate, owner, companyId, now: () => clock().getTime(), enabled: options.setupAgent ?? true,
     modelAccessConfigured: async () => (await chosen()) !== undefined,
     ...(options.installDomains === undefined ? {} : { installDomains: options.installDomains }),
+    ...(options.sandboxDenied === undefined ? {} : { sandboxDenied: options.sandboxDenied }),
   });
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, lessons, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
@@ -679,9 +691,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const tickLessons = async (): Promise<void> => {
     await lessons.tick().catch(logFailure("local_app.lessons_failed"));
   };
+  // The lighter flow's reviewer calls (questions, grown reviews) can take minutes, so they have their own timer and allowance: the pull request reads never wait for them.
+  const tickTierChecks = async (): Promise<void> => {
+    await tracking.tierChecks().catch(logFailure("local_app.tier_checks_failed"));
+  };
   const tick = async (): Promise<void> => {
     await tickCore();
     await tickTracking();
+    await tickTierChecks();
     await tickLessons();
   };
   // The in-process chat adapters begin to listen. What one hears goes through the sink, which applies the checks of the channel API (bound space, linked person, a card's request); a start that fails
@@ -722,6 +739,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     const routed = scheduleRouter.start();
     nightly = { stop: async () => { await nightlyHeard.stop(); await routed.stop(); } };
     every(10_000, tickLessons);
+    every(10_000, tickTierChecks);
   }
 
   return {
