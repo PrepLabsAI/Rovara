@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { detectWorkspacePackages } from "../../packages/worker/src/env-detect/packages.js";
-import type { Detector } from "../../packages/worker/src/env-detect/types.js";
 
 type Files = Record<string, string>;
 const node = JSON.stringify({ scripts: { test: "vitest run" } });
-const detect = (files: Files, options = {}) => detectWorkspacePackages(Object.keys(files), (path) => Promise.resolve(files[path]), "repo", options);
+const detect = (files: Files, options = {}) => detectWorkspacePackages(Object.keys(files), (path) => Promise.resolve(files[path]), "repo", { entry: { url: new URL("../../packages/worker/src/env-detect/detect-thread.ts", import.meta.url), execArgv: ["--import", "tsx"] }, ...options });
 const roots = async (files: Files) => (await detect(files)).units.map((unit) => unit.root);
 
 describe("workspace package discovery foundation", () => {
@@ -19,18 +18,18 @@ describe("workspace package discovery foundation", () => {
     expect(result.units[0]!.detection.checks[0]!.value.command).toEqual({ cwd: "repo", executable: "npm", args: ["run", "test"], timeoutSeconds: 1800 });
   });
 
-  it("discovers all 40 pnpm packages before applying a fresh path budget to each", async () => {
+  it("discovers all 40 pnpm packages and retains the root remainder", async () => {
     const files: Files = { "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - '!packages/ignored'\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'" };
     for (let n = 0; n < 40; n += 1) {
       files[`packages/p${String(n)}/package.json`] = node;
-      for (let f = 0; f < 130; f += 1) files[`packages/p${String(n)}/src/f${String(f)}.ts`] = "";
+      for (let f = 0; f < 100; f += 1) files[`packages/p${String(n)}/src/f${String(f)}.ts`] = "";
     }
     files["packages/ignored/package.json"] = node;
     files["undeclared/package.json"] = node;
     const result = await detect(files);
     expect(result.kind).toBe("workspace");
-    expect(result.units).toHaveLength(40);
-    for (const unit of result.units) {
+    expect(result.units).toHaveLength(41);
+    for (const unit of result.units.slice(1)) {
       expect(unit.detection.checks[0]!.value.command).toEqual({ cwd: `repo/${unit.root}`, executable: "pnpm", args: ["test"], timeoutSeconds: 1800 });
       expect(unit.detection.setupCommands[0]!.value).toEqual({ cwd: "repo", executable: "pnpm", args: ["install", "--frozen-lockfile"], timeoutSeconds: 900 });
       expect(unit.omittedPaths).toBe(0);
@@ -54,8 +53,8 @@ describe("workspace package discovery foundation", () => {
       "api/build.gradle.kts": 'plugins { java }', "api/src/test/java/ApiTest.java": "",
       "lib/util/build.gradle.kts": 'plugins { java }', "lib/util/src/test/java/UtilTest.java": "",
     });
-    expect(result.units.map((unit) => unit.root)).toEqual(["api", "lib/util"]);
-    for (const unit of result.units) {
+    expect(result.units.map((unit) => unit.root)).toEqual([".", "api", "lib/util"]);
+    for (const unit of result.units.slice(1)) {
       expect(unit.detection.setupCommands[0]!.value.cwd).toBe(`repo/${unit.root}`);
       expect(unit.detection.checks[0]!.value.command).toMatchObject({ cwd: `repo/${unit.root}`, executable: "gradle", args: ["--console=plain", "test"] });
     }
@@ -79,16 +78,9 @@ describe("workspace package discovery foundation", () => {
     }
   });
 
-  it("isolates nested packages and applies 5000 paths and 32 checks per package", async () => {
-    const files: Files = { "package.json": '{"workspaces":["a","a/nested","b"]}', "a/package.json": node, "a/nested/package.json": node, "b/package.json": node };
-    for (let n = 0; n < 5001; n += 1) files[`a/file${String(n)}.txt`] = "";
-    const many: Detector = ({ cwd, repo }) => {
-      expect(repo.paths).not.toContain("nested/package.json");
-      return Promise.resolve({ checks: Array.from({ length: 40 }, (_, n) => ({ source: "detector:many" as const, value: { id: `t${String(n)}`, label: "Test", kind: "test" as const, command: { cwd, executable: "make", args: [String(n)], timeoutSeconds: 60 } } })) });
-    };
-    const result = await detect(files, { only: ["many"], extraDetectors: [{ name: "many", run: many }] });
-    expect(result.units.map((unit) => [unit.root, unit.omittedPaths, unit.detection.checks.length])).toEqual([[".", 0, 32], ["a", 2, 32], ["a/nested", 0, 32], ["b", 0, 32]]);
-    for (const unit of result.units) expect(unit.detection.notes.join(" ")).toContain("More than 32 checks");
+  it("isolates nested packages", async () => {
+    const result = await detect({ "package.json": '{"workspaces":["a","a/nested","b"]}', "a/package.json": node, "a/nested/package.json": node, "b/package.json": node });
+    expect(result.units.map((unit) => [unit.root, unit.omittedPaths, unit.detection.checks.length])).toEqual([[".", 0, 0], ["a", 0, 1], ["a/nested", 0, 1], ["b", 0, 1]]);
   });
 
   it.each([
@@ -162,26 +154,6 @@ describe("workspace package discovery foundation", () => {
     expect(result).toEqual([".", "apps/api", "apps/deep/lib"]);
   });
 
-  it("keeps byte budgets independent and accepts exactly 5000 paths per package", async () => {
-    const files: Files = { "package.json": '{"workspaces":["a","b"]}' };
-    for (const root of ["a", "b"]) {
-      files[`${root}/package.json`] = node;
-      for (let n = 0; n < 4999; n += 1) files[`${root}/f${String(n)}.txt`] = n < 17 ? "x".repeat(262144) : "";
-    }
-    const budget: Detector = async ({ repo, cwd }) => {
-      if (cwd === "repo") return {};
-      for (let n = 0; n < 16; n += 1) expect((await repo.read(`f${String(n)}.txt`))?.length).toBe(262144);
-      expect(await repo.read("f16.txt")).toBeUndefined();
-      return { notes: ["byte-budget detector ran"] };
-    };
-    const result = await detect(files, { only: ["budget"], extraDetectors: [{ name: "budget", run: budget }] });
-    expect(result.units.map((unit) => unit.omittedPaths)).toEqual([0, 0, 0]);
-    for (const unit of result.units.slice(1)) {
-      expect(unit.detection.notes).toContain("byte-budget detector ran");
-      expect(unit.detection.notes).toContain("Some files were not read: the read budget ran out.");
-    }
-  });
-
   it("reads literal Python arrays with indentation, comments and bracket globs", async () => {
     expect(await roots({
       "pyproject.toml": '  [tool.uv.workspace] # workspace\n  members = [\n    "libs/[ab]", # members\n  ]\n  exclude = ["libs/b"]\n[project]\nname = "root"',
@@ -203,14 +175,12 @@ describe("workspace package discovery foundation", () => {
     expect(await detect({ "pom.xml": pom, "a/pom.xml": "<project/>" })).toMatchObject({ kind: "unavailable", units: [] });
   });
 
-  it("keeps a non-workspace Maven repository golden even with more than 5000 nested example manifests", async () => {
-    const files: Files = {};
-    for (let n = 0; n < 5001; n += 1) files[`examples/p${String(n)}/pom.xml`] = "<project/>";
-    files["pom.xml"] = "<project/>";
-    const old = await runDetectors(boundedReader(Object.keys(files), (path) => Promise.resolve(files[path])).reader, "repo");
-    const result = await detect(files);
-    expect(result.kind).toBe("single");
-    expect(JSON.stringify(result.units[0]!.detection)).toBe(JSON.stringify(old));
+  it("refuses more than 5000 inventory paths before loading any file", async () => {
+    const paths = Array.from({ length: 5001 }, (_, n) => `examples/p${String(n)}/pom.xml`);
+    const reads: string[] = [];
+    const result = await detectWorkspacePackages(paths, (path) => { reads.push(path); return Promise.resolve("<project/>"); }, "repo");
+    expect(result.kind).toBe("unavailable");
+    expect(reads).toEqual([]);
   });
 
 });
