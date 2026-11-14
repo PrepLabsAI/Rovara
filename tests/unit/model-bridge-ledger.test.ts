@@ -189,7 +189,7 @@ describe("evidence lines", () => {
   it("names Azure as not blocked whenever a suffix row is in play in an unsealed round", () => {
     const lines = modelBridgeEvidenceLines({ ...base, roundKind: "check_unsealed", blockMode: "by_name", hostSuffixes: ["openai.azure.com"], azureOpenAiNotBlocked: true });
     expect(lines).toContain(AZURE_OPENAI_NOT_BLOCKED_SENTENCE);
-    expect(AZURE_OPENAI_NOT_BLOCKED_SENTENCE).toMatch(/^Azure OpenAI is not blocked in this round/u);
+    expect(AZURE_OPENAI_NOT_BLOCKED_SENTENCE).toMatch(/^Azure resource hosts under .+ are not blocked in this round/u);
     expect(modelBridgeEvidenceLines({ ...base, roundKind: "check_unsealed", blockMode: "by_name", hostSuffixes: [], azureOpenAiNotBlocked: true })).toContain(AZURE_OPENAI_NOT_BLOCKED_SENTENCE);
     expect(modelBridgeEvidenceLines({ ...base, roundKind: "check_unsealed", blockMode: "by_name" })).not.toContain(AZURE_OPENAI_NOT_BLOCKED_SENTENCE);
   });
