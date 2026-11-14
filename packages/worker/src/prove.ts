@@ -10,6 +10,8 @@
 //   - a suite that is longer than the round budget is NOT a failure (it is why test selection exists); a suite that hits its own time limit is.
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import {
+  validPeakMemory,
+  type MachineChip,
   TEST_ENV_DEPENDENCY_PROVE_STEPS,
   TEST_ENV_PROVE_STEPS,
   TestEnvProveReportSchema,
@@ -39,10 +41,14 @@ export interface ProvePorts {
   suiteTestCount?(): Promise<number | undefined>;
   /** When the run ends, whatever it did: removes what the ports started (the test services' helpers and network, service-runner.ts). Absent for a run that started nothing; a failure here is not the run's. */
   release?(): Promise<void>;
+  /** Asked-for sandbox cgroup peak, sampled after the full suite and before release. */
+  peakMemory?(): Promise<number | undefined>;
   now(): number;
 }
 
 export interface ProveInput {
+  measureMachine?: boolean;
+  machineChip?: MachineChip;
   proposalDigest: string;
   environment: TestEnvironmentBody;
   signal: AbortSignal;
@@ -145,6 +151,10 @@ export async function proveEnvironment(ports: ProvePorts, input: ProveInput): Pr
       if (outcome?.status === "passed") {
         const count = await ports.suiteTestCount?.().catch(() => undefined);
         fullSuite = { durationMs, tests: count !== undefined && Number.isSafeInteger(count) && count >= 0 && count <= 100_000_000 ? count : 0 };
+        if (input.measureMachine === true) {
+          const peak = await Promise.resolve().then(() => ports.peakMemory?.()).catch(() => undefined);
+          if (validPeakMemory(peak)) fullSuite.peakMemoryMiB = peak;
+        }
         if (env.selection.method === "coverage_map") coverageMapRef = await ports.buildCoverageMap(controller.signal).catch(() => undefined);
       }
       return outcome;
@@ -167,6 +177,7 @@ export async function proveEnvironment(ports: ProvePorts, input: ProveInput): Pr
   });
   const finishedAt = new Date(ports.now()).toISOString();
   return TestEnvProveReportSchema.parse({
+    ...(input.measureMachine === true && input.machineChip !== undefined ? { machineChip: input.machineChip } : {}),
     schemaVersion: 1, proposalDigest: input.proposalDigest, steps,
     ...(fullSuite === undefined ? {} : { fullSuite }),
     ...(coverageMapRef === undefined ? {} : { coverageMapRef }),
