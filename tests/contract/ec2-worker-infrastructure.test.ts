@@ -83,8 +83,9 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
       "/agentx/production/worker-openai-secret-arn", "/agentx/production/worker-openrouter-providers", "/agentx/production/worker-openrouter-secret-arn",
       "/agentx/production/worker-prompt-cache-retention",
     ]);
+    // Spec 064: the legacy deployment's developer sign-in key, for account linking.
     expect(all("AWS::KMS::Alias").map((r) => r.Properties.AliasName).sort()).toEqual([
-      "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing",
+      "alias/agentx/developer-tokens", "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing",
     ]);
     const logGroups = all("AWS::Logs::LogGroup").map((r) => r.Properties.LogGroupName).filter((name) => typeof name === "string");
     expect(logGroups).toContain("/agentx/production/worker");

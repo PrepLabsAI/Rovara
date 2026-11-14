@@ -113,6 +113,8 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     const body = release.slice(release.indexOf("export async function smokeTestExecutor"), release.indexOf("export async function smokeTestWorker"));
     expect(body).toContain("executorSmokeDockerArgs(image)");
     expect(body).not.toMatch(/--network|--cap-drop|seccomp|smoke\.js/);
+    // The production release loads release-common.ts before it builds, and the smoke module reads the built contracts.
+    expect(release).not.toMatch(/^import .*executor-smoke/m);
     expect(readFileSync("scripts/test-deploy.ts", "utf8")).toContain("smokeTest: smokeTestExecutor");
   });
 

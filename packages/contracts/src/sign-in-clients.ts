@@ -17,6 +17,21 @@ export const SignInRedirectUriSchema = z.string().max(2_048).superRefine((value,
 });
 
 /** What an administrator registers. `secretHash` (SHA-256, hex) makes it confidential; the secret itself is never sent. */
+/**
+ * Spec 065: what a sign-in client may do on Rovara as the signed-in person, beyond the access check. An administrator
+ * names them when registering the client; the client asks for them at sign-in and its tokens carry the allowed ones.
+ */
+export const CLIENT_SCOPES = ["projects:members", "projects:create"] as const;
+export const ClientScopeSchema = z.enum(CLIENT_SCOPES);
+export type ClientScope = z.infer<typeof ClientScopeSchema>;
+const ClientScopesSchema = z.array(ClientScopeSchema).max(CLIENT_SCOPES.length).refine((scopes) => new Set(scopes).size === scopes.length, "scopes must be unique");
+
+/** The scopes a token's space-separated `scope` claim names, keeping only known ones. */
+export function scopesOf(claim: unknown): ClientScope[] {
+  if (typeof claim !== "string") return [];
+  return claim.split(" ").filter((scope): scope is ClientScope => ClientScopeSchema.safeParse(scope).success);
+}
+
 export const SignInClientRegistrationSchema = z.object({
   name: z.string().trim().min(1).max(80),
   audience: SignInClientAudienceSchema,
@@ -24,7 +39,16 @@ export const SignInClientRegistrationSchema = z.object({
   /** It may sign people in from a terminal, with a loopback redirect, as `agentx login` does. */
   loopback: z.boolean(),
   secretHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-}).strict().refine((registration) => registration.loopback || registration.redirectUris.length > 0, "a client needs a redirect URL, a loopback redirect, or both");
+  /** Spec 065: what it may do as the signed-in person; none when absent. */
+  scopes: ClientScopesSchema.optional(),
+  /**
+   * An update that keeps the client's secret: Rovara carries the stored hash over (the CLI never sees it). Never with a
+   * new `secretHash`, and refused for a client that has no secret.
+   */
+  keepSecret: z.literal(true).optional(),
+}).strict()
+  .refine((registration) => registration.loopback || registration.redirectUris.length > 0, "a client needs a redirect URL, a loopback redirect, or both")
+  .refine((registration) => registration.keepSecret === undefined || registration.secretHash === undefined, "keep the secret or give a new one, not both");
 export type SignInClientRegistration = z.infer<typeof SignInClientRegistrationSchema>;
 
 export const SignInClientRecordSchema = z.object({
@@ -34,6 +58,7 @@ export const SignInClientRecordSchema = z.object({
   redirectUris: z.array(z.string().max(2_048)).max(10),
   loopback: z.boolean(),
   secretHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  scopes: ClientScopesSchema.optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1).max(512),
@@ -64,14 +89,16 @@ export const AccessCheckResponseSchema = z.object({
   developerId: z.string().regex(/^[a-f0-9]{64}$/),
   displayName: z.string(),
   administrator: z.boolean(),
-  projects: z.array(z.object({ name: z.string().min(1), access: z.enum(["granted", "channel"]) }).strict()),
+  /** `administrator` (spec 065): a project the person administers, which task access alone does not list. */
+  projects: z.array(z.object({ name: z.string().min(1), access: z.enum(["granted", "channel", "administrator"]) }).strict()),
   notices: z.array(z.string()),
 }).strict();
 export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;
 
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----
 
-export const PutSignInClientRequestSchema = z.object({ kind: z.literal("put-sign-in-client"), client: SignInClientRecordSchema }).strict();
+/** `keepSecret`: carry the stored client's secret hash over, which only the sign-in server holds. */
+export const PutSignInClientRequestSchema = z.object({ kind: z.literal("put-sign-in-client"), client: SignInClientRecordSchema, keepSecret: z.literal(true).optional() }).strict();
 export type PutSignInClientRequest = z.infer<typeof PutSignInClientRequestSchema>;
 export const RemoveSignInClientRequestSchema = z.object({ kind: z.literal("remove-sign-in-client"), clientId: SignInClientIdSchema }).strict();
 export type RemoveSignInClientRequest = z.infer<typeof RemoveSignInClientRequestSchema>;
@@ -81,3 +108,56 @@ export type ListSignInClientsRequest = z.infer<typeof ListSignInClientsRequestSc
 export type SignInClientsResponse =
   | { ok: true; clients?: SignInClientView[]; removed?: boolean }
   | { ok: false; error: "invalid_request" | "unavailable" };
+
+// ---- Spec 065: a sign-in client's routes, /v1/dev/client/*, each acting as the signed-in person ----
+
+/**
+ * Spec 065b: `GET /v1/dev/client/repositories` (projects:create): the accounts the deployment's GitHub App is installed
+ * on, and the repositories each lets it reach (the first 100 of each), to choose one for a new project.
+ */
+export interface ClientRepositoriesResponse {
+  installations: Array<{
+    installationId: number;
+    accountLogin: string;
+    accountType: "User" | "Organization";
+    repositorySelection: "all" | "selected";
+    status: "active" | "suspended";
+    repositories: Array<{ fullName: string; githubRepositoryId: number; private: boolean; defaultBranch: string }>;
+  }>;
+}
+
+/**
+ * Spec 065b: `POST /v1/dev/client/projects` (projects:create): a project from one GitHub repository the deployment's
+ * GitHub App can reach. Rovara builds the rest (the App's credential, the repository's default branch, the worker
+ * settings); the commands run in the repository, one argument list each.
+ */
+export const CreateClientProjectRequestSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "must be owner/name"),
+  name: z.string().regex(/^[a-z][a-z0-9-]{1,62}$/).optional(),
+  setupCommands: z.array(z.string().trim().min(1).max(1_000)).max(16).optional(),
+  testCommands: z.array(z.string().trim().min(1).max(1_000)).max(16).optional(),
+}).strict();
+export type CreateClientProjectRequest = z.infer<typeof CreateClientProjectRequestSchema>;
+
+/** `GET /v1/dev/client/projects/{project}`: a project the signed-in person may use; needs no scope. */
+export interface ClientProjectResponse {
+  name: string;
+  latestRevision: number;
+  access: AccessCheckResponse["projects"][number]["access"];
+  /** `fullName` is `owner/name` for a GitHub repository. */
+  repositories: Array<{ name: string; url: string; defaultBranch: string; fullName?: string }>;
+}
+
+/** `GET /v1/dev/client/projects/{project}/members` (projects:members). */
+export interface ClientProjectMembersResponse {
+  project: string;
+  members: Array<{ developerId: string; name: string; role: "administrator" | "developer"; grantedAt: string | null }>;
+}
+
+/** `PUT` or `DELETE /v1/dev/client/projects/{project}/members/{developer}` (projects:members). */
+export interface ClientProjectMemberChangeResponse {
+  project: string;
+  developerId: string;
+  /** PUT: granted (or already was); DELETE: revoked, or was not a member. */
+  outcome: "granted" | "already_member" | "revoked" | "not_member";
+}

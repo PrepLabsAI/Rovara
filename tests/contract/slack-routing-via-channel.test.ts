@@ -9,8 +9,9 @@ import {
   type ChannelQueueItem, type DirectoryUser, type InboundMessage, type SlackRequestMessage,
 } from "../../packages/contracts/src/index.js";
 import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/broker/src/aws/channel-ingress.js";
-import { confirmationAction, createSlackChannelCommandsHandler, createSlackChannelEventsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
-import { slackChannelTransport } from "../../packages/broker/src/aws/slack-channel-router.js";
+import { confirmationAction, createSlackChannelCommandsHandler, createSlackChannelEventsHandler, createSlackChannelForwarder } from "../../packages/broker/src/aws/slack-adapter.js";
+import { slackChannelSurface, slackChannelTransport } from "../../packages/broker/src/aws/slack-channel-router.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createSlackAdapterFront, createSlackMentionRouter, inboundOfSlackMention, slackMentionOfInbound, type SlackMention } from "../../packages/broker/src/aws/slack-ingress.js";
 import type { SlackNoticeChannel } from "../../packages/broker/src/aws/slack-notice-channel.js";
 import { createSlackAdapterClient } from "../../packages/slack-service/src/slack-adapter-client.js";
@@ -164,6 +165,40 @@ describe("the router through the channel transport", () => {
     // A repeat of the event runs nothing.
     await route(mention);
     expect(queued).toHaveLength(1);
+  });
+
+  it("is taken end to end: the adapter forwards a plain mention, the channel API's router queues it for the chat agent, and the forwarder accepts the router's answer", async () => {
+    // As the legacy deployment runs it: no Slack tasks, so a plain mention is the chat agent's.
+    const { routerTransport, queued } = transport();
+    const claims = new Set<string>();
+    const route = createSlackMentionRouter({
+      getBinding: async () => ({ teamId: TEAM, channelId: CHANNEL, projectName: "web", updatedAt: "2026-11-01T00:00:00.000Z" }),
+      claimEvent: async (id) => { if (claims.has(id)) return false; claims.add(id); return true; }, releaseEvent: async () => undefined,
+      changePending: async () => 0,
+      enqueue: (message, groupId, behind) => routerTransport.enqueue(message, groupId, behind),
+      postMessage: async (input) => { await routerTransport.postMessage(input); },
+      now: () => NOW,
+    });
+    const builtIn = builtInAdapterRecord({ channel: "slack", callbackUrl: "https://api.example.com/v1/slack/channel-events", secretName: "agentx/production/channel-adapter/slack" });
+    const ingressClaims = new Set<string>();
+    const ingress = createChannelIngressHandler({
+      getAdapter: async (channel) => (channel === "slack" ? builtIn : undefined), getSecret: async () => SECRET,
+      getBinding: async (ref) => ({ ...ref, projectName: "web", updatedAt: "2026-11-01T00:00:00.000Z" }),
+      linkedDeveloper: vi.fn(), issueLinkCode: vi.fn(), linkUrl: (code) => code,
+      claim: async (key) => { if (ingressClaims.has(key)) return false; ingressClaims.add(key); return true; }, release: async (key) => { ingressClaims.delete(key); },
+      enqueue: vi.fn(), sendEvent: vi.fn(), surfaces: { slack: slackChannelSurface(route, new AsyncLocalStorage()) }, now: () => NOW, log: () => undefined,
+    });
+    const forward = createSlackChannelForwarder({
+      channelApiUrl: "https://api.example.com", secret: async () => SECRET, now: () => NOW,
+      fetch: async (url, init) => {
+        const path = new URL(url instanceof Request ? url.url : url.toString()).pathname;
+        const response = await ingress({ rawPath: path, body: typeof init?.body === "string" ? init.body : "", headers: init?.headers as Record<string, string>, requestContext: { http: { method: "POST" } } });
+        return new Response(response.body, { status: response.statusCode });
+      },
+    });
+    const hi: InboundMessage = { version: 2, channel: "slack", eventId: "EvROUTE0009", conversation, actor, text: "hi", receivedAt: new Date(NOW).toISOString(), messageId: THREAD };
+    await expect(forward(hi)).resolves.toBeUndefined();
+    expect(queued.map((entry) => entry.item)).toMatchObject([{ kind: "message", projectName: "web", message: { eventId: "EvROUTE0009", text: "hi" } }]);
   });
 
   it("marks a routed request and a task question for the orchestrator", async () => {

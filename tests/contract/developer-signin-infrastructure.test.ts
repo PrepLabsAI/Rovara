@@ -285,15 +285,33 @@ describe("developer sign-in infrastructure (named environments)", () => {
   });
 });
 
-describe("the legacy deployment (R3)", () => {
-  it("has none of it", () => {
+describe("the legacy deployment (R3, spec 064)", () => {
+  it("has sign-in for account linking only: no developer task settings, grants or JWT authorizer", () => {
     const text = JSON.stringify(legacy);
-    for (const absent of ["SlackTeamId", "DeveloperSignIn", "DeveloperOidc", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "agentx-developer-jwt", "/v1/dev/", "/v1/auth", "DEVELOPER_TOKEN_ISSUER", "developer-tokens"]) {
-      expect(text).not.toContain(absent);
+    for (const absent of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
+      "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "MCP_CONFIRM_ELICITATION", "agentx-developer-jwt", "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
+      expect(text, absent).not.toContain(absent);
     }
+    for (const present of ["SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId", "DeveloperOidcSince"]) expect(legacy.Parameters[present], present).toBeDefined();
+    expect(legacy.Parameters.DeveloperSignInSlack).toMatchObject({ Default: "disabled" });
+    expect(legacy.Parameters.DeveloperOidcIssuer).toMatchObject({ Default: "" });
+    // Its own token key and the legacy names.
+    expect(ofType(legacy, "AWS::KMS::Alias").map(([, r]) => r.Properties.AliasName)).toContain("alias/agentx/developer-tokens");
+    const signIn = legacy.Resources[functionId(legacy, "DeveloperSignInFunction")]!;
+    expect((signIn.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ AGENTX_ENV: "production", DEVELOPER_OIDC_SECRET_ID: "agentx/production/developer-oidc" });
+    const broker = legacy.Resources[functionId(legacy, "Broker")]!;
+    const brokerEnvironment = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(brokerEnvironment).toMatchObject({ AGENTX_ENV: "production", DEVELOPER_API_SCOPE: "linking" });
+    // No developer-task grants: no TASK# turn records and no cross-table condition check. Spec 064: the sign-in client
+    // admin changes are audited under CHANGE#.
+    const brokerRole = ((broker.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
+    const brokerStatements = grants(legacy).filter(({ role }) => role === brokerRole).map(({ statement }) => statement);
+    expect(brokerStatements.some((statement) => allows(statement, "dynamodb:ConditionCheckItem") && JSON.stringify(statement.Resource).includes("DeveloperSignInTable"))).toBe(false);
+    expect(JSON.stringify(brokerStatements)).not.toMatch(/TASK#\*/);
+    expect(JSON.stringify(brokerStatements)).toContain("CHANGE#*");
+    // The routes and their throttle, as in named environments; still only the one admin JWT authorizer.
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toEqual(expect.arrayContaining(["ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", "ANY /review/{proxy+}"]));
     expect(ofType(legacy, "AWS::ApiGatewayV2::Authorizer")).toHaveLength(1);
-    expect(ofType(legacy, "AWS::KMS::Key").map(([, r]) => r.Properties.KeySpec)).toEqual(["ECC_NIST_P256"]);
-    expect(ofType(legacy, "AWS::ApiGatewayV2::Stage").map(([, r]) => r.Properties.RouteSettings)).toEqual([undefined]);
   });
 });
 

@@ -6,8 +6,17 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import {
   AgentXNameSchema,
+  scopesOf,
+  CreateClientProjectRequestSchema,
+  type CreateClientProjectRequest,
+  type ClientRepositoriesResponse,
+  type ClientProjectMemberChangeResponse,
+  type ClientProjectMembersResponse,
+  type ClientProjectResponse,
+  type ClientScope,
   CHANNEL_MEMBERS_MAX_CHANNELS,
   DEVELOPER_TOKEN_AUDIENCE,
   DEVELOPER_WORKSPACES_PER_PROJECT,
@@ -130,6 +139,10 @@ export interface DeveloperRouteDependencies {
   now: () => number;
   /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
   tasks?: DeveloperTaskActions;
+  /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
+  createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
+  /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
+  clientRepositories?: () => Promise<ClientRepositoriesResponse["installations"]>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -327,7 +340,8 @@ export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) 
 
 /** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
 export interface SignInClientRegistry {
-  put(client: SignInClientRecord): Promise<void>;
+  /** `keepSecret`: keep the stored client's secret, which only the sign-in server can read. */
+  put(client: SignInClientRecord, options?: { keepSecret?: true }): Promise<void>;
   remove(clientId: string): Promise<boolean>;
   list(): Promise<SignInClientView[]>;
 }
@@ -341,7 +355,7 @@ export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Prom
     return answer as T;
   };
   return {
-    async put(client) { await ask({ kind: "put-sign-in-client", client }, () => true); },
+    async put(client, options) { await ask({ kind: "put-sign-in-client", client, ...(options?.keepSecret === true ? { keepSecret: true as const } : {}) }, () => true); },
     remove: (clientId) => ask({ kind: "remove-sign-in-client", clientId }, (reply) => reply.removed === true),
     list: () => ask({ kind: "list-sign-in-clients" }, (reply) => {
       const parsed = z.array(SignInClientViewSchema).safeParse(reply.clients);
@@ -659,47 +673,14 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     clientId = client.clientId;
   } else {
     if (parsed.data.developerId !== undefined) throw refused();
-    // The unverified azp only picks which client's audience the token must then verify against.
-    let azp: unknown;
-    try {
-      azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
-    } catch {
-      throw refused();
-    }
-    const client = await signInClientOf(deps, azp);
-    if (client === undefined) throw refused();
-    let claims: Record<string, unknown>;
-    try {
-      claims = await deps.developer.verifyAccessToken(authorization, client.audience);
-    } catch (error) {
-      if ((error as { code?: unknown }).code === "RUNTIME_UNAVAILABLE") throw error;
-      throw refused();
-    }
-    if (claims.azp !== client.clientId || claims.env !== deps.developer.env || typeof claims.sub !== "string" || typeof claims.sid !== "string") throw refused();
-    const amr = claims.amr;
-    if ((amr !== "slack" && amr !== "oidc") || !deps.developer.methods[amr]) throw refused();
-    const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
-    if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
-      || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)
-      || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr])) throw refused();
-    developerId = session.developerId;
-    administrator = amr === "oidc" && session.administrator === true;
-    clientId = client.clientId;
-    sessionFacts = { sessionId: claims.sid, amr, startedAt: session.startedAt, administrator };
-    const developer = await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${developerId}`);
-    if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
+    const authenticated = await authenticateClientToken(deps, authorization, nowSeconds);
+    ({ developerId, administrator } = authenticated);
+    clientId = authenticated.client.clientId;
+    sessionFacts = { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator };
   }
-  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
-  if (developer === undefined || developer.revoked) throw refused();
-  const listed = await listProjects(deps, {
-    developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
-    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
-  });
-  const answer: AccessCheckResponse = {
-    developerId, displayName: developer.displayName, administrator,
-    projects: listed.projects.map((project) => ({ name: project.name, access: project.access })),
-    notices: listed.notices,
-  };
+  const access = await projectsAPersonUses(deps, developerId);
+  if (access === undefined) throw refused();
+  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, administrator, projects: access.projects, notices: access.notices };
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
   if (ruled === undefined) throw refused();
@@ -707,6 +688,164 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const checked = AccessCheckResponseSchema.safeParse(ruled);
   if (!checked.success) throw refused();
   return checked.data;
+}
+
+/**
+ * The projects a person may use now, as the access check answers them: task access (developer grants and channels),
+ * then (spec 065) the registered projects they administer. Undefined for an unknown or revoked developer.
+ */
+async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId: string): Promise<{ displayName: string; projects: AccessCheckResponse["projects"]; notices: string[] } | undefined> {
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
+  if (developer === undefined || developer.revoked) return undefined;
+  const listed = await listProjects(deps, {
+    developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
+    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
+  });
+  const usable = new Set(listed.projects.map((project) => project.name));
+  const administered = (await queryAll<{ projectName?: unknown; role?: unknown }>(deps, `MEMBER#${developerId}`, "PROJECT#"))
+    .filter((membership) => membership.role === "administrator" && typeof membership.projectName === "string" && !usable.has(membership.projectName))
+    .map((membership) => membership.projectName as string);
+  const registered = await projectsWithPolicy(deps, administered);
+  return {
+    displayName: developer.displayName,
+    projects: [
+      ...listed.projects.map((project) => ({ name: project.name, access: project.access })),
+      ...administered.filter((name) => registered.has(name)).sort().map((name) => ({ name, access: "administrator" as const })),
+    ],
+    notices: listed.notices,
+  };
+}
+
+/** A repository's `owner/name` on GitHub, or undefined for another host. */
+function githubFullName(url: string): string | undefined {
+  return /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1];
+}
+
+/** Spec 065: `GET /v1/dev/client/projects/{project}`, for a person who may use it (no scope: it shows only what they may use). */
+async function readClientProject(deps: DeveloperRouteDependencies, developerId: string, project: string): Promise<ClientProjectResponse> {
+  const access = await projectsAPersonUses(deps, developerId);
+  if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const mine = access.projects.find((entry) => entry.name === project);
+  if (mine === undefined) throw agentXError("NOT_FOUND", "project not found");
+  const response = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
+  const definition = response.Items?.[0]?.definition;
+  if (definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
+  const repositories = (Array.isArray(definition.repositories) ? definition.repositories : []).flatMap((entry: unknown) => {
+    const repository = entry as { name?: unknown; url?: unknown; defaultBranch?: unknown };
+    if (typeof repository.name !== "string" || typeof repository.url !== "string" || typeof repository.defaultBranch !== "string") return [];
+    const fullName = githubFullName(repository.url);
+    return [{ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, ...(fullName === undefined ? {} : { fullName }) }];
+  });
+  return { name: project, latestRevision: definition.revision, access: mine.access, repositories };
+}
+
+/**
+ * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
+ * only picks which client's audience the token must then verify against. Every refusal is the same 401.
+ */
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: "slack" | "oidc"; startedAt: string }> {
+  const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  let azp: unknown;
+  try {
+    azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
+  } catch {
+    throw refused();
+  }
+  const client = await signInClientOf(deps, azp);
+  if (client === undefined) throw refused();
+  let claims: Record<string, unknown>;
+  try {
+    claims = await deps.developer.verifyAccessToken(authorization, client.audience);
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "RUNTIME_UNAVAILABLE") throw error;
+    throw refused();
+  }
+  if (claims.azp !== client.clientId || claims.env !== deps.developer.env || typeof claims.sub !== "string" || typeof claims.sid !== "string") throw refused();
+  const amr = claims.amr;
+  if ((amr !== "slack" && amr !== "oidc") || !deps.developer.methods[amr]) throw refused();
+  const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
+  if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
+    || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)
+    || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr])) throw refused();
+  const developer = await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
+  if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
+  // Spec 065 FR-002: only the scopes on the token that the registration still allows.
+  const scopes = scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
+  return { client, developerId: session.developerId, administrator: amr === "oidc" && session.administrator === true, scopes, sessionId: claims.sid, amr, startedAt: session.startedAt };
+}
+
+const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
+const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
+
+/**
+ * Spec 065: a sign-in client acting as the signed-in person, within its scopes and the person's own rights. 065a: a
+ * project's members, which only the project's administrators or a Rovara administrator may see and change.
+ */
+export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
+  const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
+  if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
+    const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    if (!creator.scopes.includes("projects:create")) throw agentXError("FORBIDDEN", `${creator.client.name} may not create projects; an administrator can allow it with the projects:create scope`);
+    if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+    if (!creating) {
+      if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      return { installations: await deps.clientRepositories() } satisfies ClientRepositoriesResponse;
+    }
+    if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+    const parsed = CreateClientProjectRequestSchema.safeParse(jsonBody(request));
+    if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+    const created = await deps.createClientProject(creator.developerId, parsed.data);
+    console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
+    return readClientProject(deps, creator.developerId, created.name);
+  }
+  const read = CLIENT_PROJECT.exec(url.pathname);
+  if (read !== null && request.method === "GET") {
+    const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    const project = decodeURIComponent(read[1]!);
+    if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+    return readClientProject(deps, reader.developerId, project);
+  }
+  const members = CLIENT_MEMBERS.exec(url.pathname);
+  if (members === null) throw agentXError("NOT_FOUND", "route not found");
+  const caller = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  if (!caller.scopes.includes("projects:members")) throw agentXError("FORBIDDEN", `${caller.client.name} may not manage project members; an administrator can allow it with the projects:members scope`);
+  const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${caller.developerId}`);
+  if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const project = decodeURIComponent(members[1]!);
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const actions = {
+    documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName,
+    ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
+    limitDefaults: { member: 0, organization: 0 }, now: deps.now,
+  };
+  // FR-004: as the person: they administer the project, or they are a Rovara administrator.
+  const own = await projectGrant(actions, project, caller.developerId);
+  if (!caller.administrator && own?.role !== "administrator") throw agentXError("FORBIDDEN", `you don't administer ${project}; ask one of its administrators`);
+  const registered = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false,
+  })) as { Items?: unknown[] };
+  if ((registered.Items ?? []).length === 0) throw agentXError("NOT_FOUND", `project ${project} is not registered`);
+  const by = { issuer: `sign-in-client:${caller.client.clientId}`, subject: caller.developerId };
+  if (request.method === "GET" && members[2] === undefined) {
+    const listed = await listProjectMembers(actions, project);
+    const named = await Promise.all(listed.map(async (member) => ({ ...member, name: (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${member.developerId}`))?.displayName ?? "Unknown" })));
+    return { project, members: named } satisfies ClientProjectMembersResponse;
+  }
+  if (members[2] === undefined || (request.method !== "PUT" && request.method !== "DELETE")) throw agentXError("NOT_FOUND", "route not found");
+  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]));
+  if (request.method === "PUT") {
+    const granted = await grantProjectAccess(actions, by, project, target.developerId);
+    console.log(JSON.stringify({ component: "broker", event: "client.project_member_granted", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, already: granted.already }));
+    return { project, developerId: target.developerId, outcome: granted.already ? "already_member" : "granted" } satisfies ClientProjectMemberChangeResponse;
+  }
+  const revoked = await revokeProjectAccess(actions, project, target.developerId);
+  console.log(JSON.stringify({ component: "broker", event: "client.project_member_revoked", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, revoked: revoked.revoked }));
+  return { project, developerId: target.developerId, outcome: revoked.revoked ? "revoked" : "not_member" } satisfies ClientProjectMemberChangeResponse;
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
@@ -1051,6 +1190,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   }
   // Spec 063 FR-004: a registered service's own route, authenticated as such, never as a Rovara caller.
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
+  // Spec 065: a registered service acting as its signed-in person, within its scopes.
+  if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
@@ -1063,6 +1204,21 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     return routeChatGptConnection(deps, caller, request, url);
   }
   if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) {
+    return routeOwnChannelLinks(deps, caller, request, url);
+  }
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
+/**
+ * Spec 064: the legacy deployment's developer API, which is for account linking only: the link page, a registered
+ * service's access check, and a person's own links. Everything else (tasks, projects, ChatGPT) is not there.
+ */
+export async function routeLinkingRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (url.pathname.startsWith("/review/link/")) return routeDeveloperRequest(deps, request, url);
+  if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
+  if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
+  if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) {
+    const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
     return routeOwnChannelLinks(deps, caller, request, url);
   }
   throw agentXError("NOT_FOUND", "route not found");

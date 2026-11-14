@@ -3,6 +3,7 @@ import {
   aws_iam as iam, type aws_lambda as lambda, aws_lambda_event_sources as eventSources, aws_secretsmanager as secretsmanager, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions,
   type aws_lambda_nodejs as lambdaNodejs,
 } from "aws-cdk-lib";
+import { CONVERSATION_STATE_THREAD_ATTRIBUTES, CONVERSATION_STATE_WORKSPACE_ATTRIBUTES } from "@agentx/contracts";
 import { Construct } from "constructs";
 import { packagedFunction } from "./control-plane.js";
 import type { AgentXNaming } from "./naming.js";
@@ -26,9 +27,8 @@ export interface ChannelAdaptersProps {
     threadTurnsPerMinute: string;
   };
   /**
-   * Phase 7d: whether administrators may register third-party adapters (named environments, where developer sign-in
-   * links their actors). The legacy deployment has no sign-in: it gets the built-in Slack adapter only, no registry,
-   * no `ChannelAdapters` parameter and nothing on the broker.
+   * Phase 7d: whether administrators may register third-party adapters, whose actors developer sign-in links. Spec 064:
+   * every deployment, the legacy one included, since it now has sign-in for linking.
    */
   registry: boolean;
   /** Whether Slack-started tasks share their threads (named environments), as Slack's ingress is told. */
@@ -39,8 +39,8 @@ export interface ChannelAdaptersProps {
 
 /**
  * Spec 062 Phase 3: the channel API (signed adapter requests in), the event sender (signed events out), the short-lived
- * channel state and the two queues. Third-party adapters are registered in named environments only, where developer
- * sign-in exists to link actors to, and only while `ChannelAdapters` is `enabled`. Phase 7d: every deployment has the
+ * channel state and the two queues. Third-party adapters are registered only while `ChannelAdapters` is `enabled`, and
+ * their actors are linked through developer sign-in. Phase 7d: every deployment has the
  * built-in Slack adapter, off until `SlackViaChannel` is `enabled`; until either is on the channel API answers 404.
  */
 export class ChannelAdapters extends Construct {
@@ -144,7 +144,7 @@ export class ChannelAdapters extends Construct {
       SLACK_APP_POSTED_MESSAGES: props.slack.appPostedMessages,
       SLACK_THREAD_TURNS_PER_MINUTE: props.slack.threadTurnsPerMinute,
     }, Duration.seconds(30));
-    // By key only: an adapter, a binding, a link; and it writes a new link code. Never a query, nothing else.
+    // By key only: an adapter, a binding, a link; and it writes a new link code. Its one query is the state read below.
     ingress.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [props.state.tableArn],
@@ -156,6 +156,23 @@ export class ChannelAdapters extends Construct {
       actions: ["dynamodb:PutItem"],
       resources: [props.state.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_LINK_CODE#*"] } },
+    }));
+    // Issue #437: the conversation state read: a conversation's thread record, and its workspace's record, operations
+    // and pull requests. Reads only, and only the fields the read shows (a read without a projection is refused).
+    const onlyAttributes = (attributes: readonly string[]) => ({
+      "ForAllValues:StringEquals": { "dynamodb:Attributes": [...attributes] },
+      StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      Null: { "dynamodb:Attributes": "false" },
+    });
+    ingress.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem"],
+      resources: [props.state.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SLACK_THREAD#*"] }, ...onlyAttributes(CONVERSATION_STATE_THREAD_ATTRIBUTES) },
+    }));
+    ingress.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem", "dynamodb:Query"],
+      resources: [props.state.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["WORKSPACE#*"] }, ...onlyAttributes(CONVERSATION_STATE_WORKSPACE_ATTRIBUTES) },
     }));
     ingress.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"],
@@ -175,7 +192,7 @@ export class ChannelAdapters extends Construct {
       apiId: props.api.ref, integrationType: "AWS_PROXY", integrationUri: ingress.functionArn, payloadFormatVersion: "2.0",
     });
     // The adapter signs each request itself (Standard Webhooks); the Lambda verifies it, as Slack ingress does Slack's.
-    for (const [routeId, kind] of [["MessagesRoute", "messages"], ["DecisionsRoute", "decisions"], ["ActionsRoute", "actions"]] as const) {
+    for (const [routeId, kind] of [["MessagesRoute", "messages"], ["DecisionsRoute", "decisions"], ["ActionsRoute", "actions"], ["ConversationStateRoute", "conversation-state"]] as const) {
       new apigwv2.CfnRoute(this, routeId, {
         apiId: props.api.ref, routeKey: `POST /v1/channels/{channel}/${kind}`, target: `integrations/${integration.ref}`, authorizationType: "NONE",
       });
@@ -188,6 +205,7 @@ export class ChannelAdapters extends Construct {
     const sender = packagedFunction(this, "EventSender", "packages/broker/src/aws/channel-events.ts", {
       CHANNEL_ADAPTERS: enabled,
       STATE_TABLE_NAME: props.state.tableName,
+      CHANNEL_STATE_TABLE_NAME: channelState.tableName,
       CHANNEL_EVENT_QUEUE_URL: events.queueUrl,
       ...builtInAdapter,
     }, Duration.seconds(30));
@@ -197,6 +215,12 @@ export class ChannelAdapters extends Construct {
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS"] } },
     }));
     sender.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [adapterSecrets] }));
+    // Issue #437: the newest event per conversation, which the conversation state read shows.
+    sender.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:PutItem"],
+      resources: [channelState.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["LAST_EVENT#*"] } },
+    }));
     // Phase 7d: at most two senders at once, so delivering replies never takes the account's few concurrent Lambdas
     // from Slack's ingress or the broker.
     sender.addEventSource(new eventSources.SqsEventSource(events, { batchSize: 10, reportBatchItemFailures: true, maxConcurrency: 2 }));
