@@ -10,7 +10,9 @@
 // websites), `--internal`, and the labels. The labels are this module's own (`rovara.run-network*`), not `rovara.run` (the end-to-end checker's) and not `agentx.setup-run` (the setup run's), so each of the three sweeps can only ever
 // see its own objects.
 //
-// Addresses in a slot: gateway .1, DNS helper .2, working sandbox .3, check sandbox .4, test-account proxy .8, service helpers .16 to .47 (32 of them).
+// Addresses in a slot: gateway .1, DNS helper .2, working sandbox .3, check sandbox .4, test-account proxy .8, MODEL HELPER .9 (TE-F1b), service helpers .16 to .47 (32 of them).
+// .9 is RESERVED: no service helper index reaches it (`runNetworkHelperIp` starts at .16), and the name its sandboxes know it by (`MODEL_HELPER_ALIAS`, `rovara-models`) is a reserved alias a repository's dependency can never take
+// (service-helpers.ts `HELPER_RESERVED_ALIASES`, check-sandbox.ts `RESERVED_RUN_ALIASES`). The model helper is started by model-helper-network.ts on a network of its own per task or per round; this module is unchanged in how it makes one.
 //
 // Sweeping: a run's objects carry `rovara.run-network.expires` (its own creation time + its own round budget + 15 minutes), stamped when the network is made. The sweep of an allocation removes an object only when
 // now >= its own expires, so a short run's allocation can never remove a longer run's live helpers. Only the worker-start sweep (`workerStart: true`) removes every family object of its own workspace, because a
@@ -40,6 +42,10 @@ export const RUN_NETWORK_EXPIRES_LABEL = "rovara.run-network.expires";
 export const RUN_NETWORK_WORKSPACE_LABEL = "rovara.run-network.workspace";
 export const RUN_NETWORK_FIRST_OCTETS = "172.30";
 export const RUN_NETWORK_SLOTS = SETUP_NETWORK_SLOTS;
+/** The last octet of the model helper's address in a slot (TE-F1b). Reserved: see the header. */
+export const RUN_NETWORK_MODEL_HELPER_OCTET = 9;
+/** The one name a sandbox knows the model helper by (`--add-host rovara-models:<.9>`). Reserved: a dependency alias can never be this. */
+export const MODEL_HELPER_ALIAS = "rovara-models";
 /** The host interface prefix: the boot firewall walls `rvi*` bridges. */
 export const RUN_NETWORK_BRIDGE_PREFIX = "rvi";
 /** How long past a round's budget a run is kept before a sweep treats it as left behind by a killed worker. */
@@ -95,6 +101,12 @@ export function runNetworkAddresses(slot: number): RunNetworkAddresses {
   assertSlot(slot);
   const base = `${RUN_NETWORK_FIRST_OCTETS}.${String(slot)}`;
   return { subnet: `${base}.0/24`, gateway: `${base}.1`, ipRange: `${base}.128/25`, dnsHelperIp: `${base}.2`, workingSandboxIp: `${base}.3`, checkSandboxIp: `${base}.4`, proxyIp: `${base}.8` };
+}
+
+/** The model helper's address in a slot (.9, TE-F1b). Not a field of `RunNetworkAddresses`: the model helper is not part of a test-services run, and a hand-built network in another lane's tests stays whole without it. */
+export function runNetworkModelHelperIp(slot: number): string {
+  assertSlot(slot);
+  return `${RUN_NETWORK_FIRST_OCTETS}.${String(slot)}.${String(RUN_NETWORK_MODEL_HELPER_OCTET)}`;
 }
 
 /** The address of the service helper with this index (0 to 31): .16 to .47 of the slot. */

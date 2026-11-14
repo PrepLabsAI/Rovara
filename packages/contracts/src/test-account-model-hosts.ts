@@ -2,7 +2,7 @@
 // model host would carry REAL model calls past Rovara's model helper: no caps, no recording, no key separation (DECISIONS 157). This module is the one place that decides "is this host a model host", from F0a's model
 // catalog (`builtinModelCatalog()`), and the test-account schema, the production check, the backing choice and the proxy all ask it.
 //
-// What counts: a catalog row's exact hosts (not its auth hosts: Google's token hosts oauth2/sts/iamcredentials are a pending owner decision and are not model hosts here), any subdomain of a catalog host suffix
+// What counts: a catalog row's exact hosts (not its auth hosts: DEC 174 keeps Google's token hosts oauth2/sts/iamcredentials allowed), any subdomain of a catalog host suffix
 // (Azure OpenAI's `<resource>.openai.azure.com`) and the suffix itself, and the company's own gateway hosts when the caller has them. Compared case-insensitively after trimming whitespace and trailing dots.
 import { builtinModelCatalog } from "./model-catalog-rows.js";
 
