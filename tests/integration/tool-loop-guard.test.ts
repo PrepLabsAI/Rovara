@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { fauxAssistantMessage, fauxToolCall, type Context } from "@earendil-works/pi-ai";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
-import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import { createDefaultPiSessionAdapter, createWorkspacePiSession, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
-import { REPEAT_LIMIT, REPEAT_WARNING_AT, TOOL_CALL_LIMIT, ToolLoopGuard, type ToolLoopAction } from "../../packages/worker/src/tool-loop-guard.js";
+import { REPEAT_LIMIT, REPEAT_WARNING_AT, TOOL_CALL_LIMIT, ToolLoopGuard, toolLoopGuardExtension, type ToolLoopAction } from "../../packages/worker/src/tool-loop-guard.js";
 
 const GIT_ADD = "cd /workspaces/sample-project-a && git add. && git commit -m 'Add Notes API and UI for demo' && git log -1";
 
@@ -95,12 +95,23 @@ describe("the tool loop guard", () => {
     expect(actions(guard, events)).toEqual([expect.objectContaining({ kind: "warn" })]);
   });
 
-  it(`stops a task that starts more than ${TOOL_CALL_LIMIT} tool calls`, () => {
+  it(`lets ${TOOL_CALL_LIMIT} calls through and refuses the next one before it runs, telling the run's owner once`, () => {
     const guard = new ToolLoopGuard();
-    const calls = Array.from({ length: TOOL_CALL_LIMIT + 1 }, (_, index) => toolCall({ command: `echo ${index}` }, { isError: false, text: "ok" })).flat();
-    const found = actions(guard, calls);
-    expect(found).toHaveLength(1);
-    expect(found[0]!.kind === "stop" && found[0]!.error.message).toMatch(/more than 200 tool calls/);
+    const told: string[] = [];
+    guard.onLimit = (error) => { told.push(error.message); };
+    const verdicts = Array.from({ length: TOOL_CALL_LIMIT + 2 }, () => guard.beforeToolCall());
+    expect(verdicts.slice(0, TOOL_CALL_LIMIT).every((verdict) => verdict === undefined)).toBe(true);
+    expect(verdicts[TOOL_CALL_LIMIT]).toMatchObject({ block: true, terminate: true, reason: expect.stringMatching(/more than 200 tool calls.*not run/) as unknown });
+    // Every call after the limit is refused too, and the owner is told only for the first.
+    expect(verdicts[TOOL_CALL_LIMIT + 1]).toMatchObject({ block: true });
+    expect(told).toEqual(["OPERATION_INTERRUPTED: the agent used more than 200 tool calls in one task; stopped it. Split the request into smaller tasks."]);
+  });
+
+  it("no longer stops on a started call: the limit is a block in front of the call, and the events only count", () => {
+    const guard = new ToolLoopGuard(2);
+    const calls = Array.from({ length: 5 }, (_, index) => toolCall({ command: `echo ${index}` }, { isError: false, text: "ok" })).flat();
+    expect(actions(guard, calls)).toEqual([]);
+    expect(guard.toolCalls).toBe(5);
   });
 });
 
@@ -193,6 +204,78 @@ describe("a real pi session whose model loops on a failing command", () => {
     // Stopped at the fifth failure: the scripted model was not asked again.
     expect(contexts).toHaveLength(REPEAT_LIMIT);
   }, 60_000);
+});
+
+describe("the tool-call limit in a real pi session", () => {
+  it(`runs ${TOOL_CALL_LIMIT} commands and refuses the next one before it runs, then ends the task`, async () => {
+    const rootPath = await preparedRoot();
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    // A model that keeps asking for one more command: every command differs, so the repeat guard never speaks.
+    let asked = 0;
+    faux.setResponses(Array.from({ length: TOOL_CALL_LIMIT + 5 }, () => () => {
+      asked += 1;
+      return fauxAssistantMessage(fauxToolCall("bash", { command: `echo ${asked}` }));
+    }));
+    const ran: string[] = [];
+    const operations: BashOperations = {
+      exec: async (command, _cwd, options) => {
+        ran.push(command);
+        options.onData(Buffer.from("ok\n"));
+        return { exitCode: 0 };
+      },
+    };
+    const guard = new ToolLoopGuard();
+    const stopped: string[] = [];
+    const adapter = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
+    const handle = await createWorkspacePiSession({ rootPath, model: FAUX_MODEL, bashOperations: operations, extensionFactories: [toolLoopGuardExtension(guard)] }, adapter);
+    // The run ends by the block itself (terminate), so the model's refused call keeps the guard's reason; the worker also aborts, which this test leaves out.
+    guard.onLimit = (error) => { stopped.push(error.message); };
+    const refused: unknown[] = [];
+    const unsubscribe = handle.subscribe((event) => {
+      const value = event as { type?: string; isError?: boolean; result?: unknown };
+      if (value.type === "tool_execution_end" && value.isError === true) refused.push(value.result);
+    });
+    try {
+      await handle.prompt("keep going");
+    } finally { unsubscribe(); handle.dispose(); }
+    // The 201st command was asked for and refused: it never reached the shell.
+    expect(ran).toHaveLength(TOOL_CALL_LIMIT);
+    expect(ran.at(-1)).toBe(`echo ${TOOL_CALL_LIMIT}`);
+    expect(asked).toBe(TOOL_CALL_LIMIT + 1);
+    expect(refused).toHaveLength(1);
+    expect(JSON.stringify(refused[0])).toContain("more than 200 tool calls");
+    expect(stopped).toEqual(["OPERATION_INTERRUPTED: the agent used more than 200 tool calls in one task; stopped it. Split the request into smaller tasks."]);
+  }, 120_000);
+});
+
+describe("the tool-call limit in a worker task", () => {
+  it(`a task whose model keeps calling tools runs ${TOOL_CALL_LIMIT} commands, never the next one, and fails with the limit's error`, async () => {
+    const rootPath = await preparedRoot();
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    let asked = 0;
+    faux.setResponses(Array.from({ length: TOOL_CALL_LIMIT + 10 }, () => () => {
+      asked += 1;
+      return fauxAssistantMessage(fauxToolCall("bash", { command: `echo ${asked}` }));
+    }));
+    const ran: string[] = [];
+    const operations: BashOperations = {
+      exec: async (command, _cwd, options) => { ran.push(command); options.onData(Buffer.from("ok\n")); return { exitCode: 0 }; },
+    };
+    const base = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
+    // run-task's own extensions (the guard, verification) are kept; only the shell is swapped.
+    const adapter: PiSessionAdapter = { create: (input) => base.create({ ...input, bashOperations: operations }) };
+    const events: WorkerEvent[] = [];
+    await expect(runTaskInvocation(taskInvocation(), {
+      rootPath, model: FAUX_MODEL, piAdapter: adapter,
+      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined,
+    })).rejects.toThrow(/OPERATION_INTERRUPTED: the agent used more than 200 tool calls in one task; stopped it\. Split the request into smaller tasks\./);
+    // The 201st call was refused before it ran, and the run ended there: the model was not asked to go on.
+    expect(ran).toHaveLength(TOOL_CALL_LIMIT);
+    expect(asked).toBeLessThanOrEqual(TOOL_CALL_LIMIT + 1);
+    const errors = events.filter((event) => event.type === "error").map((event) => (event.payload as { message?: string }).message);
+    expect(errors).toEqual([expect.stringMatching(/more than 200 tool calls/)]);
+    expect((events.find((event) => event.type === "usage")?.payload as { outcome?: string } | undefined)?.outcome).toBe("FAILED");
+  }, 120_000);
 });
 
 async function preparedRoot(): Promise<string> {

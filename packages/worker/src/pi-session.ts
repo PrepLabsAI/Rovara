@@ -18,12 +18,13 @@ import {
   type ModelRuntime,
   type ToolDefinition,
   SessionManager,
-  SettingsManager,
+  type SettingsManager,
   type SessionEntry,
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice } from "@agentx/model-runtime";
+import { createPiSettingsManager } from "@agentx/model-runtime/pi-settings";
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
@@ -61,7 +62,8 @@ export interface PiSessionHandle {
   getModel(): { provider: string; modelId: string; thinkingLevel?: PiThinkingLevel };
   /** Pi's own resolved level, even one outside AgentX's six (Pi's "max"); for artifacts only, never telemetry. */
   piThinkingLevel?(): string | undefined;
-  getSessionStats(): SessionStats;
+  /** `costFromProvider` is set only when some usage was priced: true when every priced usage carries the provider's own billed total (Pi 1.5 `cost.totalFromProvider`), as OpenRouter's does. */
+  getSessionStats(): SessionStats & { costFromProvider?: boolean };
   subscribe(listener: (event: unknown) => void): () => void;
   dispose(): void;
 }
@@ -440,10 +442,23 @@ function withoutStructuredContent<T>(event: T): T {
   return { ...event, result: kept };
 }
 
-function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]): SessionStats {
+function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]): SessionStats & { costFromProvider?: boolean } {
   // Pi counts every message entry, as getSessionStats does, so the system ones are counted the same way.
   const system = entries.filter((entry) => entry.type === "message" && entry.message.role === "system").length;
-  return { ...stats, totalMessages: stats.totalMessages - system };
+  const priced = pricedUsages(entries);
+  // Pi's own rule for a sum: provider-reported only when every part is. Left out when nothing was priced, so an unpriced session's stats keep their keys.
+  return { ...stats, totalMessages: stats.totalMessages - system, ...(priced.length === 0 ? {} : { costFromProvider: priced.every((usage) => usage.cost.totalFromProvider === true) }) };
+}
+
+/** Every usage Pi adds to a session's cost that has a price: model messages, tool-result usage, summaries and usage entries. */
+function pricedUsages(entries: readonly SessionEntry[]): Array<{ cost: { total: number; totalFromProvider?: boolean } }> {
+  const found: Array<{ cost: { total: number; totalFromProvider?: boolean } }> = [];
+  for (const entry of entries) {
+    const usage: unknown = entry.type === "message" ? (entry.message as { usage?: unknown }).usage : (entry as { usage?: unknown }).usage;
+    const cost = usage !== null && typeof usage === "object" ? (usage as { cost?: { total?: unknown } }).cost : undefined;
+    if (cost !== undefined && typeof cost.total === "number" && cost.total > 0) found.push(usage as { cost: { total: number; totalFromProvider?: boolean } });
+  }
+  return found;
 }
 
 /**
@@ -466,21 +481,12 @@ export async function createWorkerResources(
   // Pi never installs a package for the worker: the reload below would otherwise fetch every `packages` entry of the
   // settings it reads, running `npmCommand`, in the worker. AgentX loads no package.
   process.env.PI_OFFLINE = "1";
-  const settingsManager = SettingsManager.create(input.cwd, input.agentDirectory, { projectTrusted: false });
-  // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
-  // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
-  settingsManager.setCacheWarmingMode("off");
-  // Defence in depth for a settings file the worker did not write: PI_OFFLINE stops installs, but Pi still runs `npmCommand`
-  // to find its global package root. AgentX loads no package, extension path, skill, prompt or theme from settings, and
-  // runs no configured shell or npm command, whatever the file says.
-  settingsManager.setNpmCommand(undefined);
-  settingsManager.setPackages([]);
-  settingsManager.setExtensionPaths([]);
-  settingsManager.setSkillPaths([]);
-  settingsManager.setPromptTemplatePaths([]);
-  settingsManager.setThemePaths([]);
-  settingsManager.setShellPath(undefined);
-  settingsManager.setShellCommandPrefix(undefined);
+  // Pi 1.3+ reports install telemetry and puts its attribution on provider requests unless this says no; the settings below say no too.
+  process.env.PI_TELEMETRY = "0";
+  // The worker's Pi settings are written, never read: an in-memory manager with no project settings, no telemetry, no cache warming, the worker's retry budget and nothing
+  // loaded or run from settings (see createPiSettingsManager). A settings file in the agent directory or the repository cannot change any of it, and a default a later
+  // Pi release switches on stays off. Pi 1.5.1 made cache warming "idle" by default: the worker keeps it "off".
+  const settingsManager = createPiSettingsManager();
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir: input.agentDirectory,
@@ -499,22 +505,7 @@ export async function createWorkerResources(
     appendSystemPrompt: [AGENTX_PREAMBLE],
   });
   await resourceLoader.reload({ resolveProjectTrust: async () => false });
-  // Last, after every write and reload: each of them merges the stored settings files again, which drops an in-memory override.
-  applyWorkerRetryBudget(settingsManager);
   return { resourceLoader, settingsManager };
-}
-
-/**
- * The retry budget for a model call that fails with a transient error (PLANINC-3b). Pi retries such a call on its own: its default is 3 retries
- * (4 calls) with 2, 4 and 8 s waits. AgentX sets its own, smaller budget so a failing model call ends in a bounded time: `maxRetries` retries after the
- * first call (so `maxRetries + 1` calls at most), each after `baseDelayMs` doubled per retry, and never a wait longer than `maxAgentDelayMs`.
- * Change the numbers here; the planning deadline and the stall limit (model-call-monitor.ts) bound the calls themselves.
- */
-export const WORKER_MODEL_RETRY = { enabled: true, maxRetries: 2, baseDelayMs: 2_000, maxAgentDelayMs: 10_000 } as const;
-
-/** Applies WORKER_MODEL_RETRY on top of Pi's settings. It runs after the settings are loaded, so a settings file in the agent directory cannot widen the budget or turn retries off. */
-export function applyWorkerRetryBudget(settingsManager: SettingsManager): void {
-  settingsManager.applyOverrides({ retry: { ...WORKER_MODEL_RETRY } });
 }
 
 export function agentShellTool(cwd: string, operations?: BashOperations): ToolDefinition {
