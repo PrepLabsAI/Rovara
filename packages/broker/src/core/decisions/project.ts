@@ -8,7 +8,7 @@
 //   - a Full-path requirements and design pair is ONE card with two tabs that still records two approvals (owner Q1).
 // Anything an item says in words (a title, a question, a path) is flattened to plain text and cut; fixed words come from this file.
 import {
-  DECISION_LABELS, DECISION_REJECT_REASONS, decisionFocusPath, DESIGN_SOURCE_ONLY_LABEL, DecisionCardIdSchema, DecisionCardSchema, DecisionPlanChoicesSchema, DecisionTabsSchema, decisionFriction, canonicalJson,
+  CI_STATE_WORDS, DECISION_LABELS, DECISION_REJECT_REASONS, decisionFocusPath, DESIGN_SOURCE_ONLY_LABEL, DecisionCardIdSchema, DecisionCardSchema, DecisionPlanChoicesSchema, DecisionTabsSchema, decisionFriction, canonicalJson,
   type CardAction, type DecisionPlanChoices, type DecisionCard, type DecisionKind, type DecisionDetailGroup, type DecisionRejectReason, type DecisionRisk, type DecisionTab, type DecisionTabId, type EvidenceChip,
 } from "@agentx/contracts";
 import { DECISION_SPEND_LOW_MAX_USD, riskTierOf, type DecisionLocks, type TierInputs, type TierResult } from "./risk-tier.js";
@@ -77,7 +77,7 @@ export type DecisionItem =
     /** OWNER DECISION 7: a design WITHOUT design review (plan-cards.ts): its questions and open comments. A reviewed design never carries them. */
     choices?: DecisionPlanChoices | undefined;
   })
-  | (ItemBase & { kind: "merge"; sessionId?: string | undefined; /** The head of each pull request the person is shown; the press is refused if any moved. Required: a merge card without it is not pressed. */ heads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined; /** The pull requests a press would merge and the branch each goes into, for the "Merge #N into <branch>?" question; read from tracking, never from model text. */ targets?: ReadonlyArray<{ repositoryId: string; number: number; baseBranch: string }> | undefined; prRisk: DecisionRisk; prReasons: readonly string[]; proof: ProofCounts; reviewVerdict: "approved" | "concerns" | "none"; ci: "passing" | "failing" | "pending"; securityFindingsHigh: number; fullSuitePending: boolean })
+  | (ItemBase & { kind: "merge"; sessionId?: string | undefined; /** The head of each pull request the person is shown; the press is refused if any moved. Required: a merge card without it is not pressed. */ heads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined; /** The pull requests a press would merge and the branch each goes into, for the "Merge #N into <branch>?" question; read from tracking, never from model text. */ targets?: ReadonlyArray<{ repositoryId: string; number: number; baseBranch: string }> | undefined; prRisk: DecisionRisk; prReasons: readonly string[]; proof: ProofCounts; reviewVerdict: "approved" | "concerns" | "none"; ci: "passing" | "failing" | "pending" | "none" | "unreadable"; securityFindingsHigh: number; fullSuitePending: boolean })
   | (ItemBase & {
     kind: "answer_question"; question: string; index: number; of: number;
     /** A batch of design questions in ONE card (DR9, 3.7): how many. The questions themselves are the item's `details`, one group each. */
@@ -224,11 +224,13 @@ function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?
         evidence: [
           chip("test_proof", "Proof", `${String(proof.proven + proof.passed)} proven or passed, ${String(proof.failed)} failed, ${String(proof.notTested)} not tested`, proof.failed > 0 ? "bad" : proof.notTested > 0 ? "warning" : "good"),
           chip("review", "Review", item.reviewVerdict === "approved" ? "no concerns" : item.reviewVerdict === "concerns" ? "concerns raised" : "not reviewed", item.reviewVerdict === "approved" ? "good" : item.reviewVerdict === "concerns" ? "warning" : "unknown"),
-          chip("checks", "CI", item.ci, item.ci === "passing" ? "good" : item.ci === "failing" ? "bad" : "unknown"),
+          chip("checks", "CI", item.ci === "none" || item.ci === "unreadable" ? CI_STATE_WORDS[item.ci] : item.ci, item.ci === "passing" ? "good" : item.ci === "failing" ? "bad" : item.ci === "none" || item.ci === "unreadable" ? "warning" : "unknown"),
           chip("risk", "Risk", item.prRisk, item.prRisk === "low" ? "good" : item.prRisk === "medium" ? "warning" : "bad"),
           ...(item.fullSuitePending ? [chip("checks", "Full suite", "still running", "warning")] : []),
         ],
-        why: failing ? "Something failed: open it and look first." : "The checks passed and the review has no open concerns.",
+        why: failing ? "Something failed: open it and look first."
+          : item.ci === "none" || item.ci === "unreadable" ? `${CI_STATE_WORDS[item.ci]}, so no CI checked this code: look at the change yourself before you merge.`
+          : "The checks passed and the review has no open concerns.",
       };
     }
     case "answer_question":

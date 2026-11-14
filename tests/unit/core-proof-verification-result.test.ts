@@ -83,6 +83,15 @@ describe("Verified and Partially verified (nothing failed or blocked)", () => {
     expect(run(reviewOnly)).toEqual(decided("partially_verified", ["no_checks_ran"]));
   });
 
+  it("the laptop's opt-out line (environment item sandbox_model_hosts) is shown but does not change the verdict; any other environment item still does (FIX-0518 M2)", () => {
+    const optOut = { kind: "environment", id: "sandbox_model_hosts", text: "model hosts allowed in the test sandbox by project setting", reason: "sandboxModelHosts is allow in the Rovara config" };
+    expect(run(passed(), { evidence: pack([{}], { notTested: [optOut] }) })).toEqual(decided("verified"));
+    expect(run(passed(), { evidence: pack([{}], { notTested: [optOut, { kind: "environment", id: "evidence_capture", text: "x", reason: "x" }] }) })).toEqual(decided("partially_verified", ["evidence_unreadable"]));
+    // Only that id is excused: another kind with the same id, or the same kind with another id, is not.
+    expect(run(passed(), { evidence: pack([{}], { notTested: [{ ...optOut, kind: "claim" }] }) })).toEqual(decided("partially_verified", ["claim_not_tested"]));
+    expect(run(passed(), { evidence: pack([{}], { notTested: [{ ...optOut, id: "sandbox_model_host" }] }) })).toEqual(decided("partially_verified", ["evidence_unreadable"]));
+  });
+
   it("is Partially verified for each thing planned that did not run", () => {
     const notTested = (kind: string, id = "x") => pack([{}], { notTested: [{ kind, id, text: "x", reason: "x" }] });
     expect(run(passed(), { evidence: notTested("claim") })).toEqual(decided("partially_verified", ["claim_not_tested"]));
