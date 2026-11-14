@@ -14,7 +14,7 @@ export const MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE = "model hosts allowed in t
 /** The id of the pack's "not tested" item that carries the sentence above. A verdict does not read it as "details unreadable". */
 export const SANDBOX_MODEL_HOSTS_ITEM_ID = "sandbox_model_hosts";
 export const NOT_SEALED_SENTENCE = "not sealed";
-export const NOT_SEALED_BLOCKED_BY_NAME_SENTENCE = "not sealed; model hosts blocked by name only";
+export const NOT_SEALED_BLOCKED_BY_NAME_SENTENCE = "not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked";
 export const redirectEscapeSentence = (host: string): string => `not run: client ignored the redirect (called ${host})`;
 
 /**
