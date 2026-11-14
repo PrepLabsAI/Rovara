@@ -28,6 +28,8 @@ import { withTestIds } from "./test-ids.js";
 export interface CollectEvidenceInput {
   /** The workspace root, where a check's report path is resolved from its cwd. */
   rootPath: string;
+  /** Worker report storage, separate from source paths used to place test IDs and coverage. */
+  reportRootPath?: string | undefined;
   /** The project checks that were run, in order: check `readiness:<index>` is `commands[index]`. */
   commands: readonly ProjectCommand[];
   /** The round's entries on the candidate. */
@@ -117,7 +119,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     for (const [index, command] of input.commands.entries()) {
       const entry = entryOf(index);
       if (entry === undefined) continue;
-      const read = await readCheckReport(input.rootPath, command).catch(() => undefined);
+      const read = await readCheckReport(input.reportRootPath ?? input.rootPath, command).catch(() => undefined);
       const reported = read === undefined ? undefined : parseTestReport(read.text, read.kind);
       // The tests in ID form (contracts `test-id.ts`), the same strings the nightly run and the known-failing marks use.
       const parsed = reported === undefined ? undefined : await withTestIds(reported, { root: input.rootPath, cwd: command.cwd });
@@ -128,11 +130,11 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
       if (entry.after === "failed") { const tail = outputTailOf(entry.output); if (tail !== undefined) partial.outputTail = tail; }
       // A timed-out, stopped or never-run check may have left an older report on disk: only a check that ended is read.
       if (ended(entry)) {
-        const covered = await readChangedCoverage({ rootPath: input.rootPath, command, repositories: diffs, notBeforeMs: input.roundStartedAtMs, used: usedReports, approvedPath: input.coveragePaths?.[index], lineCoverage: (text, repositories) => placeLineCoverage(text, input.rootPath, command.cwd, repositories) });
+        const covered = await readChangedCoverage({ rootPath: input.rootPath, reportRootPath: input.reportRootPath, command, repositories: diffs, notBeforeMs: input.roundStartedAtMs, used: usedReports, approvedPath: input.coveragePaths?.[index], lineCoverage: (text, repositories) => placeLineCoverage(text, input.rootPath, command.cwd, repositories) });
         if ("coverage" in covered) partial.coverage = coveragePart(covered.coverage, input.repositories.length);
         const argument = sarifPathOf(command);
         if (argument !== undefined) {
-          const sarif = await readContainedReport({ root: input.rootPath, cwd: command.cwd, argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: input.roundStartedAtMs });
+          const sarif = await readContainedReport({ root: input.reportRootPath ?? input.rootPath, cwd: command.cwd, argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: input.roundStartedAtMs });
           const candidate = sarif.ok ? parseSarif(sarif.bytes.toString("utf8"), roots) : undefined;
           if (sarif.ok && candidate !== undefined) scans.push({ index, command, argument, path: sarif.path, candidateBytes: Buffer.from(sarif.bytes), candidate });
         }
@@ -258,7 +260,7 @@ export async function saveEvidenceRaw(input: {
     const complete = placed.length === input.repositories.length;
     const baseline = input.baseline;
     const raw = await collectEvidenceRaw({
-      rootPath: input.rootPath, commands: input.plan.readiness, entries: input.entries, candidateDigest: createCandidateManifest(input.candidateBefore).digest, roundStartedAtMs: input.roundStartedAtMs,
+      rootPath: input.rootPath, reportRootPath: input.baseline?.runners.reportRoot?.(), commands: input.plan.readiness, entries: input.entries, candidateDigest: createCandidateManifest(input.candidateBefore).digest, roundStartedAtMs: input.roundStartedAtMs,
       repositories: placed, repositoriesComplete: complete,
       selection: input.selection, coveragePaths: input.coveragePaths,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
