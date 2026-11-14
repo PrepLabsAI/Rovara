@@ -46,7 +46,8 @@ completed no-drop/improvement check, neutral with Retry for Not run. The lane's
 own development PR is a draft for review; that is separate from this product rule.
 
 The explicit per-project `questionPlan.limits` input carries the approved
-health-check budget when available; absent dimensions retain 200 calls and $2.
+health-check budget when available; absent dimensions use the eval-only default of 400 calls and $4 (DEC 203),
+inside the monthly provider cap. General task pacing remains 200 calls and $2.
 Before the first run, reserve N question-runs using measured upper call/cost
 bounds (including judge calls). Once suspects are known, reserve six runs per
 selected suspect before either side is re-asked. Reserve 2N only if a whole-set

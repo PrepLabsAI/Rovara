@@ -2,10 +2,14 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  inertEvidenceText, EVAL_PACING_DEFAULTS, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
+  inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
   type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
+
+// DEC 203: eval-only defaults; general task pacing remains 200 calls / $2.
+const EVAL_DEFAULT_CALL_BUDGET = 400;
+const EVAL_DEFAULT_COST_BUDGET_MICROS = 4_000_000;
 
 /** The shape of F4's `PromptChangeDecision`: whether an eval is needed, and why. */
 export interface EvalTrigger {
@@ -42,7 +46,8 @@ export interface EvalQuestionPlan {
   readonly callsAlreadyUsed?: number;
   readonly costAlreadyUsedMicros?: number;
   /** Explicit project budget, supplied from the approved health-check estimate when available.
-   * Missing dimensions fall back to DEC 171: 200 calls / $2 per task. */
+   * Missing dimensions use the DEC 203 eval-only default: 400 calls / $4 per task.
+   * Customer ModelEgress still enforces the monthly cap. */
   readonly limits?: Partial<Pick<EvalPacingLimits, "maxCalls" | "maxCostMicros">>;
   /** Runs through F1's customer ModelEgress and F3 pacing; resolves only after all calls joined.
    * Reports are read by A4. No key, response header, error or stdout belongs in this return value. */
@@ -211,8 +216,8 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   ];
   const untouched = definitions.filter(q => byId.has(q.id) && q.baseHash === q.headHash);
   if (untouched.length === 0) return refuse("too_few_questions");
-  const maxCalls = config.limits?.maxCalls ?? EVAL_PACING_DEFAULTS.maxCalls;
-  const maxCost = config.limits?.maxCostMicros ?? EVAL_PACING_DEFAULTS.maxCostMicros;
+  const maxCalls = config.limits?.maxCalls ?? EVAL_DEFAULT_CALL_BUDGET;
+  const maxCost = config.limits?.maxCostMicros ?? EVAL_DEFAULT_COST_BUDGET_MICROS;
   let calls = config.callsAlreadyUsed ?? 0; let cost = config.costAlreadyUsedMicros ?? 0;
   const whole = (v: number): boolean => Number.isSafeInteger(v) && v >= 0;
   if (![maxCalls, maxCost, calls, cost, config.maxCallsPerQuestion, config.maxCostMicrosPerQuestion].every(whole) || config.maxCallsPerQuestion < 1 || config.maxCostMicrosPerQuestion < 1) return refuse("cap");

@@ -129,7 +129,7 @@ it("validates the cached samples before spending, even with a custom cache adapt
 });
 it("pacing caps include earlier task spend and both permitted passes", async () => {
   const { input, requests } = await setup(1); const plan = input.questionPlan!;
-  expect(await runEvalRound({ ...input, questionPlan: { ...plan, previousPasses: 1, callsAlreadyUsed: 195 } })).toMatchObject({ result: { notRun: { reason: "cap" } } });
+  expect(await runEvalRound({ ...input, questionPlan: { ...plan, previousPasses: 1, callsAlreadyUsed: 395 } })).toMatchObject({ result: { notRun: { reason: "cap" } } });
   expect(requests).toEqual([{ side: "new", ids: ["q0"], runs: 1 }]);
   const second = await setup(1);
   expect(await runEvalRound({ ...second.input, questionPlan: { ...second.input.questionPlan!, previousPasses: 1 } })).toMatchObject({ result: { label: "No drop found" } });
@@ -308,10 +308,10 @@ it("runs an unchanged 50-question control and respects an explicit project call 
   const control = await setup(50, true);
   expect(await runEvalRound(control.input)).toMatchObject({ result: { label: "No drop found", questions: [] }, feedback: { questions: [] }, usage: { calls: 50 } });
   expect(control.requests).toHaveLength(1);
-  const large = await setup(201, true);
+  const large = await setup(401, true);
   expect(await runEvalRound(large.input)).toMatchObject({ result: { notRun: { reason: "cap" } } });
   expect(large.requests).toEqual([]);
-  expect(await runEvalRound({ ...large.input, questionPlan: { ...large.input.questionPlan!, limits: { maxCalls: 201 } } })).toMatchObject({ result: { label: "No drop found" }, usage: { calls: 201 } });
+  expect(await runEvalRound({ ...large.input, questionPlan: { ...large.input.questionPlan!, limits: { maxCalls: 401 } } })).toMatchObject({ result: { label: "No drop found" }, usage: { calls: 401 } });
 });
 
 it.each(["maxCallsPerQuestion", "maxCostMicrosPerQuestion"] as const)("refuses unsafe %s stage estimates without printing rounded numbers", async dimension => {
@@ -339,4 +339,26 @@ it.each(["added", "edited"] as const)("a whole-set-only runner still receives th
   expect(result).toMatchObject({ result: { label: "Worse on eval", casesRun: change === "added" ? 5 : 4 } });
   expect(requests).toEqual([{ side: "new", ids: questions.map(q => q.id), runs: 1 }]);
   expect(result).toMatchObject({ usage: { calls: questions.length } });
+});
+
+// The old 200/$2 fallback rejects this valid eval including its judge calls.
+it("runs 50 questions with a judge and ten suspects at the eval default", async () => {
+  const { input, requests } = await setup(50); const plan = input.questionPlan!;
+  const result = await runEvalRound({ ...input, questionPlan: { ...plan,
+    maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 20_000,
+    run: async request => { const output = await plan.run(request); return { ...output, calls: output.calls * 2, costMicros: output.calls * 20_000 }; },
+  } });
+  expect(result).toMatchObject({ result: { label: "Worse on eval" }, usage: { calls: 220, costMicros: 2_200_000 } });
+  expect(requests.map(r => r.ids.length * r.runs)).toEqual([50, 30, 30]);
+});
+it.each(["calls", "cost"] as const)("accepts the eval default %s boundary and refuses one more before spending", async dimension => {
+  const { input, requests } = await setup(400, true); const plan = input.questionPlan!;
+  const budgetPlan = { ...plan, maxCostMicrosPerQuestion: 10_000,
+    run: async (request: Parameters<typeof plan.run>[0]) => { const output = await plan.run(request); return { ...output, costMicros: output.calls * 10_000 }; },
+  };
+  expect(await runEvalRound({ ...input, questionPlan: budgetPlan })).toMatchObject({ result: { label: "No drop found" }, usage: { calls: 400, costMicros: 4_000_000 } });
+  requests.length = 0;
+  const result = await runEvalRound({ ...input, questionPlan: { ...budgetPlan, ...(dimension === "calls" ? { callsAlreadyUsed: 1 } : { costAlreadyUsedMicros: 1 }) } });
+  expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap", sentence: "Not run: over the eval budget" }, summary: "Eval: Not run — over the eval budget. Retry." } });
+  expect(requests).toEqual([]);
 });

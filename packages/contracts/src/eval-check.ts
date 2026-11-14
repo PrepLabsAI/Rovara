@@ -2,14 +2,14 @@
 import { inertEvidenceText } from "./evidence-inert.js";
 import { HIDDEN_EVAL_NEEDS_SEALED_SENTENCE, type EvalRoundKind } from "./eval-hidden-set.js";
 import { EVAL_NOT_RUN_CLASSES, type EvalRoundFacts } from "./eval-pacing.js";
-import { NOT_RUN_SENTENCES, capSentence } from "./model-egress/classify.js";
+import { NOT_RUN_SENTENCES } from "./model-egress/classify.js";
 
 export const EVAL_NOT_RUN_REASONS = [
   ...EVAL_NOT_RUN_CLASSES, "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
-/** Why an eval (or one measure of it) was not run, in fixed words. The class reasons are F1-a's own sentences (the cap one without an amount: `evalNotRunResult` adds the amount when it has one). */
+/** Why an eval (or one measure of it) was not run, in fixed words. Provider reasons reuse F1-a's sentences; budget refusals name the eval budget. */
 export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> = {
   no_eval_configured: "not run: no eval is configured",
   no_product_key: "not run: no product AI key is connected",
@@ -22,7 +22,7 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   quota: NOT_RUN_SENTENCES.quota,
   overloaded: NOT_RUN_SENTENCES.overloaded,
   key_refused: NOT_RUN_SENTENCES.key_refused,
-  cap: capSentence(),
+  cap: "Not run: over the eval budget",
   provider_error: "not run: provider error",
   refused: "not run: the model call was refused",
   too_many_not_run: "not run: too many cases hit a limit",
@@ -131,10 +131,10 @@ export function evalSuspects(questions: readonly EvalQuestionComparison[]): { do
   return { down, up, omitted };
 }
 export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean }): EvalCheckResult {
-  const sentence = args.reason === "cap" ? capSentence(args.capMicros) : EVAL_NOT_RUN_SENTENCES[args.reason];
+  const sentence = EVAL_NOT_RUN_SENTENCES[args.reason];
   return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason: args.reason, sentence }, usedHiddenSet: args.hiddenSetUsed === true,
     casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], fixRequested: false,
-    summary: `Eval: Not run — ${sentence.replace(/^not run: /u, "")}. Retry.`, disposition: { draft: false, check: "neutral", retry: true } };
+    summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}. Retry.`, disposition: { draft: false, check: "neutral", retry: true } };
 }
 /** First-look p in [.01,.2) justifies exactly two more new runs; mirror upward. */
 export function evalNeedsSecondLook(questions: readonly EvalQuestionComparison[]): boolean {
