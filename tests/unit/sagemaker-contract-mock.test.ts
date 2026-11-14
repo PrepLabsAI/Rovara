@@ -33,6 +33,43 @@ describe("SageMaker contract discovery", () => {
     expect(findSageMakerContract([inference('def predict_fn(x, model):\n    return {"score": 1}\n\ndef output_fn(x, accept):\n    return transform(x)\n')])).toMatchObject({ status: "not_found", message: "No contract found" });
   });
   it.each([
+    ["import", "from serde import output_fn\n"],
+    ["assignment", "output_fn = make_output()\n"],
+    ["lambda", "output_fn = lambda p, a: json.dumps(p)\n"],
+    ["async", "async def output_fn(p, a):\n    return to_csv(p)\n"],
+    ["conditional", "if enabled:\n    def output_fn(p, a):\n        return to_csv(p)\n"],
+    ["nested", "def setup():\n    def output_fn(p, a):\n        return to_csv(p)\n"],
+    ["reassigned supported definition", "def output_fn(p, a):\n    return 1\noutput_fn = make_output()\n"],
+    ["unsupported redefinition", "def output_fn(p, a):\n    return 1\ndef output_fn(p, a) -> str:\n    return to_csv(p)\n"],
+  ])("refuses unsupported output_fn form: %s", (_, output) => {
+    const content = 'def predict_fn(data, model):\n    return {"score": 1}\n\n' + output;
+    expect(findSageMakerContract([inference(content)])).toEqual({
+      status: "not_found", message: "No contract found", reason: "no_supported_input",
+      inputs: [{ index: 0, reason: "unsupported_inference" }],
+    });
+  });
+  it.each([
+    ["unknown kind", { ...fixture(), kind: "fixtures" }],
+    ["missing kind", { path: "response.json", content: "1" }],
+    ["numeric content", { ...fixture(), content: 5 }],
+    ["missing content", { kind: "fixture", path: "response.json" }],
+    ["missing path", { kind: "fixture", content: "1" }],
+    ["numeric path", { ...fixture(), path: 5 }],
+    ["null file", null],
+  ])("reports invalid runtime input: %s", (_, file) => {
+    const invalid = file as unknown as Parameters<typeof findSageMakerContract>[0][number];
+    expect(findSageMakerContract([invalid])).toEqual({
+      status: "not_found", message: "No contract found", reason: "no_supported_input",
+      inputs: [{ index: 0, reason: "invalid_input" }],
+    });
+    expect(findSageMakerContract([fixture(), invalid])).toMatchObject({
+      status: "found", inputs: [{ index: 0, reason: "selected" }, { index: 1, reason: "invalid_input" }],
+    });
+    expect(findSageMakerContract([invalid, fixture()])).toMatchObject({
+      status: "found", inputs: [{ index: 0, reason: "invalid_input" }, { index: 1, reason: "selected" }],
+    });
+  });
+  it.each([
     "def output_fn(x, accept):\n    if x:\n        return {'score': 1}\n    return {'score': 0}\n",
     "def output_fn(x, accept):\n    return {'score': run_model()}\n",
     "# def output_fn(x, accept):\n#     return {'score': 1}\n",
@@ -129,6 +166,25 @@ describe("SageMaker made-by-Rovara config", () => {
     if (result.status !== "found") throw new Error("schema missing");
     expect(generateSageMakerMock(result.contract).outputs[0].body).toBe(0);
     expect(findSageMakerContract([schema('{"type":"integer","minimum":0.1,"maximum":0.9}')])).toMatchObject({ status: "not_found" });
+  });
+  it.each([
+    [{ minimum: 2.1 }, [3, 3, 3, 3]],
+    [{ maximum: -0.5 }, [-1, -1, -1, -1]],
+    [{ minimum: 2.1, maximum: 3.1 }, [3, 3, 3, 3]],
+    [{ minimum: -1.1, maximum: -0.5 }, [-1, -1, -1, -1]],
+  ])("accepts nonempty integer bounds %j through generation", (bounds, bodies) => {
+    const result = findSageMakerContract([schema(JSON.stringify({ type: "integer", ...bounds }))]);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") return;
+    expect(isSageMakerContract(result.contract)).toBe(true);
+    const config = generateSageMakerMock(result.contract);
+    expect(config.outputs.slice(0, 4).map((entry) => entry.body)).toEqual(bodies);
+    expect(SageMakerMockConfigSchema.safeParse(config).success).toBe(true);
+  });
+  it.each([{ minimum: 2.1, maximum: 2.9 }, { minimum: -0.9, maximum: -0.5 }])("refuses empty integer bounds %j", (bounds) => {
+    expect(findSageMakerContract([schema(JSON.stringify({ type: "integer", ...bounds }))])).toMatchObject({
+      status: "not_found", inputs: [{ reason: "unsupported_shape" }],
+    });
   });
   it.each([
     { latencyMs: -1 }, { latencyMs: Infinity }, { latencyMs: 60_001 },

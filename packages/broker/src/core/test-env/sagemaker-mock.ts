@@ -13,9 +13,10 @@ function output(shape: SageMakerShape, variant: Variant): unknown {
     case "boolean": return variant !== "edge";
     case "null": return null;
     case "number": case "integer": {
-      let low = shape.minimum ?? Math.min(0, shape.maximum ?? 0);
-      let high = shape.maximum ?? Math.max(1, low);
-      if (shape.type === "integer") { low = Math.ceil(low); high = Math.floor(high); }
+      const minimum = shape.type === "integer" && shape.minimum !== undefined ? Math.ceil(shape.minimum) : shape.minimum;
+      const maximum = shape.type === "integer" && shape.maximum !== undefined ? Math.floor(shape.maximum) : shape.maximum;
+      const low = minimum ?? Math.min(0, maximum ?? 0);
+      const high = maximum ?? Math.max(1, low);
       const n = variant === "high_score" ? high : variant === "typical" ? low / 2 + high / 2 : low;
       return shape.type === "integer" ? Math.round(n) : n;
     }

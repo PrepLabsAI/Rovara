@@ -15,7 +15,7 @@ export type SageMakerShape = { source: SageMakerSource } & (
 );
 export interface SageMakerContract { source: SageMakerSource; shape: SageMakerShape }
 export interface SageMakerContractFile { kind: SageMakerSourceKind; path: string; content: string | null }
-type Reason = "selected" | "lower_priority" | "unreadable" | "too_large" | "invalid_json" | "unsupported_inference" | "unsupported_shape";
+type Reason = "selected" | "lower_priority" | "invalid_input" | "unreadable" | "too_large" | "invalid_json" | "unsupported_inference" | "unsupported_shape";
 interface InputResult { index: number; reason: Reason }
 export type SageMakerContractResult =
   | { status: "found"; contract: SageMakerContract; inputs: InputResult[] }
@@ -75,9 +75,11 @@ function fromSchema(value: unknown, source: SageMakerSource, depth: number, budg
         shape[key] = n as number;
       }
     }
-    const low = shape.minimum ?? Math.min(0, shape.maximum ?? 0);
-    const high = shape.maximum ?? Math.max(1, low);
-    if (low > high || (shape.type === "integer" && Math.ceil(low) > Math.floor(high))) unsupported();
+    const minimum = shape.type === "integer" && shape.minimum !== undefined ? Math.ceil(shape.minimum) : shape.minimum;
+    const maximum = shape.type === "integer" && shape.maximum !== undefined ? Math.floor(shape.maximum) : shape.maximum;
+    const low = minimum ?? Math.min(0, maximum ?? 0);
+    const high = maximum ?? Math.max(1, low);
+    if (low > high) unsupported();
     return shape;
   }
   if (value.type === "string" || value.type === "boolean" || value.type === "null") return { type: value.type, source };
@@ -89,6 +91,8 @@ function inferenceLiteral(text: string): { value: unknown; pointer: string } | n
   // predict_fn can describe an intermediate shape that output_fn changes.
   const functions = [...text.matchAll(/^def (output_fn|predict_fn)\([^\n]*\):[^\S\n]*\n((?:(?:[ \t]+[^\n]*|)[\n]|[ \t]+[^\n]*$)*)/gm)];
   const namedOutput = /^def output_fn\b/m.test(text);
+  // Any other mention may import, replace or conditionally define the wire formatter.
+  if (/\boutput_fn\b/.test(text.replace(/^def output_fn\b/m, ""))) return null;
   const name = namedOutput ? "output_fn" : "predict_fn";
   const selected = functions.filter((entry) => entry[1] === name);
   if (selected.length !== 1) return null;
@@ -114,12 +118,15 @@ function inferenceLiteral(text: string): { value: unknown; pointer: string } | n
  * back to the input list; no raw response values or inference source are retained. */
 export function findSageMakerContract(files: readonly SageMakerContractFile[]): SageMakerContractResult {
   if (files.length > SAGEMAKER_CONTRACT_LIMITS.files) return { status: "not_found", message: "No contract found", reason: "too_many_inputs", inputs: [] };
-  const inputs: InputResult[] = files.map((_, index) => ({ index, reason: "lower_priority" }));
+  const inputs: InputResult[] = files.map((file, index) => ({
+    index,
+    reason: !object(file) || !kinds.includes(file.kind) || typeof file.path !== "string" || (typeof file.content !== "string" && file.content !== null) ? "invalid_input" : "lower_priority",
+  }));
   let contract: SageMakerContract | undefined;
   for (const kind of kinds) {
     for (const [index, file] of files.entries()) {
-      if (file.kind !== kind || contract !== undefined) continue;
       const result = inputs[index]!;
+      if (result.reason === "invalid_input" || file.kind !== kind || contract !== undefined) continue;
       if (file.content === null) { result.reason = "unreadable"; continue; }
       if (file.content.length > SAGEMAKER_CONTRACT_LIMITS.characters || file.path.length > 2048) { result.reason = "too_large"; continue; }
       let value: unknown;
