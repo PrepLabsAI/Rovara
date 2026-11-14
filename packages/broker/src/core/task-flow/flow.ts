@@ -55,6 +55,8 @@ export function createTaskFlow(deps: TaskFlowDeps): TaskFlow {
     if (kept === undefined || kept.partitionAttribute !== index.partitionAttribute || kept.sortAttribute !== index.sortAttribute) throw new Error(`the document store must keep the ${index.name} index`);
   }
   if (Buffer.byteLength(deps.callbackSigningKey) < 32) throw new Error("the callback signing key must be at least 32 bytes");
+  // The lighter flow skips planning steps only where the reviewer that stands in for them can run: never on without one.
+  if (deps.lighterFlow === true && deps.tierReviewCall === undefined) throw new Error("the lighter flow needs the reviewer call (tierReviewCall): a small change never skips its planning steps without a review");
   return {
     deps,
     start: (caller, request) => startTask(deps, caller, request),

@@ -117,6 +117,7 @@ describe("the full text of a complete pack", () => {
       "Verified · Real run by Rovara",
       "Checked in a sealed round",
       "Checks: 2 (2 passed)",
+      "Measures: reported by the project's test runner, not measured by Rovara",
       "- Tests: pytest -q: passed, 3 tests (1 new), 90% of changed lines covered",
       "- Benchmark: render time: passed, p95 118 ms (was 120 ms)",
       "Change proof: 1 proven",
@@ -340,28 +341,27 @@ describe("callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
-    expect([0, 1]).toContain(found.status);
-    const hits = found.stdout.split("\n").filter((entry) => entry !== "");
-    // TE-A2b is the first caller (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
-    expect(hits.filter((file) => !file.startsWith("packages/contracts/")).sort()).toEqual([
+    const callers = (symbols: string[]) => {
+      const env = isolatedGitEnvironment(root, { GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "0", GIT_NOGLOB_PATHSPECS: "0", GIT_ICASE_PATHSPECS: "0" });
+      const found = spawnSync("git", ["grep", "--untracked", "-lw", ...symbols.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env });
+      expect([0, 1]).toContain(found.status);
+      return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/")).sort();
+    };
+    // The proof table alone uses the trust type and TE-192a's words; inert text is also shared by TE-B3 (weakening-flags.ts), TE-A4 (test-report.ts) and the eval files (eval-round, eval-discovery, eval-health). TE-A2b is the first caller of every other
+    // v2 export (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
+    const proofOnly = ["EvidenceTrustClass", "SCRIPTED_AI_PROOF_WORDS", "AGENT_REPLIES_UNCONFIRMED_WORDS", "AGENT_REPLIES_DISAGREED_WORDS"];
+    const writerFiles = [
       "packages/broker/src/core/proof/evidence-guard.ts",
       "packages/broker/src/core/proof/evidence-keep.ts",
       "packages/broker/src/core/proof/evidence-lines.ts",
       "packages/broker/src/core/proof/evidence-pack.ts",
       "packages/broker/src/core/proof/evidence-v2-lines.ts",
-      "packages/broker/src/core/proof/weakening-flags.ts",
-    ]);
-    // B3 may share inert text only; the other v2 exports remain confined to the A2b callers.
-    const others = spawnSync("git", ["grep", "--untracked", "-lw", ...names.filter((name) => name !== "inertEvidenceText").flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
-    expect([0, 1]).toContain(others.status);
-    expect(others.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/")).sort()).toEqual([
-      "packages/broker/src/core/proof/evidence-guard.ts",
-      "packages/broker/src/core/proof/evidence-keep.ts",
-      "packages/broker/src/core/proof/evidence-lines.ts",
-      "packages/broker/src/core/proof/evidence-pack.ts",
-      "packages/broker/src/core/proof/evidence-v2-lines.ts",
-    ]);
+    ];
+    expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText"))).toEqual(writerFiles);
+    for (const name of proofOnly) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
+    expect(callers(["inertEvidenceText"])).toEqual([
+      "packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
+    ].sort());
   });
 });
 
@@ -384,4 +384,18 @@ describe("nothing turns the version 2 writer on yet", () => {
   it("only the evidence keep file and a comment in the evidence lines name loadEvidenceRead", () => {
     expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts"]);
   });
+});
+
+it("keeps runner-measure provenance visible even with long check labels and inert measure names", () => {
+  const pack = clone(v2Pack());
+  const check = pack.checks[1]!;
+  check.label = "L".repeat(200);
+  check.measures = [{ name: "[score](https://example.com) @owner #123", unit: "ms", base: 1, head: 2, direction: "down_good" }];
+  const out = renderEvidence(pack);
+  expect(out.body).toContain("Measures: reported by the project's test runner, not measured by Rovara");
+  expect(out.text).not.toMatch(/https:\/\/|@owner|#123/u);
+  check.label = "eval";
+  expect(renderEvidence(pack).text).toContain("score");
+  for (const row of pack.checks) delete row.measures;
+  expect(renderEvidence(pack).text).not.toContain("reported by the project's test runner");
 });
