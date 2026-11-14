@@ -420,6 +420,7 @@ export function plainPath(path: string, max = 500): string {
 export type CoverageSkip = ReportFileFailure | "no_spec" | "unparsable" | "changes_unreadable";
 export interface ReadCoverageInput {
   rootPath: string;
+  reportRootPath?: string | undefined;
   command: ProjectCommand;
   /** The diff of every repository, read only once a report has been found and parsed; undefined when any repository's diff cannot be read (no line is then claimed). */
   repositories: () => Promise<readonly RepositoryChanges[] | undefined>;
@@ -443,7 +444,7 @@ export async function readChangedCoverage(input: ReadCoverageInput): Promise<{ c
     if (specs.length === 0) return { skip: "no_spec" };
     let last: CoverageSkip = "missing";
     for (const spec of specs) {
-      const read = await readContainedReport({ root: input.rootPath, cwd: input.command.cwd, argument: spec.argument, maxBytes: input.maxBytes ?? COVERAGE_REPORT_MAX_BYTES, notBeforeMs: input.notBeforeMs });
+      const read = await readContainedReport({ root: input.reportRootPath ?? input.rootPath, cwd: input.command.cwd, argument: spec.argument, maxBytes: input.maxBytes ?? COVERAGE_REPORT_MAX_BYTES, notBeforeMs: input.notBeforeMs });
       if (!read.ok) {
         last = read.reason;
         continue;

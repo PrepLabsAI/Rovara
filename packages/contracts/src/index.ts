@@ -19,6 +19,7 @@ export * from "./developer-tasks-node.js";
 export * from "./task-workflow-node.js";
 export * from "./task-workflow-revise.js";
 export * from "./task-workflow-design-review.js";
+export * from "./task-flow-tier.js";
 export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
@@ -217,6 +218,7 @@ export { formatUsdMicrodollars } from "./money-format.js";
 
 // Lane A G1: versioned project intent, preserved but not set by legacy settings writes.
 export * from "./test-proof.js";
+export * from "./real-model-check.js";
 export * from "./plugins/index.js";
 export * from "./ports/index.js";
 export * from "./outcomes.js";
@@ -224,6 +226,8 @@ export * from "./outcomes.js";
 // Proof and evidence (W4/W5): the evidence pack, decision cards, the test environment and service mocks.
 export * from "./check-kinds.js";
 export * from "./evidence.js";
+// TE-B9: the list of Rovara working files that are never committed.
+export * from "./never-commit.js";
 export * from "./evidence-inert.js";
 export * from "./evidence-render.js";
 export * from "./evidence-weakening.js";
@@ -285,6 +289,9 @@ export * from "./model-catalog.js";
 export * from "./model-catalog-rows.js";
 // The unsigned parse (`parseModelCatalogBytes`) is deliberately NOT exported here: only `builtinModelCatalog()` may feed F1 and F2 until the rows are signed.
 export { MODEL_CATALOG_MAX_BYTES, modelCatalogDigest } from "./model-catalog-digest.js";
+// TE-F4: additive static prompt/model change detection; no production callers.
+export * from "./prompt-change.js";
+export * from "./prompt-change-detect.js";
 export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
@@ -292,7 +299,23 @@ export * from "./model-egress-block.js";
 // TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
 export * from "./model-egress/index.js";
 export * from "./model-serve.js";
+// TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
+export * from "./model-sse-named.js";
+export * from "./model-family-vectors.js";
+export * from "./model-family-openai-ops.js";
+export * from "./model-family-gemini-extra.js";
+export * from "./model-family-anthropic.js";
+export * from "./model-family-cohere.js";
+export * from "./model-served-family.js";
+export * from "./model-request-facts.js";
+export * from "./model-render.js";
+export * from "./model-failure-pack.js";
+export * from "./model-families.js";
+export * from "./model-reply-provenance.js";
+export * from "./model-reply-set.js";
+export * from "./model-serve-replies.js";
 export * from "./test-account.js";
+export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
 export * from "./mcp-servers.js";
 
@@ -341,6 +364,13 @@ export * from "./task-status.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
+// TE-F8 (M2, 0.5.19): record-then-replay for changed prompts. Additive, no callers; depends on TE-F1a (model-egress) and TE-F4 (prompt-change).
+export * from "./model-record-key.js";
+export * from "./model-record-policy.js";
+export * from "./model-recording-store.js";
+export * from "./model-record-replay.js";
+export * from "./policy.js";
+export * from "./presets.js";
 
 export * from "./measures-file.js";
 // TE-F3 (M2/M3a): the eval check. Pure and additive: the question-level exact verdict, the base score cache, pacing, the hidden eval set rules. Nothing outside tests and the worker's eval round calls these yet.
@@ -351,4 +381,5 @@ export * from "./eval-check.js";
 export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter, EvalReservationAdapter } from "./ports/eval-health.js";
 
 export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
-export * from "./real-model-check.js";
+export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
+export * from "./machine-size.js";

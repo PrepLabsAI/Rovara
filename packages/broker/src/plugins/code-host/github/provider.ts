@@ -142,10 +142,20 @@ export interface GitHubCodeHostProvider {
   findLessonsPullRequest?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined>;
   /** Optional (item C1): deletes one of Rovara's lessons branches. */
   deleteLessonsBranch?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<"deleted" | "gone">;
+  /** Optional immutable tree read. Truncation is explicit; failures and rate limits throw. */
+  listTreeAtCommit?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ truncated: boolean; entries: Array<{ path: string; mode: string; type: string; sha: string }> }>;
+  /** Promote only errors observed by the file-details port reads; existing client methods retain their error codes. */
+  fileDetailsError?(error: unknown): unknown;
+  /** Optional PR head and merge base from a fresh PR/compare read, never the target branch tip. */
+  getPullRequestFileRevisions?(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<{ head: string; base: string }>;
   getCommitTree(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string>;
   getBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
   listWorkingBranches(repositoryUrl: string, expected: { installationId: number; repositoryId: number }, scope: GitHubTokenScope, page?: number): Promise<WorkingBranchPage>;
   getCommitParents(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string[]>;
+  /** Optional (DEC 213): one commit's own changes, its parents, and whether GitHub gave the whole list. A client without it leaves the adapter without `commitChanges`. */
+  getCommitChanges?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }>;
+  /** Optional (DEC 213): a commit's changes against a commit it builds on (a merge against its second parent), and whether GitHub gave the whole list. A client without it leaves the adapter without `compareChanges`. */
+  getCompareChanges?(repositoryUrl: string, baseSha: string, headSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean }>;
   getDefaultBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
   getPullRequestMergeObservation(repositoryUrl: string, number: number, budget: ReadBudget, scope: GitHubTokenScope): Promise<GitHubPullRequestDetails & { headTreeSha: string }>;
   installationForRepository(owner: string, name: string, options?: { fresh?: boolean }): Promise<{ installationId: number } | undefined>;

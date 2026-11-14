@@ -9,7 +9,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { fakeWorld } from "../support/local-pages-fakes.js";
 
 it.skipIf(!existsSync(chromium.executablePath()))("shows the eval estimate before the browser submits its independent approval", async () => {
-  const deps = { store: new MemoryDocumentStore(), companyId: "org_aaaaaaaaaaaaaaaaaaaa" };
+  const deps = { monthlyCapMicros: 50_000_000, store: new MemoryDocumentStore(), companyId: "org_aaaaaaaaaaaaaaaaaaaa" };
   await proposeEvalSpendApproval(deps, "demo", { selection: "evals/demo", inputs: { evalSetHash: "a".repeat(64), judgePin: "b".repeat(64), modelVersion: "v1", model: "model", catalogRowId: "model", commandFingerprint: "c".repeat(64), settingsFingerprint: "d".repeat(64) }, estimate: { calls: 300, costMicros: 3_000_000 } });
   const evalSpend = (await readEvalSpendItem(deps, "demo"))!;
   const world = fakeWorld();
@@ -22,7 +22,7 @@ it.skipIf(!existsSync(chromium.executablePath()))("shows the eval estimate befor
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1000, height: 900 } });
     await page.goto(server.link("/setup/demo"));
-    expect(await page.getByText("Run the eval health check: about 300 calls, about $3.000000", { exact: true }).isVisible()).toBe(true);
+    expect(await page.getByText("Run the eval health check: about 300 calls, about $3.00", { exact: true }).isVisible()).toBe(true);
     expect(await page.getByRole("button", { name: "Approve these commands" }).count()).toBe(0);
     expect(submitted).toBeUndefined();
     const screenshotDirectory = process.env["F3E_SCREENSHOT_DIR"];

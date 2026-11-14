@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { AgentXError, IMPLICIT_COMPANY_ID, agentXError, setupItemsOf, setupItemHandling, type AdapterRegistry, type ApprovalProof, type OrgId, type Principal, type SetupVerification } from "@agentx/contracts";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { localResultOf } from "../../core/decisions/local-actions.js";
+import { localOwnerMembers } from "../../core/sessions/access.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import type { ApprovalOffer, LocalActionResult, SetupHostAskView, SetupItemView, SetupPageView } from "../../core/local-pages/views.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -23,9 +24,9 @@ import type { SetupAgentCallbackDeps } from "../../core/setup-agent/callback.js"
 import { readSetupJournal } from "../../core/setup-agent/journal.js";
 import type { DecisionSubject } from "../../core/decisions/approval-gate.js";
 
-/** The subjects the approval gate must know for the setup agent: a website, the waiting setup commands, then independent eval spend. */
-export function setupDecisionSubjects(flow: TaskFlowDeps): DecisionSubject[] {
-  return [createSetupHostSubject({ store: flow.store }), createSetupProposalSubject({ flow }), createEvalSpendSubject({ store: flow.store, companyId: flow.companyId })];
+/** The subjects the approval gate must know for the setup agent: a website a run asked for, a project's waiting setup, then independent eval spend. */
+export function setupDecisionSubjects(flow: TaskFlowDeps, sandboxDenied?: (project: string) => readonly string[]): DecisionSubject[] {
+  return [createSetupHostSubject({ store: flow.store, ...(sandboxDenied === undefined ? {} : { sandboxDenied }) }), createSetupProposalSubject({ flow }), createEvalSpendSubject({ store: flow.store, companyId: flow.companyId })];
 }
 import { createSessionControlHost } from "./host.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
@@ -54,6 +55,8 @@ export interface LocalSetupAgentOptions {
   modelAccessConfigured: () => Promise<boolean>;
   /** The websites the install's machines reach by their own list. */
   installDomains?: (() => readonly string[]) | undefined;
+  /** FIX-0518: the names a project's test sandbox is denied (empty when the owner allowed model hosts for it). A website ask for one is refused as a model host and can never be approved. */
+  sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** `ROVARA_SETUP_AGENT=0`: the feature is off and every route and the worker's callback answer as an unknown path. */
   enabled: boolean;
 }
@@ -144,7 +147,10 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       };
     });
     const apply = await readSetupApply({ flow, store, companyId, now: options.now }, project);
-    const evalSpend = await readEvalSpendItem({ store, companyId }, project);
+    const evalSpend = await readEvalSpendItem({ store, companyId, members: {
+      companyRole: person => localOwnerMembers().companyRole({ ...person, ...(person.developerId === ownerDeveloperId ? { principal: options.owner } : {}) }),
+      projectGrant: () => undefined,
+    } }, project);
     const waiting = apply !== undefined && apply.state === "checking";
     void pointerTask;
     const cannotStart = !options.enabled ? "Setting a project up with Rovara is off on this install." : (await options.modelAccessConfigured()) ? undefined : "Rovara has no model key on this install, so it cannot run a setup. Set a model key, then restart `rovara up`.";
@@ -205,7 +211,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     forgetHost: (input) => guarded(async () => ((await forgetApprovedHost({ store, now: options.now }, companyId, input.project, input.host, ownerDeveloperId)) ? { ok: true, message: "That website is taken back for the next machines of this project." } : { ok: false, reason: "not_found", message: "That website is not approved." })),
     check: (input) => guarded(async () => { await startProjectSetupCheck(flow, { project: input.project, requestId: input.requestId, startedBy: ownerDeveloperId }); return { ok: true, message: "Rovara is checking the project's setup." }; }),
     decideHost: (input) => guarded(() => decide(SETUP_HOST_KIND, hostAskSubjectId(companyId, input.project, input.host), input, input.decision === "approve" ? "That website is allowed for the next setup run." : "That website is refused.")),
-    decideEval: (input) => guarded(() => decide(EVAL_SPEND_KIND, input.project, input, input.decision === "approve" ? "Eval spend is approved within this estimate and the monthly cap." : "Eval spend was rejected.")),
+    decideEval: (input) => guarded(() => decide(EVAL_SPEND_KIND, input.project, input, input.decision === "approve" ? "Eval spend is approved within this estimate. Each run still needs a monthly-cap reservation." : "Eval spend was rejected.")),
     decideProposal: (input) => guarded(() => decide(SETUP_APPLY_KIND, input.project, input, input.decision === "approve" ? "The project now uses these setup commands." : "That setup was rejected.")),
   };
 
@@ -260,6 +266,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     enabled: options.enabled,
     callback: {
       installDomains: options.installDomains,
+      sandboxDenied: options.sandboxDenied,
       // The owner is the only person who may type a command (read live at hand-over).
       mayStillRun: async (by) => by === ownerDeveloperId,
     },
