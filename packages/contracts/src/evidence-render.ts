@@ -116,8 +116,10 @@ function checksLines(checks: readonly Check[]): string[] {
   const other = checks.filter((check) => !(OUTCOME_ORDER as readonly string[]).includes(check.after)).length;
   if (other > 0) counts.push(`${number(other)} ${NEWER_EVIDENCE_WORDS.toLowerCase()}`);
   const listed = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).map(checkLine);
+  const measuresSource = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).some((check) => (check.measures?.length ?? 0) > 0)
+    ? ["Measures: reported by the project's test runner, not measured by Rovara"] : [];
   const more = checks.length - listed.length;
-  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
+  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...measuresSource, ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
 }
 
 function trustOf(entry: Dependency): EvidenceTrustClass | undefined {

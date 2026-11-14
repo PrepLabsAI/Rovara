@@ -1,0 +1,31 @@
+{
+  "format": "json",
+  "total": 4,
+  "passed": 1,
+  "failed": 1,
+  "skipped": 1,
+  "errored": 1,
+  "tests": [
+    {
+      "file": "cart.test.ts",
+      "name": "same",
+      "status": "passed",
+      "durationMs": 12
+    },
+    {
+      "file": "cart.test.ts",
+      "name": "same",
+      "status": "failed"
+    },
+    {
+      "file": "cart.test.ts",
+      "name": "skip",
+      "status": "skipped"
+    },
+    {
+      "file": "load.test.ts",
+      "name": "load.test.ts",
+      "status": "errored"
+    }
+  ]
+}
