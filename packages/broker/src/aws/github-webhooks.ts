@@ -1,9 +1,10 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
+import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
 import { isConditional } from "./broker-shared.js";
 import { feedbackReopenedMeasure, type FeedbackReviewMeasure } from "../developer/feedback-review-measures.js";
 
@@ -797,17 +798,8 @@ export async function handleGithubWebhook(input: {
   };
 }
 
-/** Validates GitHub's X-Hub-Signature-256 over the unchanged UTF-8 request body. */
-export function verifyGithubWebhookSignature(
-  rawBody: string,
-  signatureHeader: string | undefined,
-  secret: string,
-): boolean {
-  if (signatureHeader === undefined || !/^sha256=[a-f0-9]{64}$/i.test(signatureHeader)) return false;
-  const supplied = Buffer.from(signatureHeader.slice("sha256=".length), "hex");
-  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest();
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
-}
+// The signature check lives with the GitHub code host adapter, so the webhook route and the neutral normaliser share one function and cannot drift.
+export { verifyGithubWebhookSignature };
 
 /** Verifies provider signature, event shape and configured repository scope before reserving a delivery. */
 export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Promise<ReceivedGithubWebhook> {
