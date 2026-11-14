@@ -372,5 +372,10 @@ export * from "./policy.js";
 export * from "./presets.js";
 
 export * from "./measures-file.js";
+// TE-F3 (M2/M3a): the eval check. Pure and additive: the verdict and noise band, the base score cache, pacing, the hidden eval set rules. Nothing outside tests and the worker's eval round calls these yet.
+export * from "./eval-hidden-set.js";
+export * from "./eval-pacing.js";
+export * from "./eval-base-cache.js";
+export * from "./eval-check.js";
 export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";
