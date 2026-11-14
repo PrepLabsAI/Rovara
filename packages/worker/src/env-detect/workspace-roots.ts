@@ -1,6 +1,6 @@
 // Static workspace declarations only: never evaluate repository code or invoke a build tool.
 import { posix } from "node:path";
-import { boundedReader } from "./index.js";
+import { boundedReader, ENV_DETECT_MAX_PATHS } from "./index.js";
 import { blankBlocks } from "./java.js";
 import { blocksBetween } from "./types.js";
 import { parseSafeYaml } from "./safe-yaml.js";
@@ -11,6 +11,41 @@ const invalid = (): never => { throw new Error("Workspace definitions are unsupp
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : invalid();
 const strings = (value: unknown): string[] => Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : invalid();
 const relative = (path: string): boolean => path.length > 0 && path.length <= 512 && !path.startsWith("/") && !/[\\\p{Cc}\p{Cf}]/u.test(path) && !path.split("/").some((part) => part === "" || part === "." || part === "..");
+
+/** Compile the static path-glob subset once, then seek directly to its literal prefix. */
+function compileGlob(pattern: string): { prefix: string; match: RegExp } {
+  if (pattern !== "." && !relative(pattern)) return invalid();
+  if (/[{}()]/u.test(pattern)) return invalid();
+  const pieces = pattern.split("/").map((segment, index, all) => {
+    if (segment === "**") return index === all.length - 1 ? "(?:[^/.][^/]*(?:/[^/.][^/]*)*)?" : "(?:[^/.][^/]*/)*";
+    if (segment.includes("**")) return invalid();
+    let expression = segment.startsWith(".") ? "" : "(?!\\.)";
+    for (let at = 0; at < segment.length; at += 1) {
+      const char = segment[at]!;
+      if (char === "*") expression += "[^/]*";
+      else if (char === "?") expression += "[^/]";
+      else if (char === "[") {
+        const end = segment.indexOf("]", at + 1);
+        if (end < 0 || !/^!?[A-Za-z0-9_-]+$/u.test(segment.slice(at + 1, end))) return invalid();
+        expression += `[${segment.slice(at + 1, end).replace(/^!/u, "^")}]`;
+        at = end;
+      } else expression += char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    }
+    return expression + (index < all.length - 1 ? "/" : "");
+  });
+  return { prefix: pattern.split(/[*?[]/u)[0]!, match: new RegExp(`^${pieces.join("")}$`, "u") };
+}
+
+function lowerBound(sorted: readonly string[], prefix: string): number {
+  let left = 0;
+  let right = sorted.length;
+  while (left < right) {
+    const middle = (left + right) >>> 1;
+    if (sorted[middle]! < prefix) left = middle + 1;
+    else right = middle;
+  }
+  return left;
+}
 
 function yaml(text: string): unknown {
   const parsed = parseSafeYaml(text);
@@ -55,6 +90,7 @@ function pythonMembers(text: string): { members: string[]; exclude: string[] } |
 
 /** undefined means no workspace; an empty/invalid declaration is refused, never guessed from directory names. */
 export async function discoverWorkspaceRoots(paths: readonly string[], load: (path: string) => Promise<string | undefined>): Promise<string[] | undefined> {
+  if (paths.length > ENV_DETECT_MAX_PATHS) return invalid();
   const inventory = new Set(paths);
   const metadata = paths.filter((path) => DEFINITIONS.has(path) || (inventory.has("nx.json") && path.endsWith("/project.json")) || path.endsWith("/pom.xml"));
   // Root declarations must remain readable even when unrelated nested examples fill the inventory.
@@ -65,46 +101,69 @@ export async function discoverWorkspaceRoots(paths: readonly string[], load: (pa
     if (text === undefined) throw new Error("Workspace definitions could not be read.");
     return text;
   };
-  const candidates = [...new Set(paths.filter((path) => MANIFEST.test(path)).map((path) => posix.dirname(path)))];
+  const candidates = [...new Set(paths.filter((path) => MANIFEST.test(path)).map((path) => posix.dirname(path)))].sort();
+  const candidateSet = new Set(candidates);
   const roots = new Set<string>();
   let workspace = false;
   const add = (root: string): void => {
-    if (!candidates.includes(root)) return invalid();
+    if (!candidateSet.has(root)) return invalid();
     roots.add(root);
+  };
+  let patternCount = 0;
+  const compiled = new Map<string, ReturnType<typeof compileGlob>>();
+  const matches = (pattern: string): string[] => {
+    let glob = compiled.get(pattern);
+    if (glob === undefined) { glob = compileGlob(pattern); compiled.set(pattern, glob); }
+    const found: string[] = [];
+    for (let index = lowerBound(candidates, glob.prefix); index < candidates.length && candidates[index]!.startsWith(glob.prefix); index += 1) {
+      const root = candidates[index]!;
+      if (glob.match.test(root)) found.push(root);
+    }
+    return found;
   };
   const expand = (members: string[], exclude: string[] = []): void => {
     workspace = true;
+    patternCount += members.length + exclude.length;
+    if (patternCount > 256) return invalid();
     const positive = members.filter((pattern) => !pattern.startsWith("!"));
     const negative = [...exclude, ...members.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1))];
-    for (const pattern of [...positive, ...negative]) if (pattern !== "." && !relative(pattern)) return invalid();
+    const excluded = new Set(negative.flatMap(matches));
     for (const pattern of positive) {
-      const matches = candidates.filter((root) => posix.matchesGlob(root, pattern));
-      if (matches.length === 0) return invalid();
-      for (const root of matches) if (!negative.some((pattern) => posix.matchesGlob(root, pattern))) add(root);
+      const found = matches(pattern);
+      if (found.length === 0) return invalid();
+      for (const root of found) if (!excluded.has(root)) add(root);
     }
   };
 
-  if (inventory.has("pnpm-workspace.yaml")) expand(strings(object(yaml(await read("pnpm-workspace.yaml")))["packages"]));
+  if (inventory.has("pnpm-workspace.yaml")) {
+    const manifest = object(yaml(await read("pnpm-workspace.yaml")));
+    if (Object.hasOwn(manifest, "packages")) expand(strings(manifest["packages"]));
+  }
+  let malformedPackage = false;
   if (inventory.has("package.json")) {
-    const manifest = object(JSON.parse(await read("package.json")) as unknown);
-    if (Object.hasOwn(manifest, "workspaces") && !inventory.has("pnpm-workspace.yaml")) {
+    const text = await read("package.json");
+    let manifest: Record<string, unknown> = {};
+    try { manifest = object(JSON.parse(text) as unknown); } catch { malformedPackage = true; }
+    if (Object.hasOwn(manifest, "workspaces") && !workspace) {
       const value = manifest["workspaces"];
-      expand(strings(Array.isArray(value) ? value : object(value)["packages"]));
+      if (Array.isArray(value)) expand(strings(value));
+      else if (Object.hasOwn(object(value), "packages")) expand(strings(object(value)["packages"]));
     }
   }
   if (inventory.has("nx.json")) {
     if (bounded.truncated) return invalid();
     object(JSON.parse(await read("nx.json")) as unknown);
-    workspace = true;
     if (inventory.has("workspace.json")) {
       const projects = object(object(JSON.parse(await read("workspace.json")) as unknown)["projects"]);
       for (const project of Object.values(projects)) {
+        workspace = true;
         const root = typeof project === "string" ? project : object(project)["root"];
         if (typeof root !== "string") return invalid();
         add(root);
       }
     }
     for (const path of metadata.filter((path) => path.endsWith("/project.json"))) {
+      workspace = true;
       object(JSON.parse(await read(path)) as unknown);
       add(posix.dirname(path));
     }
@@ -115,11 +174,18 @@ export async function discoverWorkspaceRoots(paths: readonly string[], load: (pa
   }
   for (const path of ["settings.gradle", "settings.gradle.kts"]) {
     if (!inventory.has(path)) continue;
-    const text = blankBlocks(await read(path), "/*", "*/").replace(/\/\/[^\n]*/gu, "");
-    if (/\b(?:projectDir|includeBuild)\b/u.test(text)) return invalid();
-    for (const match of text.matchAll(/\binclude\s*(\([^)]*\)|[^\n;]*)/gu)) {
+    // Tokenize comments and strings before keywords so names and quoted text are inert.
+    const text = (await read(path)).replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/gu, (token) => token.startsWith("/") ? token.replace(/[^\n]/gu, " ") : token);
+    for (const token of text.matchAll(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(include|projectDir)\b/gu)) {
+      if (token[1] === undefined) continue;
+      if (token[1] === "projectDir") return invalid();
       workspace = true;
+      const tail = text.slice(token.index + token[0].length).trimStart();
+      const parenthesized = tail.startsWith("(");
+      const match = /^(\([^)]*\)|[^\n;]*)/u.exec(tail)!;
+      if (parenthesized && !match[1]!.endsWith(")")) return invalid();
       const body = match[1]!.replace(/^\(|\)$/gu, "").trim();
+      if (!parenthesized && body.endsWith(",")) return invalid();
       if (!/^["'][^"'\n]+["'](?:\s*,\s*["'][^"'\n]+["'])*\s*,?$/u.test(body)) return invalid();
       for (const item of body.matchAll(/["']([^"']+)["']/gu)) add(item[1]!.replace(/^:/u, "").replaceAll(":", "/"));
     }
@@ -127,7 +193,10 @@ export async function discoverWorkspaceRoots(paths: readonly string[], load: (pa
   if (inventory.has("pom.xml")) {
     const queue = ["pom.xml"];
     for (const path of queue) {
-      const text = blankBlocks(await read(path), "<!--", "-->");
+      const raw = path === "pom.xml" && !workspace ? await bounded.reader.read(path) : await read(path);
+      // Today's single-repo detector skips an oversized root pom. Required child poms still refuse.
+      if (raw === undefined) continue;
+      const text = blankBlocks(raw, "<!--", "-->");
       const blocks = blocksBetween(text, "<modules>", "</modules>");
       if (blankBlocks(text, "<modules>", "</modules>").includes("<modules")) return invalid();
       if (blocksBetween(text, "<profiles>", "</profiles>").some((block) => block.inner.includes("<modules"))) return invalid();
@@ -152,6 +221,7 @@ export async function discoverWorkspaceRoots(paths: readonly string[], load: (pa
     if (members !== undefined) expand(members.members, members.exclude);
   }
   if (!workspace) return undefined;
+  if (malformedPackage) return invalid();
   if (paths.some((path) => !relative(path))) return invalid();
   if (roots.size === 0) return invalid();
   // Preserve the root package's own commands, while excluding every child unit from its reader.
