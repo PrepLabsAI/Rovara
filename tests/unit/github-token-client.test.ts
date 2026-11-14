@@ -130,7 +130,7 @@ describe("the owner-token GitHub client", () => {
     for (const name of GITHUB_CODE_HOST_PROVIDER_METHODS) expect(typeof (client as unknown as Record<string, unknown>)[name], name).toBe("function");
     // The App client's other public methods (agent tokens, webhook history, installation lists) are not reachable through it.
     const surface = Object.keys(client).sort();
-    expect(surface).toEqual([...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "listPullRequestComments", "postPullRequestComment", "commitFilesToBranch", "findLessonsPullRequest", "deleteLessonsBranch"].sort());
+    expect(surface).toEqual([...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "getCommitChanges", "listPullRequestComments", "postPullRequestComment", "commitFilesToBranch", "findLessonsPullRequest", "deleteLessonsBranch"].sort());
     expect(Object.isFrozen(client)).toBe(true);
     for (const name of ["createAgentInstallationToken", "agentRepositoryReader", "appSlug", "oauthClient", "listWebhookDeliveries", "installation"]) expect(name in client).toBe(false);
   });

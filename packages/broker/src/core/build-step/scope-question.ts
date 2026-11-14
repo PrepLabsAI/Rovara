@@ -103,21 +103,26 @@ export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly 
   const ownTier = flow.tier?.headSha === headTier.headSha ? flow.tier : undefined;
   const reasonsHere = [...headTier.reasons, ...(ownTier?.reasons ?? [])];
   const named = reasonsHere.filter((reason) => NAMING_CODES.has(reason.code) && !COULDNT_CHECK.has(reason.code) && reason.path !== undefined && fileOf(reason.path) !== undefined);
+  // DEC 213: the commits pushed between checks that the rules flagged, each named with what was found (the reason's own words, written by Rovara from the rules), on the head's own tier only.
+  const commitLines = [...new Set(headTier.reasons.filter((reason) => reason.code === "unseen_commit_flagged" && reason.path !== undefined).map((reason) => reason.path!))].slice(0, 5);
+  const withCommits = (area: string): string => (commitLines.length === 0 ? area : [area, ...commitLines].filter((part) => part !== "").join("; "));
   if (unreadable) {
     // Files with no patch and no lines (a binary, a pure rename, a mode change) can be named, and a person may keep them explicitly; a file with lines the host did not show (too large) cannot be judged.
     const unreadableFiles = files.filter((file) => file.patch === undefined && file.status !== "removed");
     if (!unreadableFiles.every((file) => file.additions + file.deletions === 0)) return { kind: "couldnt_check", area: "Rovara could not check this change", files: [], contentDigest: whole };
     const namedHere = named.filter((reason) => !unreadableFiles.some((file) => file.path === reason.path)).map((reason) => ({ path: reason.path!, area: tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path) }));
     const listed = [...unreadableFiles.map((file) => ({ path: file.path, area: "a file Rovara could not read (binary, renamed or mode-only)" })), ...namedHere];
-    return { kind: "scope", area: [...new Set(listed.map((file) => file.area))].join(", "), files: asFiles(listed).slice(0, 20), contentDigest: whole, headBound: true };
+    return { kind: "scope", area: withCommits([...new Set(listed.map((file) => file.area))].join(", ")), files: asFiles(listed).slice(0, 20), contentDigest: whole, headBound: true };
   }
   if (named.length > 0) {
     const seen = new Map<string, string>();
     for (const reason of named) if (!seen.has(reason.path!)) seen.set(reason.path!, reason.code === "outside_plan_code" ? "code the plan did not name" : tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path));
     const all = [...seen.entries()].map(([path, area]) => ({ path, area }));
-    return { kind: "scope", area: [...new Set(all.map((file) => file.area))].join(", "), files: asFiles(all).slice(0, 20), contentDigest: whole };
+    return { kind: "scope", area: withCommits([...new Set(all.map((file) => file.area))].join(", ")), files: asFiles(all).slice(0, 20), contentDigest: whole };
   }
   const changed = files.map((file) => ({ path: file.path, area: "changed file" }));
+  // Flagged only in a commit pushed between checks: those commits, by name, with what will land (the changed files).
+  if (commitLines.length > 0) return { kind: "scope", area: withCommits(""), files: asFiles(changed).slice(0, 20), contentDigest: whole };
   const flagged = (ownTier?.reasons ?? []).filter((reason) => reason.code.startsWith("reviewer_") && !COULDNT_CHECK.has(reason.code) && reason.code !== "reviewer_text_instructions");
   if (flagged.length > 0) {
     const questions = flagged.map((reason) => TIER_QUESTIONS.find((question) => `reviewer_${question.id}` === reason.code)?.text).filter((text): text is string => text !== undefined);

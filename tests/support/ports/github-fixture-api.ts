@@ -46,6 +46,8 @@ export class GitHubFixtureApi {
   readonly tokens: Array<{ token: string; permissions: Record<string, string>; repositories?: string[] }> = [];
   /** Every request served, in order: method and path. */
   readonly requests: Array<{ method: string; path: string }> = [];
+  /** DEC 213: how the commit read (`GET /repos/../commits/<sha>`) answers: files a page (GitHub's is 100), a file whose patch GitHub leaves out, totals that do not add up (GitHub's 3,000-file limit). */
+  readonly commitReads: { pageSize: number; withoutPatch?: string; extraAdditions?: number } = { pageSize: 100 };
 
   constructor(private readonly model: FakeHostModel, private readonly options: GitHubFixtureOptions = {}) {}
 
@@ -172,6 +174,19 @@ export class GitHubFixtureApi {
     if (method === "GET" && match) {
       const head = this.model.branches.get(match[1]!);
       return head === undefined ? NOT_FOUND() : json(200, { ref: `refs/heads/${match[1]}`, object: { type: "commit", sha: head } });
+    }
+    match = new RegExp(`^${ROOT}/commits/([0-9a-f]{40})$`).exec(path);
+    if (method === "GET" && match) {
+      const revision = this.model.revisions.get(match[1]!);
+      if (revision === undefined) return json(422, { message: "No commit found for SHA" });
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const size = this.commitReads.pageSize;
+      const all = this.model.commitChangedFiles(revision.sha).map((file) => ({
+        filename: file.path, status: file.status, additions: file.additions, deletions: file.deletions, ...(file.patch === undefined || file.path === this.commitReads.withoutPatch ? {} : { patch: file.patch }),
+      }));
+      const stats = { additions: all.reduce((total, file) => total + file.additions, 0) + (this.commitReads.extraAdditions ?? 0), deletions: all.reduce((total, file) => total + file.deletions, 0) };
+      return json(200, { sha: revision.sha, parents: revision.parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size) },
+        all.length > page * size ? { link: `<${API}${ROOT}/commits/${revision.sha}?per_page=100&page=${page + 1}>; rel="next"` } : {});
     }
     match = new RegExp(`^${ROOT}/git/commits/([0-9a-f]{40})$`).exec(path);
     if (method === "GET" && match) {

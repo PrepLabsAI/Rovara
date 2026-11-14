@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import type { ChangeRequestFile, CodeHost, HostScope, WorkflowSnapshot } from "@agentx/contracts";
 import { changedFilesFromHostFiles, plainChangedPath } from "../proof/changed-files.js";
-import { TIER_ENTRY_KINDS, canonicalPatchText, factKey, type DiffInput, type HeadFacts, type TierEntryKind, type TierFile, type TierFileEntry } from "../decisions/change-tier.js";
+import { TIER_ENTRY_KINDS, TIER_REASON_CODES, canonicalPatchText, factKey, tierFromDiff, type DiffInput, type HeadFacts, type TierEntryKind, type TierFile, type TierFileEntry, type TierReason } from "../decisions/change-tier.js";
 import { DOCS_SITE_PROBES, fileTypeOf, normalizedTierPath } from "../decisions/sensitive-list.js";
 import { changeRequestRef, readChangeRequestFiles } from "./host-port.js";
 
@@ -260,52 +260,116 @@ export function baseCommitsOf(workflow: Pick<WorkflowSnapshot, "reviewBase" | "c
   return bases;
 }
 
+/** DEC 213: the most parents a commit pushed between checks may have (an ordinary commit or a two-parent merge); a commit with more is not scanned, and the head is escalated. */
+export const COMMIT_PARENTS_MAX = 2;
+/** The most commits read from the base branch's history (its current head, and the recorded base commits, down): those commits are the base branch's, not the task's. */
+export const BASE_HISTORY_READS_MAX = 40;
+/** The risky reason codes of the rules (the ones before the first standard one). */
+const RISKY_CODES: ReadonlySet<string> = new Set<string>(TIER_REASON_CODES.slice(0, TIER_REASON_CODES.indexOf("more_than_lines")));
+/** Risky reasons that do not flag one commit read on its own: an empty commit, its size (the size of the final diff is what counts), a hint, and the walk's own reasons. */
+const NOT_A_COMMIT_FLAG: ReadonlySet<string> = new Set(["no_diff_files", "large_change", "eval_hint", "incomplete_diff", "unscanned_commits", "unseen_commit_flagged"]);
+/**
+ * What a MERGE commit's own text can add. Its listed diff (against its first parent) also holds everything the other parents brought in (a newer base branch, a side branch whose commits are walked on their own), so the
+ * paths in it are not the merge's: only text added in it counts (a key written while resolving a conflict).
+ */
+const MERGE_CONTENT_CODES: ReadonlySet<string> = new Set(["secret_like_text", "reviewer_injection_text", "bidi_control", "invisible_character", "line_break_character", "confusable_text"]);
+const COMMIT_SCAN_AT = new Date(0).toISOString();
+
+/** A commit pushed between checks whose own diff the rules flagged, with the risky reasons it was flagged for (paths as the host listed them; never the flagged text). */
+export interface FlaggedCommit { repositoryId: string; commit: string; reasons: TierReason[] }
+export interface UnseenCommitsRead {
+  /** Commits found between the heads and the versions the task saw. */
+  count: number;
+  /** A path ended without reaching a seen commit (the first commit), or the walk read more than `UNSEEN_WALK_MAX` commits: what was pushed is not known at all. */
+  capped: boolean;
+  /** Commits found whose own diff could not be scanned: the host has no `commitChanges` or could not answer it, it cut the file list, or the commit has more parents than `COMMIT_PARENTS_MAX`. */
+  unscanned: number;
+  /** The commits whose own diff was flagged. */
+  flagged: FlaggedCommit[];
+}
+
+/** The reasons one commit's own diff is flagged for (empty: clean), or undefined when its list is not whole (not scanned). A merge is flagged only by text added in it (`MERGE_CONTENT_CODES`). */
+export function commitFlagsOf(repositoryId: string, read: { files: readonly ChangeRequestFile[]; complete: boolean }, merge: boolean): TierReason[] | undefined {
+  const files = tierFilesOfRead(repositoryId, read);
+  if (!files.complete) return undefined;
+  const tier = tierFromDiff({ files: files.files, complete: true }, { at: COMMIT_SCAN_AT });
+  return tier.reasons.filter((reason) => RISKY_CODES.has(reason.code) && !NOT_A_COMMIT_FLAG.has(reason.code) && (!merge || MERGE_CONTENT_CODES.has(reason.code)));
+}
+
 /**
  * The commits between each current head and the versions below it that the task saw (`seenHeadsOf`), along EVERY parent (a person's merge of another branch brings its commits in by a second parent; one first-parent line would
- * miss them): a breadth-first walk that stops each path at a seen commit. Those versions were pushed between two checks and no tier, secret scan or review ever read them: a credential added in one and taken out in the next
- * leaves a clean final diff. The history of the recorded base commits counts as seen (a merge of the base branch, Rovara's own or a person's, brings the base branch's commits in, which are not the task's), found only when the walk
- * meets a merge. `capped` is true when a path ends without reaching a seen commit (the first commit), or more than `UNSEEN_WALK_MAX` commits were read in all: what was pushed is then not known at all. A host that cannot answer
- * THROWS (the caller leaves the record as it was).
+ * miss them): a breadth-first walk that stops each path at a seen commit, reading at most `UNSEEN_WALK_MAX` commits in all. Those versions were pushed between two checks and no tier read them: a credential added in one and
+ * taken out in the next leaves a clean final diff. So each one is scanned on its OWN diff (DEC 213: the host's `commitChanges`, the same rules as the head's: secret-like text, risky paths, file mode and type), and only a
+ * flagged one counts against the head (`flagged`).
+ * The base branch's history counts as seen: the commits at and below the recorded base commits, and those reachable from the base branch's CURRENT head (`target.baseBranch`, read once, at most `BASE_HISTORY_READS_MAX`
+ * commits): GitHub's "Update branch" merges a newer base-branch head in as a second parent, and those commits were reviewed when they landed there. A host that cannot list a commit's parents THROWS (the caller leaves the
+ * record as it was); a host that cannot give a commit's changes leaves that commit `unscanned`.
  */
 export async function unseenCommits(
-  targets: ReadonlyArray<TierReadTarget & { headSha: string }>, seen: ReadonlySet<string>, scope: HostScope, beforeRequest?: () => void, bases: ReadonlyMap<string, readonly string[]> = new Map(),
-): Promise<{ count: number; capped: boolean }> {
+  targets: ReadonlyArray<TierReadTarget & { headSha: string; baseBranch?: string | undefined }>, seen: ReadonlySet<string>, scope: HostScope, beforeRequest?: () => void, bases: ReadonlyMap<string, readonly string[]> = new Map(),
+): Promise<UnseenCommitsRead> {
   let count = 0;
   let capped = false;
+  let unscanned = 0;
+  const flagged: FlaggedCommit[] = [];
   for (const target of targets) {
     const repository = { url: target.repositoryUrl };
     const parentsOf = async (commit: string): Promise<string[]> => { beforeRequest?.(); return target.host.commitParents(repository, commit, scope); };
-    // The commits at and below the recorded base commits (at most `UNSEEN_WALK_MAX` reads), found once, when the walk first meets a merge.
+    // The base branch's history (at most `BASE_HISTORY_READS_MAX` reads), found once, when the walk first meets a commit it has not seen.
     let baseHistory: Set<string> | undefined;
     const baseHistoryOf = async (): Promise<Set<string>> => {
       if (baseHistory !== undefined) return baseHistory;
       const found = new Set(bases.get(target.repositoryId) ?? []);
       baseHistory = found;
       const queue = [...found];
-      for (let step = 0; step < UNSEEN_WALK_MAX && queue.length > 0; step += 1) {
+      if (target.baseBranch !== undefined) {
+        try {
+          beforeRequest?.();
+          const current = await target.host.baseBranchHead(repository, target.baseBranch, scope);
+          if (SHA40.test(current) && !found.has(current)) { found.add(current); queue.unshift(current); }
+        } catch { /* the base branch's head could not be read: its newer commits are walked as the task's */ }
+      }
+      for (let step = 0; step < BASE_HISTORY_READS_MAX && queue.length > 0; step += 1) {
         for (const parent of await parentsOf(queue.shift()!)) if (!found.has(parent)) { found.add(parent); queue.push(parent); }
       }
       return found;
     };
-    // The head itself is walked from even when it was seen (tiered): its own unseen ancestors are its own reason on every pass.
+    /** One unseen commit, scanned on its own diff: its parents (from the same read when it answers), and whether it was scanned. */
+    const scan = async (commit: string): Promise<string[]> => {
+      const read = target.host.commitChanges === undefined ? undefined : await (async () => {
+        beforeRequest?.();
+        try {
+          const answer = await target.host.commitChanges!(repository, commit, scope);
+          return Array.isArray(answer.parents) && answer.parents.every((parent) => typeof parent === "string" && SHA40.test(parent)) && Array.isArray(answer.files) ? answer : undefined;
+        } catch { return undefined; }
+      })();
+      const parents = read?.parents ?? await parentsOf(commit);
+      const flags = read === undefined || read.complete !== true || parents.length > COMMIT_PARENTS_MAX ? undefined : commitFlagsOf(target.repositoryId, read, parents.length > 1);
+      if (flags === undefined) unscanned += 1;
+      else if (flags.length > 0) flagged.push({ repositoryId: target.repositoryId, commit, reasons: flags });
+      return parents;
+    };
+    // The head itself is walked from even when it was seen (tiered): its own unseen ancestors are its own reason on every pass. Its own changes are the change request's (read whole), so it is not scanned again.
     const visited = new Set<string>([target.headSha]);
-    const queue = [target.headSha];
+    const queue: Array<{ commit: string; head: boolean }> = [{ commit: target.headSha, head: true }];
     let reads = 0;
     while (queue.length > 0) {
       if (reads >= UNSEEN_WALK_MAX) { capped = true; break; }
-      const parents = await parentsOf(queue.shift()!);
+      const next = queue.shift()!;
+      const parents = next.head ? await parentsOf(next.commit) : await scan(next.commit);
       reads += 1;
       // A path that ends at the first commit without meeting a seen one: nothing says what was pushed.
       if (parents.length === 0) { capped = true; continue; }
-      const known = parents.length > 1 ? await baseHistoryOf() : undefined;
+      // More parents than the limit (an octopus merge): not scanned (counted above for an unseen one; the head's own counts here), and not walked.
+      if (parents.length > COMMIT_PARENTS_MAX) { if (next.head) unscanned += 1; continue; }
       for (const parent of parents) {
         if (visited.has(parent)) continue;
         visited.add(parent);
-        if (seen.has(parent) || known?.has(parent) === true) continue;
+        if (seen.has(parent) || (await baseHistoryOf()).has(parent)) continue;
         count += 1;
-        queue.push(parent);
+        queue.push({ commit: parent, head: false });
       }
     }
   }
-  return { count, capped };
+  return { count, capped, unscanned, flagged };
 }

@@ -4,7 +4,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
   type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
-  type ChangeRequestRef, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
+  type ChangeRequestRef, type CommitChanges, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
   type RepositoryRef,
 } from "@agentx/contracts";
@@ -130,6 +130,13 @@ export class FakeCodeHost implements CodeHost {
   async commitParents(repository: RepositoryRef, revision: string, scope: HostScope): Promise<string[]> {
     this.checkScope(scope);
     return ([...this.registered(repository).revision(revision).parents]);
+  }
+
+  /** DEC 213: one commit's own changes, against its first parent. The fake never cuts the list. */
+  async commitChanges(repository: RepositoryRef, revision: string, scope: HostScope): Promise<CommitChanges> {
+    this.checkScope(scope);
+    const model = this.registered(repository);
+    return { files: model.commitChangedFiles(revision), complete: true, parents: [...model.revision(revision).parents] };
   }
 
   /** A budgeted read: it counts against the pass's allowance, and a host that has told Rovara to slow down says so with the neutral signal. */

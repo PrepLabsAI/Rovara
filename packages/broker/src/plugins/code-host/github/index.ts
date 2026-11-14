@@ -9,7 +9,7 @@
 // The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
   agentXError, ChangeRequestInputSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
-  type BranchPage, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
+  type BranchPage, type CodeOwnersRead, type CommitChanges, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef,
 } from "@agentx/contracts";
@@ -63,6 +63,7 @@ function checkedScope(scope: HostScope): HostScope {
 
 export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHubCodeHostOptions): CodeHost {
   const pathKindOfProvider = typeof provider.getPathKindAtCommit === "function" ? provider.getPathKindAtCommit.bind(provider) : undefined;
+  const commitChangesOfProvider = typeof provider.getCommitChanges === "function" ? provider.getCommitChanges.bind(provider) : undefined;
   const commitFilesOfProvider = typeof provider.commitFilesToBranch === "function" ? provider.commitFilesToBranch.bind(provider) : undefined;
   const findPullRequestOfProvider = typeof provider.findLessonsPullRequest === "function" ? provider.findLessonsPullRequest.bind(provider) : undefined;
   const deleteBranchOfProvider = typeof provider.deleteLessonsBranch === "function" ? provider.deleteLessonsBranch.bind(provider) : undefined;
@@ -130,6 +131,14 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
     async commitParents(repository: RepositoryRef, revision: string, scope: HostScope): Promise<string[]> {
       return provider.getCommitParents(repository.url, revision, checkedScope(scope));
     },
+
+    // DEC 213: one commit's own changes, in the pull request files' mapping. Only where the client can read them.
+    ...(commitChangesOfProvider === undefined ? {} : {
+      async commitChanges(repository: RepositoryRef, revision: string, scope: HostScope): Promise<CommitChanges> {
+        const read = await commitChangesOfProvider(repository.url, revision, checkedScope(scope));
+        return { files: read.files.map(fileOf), complete: read.complete, parents: [...read.parents] };
+      },
+    }),
 
     async listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage> {
       const checked = checkedScope(scope);

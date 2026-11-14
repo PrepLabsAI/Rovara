@@ -197,6 +197,30 @@ const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
     },
   },
   {
+    name: "gives one commit's own changes: its files against its first parent (with patches), whether the list is whole, and its parents",
+    needs: ({ host }) => host.commitChanges !== undefined,
+    async run({ host, model, repository, unregistered, scope }) {
+      const branch = "feature/one-commit";
+      const first = model.commit(branch, { "src/a.ts": "export const a = 1;\n", "README.md": "Hello.\n" });
+      const second = model.commit(branch, { "src/a.ts": "export const a = 2;\n", "README.md": null, "src/b.ts": "export const b = 1;\n" });
+      const read = await host.commitChanges!(repository, second, scope);
+      expect(read.complete).toBe(true);
+      expect(read.parents).toEqual([first]);
+      const byPath = new Map(read.files.map((file) => [file.path, file]));
+      expect([...byPath.keys()].sort()).toEqual(["README.md", "src/a.ts", "src/b.ts"]);
+      expect(byPath.get("src/a.ts")).toMatchObject({ status: "modified" });
+      expect(byPath.get("src/a.ts")!.additions).toBeGreaterThan(0);
+      expect(byPath.get("src/a.ts")!.deletions).toBeGreaterThan(0);
+      expect(byPath.get("src/a.ts")!.patch).toContain("+export const a = 2;");
+      expect(byPath.get("src/b.ts")).toMatchObject({ status: "added", deletions: 0 });
+      expect(byPath.get("README.md")).toMatchObject({ status: "removed" });
+      // Only that commit's own diff: the first commit's README is not in the second's list as added.
+      expect((await host.commitChanges!(repository, first, scope)).files.map((file) => file.path).sort()).toEqual(["README.md", "src/a.ts"]);
+      expect(await rejection(() => host.commitChanges!(repository, "f".repeat(40), scope))).toBeDefined();
+      expect(await rejection(() => host.commitChanges!(unregistered, second, scope))).toBeDefined();
+    },
+  },
+  {
     name: "writes the lessons file on a branch Rovara owns: idempotent, never the base branch, never another path or branch name",
     needs: ({ host }) => host.commitFiles !== undefined,
     async run({ host, model, repository, scope }) {

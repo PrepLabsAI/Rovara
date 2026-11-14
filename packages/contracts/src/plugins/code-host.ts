@@ -304,6 +304,8 @@ export const ChangeRequestFileSchema = z.object({
 export type ChangeRequestFile = z.infer<typeof ChangeRequestFileSchema>;
 export const ChangeRequestFilesPageSchema = z.object({ files: z.array(ChangeRequestFileSchema).max(1_000), nextPage: z.number().int().positive().optional() }).strict();
 export type ChangeRequestFilesPage = z.infer<typeof ChangeRequestFilesPageSchema>;
+/** One commit's own changes (`CodeHost.commitChanges`, DEC 213). */
+export interface CommitChanges { files: ChangeRequestFile[]; complete: boolean; parents: string[] }
 
 export const FeedbackCommentSchema = z.object({
   id: ExternalIdSchema,
@@ -517,6 +519,12 @@ export interface CodeHost {
   baseBranchHead(repository: RepositoryRef, branch: string, scope: HostScope): Promise<string>;
   /** P6: the revisions a revision builds on (its parents): one for an ordinary commit, two for a merge, none for a root. Throws when the revision does not exist. */
   commitParents(repository: RepositoryRef, revision: string, scope: HostScope): Promise<string[]>;
+  /**
+   * DEC 213: one commit's OWN changes (against its first parent, as the host lists a commit), with the patch text in the change request's file shape, whether the list is whole, and the commit's parents. `complete` is
+   * false whenever the host cut anything (a file limit, or a changed file whose patch it did not give): what was cut is not known. Optional: a host without it leaves every commit pushed between two checks unscanned
+   * (the change is then risky). A host that cannot answer THROWS.
+   */
+  commitChanges?(repository: RepositoryRef, revision: string, scope: HostScope): Promise<CommitChanges>;
   listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage>;
   /**
    * The code owners of a branch, read and understood by the host itself (the owners file's syntax and its matching rules are the host's, never the core's), or undefined when the branch has none.

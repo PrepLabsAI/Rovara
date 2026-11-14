@@ -33,6 +33,26 @@ export interface FakeModelOptions {
 
 const sha1 = (text: string) => createHash("sha1").update(text).digest("hex");
 const lines = (text: string) => (text === "" ? 0 : text.split("\n").length);
+
+/** The changed files from `target` to `source`. Like a real host the fake gives the text of each change (every line of the old file removed, every line of the new one added), so what reads it sees a patch. */
+function diffOfFiles(target: ReadonlyMap<string, string>, source: ReadonlyMap<string, string>): ChangeRequestFile[] {
+  const textLines = (text: string): string[] => text.split("\n").filter((line, index, all) => !(index === all.length - 1 && line === ""));
+  const patchOf = (before: string | undefined, after: string): string => {
+    const old = before === undefined ? [] : textLines(before);
+    const now = textLines(after);
+    return `@@ -${old.length === 0 ? "0,0" : `1,${String(old.length)}`} +1,${String(now.length)} @@\n${[...old.map((line) => `-${line}`), ...now.map((line) => `+${line}`)].join("\n")}`;
+  };
+  const out: ChangeRequestFile[] = [];
+  for (const [path, content] of [...source.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const before = target.get(path);
+    if (before === content) continue;
+    out.push({ path, status: before === undefined ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before), patch: patchOf(before, content) });
+  }
+  for (const [path, content] of [...target.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    if (!source.has(path)) out.push({ path, status: "removed", additions: 0, deletions: lines(content) });
+  }
+  return out;
+}
 /** Rovara's replies in a thread are its own fixed text: short, one line, no mentions. */
 export const REPLY_MAX_CHARS = 200;
 export const REPLY_REFUSED_MESSAGE = "the reply is not Rovara's fixed text";
@@ -363,26 +383,17 @@ export class FakeHostModel {
   // ---- reads
 
   changedFiles(id: string): ChangeRequestFile[] {
-    // Like a real host the fake gives the text of each change (every line of the old file removed, every line of the new one added), so what reads it sees a patch.
-    const textLines = (text: string): string[] => text.split("\n").filter((line, index, all) => !(index === all.length - 1 && line === ""));
-    const patchOf = (before: string | undefined, after: string): string => {
-      const old = before === undefined ? [] : textLines(before);
-      const now = textLines(after);
-      return `@@ -${old.length === 0 ? "0,0" : `1,${String(old.length)}`} +1,${String(now.length)} @@\n${[...old.map((line) => `-${line}`), ...now.map((line) => `+${line}`)].join("\n")}`;
-    };
     const cr = this.cr(id);
     const source = this.revision(this.headRevisionOf(cr)).files;
     const target = this.revision(cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch)).files;
-    const out: ChangeRequestFile[] = [];
-    for (const [path, content] of [...source.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      const before = target.get(path);
-      if (before === content) continue;
-      out.push({ path, status: before === undefined ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before), patch: patchOf(before, content) });
-    }
-    for (const [path, content] of [...target.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      if (!source.has(path)) out.push({ path, status: "removed", additions: 0, deletions: lines(content) });
-    }
-    return out;
+    return diffOfFiles(target, source);
+  }
+
+  /** One commit's own changes (DEC 213): its files against its FIRST parent (a root commit against nothing), as GitHub's commit read lists them. */
+  commitChangedFiles(sha: string): ChangeRequestFile[] {
+    const revision = this.revision(sha);
+    const parent = revision.parents[0];
+    return diffOfFiles(parent === undefined ? new Map() : this.revision(parent).files, revision.files);
   }
 
   /** The host's word on whether the change request can merge: draft, conflicts, a required check failing or pending, else clean. */

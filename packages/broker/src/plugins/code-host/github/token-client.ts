@@ -344,7 +344,7 @@ export function githubTokenClient(options: GitHubTokenClientOptions): GitHubCode
     try { return parseGitHubRepository(address); } catch { return undefined; }
   };
   const surface: Record<string, unknown> = {};
-  for (const name of [...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "listPullRequestComments", "postPullRequestComment", "commitFilesToBranch", "findLessonsPullRequest", "deleteLessonsBranch"] as const) {
+  for (const name of [...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "getCommitChanges", "listPullRequestComments", "postPullRequestComment", "commitFilesToBranch", "findLessonsPullRequest", "deleteLessonsBranch"] as const) {
     const method: unknown = Reflect.get(provider, name);
     if (typeof method !== "function") continue;
     surface[name] = async (...args: unknown[]): Promise<unknown> => {

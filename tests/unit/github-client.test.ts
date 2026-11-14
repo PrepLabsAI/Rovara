@@ -62,6 +62,36 @@ describe("the real GitHub client under the adapters", () => {
     expect(missingGitHubProviderMethods(providerOver(new GitHubFixtureApi(githubModel())))).toEqual([]);
   });
 
+  it("DEC 213: reads one commit's changes over every page with a contents-read token, and says the list is cut when GitHub cut anything", async () => {
+    const world = codeHostWorld();
+    const changes: Record<string, string> = {};
+    for (let index = 0; index < 5; index += 1) changes[`src/f${String(index)}.ts`] = `export const f = ${String(index)};\n`;
+    const commit = world.model.commit("feature/x", changes);
+    // Two files a page: three pages, read in full.
+    world.api.commitReads.pageSize = 2;
+    const whole = await world.host.commitChanges!(world.repository, commit, world.scope);
+    expect(whole.complete).toBe(true);
+    expect(whole.files.map((file) => file.path).sort()).toEqual(Object.keys(changes).sort());
+    expect(whole.files.every((file) => file.patch !== undefined)).toBe(true);
+    expect(whole.parents).toEqual([world.model.headOf("main")]);
+    expect(world.api.requests.filter((request) => request.path.endsWith(`/commits/${commit}`))).toHaveLength(3);
+    expect(world.api.tokens.at(-1)?.permissions).toEqual({ contents: "read" });
+    // One a page: more pages than the read takes.
+    world.api.commitReads.pageSize = 1;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    world.api.commitReads.pageSize = 100;
+    // A changed file without its patch (too large for GitHub to show).
+    world.api.commitReads.withoutPatch = "src/f2.ts";
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    delete world.api.commitReads.withoutPatch;
+    // Totals that the listed files do not add up to (GitHub's 3,000-file limit).
+    world.api.commitReads.extraAdditions = 7;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    delete world.api.commitReads.extraAdditions;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(true);
+    await expect(world.host.commitChanges!(world.repository, "not-a-sha", world.scope)).rejects.toThrow();
+  });
+
   it("mints a clone credential with read access to contents and a push credential with write, for this repository only", async () => {
     const world = codeHostWorld();
     await world.host.issueGitCredential(world.repository, "clone", world.scope);

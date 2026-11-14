@@ -146,6 +146,8 @@ export interface GitHubCodeHostProvider {
   getBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
   listWorkingBranches(repositoryUrl: string, expected: { installationId: number; repositoryId: number }, scope: GitHubTokenScope, page?: number): Promise<WorkingBranchPage>;
   getCommitParents(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string[]>;
+  /** Optional (DEC 213): one commit's own changes, its parents, and whether GitHub gave the whole list. A client without it leaves the adapter without `commitChanges`. */
+  getCommitChanges?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[] }>;
   getDefaultBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
   getPullRequestMergeObservation(repositoryUrl: string, number: number, budget: ReadBudget, scope: GitHubTokenScope): Promise<GitHubPullRequestDetails & { headTreeSha: string }>;
   installationForRepository(owner: string, name: string, options?: { fresh?: boolean }): Promise<{ installationId: number } | undefined>;
