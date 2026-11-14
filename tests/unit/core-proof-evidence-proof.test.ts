@@ -55,6 +55,20 @@ const context = (over: Partial<ProofEvidenceContext> = {}): ProofEvidenceContext
 const section = (evidence: ProofEvidenceContext | undefined, level = 0) => proofSection(workflow(), { plan: plan(), ...(evidence === undefined ? {} : { evidence }) })!(level).join("\n");
 
 describe("the evidence lines", () => {
+  it("qualifies original-code evidence counts when a proving test used a Rovara-made mock", () => {
+    const testProof = {
+      schemaVersion: 1 as const, candidateDigest: CODE.digest, status: "checked" as const, note: "completed" as const, changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 5,
+      items: [{ checkId: "readiness:0", label: "Unit tests", granularity: "test" as const, test: "test_no_region", verdict: "proves_change" as const, reason: "assertion_failed_on_old" as const }],
+    };
+    for (const level of [0, 1]) {
+      const render = (trust: "made_by_rovara" | "real") => proofSection(workflow(), { plan: plan(), testProof, evidence: context(), checkDependencies: new Map([["unit", [{ dependencyId: "payments", trust }]]]) })!(level).find((line) => line.includes("Checks by kind:"));
+      expect(render("real")).toContain("2 new, 1 fail on the original code");
+      expect(render("real")).not.toContain("not Proven");
+      expect(render("made_by_rovara")).toContain("2 new, 1 fail on the original code");
+      expect(render("made_by_rovara")).toContain("with a Rovara-made mock; not Proven");
+    }
+  });
+
   const at0 = evidenceLines(context(), CODE.digest, 0);
   it("give counts per kind, new tests and what they prove, never a test's output", () => {
     expect(at0.lines[0]).toBe("Checks by kind: pytest -q ✓: 36 passed, 3 skipped; 2 new · lint ✓ · type check ✓ · security scan ✓: 0 new findings · 37 of 1,240 tests selected (coverage map)");

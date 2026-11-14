@@ -23,4 +23,5 @@ export * from "./monitoring.js";
 export * from "./outbound-events.js";
 export * from "./plugin-adapters.js";
 export * from "./plugin-points.js";
+export * from "./model-egress.js";
 export { createDefaultPolicySource, createRowsPolicySource, type PolicySource, type PolicyScope as PolicySourceScope, type PolicyRowsRead, type PolicyRowsReader } from "./policy-source.js";

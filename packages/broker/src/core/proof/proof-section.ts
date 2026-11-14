@@ -5,7 +5,7 @@
 // count line; 4 shorter requirement text and bullets without text. A failed row, a partly tested row and a not-tested item are listed at every level: they are what a reader must not miss.
 import { TestProofSchema, workflowCheckResultBroken, workflowSelectedChecks, type PlanClaim, type PlanDocument, type TestProof, type WorkflowSnapshot } from "@agentx/contracts";
 import { evidenceLines, type ProofEvidenceContext } from "./evidence-lines.js";
-import { buildProofTable, type ProofCheckResult, type ProofEvidence, type ProofResult, type ProofRow, type ProofScenarioRow } from "./proof-table.js";
+import { buildProofTable, MOCK_PROOF_EXPLANATION, MOCK_PROOF_PREFIX, testProofQualifier, type ProofCheckResult, type ProofEvidence, type ProofResult, type ProofRow, type ProofScenarioRow, type ProofTableInput } from "./proof-table.js";
 
 /**
  * What the Proof section reads about design review, already resolved by the design-review code (port lane L9: `designProofLine` and `designLinksByClaim` over the approved design). `line` is the one
@@ -25,6 +25,8 @@ export interface ProofContext {
   scenarioRows?: readonly ProofScenarioRow[] | undefined;
   /** The test proof read for this code; the table ignores it unless it is bound to the workflow's candidate digest. */
   testProof?: TestProof | undefined;
+  /** Dependencies actually used by the workflow's recorded check results. Optional reader input; old writers need not supply it. */
+  checkDependencies?: ProofTableInput["checkDependencies"];
   /** Proof and evidence P8: the evidence pack for this code and how much of it the pull request shows (see evidence-lines.ts). Used only when the pack is bound to the workflow's candidate digest. */
   evidence?: ProofEvidenceContext | undefined;
   /** The description already had a Proof section but the inputs above could not be read in time (see proof-keep.ts): the section shows `PROOF_STALE_LINE` instead of the old table. Used instead of `plan`. */
@@ -85,7 +87,10 @@ function evidenceCell(row: ProofRow, level: number): string {
 
 function evidenceCellOf(row: ProofRow, level: number): string {
   if (row.evidence.length === 0) return "none";
-  const entry = (item: ProofEvidence, max: number) => `${item.kind === "scenario" ? "Scenario: " : ""}${cut(item.label, max)} (${STATE_WORDS[item.state]})`;
+  const entry = (item: ProofEvidence, max: number) => {
+    const label = level === 1 && item.notProvenReason === "made_by_rovara" ? item.label.replace(MOCK_PROOF_PREFIX, "Rovara mock: ") : item.label;
+    return `${item.kind === "scenario" ? "Scenario: " : ""}${cut(label, max)} (${STATE_WORDS[item.state]})`;
+  };
   if (level === 0) return row.evidence.slice(0, 4).map((item) => entry(item, 80)).join("; ") + (row.evidence.length > 4 ? ` and ${row.evidence.length - 4} more` : "");
   if (level === 1) return row.evidence.slice(0, 2).map((item) => entry(item, 40)).join("; ") + (row.evidence.length > 2 ? ` and ${row.evidence.length - 2} more` : "");
   const checks = row.evidence.filter((item) => item.kind === "check").length;
@@ -115,6 +120,7 @@ export function proofSection(workflow: WorkflowSnapshot, proof: ProofContext | u
   const designLinks = design === undefined ? undefined : design.linksFor(flatClaimIds(plan.claims));
   const table = buildProofTable({
     plan, checkResults: proofCheckResults(workflow), scenarioRows: proof?.scenarioRows ?? [], testProof: proof?.testProof, candidateDigest: workflow.candidate?.digest, recordedCheckIds: recordedCheckIdsOf(workflow),
+    checkDependencies: proof?.checkDependencies,
     ...(designLinks === undefined ? {} : { designLinks }),
   });
   return (level) => {
@@ -123,6 +129,8 @@ export function proofSection(workflow: WorkflowSnapshot, proof: ProofContext | u
     const shown = table.rows.filter((row) => !folded.includes(row));
     // Setup and test health SH18: with the four results on, the table starts with the result (one of four fixed words), the same as the Testing section's heading.
     const lines = ["### Proof", "", ...(resultLabel === undefined ? [] : [`Result: ${resultLabel}`, ""]), ...(design === undefined ? [] : [design.line, ""])];
+    // Keep the reason even when evidence labels or whole passing rows are shortened away.
+    if (table.rows.some((row) => row.evidence.some((item) => item.notProvenReason === "made_by_rovara"))) lines.push(MOCK_PROOF_EXPLANATION, "");
     if (shown.length > 0) {
       lines.push("| Requirement | Evidence | Result |", "| --- | --- | --- |",
         ...shown.map((row) => `| ${cell(`${row.claimId}: ${cut(row.requirement, requirementMax)}`)} | ${cell(evidenceCell(row, level))} | ${RESULT_WORDS[row.result]} |`));
@@ -132,7 +140,7 @@ export function proofSection(workflow: WorkflowSnapshot, proof: ProofContext | u
       lines.push("", `${plural(folded.length, "more requirement")} proven or passed${proven > 0 ? ` (${proven} also fail${proven === 1 ? "s" : ""} on the original code)` : ""}; their rows are left out to keep this description short.`);
     }
     // Proof and evidence P8: counts per kind and coverage (levels 0 and 1 only), then Environment, what was not run and the link, then the mocked and not-selected items under "What wasn't tested".
-    const evidence = evidenceLines(proof?.evidence, workflow.candidate?.digest, level, { proven: provenTestNames(proof?.testProof, workflow.candidate?.digest), alreadyListed: new Set(table.notTested.map((item) => `${item.kind}:${item.id}`)) });
+    const evidence = evidenceLines(proof?.evidence, workflow.candidate?.digest, level, { proven: provenTestNames(proof?.testProof, workflow.candidate?.digest), testProofQualifier: testProofQualifier(proof?.testProof, workflow.candidate?.digest, { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: proof?.checkDependencies }), alreadyListed: new Set(table.notTested.map((item) => `${item.kind}:${item.id}`)) });
     if (evidence.lines.length > 0) lines.push("", ...evidence.lines.map((line) => `- ${line}`));
     if (table.notTested.length > 0 || evidence.notTested.length > 0) {
       lines.push("", "What wasn't tested:", ...evidence.notTested, ...table.notTested.map((item) => {

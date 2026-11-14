@@ -183,7 +183,7 @@ export async function readTierInput(targets: ReadonlyArray<TierReadTarget & { he
   const files: TierFile[] = [];
   let complete = true;
   for (const target of targets) {
-    const read = tierFilesOfRead(target.repositoryId, await readChangeRequestFiles(target.host, changeRequestRef(target.repositoryUrl, target.number), scope, beforeRequest));
+    const read = tierFilesOfRead(target.repositoryId, await readChangeRequestFiles(target.host, changeRequestRef(target.repositoryUrl, target.number), scope, beforeRequest, target.headSha));
     complete &&= read.complete;
     files.push(...read.files);
   }

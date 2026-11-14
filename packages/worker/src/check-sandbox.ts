@@ -78,7 +78,7 @@ import { realpathSync } from "node:fs";
 import { chmod, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { agentXError } from "@agentx/contracts";
-import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, type ServicesNetwork } from "./run-network.js";
+import { MODEL_HELPER_ALIAS, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, type ServicesNetwork } from "./run-network.js";
 import { SEALED_DNS_TABLE_MAX } from "./setup-dns-watch.js";
 import type { DockerCli } from "./swebench/containers.js";
 import { MASK_OPTIONS, SANDBOX_FILE_OPS_NODE, SANDBOX_INIT, TASK_SANDBOX_LABEL, TASK_SANDBOX_NETWORK, TASK_SANDBOX_PIDS_LIMIT, TASK_SANDBOX_USER, TASK_SANDBOX_WORKSPACE_LABEL, taskSandboxRunArgs } from "./task-sandbox.js";
@@ -92,7 +92,7 @@ export const SINKHOLE_ALIAS = "sinkhole";
 /** The check sandbox's host name inside the container, so a program that looks up its own name finds .4 in the hosts file. */
 export const CHECK_SANDBOX_HOSTNAME = "check";
 /** The reserved names no dependency may take (the name server, the sandboxes, the proxy, the sinkhole, the loopback name). */
-export const RESERVED_RUN_ALIASES: ReadonlySet<string> = new Set([SINKHOLE_ALIAS, CHECK_SANDBOX_HOSTNAME, "localhost", "dns", "dns-helper", "working", "proxy", "test-account-proxy", "gateway", "aws-metadata"]);
+export const RESERVED_RUN_ALIASES: ReadonlySet<string> = new Set([SINKHOLE_ALIAS, CHECK_SANDBOX_HOSTNAME, "localhost", "dns", "dns-helper", "working", "proxy", "test-account-proxy", "gateway", "aws-metadata", MODEL_HELPER_ALIAS]);
 /** The most unknown names the worker reads back from the helper's file. */
 export const SEALED_DNS_RECORD_NAMES_MAX = 200;
 /** The sealed helper's container limits (copied from the setup run's helper). */
