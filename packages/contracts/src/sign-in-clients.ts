@@ -1,5 +1,6 @@
 // Spec 063 (FR-001): services an administrator lets sign Rovara users in. Each gets tokens addressed to it (its own
-// audience), which Rovara's own API never accepts, and may ask Rovara what a signed-in person can do.
+// audience), which Rovara's own API never accepts unless the client has full access (spec 066), and may ask Rovara what
+// a signed-in person can do.
 import { z } from "zod";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE } from "./developer.js";
 import { publicHttpsUrlProblem } from "./mcp-connector.js";
@@ -46,9 +47,15 @@ export const SignInClientRegistrationSchema = z.object({
    * new `secretHash`, and refused for a client that has no secret.
    */
   keepSecret: z.literal(true).optional(),
+  /**
+   * Spec 066: Rovara's developer API accepts its tokens as the signed-in person, with all their rights, as it does the
+   * Rovara CLI's. Only for a confidential client, so its tokens are only ever issued to the service itself.
+   */
+  fullAccess: z.literal(true).optional(),
 }).strict()
   .refine((registration) => registration.loopback || registration.redirectUris.length > 0, "a client needs a redirect URL, a loopback redirect, or both")
-  .refine((registration) => registration.keepSecret === undefined || registration.secretHash === undefined, "keep the secret or give a new one, not both");
+  .refine((registration) => registration.keepSecret === undefined || registration.secretHash === undefined, "keep the secret or give a new one, not both")
+  .refine((registration) => registration.fullAccess === undefined || registration.keepSecret === true || registration.secretHash !== undefined, { message: "only a confidential client can have full access", path: ["fullAccess"] });
 export type SignInClientRegistration = z.infer<typeof SignInClientRegistrationSchema>;
 
 export const SignInClientRecordSchema = z.object({
@@ -59,6 +66,7 @@ export const SignInClientRecordSchema = z.object({
   loopback: z.boolean(),
   secretHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   scopes: ClientScopesSchema.optional(),
+  fullAccess: z.literal(true).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1).max(512),

@@ -10,6 +10,8 @@ import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper,
 import {
   AgentXNameSchema,
   scopesOf,
+  AGENTX_CLI_CLIENT_ID,
+  CLIENT_SCOPES,
   CreateClientProjectRequestSchema,
   type CreateClientProjectRequest,
   type ClientRepositoriesResponse,
@@ -726,7 +728,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; developerId: string; administrator: boolean; scopes: ClientScope[] }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; developerId: string; sessionId: string; amr: DeveloperSignInMethod; administrator: boolean; scopes: ClientScope[] }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -752,9 +754,36 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr])) throw refused();
   const developer = await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
   if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
-  // Spec 065 FR-002: only the scopes on the token that the registration still allows.
-  const scopes = scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
-  return { client, developerId: session.developerId, administrator: amr === "oidc" && session.administrator === true, scopes };
+  // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
+  // access has the person's rights, so every scope.
+  const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
+  return { client, developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes };
+}
+
+/**
+ * A developer API caller: the Rovara CLI's token, or (spec 066) a full-access sign-in client's, as its signed-in person.
+ * The unverified azp only picks the path; each then verifies the token in full. A client without full access is refused
+ * here as before, and the setting is read at every request, so turning it off takes effect at once.
+ */
+async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined): Promise<DeveloperCaller> {
+  let azp: unknown;
+  try {
+    azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
+  } catch {
+    azp = undefined;
+  }
+  if (typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID || (await signInClientOf(deps, azp))?.fullAccess !== true) {
+    return authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization));
+  }
+  const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));
+  if (person.client.fullAccess !== true) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
+  if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return {
+    developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName,
+    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
+    ...(developer.email === undefined ? {} : { email: developer.email }),
+  };
 }
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
@@ -1173,7 +1202,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   // Spec 065: a registered service acting as its signed-in person, within its scopes.
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
-  const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
+  const caller = await authenticateCaller(deps, request.headers.authorization);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
@@ -1190,18 +1219,22 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
 }
 
 /**
- * Spec 064: the legacy deployment's developer API, which is for account linking only: the link page, a registered
- * service's access check, and a person's own links. Everything else (tasks, projects, ChatGPT) is not there.
+ * Spec 064: the legacy deployment's developer API: the link page, a registered service's access check, a person's own
+ * links, and (spec 066) their projects and workspaces. Tasks and ChatGPT sign-in are not there: the legacy deployment
+ * runs no task workflow.
  */
 export async function routeLinkingRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (url.pathname.startsWith("/review/link/")) return routeDeveloperRequest(deps, request, url);
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
-  if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) {
-    const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
-    return routeOwnChannelLinks(deps, caller, request, url);
-  }
-  throw agentXError("NOT_FOUND", "route not found");
+  const projects = request.method === "GET" && url.pathname === "/v1/dev/projects";
+  const workspaces = request.method === "GET" && url.pathname === "/v1/dev/workspaces";
+  const links = url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/");
+  if (!projects && !workspaces && !links) throw agentXError("NOT_FOUND", "route not found");
+  const caller = await authenticateCaller(deps, request.headers.authorization);
+  if (projects) return listProjects(deps, caller);
+  if (workspaces) return listWorkspaces(deps, caller);
+  return routeOwnChannelLinks(deps, caller, request, url);
 }
 
 /** Spec 062 FR-031: a developer lists and removes their own channel links, and only theirs. */

@@ -689,6 +689,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--confidential", "it signs in with a secret of its own; a new one is made and shown once (each add makes a new one)")
     .option("--secret-file <path>", "with --confidential, write the secret to this new file (mode 600) instead of printing it")
     .option("--scope <scopes>", `what it may do as the signed-in person, comma-separated: ${CLIENT_SCOPES.join(", ")}; none by default`)
+    .option("--full-access", "with --confidential: Rovara's developer API accepts its tokens as the signed-in person, with all their rights, as it does this CLI's")
     .option("--yes", "apply without asking; the change is still printed", false)
     .action(async (id: string, options: SignInClientAddOptions & { secretFile?: string; yes: boolean }, command: Command) => {
       const clientId = signInClientId(id);
@@ -706,6 +707,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--loopback", "it may sign people in from a terminal with a loopback redirect")
     .option("--no-loopback", "it may not use a loopback redirect")
     .option("--scope <scopes>", `replace what it may do as the signed-in person, comma-separated: ${CLIENT_SCOPES.join(", ")}; none removes them all`)
+    .option("--full-access", "Rovara's developer API accepts its tokens as the signed-in person, with all their rights (a client with a secret only)")
+    .option("--no-full-access", "its tokens reach only the access check and its scopes again")
     .option("--rotate-secret", "give it a new secret (shown once, or written with --secret-file); the old one stops working")
     .option("--secret-file <path>", "with --rotate-secret, write the new secret to this new file (mode 600) instead of printing it")
     .option("--yes", "apply without asking; the change is still printed", false)
