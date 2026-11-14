@@ -1,4 +1,5 @@
 // T6 PLANDRYRUN: the planning worker tries a coding plan's proposed (model-written) checks on the unchanged code before anyone approves them, and reports a fixed class per check.
+import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -421,6 +422,12 @@ describe("a planning run reports the dry run and is never failed by it", () => {
     expect(sent.some((event) => Object.hasOwn(event.payload ?? {}, "planDryRun"))).toBe(false);
     expect(JSON.stringify(sent)).not.toContain(PASSWORD);
     expect(sent.some((event) => event.type === "result")).toBe(true);
+  });
+
+  it("fails the planning run, and reports no SUCCEEDED, when a dry-run command's stop could not be confirmed (FIX-RUNNER-ABORT-JOIN)", async () => {
+    const { result, sent } = await planningRun({ answer: codingPlanText([SECRET_PLAN_CHECK]), planDryRun: async () => { throw new RunnerKillUnconfirmedError({ kind: "sandbox" }); } });
+    expect(result.ok).toBe(false);
+    expect(sent.some((event) => event.type === "result" && (event.payload as { status?: string }).status === "SUCCEEDED")).toBe(false);
   });
 
   it("does not try anything for a plan with no proposed checks, or a plan that is not structured", async () => {

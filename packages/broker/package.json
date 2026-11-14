@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
+    "./core": "./dist/core/index.js",
     "./channel": "./dist/core/channel/index.js",
     "./channel-slack-adapter": "./dist/plugins/channel/slack/index.js",
     "./e2e/discovery": "./dist/e2e/discovery.js",

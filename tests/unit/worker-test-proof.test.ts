@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TestProofSchema, type CheckEntry, type ProjectCommand } from "../../packages/contracts/src/index.js";
 import { CheckNotRunError, type CheckPlan, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
-import { AgentFilesRestoreError, gitOriginalCode, ORIGINAL_CODE_REF } from "../../packages/worker/src/verification/original-code.js";
+import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
+import { AgentFilesRestoreError, gitOriginalCode, isUnconfirmedStop, ORIGINAL_CODE_REF } from "../../packages/worker/src/verification/original-code.js";
 import { runTestProof } from "../../packages/worker/src/verification/test-proof.js";
 import { withTestIds } from "../../packages/worker/src/verification/test-ids.js";
 import { evidenceTests, parseTestReport } from "../../packages/worker/src/verification/test-report.js";
@@ -129,6 +130,22 @@ describe("TESTPROOF", () => {
     const broken = { run: async () => { throw new Error("git failed"); } };
     const proof = await runTestProof(proofOptions(made, { originalCode: () => broken }));
     expect(proof).toMatchObject({ status: "not_checked", note: "original_code_unavailable" });
+  });
+
+  it("a stop that could not be confirmed fails the task and touches nothing afterwards: the agent's files are not restored over a command that may still be writing (FIX-RUNNER-ABORT-JOIN)", async () => {
+    const made = await repository({ "src/bug.ts": SOURCE_1 }, { "src/bug.ts": SOURCE_2, "src/bug.test.ts": TEST_EXPECTS(2) });
+    const command: ProjectCommand = { ...FAKE_TEST_COMMAND, args: ["test", "--", "--reporter=json", "--outputFile=report.json"] };
+    // The report the candidate's checks wrote: it is taken away before the run on the original code, and normally put back after it.
+    await writeFile(join(made.directory, "report.json"), JSON.stringify({ testResults: [] }));
+    const stuck = { ...fakeTestRunner(made.directory), runProjectCommand: async () => { throw new RunnerKillUnconfirmedError({ kind: "local" }); } };
+    const failure = await runTestProof(proofOptions(made, { runners: stuck, plan: { source: "project", readiness: [command], projectBefore: ["unknown"] } })).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AgentFilesRestoreError);
+    expect(isUnconfirmedStop(failure)).toBe(true);
+    // Still the original code: no restore ran. The agent's files are kept under the private ref for recoverAgentFiles, as for any failed restore.
+    expect(await readFile(join(made.directory, "src/bug.ts"), "utf8")).toBe(SOURCE_1);
+    // And the report file was not written back either: a command that may still be running would overwrite it.
+    expect(await exists(join(made.directory, "report.json"))).toBe(false);
+    expect(git(made.directory, "rev-parse", "--verify", ORIGINAL_CODE_REF)).toMatch(/^[0-9a-f]{40}$/u);
   });
 
   it("gives a verdict per test, for the changed files only, when the check's own command writes a JSON report; and puts the report file back", async () => {

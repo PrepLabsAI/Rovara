@@ -1,6 +1,7 @@
 // Lane L10, the build step: starting the steps after the plan is approved. Each start reads the task fresh, answers STALE when the task is no longer where the dispatch row left it, and
 // accepts the operation in one transaction with the workflow change that makes it RUNNING (the stage machine's `acceptStep`). The request id of each is made from the task, the revision and
 // the candidate, so a recovered or repeated row is the first one's duplicate.
+import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
   AgentXError, EVIDENCE_CAPTURE_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
@@ -128,9 +129,11 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     const plan = await approvedCodingPlan(deps.artifacts, workflow);
     // The plan as structured data for the worker's conversation compaction: the worker never reads it back out of the prompt, which can hold a teammate's words.
     approvedPlan = { markdown: shortenMarkdown(plan.text, WORKFLOW_PLAN_MAX_BYTES), sha256: plan.sha256, ownerInstructions: ownerPlanInstructions(workflow) };
+    // A plan nobody approved (the lighter flow skipped the approval of a small change) is never called approved.
+    const approved = !planApprovalSkipped(workflow, plan.sha256);
     prompt = found2.length === 0
-      ? implementPrompt(plan)
-      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: lastOwnerWords(workflow) });
+      ? implementPrompt(plan, approved)
+      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: lastOwnerWords(workflow), approved });
   }
   const startFrom = fixStartHead(workflow);
   const readiness = selectedCheckCommands(workflow).readiness;
