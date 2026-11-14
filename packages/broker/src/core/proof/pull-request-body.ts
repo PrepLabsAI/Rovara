@@ -198,7 +198,7 @@ const PROOF_LINE_MAX = 600;
 
 /** Supplied publication lines and derived rewrite lines carry the same mock qualifier. */
 function testProofBodyLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext): string[] {
-  const provenance = { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: context.proof?.checkDependencies };
+  const provenance = { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: context.proof?.checkDependencies, realModelRun: context.proof?.realModelRun };
   const qualifier = testProofQualifier(context.proof?.testProof, workflow.candidate?.digest, provenance);
   return context.proofLines === undefined
     ? testProofLinesOf(context.proof?.testProof, workflow.candidate?.digest, provenance)

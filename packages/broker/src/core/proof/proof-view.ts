@@ -3,7 +3,7 @@
 // as text, so those are undone), and when the checks were recorded for code that is no longer the candidate, the table reads those earlier results instead of calling every requirement untested (the page labels
 // it "earlier", the way it labels the recorded checks).
 import { redactText, type ProofTableView, type WorkflowSnapshot } from "@agentx/contracts";
-import { buildProofTable, MOCK_PROOF_EXPLANATION, testProofLinesOf } from "./proof-table.js";
+import { buildProofTable, proofReasonLines, testProofLinesOf } from "./proof-table.js";
 import { earlierProofCheckResults, proofCheckResults, recordedCheckIdsOf, type ProofContext } from "./proof-section.js";
 
 /**
@@ -24,7 +24,7 @@ export function proofTableView(workflow: WorkflowSnapshot, proof: ProofContext |
     const earlier = earlierProofCheckResults(workflow);
     const table = buildProofTable({
       plan, checkResults: earlier.length > 0 ? earlier : proofCheckResults(workflow), scenarioRows: proof?.scenarioRows ?? [], testProof: proof?.testProof, candidateDigest: workflow.candidate?.digest, recordedCheckIds: recordedCheckIdsOf(workflow),
-      checkDependencies: proof?.checkDependencies,
+      checkDependencies: proof?.checkDependencies, realModelRun: proof?.realModelRun,
     });
     return {
       rows: table.rows.slice(0, 50).map((row) => ({
@@ -33,8 +33,8 @@ export function proofTableView(workflow: WorkflowSnapshot, proof: ProofContext |
       })),
       notTested: table.notTested.slice(0, 200).map((item) => ({ kind: item.kind, id: plain(item.id, 64), text: plain(item.text, 300), reason: plain(item.reason, 100) })),
       testProofLines: [
-        ...(table.rows.some((row) => row.evidence.some((item) => item.notProvenReason === "made_by_rovara")) ? [MOCK_PROOF_EXPLANATION] : []),
-        ...testProofLinesOf(proof?.testProof, workflow.candidate?.digest, { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: proof?.checkDependencies }),
+        ...proofReasonLines(table),
+        ...testProofLinesOf(proof?.testProof, workflow.candidate?.digest, { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: proof?.checkDependencies, realModelRun: proof?.realModelRun }),
       ].slice(0, 4).map((line) => plain(line, 600)),
     };
   } catch {

@@ -213,6 +213,12 @@ describe("round trip", () => {
 });
 
 describe("the forward-compatible reader", () => {
+  it("reads a v1 pack with a newer tests key, preserving the known data", () => {
+    const pack = clone(v1Pack());
+    Object.assign(pack.checks[0]!.tests!, { somethingNewer: true });
+    expect(readEvidencePack(pack)).toEqual({ status: "v1", pack: v1Pack() });
+  });
+
   it("reads a v1 pack as v1, unchanged", () => {
     const read = readEvidencePack(v1Pack());
     expect(read.status).toBe("v1");
