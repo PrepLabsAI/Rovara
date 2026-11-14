@@ -189,6 +189,19 @@ describe("a host's stricter rules on the access check (owner decision 132)", () 
     expect(widened.body).toMatchObject({ administrator: false, projects: [{ name: "payments-api" }, { name: "solo" }] });
   });
 
+  it("never gives back a project the rules took away, even one the person administers (spec 065)", async () => {
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#hidden", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "hidden", role: "administrator" });
+    // Positive control: without a rule the administered project is in the answer.
+    expect((await bearer()).body.projects).toContainEqual({ name: "hidden", access: "administrator" });
+    rules.push(() => ({ projects: ["solo"] }));
+    const narrowed = await bearer();
+    expect(narrowed.status).toBe(200);
+    expect(narrowed.body.projects).toEqual([{ name: "solo", access: "granted" }]);
+    expect(JSON.stringify(narrowed.body.projects)).not.toContain("hidden");
+    const byId = await access(basic("scheduler", SECRET), { developerId });
+    expect(byId.body.projects).toEqual([{ name: "solo", access: "granted" }]);
+  });
+
   it("cannot widen the answer by changing what it was given: the reviewer's probe", async () => {
     rules.push((context, answer) => {
       const loose = answer as unknown as { administrator: boolean; projects: Array<{ name: string; access: string }> };

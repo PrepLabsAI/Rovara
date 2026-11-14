@@ -136,13 +136,13 @@ function toClient(redirectUri: string, params: Record<string, string>): HttpResu
 /** The CLI is public ("none"); a confidential registered client sends its secret either way (spec 063). */
 const CLIENT_AUTH_METHODS = ["none", "client_secret_basic", "client_secret_post"];
 
-/** RFC 6749 2.3.1: HTTP Basic with the form-encoded client ID and secret; undefined without the header. */
 /** Spec 065: the scopes a client asked for (space-separated) that its registration allows, unique and in order. */
 function grantedScopes(requested: string | null, client: SignInClientRecord): { scopes?: string[] } {
   const scopes = [...new Set((requested ?? "").split(" "))].filter((scope) => client.scopes?.includes(scope as ClientScope) === true);
   return scopes.length === 0 ? {} : { scopes };
 }
 
+/** RFC 6749 2.3.1: HTTP Basic with the form-encoded client ID and secret; undefined without the header. */
 function basicCredentials(authorization: string | undefined): { clientId: string; secret: string } | "malformed" | undefined {
   if (authorization === undefined) return undefined;
   const match = /^Basic ([A-Za-z0-9+/=]+)$/i.exec(authorization.trim());
