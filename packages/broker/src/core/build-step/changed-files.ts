@@ -112,7 +112,7 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
       const remote = await host.getChangeRequest(changeRequestRef(definition.url, pullRequest.number), { orgId: deps.companyId });
       // The head the host shows must be the head Rovara recorded and checked.
       if (remote.state !== "open" || remote.headRevision !== pullRequest.headSha) return "unavailable";
-      const raw = await readChangeRequestFiles(host, changeRequestRef(definition.url, pullRequest.number), { orgId: deps.companyId }, beforeRequest);
+      const raw = await readChangeRequestFiles(host, changeRequestRef(definition.url, pullRequest.number), { orgId: deps.companyId }, beforeRequest, pullRequest.headSha);
       const read = changedFilesFromHostFiles(pullRequest.repositoryId, raw.files, raw.complete);
       const tierRead = tierFilesOfRead(pullRequest.repositoryId, raw);
       all.push(...read.files);
