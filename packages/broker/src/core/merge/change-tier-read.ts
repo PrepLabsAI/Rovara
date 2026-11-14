@@ -222,13 +222,17 @@ export async function readReviewInput(targets: ReadonlyArray<TierReadTarget & { 
 
 // ---- versions pushed between checks
 
-/** How many commits below a head are walked looking for a version the task has already seen; past it, the commits are counted as not scanned. */
+/** How many commits are visited, in all, looking for the versions the task has already seen; past it, the commits are counted as not scanned. */
 export const UNSEEN_WALK_MAX = 20;
-const HEAD_IN_DETAIL = /\bhead=([a-f0-9]{40})\b/gu;
+/**
+ * The forms Rovara writes a head in, each anchored at the start of the check's detail: the head is read only from the first match, never from text that follows (a patch line copied into a detail can carry any sha).
+ * `review level=...` and `tier_review level=...` (the review records), `tier_questions`, and the quick checks' own forms (`docs secret scan`, `code_config tests ...`, `dependency source`, `dependency install in the test run ...`, `install_link`, `ci_file reviewer questions (...) ...`).
+ */
+const OWN_HEAD_IN_DETAIL = /^(?:(?:tier_)?review level=\w+|tier_questions|docs secret scan|install_link|dependency source|dependency install in the test run \w+|code_config tests \w+|ci_file reviewer questions \([^)]*\) (?:not )?answered) head=([a-f0-9]{40})\b/u;
 
 /**
  * Every commit the task has seen and checked, from its own record: the heads it recorded for its pull requests (and the heads they were synced from), the base and candidate commits, the heads its tiers were bound to,
- * and the heads named by its checks. A tier bound to a digest (several repositories) names no commit, so the pull requests' recorded heads are what count there.
+ * and the heads named by its checks in the forms Rovara itself writes (`OWN_HEAD_IN_DETAIL`). A tier bound to a digest (several repositories) names no commit, so the pull requests' recorded heads are what count there.
  */
 export function seenHeadsOf(workflow: Pick<WorkflowSnapshot, "pullRequests" | "reviewBase" | "candidate" | "flow">): Set<string> {
   const seen = new Set<string>();
@@ -238,31 +242,70 @@ export function seenHeadsOf(workflow: Pick<WorkflowSnapshot, "pullRequests" | "r
   for (const entry of workflow.candidate?.repositories ?? []) { add(entry.commitSha); add(entry.baseCommitSha); }
   const flow = workflow.flow;
   for (const tier of [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])]) { add(tier.headSha); add(tier.mergeBase); }
-  for (const check of flow?.quickChecks ?? []) for (const match of (check.detail ?? "").matchAll(HEAD_IN_DETAIL)) add(match[1]);
+  for (const check of flow?.quickChecks ?? []) add(OWN_HEAD_IN_DETAIL.exec(check.detail ?? "")?.[1]);
   return seen;
 }
 
+/** The base commits the task recorded, by repository: the history below them is the base branch's, not the task's (a merge of the base branch brings it in as a second parent). */
+export function baseCommitsOf(workflow: Pick<WorkflowSnapshot, "reviewBase" | "candidate">): Map<string, string[]> {
+  const bases = new Map<string, string[]>();
+  const add = (repositoryId: string, value: string | undefined): void => {
+    if (value === undefined || !SHA40.test(value)) return;
+    const list = bases.get(repositoryId) ?? [];
+    if (!list.includes(value)) list.push(value);
+    bases.set(repositoryId, list);
+  };
+  for (const entry of workflow.reviewBase ?? []) add(entry.repositoryId, entry.baseCommitSha);
+  for (const entry of workflow.candidate?.repositories ?? []) add(entry.repositoryId, entry.baseCommitSha);
+  return bases;
+}
+
 /**
- * The commits between each current head and the newest version below it that the task saw (`seenHeadsOf`), along the first parents (the line a push adds to). Those versions were pushed between two checks and no tier,
- * secret scan or review ever read them: a credential added in one and taken out in the next leaves a clean final diff. `capped` is true when the walk found no seen version within `UNSEEN_WALK_MAX` commits (or reached the
- * first commit): what was pushed is then not known at all. A host that cannot answer THROWS (the caller leaves the record as it was).
+ * The commits between each current head and the versions below it that the task saw (`seenHeadsOf`), along EVERY parent (a person's merge of another branch brings its commits in by a second parent; one first-parent line would
+ * miss them): a breadth-first walk that stops each path at a seen commit. Those versions were pushed between two checks and no tier, secret scan or review ever read them: a credential added in one and taken out in the next
+ * leaves a clean final diff. The history of the recorded base commits counts as seen (a merge of the base branch, Rovara's own or a person's, brings the base branch's commits in, which are not the task's), found only when the walk
+ * meets a merge. `capped` is true when a path ends without reaching a seen commit (the first commit), or more than `UNSEEN_WALK_MAX` commits were read in all: what was pushed is then not known at all. A host that cannot answer
+ * THROWS (the caller leaves the record as it was).
  */
-export async function unseenCommits(targets: ReadonlyArray<TierReadTarget & { headSha: string }>, seen: ReadonlySet<string>, scope: HostScope, beforeRequest?: () => void): Promise<{ count: number; capped: boolean }> {
+export async function unseenCommits(
+  targets: ReadonlyArray<TierReadTarget & { headSha: string }>, seen: ReadonlySet<string>, scope: HostScope, beforeRequest?: () => void, bases: ReadonlyMap<string, readonly string[]> = new Map(),
+): Promise<{ count: number; capped: boolean }> {
   let count = 0;
   let capped = false;
   for (const target of targets) {
+    const repository = { url: target.repositoryUrl };
+    const parentsOf = async (commit: string): Promise<string[]> => { beforeRequest?.(); return target.host.commitParents(repository, commit, scope); };
+    // The commits at and below the recorded base commits (at most `UNSEEN_WALK_MAX` reads), found once, when the walk first meets a merge.
+    let baseHistory: Set<string> | undefined;
+    const baseHistoryOf = async (): Promise<Set<string>> => {
+      if (baseHistory !== undefined) return baseHistory;
+      const found = new Set(bases.get(target.repositoryId) ?? []);
+      baseHistory = found;
+      const queue = [...found];
+      for (let step = 0; step < UNSEEN_WALK_MAX && queue.length > 0; step += 1) {
+        for (const parent of await parentsOf(queue.shift()!)) if (!found.has(parent)) { found.add(parent); queue.push(parent); }
+      }
+      return found;
+    };
     // The head itself is walked from even when it was seen (tiered): its own unseen ancestors are its own reason on every pass.
-    let current = target.headSha;
-    let reached = false;
-    for (let step = 0; step < UNSEEN_WALK_MAX; step += 1) {
-      beforeRequest?.();
-      const parent = (await target.host.commitParents({ url: target.repositoryUrl }, current, scope))[0];
-      if (parent === undefined) break;
-      if (seen.has(parent)) { reached = true; break; }
-      count += 1;
-      current = parent;
+    const visited = new Set<string>([target.headSha]);
+    const queue = [target.headSha];
+    let reads = 0;
+    while (queue.length > 0) {
+      if (reads >= UNSEEN_WALK_MAX) { capped = true; break; }
+      const parents = await parentsOf(queue.shift()!);
+      reads += 1;
+      // A path that ends at the first commit without meeting a seen one: nothing says what was pushed.
+      if (parents.length === 0) { capped = true; continue; }
+      const known = parents.length > 1 ? await baseHistoryOf() : undefined;
+      for (const parent of parents) {
+        if (visited.has(parent)) continue;
+        visited.add(parent);
+        if (seen.has(parent) || known?.has(parent) === true) continue;
+        count += 1;
+        queue.push(parent);
+      }
     }
-    if (!reached) capped = true;
   }
   return { count, capped };
 }

@@ -15,7 +15,7 @@ import {
 } from "../decisions/change-tier.js";
 import { floorOwed, reviewTextOf, withoutTierReviews } from "../decisions/tier-floor-state.js";
 import { applyReviewerFloor, recordReviewerFloor, type ReviewerFloorResult } from "../decisions/tier-reviewer.js";
-import { boundCommits, readTierInput, seenHeadsOf, unseenCommits, type TierReadTarget } from "../merge/change-tier-read.js";
+import { baseCommitsOf, boundCommits, readTierInput, seenHeadsOf, unseenCommits, type TierReadTarget } from "../merge/change-tier-read.js";
 import { changeRequestRef } from "../merge/host-port.js";
 import { inertLine } from "../proof/inert-text.js";
 import { SessionStore } from "../sessions/store.js";
@@ -136,7 +136,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const read = await readTierInput(targets, scope, beforeRequest);
     const input = { ...reviewTextOf(read.diff), diff: read.diff };
     // Versions pushed between two passes (a credential added in one push and taken out in the next leaves a clean final diff): none was ever scanned, so the head is risky (only up, so it stays).
-    const unseen = await unseenCommits(targets, seenHeadsOf(workflow), scope, beforeRequest);
+    const unseen = await unseenCommits(targets, seenHeadsOf(workflow), scope, beforeRequest, baseCommitsOf(workflow));
     const headTierOf = (): ChangeTier => withUnseenCommits(tierFromDiff(read.diff, { ...bound, at, head: read.head }), unseen);
     // A head the record has no tier for (a person's push, or one the post-push writer could not read) is tiered here, from the same files.
     const flow = workflow.flow;
