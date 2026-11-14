@@ -295,6 +295,21 @@ export * from "./model-egress-block.js";
 // TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
 export * from "./model-egress/index.js";
 export * from "./model-serve.js";
+// TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
+export * from "./model-sse-named.js";
+export * from "./model-family-vectors.js";
+export * from "./model-family-openai-ops.js";
+export * from "./model-family-gemini-extra.js";
+export * from "./model-family-anthropic.js";
+export * from "./model-family-cohere.js";
+export * from "./model-served-family.js";
+export * from "./model-request-facts.js";
+export * from "./model-render.js";
+export * from "./model-failure-pack.js";
+export * from "./model-families.js";
+export * from "./model-reply-provenance.js";
+export * from "./model-reply-set.js";
+export * from "./model-serve-replies.js";
 export * from "./test-account.js";
 export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
@@ -354,3 +369,5 @@ export * from "./eval-hidden-set.js";
 export * from "./eval-pacing.js";
 export * from "./eval-base-cache.js";
 export * from "./eval-check.js";
+export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
+export * from "./machine-size.js";

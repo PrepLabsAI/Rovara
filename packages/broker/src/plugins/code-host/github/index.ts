@@ -8,7 +8,7 @@
 //  - `events.normalise` (`events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
 // The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
-  agentXError, ChangeRequestInputSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
+  agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
   type BranchPage, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef,
@@ -17,6 +17,7 @@ import { parseGitHubRepository } from "../../../github-app.js";
 import { githubCodeHostEvents } from "./events.js";
 import { readCodeOwnersFile } from "../code-owners-file.js";
 import { accountKindOf, detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";
+import { entryAt, fileTrees, instructionList } from "./file-details.js";
 import { type GitHubCodeHostProvider } from "./provider.js";
 
 export const GITHUB_HOST_KIND = "github";
@@ -62,12 +63,17 @@ function checkedScope(scope: HostScope): HostScope {
 }
 
 export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHubCodeHostOptions): CodeHost {
+  async function fileDetailsRead<T>(read: () => Promise<T>): Promise<T> {
+    try { return await read(); }
+    catch (error) { throw provider.fileDetailsError?.(error) ?? error; }
+  }
   const pathKindOfProvider = typeof provider.getPathKindAtCommit === "function" ? provider.getPathKindAtCommit.bind(provider) : undefined;
   const commitFilesOfProvider = typeof provider.commitFilesToBranch === "function" ? provider.commitFilesToBranch.bind(provider) : undefined;
   const findPullRequestOfProvider = typeof provider.findLessonsPullRequest === "function" ? provider.findLessonsPullRequest.bind(provider) : undefined;
   const deleteBranchOfProvider = typeof provider.deleteLessonsBranch === "function" ? provider.deleteLessonsBranch.bind(provider) : undefined;
   const listComments = typeof provider.listPullRequestComments === "function" ? provider.listPullRequestComments.bind(provider) : undefined;
   const postComment = typeof provider.postPullRequestComment === "function" ? provider.postPullRequestComment.bind(provider) : undefined;
+  const readTree = fileTrees(provider, options.credentialRef);
   const host: CodeHost = {
     kind: options.name ?? GITHUB_HOST_KIND,
     provider: GITHUB_HOST_KIND,
@@ -200,10 +206,40 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
       return statusOf(await provider.getPullRequestStatus(ref.repository.url, pullRequestNumber(ref), checkedScope(scope), budget));
     },
 
-    async changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope): Promise<ChangeRequestFilesPage> {
-      const listed = await provider.listPullRequestFiles(ref.repository.url, pullRequestNumber(ref), { page }, checkedScope(scope));
-      return { files: listed.files.map(fileOf), ...(listed.nextPage === undefined ? {} : { nextPage: listed.nextPage }) };
+    async changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope, readOptions?: { expectedHead?: string }): Promise<ChangeRequestFilesPage> {
+      const checked = checkedScope(scope);
+      const listed = await fileDetailsRead(() => provider.listPullRequestFiles(ref.repository.url, pullRequestNumber(ref), { page }, checked));
+      const files = listed.files.map(fileOf);
+      if (files.length > 0 && provider.listTreeAtCommit !== undefined && provider.getPullRequestFileRevisions !== undefined) {
+        try {
+          const revisions = await fileDetailsRead(() => provider.getPullRequestFileRevisions!(ref.repository.url, pullRequestNumber(ref), checked));
+          if (readOptions?.expectedHead !== undefined && revisions.head !== readOptions.expectedHead) return { files, ...(listed.nextPage === undefined ? {} : { nextPage: listed.nextPage }) };
+          const head = await fileDetailsRead(() => readTree(ref.repository.url, revisions.head, checked, undefined, true));
+          const base = await fileDetailsRead(() => readTree(ref.repository.url, revisions.base, checked, undefined, true));
+          for (const file of files) {
+            const headType = entryAt(head, file.path), baseType = entryAt(base, file.previousPath ?? file.path);
+            if (headType === undefined || baseType === undefined) continue;
+            const consistent = file.status === "added" ? headType !== "none" && baseType === "none"
+              : file.status === "removed" ? headType === "none" && baseType !== "none"
+              : (file.status === "modified" || file.status === "renamed") && headType !== "none" && baseType !== "none";
+            if (consistent) file.entry = { head: headType, base: baseType };
+          }
+        } catch (error) {
+          if (hostRateLimitRetryAt(error) !== undefined) throw error;
+          // Metadata is optional: failures never turn into a guessed ordinary file.
+        }
+      }
+      return { files, ...(listed.nextPage === undefined ? {} : { nextPage: listed.nextPage }) };
     },
+
+    ...(provider.listTreeAtCommit === undefined ? {} : {
+      async instructionFiles(repository: RepositoryRef, revision: string, scope: HostScope, readOptions?: { max?: number; timeoutMs?: number }) {
+        const checked = checkedScope(scope);
+        const max = readOptions?.max ?? 500;
+        if (!Number.isSafeInteger(max) || max < 0) throw agentXError("CONFIG_INVALID", "instruction file limit is invalid");
+        return instructionList(await fileDetailsRead(() => readTree(repository.url, revision, checked, readOptions)), max);
+      },
+    }),
 
     async feedback(ref: ChangeRequestRef, scope: HostScope): Promise<ChangeRequestFeedback> {
       return feedbackOf(ref.repository.url, await provider.getPullRequestFeedback(ref.repository.url, pullRequestNumber(ref), checkedScope(scope)));
