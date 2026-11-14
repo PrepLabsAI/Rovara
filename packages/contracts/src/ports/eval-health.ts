@@ -1,4 +1,6 @@
 // Trusted setup capabilities. No production adapter is wired in Code yet.
+import type { EvalSpendApprovalRecord } from "../eval-spend.js";
+import type { Principal } from "./policy.js";
 import type { ModelEgressClass } from "../model-egress/classify.js";
 import type { ModelEgressFrame } from "../model-egress/frame.js";
 import type { ModelEgressEvent } from "./model-egress.js";
@@ -8,7 +10,8 @@ export interface EvalSpendGrant {
   readonly company: string;
   readonly project: string;
   readonly selection: string;
-  readonly role: "maintainer" | "admin";
+  readonly role: "owner" | "maintainer" | "admin";
+  readonly inputsDigest: string;
   readonly provider: "customer";
   readonly connected: boolean;
   /** Confirmed per-run ceiling shown with the initial estimate, not the initial observed call count. */
@@ -43,4 +46,17 @@ export interface MonthlyMeter {
    * Revalidate the trusted grant and resolve its own opaque provider scope; never synthesize one
    * or accept a repository-supplied payer. Undefined means refusal with no calls dispatched. */
   reserve(input: { readonly approval: EvalSpendGrant; readonly calls: number; readonly costMicros: number }): Promise<EvalMeterReservation | undefined>;
+}
+
+/** INJECTED trusted reservation adapter; Cloud F1e supplies the real binding. Never a repository plug-in.
+ * authority() re-reads the named person's project/company membership and customer connection.
+ * reserve() must atomically hold the WHOLE estimate within the company/project month caps AND approved
+ * project budget, revalidate inside that transaction and at dispatch, and issue its own provider scope.
+ * Per-call accounting consumes that hold (no second reservation); usage, failures and close follow
+ * EvalMeterReservation. Missing provider, unreadable meter or failed hold dispatches no calls. */
+export interface EvalReservationAdapter {
+  authority(input: { readonly company: string; readonly project: string; readonly approver: NonNullable<EvalSpendApprovalRecord["approvedBy"]> }): Promise<{
+    readonly company: string; readonly project: string; readonly principal: Principal; readonly provider: string; readonly connected: boolean;
+  } | undefined>;
+  reserve(input: { readonly approval: EvalSpendApprovalRecord; readonly calls: number; readonly costMicros: number; readonly revalidate: () => Promise<boolean> }): Promise<EvalMeterReservation | undefined>;
 }

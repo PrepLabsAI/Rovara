@@ -1,3 +1,4 @@
+import { evalSpendInputsDigest } from "@agentx/contracts";
 import { attestRovaraOnlyBaseCheckout, createDocumentBaseScoreCache, ModelEgressFrameSchema, evalCaseCallVia, runEvalCasesPaced } from "@agentx/contracts";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -5,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { runEvalHealth, type EvalHealthInput } from "../../packages/worker/src/verification/eval-health.js";
 import { createEvalBaselines } from "../../packages/worker/src/verification/eval-baseline-refresh.js";
-import { runEvalRound, type EvalRoundInput } from "../../packages/worker/src/verification/eval-round.js";
+import { evalSettingsFingerprint, runEvalRound, type EvalRoundInput } from "../../packages/worker/src/verification/eval-round.js";
 import { evalFactsAllRun } from "../../packages/contracts/src/eval-pacing.js";
 import { evalCommandFingerprint, type EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
 import { fakeModelEgressWorld, COMPANY_A, COMPANY_B } from "../../packages/testing/src/ports/model-egress-world.js";
@@ -267,7 +268,7 @@ it("compares a task against the actual dependency-keyed three-run setup baseline
   const key = { ...input.key, codeHash: "e".repeat(64), judgePin: plan.judgePin, evalSetHash: hash, hiddenSetHash: "none", settingsFingerprint: "f".repeat(64) };
   const cache = createDocumentBaseScoreCache(new MemoryDocumentStore(), { companyId: key.company });
   const healthInput: EvalHealthInput = { key, settings: input.settings, selection: "eval", cache, questionIds: plan.questions.map(q => q.id), maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
-    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "admin", provider: "customer", connected: true, maxCalls: 200, maxCostMicros: 2_000_000 }) },
+    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "admin", inputsDigest: evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: evalSettingsFingerprint(input.settings, key.judgePin) }), provider: "customer", connected: true, maxCalls: 200, maxCostMicros: 2_000_000 }) },
     meter: { reserve: async () => ({ call: async () => ({ class: "ok" as const, calls: 1, costMicros: 10 }), close: async () => {} }) },
     run: async ({ call }) => {
       const world = fakeModelEgressWorld();
@@ -421,7 +422,7 @@ it("keeps the first round's evidence byte-identical after setup saves; only a ne
   let release!: () => void; let started!: () => void; let reservations = 0; let calls = 0;
   const gate = new Promise<void>(resolve => { release = resolve; }); const entered = new Promise<void>(resolve => { started = resolve; });
   const health: EvalHealthInput = { key, settings: input.settings, selection: "eval", cache, questionIds: plan.questions.map(q => q.id), maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
-    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "admin", provider: "customer", connected: true, maxCalls: 200, maxCostMicros: 2_000_000 }) },
+    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "admin", inputsDigest: evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: evalSettingsFingerprint(input.settings, key.judgePin) }), provider: "customer", connected: true, maxCalls: 200, maxCostMicros: 2_000_000 }) },
     meter: { reserve: async () => { reservations++; return { call: async () => { calls++; return { class: "ok", calls: 1, costMicros: 10 }; }, close: async () => {} }; } },
     run: async ({ call }) => {
       started(); await gate;

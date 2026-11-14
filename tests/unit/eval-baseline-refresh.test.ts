@@ -51,14 +51,18 @@ it("does not share an in-flight baseline across different runner settings", asyn
 });
 
 // Two hosts, one persisted cache: setup's measurement must be visible to the task.
-import { attestRovaraOnlyBaseCheckout, createDocumentBaseScoreCache, type ModelEgressFrame, type EvalBaseRecord } from "@agentx/contracts";
+import { attestRovaraOnlyBaseCheckout, createDocumentBaseScoreCache, evalSpendInputsDigest, type ModelEgressFrame, type EvalBaseRecord } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { evalHealthKey } from "../../packages/worker/src/verification/eval-health.js";
+function approvalInputsDigest(input: Pick<EvalHealthInput, "key" | "settings">) {
+  const { evalSetHash, judgePin, modelVersion, model, catalogRowId, commandFingerprint, settingsFingerprint } = evalHealthKey(input);
+  return evalSpendInputsDigest({ evalSetHash, judgePin: judgePin!, modelVersion, model, catalogRowId, commandFingerprint, settingsFingerprint });
+}
 function persistedWorld() {
   const store = new MemoryDocumentStore(); let time = 1_800_000_000_000; let reservations = 0; let calls = 0;
   const cache = () => createDocumentBaseScoreCache(store, { companyId: key.company, now: () => time });
   const input: EvalHealthInput = { key, settings: { imageDigest: "image", route: "customer" }, cache: cache(), selection: "eval", questionIds: ["q"], maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 10,
-    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "maintainer", provider: "customer", connected: true, maxCalls: 3, maxCostMicros: 30 }) },
+    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", inputsDigest: approvalInputsDigest(input), role: "maintainer", provider: "customer", connected: true, maxCalls: 3, maxCostMicros: 30 }) },
     meter: { reserve: async () => { reservations++; return { call: async () => { calls++; return { class: "ok", calls: 1, costMicros: 10 }; }, close: async () => {} }; } },
     run: async ({ call }) => { await call({} as ModelEgressFrame); return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: key.baseCommit }), seconds: 1,
       measures: { schemaVersion: 1, source: "project_runner", eval_set_hash: key.evalSetHash, measures: [{ name: "pass", unit: "fraction", value: 1, direction: "up_good" }], questions: [{ id: "q", samples: [{ pass: true, answer: "a" }] }] } }; },
@@ -104,6 +108,7 @@ it.each(["measured", "refused", "thrown"])("finishes the mark on the %s ending",
   if (ending === "thrown") w.input.run = async () => { throw new Error("private canary"); };
   const result = await createEvalBaselines().afterMerge(w.input);
   expect(result.status).toBe(ending === "measured" ? "measured" : "not_run");
+  expect(w.usage()).toEqual({ reservations: ending === "refused" ? 0 : 1, calls: ending === "measured" ? 3 : 0 });
   expect(JSON.stringify(result)).not.toContain("private canary");
   const docs = (await w.store.query({ pk: `ORG#${key.company}#EVALBASE` })).items.filter(d => d.sk.startsWith("M#"));
   expect(docs).toHaveLength(1); expect(docs[0]).toMatchObject({ state: "finished", startedAt: 1_800_000_000, expiresAt: 1_800_003_600 });
@@ -116,7 +121,7 @@ it("maps unconfirmed health to awaiting_confirmation without a reservation", asy
 it.each([{ company: "org_bbbbbbbbbbbbbbbbbbbb" }, { codeHash: "1".repeat(64) }, { evalSetHash: "2".repeat(64) }, { modelVersion: "other" }])("does not share measuring across identity %j", async over => {
   const w = persistedWorld(); await w.input.cache.startMeasurement!(evalHealthKey(w.input));
   const otherKey = { ...key, ...over }; const grant = await w.input.approval!.read();
-  const other = { ...w.input, key: otherKey, cache: createDocumentBaseScoreCache(w.store, { companyId: otherKey.company, now: () => 1_800_000_000_000 }), approval: { read: async () => ({ ...grant!, company: otherKey.company }) } };
+  const other = { ...w.input, key: otherKey, cache: createDocumentBaseScoreCache(w.store, { companyId: otherKey.company, now: () => 1_800_000_000_000 }), approval: { read: async () => ({ ...grant!, company: otherKey.company, inputsDigest: approvalInputsDigest({ ...w.input, key: otherKey }) }) } };
   expect(await createEvalBaselines().forTask(other)).not.toBe("measuring");
   expect(w.usage().reservations).toBe(1);
 });
