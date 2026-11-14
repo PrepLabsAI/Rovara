@@ -193,3 +193,25 @@ describe("the cache service over the document store", () => {
     expect(puts).toBe(1);
   });
 });
+
+describe("dependency-keyed baseline", () => {
+  const dependencyParts = (over: Partial<EvalBaseCacheKeyParts> = {}) => parts({ codeHash: hex("e"), judgePin: hex("f"), ...over });
+  it("reuses identical code across commits, but refreshes on every dependency change", async () => {
+    const { cache } = world(); const mine = cache("org_aaaaaaaaaaaaaaaaaaaa");
+    await mine.write(dependencyParts(), record(), OWN_ROUND());
+    expect(await mine.read(dependencyParts({ baseCommit: hex("b", 40) }))).toEqual(record());
+    for (const over of [{ codeHash: hex("1") }, { judgePin: hex("2") }, { evalSetHash: hex("3") }, { modelVersion: "another-version" }, { company: "org_bbbbbbbbbbbbbbbbbbbb" }]) {
+      expect(await mine.read(dependencyParts(over))).toBeUndefined();
+    }
+    expect(await mine.read(parts())).toBeUndefined();
+  });
+  it("refuses partial or malformed dependency identity", () => {
+    for (const over of [{ codeHash: "" }, { judgePin: "main" }]) {
+      expect(() => evalBaseCacheKey(dependencyParts(over))).toThrow();
+    }
+    for (const missing of ["codeHash", "judgePin"] as const) {
+      const partial = { ...dependencyParts() }; delete partial[missing];
+      expect(() => evalBaseCacheKey(partial)).toThrow();
+    }
+  });
+});
