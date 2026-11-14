@@ -2,16 +2,14 @@
 import { inertEvidenceText } from "./evidence-inert.js";
 import { HIDDEN_EVAL_NEEDS_SEALED_SENTENCE, type EvalRoundKind } from "./eval-hidden-set.js";
 import { EVAL_NOT_RUN_CLASSES, type EvalRoundFacts } from "./eval-pacing.js";
-import { NOT_RUN_SENTENCES, capSentence } from "./model-egress/classify.js";
-import type { EvalBaseRecord } from "./eval-base-cache.js";
-import type { MeasuresFile } from "./measures-file.js";
+import { NOT_RUN_SENTENCES } from "./model-egress/classify.js";
 
 export const EVAL_NOT_RUN_REASONS = [
   ...EVAL_NOT_RUN_CLASSES, "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
-/** Why an eval (or one measure of it) was not run, in fixed words. The class reasons are F1-a's own sentences (the cap one without an amount: `evalNotRunResult` adds the amount when it has one). */
+/** Why an eval (or one measure of it) was not run, in fixed words. Provider reasons reuse F1-a's sentences; budget refusals name the eval budget. */
 export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> = {
   no_eval_configured: "not run: no eval is configured",
   no_product_key: "not run: no product AI key is connected",
@@ -24,11 +22,11 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   quota: NOT_RUN_SENTENCES.quota,
   overloaded: NOT_RUN_SENTENCES.overloaded,
   key_refused: NOT_RUN_SENTENCES.key_refused,
-  cap: capSentence(),
+  cap: "Not run: over the eval budget",
   provider_error: "not run: provider error",
   refused: "not run: the model call was refused",
   too_many_not_run: "not run: too many cases hit a limit",
-  too_few_questions: "not run: too few eval questions to detect a change",
+  too_few_questions: "not run: too few untouched questions to judge",
   base_round_unattested: "not run: the base round was not attested as run in a Rovara-only checkout",
   hidden_set_needs_sealed_round: HIDDEN_EVAL_NEEDS_SEALED_SENTENCE,
   hidden_set_unavailable: "not run: the hidden eval set could not be opened",
@@ -86,12 +84,6 @@ export interface EvalCheckInput {
   readonly hiddenSetUsed?: boolean;
   readonly judgePinned?: boolean;
   readonly sameJudgeFamily?: boolean;
-  // Old callers remain readable, but aggregate scores are never converted to question evidence.
-  readonly head?: MeasuresFile;
-  readonly base?: EvalBaseRecord | undefined;
-  readonly facts?: EvalRoundFacts;
-  readonly minQuestions?: number;
-  readonly capMicros?: number;
 }
 const bits = (answers: readonly EvalAnswer[]): number[] => answers.map(a => Number(a.pass));
 const sum = (values: readonly number[]): number => values.reduce((a, b) => a + b, 0);
@@ -139,10 +131,10 @@ export function evalSuspects(questions: readonly EvalQuestionComparison[]): { do
   return { down, up, omitted };
 }
 export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean }): EvalCheckResult {
-  const sentence = args.reason === "cap" ? capSentence(args.capMicros) : EVAL_NOT_RUN_SENTENCES[args.reason];
+  const sentence = EVAL_NOT_RUN_SENTENCES[args.reason];
   return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason: args.reason, sentence }, usedHiddenSet: args.hiddenSetUsed === true,
     casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], fixRequested: false,
-    summary: `Eval: Not run — ${sentence.replace(/^not run: /u, "")}. Retry.`, disposition: { draft: false, check: "neutral", retry: true } };
+    summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}. Retry.`, disposition: { draft: false, check: "neutral", retry: true } };
 }
 /** First-look p in [.01,.2) justifies exactly two more new runs; mirror upward. */
 export function evalNeedsSecondLook(questions: readonly EvalQuestionComparison[]): boolean {
@@ -162,7 +154,7 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
   const excluded: Array<{ id: string; reason: "edited" | "suspect_limit" }> = all.filter(q => q.edited).map(q => ({ id: inertEvidenceText(q.id, 160), reason: "edited" }));
   const qs = all.filter(q => !q.edited);
   const unavailable = (reason: EvalNotRunReason): EvalCheckResult => ({ ...refuse(reason), excluded: hidden ? [] : excluded });
-  if (qs.length === 0) return unavailable("question_data_missing");
+  if (qs.length === 0) return unavailable("too_few_questions");
   if (input.judgePinned === false) return unavailable("judge_changed");
   if (!Number.isSafeInteger(input.changedPromptCalls) || input.changedPromptCalls! < 1) return unavailable("no_changed_prompt_call");
   const suspects = evalSuspects(qs);
@@ -188,19 +180,23 @@ export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
   // Incomplete later work must never erase already-established failure.
   if (!worse && !completeFresh) return unavailable("partial_run");
   const improved = !worse && (whole(true) || targeted(suspects.up, true));
-  if (!worse && !improved && evalNeedsSecondLook(qs) && !qs.every(q => validSamples(q.moreNew, 2))) return unavailable("partial_run");
-  const questions: EvalQuestionResult[] = qs.map(q => {
+  const downP = tail(firstOld, firstNew, false);
+  const downwardPending = downP >= .01 && downP < .2;
+  if (!worse && (downwardPending || (!improved && evalNeedsSecondLook(qs))) && !qs.every(q => validSamples(q.moreNew, 2))) return unavailable("partial_run");
+  let unchanged = 0;
+  const questions: EvalQuestionResult[] = qs.flatMap(q => {
     const a = chosen.has(q.id) && validSamples(q.freshOld, 3) ? q.freshOld! : q.old;
     const b = chosen.has(q.id) && validSamples(q.freshNew, 3) ? q.freshNew! : [q.first];
     const mixed = (x: readonly EvalAnswer[]): boolean => passes(x) > 0 && passes(x) < x.length;
     const change = broke(q) ? "broke" : passes(a) === 0 && passes(b) === b.length ? "newly_pass" : mixed(a) || mixed(b) ? "flaky" : passes(q.old) >= 2 && !q.first.pass ? "newly_fail" : "unchanged";
-    return { id: inertEvidenceText(q.id, 160), change, oldAnswers: a.map(x => inertEvidenceText(x.answer, 1_000)), newAnswers: b.map(x => inertEvidenceText(x.answer, 1_000)) };
+    if (change === "unchanged") { unchanged += 1; return []; }
+    return [{ id: inertEvidenceText(q.id, 160), change, oldAnswers: a.map(x => inertEvidenceText(x.answer, 1_000)), newAnswers: b.map(x => inertEvidenceText(x.answer, 1_000)) }];
   });
   const label: EvalLabel = worse ? "Worse on eval" : improved ? "Improved on eval" : "No drop found";
   const notices = [...(subset ? [] : ["Question re-asks skipped: the runner cannot run a subset."]), ...(input.sameJudgeFamily === true ? ["The judge and product use the same model family."] : [])];
   const brokenCount = questions.filter(q => q.change === "broke").length;
   const scope = "on questions the agent could read";
-  const summary = hidden ? `Eval: ${worse ? "Worse on eval" : "No drop found"} on private questions.` : `Eval: ${label} — ${qs.length} questions · ${brokenCount} broke · ${questions.filter(q => q.change === "newly_pass").length} newly pass · ${questions.filter(q => q.change === "flaky").length} flaky · ${scope}; on the evaluated areas. Small or noisy sets can miss changes.`;
+  const summary = hidden ? `Eval: ${worse ? "Worse on eval" : "No drop found"} on private questions.` : `Eval: ${label} — ${qs.length} questions · ${brokenCount} broke · ${questions.filter(q => q.change === "newly_pass").length} newly pass · ${questions.filter(q => q.change === "flaky").length} flaky · ${unchanged} unchanged · ${scope}; on the evaluated areas. Small or noisy sets can miss changes.${label === "No drop found" ? " This check can flag repeated breaks across questions and confirmed safety or refusal breaks. A single ordinary broken question may not change the label." : ""}`;
   return { kind: "eval", roundKind: input.roundKind, outcome: "ran", label: hidden && improved ? "No drop found" : label, usedHiddenSet: hidden, casesRun: hidden ? 0 : qs.length, casesTotal: hidden ? 0 : all.length,
     measures: [], verdicts: [], questions: hidden ? [] : questions, excluded: hidden ? [] : excluded, notices: hidden ? [] : notices, summary, fixRequested: worse || (!hidden && brokenCount > 0),
     disposition: { draft: false, check: worse ? "failure" : "success", retry: false } };

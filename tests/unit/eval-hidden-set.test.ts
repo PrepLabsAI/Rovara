@@ -78,7 +78,7 @@ describe("question feedback and private isolation", () => {
   const answer = { pass: true, answer: "private-answer-canary" };
   const questions = [{ id: "private-id-canary", category: "ordinary" as const, old: [answer, answer, answer], first: answer }];
   it("public feedback shows questions and answers, private feedback has one fixed boolean and no positions/counts", () => {
-    const publicResult = evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1 });
+    const publicResult = evalCheckResult({ roundKind: "check_unsealed", questions: questions.map(q => ({ ...q, old: [answer, { ...answer, pass: false }, answer] })), changedPromptCalls: 1 });
     expect(agentFeedbackFor(publicResult)).toMatchObject({ questions: [{ id: "private-id-canary", oldAnswers: [answer.answer, answer.answer, answer.answer] }] });
     const privateResult = evalCheckResult({ roundKind: "check_sealed", questions, changedPromptCalls: 1, hiddenSetUsed: true });
     expect(agentFeedbackFor(privateResult)).toEqual({ pass: true });

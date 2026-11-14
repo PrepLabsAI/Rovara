@@ -75,3 +75,19 @@ it("matches independent Python hypergeometric convolution golden values", async 
 it("a changed judge pin cannot produce an eval label", () => {
   expect(judge([row("q")], { judgePinned: false })).toMatchObject({ label: "Not run", notRun: { reason: "judge_changed" } });
 });
+
+it("requires a downward second look even when fresh upward suspects improve", () => {
+  const down = Array.from({ length: 5 }, (_, i) => row(`down${i}`, { first: samples(false)[0]!, freshOld: samples(true, true, true), freshNew: samples(true, true, true) }));
+  const up = Array.from({ length: 2 }, (_, i) => row(`up${i}`, { old: samples(false, false, false), freshOld: samples(false, false, false), freshNew: samples(true, true, true) }));
+  expect(judge([...down, ...up])).toMatchObject({ label: "Not run", notRun: { reason: "partial_run" } });
+  expect(judge([...down, ...up].map(q => ({ ...q, moreNew: samples(true, true) }))).label).toBe("Improved on eval");
+});
+it("summarises stable questions without forwarding their answers", () => {
+  const stable = Array.from({ length: 998 }, (_, i) => row(`stable${i}`, { old: [{ pass: true, answer: "unchanged-canary" }, ...samples(true, true)], first: { pass: true, answer: "unchanged-canary" } }));
+  const result = judge([...stable, row("flaky", { old: samples(true, false, true) }), row("broke", { first: samples(false)[0]!, freshOld: samples(true, true, true), freshNew: samples(false, false, false) })]);
+  expect(result.label).toBe("No drop found");
+  expect(result.questions.map(q => [q.id, q.change])).toEqual([["flaky", "flaky"], ["broke", "broke"]]);
+  expect(result.summary).toContain("998 unchanged");
+  expect(result.summary).toContain("A single ordinary broken question may not change the label.");
+  expect(JSON.stringify(result)).not.toContain("unchanged-canary");
+});
