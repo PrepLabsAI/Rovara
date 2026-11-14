@@ -284,7 +284,7 @@ describe("a coding run that leaves the code as it was keeps what it found", () =
     const shell = scriptedShell(big);
     const run = await runTask({
       steps: [...Array.from({ length: 25 }, (_, index) => bash(`echo ${String(index)}`, `b${String(index)}`)), fauxAssistantMessage(`${"c".repeat(20_000)}\n${DONE}`)],
-      workflowMode: "IMPLEMENT", readiness: [], shell, rootPath: await gitWorkspaceRoot(),
+      workflowMode: "IMPLEMENT", readiness: [], shell, rootPath: await gitWorkspaceRoot(), contextWindow: 10_000_000,
     });
     const found = findingsOf(run.failure)!;
     expect(found.commands).toHaveLength(10);

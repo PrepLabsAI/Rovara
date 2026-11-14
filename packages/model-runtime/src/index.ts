@@ -409,7 +409,9 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
       // A proxy key is asked for each time too: it is minted for an hour, and a task can run longer.
       if (proxyKey !== undefined) key = { apiKey: await proxyKey() };
       // ChatGPT requests are not retried here: a plan's limit does not lift in seconds, and the fallback is ready.
-      const upstreamOptions = { ...options, ...key, ...(plan === undefined ? {} : { maxRetries: 0 }), fetch: observedFetch };
+      // Pi 1.4+ hands each request an identity: a detailed User-Agent and, while install telemetry is on, attribution to Pi (OpenRouter's HTTP-Referer and X-OpenRouter-Title, and the like). Rovara's settings turn
+      // telemetry off, and the attribution is dropped here as well, so no request announces Pi whatever a caller's settings say.
+      const upstreamOptions = { ...options, ...key, ...(plan === undefined ? {} : { maxRetries: 0 }), identity: { ...options?.identity, attribution: null }, fetch: observedFetch };
       const upstream = route?.api === "openai-completions" ? openAICompletionsStream(model as Model<"openai-completions">, context, upstreamOptions)
         : upstreamStream(provider, model, context, upstreamOptions, routing);
       let started = false;
@@ -430,7 +432,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
             returnedModel: returnedModel ?? null, returnedProvider: returnedProvider ?? null,
             tokens: { input: message.usage.input, output: message.usage.output, cacheRead: message.usage.cacheRead, cacheWrite: message.usage.cacheWrite },
             costUsd: priced ? message.usage.cost.total : null,
-            costSource: !priced ? "unknown" : reported.provider === "openrouter" ? "estimated" : "list-price", outcome: message.stopReason,
+            costSource: !priced ? "unknown" : reported.provider === "openrouter" ? (message.usage.cost.totalFromProvider === true ? "billed" : "estimated") : "list-price", outcome: message.stopReason,
           }); } catch { /* Telemetry must not turn a completed model response into a failed turn. */ }
         }
         output.push(event);

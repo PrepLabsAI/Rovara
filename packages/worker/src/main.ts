@@ -50,6 +50,8 @@ const trustedRuntimeBackingOwner = CONTAINED_RUNTIME_PROFILE?.id === "linux-arm6
 const invokeAuthentication = invokeAuthenticationFromEnvironment();
 // Pi installs no package for the worker (R56): a settings file's `packages` would otherwise make it run `npmCommand` here.
 process.env.PI_OFFLINE = "1";
+// Pi reports install telemetry and attributes provider requests to itself unless told not to (Pi 1.3+); the worker sends neither.
+process.env.PI_TELEMETRY = "0";
 // N9: a preparation that crashed may have left a package registry's config (and its token) in the workspace; it is removed before any task runs.
 await removeLeftoverRegistryConfigs(rootPath).catch(() => 0);
 // R56: where a project without a devcontainer runs its commands comes from the environment (always the task sandbox on EC2),

@@ -78,7 +78,8 @@ describe("the worker's deep diagnosis", () => {
     const tools = piTaskToolCapabilities(seen.created[0]!.workflowMode as "PLAN");
     expect(tools.shell).toBe(false);
     for (const forbidden of ["bash", "edit", "write"]) expect(tools.tools).not.toContain(forbidden);
-    expect(seen.created[0]!.extensionFactories ?? []).toEqual([]);
+    // No verification and no other extension: only the tool-call limit (a tool_call block, tool-loop-guard.ts) is in front of the session's calls.
+    expect((seen.created[0]!.extensionFactories ?? []).map((extension) => (extension as { name?: string }).name)).toEqual(["rovara-tool-loop-guard"]);
     expect(seen.created[0]!.contextTools).toBeUndefined();
     expect(piTaskToolCapabilities("PLAN")).toEqual({ tools: ["read", "grep", "find", "ls"], customFileTools: false, shell: false });
     expect(checkRunners.run).not.toHaveBeenCalled();
