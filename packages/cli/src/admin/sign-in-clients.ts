@@ -15,6 +15,8 @@ export interface SignInClientAddOptions {
   confidential?: boolean;
   /** Spec 065: comma-separated scopes. */
   scope?: string;
+  /** Spec 066: Rovara's developer API accepts its tokens as the signed-in person. */
+  fullAccess?: boolean;
 }
 
 /** A client ID, refused with what a valid one looks like. */
@@ -40,11 +42,12 @@ export function signInClientRegistration(clientId: string, options: SignInClient
     ...(secretHash === undefined ? {} : { secretHash }),
     // Spec 065: what it may do as the signed-in person, comma-separated.
     ...(options.scope === undefined ? {} : { scopes: options.scope.split(",").map((scope) => scope.trim()).filter((scope) => scope !== "") }),
+    ...(options.fullAccess === true ? { fullAccess: true } : {}),
   });
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const where = issue?.path[0] === "audience" ? "--audience" : issue?.path[0] === "redirectUris" ? "--redirect" : issue?.path[0] === "name" ? "--name"
-      : issue?.path[0] === "scopes" ? `--scope (one or more of ${CLIENT_SCOPES.join(", ")})` : "the client";
+      : issue?.path[0] === "scopes" ? `--scope (one or more of ${CLIENT_SCOPES.join(", ")})` : issue?.path[0] === "fullAccess" ? "--full-access (with --confidential)" : "the client";
     throw agentXError("CONFIG_INVALID", `${where}: ${issue?.message ?? "invalid"}`);
   }
   return parsed.data;
@@ -60,6 +63,8 @@ export interface SignInClientUpdateOptions {
   loopback?: boolean;
   /** Replaces the scopes, comma-separated; `none` removes them all. */
   scope?: string;
+  /** `--full-access` or `--no-full-access`; absent keeps what it is. */
+  fullAccess?: boolean;
 }
 
 /**
@@ -76,12 +81,13 @@ export function signInClientUpdate(current: SignInClientView, options: SignInCli
     redirectUris: options.clearRedirects === true ? [] : options.redirect ?? current.redirectUris,
     loopback: options.loopback ?? current.loopback,
     ...(scopes.length === 0 ? {} : { scopes }),
+    ...((options.fullAccess ?? current.fullAccess === true) ? { fullAccess: true } : {}),
     ...(secretHash !== undefined ? { secretHash } : current.confidential ? { keepSecret: true } : {}),
   });
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const where = issue?.path[0] === "audience" ? "--audience" : issue?.path[0] === "redirectUris" ? "--redirect" : issue?.path[0] === "name" ? "--name"
-      : issue?.path[0] === "scopes" ? `--scope (one or more of ${CLIENT_SCOPES.join(", ")}, or none)` : "the client";
+      : issue?.path[0] === "scopes" ? `--scope (one or more of ${CLIENT_SCOPES.join(", ")}, or none)` : issue?.path[0] === "fullAccess" ? "--full-access (only for a client with a secret)" : "the client";
     throw agentXError("CONFIG_INVALID", `${where}: ${issue?.message ?? "invalid"}`);
   }
   return parsed.data;
@@ -101,4 +107,4 @@ export async function listSignInClients(session: { controlPlaneUrl: string; acce
 }
 
 export const describeSignInClient = (client: SignInClientView) =>
-  `${client.clientId}  ${client.name}  audience: ${client.audience}  ${[...client.redirectUris, ...(client.loopback ? ["loopback"] : [])].join(", ")}${client.confidential ? "  confidential" : ""}`;
+  `${client.clientId}  ${client.name}  audience: ${client.audience}  ${[...client.redirectUris, ...(client.loopback ? ["loopback"] : [])].join(", ")}${client.confidential ? "  confidential" : ""}${client.fullAccess === true ? "  full access" : ""}`;

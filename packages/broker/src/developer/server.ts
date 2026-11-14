@@ -619,8 +619,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           if (current?.secretHash === undefined) return { ok: false, error: "no_secret" };
           client = { ...client, secretHash: current.secretHash };
         }
+        // Spec 066: full access only for a client with a secret, so its tokens only ever reach the service itself.
+        if (client.fullAccess === true && client.secretHash === undefined) return { ok: false, error: "invalid_request" };
         await store.putClient(client);
-        deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId });
+        deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId, ...(client.fullAccess === true ? { fullAccess: true } : {}) });
         return { ok: true };
       }
       if (event.kind === "remove-sign-in-client") {
