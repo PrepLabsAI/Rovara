@@ -148,13 +148,28 @@ function boundTestProof(testProof: unknown, candidateDigest: string | undefined)
 
 const oneLine = (text: string, max: number) => inertLine(text, max);
 
+export const MOCK_PROOF_PREFIX = "with a Rovara-made mock; not Proven: ";
+export const MOCK_PROOF_EXPLANATION = "Checks passing with a Rovara-made mock are not Proven.";
+type ProofProvenance = Pick<ProofTableInput, "recordedCheckIds" | "checkDependencies">;
+
+/** Qualify aggregate old-code claims when any proving item maps to an explicitly Rovara-made dependency. No provenance leaves legacy words unchanged. */
+export function testProofQualifier(testProof: unknown, candidateDigest: string | undefined, provenance: ProofProvenance = {}): "" | typeof MOCK_PROOF_PREFIX {
+  const proof = boundTestProof(testProof, candidateDigest);
+  const usesMock = proof?.items.some((item) => {
+    const checkId = checkIdOfProofItem(item.checkId, provenance.recordedCheckIds);
+    return item.verdict === "proves_change" && checkId !== undefined && provenance.checkDependencies?.get(checkId)?.some((dependency) => dependency.trust === "made_by_rovara") === true;
+  });
+  return usesMock === true ? MOCK_PROOF_PREFIX : "";
+}
+
 /**
  * The test-proof lines (#412's, from `testProofPullRequestLines`) for a proof bound to `candidateDigest`, made inert; none for any other proof. The pull request's Tests section lists them (once) and so does the task page's
  * proof block; the Proof table does not repeat them.
  */
-export function testProofLinesOf(testProof: unknown, candidateDigest: string | undefined): string[] {
+export function testProofLinesOf(testProof: unknown, candidateDigest: string | undefined, provenance: ProofProvenance = {}): string[] {
   const proof = boundTestProof(testProof, candidateDigest);
-  return proof === undefined ? [] : testProofPullRequestLines(proof, candidateDigest, (line) => inertLine(line, TEST_PROOF_LINE_MAX));
+  const qualifier = testProofQualifier(proof, candidateDigest, provenance);
+  return proof === undefined ? [] : testProofPullRequestLines(proof, candidateDigest, (line) => inertLine(line, TEST_PROOF_LINE_MAX)).map((line) => `${qualifier}${line}`);
 }
 
 const PARTLY_IDS_MAX = 30;
@@ -220,7 +235,7 @@ export function buildProofTable(input: ProofTableInput): ProofTable {
       const label = labelOfCheck.get(checkId) ?? checkId;
       evidence.push({
         kind: "check",
-        label: madeByRovara ? inertEvidenceText(`with a Rovara-made mock; not Proven: ${label}`, LABEL_MAX) : oneLine(label, LABEL_MAX),
+        label: madeByRovara ? inertEvidenceText(`${MOCK_PROOF_PREFIX}${label}`, LABEL_MAX) : oneLine(label, LABEL_MAX),
         state: state === "passed" && provesChange.has(checkId) && !madeByRovara ? "proven" : state,
         ...(madeByRovara ? { notProvenReason: "made_by_rovara" as const } : {}),
       });

@@ -8,7 +8,7 @@ import { ProofTableViewSchema, type EvidenceTrustClass, type PlanDocument, type 
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { REVIEW_SAME_MODEL_NOTE } from "../../packages/broker/src/core/proof/review-model-lines.js";
 import { PULL_REQUEST_BODY_MAX_BYTES } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { buildProofTable, checkIdOfProofItem, type ProofCheckResult, type ProofScenarioRow, type ProofTableInput } from "../../packages/broker/src/core/proof/proof-table.js";
+import { buildProofTable, checkIdOfProofItem, testProofLinesOf, type ProofCheckResult, type ProofScenarioRow, type ProofTableInput } from "../../packages/broker/src/core/proof/proof-table.js";
 import { PROOF_LEVEL_LAST, proofSection } from "../../packages/broker/src/core/proof/proof-section.js";
 import { proofTableView } from "../../packages/broker/src/core/proof/proof-view.js";
 import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
@@ -178,6 +178,56 @@ describe("mock provenance in the proof", () => {
       expect(section(level).join("\n")).not.toContain("NEVER-RENDER-THIS");
     }
     expect(ProofTableViewSchema.safeParse(proofTableView(workflowWith(), context)).success).toBe(true);
+  });
+
+  it("qualifies the Tests summary only for a proving item mapped to an explicit Rovara-made dependency", () => {
+    const legacy = ["Test proof: 1 check fails on the original code and passes now"];
+    const proof = proofFor(CODE.digest);
+    for (const checkDependencies of [undefined, new Map(), dependencies("real"), dependencies("recorded"), dependencies("simulated"), dependencies("no_outside_calls"), dependencies("made_by_rovara", "lint")]) {
+      expect(testProofLinesOf(proof, CODE.digest, { recordedCheckIds: SELECTED, checkDependencies })).toEqual(legacy);
+    }
+    const mixed = new Map([["unit", [{ dependencyId: "real-db", trust: "real" as const }, { dependencyId: "payments", trust: "made_by_rovara" as const }]]]);
+    expect(testProofLinesOf(proof, CODE.digest, { checkDependencies: mixed })).toEqual(legacy);
+    const provenance = { recordedCheckIds: ["lint", "unit"], checkDependencies: mixed };
+    expect(testProofLinesOf(proof, CODE.digest, provenance)).toEqual(legacy);
+    proof.items[0]!.checkId = "readiness:1";
+    proof.items[1]!.checkId = "readiness:0";
+    const qualified = testProofLinesOf(proof, CODE.digest, provenance);
+    expect(qualified).toEqual(["with a Rovara-made mock; not Proven: Test proof: 1 check fails on the original code and passes now"]);
+    expect(testProofLinesOf(proof, OTHER.digest, provenance)).toEqual([]);
+    expect(testProofLinesOf(proofFor(CODE.digest, "does_not_prove"), CODE.digest, { ...provenance, recordedCheckIds: SELECTED }).join("\n")).not.toContain("with a Rovara-made mock");
+  });
+
+  it.each([false, true])("qualifies Tests lines in both PR layouts, including supplied lines and status rewrites (testing=%s)", (useTesting) => {
+    const context = { plan: plan(), testProof: proofFor(CODE.digest), checkDependencies: dependencies("made_by_rovara") };
+    const testing = useTesting ? { schemaVersion: 1, result: "verified", rows: [{ label: "Unit tests", command: "npm test", status: "passed" }], reasons: [] } : undefined;
+    for (const proofLines of [undefined, ["Test proof: 1 check fails on the original code and passes now"]]) {
+      const extra = { testing, proofLines };
+      for (const body of [bodyOf(context, workflowWith(), extra), workflowPullRequestStatusLines(workflowWith(), { proof: context, ...extra } as never).join("\n")]) {
+        const line = body.split("\n").find((line) => line.includes("Test proof:"));
+        expect(line).toContain("with a Rovara-made mock; not Proven");
+        expect(line).toContain("fails on the original code");
+      }
+    }
+  });
+
+  it("qualifies the task page Tests summary", () => {
+    const view = ProofTableViewSchema.parse(proofTableView(workflowWith(), { plan: plan(), testProof: proofFor(CODE.digest), checkDependencies: dependencies("made_by_rovara") }));
+    expect(view.testProofLines.find((line) => line.includes("fails on the original code"))).toContain("with a Rovara-made mock; not Proven");
+  });
+
+  it("keeps the check name visible at shrink level one by shortening the mock prefix", () => {
+    const lines = proofSection(workflowWith(), { plan: plan(), checkDependencies: dependencies("made_by_rovara") })!(1);
+    expect(lines.find((line) => line.startsWith("| 1.1:"))).toContain("Rovara mock: Unit tests (passed)");
+  });
+
+  it("explains a mock row beyond the task page's 50-row cut even without test proof", () => {
+    const largePlan = plan({ claims: Array.from({ length: 51 }, (_, i) => ({ id: String(i + 1), text: `Requirement ${i + 1}` })), checks: { proposed: [check("unit", "Unit tests")], proves: { unit: ["51"] } } });
+    const view = ProofTableViewSchema.parse(proofTableView(workflowWith(), { plan: largePlan, checkDependencies: dependencies("made_by_rovara") }));
+    expect(view.rows).toHaveLength(50);
+    expect(view.rows.flatMap((row) => row.evidence)).toEqual([]);
+    expect(view.testProofLines).toContain("Checks passing with a Rovara-made mock are not Proven.");
+    expect(proofTableView(workflowWith(), { plan: largePlan })?.testProofLines).toEqual([]);
   });
 });
 
