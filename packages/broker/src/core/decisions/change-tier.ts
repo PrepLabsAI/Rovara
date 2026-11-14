@@ -48,7 +48,7 @@ export const TIER_REASON_CODES = [
   // risky
   "incomplete_diff", "no_diff_files", "too_many_files", "unreadable_content", "binary_content", "mode_or_type_change", "symlink_suspected", "submodule", "lfs_pointer",
   "sensitive_path", "instruction_file", "hook_file", "git_settings_file", "env_file", "package_source_setting", "registry_source_changed", "dependency_source", "install_script",
-  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "eval_hint", "line_break_character", "path_control_character", "ci_fetch_and_run", "ci_net_send", "ci_check_removed", "invisible_character", "confusable_text", "reviewer_injection_text", "docs_build_hook",
+  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "eval_hint", "line_break_character", "path_control_character", "ci_fetch_and_run", "ci_net_send", "ci_check_removed", "invisible_character", "confusable_text", "reviewer_injection_text", "docs_build_hook", "unscanned_commits",
   // standard
   "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "test_file_deleted", "no_files_named", "request_mentions_sensitive_area",
   "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed", "script_changed", "text_data_file", "vendored_code", "check_weakened", "docs_include", "docs_not_plain", "docs_unread", "docs_site_build", "docs_large", "scanner_ignore_file", "docs_build_config",
@@ -69,7 +69,17 @@ export interface TierFile {
   patch?: string | undefined;
   /** The diff changes a route declaration or a response schema (read by `parseChangedFiles`). */
   apiShapeChanged?: boolean | undefined;
+  /**
+   * What the path IS in git at the head and at the merge base (under `previousPath` for a rename), as the host reports it (DEC 182). ABSENT means the host could not tell, never "an ordinary file": such a file is never
+   * on the docs route (fail closed).
+   */
+  entry?: TierFileEntry | undefined;
 }
+
+/** What a path is in git: an ordinary file, an executable file (mode 100755), a symbolic link (120000), a submodule (160000), or nothing there. */
+export const TIER_ENTRY_KINDS = ["file", "executable", "symlink", "submodule", "none"] as const;
+export type TierEntryKind = (typeof TIER_ENTRY_KINDS)[number];
+export interface TierFileEntry { head: TierEntryKind; base: TierEntryKind }
 
 export interface DiffInput {
   files: readonly TierFile[];
@@ -140,6 +150,8 @@ export interface HeadFacts {
   importsKnown?: boolean | undefined;
   /** Paths (keyed by `factKey`) the host says are a symbolic link or a submodule at the head. */
   links?: ReadonlySet<string> | undefined;
+  /** Changed paths (keyed by `factKey`) the host says are a directory at the head: a changed path that is a directory is a submodule. */
+  submodules?: ReadonlySet<string> | undefined;
   /** Paths (keyed by `factKey`) whose kind was NOT asked (past the read limit): unknown is risky. */
   unchecked?: ReadonlySet<string> | undefined;
   /** True when the repository builds a documentation site (a docs build config exists at the head), or that could not be ruled out: a document may then be compiled or executed by the build. */
@@ -687,6 +699,7 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     const key = factKey(file.repository, name);
     if (head?.instructionImports?.has(factKey(file.repository, normal)) === true) reading.risky.push(reasonFor("instruction_import"));
     if (head?.links?.has(key) === true) reading.risky.push(reasonFor("symlink_suspected"));
+    if (head?.submodules?.has(key) === true) reading.risky.push(reasonFor("submodule"));
     if (head?.unchecked?.has(key) === true) reading.risky.push(reasonFor("link_kind_unknown"));
   }
 
@@ -701,6 +714,16 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     if (isTestPath(normalizedTierPath(old)) && !reading.isTest) reading.standard.push({ code: "test_file_deleted", path: old.slice(0, FLOW_REASON_PATH_MAX) });
     else if (fileTypeOf(old) === "code" && fileTypeOf(file.path) !== "code") reading.standard.push({ code: "code_file_deleted", path: old.slice(0, FLOW_REASON_PATH_MAX) });
   }
+
+  // What the file IS (DEC 182). A symbolic link (whatever it points at: outside the repository, into a sensitive folder, or at a document) and a submodule are risky, at the head or at the base; so is any change of
+  // type or mode between two existing entries (100644 to 100755, a file turned into a link). An executable file is code, never a document; and a file whose type the host could not tell is never on the docs route.
+  const entry = file.entry;
+  if (entry !== undefined) {
+    if (entry.head === "symlink" || entry.base === "symlink") reading.risky.push(here("symlink_suspected"));
+    if (entry.head === "submodule" || entry.base === "submodule") reading.risky.push(here("submodule"));
+    if (entry.head !== "none" && entry.base !== "none" && entry.head !== entry.base) reading.risky.push(here("mode_or_type_change"));
+  }
+  const plainEntry = removed || (entry !== undefined && entry.head === "file" && (entry.base === "file" || entry.base === "none"));
 
   // A document is plain docs only when every name of it is on the docs route, and when it is known that no instruction file reads it.
   const prose = isDocsPath(file.path) && (file.previousPath === undefined || isDocsPath(file.previousPath)) && head?.importsKnown !== false;
@@ -758,8 +781,8 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     else if (problem?.problem === "unread") reading.standard.push(here("docs_unread"));
     if (head?.docsSite === true) reading.standard.push(here("docs_site_build"));
     if (hostLines > DOCS_ROUTE_LINES_MAX) reading.standard.push(here("docs_large"));
-    routed = problem === undefined && head?.docsSite !== true && hostLines <= DOCS_ROUTE_LINES_MAX;
-  } else if (prose) routed = true;
+    routed = problem === undefined && head?.docsSite !== true && hostLines <= DOCS_ROUTE_LINES_MAX && plainEntry;
+  } else if (prose) routed = plainEntry;
   if (routed) {
     reading.kinds.add("docs");
     reading.isCode = false;
@@ -1063,6 +1086,7 @@ const REASON_PHRASES: Readonly<Record<string, string>> = {
   eval_hint: "a prompt file that needs the evaluation check", line_break_character: "a line-ending character that reads differently by reader", path_control_character: "a control character in a file name",
   ci_fetch_and_run: "a CI step that fetches code and runs it", ci_net_send: "a CI step that sends data out", ci_check_removed: "a CI step that no longer runs the tests", invisible_character: "invisible text",
   docs_executes: "a document line that runs something", bidi_control: "text that reorders what is shown", confusable_text: "a word that mixes look-alike letters", reviewer_injection_text: "a line written for the reviewer", docs_build_hook: "a hook of a documentation build",
+  unscanned_commits: "versions pushed between checks that Rovara could not scan",
   docs_not_plain: "a document line that is not plain prose", docs_unread: "a document Rovara could not read in full", docs_site_build: "a document of a site that is built", docs_large: "more than 300 changed document lines", scanner_ignore_file: "a file that tells a scanner what to skip", docs_build_config: "the setup of a documentation build",
   script_changed: "a changed script", text_data_file: "a text file a program may read", vendored_code: "vendored code", check_weakened: "a check switched off", docs_include: "a document that includes another file",
   ci_file_deleted: "a deleted CI file", check_config_deleted: "a deleted test or scanner setting", test_file_deleted: "a deleted test", unrecognised_file_type: "a kind of file Rovara does not know", long_lines: "very long lines or a large amount of text",
