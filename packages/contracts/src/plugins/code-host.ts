@@ -293,6 +293,10 @@ export const ChangeRequestStatusSchema = z.object({
 }).strict();
 export type ChangeRequestStatus = z.infer<typeof ChangeRequestStatusSchema>;
 
+export const FILE_ENTRY_TYPES = ["file", "executable", "symlink", "submodule"] as const;
+export const FileEntryTypeSchema = z.enum(FILE_ENTRY_TYPES);
+export type FileEntryType = z.infer<typeof FileEntryTypeSchema>;
+
 export const ChangeRequestFileSchema = z.object({
   path: z.string().min(1).max(4_096),
   status: z.string().min(1).max(40),
@@ -300,6 +304,8 @@ export const ChangeRequestFileSchema = z.object({
   deletions: z.number().int().nonnegative(),
   patch: z.string().optional(),
   previousPath: z.string().min(1).max(4_096).optional(),
+  /** Absent means "the host could not tell", never "an ordinary file". Both sides are known or the whole entry is absent. Base is the merge base, under previousPath for a rename. */
+  entry: z.object({ head: z.union([FileEntryTypeSchema, z.literal("none")]), base: z.union([FileEntryTypeSchema, z.literal("none")]) }).strict().optional(),
 }).strict();
 export type ChangeRequestFile = z.infer<typeof ChangeRequestFileSchema>;
 export const ChangeRequestFilesPageSchema = z.object({ files: z.array(ChangeRequestFileSchema).max(1_000), nextPage: z.number().int().positive().optional() }).strict();
@@ -548,7 +554,10 @@ export interface CodeHost {
   mergeObservation?(ref: ChangeRequestRef, scope: HostScope, budget: ReadBudget): Promise<MergeObservation>;
   /** Reviews, approvals, checks and mergeability. `budget` bounds the reads one tracking pass may spend. A host's rate limit is signalled with `HostRateLimitError`. */
   changeRequestStatus(ref: ChangeRequestRef, scope: HostScope, budget?: ReadBudget): Promise<ChangeRequestStatus>;
-  changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope): Promise<ChangeRequestFilesPage>;
+  /** With expectedHead, omit entry metadata if the current head differs from the revision the caller classified. Use the same head across pages; this does not pin the file list itself. */
+  changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope, options?: { expectedHead?: string }): Promise<ChangeRequestFilesPage>;
+  /** Optional. Every path at `revision` (a full commit id) that isAiInstructionPath() matches, at any depth, with its type. complete=false when the host could not list the whole tree (cut short or over `max`, default 500). A host that cannot answer THROWS. */
+  instructionFiles?(repository: RepositoryRef, revision: string, scope: HostScope, options?: { max?: number; timeoutMs?: number }): Promise<{ files: Array<{ path: string; type: FileEntryType }>; complete: boolean }>;
   /** Comments and threads. Untrusted text. */
   feedback(ref: ChangeRequestRef, scope: HostScope): Promise<ChangeRequestFeedback>;
   reply(ref: ChangeRequestRef, commentId: string, body: UntrustedText, scope: HostScope, budget?: ReadBudget): Promise<"replied" | "gone">;
