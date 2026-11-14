@@ -207,7 +207,7 @@ describe("the hook in run-task.ts", () => {
     const { readFileSync: read } = await import("node:fs");
     const source = read(join(__dirname, "../../packages/worker/src/run-task.ts"), "utf8");
     expect(source.match(/createCheckRunners\(/gu)).toHaveLength(3);
-    expect(source.match(/withModelHelperRound\(modelHelperPlanFor\(dependencies\.modelHelperRound, \{ rootPath: canonicalRoot \}\), /gu)).toHaveLength(3);
+    expect(source.match(/withModelHelperRound\(replyCollector\.wrap\(modelHelperPlanFor\(dependencies\.modelHelperRound, \{ rootPath: canonicalRoot \}\)\), /gu)).toHaveLength(3);
     const { modelHelperPlanFor } = await import("../../packages/worker/src/model-helper-round.js");
     expect(modelHelperPlanFor(undefined, { rootPath: "/x" })).toBeUndefined();
     const plan: ModelHelperRoundPlan = { blockList: [], onResult: SINK, start: () => Promise.resolve(undefined) };

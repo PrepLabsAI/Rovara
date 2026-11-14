@@ -16,6 +16,7 @@ function populatedFake(): Required<CheckRunners> {
   const method = () => vi.fn().mockResolvedValue(RESULT);
   return {
     kind: "sandbox",
+    beginCheck: vi.fn(),
     reportRoot: vi.fn(() => "/worker-owned/reports"),
     scopeRound: method(),
     originalCode: vi.fn().mockReturnValue(RESULT),
@@ -50,12 +51,13 @@ describe("withModelHelperRound forwards every member of the runners it wraps", (
       spy.mockClear();
       // endRound last: it ends the round and clears the started helper; the other members run with it up
       if (name === "endRound") continue;
-      const argsFor = name === "runProjectCommand" ? [{ cwd: ".", executable: "node", args: [], timeoutSeconds: 1, env: {} }, signal] : name === "runAgentCommand" ? ["replay", 1000, signal] : SENTINELS;
+      const argsFor = name === "beginCheck" ? ["readiness:0"] : name === "runProjectCommand" ? [{ cwd: ".", executable: "node", args: [], timeoutSeconds: 1, env: {} }, signal] : name === "runAgentCommand" ? ["replay", 1000, signal] : SENTINELS;
       const result: unknown = await (forwarded as (...args: unknown[]) => unknown).apply(wrapped, argsFor);
       expect(spy, name).toHaveBeenCalledTimes(1);
       // the wrapped member's own answer comes back (reportRoot and originalCode answer directly, the rest through a promise)
-      expect(result, name).toEqual(name === "reportRoot" ? "/worker-owned/reports" : RESULT);
-      if (name !== "runProjectCommand") expect(spy.mock.calls[0], name).toEqual(argsFor);
+      expect(result, name).toEqual(name === "beginCheck" ? undefined : name === "reportRoot" ? "/worker-owned/reports" : RESULT);
+      if (name === "scopeRound") expect(spy.mock.calls[0], name).toEqual([SENTINELS[0], SENTINELS[1], expect.any(Function), SENTINELS[3]]);
+      else if (name !== "runProjectCommand") expect(spy.mock.calls[0], name).toEqual(argsFor);
     }
     const end = (fake as unknown as { endRound: ReturnType<typeof vi.fn> }).endRound;
     end.mockClear();
@@ -65,6 +67,6 @@ describe("withModelHelperRound forwards every member of the runners it wraps", (
   it("a runner object with only the two required methods wraps to the same two (no member is invented)", () => {
     const bare: CheckRunners = { runProjectCommand: () => Promise.reject(new Error("x")), runAgentCommand: () => Promise.reject(new Error("x")) };
     const wrapped = withModelHelperRound(plan, bare);
-    expect(Object.keys(wrapped).sort()).toEqual(["endRound", "runAgentCommand", "runProjectCommand"]);
+    expect(Object.keys(wrapped).sort()).toEqual(["beginCheck", "endRound", "runAgentCommand", "runProjectCommand"]);
   });
 });

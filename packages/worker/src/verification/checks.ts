@@ -45,6 +45,8 @@ const MIN_CHECK_START_MS = 1_000;
 export const ABORT_JOIN_MS = CONTAINER_STOP_BOUND_MS + 10_000;
 
 export interface CheckRunners {
+  /** The actual planned id, after all skip guards and immediately before its command. */
+  beginCheck?(checkId: string): void;
   /** Worker-owned reports for the most recent round; absent means the ordinary workspace reports. */
   reportRoot?(): string;
   /** Worker-owned execution scope (multi-repo): creates and releases the round's checkout. */
@@ -287,6 +289,7 @@ async function runChecksRound(
     const timeoutMs = capped ? remaining : check.ownTimeoutMs;
     const began = now();
     try {
+      runners.beginCheck?.(check.id);
       const result = await untilAborted(check.run(timeoutMs, signal), signal, joinMs, runners.kind ?? "local");
       const duration = now() - began;
       if (result.timedOut) {

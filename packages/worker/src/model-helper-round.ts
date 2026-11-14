@@ -17,7 +17,7 @@ import {
   type ServableRow,
 } from "@agentx/contracts";
 import { CheckNotRunError, type CheckRunners } from "./verification/checks.js";
-import { UNTRUSTED_MODEL_SUMMARY, type ModelHelperSummary } from "./model-helper-ledger.js";
+import { ModelHelperSummarySchema, MODEL_SUMMARY_MAX_ESCAPE_HOSTS, UNTRUSTED_MODEL_SUMMARY, type ModelHelperSummary } from "./model-helper-ledger.js";
 import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } from "./model-reply-bundle.js";
 
 export type ModelRoundResult = "ran" | "not_run";
@@ -94,7 +94,10 @@ export interface StartedModelHelper {
   /** Stops the helper and removes its files (idempotent, never throws). */
   stop(): Promise<void>;
 }
+export type ScriptedReplyFacts = readonly { readonly checkId: string; readonly taskMade: number; readonly counted: number }[] | "unknown";
 export interface ModelHelperRoundResult {
+  /** Unknown means every check in this round may have used task-made replies. No helper: no result. */
+  readonly scriptedReplies?: ScriptedReplyFacts;
   readonly summary: ModelHelperSummary | undefined;
   readonly evidence: ModelHelperEvidence;
 }
@@ -120,52 +123,140 @@ export function modelHelperPlanFor(source: ModelHelperRoundSource | undefined, c
   return typeof source === "function" ? source(context) : source;
 }
 
+/** Each invocation owns its collector. Take immediately after the candidate round, before baseline or original-code rounds. */
+export function modelHelperReplyCollector(): { wrap(plan: ModelHelperRoundPlan | undefined): ModelHelperRoundPlan | undefined; take(): ScriptedReplyFacts | undefined } {
+  let latest: ScriptedReplyFacts | undefined;
+  return {
+    wrap(plan) {
+      // Leave an invalid plan intact so withModelHelperRound's required-consumer guard still refuses it.
+      if (plan === undefined || typeof plan.onResult !== "function") return plan;
+      return { ...plan, onResult(result) {
+        const replies = result.scriptedReplies;
+        latest = replies === undefined || replies === "unknown" ? replies : replies.map((entry) => ({ ...entry }));
+        plan.onResult(result);
+      } };
+    },
+    take() { const facts = latest; latest = undefined; return facts; },
+  };
+}
+
+// One total allowance per round, not per command. The summary port reads no project files and late read results are ignored.
+const REPLY_FACTS_MAX = 200;
+const SUMMARY_READ_MAX_BYTES = 256 * 1024;
+const SUMMARY_READ_MAX_MS = 1000;
+
 /** `runners` for a round with the model helper, or the same object for one without. */
 export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, runners: CheckRunners): CheckRunners {
   if (plan === undefined) return runners;
   // An escape reaches only `onResult`: a plan with no consumer would let a round that called a real model host pass in silence.
   if (typeof (plan as { onResult?: unknown }).onResult !== "function") throw new TypeError("a model helper plan needs an onResult consumer that turns an escape into 'not run' checks (TE-B5/TE-A3)");
   let helper: Promise<StartedModelHelper | undefined> | undefined;
+  let currentId: string | undefined;
+  let unknown = false;
+  let previous = { taskMade: 0, counted: 0 };
+  let facts = new Map<string, { checkId: string; taskMade: number; counted: number }>();
+  let readMs = 0;
+  let readBytes = 0;
+  let reads = 0;
   const ensure = (signal: AbortSignal): Promise<StartedModelHelper | undefined> => {
     helper ??= plan.start(signal).catch((): never => {
       throw new CheckNotRunError(MODEL_HELPER_START_FAILED_SENTENCE);
     });
     return helper;
   };
-  // `...runners` first: every member the wrapped runners have (kind, reportRoot, scopeRound, originalCode, prepareRound, freshServices, resetBetweenChecks, and any later one) reaches the caller; only these three are replaced.
+  const read = async (started: StartedModelHelper, signal?: AbortSignal): Promise<ModelHelperSummary | undefined> => {
+    const began = performance.now();
+    const left = SUMMARY_READ_MAX_MS - readMs;
+    if (left <= 0 || reads >= REPLY_FACTS_MAX + 1 || readBytes >= SUMMARY_READ_MAX_BYTES || signal?.aborted === true) { unknown = true; return undefined; }
+    reads++;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let abort: (() => void) | undefined;
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(() => started.readSummary()),
+        new Promise<undefined>((resolve) => {
+          abort = () => resolve(undefined);
+          signal?.addEventListener("abort", abort, { once: true });
+          timer = setTimeout(() => { readMs = SUMMARY_READ_MAX_MS; resolve(undefined); }, left);
+        }),
+      ]);
+      // Bound arrays before schema traversal (the port's TS type is not a runtime check).
+      if (!Array.isArray(result?.escapes?.hosts) || result.escapes.hosts.length > MODEL_SUMMARY_MAX_ESCAPE_HOSTS) { unknown = true; return undefined; }
+      const parsed = ModelHelperSummarySchema.safeParse(result);
+      if (!parsed.success) { unknown = true; return undefined; }
+      readBytes += Buffer.byteLength(JSON.stringify(parsed.data));
+      if (readBytes > SUMMARY_READ_MAX_BYTES) { unknown = true; return undefined; }
+      if (!parsed.data.trusted || parsed.data.replySetDigest !== started.pinnedDigest) { unknown = true; return UNTRUSTED_MODEL_SUMMARY; }
+      if (parsed.data.scripted.task_made < previous.taskMade || parsed.data.countsTowardProof < previous.counted) unknown = true;
+      return parsed.data;
+    } catch {
+      unknown = true;
+      return undefined;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (abort !== undefined) signal?.removeEventListener("abort", abort);
+      readMs += performance.now() - began;
+    }
+  };
+  const afterCommand = async (started: StartedModelHelper, signal: AbortSignal) => {
+    const id = currentId;
+    currentId = undefined;
+    // Without an id, attribution is already impossible. Keep the existing final evidence read, but never guess a position.
+    if (id === undefined) { unknown = true; return; }
+    const summary = await read(started, signal);
+    if (summary === undefined || !summary.trusted || unknown) return;
+    const next = { taskMade: summary.scripted.task_made, counted: summary.countsTowardProof };
+    const old = facts.get(id) ?? { checkId: id, taskMade: 0, counted: 0 };
+    if (!facts.has(id) && facts.size >= REPLY_FACTS_MAX) { unknown = true; return; }
+    facts.set(id, { checkId: id, taskMade: old.taskMade + next.taskMade - previous.taskMade, counted: old.counted + next.counted - previous.counted });
+    previous = next;
+  };
   const wrapped: CheckRunners = {
     ...runners,
+    // The inner scope's own runners must get the same wrapper; spreading scopeRound alone bypasses the helper entirely.
+    ...(runners.scopeRound === undefined ? {} : { scopeRound: (checkPlan, signal, run, remainingMs) => runners.scopeRound!(checkPlan, signal, (scoped) => run(withModelHelperRound(plan, scoped)), remainingMs) }),
+    beginCheck(checkId) {
+      currentId = typeof checkId === "string" && /^(?:readiness|agent):(0|[1-9]\d{0,5})$/u.test(checkId) ? checkId : undefined;
+      if (currentId === undefined) unknown = true;
+      runners.beginCheck?.(checkId);
+    },
     async runProjectCommand(command, signal) {
       const started = await ensure(signal);
       if (started === undefined) return runners.runProjectCommand(command, signal);
-      // The helper's variables go LAST: they win over the command's own and over the worker's (a real key in the user's shell is overridden with the dummy).
-      // Remove inherited credentials, while preserving a GOOGLE_APPLICATION_CREDENTIALS explicitly set by the project (decision 174).
+      // The helper's variables win; preserve only a GOOGLE_APPLICATION_CREDENTIALS explicitly set by the project (decision 174).
       const unset = Object.fromEntries(started.unsetEnvironment.filter((name) => name !== "GOOGLE_APPLICATION_CREDENTIALS" || !Object.hasOwn(command.env ?? {}, name)).map((name) => [name, undefined])) as unknown as Record<string, string>;
-      return runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...started.commandEnvironment, ...unset } }, signal);
+      try {
+        return await runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...started.commandEnvironment, ...unset } }, signal);
+      } finally { await afterCommand(started, signal); }
     },
     async runAgentCommand(replay, timeoutMs, signal) {
       const started = await ensure(signal);
-      // A replayed agent command runs with the worker's own environment, which on a laptop holds the user's real keys and no redirect: fail closed rather than let it call a real model.
-      if (started !== undefined && (Object.keys(started.commandEnvironment).length > 0 || started.unsetEnvironment.length > 0)) throw new CheckNotRunError(MODEL_HELPER_AGENT_COMMAND_SENTENCE);
-      return runners.runAgentCommand(replay, timeoutMs, signal);
+      if (started === undefined) return runners.runAgentCommand(replay, timeoutMs, signal);
+      try {
+        // A laptop replay cannot receive the redirect, so the existing refusal stays intact.
+        if (Object.keys(started.commandEnvironment).length > 0 || started.unsetEnvironment.length > 0) throw new CheckNotRunError(MODEL_HELPER_AGENT_COMMAND_SENTENCE);
+        return await runners.runAgentCommand(replay, timeoutMs, signal);
+      } finally { await afterCommand(started, signal); }
     },
     async endRound() {
       const current = helper;
-      helper = undefined;
       try {
         const started = current === undefined ? undefined : await current.catch(() => undefined);
         if (started !== undefined) {
-          const read = await started.readSummary().catch(() => undefined);
-          // The record must be the one of the files the worker pinned; any other digest is a record nobody can vouch for.
-          const summary = read !== undefined && read.trusted && read.replySetDigest !== started.pinnedDigest ? UNTRUSTED_MODEL_SUMMARY : read;
+          const summary = await read(started);
+          const evidence = modelHelperEvidence(summary, plan.blockList, plan.hostSuffixes === undefined ? {} : { hostSuffixes: plan.hostSuffixes });
+          // Any calls after the last command settled have no reliable check attribution.
+          if (summary?.scripted.task_made !== previous.taskMade || summary?.countsTowardProof !== previous.counted || evidence.result === "not_run") unknown = true;
           try {
-            plan.onResult({ summary, evidence: modelHelperEvidence(summary, plan.blockList, plan.hostSuffixes === undefined ? {} : { hostSuffixes: plan.hostSuffixes }) });
+            plan.onResult({ summary, evidence, scriptedReplies: unknown ? "unknown" : [...facts.values()] });
           } catch {
-            // a sink that throws must not keep the helper up or the round open
+            // A sink that throws must not keep the helper up or the round open.
           }
           await started.stop().catch(() => undefined);
         }
       } finally {
+        helper = undefined; currentId = undefined; unknown = false;
+        previous = { taskMade: 0, counted: 0 }; facts = new Map(); readMs = 0; readBytes = 0; reads = 0;
         await runners.endRound?.();
       }
     },
