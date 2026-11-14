@@ -1,0 +1,117 @@
+import { describe, expect, it } from "vitest";
+import { REAL_MODEL_CHECK_ARTIFACT, RealModelCheckSchema, RealModelCheckWriteSchema, realModelCheckLine, realModelPassed, type RealModelCheck } from "../../packages/contracts/src/real-model-check.js";
+
+function result(): RealModelCheck {
+  return { schemaVersion: 1, candidateDigest: "a".repeat(64), status: "completed", items: [{ checkId: "unit", test: "test_refund", result: "passed" }], totals: { selected: 1, passed: 1, passedOnRerun: 0, failed: 0, notRun: 0 }, calls: 3, costMicros: 40_000, model: "gemini-2.5-flash" };
+}
+describe("real model artifact", () => {
+  it("owns the artifact and accepts the strict writer in the tolerant reader", () => {
+    expect(REAL_MODEL_CHECK_ARTIFACT).toBe("real-model-check.json");
+    const written = RealModelCheckWriteSchema.parse(result());
+    expect(RealModelCheckSchema.parse({ ...written, future: true, items: written.items.map(i => ({ ...i, future: true })) })).toEqual(written);
+    expect(RealModelCheckWriteSchema.safeParse({ ...written, future: true }).success).toBe(false);
+    expect(RealModelCheckWriteSchema.safeParse({ ...written, items: [{ ...written.items[0], future: true }] }).success).toBe(false);
+  });
+  it.each([
+    { schemaVersion: 2 }, { candidateDigest: "bad" }, { status: "unknown" }, { calls: NaN }, { costMicros: -1 },
+    { items: [{ checkId: "unit", test: "x", result: "unknown" }] }, { items: [{ checkId: "unit", test: "x" }] },
+    { items: [{ checkId: "unit", test: "x".repeat(501), result: "passed" }] },
+    { items: [{ checkId: "unit", test: "x", result: "passed", reason: "secret cause" }] },
+    { items: Array.from({ length: 201 }, () => result().items[0]) }, { totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 } },
+    { model: null }, { calls: 0 }, { items: [{ checkId: "unit", test: "x", result: "not_run" }], status: "not_run", reason: "run_unavailable", totals: { selected: 1, passed: 0, passedOnRerun: 0, failed: 0, notRun: 1 } },
+  ])("refuses malformed whole artifacts without leaking %j", patch => {
+    const raw = { ...result(), ...patch };
+    expect(RealModelCheckSchema.safeParse(raw).success).toBe(false);
+    expect(realModelPassed(raw, "unit", "test_refund")).toBe(false);
+    expect(realModelCheckLine(raw)).toBe("Real model check: not run: real model results could not be read.");
+  });
+  it("has exact golden lines and no line when skipped", () => {
+    expect(realModelCheckLine(result())).toBe("Real model check: 1 of 1 changed AI tests passed on the real model (gemini-\u200D2.5-flash). 3 calls, $0.04, paid with your product key.");
+    const flaky = result(); flaky.items[0]!.result = "passed_on_rerun"; flaky.totals.passed = 0; flaky.totals.passedOnRerun = 1;
+    expect(realModelCheckLine(flaky)).toBe("Real model check: 0 of 1 passed; 1 passed only on re-run (flaky on the real model): test_refund. 3 calls, $0.04, paid with your product key.");
+    const failed = result(); failed.items[0]!.result = "failed"; failed.totals.passed = 0; failed.totals.failed = 1;
+    expect(realModelCheckLine(failed)).toContain("1 of 1 failed on the real model twice: test_refund.");
+    const skipped = { ...result(), status: "skipped", items: [], totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 }, calls: 0, costMicros: 0, model: null };
+    expect(realModelCheckLine(skipped)).toBeUndefined();
+  });
+  it("counts exact test passes for 192a", () => {
+    const r = result(); expect(realModelPassed(r, "unit", "test_refund")).toBe(true);
+    r.items[0]!.result = "passed_on_rerun"; r.totals.passed = 0; r.totals.passedOnRerun = 1;
+    expect(realModelPassed(r, "unit", "test_refund")).toBe(true);
+    r.items[0]!.result = "failed"; r.totals.passedOnRerun = 0; r.totals.failed = 1;
+    expect(realModelPassed(r, "unit", "test_refund")).toBe(false);
+  });
+  it.each(["[x[1]](https://example.invalid) ![a[b]c](x)", "[x][ref] ![x][ref]", "@person #123 <b>html</b>", "# title\n> quote\n---\n```\n~~~", "hidden\u200b\ufe0ftext"])("makes every displayed field inert: %s", text => {
+    const r = result(); r.items[0]!.test = text; r.items[0]!.result = "failed"; r.totals.passed = 0; r.totals.failed = 1; r.model = text;
+    const line = realModelCheckLine(r)!;
+    expect(line).not.toMatch(/\[|<b>|@person|#123|https:\/\/example|\n|\ufe0f/u);
+  });
+  it("refuses a megabyte without echo or unbounded work", () => {
+    const start = performance.now();
+    expect(realModelCheckLine({ ...result(), model: "x".repeat(1_000_000) })).toBe("Real model check: not run: real model results could not be read.");
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe("artifact limits and refusal words", () => {
+  it("accepts exactly 200 items and scopes the same test name by check", () => {
+    const r = result(); r.items = Array.from({ length: 200 }, (_, i) => ({ checkId: `c${i}`, test: "same", result: "passed" })); r.calls = 200; r.totals.selected = 200; r.totals.passed = 200;
+    expect(RealModelCheckWriteSchema.safeParse(r).success).toBe(true); expect(realModelPassed(r, "c0", "same")).toBe(true); expect(realModelPassed(r, "missing", "same")).toBe(false);
+    r.items[1] = r.items[0]!; expect(RealModelCheckSchema.safeParse(r).success).toBe(false);
+  });
+  it.each([
+    ["ports_missing", "product key approval and monthly meter are not connected"], ["round_kind", "real model tests need a check round"],
+    ["approval_missing", "product key approval is unavailable"], ["approval_invalid", "product key approval does not cover these tests"],
+    ["no_product_key", "no product AI key is connected"], ["grant_cap", "the approved call or cost ceiling cannot fit these tests"],
+    ["task_cap", "test model budget reached ($2.00 per task)"], ["monthly_cap", "the monthly cap cannot fit these tests"],
+    ["attribution_unknown", "Rovara couldn't tell which tests use the model"], ["call_count_unknown", "call count unknown"],
+    ["rate_limit", "provider rate limit"], ["quota", "provider quota used up"], ["overloaded", "provider overloaded"],
+    ["key_refused", "the product key was refused (check it in Settings)"], ["cap", "test model budget reached ($2.00 per task)"],
+    ["provider_error", "the model provider did not complete the call"], ["refused", "the model call was refused"],
+    ["invalid_usage", "model usage could not be read"], ["invalid_results", "real model results could not be read"],
+    ["timed_out", "the real model check reached its time limit"], ["run_unavailable", "the real model test run could not complete"],
+    ["close_unavailable", "the monthly reservation could not be closed"], ["invalid_input", "real model inputs could not be read"],
+    ["input_limit", "real model inputs exceed the size limit"], ["too_many_tests", "too many changed AI tests (51)"],
+  ])("prints fixed words for %s, never stored causes", (reason, words) => {
+    const raw = { ...result(), status: "not_run", items: [], totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 }, model: "private-cause", calls: 0, costMicros: 0, reason, cause: "private-cause", ...(reason === "too_many_tests" ? { tooManyCount: 51 } : {}) };
+    expect(realModelCheckLine(raw)).toBe(`Real model check: not run: ${words}.`); expect(realModelCheckLine(raw)).not.toContain("private-cause");
+  });
+});
+
+it("rejects an over-limit artifact without visiting its rows", () => {
+  const items = Array.from({ length: 201 }, () => result().items[0]);
+  Object.defineProperty(items, "0", { get: () => { throw new Error("row must not be read"); } });
+  expect(RealModelCheckSchema.safeParse({ ...result(), items }).success).toBe(false);
+});
+
+
+describe("exact check and test granularity", () => {
+  it.each(["passed", "passed_on_rerun", "failed", "not_run"] as const)("accepts whole-check %s and never infers a test pass", state => {
+    const r = result();
+    r.items = [{ checkId: "unit", result: state, ...(state === "not_run" ? { reason: "run_unavailable" as const } : {}) }];
+    r.totals = { selected: 1, passed: +(state === "passed"), passedOnRerun: +(state === "passed_on_rerun"), failed: +(state === "failed"), notRun: +(state === "not_run") };
+    if (state === "not_run") { r.status = "not_run"; r.reason = "run_unavailable"; }
+    expect(RealModelCheckWriteSchema.safeParse(r).success).toBe(true);
+    expect(realModelPassed(r, "unit")).toBe(state === "passed" || state === "passed_on_rerun");
+    expect(realModelPassed(r, "other")).toBe(false);
+    expect(realModelPassed(r, "unit", "test_refund")).toBe(false);
+    if (state === "failed") expect(realModelCheckLine(r)).toContain("twice: unit.");
+  });
+  it("never infers a whole-check pass from a per-test pass", () => {
+    expect(realModelPassed(result(), "unit", "test_refund")).toBe(true);
+    expect(realModelPassed(result(), "unit")).toBe(false);
+    expect(realModelPassed(result(), "other", "test_refund")).toBe(false);
+  });
+  it("keeps both levels distinct and rejects duplicate whole-check items", () => {
+    const r = result();
+    r.items.push({ checkId: "unit", result: "failed" });
+    r.totals.selected++; r.totals.failed++;
+    expect(RealModelCheckWriteSchema.safeParse(r).success).toBe(true);
+    expect(realModelPassed(r, "unit", "test_refund")).toBe(true);
+    expect(realModelPassed(r, "unit")).toBe(false);
+    r.items.push({ checkId: "unit", result: "failed" });
+    r.totals.selected++; r.totals.failed++;
+    expect(RealModelCheckWriteSchema.safeParse(r).success).toBe(false);
+    expect(RealModelCheckSchema.safeParse(r).success).toBe(false);
+  });
+});
