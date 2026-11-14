@@ -15,8 +15,9 @@ import {
   type PublicationCheckResult,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, tailCollector } from "../collected-process.js";
-import { devcontainerBashOperations, runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";
+import { currentWorkspaceSafety, inWorkspaceScope, type UnconfirmedKind } from "../workspace-safety.js";
+import { MAX_COMMAND_OUTPUT_BYTES, RunnerKillUnconfirmedError, redactedTail, tailCollector } from "../collected-process.js";
+import { CONTAINER_STOP_BOUND_MS, devcontainerBashOperations, runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../git.js";
 import { runProjectCommand } from "../prepare.js";
 import { SANDBOX_TARGET, executionFor } from "../execution-target.js";
@@ -34,8 +35,20 @@ const CHECK_LABEL_MAX = 8_192;
 const MAX_CHECKS = 64;
 /** Less budget than this left, and a check is not started: it could not finish. */
 const MIN_CHECK_START_MS = 1_000;
+/**
+ * After an abort, how long runChecks waits for the runner it stopped to say that it has (FIX-RUNNER-ABORT-JOIN). A local command's stop is bounded by
+ * about 10 s (SIGTERM, the grace period, SIGKILL, the confirmation); a container command's by CONTAINER_STOP_BOUND_MS (the TERM exec, the grace period, the KILL exec
+ * and the local client's end: about 37 s). This is longer than both, so a runner that is still working inside its own bound is never given up on. A runner that has not
+ * reported by then is not confirmed stopped.
+ */
+export const ABORT_JOIN_MS = CONTAINER_STOP_BOUND_MS + 10_000;
 
 export interface CheckRunners {
+  /**
+   * Where these runners run commands: what an unconfirmed stop is recorded as when runChecks gives up waiting for them (the quarantine differs: a task sandbox is removed, a devcontainer
+   * and the host cannot be). Absent (a fake): "local".
+   */
+  kind?: UnconfirmedKind;
   /**
    * A readiness command, as preparation ran it (devcontainer or host). Rejects when `signal` stops it, even when the
    * command finished just before the abort: a check round discards that result anyway.
@@ -154,14 +167,17 @@ interface PlannedCheck {
 
 /**
  * Runs the plan's checks in order. Each runs with its own timeout, cut to the budget left, and one the budget cannot
- * start, or that the budget (not its own timeout) stopped, is `not_run`. An abort stops the running check and returns
- * at once, without waiting for a runner that ignores it: that check and the rest are `not_run`, so the caller tells a
- * stopped round by its signal.
+ * start, or that the budget (not its own timeout) stopped, is `not_run`. An abort stops the running check: that check and
+ * the rest are `not_run`, so the caller tells a stopped round by its signal. The abort is JOINED: runChecks returns only after the
+ * runner it stopped has reported that it has (a command that is still running may still be writing the working tree, and callers
+ * read, restore or swap that tree as soon as this returns). A runner that has not reported within `abortJoinMs`, or that reports
+ * a stop it could not confirm, makes runChecks throw RunnerKillUnconfirmedError: the caller must treat the round as failed and
+ * must NOT touch the working tree afterwards.
  */
 export async function runChecks(
   plan: CheckPlan,
   runners: CheckRunners,
-  options: { budgetMs: number; signal: AbortSignal; now?: () => number },
+  options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number },
 ): Promise<CheckRound> {
   if (runners.endRound === undefined) return runChecksRound(plan, runners, options);
   try {
@@ -174,14 +190,15 @@ export async function runChecks(
 async function runChecksRound(
   plan: CheckPlan,
   runners: CheckRunners,
-  options: { budgetMs: number; signal: AbortSignal; now?: () => number },
+  options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number },
 ): Promise<CheckRound> {
   const now = options.now ?? Date.now;
   const { signal } = options;
+  const joinMs = options.abortJoinMs ?? ABORT_JOIN_MS;
   const startedAt = now();
   const entries: CheckEntry[] = [];
   if (runners.freshServices !== undefined && !signal.aborted) {
-    const fresh = await untilAborted(Promise.resolve().then(() => runners.freshServices?.(signal)), signal).then(() => true, () => false);
+    const fresh = await untilAborted(Promise.resolve().then(() => runners.freshServices?.(signal)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
     if (!fresh) {
       const note = signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: the test services could not be put back as they were seeded.";
       return { entries: plannedChecks(plan, runners).map((check) => ({ id: check.id, label: check.label, source: check.source, before: check.before, after: "not_run", class: classifyCheck(check.before, "not_run"), output: note, durationMs: 0 })), stopped: signal.aborted };
@@ -210,7 +227,7 @@ async function runChecksRound(
       continue;
     }
     if (!first && runners.resetBetweenChecks !== undefined) {
-      const reset = await untilAborted(Promise.resolve().then(() => runners.resetBetweenChecks?.(signal)), signal).then(() => true, () => false);
+      const reset = await untilAborted(Promise.resolve().then(() => runners.resetBetweenChecks?.(signal)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
       if (!reset) {
         resetFailed = true;
         entries.push(entry("not_run", signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: the test services could not be put back between the checks."));
@@ -227,7 +244,7 @@ async function runChecksRound(
     const timeoutMs = capped ? remaining : check.ownTimeoutMs;
     const began = now();
     try {
-      const result = await untilAborted(check.run(timeoutMs, signal), signal);
+      const result = await untilAborted(check.run(timeoutMs, signal), signal, joinMs, runners.kind ?? "local");
       const duration = now() - began;
       if (result.timedOut) {
         entries.push(capped
@@ -237,6 +254,8 @@ async function runChecksRound(
         entries.push(entry(result.exitCode === 0 ? "passed" : "failed", result.output, duration, result.exitCode));
       }
     } catch (error) {
+      // A stop that could not be confirmed is no "stopped check": the command may still be running, and the caller must not touch the tree.
+      if (error instanceof RunnerKillUnconfirmedError) throw error;
       const duration = now() - began;
       const message = error instanceof Error ? error.message : String(error);
       if (signal.aborted) entries.push(entry("not_run", "AgentX stopped this check.", duration));
@@ -282,20 +301,46 @@ function plannedChecks(plan: CheckPlan, runners: CheckRunners): PlannedCheck[] {
   return [];
 }
 
-/** The runner's result, or a rejection as soon as the signal fires, even when the runner does not honour it. */
-function untilAborted<T>(running: Promise<T>, signal: AbortSignal): Promise<T> {
+/** For a step whose failure only means "not done": a stop that could not be confirmed is rethrown, anything else is `false`. */
+function unlessUnconfirmed(error: unknown): false {
+  if (error instanceof RunnerKillUnconfirmedError) throw error;
+  return false;
+}
+
+/**
+ * The runner's result, or a rejection once the signal has fired AND the runner has reported that it stopped (FIX-RUNNER-ABORT-JOIN): a
+ * runner that has not reported within `joinMs`, or that reports a stop it could not confirm, rejects with RunnerKillUnconfirmedError.
+ * A runner that finishes, or fails, after the abort counts as stopped; the check is still `not_run`.
+ */
+function untilAborted<T>(running: Promise<T>, signal: AbortSignal, joinMs: number, kind: UnconfirmedKind): Promise<T> {
+  // The task that asked for this work: the join timer fires in whatever context aborted the signal (a cancel from another invocation, another task's), and the unconfirmed stop
+  // belongs to THIS task's latch, never to the canceller's or to nobody's.
+  const task = currentWorkspaceSafety();
   // A runner that rejects after the abort has been reported must not become an unhandled rejection.
   running.catch(() => undefined);
   return new Promise<T>((resolvePromise, reject) => {
-    const onAbort = () => reject(new Error("aborted"));
+    let joinTimer: NodeJS.Timeout | undefined;
+    const aborted = () => {
+      clearTimeout(joinTimer);
+      reject(new Error("aborted"));
+    };
+    const onAbort = () => {
+      joinTimer = setTimeout(() => reject(inWorkspaceScope(task, () => new RunnerKillUnconfirmedError({ kind }))), joinMs);
+      running.then(aborted, (error: unknown) => {
+        if (error instanceof RunnerKillUnconfirmedError) {
+          clearTimeout(joinTimer);
+          reject(error);
+        } else aborted();
+      });
+    };
     if (signal.aborted) {
       onAbort();
       return;
     }
     signal.addEventListener("abort", onAbort, { once: true });
     running.then(
-      (value) => { signal.removeEventListener("abort", onAbort); resolvePromise(value); },
-      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error instanceof Error ? error : new Error(String(error))); },
+      (value) => { signal.removeEventListener("abort", onAbort); if (!signal.aborted) resolvePromise(value); },
+      (error: unknown) => { signal.removeEventListener("abort", onAbort); if (!signal.aborted) reject(error instanceof Error ? error : new Error(String(error))); },
     );
   });
 }
@@ -365,6 +410,7 @@ export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
   const canonicalRoot = realpath(resolve(options.rootPath));
   canonicalRoot.catch(() => undefined);
   return {
+    kind: devcontainer !== undefined ? "devcontainer" : sandboxCommands !== undefined ? "sandbox" : options.bashOperations !== undefined ? "devcontainer" : "local",
     async runProjectCommand(command, signal) {
       if (signal.aborted) throw new Error("aborted");
       const root = await canonicalRoot;
@@ -400,6 +446,8 @@ export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
         });
         return { exitCode, timedOut: false, output: output.text() };
       } catch (error) {
+        // A stop that could not be confirmed must reach the caller as it is: "aborted" would say the command is gone.
+        if (error instanceof RunnerKillUnconfirmedError) throw error;
         if (signal.aborted) throw new Error("aborted", { cause: error });
         if (error instanceof Error && error.message.startsWith("timeout:")) return { exitCode: null, timedOut: true, output: output.text() };
         throw withoutRootError(error, root);
@@ -439,6 +487,6 @@ function withoutRoot(text: string, root: string): string {
 }
 
 export function withoutRootError(error: unknown, root: string): unknown {
-  if (!(error instanceof Error) || error instanceof CheckNotRunError || !error.message.includes(root)) return error;
+  if (!(error instanceof Error) || error instanceof CheckNotRunError || error instanceof RunnerKillUnconfirmedError || !error.message.includes(root)) return error;
   return new Error(withoutRoot(error.message, root), { cause: error });
 }

@@ -46,7 +46,8 @@ export const unlistedModelHostSentence = (host: string): string => `not run: unl
  * A host as the evidence may carry it, or undefined when it is not a plain public DNS name. Reads a URL (`https://user@Host:443/path?q#f`), a bracketed host (`[host]:443`), a port with a trailing dot (`host:443.`) and
  * doubled trailing dots (`host..`), then holds the result to `checkModelHost`: an address, a path, a userinfo or anything else that is not exactly one lowercase public name is not a host.
  */
-function normalizeObserved(raw: unknown): string | undefined {
+function normalizeObserved(raw: unknown, countWork?: () => void): string | undefined {
+  countWork?.();
   if (typeof raw !== "string" || raw.length > 2048) return undefined;
   let text = raw.trim().toLowerCase();
   text = text.replace(/^[a-z][a-z0-9+.-]*:\/\//u, "");
@@ -68,13 +69,14 @@ const GOOGLE_AI_HOST = /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$
  * The hosts a client called although they are blocked: every observed host that is on the block list or under a listed suffix is an "ignored redirect"; a Google AI host name (`*-aiplatform.googleapis.com`,
  * generativelanguage-like) that no row lists is an "unlisted model host". Once each, sorted, with fixed sentences. A host in a finding has passed the strict host checker, so an observed name that customer code controls
  * (a Host header, a TLS hello) is never repeated unless it is a plain DNS name of one of those shapes; anything else is not a finding here.
+ * `countWork` is an optional test counter called for each normalization attempt, including rejected observations.
  */
-export function findRedirectEscapes(blockList: readonly string[], observedHosts: readonly unknown[], options: { readonly hostSuffixes?: readonly string[] } = {}): RedirectEscape[] {
+export function findRedirectEscapes(blockList: readonly string[], observedHosts: readonly unknown[], options: { readonly hostSuffixes?: readonly string[] } = {}, countWork?: () => void): RedirectEscape[] {
   const blocked = new Set(blockList);
   const suffixes = (options.hostSuffixes ?? []).map((suffix) => `.${suffix}`);
   const found = new Map<string, RedirectEscapeKind>();
   for (const observed of observedHosts) {
-    const host = normalizeObserved(observed);
+    const host = normalizeObserved(observed, countWork);
     if (host === undefined) continue;
     if (blocked.has(host) || suffixes.some((suffix) => host.endsWith(suffix))) found.set(host, "ignored_redirect");
     else if (GOOGLE_AI_HOST.test(host)) found.set(host, "unlisted_model_host");

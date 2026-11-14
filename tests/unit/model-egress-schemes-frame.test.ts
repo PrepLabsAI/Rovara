@@ -104,6 +104,7 @@ describe("F0a's built-in catalog rows as egress rows", () => {
   it("the Azure row names a host suffix and no host: the host comes from the connection", () => {
     const azure = builtinModelCatalog().rows.find((row) => row.id === "azure-openai");
     expect(azure?.hosts).toEqual([]);
+    // code/next (the catalog rows after F0a) lists the three documented Azure OpenAI and Foundry suffixes; the row still names no host.
     expect(azure?.hostSuffixes).toEqual(["openai.azure.com", "cognitiveservices.azure.com", "services.ai.azure.com"]);
   });
 });

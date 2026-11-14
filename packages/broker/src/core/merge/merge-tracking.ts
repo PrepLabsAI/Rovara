@@ -128,6 +128,8 @@ export interface MergeTrackingDependencies {
   recordedHead?(workspaceId: string, repositoryId: string, number: number): Promise<string | undefined>;
   /** The project's real-check mode (TE-B2): what "No CI" and unreadable CI mean for marking ready. `DEFAULT_CI_MODE` when not given. */
   ciMode?(task: TrackedTask): Promise<ProjectCiMode> | ProjectCiMode;
+  /** Whether the task's draft must stay a draft (a small change that grew to risky, not yet kept by a person or not yet reviewed at risky). Absent: nothing holds it. */
+  readyHold?(task: TrackedTask, current: { repositoryId: string; headSha: string }): Promise<boolean>;
   /** The org's autonomy for Rovara Code, for the deciders; `prepare` when not given. */
   autonomy?(task: TrackedTask): Promise<Autonomy> | Autonomy;
   /**
@@ -444,6 +446,9 @@ const inertLine = (text: string): string => text.replace(/[\p{Cc}\p{Cf}@]/gu, " 
  * Follows every pull request of the task once: reads GitHub, keeps the tracking items, marks a draft ready for review and asks for the project's reviewers, and runs
  * `nextMergeAction`. Returns `gone` for a task that is closed, finished, not tracked or has no org, `changed` when an item or the workflow was written, else `unchanged`.
  */
+/** The held pull requests a person marked ready on the code host, logged once each (per process). */
+const heldNotDraftLogged = new Set<string>();
+
 export async function trackPullRequest(deps: MergeTrackingDependencies, taskId: string): Promise<TrackResult> {
   return (await trackTask(deps, taskId)).result;
 }
@@ -588,6 +593,15 @@ async function trackOne(
     // A draft is taken out of draft only where the mode allows it; a pull request that is not a draft (the host refuses drafts, or a person marked it ready) cannot be kept back, so it gets its reviewers on passing CI or no CI.
     && (status.draft ? ciAllowsReady(ci.ci, ciMode) : ciAllowsMerge(ci.ci))
     && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING";
+  // A change that grew to risky stays a draft until a person keeps it and the risky reviews pass: it is not marked ready, and one a person marked ready on the code host is noted (it cannot be undone from here).
+  // A task that skipped planning is also held until its tier, its reviewer's questions and any grown review are on the record for the head the host shows (never ready on a stale or untiered head).
+  const held = deps.readyHold === undefined ? false : await deps.readyHold(task, { repositoryId: pullRequest.repositoryId, headSha: status.headRevision }).catch(() => true);
+  const heldKey = `${task.taskId}#${String(pullRequest.number)}#${status.headRevision}`;
+  if (held && status.state === "open" && !status.draft && !heldNotDraftLogged.has(heldKey)) {
+    if (heldNotDraftLogged.size > 1_000) heldNotDraftLogged.clear();
+    heldNotDraftLogged.add(heldKey);
+    deps.log?.("merge_tracking.held_pull_request_not_draft", { taskId: task.taskId, number: pullRequest.number });
+  }
   let readyNow = false;
   let asked = false;
   let markedReady = false;
@@ -601,7 +615,7 @@ async function trackOne(
       return false;
     }
   };
-  if (wantsReady) {
+  if (wantsReady && !held) {
     // A host that cannot take a change request out of draft leaves it a draft: it is never read as ready.
     const markReady = codeHost.markReady?.bind(codeHost);
     const drafted = !status.draft || (markReady !== undefined && await attempt_(() => markReady(ref, scope, budget), "mark_ready"));
@@ -725,7 +739,7 @@ async function trackOne(
       if (merged.headByRovara) items.push(...prHeadItems({ orgId: task.orgId, repositoryKey, headSha: status.headRevision, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number }, now, deps.store.ttlAttribute).slice(0, 1));
     }
     if (action !== undefined) {
-      items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision), ...action.steps);
+      items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision, task.workflow), ...action.steps);
       // The dispatch the new workflow state is due for becomes a row through the task-flow core, and its milestones rows through the milestone hook: all in this one commit.
       if (action.dispatch !== undefined) items.push((deps.dispatchRow ?? defaultDispatchRow)({ companyId: task.orgId, taskId: task.taskId, ...action.dispatch }, stamp));
       for (const requested of action.milestones) items.push(...deps.milestones.items(requested.milestone, requested.n, { definitionVersion: action.workflow.definitionVersion }));
