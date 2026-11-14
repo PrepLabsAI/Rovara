@@ -303,6 +303,7 @@ describe("M2: snapshots and fixtures are flagged when changed, not when added, a
     expect(isFixturePath(path) || isSnapshotPath(path), path).toBe(flagged);
   });
   it("an option is an ignore option only when it ends there: --ignore-path, --ignore-scripts and --ignore-unknown are not", () => {
+    expect(flagsOf("tox.ini", ["    pip install --ignore-installed"]).testsExcluded).toBeUndefined();
     for (const line of ["\teslint --ignore-path .gitignore .", "\tnpm ci --ignore-scripts", "\tprettier --ignore-unknown --check ."]) expect(flagsOf("Makefile", [line]).testsExcluded, line).toBeUndefined();
     for (const line of ["\tpytest --ignore tests/slow", "\tpytest --ignore=tests/slow", "\tvitest --exclude src/a", "\tpytest --deselect=a::b", "\tjest --ignore-glob=*.x"]) expect(flagsOf("Makefile", [line]).testsExcluded, line).toBe(true);
   });
