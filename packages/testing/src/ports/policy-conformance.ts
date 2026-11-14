@@ -3,6 +3,7 @@
 import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
+  ApprovalSignInScopeSchema,
   assertValidTransaction,
   SecretValue,
   type Admission,
@@ -203,6 +204,16 @@ export interface ApproversHarness {
   acceptable: ApprovalProof;
   /** The same proof with a token the issuer does not know. */
   forgedToken: string;
+  /**
+   * For an adapter that claims a one-time part of a proof (owner decision 211, gap G3): a proof that it claims for `request` with `settlesClaims`. The suite presents the same secrets for later requests of the same
+   * subject (other request ids, as the decision gate makes them) and checks that a claim blocks them, a released claim frees them and a committed one spends them for ever.
+   */
+  claims?: { proof: ApprovalProof };
+  /**
+   * For an adapter that binds a proof to a decision card (gap G4): a request that names the card, and a proof it accepts for it. The suite checks the proof is refused for a request naming no card, another card
+   * or another version of it.
+   */
+  cardBound?: { request: ApprovalRequest; proof: ApprovalProof };
 }
 
 export function runApproversConformance(name: string, harness: ApproversHarness): void {
@@ -282,6 +293,96 @@ export function runApproversConformance(name: string, harness: ApproversHarness)
       expect((await approvers.verify(harness.request, proof)).approved).toBe(true);
       expect((await approvers.verify(harness.request, proof)).approved).toBe(false);
     });
+
+    // ---- Owner decision 211, gaps G1-G4: every new part of the port is optional; what an adapter states must be readable and must never widen anything.
+
+    it("states scoped sign-in rules only as readable rules, for methods it offers (gap G1)", async () => {
+      const requirement = await (await harness.create()).requirement(harness.request);
+      for (const scope of requirement.signInRules ?? []) {
+        expect(ApprovalSignInScopeSchema.safeParse(scope).success).toBe(true);
+        for (const method of scope.methods ?? []) expect(requirement.methods).toContain(method);
+      }
+    });
+
+    it("marks a sole approver only when its requirement offers the exception (gap G2)", async () => {
+      const approvers = await harness.create();
+      const requirement = await approvers.requirement(harness.request);
+      const verdict = await approvers.verify(harness.request, fresh());
+      if (verdict.approved && verdict.soleApprover !== undefined) {
+        expect(verdict.soleApprover).toBe(true);
+        expect(requirement.soleApproverAllowed).toBe(true);
+      }
+    });
+
+    it("offers both claim operations or neither, and gives no claim to a caller that does not settle claims (gap G3)", async () => {
+      const approvers = await harness.create();
+      expect(approvers.commitClaim === undefined).toBe(approvers.releaseClaim === undefined);
+      const verdict = await approvers.verify(harness.request, fresh());
+      if (verdict.approved) expect(verdict.claimId).toBeUndefined();
+      const proof = harness.claims?.proof;
+      if (proof !== undefined) {
+        const readOnly = await approvers.verify(harness.request, { ...proof, proofId: `proof-${++counter}`, requestId: `${harness.request.requestId}.read-only` });
+        if (readOnly.approved) expect(readOnly.claimId).toBeUndefined();
+      }
+    });
+
+    if (harness.claims !== undefined) {
+      const claimed = harness.claims.proof;
+      const attempt = (n: string): { request: ApprovalRequest; proof: ApprovalProof } => {
+        const request: ApprovalRequest = { ...harness.request, requestId: `${harness.request.requestId}.${n}`, settlesClaims: true };
+        return { request, proof: { ...claimed, proofId: `proof-${++counter}`, requestId: request.requestId } };
+      };
+      const claimOf = async (approvers: Approvers, n: string): Promise<string> => {
+        const { request, proof } = attempt(n);
+        const verdict = await approvers.verify(request, proof);
+        expect(verdict.approved).toBe(true);
+        const claimId = verdict.approved ? verdict.claimId : undefined;
+        expect(typeof claimId).toBe("string");
+        return claimId ?? "";
+      };
+      const accepted = async (approvers: Approvers, n: string): Promise<boolean> => {
+        const { request, proof } = attempt(n);
+        return (await approvers.verify(request, proof)).approved;
+      };
+
+      it("claims a one-time part for a caller that settles claims, and refuses the same secrets while claimed (gap G3)", async () => {
+        const approvers = await harness.create();
+        expect(typeof approvers.commitClaim).toBe("function");
+        await claimOf(approvers, "a");
+        expect(await accepted(approvers, "b")).toBe(false);
+      });
+
+      it("a released claim frees the secrets; a committed one spends them for ever; settling again changes nothing (gap G3)", async () => {
+        const approvers = await harness.create();
+        const first = await claimOf(approvers, "c");
+        await approvers.releaseClaim!(first);
+        await approvers.releaseClaim!(first);
+        const second = await claimOf(approvers, "d");
+        await approvers.commitClaim!(second);
+        await approvers.releaseClaim!(second);
+        expect(await accepted(approvers, "e")).toBe(false);
+        await approvers.commitClaim!("no-such-claim");
+        await approvers.releaseClaim!("no-such-claim");
+      });
+    }
+
+    if (harness.cardBound !== undefined) {
+      const bound = harness.cardBound;
+      const proofFor = (request: ApprovalRequest): ApprovalProof => ({ ...bound.proof, proofId: `proof-${++counter}`, requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest });
+
+      it("accepts a card-bound proof for the card and version it names (gap G4)", async () => {
+        expect((await (await harness.create()).verify(bound.request, proofFor(bound.request))).approved).toBe(true);
+      });
+
+      it("refuses a card-bound proof for a request naming no card, another card or another version (gap G4)", async () => {
+        const card = bound.request.card!;
+        const noCard: ApprovalRequest = { ...bound.request };
+        delete noCard.card;
+        for (const request of [noCard, { ...bound.request, card: { ...card, cardId: `${card.cardId}-other` } }, { ...bound.request, card: { ...card, contentVersion: `${card.contentVersion}-other` } }]) {
+          expect((await (await harness.create()).verify(request, proofFor(request))).approved).toBe(false);
+        }
+      });
+    }
   });
 }
 
