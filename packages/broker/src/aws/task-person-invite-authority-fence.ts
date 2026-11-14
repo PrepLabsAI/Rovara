@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { SLACK_CHANNEL, isChannelBindingKeyOf } from "@agentx/contracts";
-import type { ProjectAuthorityWitness } from "../developer/task-project-access.js";
+import { mayUseProject, type ProjectAuthorityWitness, type ProjectUseRole } from "../developer/task-project-access.js";
 
 export type TaskPersonProjectAuthorityWitness = ProjectAuthorityWitness & {
   taskId: string;
@@ -17,7 +17,7 @@ export type TaskPersonInviteStateCondition =
     developerTasksPresent: boolean;
     developerTasks?: unknown;
   }
-  | { kind: "developer-grant"; pk: string; sk: string; projectName: string; role: "developer" }
+  | { kind: "developer-grant"; pk: string; sk: string; projectName: string; role: ProjectUseRole }
   | { kind: "channel-binding"; pk: string; sk: string; teamId: string; channelId: string; projectName: string; updatedAt: string };
 
 function projectRevisionCondition(witness: TaskPersonProjectAuthorityWitness, project: string): TaskPersonInviteStateCondition | undefined {
@@ -43,7 +43,7 @@ function positiveRowCondition(
     const membership = witness.membership;
     if (membership === undefined || witness.binding !== undefined
       || membership.pk !== `MEMBER#${witness.developerId}` || membership.sk !== `PROJECT#${project}`
-      || membership.projectName !== project || membership.role !== "developer") return undefined;
+      || membership.projectName !== project || !mayUseProject(membership.role)) return undefined;
     return { kind: "developer-grant", pk: membership.pk, sk: membership.sk, projectName: membership.projectName, role: membership.role };
   }
   const binding = witness.binding;

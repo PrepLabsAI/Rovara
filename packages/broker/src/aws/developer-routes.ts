@@ -71,7 +71,7 @@ import {
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
-import { evaluateProjectAuthority } from "../developer/task-project-access.js";
+import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -595,12 +595,13 @@ const describeChannel = (channelId: string, names: Map<string, { name: string; i
 };
 
 /**
- * FR-013: only `developer` rows are grants. A developer ID is built like an admin owner key, so an
- * admin's `administrator` rows can sit under the same key when both sign in through one IdP.
+ * FR-013.1: `developer` and `administrator` rows are grants. A developer ID is built like an admin
+ * owner key, so an admin's `administrator` rows sit under the same key when both sign in through one
+ * IdP, and that person may use the projects they administer (#630).
  */
 async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessSubject): Promise<string[]> {
   return (await queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#"))
-    .filter((membership) => membership.role === "developer")
+    .filter((membership) => mayUseProject(membership.role))
     .map((membership) => membership.projectName);
 }
 

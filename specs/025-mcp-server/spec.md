@@ -443,7 +443,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   MUST be refreshed at each sign-in.
 - **FR-013**: A developer MAY use a project when any of these holds, checked at every task start:
   1. an admin granted them access to the project (a `ProjectMembership` record for their developer
-     ID with role `developer`);
+     ID with role `developer`), or they administer it (role `administrator`: an administrator may do
+     everything a developer may, #630);
   2. the project's `developerTasks.channelMembersMayUse` is true (the default), and their linked
      Slack user is a member of a channel bound to the project, checked with `conversations.members`
      and cached for at most 10 minutes.
