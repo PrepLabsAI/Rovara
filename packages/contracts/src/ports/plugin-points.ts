@@ -67,6 +67,7 @@ export const PLUGIN_POINTS = [
   "model-provider",
   /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
   "secrets",
+  /** Company-scoped, short-lived credentials for one purpose; owner-configured only, with broker rights. */
   "cloud-account",
   /** Where a project's saved environment image lives (login for one repository, list, delete). Code: a registry container on the owner's Docker; Cloud: its cloud registry. */
   "image-registry",

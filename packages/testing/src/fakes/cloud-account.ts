@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
-  assertCloudAccountCredentials, CloudAccountPurposeSchema, CloudAccountRefusedError, ExternalAccountRefSchema,
+  assertCloudAccountCredentials, CloudAccountPurposeSchema, CloudAccountRefusedError, ExternalAccountRefSchema, OrgIdSchema,
   type CloudAccountPurpose, type ExternalAccountRef,
 } from "@agentx/contracts";
 import type { CloudAccountIssuance, CloudAccountWorld } from "../ports/cloud-account-conformance.js";
 
 function assertCompany(companyId: string): void {
-  if (typeof companyId !== "string" || companyId === "" || /[#\s\p{Cc}\p{Cf}]/u.test(companyId)) throw new CloudAccountRefusedError();
+  if (!OrgIdSchema.safeParse(companyId).success) throw new CloudAccountRefusedError();
 }
 
 function accountKey(companyId: string, ref: ExternalAccountRef): string {
@@ -23,6 +23,7 @@ function assertPurpose(purpose: CloudAccountPurpose): void {
 /** Offline only. Holds provider fixture callbacks, never persists or caches issued credentials. Do not register in production. */
 export function createFakeCloudAccountWorld(): CloudAccountWorld {
   const grants = new Map<string, Map<CloudAccountPurpose, () => unknown>>();
+  const connectionProbes = new Map<string, () => Promise<void>>();
   const externalIds = new Map<string, string>();
   const issuances: CloudAccountIssuance[] = [];
   let nowSeconds = 0;
@@ -44,7 +45,13 @@ export function createFakeCloudAccountWorld(): CloudAccountWorld {
         }
       },
       async testConnection(companyId, ref) {
-        if (!grants.has(accountKey(companyId, ref))) throw new CloudAccountRefusedError();
+        try {
+          const key = accountKey(companyId, ref);
+          if (!grants.has(key)) throw new CloudAccountRefusedError();
+          await connectionProbes.get(key)?.();
+        } catch {
+          throw new CloudAccountRefusedError();
+        }
       },
       async externalIdFor(companyId) {
         assertCompany(companyId);
@@ -63,7 +70,12 @@ export function createFakeCloudAccountWorld(): CloudAccountWorld {
       held.set(purpose, issue);
       grants.set(key, held);
     },
-    disconnect(companyId, ref) { grants.delete(accountKey(companyId, ref)); },
+    setConnectionProbe(companyId, ref, probe) { connectionProbes.set(accountKey(companyId, ref), probe); },
+    disconnect(companyId, ref) {
+      const key = accountKey(companyId, ref);
+      grants.delete(key);
+      connectionProbes.delete(key);
+    },
     setNow(seconds) { nowSeconds = seconds; },
     get issuances() { return issuances.map((entry) => ({ ...entry })); },
   };

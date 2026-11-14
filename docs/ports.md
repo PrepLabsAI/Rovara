@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below), `scheduler` (when something is due, below), `realtime` (a hint to open pages that something changed, below) and `email` (one plain notice to one address, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `cloud-account` (company credentials for one purpose, below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below), `scheduler` (when something is due, below), `realtime` (a hint to open pages that something changed, below) and `email` (one plain notice to one address, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -369,6 +369,22 @@ adapts the port to its secret store and proxy. On a laptop the keys are READ thr
 adapter asks for `{ "env": "<PROVIDER>_API_KEY" }` and then `{ "key": "<provider>" }`, in that order, so the environment still wins over `keys.json`, and
 `keys.json` keeps its rule (mode 0600, no link). Which providers have a key is the same store's answer for each of `anthropic`, `openai` and `openrouter` (the socket reads one reference at a time, so the listing asks it per provider), so `keys.json` entries for other
 names are not listed. A worker never holds a key (the model proxy below reads it through this point).
+
+## Cloud account (decision 160, TE-IF2)
+
+The `cloud-account` point holds one `CloudAccount` adapter (`packages/contracts/src/ports/cloud-account.ts`). Like `secrets`,
+it is owner-configured only and runs with the broker's rights; never load its configuration from a customer repository or PR.
+Code's default is unavailable and refuses every call without reading ambient credentials. The offline fake and conformance suite
+live in `packages/testing/src/fakes/cloud-account.ts` and `packages/testing/src/ports/cloud-account-conformance.ts`.
+
+Every call validates the company with `OrgIdSchema`. `credentialsFor(companyId, accountRef, purpose)` resolves that company's
+full account reference and issues credentials restricted to one of `invoke_only_endpoint`, `device_farm_project`, `recording_bucket`
+or `test_account_confirm`. The adapter must enforce the corresponding resource and permissions; the purpose enum alone does not.
+AWS is the only credential payload today; all three secret fields remain `SecretValue`. Expiry uses Unix seconds, refuses expired-at-now
+credentials, and allows a fixed 60-second clock-skew margin on the 3600-second maximum (3660 accepted, 3661 refused), without changing expiry.
+`testConnection` checks the connection without issuing credentials; `externalIdFor` returns a stable, separate external id per company.
+All failures, including provider failures, use `CloudAccountRefusedError` with fixed words and no cause or input echo. Credentials are never persisted.
+The issuance ledger is currently a conformance fixture; a production audit hook is deferred to TE-F6 (`IF2-LEDGER-PORT`).
 
 ## Secrets (owner decision 60, item R2)
 

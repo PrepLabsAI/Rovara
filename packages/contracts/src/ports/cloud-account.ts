@@ -1,5 +1,6 @@
 // IF2, decision 160: a company account may issue short-lived credentials for ONE named purpose.
 import { z } from "zod";
+import type { OrgId } from "../browser-ids.js";
 import { SecretValue } from "./model-keys.js";
 import type { ExternalAccountRef } from "./policy.js";
 
@@ -7,6 +8,7 @@ export const CLOUD_ACCOUNT_PURPOSES = ["invoke_only_endpoint", "device_farm_proj
 export const CloudAccountPurposeSchema = z.enum(CLOUD_ACCOUNT_PURPOSES);
 export type CloudAccountPurpose = z.infer<typeof CloudAccountPurposeSchema>;
 export const CLOUD_ACCOUNT_MAX_LIFETIME_SECONDS = 3600;
+const CLOCK_SKEW_MARGIN_SECONDS = 60;
 
 /** Provider-discriminated credentials; AWS is the only approved member today. Never persist or log revealed material. */
 export type CloudAccountCredentials = {
@@ -14,7 +16,7 @@ export type CloudAccountCredentials = {
   readonly accessKeyId: SecretValue;
   readonly secretAccessKey: SecretValue;
   readonly sessionToken: SecretValue;
-  /** Unix seconds. Expired at now is refused; validity beyond 3600 seconds is refused, never shortened. */
+  /** Unix seconds. Expired at now is refused; the 3600-second maximum allows 60 seconds of clock skew, never shortened. */
   readonly expiresAt: number;
 };
 
@@ -39,9 +41,10 @@ export function assertCloudAccountCredentials(value: unknown, nowSeconds: number
   const parsed = CredentialsSchema.safeParse(value);
   if (!parsed.success || !Number.isSafeInteger(nowSeconds) || nowSeconds < 0) throw new CloudAccountRefusedError();
   const lifetime = parsed.data.expiresAt - nowSeconds;
-  if (lifetime <= 0 || lifetime > CLOUD_ACCOUNT_MAX_LIFETIME_SECONDS) throw new CloudAccountRefusedError();
+  if (lifetime <= 0 || lifetime > CLOUD_ACCOUNT_MAX_LIFETIME_SECONDS + CLOCK_SKEW_MARGIN_SECONDS) throw new CloudAccountRefusedError();
 }
 
+/** Every method must validate companyId with OrgIdSchema and refuse an invalid id before accessing provider state. */
 export interface CloudAccount {
   /**
    * Resolve the full reference inside companyId on every call. No fallback to another company or purpose.
@@ -50,9 +53,9 @@ export interface CloudAccount {
    * Validate with assertCloudAccountCredentials immediately before returning; the provider must match accountRef.provider. All secret fields stay SecretValue.
    * No credential persistence. Failures throw CloudAccountRefusedError, never an upstream error or free text.
    */
-  credentialsFor(companyId: string, accountRef: ExternalAccountRef, purpose: CloudAccountPurpose): Promise<CloudAccountCredentials>;
+  credentialsFor(companyId: OrgId, accountRef: ExternalAccountRef, purpose: CloudAccountPurpose): Promise<CloudAccountCredentials>;
   /** Resolve and check this company's connection without returning/issuing credentials. Success is void; every failure is CloudAccountRefusedError. */
-  testConnection(companyId: string, accountRef: ExternalAccountRef): Promise<void>;
+  testConnection(companyId: OrgId, accountRef: ExternalAccountRef): Promise<void>;
   /** Stable for this company across its accounts; never reuse another company's external id. Unavailable/invalid scope throws CloudAccountRefusedError. */
-  externalIdFor(companyId: string): Promise<string>;
+  externalIdFor(companyId: OrgId): Promise<string>;
 }

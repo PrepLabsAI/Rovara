@@ -3,21 +3,23 @@ import { format, inspect } from "node:util";
 import { expect } from "vitest";
 import {
   CLOUD_ACCOUNT_PURPOSES, CloudAccountRefusedError, SecretValue,
-  type CloudAccount, type CloudAccountCredentials, type CloudAccountPurpose, type ExternalAccountRef,
+  type CloudAccount, type CloudAccountCredentials, type CloudAccountPurpose, type ExternalAccountRef, type OrgId,
 } from "@agentx/contracts";
 import { assertNoSecretLeaks, captureLogs } from "../isolation/leaks.js";
 import { runContract, type ContractCheck } from "./plugin-contract-kit.js";
 
 export interface CloudAccountIssuance {
-  readonly companyId: string;
+  readonly companyId: OrgId;
   readonly purpose: CloudAccountPurpose;
 }
 
 /** Provider fixture controls, never production configuration or credential persistence. */
 export interface CloudAccountWorld {
   port: CloudAccount;
-  grant(companyId: string, ref: ExternalAccountRef, purpose: CloudAccountPurpose, issue: () => unknown): void;
-  disconnect(companyId: string, ref: ExternalAccountRef): void;
+  grant(companyId: OrgId, ref: ExternalAccountRef, purpose: CloudAccountPurpose, issue: () => unknown): void;
+  /** Configure the offline provider probe used by testConnection, without issuing credentials. */
+  setConnectionProbe(companyId: OrgId, ref: ExternalAccountRef, probe: () => Promise<void>): void;
+  disconnect(companyId: OrgId, ref: ExternalAccountRef): void;
   setNow(seconds: number): void;
   readonly issuances: readonly CloudAccountIssuance[];
 }
@@ -43,12 +45,13 @@ const plant = (world: CloudAccountWorld, company = A, ref = REF, purpose: CloudA
   world.setNow(NOW);
   world.grant(company, ref, purpose, () => payload(label));
 };
-async function refused(run: () => Promise<unknown>): Promise<void> {
+async function refused(run: () => Promise<unknown>): Promise<Error> {
   const result = await run().then(() => undefined, (error: unknown) => error);
   expect(result).toBeInstanceOf(CloudAccountRefusedError);
   expect((result as Error).message).toBe("cloud account unavailable");
   expect(Object.keys(result as Error)).toEqual(["name"]);
   expect((result as Error).cause).toBeUndefined();
+  return result as Error;
 }
 
 export function cloudAccountChecks(): ContractCheck<CloudAccountWorld>[] {
@@ -115,12 +118,20 @@ export function cloudAccountChecks(): ContractCheck<CloudAccountWorld>[] {
       await refused(() => world.port.credentialsFor(A, REF, PURPOSE));
       expect(world.issuances).toEqual([{ companyId: A, purpose: PURPOSE }]);
     } },
+    { name: "accepts the fixed 60-second clock-skew margin without changing expiry", run: async (world) => {
+      plant(world);
+      for (const lifetime of [3601, 3660]) {
+        world.grant(A, REF, PURPOSE, () => payload("alpha", NOW + lifetime));
+        expect((await world.port.credentialsFor(A, REF, PURPOSE)).expiresAt).toBe(NOW + lifetime);
+      }
+      expect(world.issuances).toEqual([{ companyId: A, purpose: PURPOSE }, { companyId: A, purpose: PURPOSE }]);
+    } },
     { name: "overlong credentials are refused, never relabelled", run: async (world) => {
       plant(world);
-      const tooLong = payload("alpha", NOW + 3601);
+      const tooLong = payload("alpha", NOW + 3661);
       world.grant(A, REF, PURPOSE, () => tooLong);
       await refused(() => world.port.credentialsFor(A, REF, PURPOSE));
-      expect(tooLong.expiresAt).toBe(NOW + 3601);
+      expect(tooLong.expiresAt).toBe(NOW + 3661);
       expect(world.issuances).toEqual([]);
     } },
     { name: "invalid expiry and clock numbers fail closed", run: async (world) => {
@@ -173,9 +184,30 @@ export function cloudAccountChecks(): ContractCheck<CloudAccountWorld>[] {
       assertNoSecretLeaks(captured.lines, secrets);
       expect(world.issuances).toEqual([]);
     } },
+    { name: "connection provider failures use fixed words without causes, leaks or input echo", run: async (world) => {
+      const secrets = material("connection-failure");
+      const ref = { ...REF, accountId: secrets[0]! };
+      plant(world, A, ref);
+      let probes = 0;
+      world.setConnectionProbe(A, ref, async () => {
+        probes += 1;
+        await Promise.resolve();
+        throw new Error(secrets.join(" "), { cause: { input: ref, secret: secrets[1] } });
+      });
+      const captured = await captureLogs(async () => {
+        const error = await refused(() => world.port.testConnection(A, ref));
+        return [error, inspect(error, { depth: 10 }), JSON.stringify(error), format("%s %j %o %O", error, error, error, error)];
+      });
+      expect(probes).toBe(1);
+      assertNoSecretLeaks([...captured.result, ...captured.lines], secrets);
+      expect(world.issuances).toEqual([]);
+      // A different company cannot reach the planted provider, even with the identical reference.
+      await refused(() => world.port.testConnection(B, ref));
+      expect(probes).toBe(1);
+    } },
     { name: "malformed companies and references are refused at the boundary", run: async (world) => {
       plant(world);
-      for (const company of ["", "bad\u0000company", "bad company", "bad#company"]) {
+      for (const company of ["", "bad\u0000company", "bad company", "bad#company", "*", "ORG_aaaaaaaaaaaaaaaaaaaa", "org_short", "org_x/../org_y"]) {
         await refused(() => world.port.credentialsFor(company, REF, PURPOSE));
         await refused(() => world.port.testConnection(company, REF));
         await refused(() => world.port.externalIdFor(company));
