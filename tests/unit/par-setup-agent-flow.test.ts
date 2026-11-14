@@ -554,3 +554,36 @@ async function startRun2(h: Harness) {
   await h.callback(prepare, "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: BASE }] } });
   return { taskId, workspaceId, job: await h.nextJob(workspaceId, seen) };
 }
+
+it("shows and approves eval spend on its own form before any health run, without approving setup commands", async () => {
+  const { proposeEvalSpendApproval, evalSpendKey } = await import("../../packages/broker/src/core/setup-agent/eval-spend.js");
+  const h = await launch();
+  expect(setupDecisionSubjects(h.runtime.app.flow.deps).map(subject => subject.kind)).toEqual(["setup-host", "setup-proposal", "setup-eval-spend"]);
+  expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
+  await proposeEvalSpendApproval({ store: h.store, companyId: IMPLICIT_COMPANY_ID }, "payments", {
+    selection: "evals/refunds", inputs: { evalSetHash: "a".repeat(64), judgePin: "b".repeat(64), modelVersion: "version-1", model: "model", catalogRowId: "model", commandFingerprint: "c".repeat(64), settingsFingerprint: "d".repeat(64) }, estimate: { calls: 300, costMicros: 3_000_000 },
+  });
+  const link = await h.browse("/setup/payments");
+  const page = await h.page(link, "/setup/payments");
+  expect(page.body).toContain("Run the eval health check: about 300 calls, about $3.000000");
+  expect(page.body).toContain("at most 400 calls (about $4.000000), within the monthly cap");
+  expect(page.body).not.toContain("Approve these commands");
+  const form = formOf(page.body, "/setup/payments/eval");
+  expect(form).toBeDefined();
+  const invalid = await h.post(link, form.action, { ...form.fields, decision: "unexpected" });
+  expect(invalid.headers["location"]).toContain("n=invalid");
+  expect((await h.store.get(evalSpendKey(IMPLICIT_COMPANY_ID, "payments")))?.["state"]).toBe("waiting");
+  const forged = await h.post(link, form.action, { ...form.fields, ft: "forged", decision: "approve" });
+  expect(forged.headers["location"]).toContain("n=form");
+  expect((await h.store.get(evalSpendKey(IMPLICIT_COMPANY_ID, "payments")))?.["state"]).toBe("waiting");
+  const wrong = await h.post(link, form.action, { ...form.fields, digest: "f".repeat(64) });
+  expect(wrong.headers["location"]).toContain("n=form");
+  expect((await h.store.get(evalSpendKey(IMPLICIT_COMPANY_ID, "payments")))?.["state"]).toBe("waiting");
+  const fresh = formOf((await h.page(link, "/setup/payments")).body, "/setup/payments/eval");
+  expect((await h.post(link, fresh.action, { ...fresh.fields, decision: "approve" })).headers["location"]).toContain("n=setupdone");
+  expect((await h.store.get(evalSpendKey(IMPLICIT_COMPANY_ID, "payments")))?.["approvedBy"]).toMatchObject({ role: "owner" });
+  const approvedPage = await h.page(link, "/setup/payments");
+  expect(approvedPage.body).toContain("Spend approval: approved");
+  expect(approvedPage.body).not.toContain("Approve eval spend");
+  expect((await h.store.get(orgProjectCatalogKey(IMPLICIT_COMPANY_ID, "payments")))?.["latestRevision"]).toBe(1);
+});

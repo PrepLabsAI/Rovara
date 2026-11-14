@@ -68,6 +68,14 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
       + `<form method="post" action="${action("discard")}" class="row">${token("discard")}${button("Discard")}</form></div>`;
   };
 
+  const evalSpend = (): string => {
+    const item = view.evalSpend;
+    if (item === undefined) return "";
+    const offer = item.approval;
+    const form = (decision: "approve" | "reject"): string => offer === undefined ? "" : `<form method="post" action="${action("eval")}" class="row">${hidden("decision", decision)}${hidden("requestId", offer.requestId)}${hidden("revision", offer.revision)}${hidden("digest", offer.artifactDigest)}${token("eval", { requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })}${button(decision === "approve" ? "Approve eval spend" : "Not now", decision === "approve" ? "primary" : "")}</form>`;
+    return `<div class="panel"><h2>Eval health check</h2><p>${esc(item.label)}</p><p>${esc(item.budget)}</p><p>One approval covers later refreshes within this estimate and the monthly cap. A higher estimate or changed eval inputs needs another approval.</p><p>Spend approval: ${esc(item.state)}. Approving spend does not start a health check.</p><div class="row">${form("approve")}${form("reject")}</div></div>`;
+  };
+
   const hosts = (): string => {
     if (view.hostAsks.length === 0) return "";
     const rows = view.hostAsks.map((ask) => {
@@ -88,7 +96,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
   const summary = view.summary === undefined ? "" : `<p class="muted">${esc(view.summary.commandsRun)} commands, ${esc(view.summary.elapsedMin)} minutes, about $${esc((view.summary.spendCents / 100).toFixed(2))}${view.summary.partial ? ", stopped before it finished (what it learned is kept)" : ""}.</p>`;
   return layout({
     title: `Set up ${view.project}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
-    body: `<h1>Set up ${esc(view.project)}</h1><p>${esc(STATUS_WORDS[view.status])}${view.failure === undefined ? "" : ` ${esc(view.failure)}`}${view.stoppedBy === undefined ? "" : ` <span class="muted">Stopped by ${untrusted(view.stoppedBy)}.</span>`}</p>${summary}${control()}${apply()}${hosts()}${approved()}${proposal()}${journal()}${checkPanel}`
+    body: `<h1>Set up ${esc(view.project)}</h1><p>${esc(STATUS_WORDS[view.status])}${view.failure === undefined ? "" : ` ${esc(view.failure)}`}${view.stoppedBy === undefined ? "" : ` <span class="muted">Stopped by ${untrusted(view.stoppedBy)}.</span>`}</p>${summary}${control()}${apply()}${evalSpend()}${hosts()}${approved()}${proposal()}${journal()}${checkPanel}`
       + `<p><a href="${esc(context.base)}/setup">All projects</a></p>`,
   });
 }

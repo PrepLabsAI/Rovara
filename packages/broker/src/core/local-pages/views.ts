@@ -17,7 +17,7 @@ export interface ApprovalOffer {
   revision: number;
   artifactDigest: string;
   /** `plan`, `design`, `test-environment`, `setup` (a project's setup commands, or a website for a setup run), `automation` (turning a trigger on, deciding a chain's gate): the W0 approval kind. */
-  kind: "plan" | "design" | "test-environment" | "setup" | "automation";
+  kind: "plan" | "design" | "test-environment" | "setup" | "setup-eval-spend" | "automation";
   risk?: "low" | "medium" | "high";
 }
 
@@ -310,6 +310,8 @@ export interface SetupPageView {
   check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string };
   /** A proposal waiting: the commands, and where the check on them stands. */
   apply?: { candidateRevision: number; setup: string[]; readiness: string[]; check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string }; approval?: ApprovalOffer };
+  /** The independent eval-spend item. No repository text reaches its labels. */
+  evalSpend?: { state: "waiting" | "approved" | "rejected"; label: string; budget: string; approval?: ApprovalOffer };
   /** The websites the owner approved for this project, with when, each to be taken back on the page. */
   approvedHosts: Array<{ host: string; at: string | undefined }>;
 }
@@ -559,6 +561,8 @@ export interface LocalPageActions {
   setupCheck?(input: { project: string; requestId: string }): Promise<LocalActionResult>;
   /** Approves or refuses a website a setup run asked for. `proof` is the page session's proof over exactly this ask. */
   setupDecideHost?(input: { project: string; host: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
+  /** Approves or rejects the independent eval-spend item. */
+  setupDecideEval?(input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** Approves or rejects the waiting setup proposal of a project. */
   setupDecideProposal?(input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
 }
