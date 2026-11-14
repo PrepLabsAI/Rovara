@@ -697,3 +697,85 @@ describe("the reviewer model in a description that has a Proof section", () => {
   });
 });
 
+
+describe("192a agent-written replies", () => {
+  const UNCONFIRMED = "proven with scripted replies written in this task: check them";
+  const DISAGREED = "scripted replies written in this task: the real model did not agree";
+  const dependencies = (trust: EvidenceTrustClass = "simulated") => new Map([["unit", [{ dependencyId: "never-display-dependency", trust, replies: "task_made" as const }]]]);
+  const realRun = (result: "passed" | "passed_on_rerun" | "failed" | "not_run" = "passed") => ({ schemaVersion: 1 as const, candidateDigest: CODE.digest, items: [{ checkId: "readiness:0", result }] });
+  const input = (overrides: Partial<ProofTableInput> = {}): ProofTableInput => ({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof: proofFor(CODE.digest), candidateDigest: CODE.digest, recordedCheckIds: SELECTED, checkDependencies: dependencies(), ...overrides });
+  it.each([
+    [undefined, "passed", "agent_replies_unconfirmed", UNCONFIRMED],
+    ["not_run", "passed", "agent_replies_unconfirmed", UNCONFIRMED],
+    ["failed", "passed", "agent_replies_disagreed", DISAGREED],
+    ["passed", "proven", undefined, "proven with scripted AI replies"],
+    ["passed_on_rerun", "proven", undefined, "proven with scripted AI replies"],
+  ] as const)("golden row for %s", (result, state, reason, words) => {
+    const table = buildProofTable(input({ realModelRun: result === undefined ? undefined : realRun(result) }));
+    expect(rowOf(table, "1.1")).toEqual({ claimId: "1.1", requirement: "The retry waits longer each time.", evidence: [{ kind: "check", label: `${words}: Unit tests`, state, ...(reason === undefined ? {} : { notProvenReason: reason }) }], result: state });
+  });
+  it("Rovara-made mocks win even when the real model agrees", () => {
+    for (const realModelRun of [undefined, realRun("failed"), realRun()]) {
+      expect(rowOf(buildProofTable(input({ checkDependencies: dependencies("made_by_rovara"), realModelRun })), "1.1").evidence[0]).toEqual({ kind: "check", label: "with a Rovara-made mock; not Proven: Unit tests", state: "passed", notProvenReason: "made_by_rovara" });
+    }
+  });
+  it("only restricts existing proof and never changes a failed or unrun check", () => {
+    for (const status of ["FAILED", "UNKNOWN"] as const) {
+      const row = rowOf(buildProofTable(input({ checkResults: [{ checkId: "unit", status }], realModelRun: realRun() })), "1.1");
+      expect(row.evidence[0]).toEqual({ kind: "check", label: "Unit tests", state: status === "FAILED" ? "failed" : "not_checked" });
+    }
+    expect(rowOf(buildProofTable(input({ testProof: undefined, realModelRun: realRun() })), "1.1").result).toBe("passed");
+  });
+  it("propagates to PR, folded rows, aggregate test lines and the task page", () => {
+    for (const result of [undefined, "failed", "passed"] as const) {
+      const context = { plan: plan(), testProof: proofFor(CODE.digest), checkDependencies: dependencies(), realModelRun: result === undefined ? undefined : realRun(result) };
+      const words = result === "passed" ? "proven with scripted AI replies" : result === "failed" ? DISAGREED : UNCONFIRMED;
+      const explanation = result === "failed" ? "Checks passing on scripted replies written in this task are not Proven: the real model did not agree." : "Checks passing on scripted replies written in this task are not Proven until the real model agrees: check them.";
+      const section = proofSection(workflowWith(), context)!;
+      for (let level = 0; level <= PROOF_LEVEL_LAST; level += 1) {
+        if (result !== "passed") expect(section(level)).toContain(explanation);
+      }
+      const view = ProofTableViewSchema.parse(proofTableView(workflowWith(), context));
+      expect(view.rows.find((row) => row.claimId === "1.1")?.evidence[0]?.label).toBe(`${words}: Unit tests`);
+      const body = bodyOf(context);
+      expect(body).toContain(`${words}: Test proof:`);
+      expect(view.testProofLines.some((line) => line.startsWith(`${words}: Test proof:`))).toBe(true);
+    }
+  });
+  it("leaves pre-task replies and recordings byte-identical, even with malformed or unrelated real runs", () => {
+    const golden = JSON.stringify(buildProofTable(input({ checkDependencies: undefined })));
+    for (const realModelRun of [undefined, realRun(), { items: "broken" } as never]) {
+      expect(JSON.stringify(buildProofTable(input({ checkDependencies: undefined, realModelRun })))).toBe(golden);
+      expect(JSON.stringify(buildProofTable(input({ checkDependencies: new Map([["unit", [{ dependencyId: "recording", trust: "recorded" }]]]), realModelRun })))).toBe(golden);
+    }
+  });
+  it("renders only fixed refusal words, never real-run fields or dependency ids, with hostile long labels inert", () => {
+    const secret = `gh${"p"}_${"a".repeat(36)}`;
+    const hostile = "[nested [link]](https://evil.example) ![image][ref]\n[ref]: https://evil.example\n@team #123 <img>\n# heading\n> quote\n---\n```\n~~~\n\u200b\u202e\ufe0f";
+    const start = performance.now();
+    const table = buildProofTable(input({ plan: plan({ checks: { proposed: [check("unit", hostile + "x".repeat(1_048_576))], proves: { unit: ["1.1"] } } }), realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }));
+    const label = rowOf(table, "1.1").evidence[0]!.label;
+    expect(label).toMatch(/^proven with scripted replies written in this task: check them/u);
+    expect(label).not.toMatch(/\]\(|!\[|@team|#123|<img>|[\r\n\u200b\u202e]|\ufe0f/u);
+    expect(JSON.stringify(table)).not.toContain(secret);
+    expect(JSON.stringify(table)).not.toContain("never-display-dependency");
+    expect(Array.from(label).length).toBeLessThanOrEqual(120);
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
+});
+
+it("unknown reply provenance values cannot count as confirmed task-made replies", () => {
+  const table = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof: proofFor(CODE.digest), candidateDigest: CODE.digest, recordedCheckIds: SELECTED, checkDependencies: new Map([["unit", [{ dependencyId: "reply", trust: "simulated", replies: "unknown" }]]]) as never, realModelRun: { schemaVersion: 1, candidateDigest: CODE.digest, items: [{ checkId: "readiness:0", result: "passed" }] } });
+  expect(rowOf(table, "1.1").result).toBe("passed");
+  expect(rowOf(table, "1.1").evidence[0]?.notProvenReason).toBe("agent_replies_unconfirmed");
+});
+
+it("ambiguous or incomplete recorded check mappings never confirm agent replies", () => {
+  const testProof = proofFor(CODE.digest);
+  testProof.items[1] = { ...testProof.items[0]!, checkId: "readiness:1" };
+  const realModelRun = { schemaVersion: 1 as const, candidateDigest: CODE.digest, items: [{ checkId: "readiness:0", result: "failed" as const }, { checkId: "readiness:1", result: "passed" as const }] };
+  for (const recordedCheckIds of [["unit", "unit"], ["lint", "unit", "extra"]]) {
+    const table = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof, candidateDigest: CODE.digest, recordedCheckIds, realModelRun, checkDependencies: new Map([["unit", [{ dependencyId: "reply", trust: "simulated", replies: "task_made" }]]]) });
+    expect(rowOf(table, "1.1")).toMatchObject({ result: "passed", evidence: [{ state: "passed", notProvenReason: "agent_replies_unconfirmed" }] });
+  }
+});
