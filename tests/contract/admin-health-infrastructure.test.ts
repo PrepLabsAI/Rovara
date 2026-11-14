@@ -212,11 +212,12 @@ describe("the health route's grants (A13)", () => {
     expect(retry).not.toContain("indexExpiresAt");
   });
 
-  it("adds nothing to the legacy template", () => {
-    expect(brokerStatements(legacy).some((statement) => statement.Action === "cloudwatch:DescribeAlarms" || statement.Action === "sqs:GetQueueAttributes")).toBe(false);
+  it("gives the legacy template (production) the same health grants, and leaves its State table's expiry as it was", () => {
+    expect(brokerStatements(legacy).some((statement) => statement.Action === "cloudwatch:DescribeAlarms")).toBe(true);
+    expect(brokerStatements(legacy).some((statement) => statement.Action === "sqs:GetQueueAttributes")).toBe(true);
     const legacyTables = Object.values(legacy.findResources("AWS::DynamoDB::Table") as Record<string, { Properties: { StreamSpecification?: unknown; TimeToLiveSpecification?: unknown } }>);
     expect(legacyTables.find((table) => table.Properties.StreamSpecification !== undefined)?.Properties.TimeToLiveSpecification).toBeUndefined();
-    expect(brokerEnvironment(legacy)).not.toHaveProperty("AGENTX_ALARM_PREFIX");
-    expect(brokerEnvironment(legacy)).not.toHaveProperty("HEALTH_DEAD_LETTER_QUEUES");
+    expect(brokerEnvironment(legacy)).toHaveProperty("AGENTX_ALARM_PREFIX");
+    expect(brokerEnvironment(legacy)).toHaveProperty("HEALTH_DEAD_LETTER_QUEUES");
   });
 });
