@@ -80,7 +80,7 @@ function fixture(overrides: Partial<TaskPersonInviteHandlerPorts> = {}) {
         && (!condition.developerTasksPresent || isDeepStrictEqual(definition?.developerTasks, condition.developerTasks));
     }
     if (condition.kind === "developer-grant") return row.pk === condition.pk && row.sk === condition.sk
-      && row.projectName === condition.projectName && row.role === "developer";
+      && row.projectName === condition.projectName && row.role === condition.role;
     return row.pk === condition.pk && row.sk === condition.sk && row.teamId === condition.teamId
       && row.channelId === condition.channelId && row.projectName === condition.projectName && row.updatedAt === condition.updatedAt;
   };

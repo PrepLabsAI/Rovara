@@ -114,6 +114,37 @@ describe("task dispatch access", () => {
     expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
   });
 
+  it("allows dispatch on an unchanged administrator membership, fencing the role it saw (#630)", async () => {
+    const h = harness();
+    const revision = {
+      pk: "PROJECT#payments", sk: "REV#000000000007",
+      definition: { revision: 7, developerTasks: { enabled: true, channelMembersMayUse: false } },
+    };
+    const membership = { pk: `MEMBER#${OWNER}`, sk: "PROJECT#payments", projectName: "payments", role: "administrator" as const };
+    h.db.set(revision);
+    h.db.set(membership);
+    const fenced: unknown[] = [];
+    const documentClient = {
+      async send(command: unknown): Promise<unknown> {
+        if (command instanceof TransactWriteCommand) {
+          const items = (command.input as { TransactItems?: Array<{ ConditionCheck?: { Key?: { pk?: string }; ExpressionAttributeValues?: Record<string, unknown> } }> }).TransactItems ?? [];
+          fenced.push(...items.filter((item) => item.ConditionCheck?.Key?.pk === membership.pk).map((item) => item.ConditionCheck?.ExpressionAttributeValues));
+        }
+        return h.db.send(command as never);
+      },
+    };
+    const witness: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } = {
+      taskId: TASK_ID, developerId: OWNER, project: "payments", access: "granted",
+      projectRevision: { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks },
+      membership,
+    };
+    await expect(guardTaskDispatch({
+      documentClient, tableName: "state", checkTaskPerson: h.checkTaskPerson,
+      stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId === taskOwnerKey(OWNER, TASK_ID) ? witness : undefined,
+    }, h.outbox)).resolves.toBe("ALLOWED");
+    expect(fenced).toEqual([{ ":project": "payments", ":role": "administrator" }]);
+  });
+
   it.each(["binding", "policy"] as const)("requalifies after the qualifying channel %s changes before the final State fence", async (changedWitness) => {
     const h = harness();
     const revision = {

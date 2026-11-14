@@ -99,11 +99,12 @@ describe("GET /v1/dev/projects (FR-016, FR-013)", () => {
     expect(body.notices).toEqual(["slack_unavailable"]);
   });
 
-  it("does not count an administrator membership as a developer grant (FR-013)", async () => {
+  it("counts an administrator membership as a grant, and no other role (FR-013.1, #630)", async () => {
     db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#ledger", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "ledger", role: "administrator" });
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#payments-api", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "payments-api", role: "viewer" });
     channelMembers.mockResolvedValueOnce({ ok: true, memberOf: [] });
-    const body = JSON.parse((await call("/v1/dev/projects", claims())).body) as { projects: Array<{ name: string }> };
-    expect(body.projects.map((project) => project.name)).toEqual(["solo"]);
+    const body = JSON.parse((await call("/v1/dev/projects", claims())).body) as { projects: Array<{ name: string; access: string }> };
+    expect(body.projects.map((project) => [project.name, project.access])).toEqual([["ledger", "granted"], ["solo", "granted"]]);
   });
 
   it("reads the session and developer from the sign-in table, and grants and bindings from the state table", async () => {
