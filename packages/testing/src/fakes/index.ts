@@ -2,7 +2,7 @@
 // a provider's tests import them from here, so they need to know no path inside the core. The fakes' webhook secrets are public constants: never register one in a production build.
 export * from "@agentx/broker/fakes";
 export {
-  FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter, FakeWorkerMachines, MemoryDocumentStore, MemoryQueueService,
+  FAKE_CHANNEL_CAPABILITIES, FAKE_ONE_TIME_PART, FAKE_SESSION_METHOD, FakeChannelAdapter, FakeWorkerMachines, MemoryDocumentStore, MemoryQueueService, createFakeApprovers,
   createFakeEmailSender, createFakeImageRegistry, createFakeMonitoringAdapter, createFakeRecordSource, createFakeScheduler,
   createInProcessRealtime, createMemoryLessonVectors, createMemoryLearningAdapter, createMemoryModelKeyStore, createMemoryRecordSink,
 } from "@agentx/broker/ports";

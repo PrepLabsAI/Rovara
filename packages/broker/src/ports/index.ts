@@ -2,6 +2,7 @@
 export * from "./adapter-registry.js";
 export * from "./build-systems.js";
 export * from "./email.js";
+export * from "./fake-approvers.js";
 export * from "./fake-channel-adapter.js";
 export * from "./fake-image-registry.js";
 export * from "./fake-scheduler.js";
