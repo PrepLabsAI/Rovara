@@ -35,7 +35,7 @@ registered client, use `update`.
 ## Change a service
 
 ```sh
-agentx admin sign-in-client update rovara-cloud --scope projects:members
+agentx admin sign-in-client update web-app --scope projects:members
 ```
 
 `update` changes only the settings you give and keeps everything else, its secret included:

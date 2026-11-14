@@ -775,7 +775,7 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
 
 /**
  * The only admin changes the legacy deployment takes (spec 064), confirmed in the CLI: sign-in clients, and granting a
- * signed-in person a project, so a service such as the Rovara Cloud web app shows them the projects they may use.
+ * signed-in person a project, so a service such as the web app shows them the projects they may use.
  */
 const LINKING_CHANGE_KINDS: ReadonlySet<string> = new Set(["register_sign_in_client", "remove_sign_in_client", "grant_project_access", "revoke_project_access"]);
 
@@ -14959,6 +14959,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     endDeveloperSessions: endDeveloperSessionsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
+    ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
     channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({

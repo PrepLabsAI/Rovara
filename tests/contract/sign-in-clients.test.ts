@@ -112,12 +112,12 @@ describe("registering and removing, as admin changes (FR-001)", () => {
 });
 
 describe("updating a client, keeping its secret", () => {
-  const current = { clientId: "rovara-cloud", name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: [], loopback: true, confidential: true, createdAt: "2026-11-13T00:00:00.000Z", updatedAt: "2026-11-13T00:00:00.000Z", updatedBy: "admin" };
+  const current = { clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: [], loopback: true, confidential: true, createdAt: "2026-11-13T00:00:00.000Z", updatedAt: "2026-11-13T00:00:00.000Z", updatedBy: "admin" };
 
   it("changes only the settings given, and keeps the secret unless a new one is made", () => {
-    expect(signInClientUpdate(current, { scope: "projects:members" })).toEqual({ name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: [], loopback: true, scopes: ["projects:members"], keepSecret: true });
+    expect(signInClientUpdate(current, { scope: "projects:members" })).toEqual({ name: "Web App", audience: "web-app", redirectUris: [], loopback: true, scopes: ["projects:members"], keepSecret: true });
     expect(signInClientUpdate({ ...current, scopes: ["projects:members"] }, { redirect: ["https://cloud.example.com/callback"] }))
-      .toEqual({ name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: ["https://cloud.example.com/callback"], loopback: true, scopes: ["projects:members"], keepSecret: true });
+      .toEqual({ name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: true, scopes: ["projects:members"], keepSecret: true });
     expect(signInClientUpdate({ ...current, scopes: ["projects:members"] }, { scope: "none" })).not.toHaveProperty("scopes");
     const { secretHash } = newClientSecret();
     expect(signInClientUpdate(current, {}, secretHash)).toMatchObject({ secretHash });
@@ -174,14 +174,14 @@ describe("agentx admin sign-in-client (FR-001)", () => {
 
   it("update reads the client, keeps every setting not named and its secret, and makes no secret", async () => {
     const session = await cli("applied");
-    const listed = { clients: [{ clientId: "rovara-cloud", name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: [], loopback: true, confidential: true, createdAt: "2026-11-13T00:00:00.000Z", updatedAt: "2026-11-13T00:00:00.000Z", updatedBy: "admin" }] };
+    const listed = { clients: [{ clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: [], loopback: true, confidential: true, createdAt: "2026-11-13T00:00:00.000Z", updatedAt: "2026-11-13T00:00:00.000Z", updatedBy: "admin" }] };
     const base = session.fetch.getMockImplementation()!;
     session.fetch.mockImplementation(async (input: string | URL | Request, init?: RequestInit) =>
       (new URL(input instanceof Request ? input.url : input).pathname === "/v1/admin/sign-in-clients" ? Response.json(listed) : base(input, init)));
-    expect(await session.run(["update", "rovara-cloud", "--scope", "projects:members"])).toBe(0);
+    expect(await session.run(["update", "web-app", "--scope", "projects:members"])).toBe(0);
     expect((session.bodies[0] as { change: unknown }).change).toEqual({
-      kind: "register_sign_in_client", clientId: "rovara-cloud",
-      registration: { name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: [], loopback: true, scopes: ["projects:members"], keepSecret: true },
+      kind: "register_sign_in_client", clientId: "web-app",
+      registration: { name: "Web App", audience: "web-app", redirectUris: [], loopback: true, scopes: ["projects:members"], keepSecret: true },
     });
     expect(session.err()).not.toContain("Client secret");
   });

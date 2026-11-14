@@ -1,5 +1,5 @@
 // Spec 064: the legacy deployment (production), whose sign-in is for account linking only, takes the sign-in client
-// admin changes, confirmed in the CLI, so a service such as the Rovara Cloud web app can be registered there. Every other
+// admin changes, confirmed in the CLI, so a service such as the web app can be registered there. Every other
 // kind of change is refused before it is planned.
 import { describe, expect, it } from "vitest";
 import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
@@ -8,7 +8,7 @@ import { createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { identityHarness } from "../support/developer-fakes.js";
 import { OMAR } from "../support/developer-task-broker.js";
 
-const registration = { name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: ["https://cloud.example.com/auth/callback"], loopback: true };
+const registration = { name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/auth/callback"], loopback: true };
 
 async function production() {
   const identity = identityHarness();
@@ -23,19 +23,19 @@ async function production() {
 describe("admin changes in the legacy deployment (spec 064)", () => {
   it("registers a sign-in client, confirmed in the CLI, and removes it", async () => {
     const { harness, rows } = await production();
-    const planned = await harness.propose({ kind: "register_sign_in_client", clientId: "rovara-cloud", registration }, ["cli"]);
+    const planned = await harness.propose({ kind: "register_sign_in_client", clientId: "web-app", registration }, ["cli"]);
     expect(planned.status).toBe(201);
     expect(planned.body.change).toMatchObject({ kind: "register_sign_in_client", status: "pending", methodsOffered: ["cli"] });
     expect(rows()).toEqual([]);
     const applied = await harness.apply((planned.body.change as { changeId: string }).changeId, "cli");
     expect(applied.status).toBe(200);
-    expect(rows()).toEqual([expect.objectContaining({ sk: "CLIENT#rovara-cloud", audience: "rovara-cloud" })]);
+    expect(rows()).toEqual([expect.objectContaining({ sk: "CLIENT#web-app", audience: "web-app" })]);
     // The list `update` reads first, served by the linking-only sign-in too.
     const listed = await harness.admin("GET", "/v1/admin/sign-in-clients");
     expect(listed.status).toBe(200);
-    expect(listed.body.clients).toEqual([expect.objectContaining({ clientId: "rovara-cloud", audience: "rovara-cloud" })]);
+    expect(listed.body.clients).toEqual([expect.objectContaining({ clientId: "web-app", audience: "web-app" })]);
 
-    const removal = await harness.propose({ kind: "remove_sign_in_client", clientId: "rovara-cloud" }, ["cli"]);
+    const removal = await harness.propose({ kind: "remove_sign_in_client", clientId: "web-app" }, ["cli"]);
     await harness.apply((removal.body.change as { changeId: string }).changeId, "cli");
     expect(rows()).toEqual([]);
   });

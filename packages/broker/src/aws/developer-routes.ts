@@ -120,6 +120,11 @@ export interface DeveloperApiConfiguration {
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
   /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
   signInClients?: SignInClientRegistry;
+  /**
+   * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
+   * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
+   */
+  clientRoutes?: true;
   /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
@@ -785,6 +790,7 @@ const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]
  * project's members, which only the project's administrators or a Rovara administrator may see and change.
  */
 export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.developer.clientRoutes !== true) throw agentXError("NOT_FOUND", "route not found");
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
   if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
