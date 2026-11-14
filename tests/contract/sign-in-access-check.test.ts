@@ -69,9 +69,14 @@ describe("POST /v1/dev/access with the person's token for the service (FR-004)",
     const answer = await bearer();
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({
-      developerId, displayName: "Ada", administrator: true, notices: [],
+      developerId, displayName: "Ada", nameChosen: false, administrator: true, notices: [],
       projects: [{ name: "payments-api", access: "channel" }, { name: "solo", access: "granted" }],
     });
+  });
+
+  it("says when the person chose their own name (#634)", async () => {
+    db.set({ ...db.get(`DEVELOPER#${developerId}`, "META")!, displayName: "Ada L", displayNameChosen: true });
+    expect((await bearer()).body).toMatchObject({ displayName: "Ada L", nameChosen: true });
   });
 
   it("lists the projects they administer too (spec 065), once each, and only a registered one", async () => {

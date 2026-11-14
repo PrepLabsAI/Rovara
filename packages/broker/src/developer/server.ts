@@ -16,6 +16,8 @@ import {
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
   EndDeveloperSessionsRequestSchema,
+  SetDisplayNameRequestSchema,
+  SetMyNameBodySchema,
   ListSignInClientsRequestSchema,
   PutSignInClientRequestSchema,
   RemoveSignInClientRequestSchema,
@@ -39,6 +41,8 @@ import {
   type TaskPeopleDisplayReadResponse,
   type DeveloperSignInMethod,
   type EndDeveloperSessionsRequest,
+  type SetDisplayNameRequest,
+  type SetDisplayNameResponse,
   type ListSignInClientsRequest,
   type PutSignInClientRequest,
   type RemoveSignInClientRequest,
@@ -605,8 +609,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse> => {
+      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse> => {
     if ("kind" in event) {
       // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
       if (event.kind === "put-sign-in-client") {
@@ -642,6 +646,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         const result = await store.endSessions(parsed.data.developerId, parsed.data.at);
         deps.log({ event: "signin.sessions_ended_by_admin", developerId: parsed.data.developerId, result });
         return result === "ended" ? { ok: true } : { ok: false, error: "not_found" };
+      }
+      if (event.kind === "set-display-name") {
+        const parsed = SetDisplayNameRequestSchema.safeParse(event);
+        // Checked again here, so no caller of this Lambda can store a name the route would refuse (an email address, a placeholder).
+        const name = parsed.success ? SetMyNameBodySchema.safeParse({ name: parsed.data.name }) : undefined;
+        if (!parsed.success || name?.success !== true || name.data.name !== parsed.data.name) return { ok: false, error: "invalid_request" };
+        try {
+          const stored = await store.setChosenDisplayName(parsed.data.developerId, name.data.name);
+          // No name in the log: it is the person's choice, not an operational fact.
+          deps.log({ event: "signin.display_name_chosen", developerId: parsed.data.developerId });
+          return { ok: true, name: stored.displayName };
+        } catch (error) {
+          if ((error as { code?: unknown }).code === "NOT_FOUND") return { ok: false, error: "not_found" };
+          throw error;
+        }
       }
       if (event.kind === "channel-by-name") {
         const parsed = ChannelByNameRequestSchema.safeParse(event);

@@ -65,3 +65,11 @@ export type SetMyNameBody = z.output<typeof SetMyNameBodySchema>;
 export const SetMyNameResponseSchema = z.object({ name: z.string().min(1).max(200), nameChosen: z.literal(true) }).strict();
 export type SetMyNameResponse = z.infer<typeof SetMyNameResponseSchema>;
 export const SetMyNameResponseReaderSchema = forwardReader(SetMyNameResponseSchema);
+
+/**
+ * The broker's request to DeveloperIdentity, which owns the sign-in table: store the name a person chose for themselves (`PUT /v1/dev/me/name`). `developerId`
+ * is the verified caller's. `name` was checked with `SetMyNameBodySchema` at the route and is checked again by the sign-in Lambda.
+ */
+export const SetDisplayNameRequestSchema = z.object({ kind: z.literal("set-display-name"), developerId: z.string().regex(/^[a-f0-9]{64}$/u), name: z.string().min(1).max(400) }).strict();
+export type SetDisplayNameRequest = z.infer<typeof SetDisplayNameRequestSchema>;
+export type SetDisplayNameResponse = { ok: true; name: string } | { ok: false; error: "not_found" | "invalid_request" | "unavailable" };
