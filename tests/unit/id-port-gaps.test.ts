@@ -203,8 +203,12 @@ const STEP_UP = "fake-step-up";
 const SESSION = token("fake", "session", "maya");
 const ONCE = token("fake", "once", "secret", "for", "maya", "0123456789");
 let proofs = 0;
-const proofFor = (request: ApprovalRequest, overrides: Partial<ApprovalProof> = {}): ApprovalProof =>
-  ({ proofId: `proof-${++proofs}`, method: STEP_UP, requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token: SESSION, parts: { [FAKE_ONE_TIME_PART]: ONCE }, ...overrides });
+/** A step-up proof for the request; `parts: undefined` in the overrides leaves the parts out. */
+const proofFor = (request: ApprovalRequest, overrides: Partial<Omit<ApprovalProof, "parts">> & { parts?: ApprovalProof["parts"] | undefined } = {}): ApprovalProof => {
+  const { parts, ...rest } = overrides;
+  const proof: ApprovalProof = { proofId: `proof-${++proofs}`, method: STEP_UP, requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token: SESSION, ...rest };
+  return "parts" in overrides && parts === undefined ? proof : { ...proof, parts: parts ?? { [FAKE_ONE_TIME_PART]: ONCE } };
+};
 
 function fake(options: { now?: () => number; card?: typeof CARD | undefined } = {}) {
   return createFakeApprovers({
