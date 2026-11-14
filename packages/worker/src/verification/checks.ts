@@ -24,6 +24,7 @@ import { SANDBOX_TARGET, executionFor } from "../execution-target.js";
 import { localBashOperations, type TaskSandbox } from "../task-sandbox.js";
 import { projectBefore, type CheckHistory } from "./check-history.js";
 import type { CommandRecorder, RecordedCommand } from "./recorder.js";
+import type { OriginalCode, OriginalCodeRepository } from "./original-code.js";
 
 /** An agent command's own timeout (FR-005). */
 export const AGENT_CHECK_TIMEOUT_MS = 10 * 60_000;
@@ -44,6 +45,14 @@ const MIN_CHECK_START_MS = 1_000;
 export const ABORT_JOIN_MS = CONTAINER_STOP_BOUND_MS + 10_000;
 
 export interface CheckRunners {
+  /** Worker-owned reports for the most recent round; absent means the ordinary workspace reports. */
+  reportRoot?(): string;
+  /** Worker-owned execution scope (multi-repo): creates and releases the round's checkout. */
+  scopeRound?(plan: CheckPlan, signal: AbortSignal, run: (runners: CheckRunners) => Promise<CheckRound>, remainingMs: () => number): Promise<CheckRound>;
+  /** Applies old-code phases inside that execution scope, leaving the candidate directories alone. */
+  originalCode?(this: void, repositories: readonly OriginalCodeRepository[]): OriginalCode;
+  /** Setup inside the round, after its service helpers are ready. */
+  prepareRound?(signal: AbortSignal): Promise<void>;
   /**
    * Where these runners run commands: what an unconfirmed stop is recorded as when runChecks gives up waiting for them (the quarantine differs: a task sandbox is removed, a devcontainer
    * and the host cannot be). Absent (a fake): "local".
@@ -179,6 +188,36 @@ export async function runChecks(
   runners: CheckRunners,
   options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number },
 ): Promise<CheckRound> {
+  if (runners.scopeRound !== undefined) {
+    // Scope creation, checkout, setup and checks share one clock and the same abort/join guard.
+    const now = options.now ?? Date.now;
+    const started = now();
+    const remainingMs = () => Math.max(0, options.budgetMs - (now() - started));
+    const stop = new AbortController();
+    const cancel = () => stop.abort();
+    options.signal.addEventListener("abort", cancel, { once: true });
+    if (options.signal.aborted) cancel();
+    let expired = false;
+    const timer = setTimeout(() => { expired = true; stop.abort(); }, remainingMs());
+    let completed: CheckRound | undefined;
+    const budgetResult = (): CheckRound => ({ entries: (completed?.entries ?? plannedChecks(plan, runners).map((check) => ({ id: check.id, label: check.label, source: check.source, before: check.before, after: "not_run" as const, class: classifyCheck(check.before, "not_run"), output: "", durationMs: 0 }))).map((entry) => entry.after !== "not_run" ? entry : { ...entry, output: "AgentX did not run this check: the time budget for checks ran out." }), stopped: options.signal.aborted });
+    try {
+      const running = runners.scopeRound(plan, stop.signal, async (scoped) => {
+        completed = await runChecks(plan, scoped, { ...options, signal: stop.signal, budgetMs: remainingMs() });
+        return completed;
+      }, remainingMs);
+      const result = await untilAborted(running, stop.signal, options.abortJoinMs ?? ABORT_JOIN_MS, runners.kind ?? "local");
+      return expired ? budgetResult() : result;
+    } catch (error) {
+      if (error instanceof RunnerKillUnconfirmedError) throw error;
+      if (options.signal.aborted && completed !== undefined) return completed;
+      if (!expired || options.signal.aborted) throw error;
+      return budgetResult();
+    } finally {
+      clearTimeout(timer);
+      options.signal.removeEventListener("abort", cancel);
+    }
+  }
   if (runners.endRound === undefined) return runChecksRound(plan, runners, options);
   try {
     return await runChecksRound(plan, runners, options);
@@ -203,6 +242,10 @@ async function runChecksRound(
       const note = signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: the test services could not be put back as they were seeded.";
       return { entries: plannedChecks(plan, runners).map((check) => ({ id: check.id, label: check.label, source: check.source, before: check.before, after: "not_run", class: classifyCheck(check.before, "not_run"), output: note, durationMs: 0 })), stopped: signal.aborted };
     }
+  }
+  if (runners.prepareRound !== undefined && !signal.aborted) {
+    const ready = await untilAborted(Promise.resolve().then(() => runners.prepareRound?.(signal)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
+    if (!ready) return { entries: plannedChecks(plan, runners).map((check) => ({ id: check.id, label: check.label, source: check.source, before: check.before, after: "not_run", class: classifyCheck(check.before, "not_run"), output: signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: multi-repository setup failed.", durationMs: 0 })), stopped: signal.aborted };
   }
   let resetFailed = false;
   let first = true;
