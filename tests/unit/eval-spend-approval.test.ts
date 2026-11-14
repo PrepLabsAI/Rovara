@@ -8,6 +8,7 @@ import { createDecisionGate, type DecisionAttempt } from "../../packages/broker/
 import { createSetupProposalSubject, setupApplyDigest } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { createEvalSpendSubject, proposeEvalSpendApproval, readEvalSpendItem, evalSpendKey, createEvalSpendCapabilities, EVAL_SPEND_KIND } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { runEvalHealth, type EvalHealthInput } from "../../packages/worker/src/verification/eval-health.js";
+import { createEvalBaselines } from "../../packages/worker/src/verification/eval-baseline-refresh.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
 import { renderSetupPage } from "../../packages/broker/src/core/local-pages/setup-page.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
@@ -68,6 +69,46 @@ async function refused(w: ReturnType<typeof world>, input = w.input()) {
   if (result.status === "not_run") expect(result.message).toContain("Not run:");
   expect(w.ledger).toEqual([]); expect(w.holds).toEqual([]);
 }
+
+it.each(["owner", "admin", "maintainer"])("reconciles %s approval with cross-host measuring and a later task", async role => {
+  const w = world(role);
+  expect(await createEvalBaselines().forTask(w.input())).toBe("awaiting_confirmation");
+  expect(w.holds).toEqual([]); expect(w.ledger).toEqual([]);
+  await w.approve();
+  const input = w.input(); const run = input.run.bind(input);
+  let entered!: () => void; let release!: () => void;
+  const began = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  input.run = async request => { entered(); await gate; return run(request); };
+  const setup = createEvalBaselines().afterMerge(input);
+  try {
+    await Promise.race([began, setup.then(() => { throw new Error("measurement never started"); })]);
+    expect(await createEvalBaselines().forTask(w.input())).toBe("measuring");
+    expect(await createEvalBaselines().afterMerge(w.input())).toEqual({ status: "measuring" });
+    expect(w.holds).toHaveLength(1); expect(w.ledger).toEqual([]);
+  } finally { release(); await setup; }
+  expect(await setup).toMatchObject({ status: "measured", baseline: "stored" });
+  expect(await createEvalBaselines().forTask(w.input())).toBe("ready");
+  expect(w.holds).toHaveLength(1); expect(w.ledger).toHaveLength(6);
+});
+
+it.each(["stale approver", "corrupt row", "changed inputs", "monthly denial"])("finishes a refused baseline with F3e's %s guard intact", async mode => {
+  const w = world(); await w.approve(); const input = w.input();
+  if (mode === "stale approver") w.state.grants.clear();
+  if (mode === "corrupt row") {
+    const key = evalSpendKey(company, project); const row = (await w.store.get(key))!;
+    await w.store.put({ item: { ...row, extra: "private-corrupt-detail" } });
+  }
+  if (mode === "changed inputs") input.key = { ...input.key, evalSetHash: "e".repeat(64) };
+  if (mode === "monthly denial") w.state.remainingCost = 59;
+  const result = await createEvalBaselines().afterMerge(input);
+  expect(result).toEqual({ status: "not_run", reason: mode === "monthly denial" ? "monthly_cap" : "not_confirmed",
+    message: mode === "monthly denial" ? "Not run: the monthly cap cannot fit these runs." : "Not run: an owner, maintainer or admin must confirm the connected customer's call estimate." });
+  expect(await createEvalBaselines().forTask(input)).toBe(mode === "monthly denial" ? "unavailable" : "awaiting_confirmation");
+  const marks = (await w.store.query({ pk: `ORG#${company}#EVALBASE` })).items.filter(row => row.sk.startsWith("M#"));
+  expect(marks).toHaveLength(1); expect(marks[0]).toMatchObject({ state: "finished" });
+  expect(w.holds).toEqual([]); expect(w.ledger).toEqual([]);
+});
 
 describe("persisted eval spend approval", () => {
   it("shows a separate estimate and usual/maximum budget before approval; refreshes use one approval", async () => {

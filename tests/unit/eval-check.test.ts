@@ -42,3 +42,37 @@ describe("eval evidence", () => {
     }
   });
 });
+
+it.each([
+  ["baseline_measuring", "baseline still being measured", "Eval: Not run — baseline still being measured. Not a pass or a fail."],
+  ["baseline_not_confirmed", "the eval health check is waiting for a maintainer or admin to confirm it", "Eval: Not run — the eval health check is waiting for a maintainer or admin to confirm it."],
+] as const)("keeps %s neutral with exact fixed words", (reason, words, summary) => {
+  const result = evalNotRunResult({ roundKind: "check_unsealed", reason });
+  expect(result.notRun).toEqual({ reason, sentence: `not run: ${words}` }); expect(result.summary).toBe(summary);
+  expect(result.disposition).toEqual({ draft: false, check: "neutral", retry: true });
+});
+
+import * as evalContracts from "../../packages/contracts/src/eval-check.js";
+import { renderEvidence } from "../../packages/contracts/src/evidence-render.js";
+import { v2Pack } from "../support/evidence-v2-fixtures.js";
+it("maps every refusal to fixed not-tested words and renders the measuring golden", () => {
+  for (const reason of evalContracts.EVAL_NOT_RUN_REASONS) {
+    const result = evalNotRunResult({ roundKind: "check_unsealed", reason });
+    const entry = evalContracts.evalNotTestedEntry(result);
+    expect(entry).toEqual({ kind: "check", id: "eval", what: "Eval comparison", reason: evalContracts.EVAL_NOT_RUN_SENTENCES[reason].replace(/^not run: /iu, "") });
+  }
+  const entry = evalContracts.evalNotTestedEntry(evalNotRunResult({ roundKind: "check_unsealed", reason: "baseline_measuring" }))!;
+  expect(renderEvidence(v2Pack({ notTested: [entry] })).body.join("\n")).toContain("Eval comparison (baseline still being measured)");
+  expect(evalContracts.evalNotTestedEntry(evalCheckResult({ roundKind: "check_unsealed", questions: [row("q")], changedPromptCalls: 1 }))).toBeUndefined();
+});
+it("never echoes malformed reasons or stored sentences, even with a megabyte of hostile text", () => {
+  const hostile = "@secret [x](https://private.invalid)".repeat(40_000); const start = performance.now();
+  for (const reason of ["__proto__", "constructor", "unknown", 5, undefined, null, hostile]) {
+    const result = evalNotRunResult({ roundKind: "check_unsealed", reason: reason as never });
+    expect(result.notRun).toEqual({ reason: "invalid_question_data", sentence: "not run: question results are incomplete or invalid" });
+    expect(JSON.stringify(result)).not.toContain("@secret");
+    expect(evalContracts.evalNotTestedEntry({ ...result, notRun: { reason: reason as never, sentence: hostile } })).toEqual({ kind: "check", id: "eval", what: "Eval comparison", reason: "question results are incomplete or invalid" });
+  }
+  for (const value of [null, undefined, {}, { kind: "eval", outcome: "other" }]) expect(evalContracts.evalNotTestedEntry(value as never)).toBeUndefined();
+  expect(performance.now() - start).toBeLessThan(1000);
+});
