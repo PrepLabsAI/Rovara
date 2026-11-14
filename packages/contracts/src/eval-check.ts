@@ -5,7 +5,7 @@ import { EVAL_NOT_RUN_CLASSES, type EvalRoundFacts } from "./eval-pacing.js";
 import { NOT_RUN_SENTENCES } from "./model-egress/classify.js";
 
 export const EVAL_NOT_RUN_REASONS = [
-  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured",
+  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured", "not_connected", "spend_not_approved", "needs_fresh_sandbox", "checks_failed", "stopped",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
@@ -13,6 +13,11 @@ export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> = {
   baseline_measuring: "not run: baseline still being measured",
   baseline_not_confirmed: "not run: the eval health check is waiting for a maintainer or admin to confirm it",
+  not_connected: "not run: the eval's spend approval or model meter is not connected yet",
+  spend_not_approved: "not run: an owner, maintainer or admin must confirm the eval's call estimate in setup",
+  needs_fresh_sandbox: "not run: real model checks need a fresh check sandbox",
+  checks_failed: "not run: the tests did not pass, so the eval was not run",
+  stopped: "not run: the check round stopped before the eval finished",
   no_eval_configured: "not run: no eval is configured",
   no_product_key: "not run: no product AI key is connected",
   question_data_missing: "not run: three saved old answers and complete question results are required",
