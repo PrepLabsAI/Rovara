@@ -5,12 +5,14 @@ import { EVAL_NOT_RUN_CLASSES, type EvalRoundFacts } from "./eval-pacing.js";
 import { NOT_RUN_SENTENCES } from "./model-egress/classify.js";
 
 export const EVAL_NOT_RUN_REASONS = [
-  ...EVAL_NOT_RUN_CLASSES, "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured",
+  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
 /** Why an eval (or one measure of it) was not run, in fixed words. Provider reasons reuse F1-a's sentences; budget refusals name the eval budget. */
 export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> = {
+  baseline_measuring: "not run: baseline still being measured",
+  baseline_not_confirmed: "not run: the eval health check is waiting for a maintainer or admin to confirm it",
   no_eval_configured: "not run: no eval is configured",
   no_product_key: "not run: no product AI key is connected",
   question_data_missing: "not run: three saved old answers and complete question results are required",
@@ -131,10 +133,21 @@ export function evalSuspects(questions: readonly EvalQuestionComparison[]): { do
   return { down, up, omitted };
 }
 export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean }): EvalCheckResult {
-  const sentence = EVAL_NOT_RUN_SENTENCES[args.reason];
-  return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason: args.reason, sentence }, usedHiddenSet: args.hiddenSetUsed === true,
+  const reason = fixedNotRunReason(args.reason);
+  const sentence = EVAL_NOT_RUN_SENTENCES[reason];
+  const ending = reason === "baseline_measuring" ? "Not a pass or a fail." : reason === "baseline_not_confirmed" ? "" : "Retry.";
+  return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason, sentence }, usedHiddenSet: args.hiddenSetUsed === true,
     casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], fixRequested: false,
-    summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}. Retry.`, disposition: { draft: false, check: "neutral", retry: true } };
+    summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}.${ending === "" ? "" : ` ${ending}`}`, disposition: { draft: false, check: "neutral", retry: true } };
+}
+/** Never trust a stored sentence or an unknown reason as user-facing text. */
+function fixedNotRunReason(reason: unknown): EvalNotRunReason {
+  return typeof reason === "string" && reason.length <= 64 && Object.hasOwn(EVAL_NOT_RUN_SENTENCES, reason) ? reason as EvalNotRunReason : "invalid_question_data";
+}
+/** Pure projection for the evidence writer; later cache writes cannot change a round's evidence. */
+export function evalNotTestedEntry(result: EvalCheckResult): { kind: "check"; id: "eval"; what: "Eval comparison"; reason: string } | undefined {
+  if (typeof result !== "object" || result === null || result.kind !== "eval" || result.outcome !== "not_run") return undefined;
+  return { kind: "check", id: "eval", what: "Eval comparison", reason: EVAL_NOT_RUN_SENTENCES[fixedNotRunReason(result.notRun?.reason)].replace(/^not run: /iu, "") };
 }
 /** First-look p in [.01,.2) justifies exactly two more new runs; mirror upward. */
 export function evalNeedsSecondLook(questions: readonly EvalQuestionComparison[]): boolean {

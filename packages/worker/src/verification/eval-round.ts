@@ -81,7 +81,7 @@ export interface EvalRoundInput {
   readonly hashHiddenSet?: (hostPath: string) => Promise<string>;
   readonly cache: BaseScoreCache;
   /** F3d trusted setup/merge coordinator. On a miss only; never grants spending authority itself. */
-  readonly prepareBaseline?: (key: EvalBaseCacheKeyParts) => Promise<"ready" | "measuring" | "unavailable">;
+  readonly prepareBaseline?: (key: EvalBaseCacheKeyParts) => Promise<"ready" | "measuring" | "awaiting_confirmation" | "unavailable">;
   /** The project's hidden eval set, when it keeps one. */
   readonly hiddenSet?: HiddenEvalSetSource;
 }
@@ -214,7 +214,8 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   if (base?.questions === undefined && input.prepareBaseline !== undefined) {
     try {
       const state = await input.prepareBaseline(parts);
-      if (state === "measuring") return finish({ ...evalNotRunResult({ roundKind: input.roundKind, reason: "no_base_score", hiddenSetUsed: hidden }), notices: hidden ? [] : ["baseline still being measured"] });
+      if (state === "measuring") return finish({ ...evalNotRunResult({ roundKind: input.roundKind, reason: "baseline_measuring", hiddenSetUsed: hidden }), notices: hidden ? [] : ["baseline still being measured"] });
+      if (state === "awaiting_confirmation") return refuse("baseline_not_confirmed");
       if (state === "ready") base = await input.cache.read(parts);
     } catch { return refuse("no_base_score"); }
   }

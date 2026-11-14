@@ -229,3 +229,14 @@ it.each([false, true])("joins in-flight calls before closing, including a throwi
   expect(closed).toBe(false); expect(await w.cache.read(key)).toBeUndefined();
   release(); expect((await result).status).toBe(throws ? "not_run" : "measured"); expect(closed).toBe(true);
 });
+
+it("identifies unconfirmed approval without changing the refusal words", async () => {
+  const w = world(); w.input.approval = { read: async () => undefined };
+  expect(await runEvalHealth(w.input)).toEqual({ status: "not_run", reason: "not_confirmed", message: "Not run: a maintainer or admin must confirm the connected customer's call estimate." });
+  expect(w.ledger).toEqual([]);
+});
+it.each([undefined, null, "private canary", 4])("refuses malformed health inventories with fixed words (%s)", async questionIds => {
+  const w = world();
+  expect(await runEvalHealth({ ...w.input, questionIds: questionIds as never })).toEqual({ status: "not_run", reason: "invalid_questions", message: "Not run: question inventory is incomplete." });
+  expect(w.ledger).toEqual([]);
+});

@@ -9,12 +9,13 @@
 //   - Legacy records hold aggregate scores. New records can also hold three question samples; these stay in the company-scoped store and are never returned as private-set agent feedback.
 //   - A record that is corrupt, tampered with, filed under the wrong key, another company's, or expired is a miss. A store that is down is a miss (the cache is only an optimisation).
 // The store is the existing `DocumentStore` port with company-scoped partitions (no new port, so no DECISIONS 42/63 item): partition `ORG#<company>#EVALBASE`, sort key `K#<key>`, a 30-day expiry.
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { EvalQuestionRowsSchema, MeasuresFileEntrySchema } from "./measures-file.js";
 import { EVIDENCE_MEASURES_MAX } from "./evidence.js";
 import { companyScoped } from "./ports/company-scope.js";
-import { DOCUMENT_STORE_LIMITS, type DocumentStore, type StoredDocument } from "./ports/document-store.js";
+import { DOCUMENT_STORE_LIMITS, when, type DocumentStore, type StoredDocument } from "./ports/document-store.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 
 /** The longest a cached base score is used (DECISIONS 170: "a maximum age"). A project may set it lower (`maxAgeDays`), never higher. */
@@ -131,10 +132,19 @@ export interface EvalBaseWriteProvenance {
   readonly baseCommit: string;
 }
 
+/** Persisted seconds, not milliseconds. A stale host may only finish its own mark. */
+export interface EvalBaselineMark { readonly claimId: string; readonly startedAt: number; readonly expiresAt: number; readonly state: "measuring" | "finished" }
+export type EvalBaselineStart = { status: "started"; mark: EvalBaselineMark } | { status: "measuring" | "unavailable" };
+const MEASURING_SECONDS = 60 * 60;
+const validClaimId = (value: unknown): boolean => typeof value === "string" && value.length === 36 && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(value);
 /** The read and write seam. TE-C1's baseline store implements the same two calls. */
 export interface BaseScoreCache {
   /** The record for these parts, or undefined (a miss, an unreadable record, another company's, an expired one, a store that is down). */
   read(parts: EvalBaseCacheKeyParts): Promise<EvalBaseRecord | undefined>;
+  /** Refresh requires these document-backed operations; score-only legacy caches can still serve saved scores. */
+  readMeasurement?(parts: EvalBaseCacheKeyParts): Promise<"idle" | "measuring" | "unavailable">;
+  startMeasurement?(parts: EvalBaseCacheKeyParts): Promise<EvalBaselineStart>;
+  finishMeasurement?(parts: EvalBaseCacheKeyParts, mark: EvalBaselineMark): Promise<void>;
   write(parts: EvalBaseCacheKeyParts, record: EvalBaseRecord, provenance: EvalBaseWriteProvenance): Promise<"stored" | "refused">;
 }
 
@@ -146,14 +156,56 @@ export function createDocumentBaseScoreCache(store: Pick<DocumentStore, "get" | 
   // The attribute the store sweeps, when it sweeps one. The record also keeps its own `expiresAt`, which `read` tests itself (a document past its time may be read until it is swept).
   const ttlAttribute = store.ttlAttribute;
   const keyFor = (parts: EvalBaseCacheKeyParts): string | undefined => {
-    if (parts.company !== options.companyId) return undefined;
+    if (typeof parts !== "object" || parts === null || parts.company !== options.companyId) return undefined;
     try {
       return evalBaseCacheKey(parts);
     } catch {
       return undefined;
     }
   };
+  const seconds = (): number => Math.floor(now() / 1000);
+  const validMark = (found: StoredDocument, key: string, time: number): boolean =>
+    found.pk === pk && found.sk === `M#${key}` && found["company"] === options.companyId && found["key"] === key && found["kind"] === "evalbase_measurement" &&
+    (found["state"] === "measuring" || found["state"] === "finished") &&
+    (found["claimId"] === undefined || validClaimId(found["claimId"])) &&
+    typeof found["startedAt"] === "number" && Number.isSafeInteger(found["startedAt"]) && found["startedAt"] >= 0 && found["startedAt"] <= time &&
+    typeof found["expiresAt"] === "number" && Number.isSafeInteger(found["expiresAt"]) && found["expiresAt"] === found["startedAt"] + MEASURING_SECONDS;
+  const markItem = (key: string, mark: EvalBaselineMark): StoredDocument => ({ pk, sk: `M#${key}`, kind: "evalbase_measurement", company: options.companyId, key,
+    claimId: mark.claimId, startedAt: mark.startedAt, expiresAt: mark.expiresAt, state: mark.state, ...(ttlAttribute === undefined ? {} : { [ttlAttribute]: mark.expiresAt }) });
   return {
+    async readMeasurement(parts) {
+      try {
+        const key = keyFor(parts); const time = seconds();
+        if (key === undefined || !Number.isSafeInteger(time) || time < 0) return "unavailable";
+        const found = await store.get({ pk, sk: `M#${key}` });
+        if (found === undefined) return "idle";
+        if (!validMark(found, key, time)) return "unavailable";
+        if (found["claimId"] === undefined) return "idle";
+        return found["state"] === "measuring" && (found["expiresAt"] as number) > time ? "measuring" : "idle";
+      } catch { return "unavailable"; }
+    },
+    async startMeasurement(parts) {
+      try {
+        const key = keyFor(parts); const time = seconds();
+        if (key === undefined || !Number.isSafeInteger(time) || time < 0 || !Number.isSafeInteger(time + MEASURING_SECONDS)) return { status: "unavailable" };
+        const previous = await store.get({ pk, sk: `M#${key}` });
+        if (previous !== undefined && !validMark(previous, key, time)) return { status: "unavailable" };
+        const mark: EvalBaselineMark = { claimId: randomUUID(), state: "measuring", startedAt: time, expiresAt: time + MEASURING_SECONDS };
+        const written = await store.put({ item: markItem(key, mark), condition: when.or(when.absent(),
+          when.and(when.eq("company", options.companyId), when.eq("key", key), when.eq("kind", "evalbase_measurement"),
+            when.or(when.notExists("claimId"), when.eq("state", "finished"), when.and(when.eq("state", "measuring"), when.lte("expiresAt", time))))) });
+        if (written.applied) return { status: "started", mark };
+        const found = await store.get({ pk, sk: `M#${key}` });
+        return { status: found !== undefined && validMark(found, key, time) && validClaimId(found["claimId"]) && found["state"] === "measuring" && (found["expiresAt"] as number) > time ? "measuring" : "unavailable" };
+      } catch { return { status: "unavailable" }; }
+    },
+    async finishMeasurement(parts, mark) {
+      try {
+        const key = keyFor(parts);
+        if (key === undefined || typeof mark !== "object" || mark === null || !validClaimId(mark.claimId) || !validMark(markItem(key, mark), key, seconds()) || mark.state !== "measuring") throw new Error("baseline mark could not be finished");
+        await store.put({ item: markItem(key, { ...mark, state: "finished" }), condition: when.and(when.eq("claimId", mark.claimId), when.eq("state", "measuring"), when.eq("startedAt", mark.startedAt), when.eq("expiresAt", mark.expiresAt)) });
+      } catch { throw new Error("baseline mark could not be finished"); }
+    },
     async read(parts) {
       const key = keyFor(parts);
       if (key === undefined) return undefined;

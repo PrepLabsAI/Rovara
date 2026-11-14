@@ -1,6 +1,6 @@
 import { agentXError, type ProjectCommand, type WorkspaceStatus } from "@agentx/contracts";
 import { discoverEvals, type EvalDiscovery } from "./verification/eval-discovery.js";
-import { type EvalHealthInput, type EvalHealthResult } from "./verification/eval-health.js";
+import { type EvalHealthInput } from "./verification/eval-health.js";
 import { type EvalBaselines } from "./verification/eval-baseline-refresh.js";
 import { storedCommandOutput } from "./command-failure.js";
 
@@ -31,7 +31,7 @@ export async function evaluateReadiness(
     evalSetup?: { health?: EvalHealthInput; baselines?: EvalBaselines };
   },
   runner: ReadinessCommandRunner,
-): Promise<{ ready: boolean; results: ReadinessResult[]; eval?: { discovery: EvalDiscovery; message: string; measurement: Promise<EvalHealthResult | { status: "cached" }> } }> {
+): Promise<{ ready: boolean; results: ReadinessResult[]; eval?: { discovery: EvalDiscovery; message: string; measurement: ReturnType<EvalBaselines["afterMerge"]> } }> {
   const results: ReadinessResult[] = [];
   for (const [index, command] of input.commands.entries()) {
     try {
@@ -60,7 +60,7 @@ export async function evaluateReadiness(
   const discovery = await discoverEvals(input.rootPath);
   const { health, baselines } = input.evalSetup;
   const measurement = health === undefined || baselines === undefined
-    ? Promise.resolve({ status: "not_run" as const, message: "Not run: trusted eval setup capabilities are not connected." })
+    ? Promise.resolve({ status: "not_run" as const, reason: "not_connected" as const, message: "Not run: trusted eval setup capabilities are not connected." })
     : baselines.afterMerge(health);
   // The host owns this promise: readiness and the first task do not wait on model calls.
   return { ready, results, eval: { discovery, message: health === undefined || baselines === undefined ? "Eval health check is not connected" : "baseline still being measured", measurement } };
