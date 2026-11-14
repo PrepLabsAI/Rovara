@@ -11,11 +11,11 @@
 import { change, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import {
-  DOCS_ROUTE_LINES_MAX, higherLevel, plannedPathsExceeded, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
+  DOCS_ROUTE_LINES_MAX, capReasons, higherLevel, plannedPathsExceeded, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
 } from "../decisions/change-tier.js";
 import { floorOwed, reviewTextOf, withoutTierReviews } from "../decisions/tier-floor-state.js";
 import { applyReviewerFloor, recordReviewerFloor, type ReviewerFloorResult } from "../decisions/tier-reviewer.js";
-import { boundCommits, readTierInput, type TierReadTarget } from "../merge/change-tier-read.js";
+import { baseCommitsOf, boundCommits, readTierInput, seenHeadsOf, unseenCommits, type TierReadTarget } from "../merge/change-tier-read.js";
 import { changeRequestRef } from "../merge/host-port.js";
 import { inertLine } from "../proof/inert-text.js";
 import { SessionStore } from "../sessions/store.js";
@@ -101,6 +101,13 @@ function raisedByCheck(tier: ChangeTier, failed: FlowQuickCheck): ChangeTier {
 
 const reviewAttempt = (level: TierLevel, head: string) => `review level=${level} head=${head}`;
 
+/** The head's tier with the versions pushed before it that no check read: risky, with the reason in front. */
+export function withUnseenCommits(tier: ChangeTier, unseen: { count: number; capped: boolean }): ChangeTier {
+  if (unseen.count === 0 && !unseen.capped) return tier;
+  const path = unseen.capped ? "commits pushed between checks, down to none Rovara saw" : `${String(unseen.count)} ${unseen.count === 1 ? "commit" : "commits"} pushed between checks`;
+  return { ...tier, level: "risky", reasons: capReasons([{ code: "unscanned_commits", path }, ...tier.reasons], 50) };
+}
+
 /** One pass of the lighter flow's checks for a task. Never throws for a host or a model that cannot answer: the record then stays as it was (the merge gate refuses what is owed). */
 export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, beforeRequest?: () => void): Promise<TierChecksOutcome> {
   const workflow = task.workflow;
@@ -128,6 +135,9 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // The gate's own read of the change at the pinned heads, once: the reviewer is given exactly its patch (the form `readReviewInput` gives), and the tier reads the head facts the same read returned.
     const read = await readTierInput(targets, scope, beforeRequest);
     const input = { ...reviewTextOf(read.diff), diff: read.diff };
+    // Versions pushed between two passes (a credential added in one push and taken out in the next leaves a clean final diff): none was ever scanned, so the head is risky (only up, so it stays).
+    const unseen = await unseenCommits(targets, seenHeadsOf(workflow), scope, beforeRequest, baseCommitsOf(workflow));
+    const headTierOf = (): ChangeTier => withUnseenCommits(tierFromDiff(read.diff, { ...bound, at, head: read.head }), unseen);
     // A head the record has no tier for (a person's push, or one the post-push writer could not read) is tiered here, from the same files.
     const flow = workflow.flow;
     // A reviewer outage holds the head it happened on, not the next ones: the head of the first tier an outage raised.
@@ -135,7 +145,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const outageHead = [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])].find((tier) => tier.reasons.some((reason) => reason.code === "reviewer_unavailable"))?.headSha;
     const outageElsewhere = outageOnly && outageHead !== head;
     const needsTier = flow?.tier?.headSha !== head || flow.tier.source === "estimate" || outageElsewhere;
-    const fresh = needsTier ? tierFromDiff(read.diff, { ...bound, at, head: read.head }) : undefined;
+    const fresh = needsTier ? headTierOf() : undefined;
     // The heads must not have moved while they were read.
     for (const target of targets) {
       beforeRequest?.();
@@ -248,7 +258,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       // Only reviews that ran, both, at the grown level, on this head, with nothing to fix, are recorded as the review of that tier.
       return passed ? recordTierReview(noted, { level: grown.level, headSha: head, findings: grown.result.findings, mustFix: grown.result.mustFix, at }) : noted;
     };
-    const headTier = tierFromDiff(read.diff, { ...bound, at, head: read.head });
+    const headTier = headTierOf();
     const earlierQuestion = await readScopeQuestion(deps, task.taskId);
     let scoped: ReturnType<typeof planScopeQuestion> = { asked: false };
     // Written under the record read, with the scope question in the SAME commit; another writer that got in first gets the same results applied to its record.
