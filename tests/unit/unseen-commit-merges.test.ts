@@ -63,8 +63,8 @@ describe("a merge's own changes (git show --cc)", () => {
     const changed = { path: "bin/run", status: "changed", additions: 0, deletions: 0 };
     expect(mergeOwnChanges({ files: [changed], complete: true }, { files: [{ ...changed, status: "modified" }], complete: true }).files[0]!.status).toBe("modified");
     expect(mergeOwnChanges({ files: [changed], complete: true }, { files: [changed], complete: true }).files[0]!.status).toBe("changed");
-    const link = { ...changed, status: "modified", entry: { head: "symlink", base: "file" } };
-    const fromSecond = mergeOwnChanges({ files: [link], complete: true }, { files: [{ ...link, entry: { head: "symlink", base: "symlink" } }], complete: true }).files[0] as F;
+    const link = { ...changed, status: "modified", entry: { head: "symlink", base: "file" } as const };
+    const fromSecond = mergeOwnChanges({ files: [link], complete: true }, { files: [{ ...link, entry: { head: "symlink", base: "symlink" } as const }], complete: true }).files[0] as F;
     expect(fromSecond.entry).toEqual({ head: "symlink", base: "symlink" });
     const own = mergeOwnChanges({ files: [link], complete: true }, { files: [link], complete: true }).files[0] as F;
     expect(own.entry).toEqual({ head: "symlink", base: "file" });
