@@ -6,6 +6,7 @@
 import { RISK_LARGE_CHANGE_LINES, RiskAssessmentSchema, type RiskAssessment, type VerificationReport } from "@agentx/contracts";
 import type { EvidenceRiskSignal } from "./evidence-risk.js";
 import { inertLine } from "./inert-text.js";
+import { TEST_CONFIG_PATH_PATTERNS, isInstructionFilePath } from "./weakening-paths.js";
 
 export type RiskLevel = RiskAssessment["level"];
 
@@ -41,6 +42,15 @@ export const CI_CONFIG_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.(circleci|buildkite|drone)(\/|$)/,
   /(^|\/)(\.gitlab-ci\.ya?ml|jenkinsfile|azure-pipelines\.ya?ml|\.travis\.ya?ml|bitbucket-pipelines\.ya?ml|appveyor\.ya?ml|\.drone\.ya?ml|buildkite\.ya?ml)$/,
 ];
+
+/**
+ * Whether a path is a file a CI run executes: CI configuration (the high-risk patterns above) or test and coverage configuration, a Makefile or a conftest.py (`TEST_CONFIG_PATH_PATTERNS`). Used for the flag only: the
+ * high-risk rule keeps `CI_CONFIG_PATH_PATTERNS` alone, so a test setup file or a coverage config is flagged and not made high (high needs the strong sign-in at merge).
+ */
+export function isCiExecutedPath(path: string): boolean {
+  const value = normalized(path);
+  return CI_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(value)) || TEST_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(value));
+}
 
 /** The lock files and manifests whose change is at least medium (matched on the file name). */
 const MANIFEST_NAMES = new Set([
@@ -92,6 +102,14 @@ export interface RiskFile {
   testsSkipped?: true | undefined;
   /** package.json: the change adds or removes a line of the `test` scripts. */
   testCommandChanged?: true | undefined;
+  /** TE-B3: package.json: the change adds or removes a line of another script CI runs (`pretest`, `posttest`, `ci`, `coverage`, `verify`, `check`). A flag, medium at most. */
+  ciScriptChanged?: true | undefined;
+  /** TE-B3: a line the change adds takes tests or coverage out of a run (a config ignore or exclude option, a coverage pragma). */
+  testsExcluded?: true | undefined;
+  /** TE-B3: the file is a snapshot or golden file. */
+  snapshotChanged?: true | undefined;
+  /** TE-B3: the file is a fixture, mock or recorded-answer file. */
+  fixtureChanged?: true | undefined;
   /** The diff changes a route declaration, a response model or a schema file (read from the diff, never from a model). */
   apiShapeChanged?: true | undefined;
 }
@@ -149,6 +167,19 @@ export function assessRisk(input: RiskInput): RiskAssessment {
     const hidden = [...new Set(input.changedFiles.filter((file) => file.testsRemoved === true || file.testsSkipped === true).map((file) => file.path))];
     if (hidden.length > 0) medium.push(`Removes or skips tests (${shown(hidden)}).`);
   }
+  // TE-B3 (O39): flags for a reviewer, never approvals. The level moves no higher than medium for them; a path that is already a sensitive path is high above and not repeated.
+  const flaggedNamed = (pick: (file: RiskFile) => boolean): string[] => [...new Set(input.changedFiles.filter(pick).flatMap(named))];
+  const instruction = [...new Set(input.changedFiles.flatMap((file) => named(file).filter((path) => isInstructionFilePath(path) && !isSensitivePath(path))))];
+  if (instruction.length > 0) medium.push(`Changes Rovara instruction files (${shown(instruction)}), which tell Rovara how to work in this repository; read the change.`);
+  const snapshots = flaggedNamed((file) => file.snapshotChanged === true);
+  if (snapshots.length > 0) medium.push(`Changes snapshot files (${shown(snapshots)}), the expected output that tests compare with.`);
+  const fixtures = flaggedNamed((file) => file.fixtureChanged === true);
+  if (fixtures.length > 0) medium.push(`Changes test fixtures or recorded answers (${shown(fixtures)}).`);
+  const excluded = [...new Set(input.changedFiles.filter((file) => file.testsExcluded === true).map((file) => file.path))];
+  if (excluded.length > 0) medium.push(`Takes tests or code out of a test or coverage run (${shown(excluded)}).`);
+  // The `test` script is high in a fix (above); every other script CI runs is a flag at medium, and the `test` script too in an ordinary change.
+  const scripts = [...new Set(input.changedFiles.filter((file) => file.ciScriptChanged === true || (input.fix !== true && file.testCommandChanged === true)).map((file) => file.path))];
+  if (scripts.length > 0) medium.push(`Changes the scripts that CI runs (${shown(scripts)}), which decide what is checked before a merge.`);
   if (input.acceptedFindings.some((finding) => finding.role === "SECURITY")) high.push("The owner accepted a security review finding.");
   else if (input.securityFindings > 0) high.push("The security review reported a problem with this change.");
   if (input.reviewerRisk === "high") high.push("The code review rated this change high risk.");

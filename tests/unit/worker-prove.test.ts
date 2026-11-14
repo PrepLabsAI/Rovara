@@ -1,3 +1,8 @@
+import { mkdtemp, rm, writeFile, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { proveWithMachineMeasurement } from "../../packages/worker/src/machine-measurement.js";
+import { TestEnvProveReportSchema, TEST_ENV_PROVE_MEASURE_FEATURE } from "@agentx/contracts";
 // Proof and test environment E3: the Prove run's sequence, failure words, bounds, and the report the broker re-reads.
 import { describe, expect, it } from "vitest";
 import { TestEnvironmentBodySchema, testEnvDigest, testEnvIsProved, type ProjectCommand, type TestEnvironmentBody } from "@agentx/contracts";
@@ -186,4 +191,45 @@ describe("bounds", () => {
     const report = await prove(fakes().ports);
     expect(testEnvIsProved(report, sha("0"), {})).toBe(false);
   });
+});
+
+describe("asked-for machine measurement", () => {
+  it("gate off is byte-for-byte unchanged and never reads the port", async () => {
+    const before = await prove(fakes().ports); let reads = 0;
+    const ports = fakes({ peakMemory: async () => { reads++; return 6144; } }).ports;
+    const environment = env();
+    const after = await proveEnvironment(ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, machineChip: "arm64", measureMachine: false });
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before)); expect(reads).toBe(0);
+  });
+  it("adds facts only when asked, after the suite and before release", async () => {
+    const { ports, ran } = fakes(); let released = false;
+    ports.release = async () => { released = true; };
+    ports.peakMemory = async () => { expect(ran).toContain("pytest -q"); expect(released).toBe(false); return 6144; };
+    const environment = env();
+    const report = await proveEnvironment(ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, machineChip: "arm64", measureMachine: true });
+    expect(report.fullSuite?.peakMemoryMiB).toBe(6144); expect(report.machineChip).toBe("arm64");
+  });
+  it.each([undefined, NaN, Infinity, -1, 1_048_577])("omits invalid measurement %s", async peak => {
+    const environment = env(); const report = await proveEnvironment(fakes({ peakMemory: async () => peak }).ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, measureMachine: true });
+    expect(report.fullSuite).not.toHaveProperty("peakMemoryMiB");
+  });
+  it("a rejected reader does not fail the suite", async () => {
+    const environment = env(); const report = await proveEnvironment(fakes({ peakMemory: async () => { throw new Error("unreadable"); } }).ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, measureMachine: true });
+    expect(report.fullSuite).toEqual({ durationMs: 90000, tests: 1240 });
+  });
+});
+
+it("the single future setup entry point negotiates and reads the sandbox before release; old reports still parse", async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), "te-c5-integration-"));
+  try {
+    expect(dirname(directory)).toBe(await realpath(tmpdir()));
+    await writeFile(join(directory, "memory.peak"), "6442450944\n");
+    const environment = env(), input = { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000 };
+    const old = await prove(fakes().ports); expect(TestEnvProveReportSchema.parse(old)).toEqual(old);
+    for (const machineSize of [false, true]) for (const workerFeatures of [[], [TEST_ENV_PROVE_MEASURE_FEATURE]]) {
+      const report = await proveWithMachineMeasurement(fakes().ports, input, { machineSize, workerFeatures, machineChip: "arm64", cgroupDirectory: directory });
+      if (machineSize && workerFeatures.length > 0) expect(report.fullSuite?.peakMemoryMiB).toBe(6144);
+      else expect(report).toEqual(old);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

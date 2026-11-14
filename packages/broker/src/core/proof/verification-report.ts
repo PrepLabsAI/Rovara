@@ -65,6 +65,16 @@ export interface ChangedFileEntry {
   testsSkipped?: true | undefined;
   /** package.json: a line of the `test` scripts was added or removed (Plan 6 Task 16): what a fix looks like that makes the tests not run. */
   testCommandChanged?: true | undefined;
+  /** TE-B3: package.json: a line of another script CI runs (`pretest`, `posttest`, `ci`, `coverage`, `verify`, `check`) was added or removed. */
+  ciScriptChanged?: true | undefined;
+  /** TE-B3: a line the change adds takes tests or coverage out of a run (an ignore, deselect or exclude option in a test or coverage configuration, a `pragma: no cover` or an istanbul, c8 or v8 ignore comment). */
+  testsExcluded?: true | undefined;
+  /** TE-B3: the file is a test runner's or coverage tool's configuration, a Makefile or a `conftest.py` (under either name, for a rename). */
+  testConfigChanged?: true | undefined;
+  /** TE-B3: the file is a snapshot or golden file (under either name). */
+  snapshotChanged?: true | undefined;
+  /** TE-B3: the file is a fixture, mock or recorded-answer file (under either name). */
+  fixtureChanged?: true | undefined;
   /** The diff changes a route declaration or response model, or a schema, serializer, OpenAPI or protobuf file: the public API or the shape of a response may be different for existing callers. */
   apiShapeChanged?: true | undefined;
 }

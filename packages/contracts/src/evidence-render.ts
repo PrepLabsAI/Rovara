@@ -6,6 +6,7 @@ import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPT
 import { inertEvidenceText } from "./evidence-inert.js";
 import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
+import { weakeningLines } from "./evidence-weakening.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
 
 export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3 } as const;
@@ -115,8 +116,10 @@ function checksLines(checks: readonly Check[]): string[] {
   const other = checks.filter((check) => !(OUTCOME_ORDER as readonly string[]).includes(check.after)).length;
   if (other > 0) counts.push(`${number(other)} ${NEWER_EVIDENCE_WORDS.toLowerCase()}`);
   const listed = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).map(checkLine);
+  const measuresSource = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).some((check) => (check.measures?.length ?? 0) > 0)
+    ? ["Measures: reported by the project's test runner, not measured by Rovara"] : [];
   const more = checks.length - listed.length;
-  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
+  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...measuresSource, ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
 }
 
 function trustOf(entry: Dependency): EvidenceTrustClass | undefined {
@@ -161,16 +164,14 @@ function proofLines(proof: NonNullable<EvidencePackV2Read["proof"]>, scripted: b
   return lines;
 }
 
-function weakeningLine(weakening: NonNullable<EvidencePackV2Read["weakening"]>): string | undefined {
-  const parts = [
-    ...(weakening.skipRise === undefined ? [] : [`skipped tests rose from ${number(weakening.skipRise.before)} to ${number(weakening.skipRise.after)}`]),
-    ...(weakening.removedTests.length === 0 ? [] : [`${plural(weakening.removedTests.length, "test")} removed`]),
-    ...(weakening.absentOnNew.length === 0 ? [] : [`${plural(weakening.absentOnNew.length, "test")} missing on the new code`]),
-    ...(weakening.changedTestConfig.length === 0 ? [] : [`${plural(weakening.changedTestConfig.length, "test config file")} changed`]),
-    ...(weakening.changedSnapshots.length === 0 ? [] : [`${plural(weakening.changedSnapshots.length, "snapshot")} changed`]),
-    ...(weakening.changedFixtures.length === 0 ? [] : [`${plural(weakening.changedFixtures.length, "fixture")} changed`]),
-  ];
-  return parts.length === 0 ? undefined : line(`Tests may be weaker: ${parts.join("; ")}`);
+/** The flag lines (instruction files and CI-executed files, shown right after the producer line) and the "tests may be weaker" lines of a pack: the words are `weakeningLines` (evidence-weakening.ts), shared with the pull request description. */
+function weakeningPart(pack: EvidencePackV2Read): { flags: string[]; weakening: string[] } {
+  const weakening = pack.weakening;
+  const lines = weakeningLines({
+    ...(weakening === undefined ? {} : { skipRise: weakening.skipRise, removedTests: weakening.removedTests, absentOnNew: weakening.absentOnNew, absentOnNewCount: weakening.absentOnNewCount, changedTestConfig: weakening.changedTestConfig, changedSnapshots: weakening.changedSnapshots, changedFixtures: weakening.changedFixtures }),
+    ...(pack.flags === undefined ? {} : { instructionFiles: pack.flags.instructionFiles, ciExecutedFiles: pack.flags.ciExecutedFiles }),
+  });
+  return { flags: lines.flags.map(bullet), weakening: lines.weakening.length === 0 ? [] : ["Tests may be weaker:", ...lines.weakening.map(bullet)] };
 }
 
 /** The first line and the body of a v2 pack. Pure; the same pack and options always give the same text. */
@@ -191,13 +192,15 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
   const newer = options.newer ?? noNewerEvidence();
   const notTested = pack.notTested;
+  const flagged = weakeningPart(pack);
   const body = [
     producerLine,
+    ...flagged.flags,
     ...slot(options.rovaraProblemLine),
     ...slot(options.timeTargetLine),
     ...checksLines(pack.checks),
     ...(pack.proof === undefined ? [] : proofLines(pack.proof, scripted)),
-    ...(pack.weakening === undefined ? [] : weakeningLine(pack.weakening) === undefined ? [] : [weakeningLine(pack.weakening)!]),
+    ...flagged.weakening,
     ...dependencyLines(pack.dependencies ?? []),
     ...(pack.meters === undefined ? [] : [line(`Spent: ${dollars(pack.meters.modelUsd)} model, ${plural(pack.meters.machineMinutes, "machine minute")} (${dollars(pack.meters.machineUsd)})`)]),
     ...(notTested.length === 0 ? [] : [
