@@ -735,6 +735,16 @@ describe("file mode and type (DEC 182): a type the host reports, or cannot tell,
     const doc = tierOf(typed("docs/run.md", { head: "executable", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+Plain words.", additions: 1, deletions: 0 }));
     expect(doc.kinds).not.toContain("docs");
   });
+  it("M12 a symbolic link DELETED (a link at the base, nothing at the head) is risky: the base side counts", () => {
+    const tier = tierOf({ ...file("docs/link.md", { status: "removed", before: ["../../outside"], after: [] }), entry: { head: "none", base: "symlink" } });
+    expect(tier.level).toBe("risky");
+    expect(codes(tier)).toContain("symlink_suspected");
+  });
+  it("M12b a submodule DELETED (a submodule at the base, nothing at the head) is risky: the base side counts", () => {
+    const tier = tierOf({ ...file("vendor/lib", { status: "removed", before: ["Subproject commit abc"], after: [] }), entry: { head: "none", base: "submodule" } });
+    expect(tier.level).toBe("risky");
+    expect(codes(tier)).toContain("submodule");
+  });
   it("M11 the tier read keeps the host's entry, and drops a malformed one (read as not known)", () => {
     const base = { path: "README.md", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" };
     const read = tierFilesOfRead("app", { files: [{ ...base, entry: { head: "executable", base: "file" } }, { ...base, path: "docs/a.md", entry: { head: "blob", base: "file" } }, { ...base, path: "docs/b.md" }] as never, complete: true });
