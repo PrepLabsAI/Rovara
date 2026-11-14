@@ -55,25 +55,34 @@ const FAKE_SESSION = ["fake", "session", "for", "tests"].join("-");
 const FAKE_ONCE = ["fake", "once", "for", "tests"].join("-");
 const FAKE_CARD = { cardId: "approve_plan:t1", contentVersion: "a".repeat(64) };
 const fakeProof = (method: string, parts?: Record<string, string>) => ({ proofId: "p", method, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: FAKE_SESSION, ...(parts === undefined ? {} : { parts }) });
-const fakeApprovers = (card?: typeof FAKE_CARD) => createFakeApprovers({
-  people: [{ token: FAKE_SESSION, principal: { ...owner, personId: "maya", provider: "example-idp" }, soleApprover: true }],
+const MAYA = { ...owner, personId: "maya", provider: "example-idp" };
+const fakeApprovers = (card?: typeof FAKE_CARD, now?: () => number) => createFakeApprovers({
+  people: [{ token: FAKE_SESSION, principal: MAYA, soleApprover: true }],
   soleApproverAllowed: true, minApprovers: 2, selfApprovalAllowed: false,
   signInRules: [{ outcomes: ["approve"], risks: ["medium"], methods: ["fake-step-up"], rule: { mode: "window", seconds: 600 } }],
   oneTime: [{ method: "fake-step-up", token: FAKE_SESSION, secret: FAKE_ONCE, ...(card === undefined ? {} : { card }) }],
+  claimSeconds: 60, ...(now === undefined ? {} : { now }),
 });
-runApproversConformance("fake approvers (session)", {
+runApproversConformance("fake approvers (session, asked by the sole approver)", {
   create: async () => fakeApprovers(),
-  request: REQUEST,
+  request: { ...REQUEST, requestedBy: MAYA },
   acceptable: fakeProof(FAKE_SESSION_METHOD),
   forgedToken: "guessed-session",
 });
+const STEP_UP_REQUEST = { ...REQUEST, card: FAKE_CARD, settlesClaims: true as const };
 runApproversConformance("fake approvers (step-up with a one-time part, bound to a card)", {
   create: async () => fakeApprovers(FAKE_CARD),
-  request: { ...REQUEST, card: FAKE_CARD },
+  request: STEP_UP_REQUEST,
   acceptable: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }),
   forgedToken: "guessed-session",
-  claims: { proof: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }) },
-  cardBound: { request: { ...REQUEST, card: FAKE_CARD }, proof: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }) },
+  claims: {
+    proof: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }),
+    withClock: async () => {
+      let now = Date.now();
+      return { approvers: fakeApprovers(FAKE_CARD, () => now), lapse: () => { now += 61_000; } };
+    },
+  },
+  cardBound: { request: STEP_UP_REQUEST, proof: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }) },
 });
 
 runIdentityConformance("Code default (local owner)", {

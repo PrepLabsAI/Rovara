@@ -208,7 +208,11 @@ export interface ApproversHarness {
    * For an adapter that claims a one-time part of a proof (owner decision 211, gap G3): a proof that it claims for `request` with `settlesClaims`. The suite presents the same secrets for later requests of the same
    * subject (other request ids, as the decision gate makes them) and checks that a claim blocks them, a released claim frees them and a committed one spends them for ever.
    */
-  claims?: { proof: ApprovalProof };
+  claims?: {
+    proof: ApprovalProof;
+    /** A fresh adapter on a clock the suite moves: `lapse()` puts the clock past the adapter's claim window. The suite checks a lapsed claim is never given back. */
+    withClock: () => Promise<{ approvers: Approvers; lapse: () => void }>;
+  };
   /**
    * For an adapter that binds a proof to a decision card (gap G4): a request that names the card, and a proof it accepts for it. The suite checks the proof is refused for a request naming no card, another card
    * or another version of it.
@@ -304,26 +308,29 @@ export function runApproversConformance(name: string, harness: ApproversHarness)
       }
     });
 
-    it("marks a sole approver only when its requirement offers the exception (gap G2)", async () => {
+    it("marks a sole approver only when its requirement offers the exception, only for the person who asked, and fences the verdict (gap G2)", async () => {
       const approvers = await harness.create();
       const requirement = await approvers.requirement(harness.request);
       const verdict = await approvers.verify(harness.request, fresh());
       if (verdict.approved && verdict.soleApprover !== undefined) {
         expect(verdict.soleApprover).toBe(true);
         expect(requirement.soleApproverAllowed).toBe(true);
+        expect(harness.request.requestedBy).toMatchObject({ provider: verdict.approver.provider, personId: verdict.approver.personId });
+        expect(Number.isSafeInteger(verdict.fence?.membershipVersion)).toBe(true);
       }
+      // The same proof for a request someone else asked for is never a sole approval.
+      const someoneElse: Principal = { companyId: harness.request.companyId, personId: "someone-else-who-asked", displayName: "Someone else", roles: [], provider: verdict.approved ? verdict.approver.provider : "any" };
+      const other = await (await harness.create()).verify({ ...harness.request, requestedBy: someoneElse }, fresh());
+      if (other.approved) expect(other.soleApprover).toBeUndefined();
     });
 
     it("offers both claim operations or neither, and gives no claim to a caller that does not settle claims (gap G3)", async () => {
       const approvers = await harness.create();
       expect(approvers.commitClaim === undefined).toBe(approvers.releaseClaim === undefined);
-      const verdict = await approvers.verify(harness.request, fresh());
+      const plain: ApprovalRequest = { ...harness.request };
+      delete plain.settlesClaims;
+      const verdict = await approvers.verify(plain, fresh());
       if (verdict.approved) expect(verdict.claimId).toBeUndefined();
-      const proof = harness.claims?.proof;
-      if (proof !== undefined) {
-        const readOnly = await approvers.verify(harness.request, { ...proof, proofId: `proof-${++counter}`, requestId: `${harness.request.requestId}.read-only` });
-        if (readOnly.approved) expect(readOnly.claimId).toBeUndefined();
-      }
     });
 
     if (harness.claims !== undefined) {
@@ -345,6 +352,36 @@ export function runApproversConformance(name: string, harness: ApproversHarness)
         return (await approvers.verify(request, proof)).approved;
       };
 
+      it("refuses a one-time method to a caller that does not settle claims (gap G3)", async () => {
+        const approvers = await harness.create();
+        const { request, proof } = attempt("plain");
+        const plain: ApprovalRequest = { ...request };
+        delete plain.settlesClaims;
+        expect((await approvers.verify(plain, proof)).approved).toBe(false);
+      });
+
+      it("never gives a lapsed claim back: claim, lapse, commit, then refused; and a lapsed claim's secrets are refused to the next request (gap G3)", async () => {
+        const first = await harness.claims!.withClock();
+        const claimId = await claimOf(first.approvers, "lapse-a");
+        first.lapse();
+        expect(await first.approvers.commitClaim!(claimId)).toEqual({ applied: false });
+        expect(await accepted(first.approvers, "lapse-b")).toBe(false);
+        const second = await harness.claims!.withClock();
+        await claimOf(second.approvers, "lapse-c");
+        second.lapse();
+        expect(await accepted(second.approvers, "lapse-d")).toBe(false);
+        await second.approvers.releaseClaim!(claimId);
+        expect(await accepted(second.approvers, "lapse-e")).toBe(false);
+      });
+
+      it("a released lapsed claim stays spent (gap G3)", async () => {
+        const clocked = await harness.claims!.withClock();
+        const claimId = await claimOf(clocked.approvers, "lapse-f");
+        clocked.lapse();
+        await clocked.approvers.releaseClaim!(claimId);
+        expect(await accepted(clocked.approvers, "lapse-g")).toBe(false);
+      });
+
       it("claims a one-time part for a caller that settles claims, and refuses the same secrets while claimed (gap G3)", async () => {
         const approvers = await harness.create();
         expect(typeof approvers.commitClaim).toBe("function");
@@ -358,10 +395,12 @@ export function runApproversConformance(name: string, harness: ApproversHarness)
         await approvers.releaseClaim!(first);
         await approvers.releaseClaim!(first);
         const second = await claimOf(approvers, "d");
-        await approvers.commitClaim!(second);
+        expect(await approvers.commitClaim!(second)).toEqual({ applied: true });
+        expect(await approvers.commitClaim!(second)).toEqual({ applied: false });
         await approvers.releaseClaim!(second);
         expect(await accepted(approvers, "e")).toBe(false);
-        await approvers.commitClaim!("no-such-claim");
+        expect(await approvers.commitClaim!(first)).toEqual({ applied: false });
+        expect(await approvers.commitClaim!("no-such-claim")).toEqual({ applied: false });
         await approvers.releaseClaim!("no-such-claim");
       });
     }

@@ -3,7 +3,7 @@
 // fields yet. The pure rules (`signInRulesFor`, `checkApprovalSignInFor`, `checkApproverCount`, `isValidApprovalCardRef`) are what a caller will use when it is.
 import { describe, expect, it } from "vitest";
 import {
-  approvalProofKey, checkApprovalSignInFor, checkApproverCount, isValidApprovalCardRef, signInRulesFor,
+  NEEDS_SETTLING_CALLER, approvalProofKey, checkApprovalSignInFor, checkApproverCount, isValidApprovalCardRef, signInRulesFor,
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalSignInScope, type ApprovalVerdict, type Principal,
 } from "@agentx/contracts";
 import { LOCAL_SESSION_METHOD, createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -35,6 +35,17 @@ describe("G1: signInRulesFor (which sign-in rules apply to one answer)", () => {
 
   it("a request whose risk is not known is treated as high (fail closed)", () => {
     expect(signInRulesFor({ signIn: WINDOW_10M }, { outcome: "approve", risk: undefined, method: "a" })).toEqual({ ok: true, rules: [WINDOW_10M] });
+  });
+
+  it("a risk or an outcome the rules do not know is never skipped: an unknown risk counts as high, an unknown outcome as a rejection (fail closed)", () => {
+    const requirement = { signIn: WINDOW_10M, signInRules: [{ outcomes: ["approve"], risks: ["high"], rule: WINDOW_1H }] as ApprovalSignInScope[] };
+    for (const risk of ["critical", "HIGH", ""]) {
+      expect(signInRulesFor(requirement, { outcome: "approve", risk: risk as "high", method: "x" })).toEqual({ ok: true, rules: [WINDOW_10M, WINDOW_1H] });
+    }
+    expect(signInRulesFor(requirement, { outcome: "Reject" as "reject", risk: "low", method: "x" })).toEqual({ ok: true, rules: [WINDOW_10M] });
+    const rejectScoped = { signInRules: [{ outcomes: ["reject"], risks: ["low"], rule: WINDOW_1H }] as ApprovalSignInScope[] };
+    expect(signInRulesFor(rejectScoped, { outcome: "APPROVE" as "approve", risk: "low", method: "x" })).toEqual({ ok: true, rules: [WINDOW_1H] });
+    expect(checkApprovalSignInFor(requirement, { outcome: "approve", risk: "critical" as "high", method: "x" }, {}, NOW, { companySignIn: false })).toEqual({ ok: false, reason: "no_sign_in_time" });
   });
 
   it("no rule at all when the plug-in names none (Code)", () => {
@@ -115,6 +126,7 @@ describe("G1: checkApprovalSignInFor (does this approver's sign-in satisfy every
 describe("G2: checkApproverCount (how many distinct approvers, and whether the person who asked may be one)", () => {
   const maya = person("maya"), ana = person("ana");
   const twoNoSelf: Pick<ApprovalRequirement, "minApprovers" | "selfApprovalAllowed" | "soleApproverAllowed"> = { minApprovers: 2, selfApprovalAllowed: false };
+  const allows = { ...twoNoSelf, soleApproverAllowed: true };
 
   it("keeps the older rule: minApprovers distinct people, and no self-approval when it is not allowed", () => {
     expect(checkApproverCount(twoNoSelf, ana, [approved(maya)])).toEqual({ ok: false, reason: "needs_more_approvers" });
@@ -122,7 +134,14 @@ describe("G2: checkApproverCount (how many distinct approvers, and whether the p
     expect(checkApproverCount(twoNoSelf, ana, [approved(maya), approved(person("li"))])).toEqual({ ok: true });
     expect(checkApproverCount(twoNoSelf, ana, [approved(maya), approved(ana)])).toEqual({ ok: false, reason: "self_approval_not_allowed" });
     expect(checkApproverCount({ minApprovers: 1, selfApprovalAllowed: true }, ana, [approved(ana)])).toEqual({ ok: true });
-    expect(checkApproverCount({ minApprovers: 0, selfApprovalAllowed: true }, undefined, [])).toEqual({ ok: false, reason: "needs_more_approvers" });
+  });
+
+  it("needs a whole minApprovers of at least 1, and at least one verdict (fail closed)", () => {
+    for (const minApprovers of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(checkApproverCount({ minApprovers, selfApprovalAllowed: true }, undefined, [approved(maya)])).toEqual({ ok: false, reason: "invalid_requirement" });
+    }
+    expect(checkApproverCount({ minApprovers: 1, selfApprovalAllowed: true }, undefined, [])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount({ minApprovers: 1, selfApprovalAllowed: true, soleApproverAllowed: true }, undefined, [])).toEqual({ ok: false, reason: "needs_more_approvers" });
   });
 
   it("the same person under another provider is another approver only by the pair (provider, personId)", () => {
@@ -130,7 +149,6 @@ describe("G2: checkApproverCount (how many distinct approvers, and whether the p
   });
 
   it("a verdict marked sole approver lets the person who asked approve alone, only when the requirement allows the exception", () => {
-    const allows = { ...twoNoSelf, soleApproverAllowed: true };
     expect(checkApproverCount(allows, ana, [approved(ana, { soleApprover: true })])).toEqual({ ok: true });
     // The adapter's mark is ignored when its requirement did not offer the exception (a mark alone never widens anything).
     expect(checkApproverCount(twoNoSelf, ana, [approved(ana, { soleApprover: true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
@@ -138,14 +156,23 @@ describe("G2: checkApproverCount (how many distinct approvers, and whether the p
     expect(checkApproverCount({ ...allows, soleApproverAllowed: false }, ana, [approved(ana, { soleApprover: true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
   });
 
-  it("an unmarked verdict never benefits from the exception: the person who asked still cannot approve their own work", () => {
-    const allows = { ...twoNoSelf, soleApproverAllowed: true };
-    expect(checkApproverCount(allows, ana, [approved(ana)])).toEqual({ ok: false, reason: "needs_more_approvers" });
-    expect(checkApproverCount(allows, ana, [approved(maya, { soleApprover: true }), approved(ana)])).toEqual({ ok: false, reason: "self_approval_not_allowed" });
+  it("only an explicit true is believed, on the requirement and on the verdict", () => {
+    expect(checkApproverCount({ ...twoNoSelf, soleApproverAllowed: "true" as unknown as boolean }, ana, [approved(ana, { soleApprover: true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount({ ...twoNoSelf, soleApproverAllowed: 1 as unknown as boolean }, ana, [approved(ana, { soleApprover: true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount(allows, ana, [approved(ana, { soleApprover: "yes" as unknown as true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount(allows, ana, [approved(ana, { soleApprover: 1 as unknown as true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
   });
 
-  it("a sole-approver mark from a person other than the one who asked also satisfies the count alone", () => {
-    expect(checkApproverCount({ ...twoNoSelf, soleApproverAllowed: true }, ana, [approved(maya, { soleApprover: true })])).toEqual({ ok: true });
+  it("an unmarked verdict never benefits from the exception: the person who asked still cannot approve their own work", () => {
+    expect(checkApproverCount(allows, ana, [approved(ana)])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount(allows, ana, [approved(ana, { soleApprover: true }), approved(maya)])).toEqual({ ok: true });
+  });
+
+  it("the mark is honoured only for the person who asked: a sole mark on anyone else counts as one ordinary approval", () => {
+    expect(checkApproverCount(allows, ana, [approved(maya, { soleApprover: true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount(allows, undefined, [approved(maya, { soleApprover: true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount(allows, person("ana", { provider: "other-idp" }), [approved(ana, { soleApprover: true })])).toEqual({ ok: false, reason: "needs_more_approvers" });
+    expect(checkApproverCount(allows, ana, [approved(maya, { soleApprover: true }), approved(ana)])).toEqual({ ok: false, reason: "self_approval_not_allowed" });
   });
 });
 
@@ -167,7 +194,10 @@ describe("G4: isValidApprovalCardRef", () => {
 
 // ---- The fake approvers: every gap, as a Cloud-like plug-in would answer ----
 
+const MAYA = person("maya");
 const REQUEST: ApprovalRequest = { companyId: COMPANY, requestId: "req-1", kind: "plan", subject: { type: "task", id: "t1" }, revision: 3, artifactDigest: "b".repeat(64), risk: "high" };
+/** A request from a caller that settles claims (the only caller a one-time method answers). */
+const SETTLING: ApprovalRequest = { ...REQUEST, settlesClaims: true };
 const CARD = { cardId: "approve_plan:t1", contentVersion: "b".repeat(64) };
 const STEP_UP = "fake-step-up";
 const SESSION = token("fake", "session", "maya");
@@ -177,93 +207,137 @@ const proofFor = (request: ApprovalRequest, overrides: Partial<ApprovalProof> = 
   ({ proofId: `proof-${++proofs}`, method: STEP_UP, requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token: SESSION, parts: { [FAKE_ONE_TIME_PART]: ONCE }, ...overrides });
 
 function fake(options: { now?: () => number; card?: typeof CARD | undefined } = {}) {
-  const maya = person("maya");
   return createFakeApprovers({
-    people: [{ token: SESSION, principal: maya, soleApprover: true }],
+    people: [{ token: SESSION, principal: MAYA, soleApprover: true }],
     methods: [FAKE_SESSION_METHOD, STEP_UP],
     strongMethods: [STEP_UP],
     minApprovers: 2, selfApprovalAllowed: false, soleApproverAllowed: true,
     signInRules: [{ outcomes: ["approve"], risks: ["medium"], methods: [FAKE_SESSION_METHOD], rule: WINDOW_1H }],
     oneTime: [{ method: STEP_UP, token: SESSION, secret: ONCE, ...(options.card === undefined ? {} : { card: options.card }) }],
+    claimSeconds: 60, membershipVersion: 7,
     now: options.now ?? (() => NOW),
   });
 }
 
 describe("fake approvers: the gaps as a plug-in states them", () => {
+  const session = (request: ApprovalRequest) => proofFor(request, { method: FAKE_SESSION_METHOD, parts: undefined });
+
   it("states its scoped sign-in rules and that it offers the sole-approver exception (G1, G2)", async () => {
     const requirement = await fake().requirement(REQUEST);
     expect(requirement.signInRules).toEqual([{ outcomes: ["approve"], risks: ["medium"], methods: [FAKE_SESSION_METHOD], rule: WINDOW_1H }]);
     expect(requirement.soleApproverAllowed).toBe(true);
   });
 
-  it("marks the sole approver on the verdict (G2)", async () => {
-    const verdict = await fake().verify(REQUEST, proofFor(REQUEST, { method: FAKE_SESSION_METHOD, parts: undefined }));
-    expect(verdict).toMatchObject({ approved: true, soleApprover: true });
+  it("marks the sole approver on the verdict when that person asked, with the membership fence it read (G2)", async () => {
+    const request = { ...REQUEST, requestedBy: MAYA };
+    expect(await fake().verify(request, session(request))).toMatchObject({ approved: true, soleApprover: true, fence: { membershipVersion: 7 } });
+  });
+
+  it("never marks a sole approver for a request someone else asked for, or nobody named (G2)", async () => {
+    for (const request of [{ ...REQUEST, requestedBy: person("ana") }, { ...REQUEST, requestedBy: person("maya", { provider: "other-idp" }) }, REQUEST]) {
+      const verdict = await fake().verify(request, session(request));
+      expect(verdict.approved).toBe(true);
+      if (verdict.approved) {
+        expect(verdict.soleApprover).toBeUndefined();
+        expect(verdict.fence).toEqual({ membershipVersion: 7 });
+      }
+    }
   });
 
   it("never marks a sole approver when it does not offer the exception (G2)", async () => {
-    const approvers = createFakeApprovers({ people: [{ token: SESSION, principal: person("maya"), soleApprover: true }], now: () => NOW });
+    const approvers = createFakeApprovers({ people: [{ token: SESSION, principal: MAYA, soleApprover: true }], now: () => NOW });
     expect((await approvers.requirement(REQUEST)).soleApproverAllowed).toBeUndefined();
-    const verdict = await approvers.verify(REQUEST, proofFor(REQUEST, { method: FAKE_SESSION_METHOD, parts: undefined }));
+    const request = { ...REQUEST, requestedBy: MAYA };
+    const verdict = await approvers.verify(request, session(request));
     expect(verdict.approved).toBe(true);
     if (verdict.approved) expect(verdict.soleApprover).toBeUndefined();
   });
 });
 
 describe("fake approvers G3: a proof with two secrets, claimed by verify and then spent or given back", () => {
-  const second = (n: number): ApprovalRequest => ({ ...REQUEST, requestId: `req-1.${String(n)}` });
+  const next = (n: number): ApprovalRequest => ({ ...SETTLING, requestId: `req-1.${String(n)}` });
+  const claimOf = async (approvers: ReturnType<typeof fake>, request: ApprovalRequest): Promise<string> => {
+    const verdict = await approvers.verify(request, proofFor(request));
+    expect(verdict.approved).toBe(true);
+    return verdict.approved ? verdict.claimId ?? "" : "";
+  };
 
   it("needs the one-time part: a step-up proof without it, or with another, is refused", async () => {
     const approvers = fake();
-    expect((await approvers.verify(REQUEST, proofFor(REQUEST, { parts: undefined }))).approved).toBe(false);
-    expect((await approvers.verify(REQUEST, proofFor(REQUEST, { parts: { [FAKE_ONE_TIME_PART]: `${ONCE}x` } }))).approved).toBe(false);
+    expect((await approvers.verify(SETTLING, proofFor(SETTLING, { parts: undefined }))).approved).toBe(false);
+    expect((await approvers.verify(SETTLING, proofFor(SETTLING, { parts: { [FAKE_ONE_TIME_PART]: `${ONCE}x` } }))).approved).toBe(false);
   });
 
-  it("gives no claim to a caller that does not settle claims, and stays read-only for it (the older single-shot verify)", async () => {
+  it("refuses a one-time method to a caller that does not settle claims, and claims nothing for it", async () => {
     const approvers = fake();
-    const verdict = await approvers.verify(REQUEST, proofFor(REQUEST));
-    expect(verdict.approved).toBe(true);
-    if (verdict.approved) expect(verdict.claimId).toBeUndefined();
-    // Not claimed: the same one-time part still checks out for the next attempt (the caller's commit is still the guarantee there).
-    expect((await approvers.verify(second(1), proofFor(second(1)))).approved).toBe(true);
+    expect(await approvers.verify(REQUEST, proofFor(REQUEST))).toEqual({ approved: false, reason: NEEDS_SETTLING_CALLER });
+    expect(await approvers.verify({ ...REQUEST, settlesClaims: "yes" as unknown as true }, proofFor(REQUEST))).toEqual({ approved: false, reason: NEEDS_SETTLING_CALLER });
+    // Nothing was claimed by the refused attempts: a settling caller still gets the part.
+    expect(typeof await claimOf(approvers, next(1))).toBe("string");
   });
 
   it("claims the one-time part for a caller that settles claims: a second attempt is refused while it is claimed", async () => {
     const approvers = fake();
-    const first = await approvers.verify({ ...REQUEST, settlesClaims: true }, proofFor(REQUEST));
-    expect(first.approved).toBe(true);
-    const claimId = first.approved ? first.claimId : undefined;
-    expect(typeof claimId).toBe("string");
-    expect(await approvers.verify({ ...second(2), settlesClaims: true }, proofFor(second(2)))).toEqual({ approved: false, reason: "one_time_part_claimed" });
-    // Read-only callers are refused too while it is claimed: a claim is a claim.
-    expect((await approvers.verify(second(3), proofFor(second(3)))).approved).toBe(false);
+    const claimId = await claimOf(approvers, SETTLING);
+    expect(claimId.length).toBeGreaterThan(0);
+    expect(await approvers.verify(next(2), proofFor(next(2)))).toEqual({ approved: false, reason: "one_time_part_claimed" });
   });
 
   it("a released claim gives the part back; a committed one spends it for ever; settling twice changes nothing", async () => {
     const approvers = fake();
-    const first = await approvers.verify({ ...REQUEST, settlesClaims: true }, proofFor(REQUEST));
-    const claimId = first.approved ? first.claimId! : "";
+    const claimId = await claimOf(approvers, SETTLING);
     await approvers.releaseClaim!(claimId);
     await approvers.releaseClaim!(claimId);
-    const again = await approvers.verify({ ...second(4), settlesClaims: true }, proofFor(second(4)));
-    expect(again.approved).toBe(true);
-    const againId = again.approved ? again.claimId! : "";
-    await approvers.commitClaim!(againId);
+    const againId = await claimOf(approvers, next(4));
+    expect(await approvers.commitClaim!(againId)).toEqual({ applied: true });
     await approvers.releaseClaim!(againId);
-    await approvers.commitClaim!(againId);
-    expect(await approvers.verify({ ...second(5), settlesClaims: true }, proofFor(second(5)))).toEqual({ approved: false, reason: "one_time_part_spent" });
-    expect((await approvers.verify(second(6), proofFor(second(6)))).approved).toBe(false);
+    expect(await approvers.commitClaim!(againId)).toEqual({ applied: false });
+    expect(await approvers.commitClaim!(claimId)).toEqual({ applied: false });
+    expect(await approvers.verify(next(5), proofFor(next(5)))).toEqual({ approved: false, reason: "one_time_part_spent" });
   });
 
-  it("an unknown claim id is a no-op, and a claim the caller never settles lapses by itself", async () => {
+  it("an unknown claim id changes nothing", async () => {
+    const approvers = fake();
+    expect(await approvers.commitClaim!("no-such-claim")).toEqual({ applied: false });
+    await approvers.releaseClaim!("no-such-claim");
+    expect((await approvers.verify(SETTLING, proofFor(SETTLING))).approved).toBe(true);
+  });
+
+  it("a claim the caller never settles lapses to SPENT: the clock never gives the part back", async () => {
     let now = NOW;
     const approvers = fake({ now: () => now });
-    await approvers.commitClaim!("no-such-claim");
-    await approvers.releaseClaim!("no-such-claim");
-    expect((await approvers.verify({ ...REQUEST, settlesClaims: true }, proofFor(REQUEST))).approved).toBe(true);
-    expect((await approvers.verify({ ...second(7), settlesClaims: true }, proofFor(second(7)))).approved).toBe(false);
-    now += 10 * 60_000;
-    expect((await approvers.verify({ ...second(8), settlesClaims: true }, proofFor(second(8)))).approved).toBe(true);
+    await claimOf(approvers, SETTLING);
+    now += 61_000;
+    expect(await approvers.verify(next(8), proofFor(next(8)))).toEqual({ approved: false, reason: "one_time_part_spent" });
+    now += 24 * 3_600_000;
+    expect((await approvers.verify(next(9), proofFor(next(9)))).approved).toBe(false);
+  });
+
+  it("claim, lapse, then commit: the commit is not applied and the part stays spent", async () => {
+    let now = NOW;
+    const approvers = fake({ now: () => now });
+    const claimId = await claimOf(approvers, SETTLING);
+    now += 61_000;
+    expect(await approvers.commitClaim!(claimId)).toEqual({ applied: false });
+    expect((await approvers.verify(next(10), proofFor(next(10)))).approved).toBe(false);
+  });
+
+  it("claim r1, lapse, then r2 with the same one-time part is refused, and r1's late release frees nothing", async () => {
+    let now = NOW;
+    const approvers = fake({ now: () => now });
+    const claimId = await claimOf(approvers, next(11));
+    now += 61_000;
+    expect((await approvers.verify(next(12), proofFor(next(12)))).approved).toBe(false);
+    await approvers.releaseClaim!(claimId);
+    expect((await approvers.verify(next(13), proofFor(next(13)))).approved).toBe(false);
+  });
+
+  it("a claim settled just inside its window still counts", async () => {
+    let now = NOW;
+    const approvers = fake({ now: () => now });
+    const claimId = await claimOf(approvers, SETTLING);
+    now += 59_000;
+    expect(await approvers.commitClaim!(claimId)).toEqual({ applied: true });
   });
 
   it("the single-use key of a proof is unchanged by its parts (stored markers keep their keys)", () => {
@@ -274,15 +348,15 @@ describe("fake approvers G3: a proof with two secrets, claimed by verify and the
 
 describe("fake approvers G4: a step-up bound to the card and the version shown", () => {
   it("accepts the proof for the card and version it was issued for", async () => {
-    expect((await fake({ card: CARD }).verify({ ...REQUEST, card: CARD }, proofFor(REQUEST))).approved).toBe(true);
+    expect((await fake({ card: CARD }).verify({ ...SETTLING, card: CARD }, proofFor(SETTLING))).approved).toBe(true);
   });
 
   it("refuses it for a request that names no card, another card, another version, or a card that cannot be read", async () => {
     const approvers = fake({ card: CARD });
-    expect(await approvers.verify(REQUEST, proofFor(REQUEST))).toEqual({ approved: false, reason: "card_not_named" });
-    expect(await approvers.verify({ ...REQUEST, card: { ...CARD, cardId: "approve_plan:t2" } }, proofFor(REQUEST))).toEqual({ approved: false, reason: "other_card" });
-    expect(await approvers.verify({ ...REQUEST, card: { ...CARD, contentVersion: "c".repeat(64) } }, proofFor(REQUEST))).toEqual({ approved: false, reason: "other_card" });
-    expect(await approvers.verify({ ...REQUEST, card: { cardId: "", contentVersion: "1" } }, proofFor(REQUEST))).toEqual({ approved: false, reason: "card_not_named" });
+    expect(await approvers.verify(SETTLING, proofFor(SETTLING))).toEqual({ approved: false, reason: "card_not_named" });
+    expect(await approvers.verify({ ...SETTLING, card: { ...CARD, cardId: "approve_plan:t2" } }, proofFor(SETTLING))).toEqual({ approved: false, reason: "other_card" });
+    expect(await approvers.verify({ ...SETTLING, card: { ...CARD, contentVersion: "c".repeat(64) } }, proofFor(SETTLING))).toEqual({ approved: false, reason: "other_card" });
+    expect(await approvers.verify({ ...SETTLING, card: { cardId: "", contentVersion: "1" } }, proofFor(SETTLING))).toEqual({ approved: false, reason: "card_not_named" });
   });
 });
 

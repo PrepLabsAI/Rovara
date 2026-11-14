@@ -72,7 +72,7 @@ export const ApprovalSignInScopeSchema = z.object({
 }).strict();
 const ApprovalSignInScopesSchema = z.array(ApprovalSignInScopeSchema).max(50);
 
-/** One answer, as the rules are matched against it. A risk that is not known counts as high (fail closed). */
+/** One answer, as the rules are matched against it. A risk that is not one of the three names (absent, `critical`, `HIGH`) counts as high, and an outcome that is not one of the three as a rejection (fail closed). */
 export interface ApprovalSignInAt {
   outcome: ApprovalAnswer;
   risk: ApprovalRisk | undefined;
@@ -86,14 +86,15 @@ export type ApprovalSignInRules = { ok: true; rules: ApprovalSignInRule[] } | { 
  * cover this one. A plug-in's rules are data: when any scoped rule cannot be read the answer is `invalid_rule`, whatever answer it was about, and the caller refuses. Rules only ever add.
  */
 export function signInRulesFor(requirement: Pick<ApprovalRequirement, "signIn" | "signInRules">, at: ApprovalSignInAt): ApprovalSignInRules {
-  const risk = at.risk ?? "high";
+  const risk: ApprovalRisk = at.risk !== undefined && RISKS.includes(at.risk) ? at.risk : "high";
+  const outcome: ApprovalAnswer = ANSWERS.includes(at.outcome) ? at.outcome : "reject";
   const rules: ApprovalSignInRule[] = [];
-  if (requirement.signIn !== undefined && (at.outcome === "reject" || (at.outcome === "approve" && risk === "high"))) rules.push(requirement.signIn);
+  if (requirement.signIn !== undefined && (outcome === "reject" || (outcome === "approve" && risk === "high"))) rules.push(requirement.signIn);
   if (requirement.signInRules === undefined) return { ok: true, rules };
   const scopes = ApprovalSignInScopesSchema.safeParse(requirement.signInRules);
   if (!scopes.success) return { ok: false, reason: "invalid_rule" };
   for (const scope of scopes.data) {
-    if (!scope.outcomes.includes(at.outcome)) continue;
+    if (!scope.outcomes.includes(outcome)) continue;
     if (scope.risks !== undefined && !scope.risks.includes(risk)) continue;
     if (scope.methods !== undefined && !scope.methods.includes(at.method)) continue;
     rules.push(scope.rule);

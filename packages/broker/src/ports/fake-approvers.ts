@@ -1,14 +1,15 @@
 // Owner decision 211: a fake approvers plug-in that speaks every part of the Approvers port, for conformance suites and for a provider's own tests. It answers as a company plug-in would (its own method names,
 // people found by a session token, a step-up with a one-time part), so the gaps Cloud's adapter listed (G1-G4) can be exercised in Code without Cloud:
 //   G1  it states scoped sign-in rules (`signInRules`). Like every plug-in today it does not enforce them itself: that is the caller's (`checkApprovalSignInFor`).
-//   G2  it may offer the sole-approver exception (`soleApproverAllowed`) and marks the verdict of a person configured as a sole approver.
-//   G3  a one-time method needs `parts[FAKE_ONE_TIME_PART]`. For a caller that settles claims (`settlesClaims`) verify CLAIMS the part and answers a `claimId`; `commitClaim` spends it, `releaseClaim` gives it back, and an
-//       unsettled claim lapses after `claimSeconds`. For any other caller verify only checks that the part is neither claimed nor spent (read-only, as before).
+//   G2  it may offer the sole-approver exception (`soleApproverAllowed`) and marks the verdict of a person configured as a sole approver, only when that person asked (`requestedBy`). Every verdict carries the
+//       membership `fence` it read (`membershipVersion`).
+//   G3  a one-time method needs `parts[FAKE_ONE_TIME_PART]` and a caller that settles claims (`settlesClaims`; any other is refused, `needs_settling_caller`). verify CLAIMS the part and answers a `claimId`;
+//       `commitClaim` spends it, `releaseClaim` gives a live claim back, and a claim not settled within `claimSeconds` lapses to SPENT (as Cloud's claimed session keeps its used time): the clock never frees a part.
 //   G4  a one-time secret may be bound to one decision card and version; the request must then name exactly that card (`ApprovalRequest.card`).
 // Never register it in a production build: its people and secrets are whatever the test hands it.
 import { randomUUID } from "node:crypto";
 import {
-  approvalProofKey, isValidApprovalCardRef,
+  NEEDS_SETTLING_CALLER, approvalProofKey, isValidApprovalCardRef,
   type ApprovalCardRef, type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalSignInScope, type ApprovalVerdict, type Approvers, type Principal,
 } from "@agentx/contracts";
 
@@ -47,8 +48,10 @@ export interface FakeApproversOptions {
   signInRules?: readonly ApprovalSignInScope[];
   soleApproverAllowed?: boolean;
   oneTime?: readonly FakeOneTimeSecret[];
-  /** How long an unsettled claim holds a one-time part. Default 300. */
+  /** How long a claim waits to be settled before it lapses to spent. Default 300. */
   claimSeconds?: number;
+  /** The membership version every verdict is fenced on (`ApprovalVerdict.fence`). Default 1. */
+  membershipVersion?: number;
   now?: () => number;
 }
 
@@ -67,22 +70,25 @@ export function createFakeApprovers(options: FakeApproversOptions): Approvers {
 
   const stateOf = (secret: string): PartState | undefined => {
     const state = parts.get(secret);
+    // A claim nobody settled in time lapses to spent: the part is never given back by the clock (a slow commit could otherwise share it with a second decision).
     if (state?.state === "claimed" && state.until <= now()) {
-      parts.delete(secret);
+      parts.set(secret, { state: "spent" });
       claims.delete(state.claimId);
-      return undefined;
+      return { state: "spent" };
     }
     return state;
   };
 
-  const settle = (claimId: string, to: "spent" | "free"): void => {
+  /** Settles a live claim; true when it was live. An unknown, lapsed or settled claim changes nothing. */
+  const settle = (claimId: string, to: "spent" | "free"): boolean => {
     const secret = claims.get(claimId);
-    if (secret === undefined) return;
-    claims.delete(claimId);
+    if (secret === undefined) return false;
     const state = stateOf(secret);
-    if (state?.state !== "claimed" || state.claimId !== claimId) return;
+    claims.delete(claimId);
+    if (state?.state !== "claimed" || state.claimId !== claimId) return false;
     if (to === "spent") parts.set(secret, { state: "spent" });
     else parts.delete(secret);
+    return true;
   };
 
   return {
@@ -114,6 +120,8 @@ export function createFakeApprovers(options: FakeApproversOptions): Approvers {
       let claimId: string | undefined;
       const secrets = oneTime.filter((entry) => entry.method === proof.method);
       if (secrets.length > 0) {
+        // A read-only check of a one-time secret would leave it replayable: only a caller that settles claims may use the method.
+        if (request.settlesClaims !== true) return refuse(NEEDS_SETTLING_CALLER);
         const presented = proof.parts?.[FAKE_ONE_TIME_PART];
         const secret = secrets.find((entry) => entry.token === proof.token && presented !== undefined && entry.secret === presented);
         if (secret === undefined) return refuse("one_time_part_missing");
@@ -124,20 +132,22 @@ export function createFakeApprovers(options: FakeApproversOptions): Approvers {
         const state = stateOf(secret.secret);
         if (state?.state === "spent") return refuse("one_time_part_spent");
         if (state?.state === "claimed") return refuse("one_time_part_claimed");
-        if (request.settlesClaims === true) {
-          claimId = randomUUID();
-          parts.set(secret.secret, { state: "claimed", claimId, until: now() + claimMs });
-          claims.set(claimId, secret.secret);
-        }
+        claimId = randomUUID();
+        parts.set(secret.secret, { state: "claimed", claimId, until: now() + claimMs });
+        claims.set(claimId, secret.secret);
       }
 
       used.add(approvalProofKey(proof));
-      const sole = options.soleApproverAllowed === true && person.soleApprover === true;
-      return { approved: true, approver: person.principal, method: proof.method, proofId: proof.proofId, ...(sole ? { soleApprover: true as const } : {}), ...(claimId === undefined ? {} : { claimId }) };
+      const asked = request.requestedBy;
+      const sole = options.soleApproverAllowed === true && person.soleApprover === true && asked !== undefined && asked.provider === person.principal.provider && asked.personId === person.principal.personId;
+      return {
+        approved: true, approver: person.principal, method: proof.method, proofId: proof.proofId, fence: { membershipVersion: options.membershipVersion ?? 1 },
+        ...(sole ? { soleApprover: true as const } : {}), ...(claimId === undefined ? {} : { claimId }),
+      };
     },
 
-    async commitClaim(claimId: string): Promise<void> {
-      settle(claimId, "spent");
+    async commitClaim(claimId: string): Promise<{ applied: boolean }> {
+      return { applied: settle(claimId, "spent") };
     },
 
     async releaseClaim(claimId: string): Promise<void> {
