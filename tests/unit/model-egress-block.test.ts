@@ -235,6 +235,11 @@ describe("the fixed sentences", () => {
   });
 });
 
+// TE-F2 part A's exact files (the brief's stacked lane): 14 pure contract files and 10 test files.
+const F2A_SOURCES = ["model-failure-pack", "model-families", "model-family-anthropic", "model-family-cohere", "model-family-gemini-extra", "model-family-openai-ops", "model-family-vectors", "model-render", "model-reply-provenance", "model-reply-set", "model-request-facts", "model-serve-replies", "model-served-family", "model-sse-named"];
+const F2A_TESTS = ["model-failure-pack", "model-family-anthropic", "model-family-cohere", "model-family-openai-ops", "model-replies-contracts-guard", "model-reply-provenance", "model-reply-provenance-base", "model-reply-set", "model-request-facts", "model-serve-replies"].map((name) => `tests/unit/${name}.test.ts`);
+const F2A_FILES: ReadonlySet<string> = new Set([...F2A_SOURCES.map((name) => `packages/contracts/src/${name}.ts`), ...F2A_TESTS]);
+
 describe("no callers yet", () => {
   const NEW_MODULES = ["model-catalog", "model-catalog-rows", "model-catalog-digest", "model-family-common", "model-family-gemini", "model-family-openai", "model-egress-block", "model-serve"];
   const walk = (directory: string): string[] =>
@@ -250,7 +255,8 @@ describe("no callers yet", () => {
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
         // TE-F1a (the first caller, by design: it is built on F0a) lives in `packages/contracts/src/model-egress/`, `packages/testing/` and its own tests.
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        // TE-F2 part A stacks on F0a too: exactly its F2A_FILES may import F0a's modules (its guard model-replies-contracts-guard.test.ts proves nothing else calls them).
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
@@ -262,7 +268,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;
