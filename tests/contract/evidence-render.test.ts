@@ -322,9 +322,10 @@ describe("no callers", () => {
       expect([0, 1]).toContain(found.status);
       return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
     };
-    // MOCK-PROVENANCE-IN-PROOF consumes these two shared definitions only; it does not switch on evidence v2 readers or writers.
+    // MOCK-PROVENANCE-IN-PROOF consumes two shared definitions in proof-table.ts; TE-B3 shares only inert text in weakening-flags.ts. Neither switches on evidence v2 readers or writers.
     const proofExports = ["EvidenceTrustClass", "inertEvidenceText"];
     expect(callers(names.filter((name) => !proofExports.includes(name)))).toEqual([]);
-    for (const name of proofExports) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
+    expect(callers(["EvidenceTrustClass"])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
+    expect(callers(["inertEvidenceText"]).sort()).toEqual(["packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts"]);
   });
 });

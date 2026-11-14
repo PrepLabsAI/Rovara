@@ -47,23 +47,80 @@ const gateways = (): CompanyGatewayRow[] => {
 };
 
 describe("modelHostBlockList", () => {
-  it("holds every catalog host, every auth host and every company gateway host, sorted and without duplicates", () => {
+  it("blocks documented Azure AI inference hosts and finds serverless calls at DNS label boundaries", () => {
+    const block = modelHostBlockList(rows, []);
+    const hostSuffixes = modelHostSuffixBlockList(rows);
+    expect(block).toContain("models.inference.ai.azure.com");
+    expect(hostSuffixes).toContain("models.ai.azure.com");
+    for (const host of ["models.inference.ai.azure.com", "deployment.eastus2.models.ai.azure.com", "deployment.models.ai.azure.com"]) {
+      expect(findRedirectEscapes(block, [host], { hostSuffixes })).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+    expect(findRedirectEscapes(block, ["notmodels.ai.azure.com", "models.ai.azure.com.example.com", "models.inference.ai.azure.com.example.com", "login.microsoftonline.com"], { hostSuffixes })).toEqual([]);
+  });
+  it.each([
+    ["OpenAI residency", ["eu.api.openai.com", "us.api.openai.com"]],
+    ["Codestral", ["codestral.mistral.ai"]],
+    ["Vertex location", ["us-west8-aiplatform.googleapis.com", "us-west8-aiplatform.mtls.googleapis.com"]],
+  ])("blocks every verified Round 2 %s host", (_group, hosts) => {
+    const block = modelHostBlockList(rows, []);
+    for (const host of hosts) {
+      expect(block, host).toContain(host);
+      expect(findRedirectEscapes(block, [host])).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+  });
+  it("blocks all documented Vertex REP names without expanding to other Google APIs", () => {
+    // Independent provider-doc inventory; northamerica-south1 REP is not documented.
+    const locations = "africa-south1 asia-east1 asia-east2 asia-northeast1 asia-northeast2 asia-northeast3 asia-south1 asia-south2 asia-southeast1 asia-southeast2 australia-southeast1 australia-southeast2 eu europe-central2 europe-north1 europe-north2 europe-southwest1 europe-west1 europe-west10 europe-west12 europe-west2 europe-west3 europe-west4 europe-west6 europe-west8 europe-west9 me-central1 me-central2 me-west1 northamerica-northeast1 northamerica-northeast2 southamerica-east1 southamerica-west1 us us-central1 us-east1 us-east4 us-east5 us-south1 us-west1 us-west2 us-west3 us-west4 us-west8".split(" ");
+    const block = modelHostBlockList(rows, []);
+    for (const location of locations) {
+      for (const domain of ["googleapis.com", "mtls.googleapis.com"]) {
+        const host = `aiplatform.${location}.rep.${domain}`;
+        expect(block, host).toContain(host);
+        expect(findRedirectEscapes(block, [host])).toMatchObject([{ host, kind: "ignored_redirect" }]);
+      }
+    }
+    const allowed = ["storage.googleapis.com", "bigquery.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com", "storage.us-central1.rep.googleapis.com", "bigquery.us-central1.rep.googleapis.com"];
+    for (const host of allowed) expect(block).not.toContain(host);
+    expect(findRedirectEscapes(block, allowed, { hostSuffixes: modelHostSuffixBlockList(rows) })).toEqual([]);
+    expect(modelHostSuffixBlockList(rows).some((suffix) => suffix.endsWith("googleapis.com"))).toBe(false);
+  });
+  it.each(["cognitiveservices.azure.com", "services.ai.azure.com"])("blocks the Azure %s suffix with DNS label boundaries", (suffix) => {
+    const block = modelHostBlockList(rows, []);
+    const suffixes = modelHostSuffixBlockList(rows);
+    expect(suffixes).toContain(suffix);
+    for (const host of [`resource.${suffix}`, `nested.resource.${suffix}`]) {
+      expect(findRedirectEscapes(block, [host], { hostSuffixes: suffixes })).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+    expect(findRedirectEscapes(block, [`not${suffix}`, `${suffix}.example.com`], { hostSuffixes: suffixes })).toEqual([]);
+  });
+
+  it("holds every model host and every company gateway host, sorted and without duplicates", () => {
     const list = modelHostBlockList(rows, gateways());
     expect([...list]).toEqual([...new Set(list)].sort());
-    for (const host of ["generativelanguage.googleapis.com", "aiplatform.googleapis.com", "us-central1-aiplatform.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com", "openrouter.ai", "gateway.ai.cloudflare.com", "ai-gateway.vercel.sh", "api.portkey.ai", "llm.corp-gateway.example.com"]) {
+    for (const host of ["generativelanguage.googleapis.com", "aiplatform.googleapis.com", "us-central1-aiplatform.googleapis.com", "firebasevertexai.googleapis.com", "aiplatform.us-central1.rep.googleapis.com", "aiplatform.us-central1.rep.mtls.googleapis.com", "openrouter.ai", "gateway.ai.cloudflare.com", "ai-gateway.vercel.sh", "api.portkey.ai", "llm.corp-gateway.example.com"]) {
       expect(list, host).toContain(host);
     }
-    const every = rows.flatMap((row) => [...row.hosts, ...row.authHosts]);
+    const every = rows.flatMap((row) => row.hosts);
     for (const host of every) expect(list).toContain(host);
     // generativelanguage.googleapis.com is two rows' host and is listed once.
     expect(list.filter((host) => host === "generativelanguage.googleapis.com")).toHaveLength(1);
+  });
+  it("keeps Google token hosts out of every block list and escape finding", () => {
+    const tokenHosts = ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
+    for (const catalogRows of [rows, rows.filter((row) => row.id === "openai")]) {
+      const list = modelHostBlockList(catalogRows, gateways());
+      for (const host of tokenHosts) expect(list).not.toContain(host);
+      expect(findRedirectEscapes(list, tokenHosts)).toEqual([]);
+      expect(list).toContain("api.openai.com");
+    }
+    expect(modelHostBlockList([{ hosts: ["api.example.com"], authHosts: ["auth.example.com"] }], [])).toEqual(["api.example.com"]);
   });
   it("holds every direct provider, and the Azure suffix is in the suffix list", () => {
     const list = modelHostBlockList(rows, []);
     for (const host of ["api.openai.com", "api.anthropic.com", "api.cohere.com", "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz", "europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "generativelanguage.mtls.googleapis.com"]) {
       expect(list, host).toContain(host);
     }
-    expect(modelHostSuffixBlockList(rows)).toEqual(["openai.azure.com"]);
+    expect(modelHostSuffixBlockList(rows)).toEqual(["cognitiveservices.azure.com", "models.ai.azure.com", "openai.azure.com", "services.ai.azure.com"]);
     expect(list.some((host) => host.endsWith("openai.azure.com"))).toBe(false);
   });
   it("never lists a wildcard, so Cloud Storage's *.googleapis.com is not caught", () => {
@@ -82,17 +139,24 @@ describe("findRedirectEscapes", () => {
     const escapes = findRedirectEscapes(block, ["127.0.0.1", "registry.npmjs.org", "generativelanguage.googleapis.com"]);
     expect(escapes).toEqual([{ host: "generativelanguage.googleapis.com", kind: "ignored_redirect", sentence: "not run: client ignored the redirect (called generativelanguage.googleapis.com)" }]);
   });
+  it("finds Firebase AI Logic and regional Vertex endpoints even before a catalog update", () => {
+    for (const host of ["firebasevertexai.googleapis.com", "aiplatform.us-central1.rep.googleapis.com", "aiplatform.us-central1.rep.mtls.googleapis.com"]) {
+      expect(findRedirectEscapes([], [host])).toEqual([{ host, kind: "unlisted_model_host", sentence: unlistedModelHostSentence(host) }]);
+      expect(findRedirectEscapes(block, [host])).toEqual([{ host, kind: "ignored_redirect", sentence: redirectEscapeSentence(host) }]);
+      expect(findRedirectEscapes([], [`${host}.evil.example.com`])).toEqual([]);
+    }
+  });
   it("is clean when no model host was observed", () => {
     expect(findRedirectEscapes(block, ["127.0.0.1", "registry.npmjs.org", "rovara-models"])).toEqual([]);
     expect(findRedirectEscapes(block, [])).toEqual([]);
   });
   it("reads a host in any spelling the evidence might carry: case, a port, a trailing dot", () => {
-    const escapes = findRedirectEscapes(block, ["OpenRouter.AI:443", "oauth2.googleapis.com.", " api.portkey.ai "]);
-    expect(escapes.map((escape) => escape.host)).toEqual(["api.portkey.ai", "oauth2.googleapis.com", "openrouter.ai"]);
+    const escapes = findRedirectEscapes(block, ["OpenRouter.AI:443", "api.openai.com.", " api.portkey.ai "]);
+    expect(escapes.map((escape) => escape.host)).toEqual(["api.openai.com", "api.portkey.ai", "openrouter.ai"]);
   });
   it("reads URL forms, bracketed hosts, a port with a trailing dot and doubled dots through the strict host checker", () => {
-    const forms = ["https://OpenRouter.ai/api/v1/chat?x=1", "[api.portkey.ai]:443", "oauth2.googleapis.com:443.", "ai-gateway.vercel.sh..", "api.groq.com...", "api.mistral.ai:443..", "https://user:pw@api.openai.com:443/x", "HTTP://API.GROQ.COM", "wss://api.mistral.ai#frag"];
-    expect(findRedirectEscapes(block, forms).map((escape) => escape.host)).toEqual(["ai-gateway.vercel.sh", "api.groq.com", "api.mistral.ai", "api.openai.com", "api.portkey.ai", "oauth2.googleapis.com", "openrouter.ai"]);
+    const forms = ["https://OpenRouter.ai/api/v1/chat?x=1", "[api.portkey.ai]:443", "api.openai.com:443.", "ai-gateway.vercel.sh..", "api.groq.com...", "api.mistral.ai:443..", "https://user:pw@api.openai.com:443/x", "HTTP://API.GROQ.COM", "wss://api.mistral.ai#frag"];
+    expect(findRedirectEscapes(block, forms).map((escape) => escape.host)).toEqual(["ai-gateway.vercel.sh", "api.groq.com", "api.mistral.ai", "api.openai.com", "api.portkey.ai", "openrouter.ai"]);
   });
   it("reads each odd trailing form on its own", () => {
     for (const form of ["api.together.xyz:443..", "api.together.xyz...", "api.together.xyz:443.", "[api.together.xyz]:443.", "api.together.xyz.:443"]) {
@@ -171,6 +235,11 @@ describe("the fixed sentences", () => {
   });
 });
 
+// TE-F2 part A's exact files (the brief's stacked lane): 14 pure contract files and 10 test files.
+const F2A_SOURCES = ["model-failure-pack", "model-families", "model-family-anthropic", "model-family-cohere", "model-family-gemini-extra", "model-family-openai-ops", "model-family-vectors", "model-render", "model-reply-provenance", "model-reply-set", "model-request-facts", "model-serve-replies", "model-served-family", "model-sse-named"];
+const F2A_TESTS = ["model-failure-pack", "model-family-anthropic", "model-family-cohere", "model-family-openai-ops", "model-replies-contracts-guard", "model-reply-provenance", "model-reply-provenance-base", "model-reply-set", "model-request-facts", "model-serve-replies"].map((name) => `tests/unit/${name}.test.ts`);
+const F2A_FILES: ReadonlySet<string> = new Set([...F2A_SOURCES.map((name) => `packages/contracts/src/${name}.ts`), ...F2A_TESTS]);
+
 describe("no callers yet", () => {
   const NEW_MODULES = ["model-catalog", "model-catalog-rows", "model-catalog-digest", "model-family-common", "model-family-gemini", "model-family-openai", "model-egress-block", "model-serve"];
   const walk = (directory: string): string[] =>
@@ -185,7 +254,9 @@ describe("no callers yet", () => {
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        // TE-F1a (the first caller, by design: it is built on F0a) lives in `packages/contracts/src/model-egress/`, `packages/testing/` and its own tests.
+        // TE-F2 part A stacks on F0a too: exactly its F2A_FILES may import F0a's modules (its guard model-replies-contracts-guard.test.ts proves nothing else calls them).
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
@@ -197,7 +268,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

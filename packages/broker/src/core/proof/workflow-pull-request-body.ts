@@ -1,6 +1,7 @@
 // The pull request's description as the task flow publishes it (Cloud: `aws/developer-tasks/pull-request-body.ts`, the part that builds the text). A Rovara Code (version 2) task gets `rovaraPullRequestBody`; a
 // version 1 task's description is exactly what it was. Inputs the broker used to read from the task record are context fields now (`secondReviewLines`, `reviewSameModel`): the caller (the task flow, lane L6a,
 // and the second-review module, lane L9) computes them. Selecting the approved plan, reading the proof inputs and publishing stay with the task flow.
+import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import {
   attributionBodyLines,
   workflowReviewsSawPartialDiff,
@@ -17,7 +18,7 @@ import { documentSummaryLines } from "../../developer/workflow-messages.js";
 import { breakLinearKeys } from "./linear-close.js";
 import { inertPlanLine } from "./inert-text.js";
 import { reviewSameModelOf } from "./review-model-lines.js";
-import { lessonsUsedLines, rovaraPullRequestBody, rovaraStatusLines, type PullRequestBodyContext } from "./pull-request-body.js";
+import { ROVARA_PULL_REQUEST_CLOSING, ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL, lessonsUsedLines, rovaraPullRequestBody, rovaraStatusLines, type PullRequestBodyContext } from "./pull-request-body.js";
 
 /** The task as the description needs it. */
 export interface PullRequestBodyTask {
@@ -38,7 +39,10 @@ const WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED = 20;
  */
 export function workflowPullRequestBody(task: PullRequestBodyTask, workflow: WorkflowSnapshot, plan: LoadedDocument | string | undefined, pageUrl: string | undefined, context?: PullRequestBodyContext, proofLines: readonly string[] = []): string {
   // S3 (C59): the description is read by everyone who can see the repository, and the plan, the findings and the title are a model's and a person's words. No email address is written on GitHub; layout is kept, so a code block still renders.
-  const body = hideEmailAddresses(buildWorkflowPullRequestBody(task, workflow, plan, pageUrl, context, proofLines));
+  const built = buildWorkflowPullRequestBody(task, workflow, plan, pageUrl, context, proofLines);
+  // A small change's plan went to coding with no approval (the lighter flow): the description never calls it approved.
+  const honest = planApprovalSkipped(workflow) ? built.replace(ROVARA_PULL_REQUEST_CLOSING, ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL).replace("after the owner-approved plan", "after the plan (no approval needed: small change)") : built;
+  const body = hideEmailAddresses(honest);
   return fitPullRequestBody(body);
 }
 

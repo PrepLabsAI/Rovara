@@ -551,7 +551,8 @@ describe("the Proof section of the version 2 pull request description", () => {
     // A test proof without a plan with claims adds only its Tests line (as the publication's own hook does); there is still no Proof section.
     const withProofOnly = bodyOf({ plan: undefined, testProof: proofFor(CODE.digest) });
     expect(withProofOnly).not.toContain("### Proof");
-    expect(withProofOnly.replace("\n- Test proof: 1 check fails on the original code and passes now", "")).toBe(today);
+    // (TE-B3: a test proof from before the weakening facts could not compare the untouched tests, and the description says so in its own block.)
+    expect(withProofOnly.replace("\n- Test proof: 1 check fails on the original code and passes now", "").replace("## Flags for the reviewer\n- Test weakening: could not compare (no test report to compare)\n\n", "")).toBe(today);
     expect(workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { plan: undefined } })).toEqual(workflowPullRequestStatusLines(workflowWith(), { changedFiles: files }));
   });
 

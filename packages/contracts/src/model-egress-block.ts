@@ -18,12 +18,12 @@ export const NOT_SEALED_BLOCKED_BY_NAME_SENTENCE = "not sealed; model hosts bloc
 export const redirectEscapeSentence = (host: string): string => `not run: client ignored the redirect (called ${host})`;
 
 /**
- * Every host a customer's code must not reach directly: each catalog row's hosts and auth hosts (Google's token hosts), and each company gateway's host. Sorted, no duplicates, no wildcard. The F1 contract test builds the
+ * Every host a customer's code must not reach directly: each catalog row's model hosts (never authHosts, which serve other APIs too), and each company gateway's host. Sorted, no duplicates, no wildcard. The F1 contract test builds the
  * `--add-host` list and the sealed DNS table from this, so a row cannot exist without a block entry.
  */
 export function modelHostBlockList(rows: readonly Pick<ModelCatalogRow, "hosts" | "authHosts">[], gatewayRows: readonly Pick<CompanyGatewayRow, "host">[]): string[] {
   const hosts = new Set<string>();
-  for (const row of rows) for (const host of [...row.hosts, ...row.authHosts]) hosts.add(host);
+  for (const row of rows) for (const host of row.hosts) hosts.add(host);
   for (const row of gatewayRows) hosts.add(row.host);
   return [...hosts].sort();
 }
@@ -62,8 +62,8 @@ function normalizeObserved(raw: unknown, countWork?: () => void): string | undef
   return checked.ok ? checked.host : undefined;
 }
 
-/** Google's AI hosts by name shape: a regional or mtls aiplatform host, or anything generativelanguage-like. A name of this shape that no row lists is a model host the catalog has missed. */
-const GOOGLE_AI_HOST = /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$|^[a-z0-9.-]*generativelanguage[a-z0-9.-]*\.googleapis\.com$/u;
+/** Google's AI hosts by name shape: a regional or mtls aiplatform host, Firebase AI Logic, or anything generativelanguage-like. A name of this shape that no row lists is a model host the catalog has missed. */
+const GOOGLE_AI_HOST = /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$|^aiplatform\.[a-z0-9-]+\.rep(?:\.mtls)?\.googleapis\.com$|^firebasevertexai\.googleapis\.com$|^[a-z0-9.-]*generativelanguage[a-z0-9.-]*\.googleapis\.com$/u;
 
 /**
  * The hosts a client called although they are blocked: every observed host that is on the block list or under a listed suffix is an "ignored redirect"; a Google AI host name (`*-aiplatform.googleapis.com`,
