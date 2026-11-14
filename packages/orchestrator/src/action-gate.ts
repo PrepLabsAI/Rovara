@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { redactText, type ActionPolicy, type ConnectorCatalog } from "@agentx/contracts";
+import { TOOL_SEARCH_TOOL_NAME } from "@agentx/model-runtime";
 import { ClassifierError, usableClassifierTimeout, type ActionClassifier, type ClassifierUsage, type ClassifierVerdict } from "./action-classifier.js";
 
 export type { ActionClassifier } from "./action-classifier.js";
@@ -458,8 +459,10 @@ export function actionGateExtension(options: ActionGateOptions): InlineExtension
       });
       // A blocked call also ends (as an error), so only calls the gate let through count as ran.
       const blocked = new Set<string>();
+      // tool_search only loads tool descriptions: it is not an action that ran, so a turn that searched and then only asked is still "only asked" (the Slack
+      // reply is withheld, processor.ts).
       pi.on("tool_execution_end", (event) => {
-        if (!blocked.has(event.toolCallId)) options.session.ran += 1;
+        if (!blocked.has(event.toolCallId) && event.toolName !== TOOL_SEARCH_TOOL_NAME) options.session.ran += 1;
       });
       pi.on("tool_call", async (event, ctx) => {
         const verdict = await check(event, ctx);

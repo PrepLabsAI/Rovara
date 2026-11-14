@@ -501,9 +501,17 @@ export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>;
 /** Six in-house tools when recovery tools are shown; kept equal to ORCHESTRATION_TOOL_NAMES by a test. */
 export const IN_HOUSE_TOOL_COUNT = 6;
 
-export const TOOL_WARNING_THRESHOLD = 20;
+/**
+ * Above this many connector or context-source tools, a session does not declare them: it declares `tool_search`, and the model loads the tools it
+ * needs (Pi's `deferred` exposure). At or below it, every tool is declared as before. The wire field is still called `warnAbove` (this replaces the
+ * old warning that tool choice gets less reliable above 20).
+ */
+export const DEFERRED_TOOLS_ABOVE = 20;
 
-export const TOOL_LIMIT = 40;
+export const TOOL_WARNING_THRESHOLD = DEFERRED_TOOLS_ABOVE;
+
+/** A sanity bound on the tools a project registers. It is not what the model sees first: tools above DEFERRED_TOOLS_ABOVE are loaded on demand. This replaces the old limit of 40. */
+export const TOOL_LIMIT = 200;
 
 interface ConnectorApprovals {
   integrations?: {
@@ -517,11 +525,10 @@ export function approvedToolCount(definition: ConnectorApprovals): number {
   return legacy + (definition.integrations?.connectors ?? []).reduce((sum, connector) => sum + connector.tools.length, 0);
 }
 
-/** The most tools the model could see: every in-house tool plus every approval. */
+/** The most tools a project can register: every in-house tool plus every approval. Above DEFERRED_TOOLS_ABOVE the model sees them only by searching, so there is no warning. */
 export function toolBudget(approved: number): { maximum: number; warning?: string; refusal?: string } {
   const maximum = IN_HOUSE_TOOL_COUNT + approved;
   if (maximum > TOOL_LIMIT) return { maximum, refusal: `this project could expose ${maximum} tools; at most ${TOOL_LIMIT} are allowed. Approve fewer connector tools.` };
-  if (maximum > TOOL_WARNING_THRESHOLD) return { maximum, warning: `the model could see ${maximum} tools; above ${TOOL_WARNING_THRESHOLD}, tool choice gets less reliable. Approve fewer connector tools.` };
   return { maximum };
 }
 
