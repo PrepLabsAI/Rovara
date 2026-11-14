@@ -1,4 +1,4 @@
-import { ProjectCommandSchema, ProjectDefinitionSchema, StoredProjectDefinitionSchema } from "../../packages/contracts/src/project.js";
+import { ProjectCommandSchema, ProjectDefinitionSchema, StoredProjectDefinitionSchema } from "../../packages/contracts/src/project-node.js";
 import { describe, expect, it } from "vitest";
 
 // #54 (first slice): a project command may set environment variables for itself.

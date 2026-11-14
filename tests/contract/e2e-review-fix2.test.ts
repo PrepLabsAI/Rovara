@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   E2EAppRecipeSchema, E2EAssertionSchema, E2EExecutionPlanSchema, E2EScenarioSchema, E2EStepSchema,
   aggregateE2EVerification, projectE2EVerification,
-} from "../../packages/contracts/src/e2e.js";
+} from "../../packages/contracts/src/e2e-node.js";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";
 

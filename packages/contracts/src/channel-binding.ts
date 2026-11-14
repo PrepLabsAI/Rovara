@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ChannelIdSchema, ChannelOpaqueIdSchema, SLACK_CHANNEL } from "./conversation.js";
-import { AgentXNameSchema } from "./project.js";
+import { orgScoped, type OrgId, type OrgKey } from "./company-scope.js";
+import { AgentXNameSchema } from "./names.js";
 import { SlackChannelBindingSchema, SlackChannelIdSchema, SlackTeamIdSchema, type SlackChannelBinding } from "./slack.js";
 
 /**
@@ -53,6 +54,20 @@ export function channelBindingSortPrefix(channel: string): string {
 export function channelBindingKey(ref: ChannelSpaceRef): { pk: string; sk: string } {
   const parsed = ChannelSpaceRefSchema.parse(ref);
   return { pk: channelBindingPartition(parsed.channel, parsed.tenant), sk: `${channelBindingSortPrefix(parsed.channel)}${parsed.space}` };
+}
+
+/**
+ * Decisions 45.6 and 45.5a: the same binding key under the company scope (`ORG#<orgId>#...`), the layout Cloud and Code share. For Slack it equals
+ * `slackBindingKey(orgId, team, channel)` in org-scoped-keys.ts; another channel's binding sits under the same scope. The unscoped functions above are
+ * public's stored layout (phase 2) and stay until the broker's call sites move to these in lane L6.
+ */
+export function orgChannelBindingPartition(orgId: OrgId, channel: string, tenant: string): string {
+  return orgScoped(orgId, channelBindingPartition(channel, tenant));
+}
+
+export function orgChannelBindingKey(orgId: OrgId, ref: ChannelSpaceRef): OrgKey {
+  const key = channelBindingKey(ref);
+  return { pk: orgScoped(orgId, key.pk), sk: key.sk };
 }
 
 /** Whether a stored row's key is exactly `ref`'s binding key. Never throws: a malformed `ref` is simply not a match. */

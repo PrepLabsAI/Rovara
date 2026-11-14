@@ -1,12 +1,16 @@
 name: CI
 
-# Pull requests and manual runs only, to save Actions minutes. A merge to mainline does not run CI
+# Pull requests and manual runs, to save Actions minutes. A merge to mainline does not run CI
 # again: its pull request's run already tested the change. A draft pull request runs nothing until it
-# is marked ready for review.
+# is marked ready for review. One branch also runs on push: `code/next`, where the controller lands the
+# Rovara Code port lanes (docs/porting.md); a pull request into it runs like any other, and both also
+# run the port guard (the `port-guard` job below).
 on:
   workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [code/next]
 
 # Read-only by default; a job that needs more says so itself (linux-runtime reads packages, live-aws mints an OIDC token).
 permissions:
@@ -91,6 +95,15 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
+      # tests/unit/port-guard.test.ts runs the real secret scan, and its re-check 3 cases fail loudly without gitleaks (they never skip). Same pinned
+      # release and checksum as the port-guard job below; keep the two in step.
+      - name: Install gitleaks 8.30.1 (checksum pinned)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          mkdir "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
       # The packages import each other through their built output, which `npm run typecheck` used to leave behind.
       - run: npm run build
       - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
@@ -241,6 +254,46 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts
+
+  # The Rovara Code port (docs/porting.md): nothing Cloud-only, no private name and no secret may reach code/next. The guard runs on a push to
+  # code/next and on a pull request into it (not a draft), over everything code/next holds that mainline does not; mainline's own pull requests
+  # do not run it. It needs no secret and no `npm ci`: Node runs the script directly. The gitleaks release is pinned by version and checksum.
+  # On a pull request the guard that runs is the base branch's copy, so the pull request cannot weaken the check that judges it; a second run
+  # of that copy over the pull request's own commits, without --allow-guard-edits, turns red on any edit to the guard, its tests, the
+  # `port:guard` script or this file, which the controller must then review by hand. On a push the run is after the fact (the content is already
+  # on code/next), so it detects and does not prevent; the controller's own run before the merge is the preventive one. It is a check of its own,
+  # not part of the `local` gate (a skipped job would fail that gate on mainline's pull requests).
+  port-guard:
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.base_ref == 'code/next' && github.event.pull_request.draft != true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The whole history, so that origin/mainline and the merge base are there.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - name: Install gitleaks 8.30.1 (checksum pinned)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          mkdir "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+      - name: Port guard over everything code/next holds beyond mainline
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # The base branch's copy judges the pull request; a pull request that rewrites the guard is judged by the old one.
+            git show origin/code/next:scripts/port-guard.ts > "$RUNNER_TEMP/port-guard.ts" || cp scripts/port-guard.ts "$RUNNER_TEMP/port-guard.ts"
+            node "$RUNNER_TEMP/port-guard.ts" --range origin/mainline..HEAD --allow-guard-edits
+          else
+            npm run port:guard -- --range origin/mainline..HEAD --allow-guard-edits
+          fi
+      - name: Edits to the guard need the controller's review (pull requests only)
+        if: github.event_name == 'pull_request'
+        run: node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:

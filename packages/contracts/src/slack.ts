@@ -1,17 +1,19 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { ActionPolicySchema } from "./action-policy.js";
-import { ThreadConnectorSchema } from "./connectors.js";
-import { AgentXNameSchema } from "./project.js";
+import { ActionPolicySchema } from "./action-policy-node.js";
+import { MAX_PROJECT_CONNECTORS, ThreadConnectorSchema } from "./connectors-node.js";
+import { ModelIdentifierSchema } from "./models.js";
+import { OrgIdSchema } from "./company-scope.js";
+import { AgentXNameSchema } from "./project-node.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
+import { SlackChannelIdSchema, SlackMessageTimestampSchema, SlackTeamIdSchema } from "./browser-ids.js";
 
 // Thread owner keys hash this issuer; OIDC issuers are https URLs, so the key spaces never overlap.
 export const SLACK_THREAD_OWNER_ISSUER = "slack-thread";
 
-export const SlackTeamIdSchema = z.string().regex(/^[TE][A-Z0-9]{2,31}$/);
-export const SlackChannelIdSchema = z.string().regex(/^[CG][A-Z0-9]{2,31}$/);
+// Defined in browser-ids.ts, which browser-safe contracts import.
+export { SlackTeamIdSchema, SlackChannelIdSchema, SlackMessageTimestampSchema };
 export const SlackUserIdSchema = z.string().regex(/^[UW][A-Z0-9]{2,31}$/);
-export const SlackMessageTimestampSchema = z.string().regex(/^\d{10}\.\d{6}$/);
 
 export const SlackThreadSchema = z
   .object({
@@ -47,7 +49,11 @@ export const SLACK_TASK_CONTEXT_MAX_CHARS = 40_000;
  * What a Slack service adds to POST /v1/threads/workspace to ask for task mode in a task's own thread. `commentId` names
  * a task page comment being answered, so the broker adds that comment's place and thread to the task context.
  */
-export const SlackTaskAnswerRequestSchema = z.object({ taskId: z.string().uuid(), commentId: z.string().uuid().optional() }).strict();
+export const SlackTaskAnswerRequestSchema = z.object({
+  taskId: z.string().uuid(), commentId: z.string().uuid().optional(),
+  /** The saved thread reply this question answers (a thread question, not a page comment): with it, the broker marks a question it refuses in fixed words by this reply, so that question is not recorded as an Ask (LA-6, N5). */
+  noteTs: z.string().regex(/^\d{10}\.\d{6}$/).optional(),
+}).strict();
 export type SlackTaskAnswerRequest = z.infer<typeof SlackTaskAnswerRequestSchema>;
 
 /** The body of POST /v1/service/tasks/thread-notes/answered: which saved thread note a question answer covers. */
@@ -55,11 +61,30 @@ export const SlackThreadNoteAnsweredRequestSchema = z.object({
   taskId: z.string().uuid(),
   messageTs: SlackMessageTimestampSchema,
   thread: SlackThreadSchema,
+  /**
+   * Live interaction A3: the question and its answer, so the broker can keep the Ask's record (per edition: Public keeps a hash and sizes for a Slack Ask, never the words) and audit it. Optional: a
+   * service built before Ask sends none, and then the note is marked answered and nothing else is written.
+   */
+  ask: z.object({ question: z.string().min(1).max(1_000), answer: z.string().min(1).max(20_000), contextBytes: z.number().int().min(0).max(70_000).optional() }).strict().optional(),
 }).strict();
 export type SlackThreadNoteAnsweredRequest = z.infer<typeof SlackThreadNoteAnsweredRequestSchema>;
 
 /** The answer: the note is marked answered (a repeat is the same answer). */
 export const SlackThreadNoteAnsweredResultSchema = z.object({ outcome: z.literal("ANSWERED") }).strict();
+
+/**
+ * The body of POST /v1/service/model-access: the per-turn model key the Slack orchestrator asks for. The org is the one the
+ * thread's Slack team is bound to (ruling R32); `orgId` is optional, and when sent it must equal that org. The member the key
+ * answers to comes from the signed Slack user header, never from the body.
+ */
+export const SlackModelAccessRequestSchema = z.object({
+  orgId: OrgIdSchema.optional(),
+  turnId: z.string().min(1).max(200),
+  /** The models the service will call with the key: the orchestrator's own and the gate classifier's. The control plane routes the first and keeps the second on Rovara's catalog. */
+  model: ModelIdentifierSchema.optional(),
+  classifierModel: ModelIdentifierSchema.optional(),
+}).strict();
+export type SlackModelAccessRequest = z.infer<typeof SlackModelAccessRequestSchema>;
 
 export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", [
   z
@@ -72,7 +97,7 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       orchestratorInstructions: z.string().min(1).max(32_768),
       githubMcpRepositories: z.array(AgentXNameSchema).max(32).optional(),
       // Connector metadata for services that send includeConnectors: true (feature 013).
-      connectors: z.array(ThreadConnectorSchema).max(8).optional(),
+      connectors: z.array(ThreadConnectorSchema).max(MAX_PROJECT_CONNECTORS).optional(),
       repositories: z.array(AgentXNameSchema).max(32).optional(),
       // Sent only to services that send includeRecoverableOperations: true (see the broker).
       recoverableOperations: z.array(z.string().uuid()).max(5).optional(),

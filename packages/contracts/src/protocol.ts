@@ -1,12 +1,37 @@
+import { StageIdSchema } from "./stage-model-shared.js";
+import { ActingAttributionSchema } from "./attribution.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, WorkflowFeedbackApprovalBindingSchema, WorkflowReviewBaseSchema } from "./task-workflow.js";
-import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
-import { ModelSelectionSchema, type ModelSelection } from "./models.js";
-import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
+import { AgentXNameSchema } from "./names.js";
+import { ProjectCommandSchema } from "./project.js";
+import { StoredProjectDefinitionSchema } from "./project-node.js";
+import { ModelIdentifierSchema, ModelSelectionSchema } from "./models.js";
+import { type ModelSelection } from "./models-node.js";
+import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies-node.js";
 import { E2EFeaturePlanIntentAnySchema } from "./e2e-application.js";
-import { E2EWorkflowAdmissionRefSchema } from "./e2e.js";
-import { DEVELOPER_INSTRUCTIONS_MAX_BYTES } from "./developer-tasks.js";
+import { SECOND_REVIEW_CANDIDATES_MAX, SecondReviewContextSchema } from "./second-review.js";
+import { E2EWorkflowAdmissionRefSchema } from "./e2e-node.js";
+import { DEVELOPER_INSTRUCTIONS_MAX_BYTES } from "./developer-tasks-node.js";
+import { AgentIdSchema, SkillIdSchema } from "./agent.js";
+import { MAX_RESOLVED_SKILLS, PI_TOOL_NAMES, PiToolNameSchema, StepIdSchema } from "./agent-recipe.js";
+import { ResultContractSchema, RunCheckoutSchema } from "./agent-run-node.js";
+import { WorkflowFixPayloadSchema } from "./rovara-code.js";
+import { LiveSteerPayloadSchema } from "./live-steer.js";
+import { PreparePinsSchema, SetupAgentWireSchema } from "./setup-run.js";
+import { NightlyRunPayloadSchema } from "./nightly-run.js";
+import { SETUP_RECIPE_OFFERS_MAX, SetupRecipeOfferSchema } from "./setup-recipe.js";
+import { PrepareMetaSchema } from "./meta-project.js";
+import { PrepareRegistriesSchema } from "./project-registries.js";
+import { PrepareSavedEnvSchema } from "./saved-env-image.js";
+import { PrepareSavedEnvBuildSchema } from "./saved-env-build.js";
+import { LearnedContextSchema, LearnedRefsSchema } from "./learned-context.js";
+import { SpecReviewInputSchema, SpecWriteBindingSchema } from "./spec-target.js";
+import { OwnerRedirectInvocationSchema } from "./live-interaction.js";
+import { DiagnosisInvocationSchema } from "./live-diagnosis.js";
+import { TASK_DEPENDENCY_PLAN_MAX, TaskDependencyPlanSchema, TestEnvTaskPlanSchema } from "./test-environment-wire.js";
+import { PeekPayloadSchema } from "./live-peek.js";
+import { DESIGN_REVIEW_REVIEWERS_MAX, ReviewerRoleSchema } from "./design-review.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -17,8 +42,25 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
+/** SR-1 (switch `cr`): the second reviewer inside a REVIEW operation. Sent only to a worker that lists it; an older worker gets the review without it (it runs as today) and its result has no second-review key. */
+export const SECOND_REVIEWER_FEATURE = "task.workflowSecondReviewer.v1" as const;
+/** DR5: the design-review form of the PLAN_CRITIQUE operation (`designReview` binding). A worker without it is never sent the binding; the broker refuses delivery instead (ec2-delivery.ts). */
+export const DESIGN_REVIEW_WORKER_FEATURE = "task.designReview.v1" as const;
+// Port lane L1: this is the list the PUBLIC worker really implements. Cloud's list is longer (it names the features of the engine that lane L5 ports); the worker advertises this list on /ping, so it must not claim a feature the worker lacks. L5 extends it as it ports each feature.
 export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
+/** An agent step's payload (`agentStep`) goes only to a worker that lists this; the agent kind also needs AGENT_RUN_FEATURE. */
+export const AGENT_STEP_FEATURE = "task.agentStep" as const;
+export const AGENT_RUN_FEATURE = "task.agentRun" as const;
+/**
+ * A worker that lists this checks an agent step's report against the tool calls it made and sends `agentStepResult.grounding` with every step (grounded or unverified).
+ * Nothing is sent to the worker for it, so an older worker is never refused: it sends no grounding, the broker has no signal and treats the step as it always did.
+ */
+export const AGENT_GROUNDING_FEATURE = "task.agentGrounding.v1" as const;
+/** A routed model (`modelRoute`) goes only to a worker that lists this. */
+export const MODEL_ROUTE_FEATURE = "model.route" as const;
+/** What a delivery says when the worker lacks a feature an agent step or a model route needs. Such a field is never dropped. */
+export const AGENT_WORKER_OUTDATED = "This agent needs a newer worker. Ask an admin to upgrade Rovara.";
 /**
  * The worker tries a coding plan's proposed checks on the unchanged code while it plans, and reports only a fixed class per check (see PlanDryRunReportSchema).
  * Nothing in an invocation asks for it: a worker that lists this feature does it for every structured coding plan that proposes checks. The planner is asked for
@@ -123,6 +165,127 @@ export type WorkflowReviewFeedback = z.infer<typeof WorkflowReviewFeedbackSchema
 export const WorkflowReviewNoteSchema = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= DEVELOPER_INSTRUCTIONS_MAX_BYTES, `review note exceeds ${DEVELOPER_INSTRUCTIONS_MAX_BYTES} UTF-8 bytes`);
 export type WorkflowReviewNote = z.infer<typeof WorkflowReviewNoteSchema>;
 
+const utf8Encoder = new TextEncoder();
+/** Text of at most `max` UTF-8 bytes (`.max` would count UTF-16 units instead). */
+const textUpTo = (max: number) => z.string().refine((value) => utf8Encoder.encode(value).byteLength <= max, `must be at most ${max} UTF-8 bytes`);
+
+/**
+ * The most bytes of rendered run input and earlier reports one agent step is given, and of its instructions. An
+ * invocation is stored inline in the DynamoDB outbox item (400 KB, `OutboxRecordBase.invocation` in broker/aws/lambda.ts)
+ * and the worker refuses a body over 1 MiB, so both together stay well under the item limit. Task 22 shortens reports
+ * (and the run input's context) to fit; it never relies on a larger payload.
+ */
+export const AGENT_STEP_INPUTS_MAX_BYTES = 262_144;
+export const AGENT_STEP_INSTRUCTIONS_MAX_BYTES = 65_536;
+/** The longest a step may run: the check step's 240 minutes. */
+export const AGENT_STEP_TIMEOUT_MAX_MS = 240 * 60_000;
+
+/** A skill an agent step may read, pinned to the digest the agent version was published with. */
+export const AgentStepSkillSchema = z.object({ skillId: SkillIdSchema, digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+const AgentStepBase = { agentId: AgentIdSchema, version: z.number().int().min(1), stepId: StepIdSchema };
+const AgentStepTimeoutSchema = z.number().int().min(1).max(AGENT_STEP_TIMEOUT_MAX_MS);
+const AgentStepSkillsSchema = z.array(AgentStepSkillSchema).max(MAX_RESOLVED_SKILLS);
+
+/**
+ * What the recipe adds to one operation of a coding task (`kind: "coding"`: the step's tools, skills, time limit and
+ * instruction section) or what one step of an agent-step run is (`kind: "agent"`). Sent only to a worker that lists
+ * `task.agentStep` (and, for the agent kind, `task.agentRun`).
+ */
+export const AgentStepPayloadSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("coding"),
+    ...AgentStepBase,
+    // A test run of an agent's draft has no published version.
+    version: z.union([AgentStepBase.version, z.literal("draft")]),
+    tools: z.array(PiToolNameSchema).max(PI_TOOL_NAMES.length).optional(),
+    skills: AgentStepSkillsSchema.optional(),
+    timeoutMs: AgentStepTimeoutSchema.optional(),
+    promptSection: textUpTo(DEVELOPER_INSTRUCTIONS_MAX_BYTES).pipe(z.string().min(1)).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("agent"),
+    ...AgentStepBase,
+    // A draft test run has no published version, as for the coding variant.
+    version: z.union([AgentStepBase.version, z.literal("draft")]),
+    instructions: textUpTo(AGENT_STEP_INSTRUCTIONS_MAX_BYTES),
+    workspace: z.enum(["none", "read"]),
+    inputs: textUpTo(AGENT_STEP_INPUTS_MAX_BYTES).pipe(z.string().min(1)),
+    timeoutMs: AgentStepTimeoutSchema.optional(),
+    skills: AgentStepSkillsSchema.optional(),
+    /** On the last agent step of a run whose start named the branches it may choose between (G1). */
+    resultContract: ResultContractSchema.optional(),
+    /** The pull request heads the run's workspace has checked out read-only (`AGENT_RUN.checkout`); the worker verifies the commit is what it holds. */
+    checkout: z.array(RunCheckoutSchema).max(10).optional(),
+  }).strict(),
+]);
+export type AgentStepPayload = z.infer<typeof AgentStepPayloadSchema>;
+
+/** The API a routed model speaks through the model proxy. */
+export const MODEL_ROUTE_APIS = ["anthropic-messages", "openai-responses", "openai-completions"] as const;
+/** Where one operation's model comes from: the proxy alias its key may call, the API it speaks, and the catalog entry for its limits and usage. */
+export const ModelRouteSchema = z.object({
+  alias: z.string().min(1).max(512),
+  api: z.enum(MODEL_ROUTE_APIS),
+  catalog: z.string().min(1).max(256),
+}).strict();
+export type InvocationModelRoute = z.infer<typeof ModelRouteSchema>;
+/**
+ * SR-1: the second reviewer of a REVIEW operation: the models it may try, in order (each with the proxy route the broker chose for it, so it is called the way the broker checked), at most two names
+ * (`SECOND_REVIEW_CANDIDATES_MAX`; the worker makes at most 3 tries in all). The key may call only the aliases the broker chose for these models and no others, and the proxy is configured with no router fallbacks (`litellmConfig` writes none and the guard refuses fallback fields in a request; checked by a test for Rovara's own config, and a deferred check for company sources), so the model named is the model that answers.
+ */
+export const SecondReviewerSchema = z.object({
+  candidates: z.array(z.object({ model: ModelSelectionSchema, modelRoute: ModelRouteSchema.optional() }).strict()).min(1).max(SECOND_REVIEW_CANDIDATES_MAX),
+  /** What the second reviewer is shown besides the change: absent means `change_only` (no source tools, lessons, step instructions or skills). */
+  context: SecondReviewContextSchema.optional(),
+}).strict();
+export type SecondReviewerPayload = z.infer<typeof SecondReviewerSchema>;
+
+const DesignReviewKeySlot = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/);
+/**
+ * DR5: the design-review form of a PLAN_CRITIQUE operation (design-review-stage.md 3.2 and 3.10). The binding is small on purpose: it names each reviewer, the model key slot the broker minted for that reviewer alone, the packet digest
+ * the broker built, and the model; the packets themselves (up to 400 KB each) are fetched from the broker by the worker, which then digests what it really sends. Reviewers resolve their model through the `plan_check` stage, so
+ * the worker never picks one. `merge` is absent for the Light tier (a code-only merge). Nothing in a binding can set a tier, an approver, a cost or a mode.
+ */
+export const DesignReviewBindingSchema = z.object({
+  version: z.literal(1),
+  round: z.union([z.literal(1), z.literal(2)]),
+  reviewers: z.array(z.object({
+    role: ReviewerRoleSchema,
+    /** Names the model key this reviewer alone uses: the worker asks the broker's model-access route for this slot, and no other reviewer is given its key. */
+    keySlot: DesignReviewKeySlot,
+    /** The digest of the packet the broker built; the worker refuses to start the reviewer when the packet it fetches hashes to anything else. */
+    packetDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    model: ModelSelectionSchema,
+    modelRoute: ModelRouteSchema.optional(),
+  }).strict()).min(1).max(DESIGN_REVIEW_REVIEWERS_MAX),
+  /** The round's pinned base commit of each repository (by the name section 8 uses): the worker's early citation check accepts a code citation at these pins. The broker checks again with its own. */
+  baseCommits: z.record(z.string().min(1).max(200), z.string().regex(/^[a-f0-9]{40}$/)).optional().refine((pins) => pins === undefined || Object.keys(pins).length <= 20, "at most 20 repositories"),
+  merge: z.object({
+    keySlot: DesignReviewKeySlot,
+    model: ModelSelectionSchema,
+    modelRoute: ModelRouteSchema.optional(),
+    prompt: z.object({ id: z.string().min(1).max(100), version: z.number().int().min(1), text: z.string().min(1).max(64_000) }).strict(),
+  }).strict().optional(),
+}).strict().superRefine((binding, context) => {
+  const roles = binding.reviewers.map((reviewer) => reviewer.role);
+  if (new Set(roles).size !== roles.length) context.addIssue({ code: "custom", path: ["reviewers"], message: "a reviewer role is used once per round" });
+  const slots = [...binding.reviewers.map((reviewer) => reviewer.keySlot), ...(binding.merge === undefined ? [] : [binding.merge.keySlot])];
+  if (new Set(slots).size !== slots.length) context.addIssue({ code: "custom", path: ["reviewers"], message: "every reviewer and the merge step have a model key of their own" });
+});
+export type DesignReviewBinding = z.infer<typeof DesignReviewBindingSchema>;
+/** Broker-created task context, never a client choice or permission to fallback. */
+export const TaskModelPolicyBindingSchema=z.object({version:z.literal(1),stage:StageIdSchema,companyRevision:z.number().int().min(0),recipeDigest:z.string().regex(/^[a-f0-9]{64}$/u)}).strict();
+export type TaskModelPolicyBinding=z.infer<typeof TaskModelPolicyBindingSchema>;
+/** A worker must match the binding before using a server-authorized replacement. No credentials are carried. */
+export const TaskModelFallbackAuthorizationSchema=z.object({version:z.literal(1),binding:TaskModelPolicyBindingSchema,model:ModelSelectionSchema,modelRoute:ModelRouteSchema.optional(),sourcesRevision:z.number().int().min(0)}).strict();
+export type TaskModelFallbackAuthorization=z.infer<typeof TaskModelFallbackAuthorizationSchema>;
+export const TaskModelFallbackRequestSchema=z.object({version:z.literal(1),binding:TaskModelPolicyBindingSchema,reason:z.enum(["unavailable","limit","revoked","model","missing_key"]),failedModel:ModelIdentifierSchema,environmentFallback:ModelIdentifierSchema.optional()}).strict().superRefine((request,context)=>{
+ if(request.environmentFallback!==undefined&&request.reason!=="missing_key")context.addIssue({code:"custom",path:["environmentFallback"],message:"only a missing-key fallback names an environment candidate"});
+});
+export type TaskModelFallbackRequest=z.infer<typeof TaskModelFallbackRequestSchema>;
+
+
+
 const InvocationBaseSchema = z.object({
   protocolVersion: z.literal(AGENTX_PROTOCOL_VERSION),
   operationId: z.string().uuid(),
@@ -151,7 +314,29 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("prepare"),
-    payload: z.object({ project: StoredProjectDefinitionSchema, repositoryGrant: z.string().min(1) }).strict(),
+    payload: z.object({
+      project: StoredProjectDefinitionSchema,
+      repositoryGrant: z.string().min(1),
+      /** An agent-step run that looks at pull requests: after cloning, the worker fetches each head, checks the commit out detached and verifies it (Plan 3, Task 22). Sent only to a worker that lists `task.agentRun`. */
+      checkout: z.array(RunCheckoutSchema).max(10).optional(),
+      /** An agent-step run's preparation clones and checks out only: no devcontainer, no setup command, no readiness command (Plan 3 final fix wave). Sent only to a worker that lists `task.agentRun`. */
+      readOnly: z.literal(true).optional(),
+      /** Meta repo lane A3: the project's meta repository, read-only and sparse, beside the code. Sent only to a worker that lists `prepare.metaRepo`. */
+      meta: PrepareMetaSchema.optional(),
+      /** N9 (INTG2): the project's private package registries (where they are, never a credential): the worker asks the broker for each one's short-lived token by name, writes the package manager's config outside the repository for the setup and readiness commands, and removes it. Sent only to a worker that lists `prepare.registries.v1`. */
+      registries: PrepareRegistriesSchema.optional(),
+      /** Saved environments (SH25, switch `sv`): the project's saved image to start from (digest, a one-repository pull login, the revision the task is pinned to). Informational: a worker that does not list `prepare.savedEnv.v1` is sent no field and sets up fresh. */
+      savedEnv: PrepareSavedEnvSchema.optional(),
+      /** P1: the default-branch head the broker read for each repository of a setup run; the worker refuses the preparation if its own resolution differs. Sent only to a worker that lists `prepare.pins.v1`. */
+      pins: PreparePinsSchema.optional(),
+      /** Saved project images (switch `sv`): a rebuild of the project's image. The preparation is read only and pinned (`pins` are the job's commits); after it the worker proves the approved environment in a fresh sandbox and builds and pushes the image (saved-env/rebuild.ts). The lease token is added by the dispatcher at delivery. Sent only to a worker that lists `prepare.savedEnvBuild.v1`; never dropped. */
+      savedEnvBuild: PrepareSavedEnvBuildSchema.optional(),
+      /**
+       * Test services (slice 1, Prove): a test environment's CANDIDATE check starts these dependencies (pinned by digest; no secret), runs the proposal's readiness commands against them with the sealed check runners and
+       * reports a usage record under `testServicesUsage` in its result. Sent only with the switch `tx` on and only to a worker whose /ping lists `task.testServices.v1`; never dropped (delivery refuses an older worker).
+       */
+      testServices: z.object({ dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX) }).strict().optional(),
+    }).strict(),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("task"),
@@ -162,7 +347,16 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         /** The control plane's record that this conversation already owns a saved session. */
         conversationStarted: z.boolean().optional(),
         /** The broker-selected tool boundary for the current native workflow stage (spec 056). */
-        workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW"]).optional(),
+        workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW", "UNDERSTAND", "PLAN_CRITIQUE", "SETUP_DRAFT", "SETUP_AGENT", "SPEC_WRITE"]).optional(),
+        /** The setup run that runs commands (SH14, switch `su`): its limits, fixed by the broker when the run started. Only with `workflowMode: "SETUP_AGENT"`, and only to a worker whose /ping lists "task.setupAgent.v1". */
+        setupAgent: SetupAgentWireSchema.optional(),
+        /** The nightly run (NH-1, switch `nh`): what the broker fixed when the fire started it. Only with `workflowMode: "CHECKS"`, and only to a worker whose /ping lists "task.nightlyRun.v1". */
+        nightlyRun: NightlyRunPayloadSchema.optional(),
+        /**
+         * Meta repo lane B: a setup proposal run is told which of the project's repositories is its meta repository (the team's rules, specs and runbooks live there), so it
+         * knows where to look for them. Sent only with `workflowMode: "SETUP_DRAFT"`, and only to a worker whose /ping lists "task.setupProposal.v2".
+         */
+        setupMetaRepo: AgentXNameSchema.optional(),
         /**
          * The document a planning run writes in the Full path (a Quick plan has none). The worker uses it to read the
          * planner's answer as that kind of plan. Sent only to a worker whose /ping lists "task.structuredPlans"; an older
@@ -218,8 +412,46 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * the review without it.
          */
         workflowReviewFeedback: WorkflowReviewFeedbackSchema.optional(),
+        /**
+         * Meta repo lane D (D3): the spec's requirements, read by the broker at the commit recorded when the spec was published, for the code review to walk. Review operations only. Sent only to a worker whose /ping
+         * lists "task.workflowReviewSpec.v1"; never dropped, because an older worker would review without the spec.
+         */
+        workflowReviewSpec: SpecReviewInputSchema.optional(),
         /** The exact owner retry note, shown as untrusted context. Older workers omit it and review as before. */
         workflowReviewNote: WorkflowReviewNoteSchema.optional(),
+        /**
+         * Which reviews a review operation runs when its step asks for fewer than both (a custom coding sequence's
+         * security-only review). Absent: both, as always. Sent only to a worker whose /ping lists "task.workflowReviewers";
+         * never dropped, because an older worker would run reviews the step did not ask for.
+         */
+        workflowReviewers: z.array(z.enum(["CRITIC", "SECURITY"])).min(1).max(2).refine((roles) => new Set(roles).size === roles.length, "reviewers must be unique").optional(),
+        /**
+         * Rovara Code version 2: the code review states a risk level (low, medium or high) beside its findings. Review operations only. It only adds one word to the report; a worker whose /ping does not list
+         * "task.workflowReviewRisk" is sent the review without it, and the risk level then comes from the paths, the size and the checks alone.
+         */
+        workflowReviewRisk: z.literal(true).optional(),
+        /** SR-1: the second reviewer (another AI company's model) that runs after the reviews above, inside this operation. Review operations only; a worker without "task.workflowSecondReviewer.v1" is sent the review without it. */
+        workflowSecondReviewer: SecondReviewerSchema.optional(),
+        /**
+         * DR5: this PLAN_CRITIQUE operation reviews a design with several fresh reviewers (see DesignReviewBindingSchema). Plan-check mode only; sent only to a worker that lists "task.designReview.v1"; never dropped,
+         * because an older worker would run the plan check on the design with one session that has the planner's workspace and history.
+         */
+        designReview: DesignReviewBindingSchema.optional(),
+        /**
+         * Rovara Code (Plan 6 Task 15): this coding run fixes a pull request that is already open (failing CI, a conflict, comments), so it changes that code and leaves it alone when
+         * nothing it can do helps. Implementation mode only. Sent only to a worker whose /ping lists "task.workflowFix"; never dropped, because an older worker would take the run for a first build.
+         */
+        workflowFix: WorkflowFixPayloadSchema.optional(),
+        /**
+         * Meta repo lane D: the spec write run. It reads the owner-approved plan (in the prompt, as data) and returns a structured spec draft; it changes nothing. SPEC_WRITE mode only. Sent only to a worker whose /ping
+         * lists "task.specWrite.v1"; never dropped, because an older worker would not know the mode.
+         */
+        specWrite: SpecWriteBindingSchema.optional(),
+        /**
+         * Lane E: the project has MCP context sources for this stage (Understand, Plan, Plan check or Review; never Build), so the worker asks the broker for the stage's source tools with its
+         * `context-tools` capability. Sent only to a worker that lists "task.contextSources.v1"; never dropped, because an older worker would run the stage without the team's sources and say nothing.
+         */
+        contextSources: z.literal(true).optional(),
         model: ModelSelectionSchema.optional(),
         /**
          * Sign in with ChatGPT (#341): the task runs on its owner's ChatGPT plan, with this model, and the worker asks
@@ -234,8 +466,87 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * test commands. Sent only to a worker whose /ping lists "task.readiness". The limit is the project's own.
          */
         readiness: z.array(ProjectCommandSchema).max(64).optional(),
+        /** What the agent's recipe adds to this operation, or the agent step it is. Sent only to a worker that lists "task.agentStep"; never dropped. */
+        agentStep: AgentStepPayloadSchema.optional(),
+        /** The model proxy alias to use in place of the install's default route. Sent only to a worker that lists "model.route"; never dropped. */
+        modelRoute: ModelRouteSchema.optional(),
+        /** Governed tasks require broker authorization before any worker-side replacement; never dropped. */
+        modelPolicy:TaskModelPolicyBindingSchema.optional(),
+        /**
+         * Learning v2: the lessons chosen for this stage, advice the worker re-checks against the task's base commit and renders in a labelled block. Sent only to a worker that lists
+         * "task.learnedContext.v1"; an older worker is sent none, which is safe (the task runs as without memory). Never carries a tool, a check, an approval or a limit.
+         */
+        learnedContext: LearnedContextSchema.optional(),
+        /**
+         * The stored and queued form of `learnedContext` (WL-6): lesson ids and versions only. The dispatcher turns it into `learnedContext` from the lesson store at delivery and never sends it on
+         * to a worker, so no lesson text sits in an outbox row, a queue message or a dead-letter copy.
+         */
+        learnedRefs: LearnedRefsSchema.optional(),
+        /**
+         * Live interaction, Stop & redirect (keep the plan): the owner's instruction that stopped the previous run of this coding step. The worker records it as taken from the owner (so the re-approval stop applies) and
+         * puts it in the prompt, framed and untrusted. Implementation mode only. Sent only to a worker whose /ping lists "task.ownerRedirect.v1"; never dropped, because an older worker would run the step
+         * without the re-approval stop the owner's instruction is bound by.
+         */
+        ownerRedirect: OwnerRedirectInvocationSchema.optional(),
+        /**
+         * Live interaction F3 (Fix with agent, deep tier): this read-only look is a diagnosis, not a setup draft. The worker adds the diagnosis instructions and answers with the diagnosis JSON. Setup-draft mode
+         * only (read, grep, find and ls: no shell, no write tool, no network, no MCP). Sent only to a worker whose /ping lists "task.diagnosis.v1"; never dropped, because an older worker would run it as a setup draft.
+         */
+        diagnosis: DiagnosisInvocationSchema.optional(),
+        /**
+         * Proof and evidence (wire-proof): this verification run also writes `evidence-raw.json` (the test report of each check that names one, read in the workspace; never a change to any command). Verification mode
+         * only. Sent only while the proof switch is on, and only to a worker whose /ping lists "task.evidenceCapture.v1"; the dispatcher drops the field for an older worker (no evidence is captured and the omission is logged), because its strict parse would refuse it.
+         */
+        evidenceCapture: z.literal(true).optional(),
+        /**
+         * Test environment (wire-testenv): this setup draft also runs the environment detectors over the default branch's files and reports the environment it would propose (a draft, never approved or run). Setup-draft
+         * mode only. Sent only while the test environment switch is on, and only to a worker whose /ping lists "task.testEnvDetect.v1"; the dispatcher drops the field for an older worker (the setup draft then has no environment draft and the omission is logged), because its strict parse would refuse it.
+         */
+        testEnvDetect: z.literal(true).optional(),
+        /** SH30 (switch `sp`): the company recipes offered to the detectors' proposal. Only with `testEnvDetect`; only to a worker whose /ping lists "task.setupRecipes.v1". */
+        testEnvRecipes: z.array(SetupRecipeOfferSchema).max(SETUP_RECIPE_OFFERS_MAX).optional(),
+        /**
+         * Test environment (wire-testenv): the approved environment as this verification run needs it (which commands are its checks, how to select tests, the round budget). Verification mode only; a coding run is sent it too, but only a plan with dependencies (test services: the working sandbox gets them while the agent codes). Sent only while the
+         * switch is on and the task pinned an environment a task may use, and only to a worker whose /ping lists "task.testEnvironment.v1"; never dropped, because an older worker's strict parse would refuse it.
+         */
+        testEnvironment: TestEnvTaskPlanSchema.optional(),
       })
       .strict().superRefine((payload, context) => {
+        if ((payload.setupAgent !== undefined) !== (payload.workflowMode === "SETUP_AGENT")) {
+          context.addIssue({ code: "custom", path: ["setupAgent"], message: "a setup run carries its limits, and only a setup run does" });
+        }
+        if (payload.setupAgent !== undefined && (payload.agentStep !== undefined || payload.ownerRedirect !== undefined || payload.specWrite !== undefined || payload.contextSources !== undefined || payload.diagnosis !== undefined || payload.testEnvDetect !== undefined)) {
+          context.addIssue({ code: "custom", path: ["setupAgent"], message: "a setup run carries no agent step, redirect, spec write, context sources, diagnosis or detection" });
+        }
+        if (payload.nightlyRun !== undefined && payload.workflowMode !== "CHECKS") {
+          context.addIssue({ code: "custom", path: ["nightlyRun"], message: "a nightly run is a verification-mode operation" });
+        }
+        if (payload.diagnosis !== undefined && payload.workflowMode !== "SETUP_DRAFT") {
+          context.addIssue({ code: "custom", path: ["diagnosis"], message: "a diagnosis is a read-only look and requires the setup draft mode" });
+        }
+        if (payload.diagnosis !== undefined && (payload.agentStep !== undefined || payload.ownerRedirect !== undefined || payload.specWrite !== undefined || payload.contextSources !== undefined)) {
+          context.addIssue({ code: "custom", path: ["diagnosis"], message: "a diagnosis carries no agent step, redirect, spec write or context sources" });
+        }
+        if (payload.evidenceCapture !== undefined && payload.workflowMode !== "CHECKS") {
+          context.addIssue({ code: "custom", path: ["evidenceCapture"], message: "evidence capture requires the verification (checks) mode" });
+        }
+        if (payload.testEnvRecipes !== undefined && payload.testEnvDetect !== true) {
+          context.addIssue({ code: "custom", path: ["testEnvRecipes"], message: "company recipes are offered to a test environment detection only" });
+        }
+        if (payload.testEnvDetect !== undefined && (payload.workflowMode !== "SETUP_DRAFT" || payload.diagnosis !== undefined)) {
+          context.addIssue({ code: "custom", path: ["testEnvDetect"], message: "test environment detection requires the setup draft mode and is not a diagnosis" });
+        }
+        // Test services (slice 1): a coding run carries the plan too, but only one with dependencies (the working sandbox gets them while the agent codes); every other mode is as it was.
+        if (payload.testEnvironment !== undefined && payload.workflowMode !== "CHECKS" && !(payload.workflowMode === "IMPLEMENT" && (payload.testEnvironment.dependencies?.length ?? 0) > 0)) {
+          context.addIssue({ code: "custom", path: ["testEnvironment"], message: "a test environment plan requires the verification (checks) mode, or a coding run with dependencies" });
+        }
+        if (payload.ownerRedirect !== undefined && payload.workflowMode !== "IMPLEMENT") {
+          context.addIssue({ code: "custom", path: ["ownerRedirect"], message: "an owner redirect requires implementation mode" });
+        }
+        if (payload.ownerRedirect !== undefined && payload.agentStep !== undefined) {
+          context.addIssue({ code: "custom", path: ["ownerRedirect"], message: "an owner redirect is for a coding step, not an agent step (the agent step would ignore it)" });
+        }
+        if(payload.modelPolicy!==undefined&&payload.model===undefined)context.addIssue({code:"custom",path:["model"],message:"a governed task requires an explicit server-resolved model"});
         if ((payload.workflowMode === "FEEDBACK_REVIEW") !== (payload.workflowFeedbackReview !== undefined)) {
           context.addIssue({ code: "custom", path: ["workflowFeedbackReview"], message: "feedback review mode requires its exact task workflow binding" });
         }
@@ -263,8 +574,33 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         if (payload.workflowReviewNote !== undefined && payload.workflowMode !== "REVIEW") {
           context.addIssue({ code: "custom", path: ["workflowReviewNote"], message: "the retry note reviewers are shown requires review mode" });
         }
+        if (payload.workflowReviewSpec !== undefined && payload.workflowMode !== "REVIEW") {
+          context.addIssue({ code: "custom", path: ["workflowReviewSpec"], message: "the spec the review walks requires review mode" });
+        }
+        if (payload.workflowReviewers !== undefined && payload.workflowMode !== "REVIEW") {
+          context.addIssue({ code: "custom", path: ["workflowReviewers"], message: "the reviews to run require review mode" });
+        }
+        if (payload.workflowSecondReviewer !== undefined && (payload.workflowMode !== "REVIEW" || (payload.workflowReviewers !== undefined && !payload.workflowReviewers.includes("CRITIC")))) {
+          context.addIssue({ code: "custom", path: ["workflowSecondReviewer"], message: "the second reviewer requires review mode with the code review" });
+        }
+        if (payload.designReview !== undefined && payload.workflowMode !== "PLAN_CRITIQUE") {
+          context.addIssue({ code: "custom", path: ["designReview"], message: "the design review requires plan-check mode" });
+        }
+        if (payload.workflowReviewRisk !== undefined && payload.workflowMode !== "REVIEW") {
+          context.addIssue({ code: "custom", path: ["workflowReviewRisk"], message: "the review's risk level requires review mode" });
+        }
+        if (payload.workflowFix !== undefined && (payload.workflowMode !== "IMPLEMENT" || payload.workflowDependencies !== undefined)) {
+          context.addIssue({ code: "custom", path: ["workflowFix"], message: "a fix to an open pull request requires implementation mode and no work breakdown" });
+        }
+        if ((payload.workflowMode === "SPEC_WRITE") !== (payload.specWrite !== undefined)) {
+          context.addIssue({ code: "custom", path: ["specWrite"], message: "the spec write mode and its binding go together" });
+        }
         if (payload.workflowFeedbackApproval !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "feedback approval binding requires implementation mode" });
+        }
+        // Rovara's own decision on review comments (Plan 6 Task 16) is a feedback fix. (A feedback fix may also run with no approval: the owner's Retry of one that stopped continues it from the current code.)
+        if (payload.workflowFeedbackApproval?.autonomy !== undefined && payload.workflowFix?.source !== "feedback") {
+          context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "an automatic feedback approval belongs to a feedback fix" });
         }
         if (payload.workflowDependencies !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowDependencies"], message: "a work breakdown requires implementation mode" });
@@ -319,6 +655,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * Sent only to a worker whose /ping lists "publish.workflowBase"; never dropped for an older one.
          */
         workflowBaseCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+        /**
+         * Enterprise foundations I3: who asked for the work and who approved its plan, written as `Requested-by` / `Approved-by` trailers on the commit the worker makes. Built by the broker from its
+         * own records (a person who was erased is "a former member", never named). Sent only to a worker whose /ping lists "publish.attribution"; never dropped for an older one, because a
+         * publication that was meant to say whose it was must not go out saying nothing.
+         */
+        attribution: ActingAttributionSchema.optional(),
       })
       .strict()
       .superRefine((value, context) => {
@@ -377,9 +719,34 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         workflowCandidateTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
         /** The base commit the broker pinned for the task in this repository; it must be in the workspace's history. Always and only with workflowCandidateTreeSha. */
         workflowBaseCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+        /**
+         * Which fix the reviewed tree is (failing CI, a conflict, comments), so its commit says so. Only with workflowCandidateTreeSha. It changes nothing about the push: a worker whose /ping does not list
+         * "task.workflowFix" is sent the push without it, and its commit keeps the usual message.
+         */
+        workflowFix: WorkflowFixPayloadSchema.optional(),
+        /**
+         * A workflow task's merge of the base branch into its pull request's branch (Plan 6 Task 17, `sync` only): the worker merges exactly `baseCommit` (no rebase, no force-push), runs the readiness
+         * checks and pushes to the head it was told (`expectedHeadCommit`); a conflict is returned as the conflicting files, nothing pushed, the merge's files left in the workspace. Sent only to a
+         * worker whose /ping lists "maintain.workflowSync"; never dropped, because an older worker would merge whatever the base is now.
+         */
+        workflowSync: z.object({ baseCommit: z.string().regex(/^[a-f0-9]{40}$/), expectedHeadCommit: z.string().regex(/^[a-f0-9]{40,64}$/) }).strict().optional(),
+        /**
+         * A conflict round's reviewed fix is pushed as a merge commit (`append` with the reviewed tree only): the first parent is the head the pull request has, the second is this commit of the base.
+         * Sent only to a worker whose /ping lists "maintain.workflowSync".
+         */
+        workflowMergeBase: z.string().regex(/^[a-f0-9]{40}$/).optional(),
       })
       .strict()
       .superRefine((value, context) => {
+        if (value.workflowSync !== undefined && (value.action !== "sync" || value.workflowCandidateTreeSha !== undefined || value.workflowSync.expectedHeadCommit !== value.expectedHeadCommit)) {
+          context.addIssue({ code: "custom", path: ["workflowSync"], message: "a merge of the base branch is a sync of the recorded head, with no reviewed tree" });
+        }
+        if (value.workflowMergeBase !== undefined && value.workflowCandidateTreeSha === undefined) {
+          context.addIssue({ code: "custom", path: ["workflowMergeBase"], message: "the base a fix was merged with goes with the reviewed tree" });
+        }
+        if (value.workflowFix !== undefined && value.workflowCandidateTreeSha === undefined) {
+          context.addIssue({ code: "custom", path: ["workflowFix"], message: "the fix a push is for goes with the reviewed tree" });
+        }
         if (value.workflowCandidateTreeSha !== undefined && value.action !== "append") {
           context.addIssue({ code: "custom", message: "workflowCandidateTreeSha is allowed only with append" });
         }
@@ -393,6 +760,10 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
     kind: z.literal("cancel"),
     payload: z.object({ targetOperationId: z.string().uuid() }).strict(),
   }).strict(),
+  // Live steer: a person's message for the pi session of the running step `payload.targetOperationId` (live-steer.ts).
+  InvocationBaseSchema.extend({ kind: z.literal("steer"), payload: LiveSteerPayloadSchema }).strict(),
+  // Live interaction A2: a read-only look at the workspace's working tree for an Ask (live-peek.ts). Answered on the same request; no operation record, no callback.
+  InvocationBaseSchema.extend({ kind: z.literal("peek"), payload: PeekPayloadSchema }).strict(),
   InvocationBaseSchema.extend({ kind: z.literal("resume"), payload: z.object({}).strict() }).strict(),
   InvocationBaseSchema.extend({ kind: z.literal("close"), payload: z.object({}).strict() }).strict(),
 ]);

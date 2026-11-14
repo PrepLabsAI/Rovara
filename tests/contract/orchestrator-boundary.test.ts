@@ -200,7 +200,7 @@ describe("pi orchestration boundary", () => {
   });
 
   it("keeps the shared registration budget in step with the orchestrator", async () => {
-    const { IN_HOUSE_TOOL_COUNT, TOOL_LIMIT } = await import("../../packages/contracts/src/connectors.js");
+    const { IN_HOUSE_TOOL_COUNT, TOOL_LIMIT } = await import("../../packages/contracts/src/connectors-node.js");
     const { ORCHESTRATION_TOOL_NAMES } = await import("../../packages/orchestrator/src/orchestration-tools.js");
     const { MAX_VISIBLE_TOOLS } = await import("../../packages/orchestrator/src/orchestrator.js");
     expect(ORCHESTRATION_TOOL_NAMES).toHaveLength(IN_HOUSE_TOOL_COUNT);

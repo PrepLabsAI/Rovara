@@ -15,6 +15,7 @@
     "clean": "tsc -b --clean",
     "lint": "node scripts/lint-shards.ts",
     "agentx": "node packages/cli/dist/bin.js",
+    "port:guard": "node scripts/port-guard.ts",
     "preflight": "tsx scripts/preflight.ts",
     "eval": "tsx scripts/eval.ts",
     "test": "vitest run",

@@ -4,7 +4,7 @@
 // Shared by the Slack ingress and interactivity (packages/broker) and the Slack service (packages/slack-service).
 import { z } from "zod";
 import type { SlackThread } from "./slack.js";
-import { workflowRequestId } from "./task-workflow.js";
+import { workflowRequestId } from "./task-workflow-node.js";
 
 /** The Quick or Full question's buttons, and (Task 21) the button that sends the request to the chat agent instead. */
 export const WORKFLOW_PATH_QUICK_ACTION = "agentx_workflow_path_quick";

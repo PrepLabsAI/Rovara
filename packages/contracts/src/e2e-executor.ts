@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationExecutionAdmissionSchema } from "./e2e-application-execution.js";
-import { E2EFormLoginSchema } from "./e2e.js";
+import { E2EFormLoginSchema } from "./e2e-node.js";
 import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH } from "./e2e-model-channel.js";
 import { E2EReplayTraceSchema, E2E_REPLAY_TRACES_MAX } from "./e2e-replay.js";
 

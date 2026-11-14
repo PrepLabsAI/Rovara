@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { E2ESharedView } from "../../packages/contracts/src/e2e-view.js";
+import type { E2ESharedView } from "../../packages/contracts/src/e2e-view-node.js";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks, renderE2EUnavailableSlackBlock } from "../../packages/broker/src/e2e-presentation.js";
 
 const view: E2ESharedView = {

@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { E2EExpectedCaseSchema } from "../../packages/contracts/src/e2e.js";
+import { E2EExpectedCaseSchema } from "../../packages/contracts/src/e2e-node.js";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
-import { E2EApplicationPlanIntentSchema, createCandidateManifest, e2eApplicationMetadataSourceRefs, inspectE2ERepository,
-  E2ERegisteredRuntimeSchema, E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest,
-  proposeE2ESetup, type E2EPolicy, type E2ESourceSnapshot } from "../../packages/contracts/src/index.js";
+import { E2EApplicationPlanIntentSchema } from "../../packages/contracts/src/e2e-application.js";
+import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
+import { e2eApplicationMetadataSourceRefs } from "../../packages/contracts/src/e2e-application-metadata.js";
+import { inspectE2ERepository, proposeE2ESetup } from "../../packages/contracts/src/e2e-catalog.js";
+import { E2ERegisteredRuntimeSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/e2e-runtime-registration.js";
+import { E2ERuntimeCapabilityDescriptorSchema } from "../../packages/contracts/src/e2e-runtime-capabilities.js";
+import { e2eScenarioBundleDigest, type E2EPolicy } from "../../packages/contracts/src/e2e-node.js";
+import { type E2ESourceSnapshot } from "../../packages/contracts/src/e2e-source.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, projectE2EApplicationPortableSelection, selectE2EApplicationExecutionPlan,
   type E2EApplicationPlanSelectionInput } from "../../packages/contracts/src/e2e-application-execution-plan.js";
 import { e2eCaseIdFromIdentity, e2eCaseIdentityDigest, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";

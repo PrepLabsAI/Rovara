@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ActorRefSchema, ChannelIdSchema, ChannelOpaqueIdSchema, ConversationRefSchema, InboundMessageSchema, SLACK_CHANNEL, type ActorRef, type ConversationRef } from "./conversation.js";
 import { publicHttpsUrlSchema } from "./mcp-connector.js";
 import { ChannelFormSchema, ChannelFormSubmissionSchema } from "./channel-forms.js";
-import { AgentXNameSchema } from "./project.js";
+import { AgentXNameSchema } from "./names.js";
 
 /**
  * Spec 062 Phase 3: the channel adapter protocol. An administrator registers an adapter; the adapter signs what it

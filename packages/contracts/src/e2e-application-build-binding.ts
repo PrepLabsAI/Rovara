@@ -5,7 +5,7 @@ import {
   e2eAppBuildManifestDigest, type E2EApplicationApprovalBinding, type E2EAppArtifactRef, type E2EAppBuildManifest,
   type SourceRef,
 } from "./e2e-application.js";
-import { E2EAppRecipeSchema, type E2EAppRecipe } from "./e2e.js";
+import { E2EAppRecipeSchema, type E2EAppRecipe } from "./e2e-node.js";
 import { e2eApplicationMetadataSourceRefs } from "./e2e-application-metadata.js";
 import { inspectE2EApplicationRepository } from "./e2e-catalog.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";

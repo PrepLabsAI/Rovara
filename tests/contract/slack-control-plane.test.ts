@@ -9,7 +9,7 @@ import {
   type Handler,
 } from "../support/slack-broker.js";
 import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
-import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 // Broker code resolves @agentx/gateway to the built dist; importing from there (not from

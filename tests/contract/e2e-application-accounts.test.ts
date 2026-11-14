@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
-import { E2EAppRecipeSchema } from "../../packages/contracts/src/e2e.js";
+import { E2EAppRecipeSchema } from "../../packages/contracts/src/e2e-node.js";
 import { E2EApplicationRuntimeRefSchema } from "../../packages/contracts/src/e2e-application.js";
 import type { E2ESourceSnapshot } from "../../packages/contracts/src/e2e-source.js";
-import { createCandidateManifest } from "../../packages/contracts/src/task-workflow.js";
+import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
 import type { z } from "zod";
 import { e2eApplicationRecipeOrigin, inspectE2EApplicationRepository, inspectE2ERepository, withE2EAnonymousTargets } from "../../packages/contracts/src/e2e-catalog.js";
 import {

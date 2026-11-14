@@ -1,4 +1,4 @@
-import * as workflowContracts from "../../packages/contracts/src/task-workflow.js";
+import * as workflowContracts from "../../packages/contracts/src/task-workflow-node.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
@@ -60,10 +60,11 @@ describe("native task workflow contracts", () => {
     expect(() => workflowContracts.WorkflowSnapshotSchema.parse({ ...qualified, e2e: { ...qualified.e2e!, qualifiedRound: { ...qualification, roundId: "33333333-3333-4333-8333-333333333333" } } })).toThrow(/current candidate, contract, plan, and round/);
   });
 
-  it("requires an explicit Quick or Full choice when creating a workflow task", () => {
+  it("allows a workflow request with no Quick or Full choice and refuses a choice with no workflow (Plan 6 Task 3: the start itself refuses a missing choice unless Understand makes it, see rovara-code-intent.test.ts)", () => {
     const request = { requestId: "a1ec6b71-2494-4cbd-92a9-6eecab01676b", project: "payments", instructions: "Fix retry handling", workflow: true };
-    expect(StartDeveloperTaskRequestSchema.safeParse(request).success).toBe(false);
+    expect(StartDeveloperTaskRequestSchema.safeParse(request).success).toBe(true);
     expect(StartDeveloperTaskRequestSchema.safeParse({ ...request, workflowPath: "QUICK" }).success).toBe(true);
+    expect(StartDeveloperTaskRequestSchema.safeParse({ requestId: request.requestId, project: "payments", instructions: "Fix retry handling", workflowPath: "QUICK" }).success).toBe(false);
   });
 
   it("stores exact task Canvas lineage and retryable closeout state while keeping legacy snapshots valid", () => {
@@ -543,6 +544,115 @@ describe("immutable multi-PR feedback reviews", () => {
     expect(collected.stage).toBe("WAIT_FOR_MERGE");
     expect(() => decideWorkflowFeedbackFindings(collected, { ...request, expectedRevision: collected.revision }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
     expect(() => workflowContracts.collectWorkflowFeedbackBundles(current, { bundleRefs: [bundleRefs[0]], threadObservations: [] }, now)).toThrow();
+  });
+  describe("the comments the agent was shown (lessons capture)", () => {
+    it("records every comment of the collected bundles and of the threads seen, per round, not only the selected ones", () => {
+      const { current, bundleRefs } = fixture();
+      const observations = [{ repositoryId: "api", number: 1, threadId: "thread-api", resolved: false, comments: [{ id: "api-0", updatedAt: now, bodyDigest: hash("a") }, { id: "api-reply", updatedAt: now, bodyDigest: hash("b") }], eligibleCommentIds: ["api-0"] }];
+      const collected = workflowContracts.collectWorkflowFeedbackBundles(current, { bundleRefs, threadObservations: observations }, now);
+      expect(collected.feedbackShown?.incomplete).toBeUndefined();
+      expect(collected.feedbackShown?.rounds).toHaveLength(1);
+      const pulls = collected.feedbackShown!.rounds[0]!.pulls;
+      expect(pulls.find(pull => pull.repositoryId === "api")?.comments.map(comment => comment.id)).toEqual(["api-0", "api-1", "api-reply"]);
+      expect(pulls.find(pull => pull.repositoryId === "ui")?.comments.map(comment => comment.id)).toEqual(["ui-0", "ui-1"]);
+      // Each comment carries when the host last changed it, as the agent was shown it.
+      expect(pulls[0]!.comments[0]!.at).toBe(Date.parse(now));
+      // A second round adds a round; the first stays.
+      const running = { ...collected, state: "WAITING" as const };
+      const again = workflowContracts.collectWorkflowFeedbackBundles(running, { bundleRefs, threadObservations: [] }, now);
+      expect(again.feedbackShown?.rounds).toHaveLength(2);
+      expect(again.feedbackShown?.incomplete).toBeUndefined();
+    });
+    it("marks the record incomplete when an earlier round was collected before it existed", () => {
+      const { current, bundleRefs, reviewRef } = fixture();
+      const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+      const collected = workflowContracts.collectWorkflowFeedbackBundles(reviewed, { bundleRefs, threadObservations: [] }, now);
+      expect(collected.feedbackShown?.incomplete).toBe(true);
+    });
+    it("R3: the host's record of an edit goes into the shown record per comment (false = never edited, true = edited, absent = not said)", () => {
+      const { current, bundleRefs } = fixture();
+      const collected = workflowContracts.collectWorkflowFeedbackBundles(current, { bundleRefs, threadObservations: [], edits: [{ repositoryId: "api", number: 1, edits: { "api-0": false, "api-1": true } }] }, now);
+      const api = collected.feedbackShown!.rounds[0]!.pulls.find(pull => pull.repositoryId === "api")!;
+      expect(api.comments.map(comment => [comment.id, comment.edited])).toEqual([["api-0", false], ["api-1", true]]);
+      // The other pull request's comments were not listed: unknown.
+      expect(collected.feedbackShown!.rounds[0]!.pulls.find(pull => pull.repositoryId === "ui")!.comments.every(comment => comment.edited === undefined)).toBe(true);
+    });
+    it("R4: a round that would push the task's metadata over its storage budget is not added: the record is marked incomplete and collection still succeeds", () => {
+      const { current, bundleRefs: small } = fixture();
+      // A large pull request: 128 comments with long ids in the first bundle.
+      const bundleRefs = [{ ...small[0]!, comments: Array.from({ length: 128 }, (_, i) => ({ ...small[0]!.comments[0]!, id: `api-${String(i).padStart(3, "0")}-${"x".repeat(100)}`, threadId: undefined })) }, small[1]!];
+      const budget = 262_144;
+      const gap = (extra: number) => {
+        // Pad the snapshot's seen-thread record until the metadata (with the collected review, without the new round) leaves `extra` bytes below the budget.
+        const threads: Array<{ repositoryId: string; number: number; threadId: string; resolved: boolean; comments: Array<{ id: string; updatedAt: string; bodyDigest: string }>; eligibleCommentIds: string[] }> = [];
+        for (;;) {
+          const padded = WorkflowSnapshotSchema.parse({ ...current, feedbackThreadObservations: threads });
+          const bytes = new TextEncoder().encode(JSON.stringify({ feedbackReview: { status: "COLLECTING", bundleRefs, threadObservations: [] }, feedbackReviewHistory: [], feedbackThreadObservations: threads })).length;
+          if (bytes >= budget - extra) return padded;
+          threads.push({ repositoryId: "api", number: 1, threadId: `pad-${threads.length}`, resolved: true, comments: [{ id: `p${"y".repeat(120)}`, updatedAt: now, bodyDigest: hash("a") }], eligibleCommentIds: [] });
+        }
+      };
+      // Room for the new round: it is recorded.
+      const roomy = workflowContracts.collectWorkflowFeedbackBundles(gap(60_000), { bundleRefs, threadObservations: [] }, now);
+      expect(roomy.feedbackShown?.incomplete).toBeUndefined();
+      expect(roomy.feedbackShown?.rounds).toHaveLength(1);
+      // No room for it (about 128 ids need over 20 KB): the collection still works, and the record says it is not the whole.
+      const tight = workflowContracts.collectWorkflowFeedbackBundles(gap(8_000), { bundleRefs, threadObservations: [] }, now);
+      expect(tight.feedbackShown).toEqual({ rounds: [], incomplete: true });
+      expect(tight.feedbackReview).toMatchObject({ status: "COLLECTING" });
+      expect(workflowContracts.WorkflowSnapshotSchema.safeParse(tight).success).toBe(true);
+    });
+    it("F6: when even the earlier rounds with the mark do not fit, the last resort keeps only the mark (collection still succeeds and the snapshot stays valid)", () => {
+      const { current, bundleRefs: small } = fixture();
+      // The first collection records a small round. The second brings a large pull request (128 comments with long ids) into a snapshot that has room for the review but not for the earlier round and the mark as well.
+      const large = [{ ...small[0]!, comments: Array.from({ length: 128 }, (_, i) => ({ ...small[0]!.comments[0]!, id: `api-${String(i).padStart(3, "0")}-${"x".repeat(100)}`, threadId: undefined })) }, small[1]!];
+      const budget = 262_144;
+      type Pad = { repositoryId: string; number: number; threadId: string; resolved: boolean; comments: Array<{ id: string; updatedAt: string; bodyDigest: string }>; eligibleCommentIds: string[] };
+      const thread = (n: number, id: string): Pad => ({ repositoryId: "api", number: 1, threadId: `pad-${n}`, resolved: true, comments: [{ id, updatedAt: now, bodyDigest: hash("a") }], eligibleCommentIds: [] });
+      const measure = (threads: Pad[]) => new TextEncoder().encode(JSON.stringify({ feedbackReview: { status: "COLLECTING", bundleRefs: large, threadObservations: [] }, feedbackReviewHistory: [], feedbackThreadObservations: threads })).length;
+      // The seen-thread record padded so that the large review leaves `room` bytes below the budget: short threads, then one whose id is as long as the rest needs (a byte count exactly reachable).
+      const padded = (room: number) => {
+        const target = budget - room;
+        const threads: Pad[] = [];
+        const short = `p${"y".repeat(40)}`;
+        const per = measure([thread(0, short)]) - measure([]);
+        for (let n = Math.max(0, Math.floor((target - measure([])) / per) - 4); n > 0; n -= 1) threads.push(thread(threads.length, short));
+        const overhead = measure([...threads, thread(threads.length, "q")]) - measure(threads) - 1;
+        while (target - measure(threads) > overhead + 128) threads.push(thread(threads.length, short));
+        threads.push(thread(threads.length, `q${"z".repeat(Math.max(0, target - measure(threads) - overhead))}`));
+        return WorkflowSnapshotSchema.parse({ ...current, feedbackThreadObservations: threads });
+      };
+      const collectTwice = (room: number) => {
+        const first = workflowContracts.collectWorkflowFeedbackBundles(padded(room), { bundleRefs: small, threadObservations: [] }, now);
+        return workflowContracts.collectWorkflowFeedbackBundles(first, { bundleRefs: large, threadObservations: [] }, now);
+      };
+      const collects = (room: number): boolean => { try { collectTwice(room); return true; } catch { return false; } };
+      // The least room in which the large review is accepted at all.
+      let low = -3_000, high = 30_000;
+      expect(collects(high)).toBe(true);
+      while (high - low > 1) { const middle = Math.floor((low + high) / 2); if (collects(middle)) high = middle; else low = middle; }
+      const outcomes = new Set<string>();
+      for (let room = high; room < high + 400; room += 1) {
+        const second = collectTwice(room);
+        const shown = second.feedbackShown!;
+        outcomes.add(`${String(shown.rounds.length)}${shown.incomplete === true ? "!" : ""}`);
+        if (shown.rounds.length === 0) {
+          expect(shown).toEqual({ rounds: [], incomplete: true });
+          expect(second.feedbackReview).toMatchObject({ status: "COLLECTING" });
+          expect(workflowContracts.WorkflowSnapshotSchema.safeParse(second).success).toBe(true);
+        }
+      }
+      // Tightest room: only the mark. A little more room: the earlier round and the mark. Plenty: both rounds.
+      expect([...outcomes]).toEqual(expect.arrayContaining(["0!", "1!"]));
+    });
+    it("marks the record incomplete (and does not grow it) when the list is full", () => {
+      const { current, bundleRefs } = fixture();
+      const many = Array.from({ length: 799 }, (_, i) => ({ id: `x-${i}`, at: 1 }));
+      const full = WorkflowSnapshotSchema.parse({ ...current, feedbackShown: { rounds: [{ at: now, pulls: [{ repositoryId: "api", number: 1, comments: many }] }] } });
+      const collected = workflowContracts.collectWorkflowFeedbackBundles(full, { bundleRefs, threadObservations: [] }, now);
+      expect(collected.feedbackShown?.incomplete).toBe(true);
+      expect(collected.feedbackShown?.rounds).toHaveLength(1);
+    });
   });
   it("returns the exact active critic report to a waiting owner decision", () => {
     const { current, bundleRefs, reviewRef } = fixture();

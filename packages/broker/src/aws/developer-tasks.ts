@@ -104,6 +104,7 @@ import {
   WorkflowFeedbackReviewRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_PATH_REQUIRED,
   WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
@@ -124,6 +125,8 @@ import {
   WORKFLOW_THREAD_NOTE_MAX_CHARS,
   WORKFLOW_THREAD_NOTES_MAX,
   WorkflowThreadNoteSchema,
+  SlackNoteSchema,
+  type SlackNote,
   type SlackThread,
   type WorkflowThreadNote,
   unblockWorkflowPublication,
@@ -161,6 +164,7 @@ import {
   resolveWorkflowReviewFindings,
   workflowFindingAccepted,
   workflowFindingProblem,
+  type DeveloperSignInMethod,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { channelLabel, decideMode, decideShare, type BoundChannel, type ShareDecision } from "../developer/share.js";
@@ -244,7 +248,7 @@ export interface DeveloperTaskRouteDependencies {
   /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
   checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<{
     subject: { developerId: string; slackUserId?: string };
-    identity: { developerId: string; slackUserId: string; name: string; method: "slack" | "oidc"; issuer: string; subject: string };
+    identity: { developerId: string; slackUserId: string; name: string; method: DeveloperSignInMethod; issuer: string; subject: string };
     eligible: boolean;
     channelMember: boolean;
   }>;
@@ -1439,6 +1443,11 @@ async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller:
 
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(StartDeveloperTaskRequestSchema, value, deps, "start");
+  // The contracts now accept shapes this broker has no path for (a workflow request with no Quick or Full choice, where Understand would choose it; a named agent;
+  // an agent input). Before the contracts were ported, the request schema refused each; this keeps those refusals (same error code, same words for the first).
+  if (request.workflow === true && request.workflowPath === undefined) throw agentXError("CONFIG_INVALID", WORKFLOW_PATH_REQUIRED);
+  if (request.agent !== undefined) throw agentXError("CONFIG_INVALID", "agent: Unrecognized key");
+  if (request.input !== undefined) throw agentXError("CONFIG_INVALID", "input: Unrecognized key");
   const turns = turnTable(deps);
   // Only the Slack workflow's own caller can say "slack": an AI tool that sends that name is still an AI tool.
   const client = caller.sessionId === SLACK_WORKFLOW_SESSION_ID && request.client?.trim().toLowerCase() === "slack" ? SLACK_CLIENT_NAME : cleanClientName(request.client);
@@ -4980,7 +4989,7 @@ export async function recordWorkflowThreadNote(
   const workflowRevision = task.workflow.revision;
   let receivedAt = iso(deps);
   for (let attempt = 1; ; attempt += 1) {
-    const note: WorkflowThreadNote = WorkflowThreadNoteSchema.parse({
+    const note: SlackNote = SlackNoteSchema.parse({
       schemaVersion: 1, taskId: task.taskId, slackUserId, isOwner,
       teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs, messageTs,
       eventId: input.eventId, text, truncated: text.length < trimmed.length, receivedAt, workflowRevision,
@@ -5056,8 +5065,11 @@ export async function readWorkflowThreadNotes(
     }
     start = page.LastEvaluatedKey;
   } while (start !== undefined && notes.length < WORKFLOW_THREAD_NOTES_MAX);
-  return notes.sort((left, right) => left.receivedAt.localeCompare(right.receivedAt) || left.messageTs.localeCompare(right.messageTs));
+  return notes.sort((left, right) => left.receivedAt.localeCompare(right.receivedAt) || noteOrderKey(left).localeCompare(noteOrderKey(right)));
 }
+
+/** A note's own message id: a Slack reply's timestamp, or a session message's id (the contracts now name both kinds of note). */
+const noteOrderKey = (note: WorkflowThreadNote): string => ("messageTs" in note ? note.messageTs : note.messageId);
 
 /**
  * The chat agent answered this reply as a question, so the next step skips it. Only for a Slack-started task's own

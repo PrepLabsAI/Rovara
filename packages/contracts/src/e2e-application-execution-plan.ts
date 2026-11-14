@@ -4,9 +4,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationPlanIntentSchema, E2
   type E2EApplicationApprovalBinding, type E2EApplicationPlanIntent, type PlanApprovalRef, type E2ERuntimeAccountRef } from "./e2e-application.js";
 import { e2eApplicationMetadataSourcePaths, e2eApplicationMetadataSourceRefs } from "./e2e-application-metadata.js";
 import { selectE2EExecutionPlan, type E2EPlanSelectionInput } from "./e2e-execution-plan.js";
-import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERuntimeAvailabilitySchema, E2EScenarioBundleSchema, E2ESetupProposalSchema,
-  E2EApiMockFixtureSchema, e2eExecutionPlanDigest, e2eScenarioBundleDigest, validateE2EScenarioBundleForPolicy,
-  type E2EExpectedCase, type E2EExecutionPlan, type E2EMockSpec, type E2EScenario, type E2EScenarioBundle, type E2ESetupProposal } from "./e2e.js";
+import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERuntimeAvailabilitySchema, E2EScenarioBundleSchema, E2ESetupProposalSchema, E2EApiMockFixtureSchema, e2eExecutionPlanDigest, e2eScenarioBundleDigest, validateE2EScenarioBundleForPolicy, type E2EExpectedCase, type E2EExecutionPlan, type E2EMockSpec, type E2EScenario, type E2EScenarioBundle, type E2ESetupProposal } from "./e2e-node.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity } from "./e2e-case-identity.js";
 import { e2eTargetSourceIdentity, inspectE2EApplicationRepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, withE2EAnonymousTargets } from "./e2e-catalog.js";
 import { verifyE2ESourceSnapshot } from "./e2e-source.js";

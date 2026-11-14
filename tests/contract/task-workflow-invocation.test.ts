@@ -71,6 +71,18 @@ describe("workflow-mode worker invocation", () => {
     expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EAdmission");
   });
 
+  it("carries the evidence request only on a verification run, as the literal true, and the worker feature that reads it is listed (wire-proof)", () => {
+    const parse = (extra: Record<string, unknown>, workflowMode = "CHECKS") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, ...extra } }).success;
+    expect(parse({ evidenceCapture: true })).toBe(true);
+    expect(parse({ evidenceCapture: true }, "IMPLEMENT")).toBe(false);
+    expect(parse({ evidenceCapture: true }, "REVIEW")).toBe(false);
+    expect(parse({ evidenceCapture: false })).toBe(false);
+    expect(parse({ evidenceCapture: "yes" })).toBe(false);
+    expect(parse({})).toBe(true);
+    // Lane L1: the public worker does not implement this yet, so its advertised list lacks it; lane L5 flips this to toContain when it ports the feature.
+    expect(WORKER_INVOCATION_FEATURES).not.toContain("task.evidenceCapture.v1");
+  });
+
   it("carries the approved plan for the reviewers, with its digest, only on a review operation and within 32,768 bytes", () => {
     const sha256 = "a".repeat(64);
     const plan = (workflowReviewPlan: unknown, workflowMode = "REVIEW") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowReviewPlan } }).success;
@@ -111,6 +123,43 @@ describe("workflow-mode worker invocation", () => {
     expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowReviewNote");
   });
 
+  it("carries the reviews to run only on review operations, from one to both, each once", () => {
+    const reviewers = (workflowReviewers: unknown, workflowMode = "REVIEW") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowReviewers } }).success;
+    expect(reviewers(["SECURITY"])).toBe(true);
+    expect(reviewers(["CRITIC", "SECURITY"])).toBe(true);
+    expect(reviewers([])).toBe(false);
+    expect(reviewers(["SECURITY", "SECURITY"])).toBe(false);
+    expect(reviewers(["OTHER"])).toBe(false);
+    expect(reviewers(["SECURITY"], "IMPLEMENT")).toBe(false);
+    expect(WorkerInvocationSchema.parse(base).payload).not.toHaveProperty("workflowReviewers");
+    // Lane L1: the public worker does not implement this yet, so its advertised list lacks it; lane L5 flips this to toContain when it ports the feature.
+    expect(WORKER_INVOCATION_FEATURES).not.toContain("task.workflowReviewers");
+  });
+
+  it("asks for the code review's risk level only on review operations, as the literal true (Plan 6 Task 13)", () => {
+    const risk = (workflowReviewRisk: unknown, workflowMode = "REVIEW") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowReviewRisk } }).success;
+    expect(risk(true)).toBe(true);
+    expect(risk(false)).toBe(false);
+    expect(risk("yes")).toBe(false);
+    expect(risk(true, "IMPLEMENT")).toBe(false);
+    expect(WorkerInvocationSchema.parse(base).payload).not.toHaveProperty("workflowReviewRisk");
+    // Lane L1: the public worker does not implement this yet, so its advertised list lacks it; lane L5 flips this to toContain when it ports the feature.
+    expect(WORKER_INVOCATION_FEATURES).not.toContain("task.workflowReviewRisk");
+  });
+
+  it("marks a coding run as a fix to an open pull request only on implementation operations, with a known source and no work breakdown (Plan 6 Task 15)", () => {
+    const fix = (workflowFix: unknown, extra: Record<string, unknown> = {}, workflowMode = "IMPLEMENT") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowFix, ...extra } }).success;
+    for (const source of ["ci", "conflict", "feedback"]) expect(fix({ source })).toBe(true);
+    expect(fix({ source: "other" })).toBe(false);
+    expect(fix({ source: "ci", extra: 1 })).toBe(false);
+    expect(fix({})).toBe(false);
+    expect(fix(true)).toBe(false);
+    for (const mode of ["PLAN", "REVIEW", "CHECKS"]) expect(fix({ source: "ci" }, {}, mode)).toBe(false);
+    expect(WorkerInvocationSchema.parse(base).payload).not.toHaveProperty("workflowFix");
+    // Lane L1: the public worker does not implement this yet, so its advertised list lacks it; lane L5 flips this to toContain when it ports the feature.
+    expect(WORKER_INVOCATION_FEATURES).not.toContain("task.workflowFix");
+  });
+
   it("carries the reviewed tree for a pull request update, only as 40 hex on a maintain append", () => {
     const maintain = {
       ...base,
@@ -143,6 +192,11 @@ describe("workflow-mode worker invocation", () => {
     expect(parse({ workflowBaseCommit: "c".repeat(41), workflowCandidateTreeSha: "a".repeat(40) })).toBe(false);
     expect(parse({ workflowCandidateTreeSha: "a".repeat(40), ...pinned }, "sync")).toBe(false);
     expect(parse({ somethingElse: true })).toBe(false);
+    // Plan 6 Task 15: which fix the reviewed tree is, for its commit's message; never without the tree.
+    const reviewed = { workflowCandidateTreeSha: "a".repeat(40), ...pinned };
+    for (const source of ["ci", "conflict", "feedback"]) expect(parse({ ...reviewed, workflowFix: { source } })).toBe(true);
+    expect(parse({ ...reviewed, workflowFix: { source: "other" } })).toBe(false);
+    expect(parse({ workflowFix: { source: "ci" } })).toBe(false);
     expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowPullRequestUpdate");
   });
 });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isKeyedModelProvider } from "./model-providers.js";
-import { ThinkingLevelSchema, type ThinkingLevel } from "./models.js";
+import { ThinkingLevelSchema } from "./models.js";
+import { type ThinkingLevel } from "./models-node.js";
 
 export type PiCacheRetention = "short" | "long";
 export type TaskUsageOutcome = "SUCCEEDED" | "FAILED" | "CANCELLED";

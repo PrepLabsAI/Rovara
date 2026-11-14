@@ -18,3 +18,4 @@ export * from "./registry.js";
 export * from "./tasks.js";
 export * from "./workspaces.js";
 export * from "./worker-callbacks.js";
+export * from "./ports/index.js";

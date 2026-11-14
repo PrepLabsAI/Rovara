@@ -31,7 +31,7 @@ import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/pro
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
 import { issueProjectSetupCapability, type ProjectSetupCallbackClaims } from "../../packages/broker/src/aws/project-setup-capability.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
-import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
+import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies-node.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
 import { observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
 

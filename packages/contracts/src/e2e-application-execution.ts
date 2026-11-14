@@ -4,9 +4,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationApprovalBindingSchema, E2EAppArtifactRefSchema, E2EAppBuildManifestSchema,
   E2EApplicationPlanIntentSchema, PlanApprovalRefSchema, SourceRefSchema,
   type E2EApplicationApprovalBinding, type E2EAppArtifactRef, type E2EAppBuildManifest } from "./e2e-application.js";
-import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema,
-  E2ERuntimeAvailabilitySchema, E2EScenarioBundleSchema, E2EScenarioSchema, E2ESetupProposalSchema,
-  type E2ERound, type E2ERunBinding, type E2EExecutionPlan, type E2EScenarioBundle } from "./e2e.js";
+import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2ERuntimeAvailabilitySchema, E2EScenarioBundleSchema, E2EScenarioSchema, E2ESetupProposalSchema, type E2ERound, type E2ERunBinding, type E2EExecutionPlan, type E2EScenarioBundle } from "./e2e-node.js";
 import { CandidateManifestSchema } from "./task-workflow.js";
 import { isSafeE2ESourcePath } from "./e2e-source.js";
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
@@ -188,9 +186,11 @@ const applicationBuildBindingValueSchema = z.object({ approval: E2EApplicationAp
 const applicationMapEntrySchema = z.object({ key: id(120), value: applicationBuildBindingValueSchema }).strict();
 const runtimeMapEntrySchema = z.object({ key: id(120), value: E2ERegisteredRuntimeSchema }).strict();
 const orderedUniqueKeys = (values: readonly string[]) => new Set(values).size === values.length && values.every((item, index) => index === 0 || values[index - 1]! < item);
-/** The creator's access as the broker proved it when it admitted the round (a direct membership grant, or the locally bound channels), compared again at verification. */
+/** The creator's access as the broker proved it when it admitted the round (a direct membership grant, an org owner's or admin's role, or the locally bound channels), compared again at verification. */
 export const E2ECreatorAuthoritySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("direct-membership"), developerId: id(200), project: id(200), role: z.enum(["developer", "administrator"]), grantId: id(64) }).strict(),
+  // a hosted install: an org owner or admin with no grant of their own maintains every project of the org (the proof records the live role record's time, so a role changed and changed back reads as new).
+  z.object({ kind: z.literal("org-role"), developerId: id(200), project: id(200), orgId: id(64), role: z.enum(["owner", "admin"]), memberUpdatedAt: id(40) }).strict(),
   z.object({ kind: z.literal("channel-access"), developerId: id(200), project: id(200), teamId: id(64), channelIds: z.array(id(64)).min(1).max(64),
     bindings: z.array(z.object({ channelId: id(64), updatedAt: id(40) }).strict()).min(1).max(64) }).strict(),
 ]);

@@ -17,7 +17,7 @@ import {
   workflowFindingFingerprint,
   type WorkflowOwnerAuthority,
   type WorkflowSnapshot,
-} from "../../packages/contracts/src/task-workflow.js";
+} from "../../packages/contracts/src/task-workflow-node.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const creator = "a".repeat(64);

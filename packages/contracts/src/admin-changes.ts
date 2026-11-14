@@ -9,7 +9,8 @@ import { ChatGptModelIdSchema } from "./chatgpt.js";
 import { z } from "zod";
 import { INDEX_EXPIRY_ATTRIBUTE } from "./admin.js";
 import { looseCopy } from "./loose.js";
-import { AgentXNameSchema } from "./project.js";
+import { OrgIdSchema } from "./company-scope.js";
+import { AgentXNameSchema } from "./project-node.js";
 import { SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 
 export const ADMIN_CHANGE_TTL_MS = 10 * 60_000;
@@ -287,7 +288,8 @@ export const AdminChangePendingRecordSchema = z.object({
   confirmationEffect: z.string().max(ADMIN_CHANGE_EFFECT_MAX).optional(),
   details: z.record(z.string(), z.unknown()),
   stateHash: z.string().min(1).max(128),
-  admin: z.object({ issuer: z.string().min(1).max(512), subject: z.string().min(1).max(256), ownerKey: z.string().min(1).max(256), displayName: z.string().min(1).max(200).optional() }).strict(),
+  // `orgId`: the planning admin's org, so a Slack press (which carries no token) applies in the same org.
+  admin: z.object({ issuer: z.string().min(1).max(512), subject: z.string().min(1).max(256), ownerKey: z.string().min(1).max(256), orgId: OrgIdSchema.optional(), displayName: z.string().min(1).max(200).optional() }).strict(),
   slackUserId: SlackUserIdSchema.optional(),
   methodsOffered: z.array(ConfirmationMethodSchema),
   status: AdminChangeStatusSchema,

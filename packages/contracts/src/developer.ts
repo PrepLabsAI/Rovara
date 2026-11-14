@@ -1,9 +1,12 @@
 // Spec 025 phase 25a: the developer sign-in's shared names and wire shapes. The CLI parses server
 // responses with the non-strict schemas here, so a newer control plane can add fields.
 import { z } from "zod";
+import { ProjectRoleSchema } from "./app-projects.js";
 import { EnvironmentNameSchema } from "./environments.js";
+export { normalizeEmail } from "./email.js";
 import { looseCopy } from "./loose.js";
-import { DeveloperTaskPolicySchema } from "./project.js";
+import { OrgRoleSchema } from "./company-scope.js";
+import { DeveloperTaskPolicySchema } from "./project-node.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
 
@@ -14,10 +17,15 @@ export const DEVELOPER_ACCESS_TOKEN_SECONDS = 3600;
 export const DEVELOPER_SESSION_SECONDS = 7 * 24 * 3600;
 export const DEVELOPER_CODE_SECONDS = 300;
 export const DEVELOPER_AUTH_REQUEST_SECONDS = 600;
+/**
+ * Plan 2, Task 8b: how long a sign-in counts as fresh for changing the account's sign-in methods (removing one, adding one back): ten
+ * minutes from the interactive sign-in itself. A refresh renewal never extends it.
+ */
+export const FRESH_SIGN_IN_SECONDS = 600;
 export const SLACK_OIDC_ISSUER = "https://slack.com";
 
-export const DeveloperSignInMethodSchema = z.enum(["slack", "oidc"]);
-export type DeveloperSignInMethod = z.infer<typeof DeveloperSignInMethodSchema>;
+export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
+import { DeveloperSignInMethodSchema } from "./developer-web.js";
 
 const LOOPBACK_REDIRECT = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/callback$/;
 
@@ -52,6 +60,12 @@ export const AgentXConfigurationSchema = z.object({
   methods: z.object({
     slack: z.boolean(),
     oidc: z.object({ displayName: z.string().min(1).max(40) }).nullable(),
+    /** SAML single sign-on, on Enterprise installs whose administrator saved and enabled the identity provider's settings; absent from an older server. */
+    saml: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
+    /** The hosted Rovara sign-in, which creates an org on first sign-in; absent from an older server. */
+    cloud: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
+    /** Sign up and sign in with GitHub, on cloud installs that configured a GitHub OAuth app; absent from an older server. */
+    github: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
   }),
 });
 export type AgentXConfiguration = z.infer<typeof AgentXConfigurationSchema>;
@@ -70,8 +84,21 @@ export const DeveloperSummarySchema = z.object({
   provider: DeveloperSignInMethodSchema,
   slackUserId: SlackUserIdSchema.optional(),
   email: z.string().email().optional(),
+  /** The developer's role in their org; absent from a control plane that predates it. */
+  orgRole: OrgRoleSchema.optional(),
 });
 export type DeveloperSummary = z.infer<typeof DeveloperSummarySchema>;
+
+export { LinkedIdentitySchema, type LinkedIdentity, AppMeResponseSchema, type AppMeResponse } from "./developer-web.js";
+import { LinkedIdentitySchema } from "./developer-web.js";
+
+/** `DELETE /v1/app/me/identities/{provider}`: the sign-in methods still linked after one was removed (Plan 2, Task 8). */
+export const UnlinkIdentityAppResponseSchema = z.object({ identities: z.array(LinkedIdentitySchema) });
+export type UnlinkIdentityAppResponse = z.infer<typeof UnlinkIdentityAppResponseSchema>;
+
+/** `POST /v1/app/me/identities/{provider}`: the sign-in link that adds a method the person removed earlier back to their account (Plan 2, Task 8b). */
+export const StartIdentityLinkAppResponseSchema = z.object({ authorizeUrl: z.string().url().max(2048) });
+export type StartIdentityLinkAppResponse = z.infer<typeof StartIdentityLinkAppResponseSchema>;
 
 /**
  * F6: a non-strict copy of `DeveloperTaskPolicySchema` (`project.ts`), used only to parse a
@@ -89,6 +116,11 @@ export const DeveloperProjectSchema = z.object({
   channels: z.array(z.object({ channelId: SlackChannelIdSchema, name: z.string().optional(), isPrivate: z.boolean().optional() })),
   // Absent from a 1.0 control plane.
   tasks: DeveloperProjectTaskPolicySchema.optional(),
+  // Plan 2, Task 21: the caller's role in the project, where it comes from, and who added them (absent for the operator console's grants).
+  // Absent from an older control plane.
+  role: ProjectRoleSchema.optional(),
+  roleSource: z.enum(["grant", "org_role", "channel"]).optional(),
+  addedBy: z.object({ developerId: z.string(), name: z.string() }).optional(),
 });
 export type DeveloperProject = z.infer<typeof DeveloperProjectSchema>;
 
@@ -98,6 +130,13 @@ export const DeveloperProjectsResponseSchema = z.object({
   notices: z.array(z.enum(["slack_unavailable"])),
 });
 export type DeveloperProjectsResponse = z.infer<typeof DeveloperProjectsResponseSchema>;
+
+/** POST /v1/dev/projects (ruling R55): what the CLI reads of the answer; the rest of the registration is the broker's. */
+export const DeveloperCreateProjectResponseSchema = z.object({
+  duplicate: z.boolean(),
+  project: z.object({ definition: z.object({ name: z.string().min(1), revision: z.number().int().positive() }) }),
+});
+export type DeveloperCreateProjectResponse = z.infer<typeof DeveloperCreateProjectResponseSchema>;
 
 /**
  * Spec 041: one workspace as a developer may see it. It names what the workspace is and how it is
@@ -341,6 +380,44 @@ export type ChannelInfoResponse =
   | { ok: false; error: "slack_unavailable" }
   | { ok: false; error: "invalid_request" };
 
+/**
+ * Team record source rows (lane task 7): what Slack says a channel IS, read fresh (never cached) by DeveloperIdentity with the bot token. Unlike `channel-info` it also answers for a DM and a group DM
+ * (ids starting with D), says whether another organisation shares the channel (Slack Connect), and only answers for the team the bot token belongs to. `{ ok: true }` without a channel: Slack does not know it.
+ */
+export const ChannelClassRequestSchema = z.object({ kind: z.literal("channel-class"), teamId: SlackTeamIdSchema, channelId: z.string().regex(/^[CGD][A-Z0-9]{2,31}$/) }).strict();
+export type ChannelClassRequest = z.infer<typeof ChannelClassRequestSchema>;
+export type ChannelClassResponse =
+  | { ok: true; channel: { kind: "public" | "private" | "im" | "mpim"; extShared: boolean } }
+  | { ok: true }
+  | { ok: false; error: "slack_unavailable" }
+  | { ok: false; error: "invalid_request" };
+
+/**
+ * Team record source pickers (lane task 10): the channels the bot can see, one page of `conversations.list` at a time, read fresh with the same bot token. Only for the team the bot token belongs to.
+ * Public channels only: private channels (their names would reach people who are not in them), direct messages and group messages are never listed; they are added by typing the ID. `private` stays in the type so a reply
+ * that carries one can be read and dropped on the broker side. `joined` says whether the bot is in the
+ * channel (`is_member`; missing is not joined). `cursor` is Slack's own, passed back as Slack gave it.
+ * `missing_scope`: the Slack app was installed without the scopes that listing needs (the broker says so in one fixed sentence).
+ */
+export const ChannelListRequestSchema = z.object({
+  kind: z.literal("channel-list"), teamId: SlackTeamIdSchema, cursor: z.string().regex(/^[A-Za-z0-9+/=_%.-]{1,300}$/).optional(),
+}).strict();
+export type ChannelListRequest = z.infer<typeof ChannelListRequestSchema>;
+export type ChannelListEntry = { id: string; name: string; kind: "public" | "private"; extShared: boolean; joined: boolean };
+export type ChannelListResponse =
+  | { ok: true; channels: ChannelListEntry[]; next?: string }
+  | { ok: false; error: "slack_unavailable" | "missing_scope" | "invalid_request" };
+
+/**
+ * Team record source pickers (lane task 11): "your private channels". One Slack user's private channels that the bot is also in: `users.conversations` with `user` and `types=private_channel` (with a bot token Slack returns
+ * only the private channels the bot shares with that user). The user id is the editor's own linked Slack id, chosen by the broker from its sign-in store, never from a request. Only for the install's own team. The reply is a
+ * `ChannelListResponse` whose entries are private channels only. A Slack user who is not in this workspace has no channels here (an empty list).
+ */
+export const MemberChannelsRequestSchema = z.object({
+  kind: z.literal("member-channels"), teamId: SlackTeamIdSchema, userId: SlackUserIdSchema, cursor: z.string().regex(/^[A-Za-z0-9+/=_%.-]{1,300}$/).optional(),
+}).strict();
+export type MemberChannelsRequest = z.infer<typeof MemberChannelsRequestSchema>;
+
 /** Spec 025 A12: the broker asks DeveloperIdentity which Slack user owns a verified email (FR-012's lookup). */
 export const SlackUserByEmailRequestSchema = z.object({ kind: z.literal("slack-user-by-email"), email: z.string().email().max(254) }).strict();
 export type SlackUserByEmailRequest = z.infer<typeof SlackUserByEmailRequestSchema>;
@@ -355,6 +432,49 @@ export type SlackAuthCheckResponse = { ok: true; teamId: string } | { ok: false;
 export const EndDeveloperSessionsRequestSchema = z.object({ kind: z.literal("end-developer-sessions"), developerId: z.string().regex(/^[a-f0-9]{64}$/), at: z.string().datetime() }).strict();
 export type EndDeveloperSessionsRequest = z.infer<typeof EndDeveloperSessionsRequestSchema>;
 export type EndDeveloperSessionsResponse = { ok: true } | { ok: false; error: "not_found" | "invalid_request" | "unavailable" };
+
+/**
+ * ERASE-NAME-1: a person's erase clears the name their sign-in record holds (the broker has no write on that table, so it asks DeveloperIdentity). The record then holds the placeholder name, and a later sign-in
+ * leaves it alone. Not found is an answer (the person never signed in).
+ */
+export const EraseDeveloperNameRequestSchema = z.object({ kind: z.literal("erase-developer-name"), developerId: z.string().regex(/^[a-f0-9]{64}$/), at: z.string().datetime() }).strict();
+export type EraseDeveloperNameRequest = z.infer<typeof EraseDeveloperNameRequestSchema>;
+export type EraseDeveloperNameResponse = { ok: true } | { ok: false; error: "not_found" | "invalid_request" | "unavailable" };
+
+/**
+ * The sign-in methods a person may unlink from their account (Plan 2, Task 8): the two that cloud installs link by verified email, and Slack, which a signed-in web user links
+ * to their own account by signing in with Slack (owner decision, 2026-11-05).
+ */
+export const UnlinkableSignInMethodSchema = z.enum(["cloud", "github", "slack"]);
+export type UnlinkableSignInMethod = z.infer<typeof UnlinkableSignInMethodSchema>;
+/** The id of a sign-in session (a UUID), which the broker names from the verified token. */
+const SessionIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+/**
+ * Plan 2, Task 8 and 8b: unlinks one sign-in method from the caller's own developer, through DeveloperIdentity (the broker may not write
+ * the sign-in table). `developerId` and `sessionId` are the caller's verified token's, never body values of the public route. The session
+ * is what proves the person signed in freshly with a method that is not the one being removed.
+ */
+export const UnlinkIdentityRequestSchema = z.object({ kind: z.literal("unlink-identity"), developerId: z.string().regex(/^[a-f0-9]{64}$/), sessionId: SessionIdSchema, provider: UnlinkableSignInMethodSchema }).strict();
+export type UnlinkIdentityRequest = z.infer<typeof UnlinkIdentityRequestSchema>;
+/**
+ * `refused` carries the person's words (the store's fixed refusal text); `reauth` is a refusal that a fresh sign-in would fix (its words
+ * say which); `not_found` is a method that is not linked.
+ */
+export type UnlinkIdentityResponse = { ok: true } | { ok: false; error: "refused" | "reauth"; message: string } | { ok: false; error: "not_found" | "invalid_request" | "unavailable" };
+
+/**
+ * Plan 2, Task 8b: starts adding a sign-in method the person removed earlier back to their own account. It is made under a fresh session
+ * of the caller, which must be fresh again when the person finishes at the provider. The result is the sign-in link to open.
+ */
+export const StartIdentityLinkRequestSchema = z.object({
+  kind: z.literal("start-identity-link"), developerId: z.string().regex(/^[a-f0-9]{64}$/), sessionId: SessionIdSchema, provider: UnlinkableSignInMethodSchema,
+  /** The web app started it, from a live browser session: the link then has to be finished in the browser that holds that session. The Slack link is made only this way. */
+  browser: z.literal(true).optional(),
+  /** UX1: where a browser link of GitHub sends the person back (the account menu, or the onboarding step it was started from). Fixed choices only. */
+  returnTo: z.enum(["/app", "/app/onboard", "/app/admin/connections"]).optional(),
+}).strict();
+export type StartIdentityLinkRequest = z.infer<typeof StartIdentityLinkRequestSchema>;
+export type StartIdentityLinkResponse = { ok: true; authorizeUrl: string } | { ok: false; error: "refused" | "reauth"; message: string } | { ok: false; error: "invalid_request" | "unavailable" };
 
 /** Spec 025 E12 (Q8): a public channel of the environment's team, by its name. */
 export const ChannelByNameRequestSchema = z.object({ kind: z.literal("channel-by-name"), name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/) }).strict();
