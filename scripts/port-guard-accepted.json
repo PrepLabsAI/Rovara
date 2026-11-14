@@ -15,6 +15,12 @@
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
+      "path": "packages/broker/src/aws/channel-conversation-state.ts",
+      "rule": "cloud-aws",
+      "blob": "174d140a6a3f64ba35a409740fce6cb7a4349037",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (DEC 137; byte-identical to mainline 508fea812, brought in by the mainline sync)"
+    },
+    {
       "path": "packages/broker/src/aws/channel-conversation.ts",
       "rule": "cloud-aws",
       "blob": "4c1d53d1eec46e703206a27ce378f2de89cb2852",
@@ -23,7 +29,7 @@
     {
       "path": "packages/broker/src/aws/slack-adapter.ts",
       "rule": "cloud-aws",
-      "blob": "e9e837508d33be37982fa5b78bf023a6fc2bba4c",
+      "blob": "e89ec7edbfd752e78616fc62e74511d00b7964c9",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
@@ -57,9 +63,15 @@
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
+      "path": "packages/broker/src/aws/worker-binding.ts",
+      "rule": "cloud-aws",
+      "blob": "df84de61d56d36b8e1cd50a69b186f1e0a1ab439",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (DEC 137; byte-identical to mainline 508fea812, brought in by the mainline sync)"
+    },
+    {
       "path": "tests/contract/sign-in-access-check.test.ts",
       "rule": "secret",
-      "blob": "ef17a80078a78c06dfe8fc50b2ebf3de8a76c8ba",
+      "blob": "5a251c69d8816506fe1ae3a1d71295a8cd71a791",
       "reason": "mainline commit fcc0206a, fake test value"
     },
     {
