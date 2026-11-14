@@ -432,6 +432,16 @@ export class FakeHostModel {
   // ---- reads
 
   changedFiles(id: string): ChangeRequestFile[] {
+    const cr = this.cr(id);
+    const source = this.revision(this.headRevisionOf(cr));
+    const targetSha = cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch);
+    const target = this.revision(this.mergeBase(source.sha, targetSha));
+    return this.diffOfRevisions(target, source);
+  }
+
+  /** The changed files from `base` to `source` (`base` undefined: nothing, as for a root commit). Entry types are given only where both trees are known whole. */
+  private diffOfRevisions(base: FakeRevision | undefined, source: FakeRevision): ChangeRequestFile[] {
+    const target: FakeRevision = base ?? { entries: new Map(), sha: "", tree: "", parents: [], files: new Map(), symlinks: new Set() };
     // Like a real host the fake gives the text of each change (every line of the old file removed, every line of the new one added), so what reads it sees a patch.
     const textLines = (text: string): string[] => text.split("\n").filter((line, index, all) => !(index === all.length - 1 && line === ""));
     const patchOf = (before: string | undefined, after: string): string => {
@@ -439,10 +449,6 @@ export class FakeHostModel {
       const now = textLines(after);
       return `@@ -${old.length === 0 ? "0,0" : `1,${String(old.length)}`} +1,${String(now.length)} @@\n${[...old.map((line) => `-${line}`), ...now.map((line) => `+${line}`)].join("\n")}`;
     };
-    const cr = this.cr(id);
-    const source = this.revision(this.headRevisionOf(cr));
-    const targetSha = cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch);
-    const target = this.revision(this.mergeBase(source.sha, targetSha));
     const known = !this.incompleteTrees.has(source.sha) && !this.incompleteTrees.has(target.sha);
     const directories = (revision: FakeRevision): Set<string> => {
       const found = new Set<string>();
@@ -473,6 +479,31 @@ export class FakeHostModel {
       out.push({ path, status: "removed", additions: 0, deletions: lines(targetFiles.get(path) ?? ""), ...(knownAt(path, path) ? { entry: { head: "none", base: target.entries.get(path)! } } : {}) });
     }
     return out;
+  }
+
+  /** One commit's own changes (DEC 213): its files against its FIRST parent (a root commit against nothing), as GitHub's commit read lists them. */
+  commitChangedFiles(sha: string): ChangeRequestFile[] {
+    const revision = this.revision(sha);
+    const parent = revision.parents[0];
+    return this.diffOfRevisions(parent === undefined ? undefined : this.revision(parent), revision);
+  }
+
+  /** DEC 213: `head`'s files against `base`, a revision `head` builds on (a merge against its second parent), as GitHub's compare read lists them. Throws when `base` is not an ancestor of `head` (or is `head`). */
+  compareChangedFiles(base: string, head: string): ChangeRequestFile[] {
+    const from = this.revision(base);
+    const to = this.revision(head);
+    const queue = [...to.parents];
+    const visited = new Set<string>();
+    let found = false;
+    while (queue.length > 0 && !found) {
+      const next = queue.shift()!;
+      if (visited.has(next)) continue;
+      visited.add(next);
+      if (next === from.sha) found = true;
+      else queue.push(...this.revision(next).parents);
+    }
+    if (!found) throw new Error("the base is not a revision the head builds on");
+    return this.diffOfRevisions(from, to);
   }
 
   /** The host's word on whether the change request can merge: draft, conflicts, a required check failing or pending, else clean. */
