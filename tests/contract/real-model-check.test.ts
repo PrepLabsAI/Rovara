@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { REAL_MODEL_CHECK_ARTIFACT, RealModelCheckSchema, RealModelCheckWriteSchema, realModelPassed } from "../../packages/contracts/src/real-model-check.js";
 import { TestProofSchema, TestProofWriteSchema } from "../../packages/contracts/src/test-proof.js";
 
+import { agentRepliesStatus } from "../../packages/broker/src/core/proof/agent-replies.js";
+
 const digest = "1".repeat(64);
 const item = { checkId: "readiness:0", test: "a", result: "passed" };
 const run = (items: unknown[] = [item]) => ({ schemaVersion: 1, candidateDigest: digest, items });
@@ -104,4 +106,11 @@ it("refuses invalid reply fact ids and every non-count numeric form", () => {
     expect(TestProofSchema.safeParse({ ...proof, scriptedReplies: [value] }).success).toBe(false);
     expect(TestProofWriteSchema.safeParse({ ...proof, scriptedReplies: [value] }).success).toBe(false);
   }
+});
+
+
+it("F9 workflow ids cannot confirm proof readiness ids", () => {
+  const testProof = { ...proof, items: [{ checkId: "readiness:0", label: "Tests", granularity: "test", test: "a", verdict: "proves_change", reason: "assertion_failed_on_old" }], scriptedReplies: [{ checkId: "readiness:0", taskMade: 1, counted: 0 }] };
+  expect(agentRepliesStatus({ checkId: "readiness:0", testProof, realRun: run() })).toBe("confirmed");
+  expect(agentRepliesStatus({ checkId: "readiness:0", testProof, realRun: run([{ ...item, checkId: "workflow-id" }]) })).toBe("unconfirmed");
 });

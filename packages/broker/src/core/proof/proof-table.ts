@@ -277,7 +277,7 @@ export function buildProofTable(input: ProofTableInput): ProofTable {
       if (!(proves[checkId] ?? []).some((id) => covered.has(id))) continue;
       const state = stateOfCheck(checkId);
       const madeByRovara = state === "passed" && input.checkDependencies?.get(checkId)?.some((dependency) => dependency.trust === "made_by_rovara") === true;
-      const replies = state === "passed" ? replyStatus(checkId, input, replyStatuses) : undefined;
+      const replies = state === "passed" && provesChange.has(checkId) ? replyStatus(checkId, input, replyStatuses) : undefined;
       const replyReason = replies === "unconfirmed" ? "agent_replies_unconfirmed" : replies === "disagreed" ? "agent_replies_disagreed" : undefined;
       const reason = madeByRovara ? "made_by_rovara" : replyReason;
       const label = labelOfCheck.get(checkId) ?? checkId;

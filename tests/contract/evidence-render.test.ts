@@ -325,10 +325,13 @@ describe("no callers", () => {
       expect([0, 1]).toContain(found.status);
       return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
     };
-    // The proof table alone uses the trust type and TE-192a's words; inert text is also shared by TE-B3 (weakening-flags.ts), TE-A4 (test-report.ts) and the eval files (eval-round, eval-discovery, eval-health). Every other v2 export stays forbidden.
+    // The proof table uses the trust type and TE-192a's words; the v1 loader also uses the unconfirmed words; inert text is also shared by TE-B3 (weakening-flags.ts), TE-A4 (test-report.ts) and the eval files (eval-round, eval-discovery, eval-health). Every other v2 export stays forbidden.
     const proofOnly = ["EvidenceTrustClass", "SCRIPTED_AI_PROOF_WORDS", "AGENT_REPLIES_UNCONFIRMED_WORDS", "AGENT_REPLIES_DISAGREED_WORDS"];
     expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText"))).toEqual([]);
-    for (const name of proofOnly) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
+    for (const name of proofOnly) expect(callers([name])).toEqual([
+      "packages/broker/src/core/proof/proof-table.ts",
+      ...(name === "AGENT_REPLIES_UNCONFIRMED_WORDS" ? ["packages/broker/src/developer/test-proof-lines.ts"] : []),
+    ]);
     expect(callers(["inertEvidenceText"]).sort()).toEqual(["packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts"]);
   });
 });

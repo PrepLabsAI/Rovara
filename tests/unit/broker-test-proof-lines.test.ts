@@ -1,7 +1,7 @@
 // TESTPROOF: the pull request shows one or two lines about test-proof.json, only when it is bound to the task's current candidate.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type TestProof } from "../../packages/contracts/src/index.js";
+import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, AGENT_REPLIES_UNCONFIRMED_WORDS, type TestProof } from "../../packages/contracts/src/index.js";
 import { loadTestProofLines, testProofPullRequestLines } from "../../packages/broker/src/developer/test-proof-lines.js";
 import { workflowPullRequestStatusLines } from "../../packages/broker/src/aws/developer-tasks.js";
 
@@ -94,5 +94,61 @@ describe("test proof lines for the pull request", () => {
     expect(await loadTestProofLines(actions, task, DIGEST, inert)).toEqual(["Test proof: 1 check fails on the original code and passes now"]);
     expect(await loadTestProofLines(actions, task, "c".repeat(64), inert)).toEqual([]);
     expect(await loadTestProofLines({ ...actions, readArtifact: async () => { throw new Error("S3 down"); } }, task, DIGEST, inert)).toEqual([]);
+  });
+});
+
+
+describe("v1 reply provenance", () => {
+  const task = { ownerKey: "owner", workspaceId: "ws" };
+  const facts = (checkId = "readiness:0", taskMade = 1) => [{ checkId, taskMade, counted: 0 }];
+  const load = async (newest: unknown, older: unknown = proof([item("proves_change")])) => {
+    const reads: string[] = [];
+    const listings: string[] = [];
+    const lines = await loadTestProofLines({
+      operations: async () => ["old", "new"].map((id, i) => ({ id, kind: "task", status: "SUCCEEDED", createdAt: `2026-11-14T0${i}:00:00.000Z` })),
+      artifacts: async (_ws, id) => { listings.push(id); return [{ name: "test-proof.json", objectKey: `private/owner/ws/${id}/proof` }]; },
+      readArtifact: async (key) => { reads.push(key); const value = key.includes("/new/") ? newest : older; return typeof value === "string" ? value : JSON.stringify(value); },
+    }, task, DIGEST, inert);
+    return { lines, reads, listings };
+  };
+  const countLine = "Test proof: 1 check fails on the original code and passes now";
+  it("qualifies only a marked proving check on the newest candidate", async () => {
+    const value = { ...proof([item("proves_change"), item("does_not_prove", "vacuous")]), scriptedReplies: facts() };
+    const result = await load(value);
+    expect(result.lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`, "Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)"]);
+    expect(result.reads).toEqual(["private/owner/ws/new/proof"]);
+    for (const scriptedReplies of [undefined, [], facts("readiness:0", 0), facts("readiness:1")]) {
+      expect((await load({ ...proof([item("proves_change")]), scriptedReplies })).lines).toEqual([countLine]);
+    }
+    expect((await load({ ...proof([item("does_not_prove", "vacuous")]), scriptedReplies: facts() })).lines).toEqual(["Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)"]);
+    expect((await load({ ...proof([item("proves_change")], OLD_DIGEST), scriptedReplies: facts() })).lines).toEqual([countLine]);
+  });
+  it("never revives older proof after unreadable reply facts or a malformed marked proof", async () => {
+    const secret = `gh${"p"}_${"z".repeat(36)}`;
+    const valid = { ...proof([item("proves_change")]), scriptedReplies: facts() };
+    const bad = [null, secret, {}, [{ checkId: "readiness:0" }], [{ ...facts()[0], taskMade: "1" }], [...facts(), ...facts()]];
+    for (const value of [...bad.map((scriptedReplies) => ({ ...valid, scriptedReplies })), { ...valid, status: secret }, { ...valid, items: [{ ...item("proves_change"), verdict: secret }] }, { ...valid, candidateDigest: secret }, JSON.stringify(valid).slice(0, -1)]) {
+      const result = await load(value);
+      expect(result.lines).toEqual([]);
+      expect(result.listings).toEqual(["new"]);
+      expect(result.reads).toEqual(["private/owner/ws/new/proof"]);
+      expect(JSON.stringify(result)).not.toContain(secret);
+    }
+  });
+  it("preserves legacy bytes for missing provenance and malformed unmarked roots", async () => {
+    expect((await load(proof([item("proves_change")]))).lines.join("\n")).toBe(countLine);
+    for (const value of [{ invalid: true }, null, 42]) expect((await load(value)).lines.join("\n")).toBe(countLine);
+    expect((await load("{broken")).lines).toEqual([]);
+  });
+  it("uses fixed qualifier words without leaking hostile proving labels and bounds large input", async () => {
+    const secret = `gh${"p"}_${"q".repeat(36)}`;
+    const hostile = `[nested [link]](https://evil.example) ![image][ref]\n[ref]: https://evil.example\n@team #123 <img>\n# heading\n> quote\n---\n\`\`\`\n~~~\n\u200b\u202e\ufe0f ${secret}`;
+    const started = performance.now();
+    const value = { ...proof([item("proves_change", hostile)]), scriptedReplies: facts() };
+    expect((await load(value)).lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`]);
+    expect((await load({ ...value, items: [item("proves_change", hostile + "x".repeat(1_048_576))] })).lines).toEqual([]);
+    const items = Array.from({ length: 200 }, (_, i) => item("proves_change", "x".repeat(1024), { checkId: `readiness:${i}` }));
+    expect((await load({ ...proof(items), scriptedReplies: items.map(({ checkId }) => ({ checkId, taskMade: 1, counted: 0 })) })).lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: Test proof: 200 checks fail on the original code and pass now`]);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });

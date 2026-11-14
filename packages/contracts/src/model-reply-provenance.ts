@@ -42,13 +42,13 @@ export function replyCountsTowardProof(value: unknown): boolean {
 export const REPLY_PROVENANCE_LABELS: Readonly<Record<ReplyResultClass, string>> = {
   before_task: "scripted replies from the project's reply set (written before the task)",
   independent: "scripted replies written independently in this task",
-  task_made: "scripted replies added in this task (not counted)",
+  task_made: "scripted replies written in this task",
   failure_pack: "failure pack: informational only, never proof (not counted)",
   unmatched: "not run: no scripted reply for this request (not counted)",
   not_served: "not served by the model helper (not counted)",
 };
 
-/** The label of a class; anything unknown gets the `task_made` words (not counted). */
+/** The label of a class; anything unknown gets the `task_made` words. */
 export function replyLabelOf(value: unknown): string {
   return isReplyResultClass(value) ? REPLY_PROVENANCE_LABELS[value] : REPLY_PROVENANCE_LABELS.task_made;
 }

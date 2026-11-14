@@ -2,7 +2,7 @@
 // names it and the browser/API scenarios `scenarioProves` names. The section is public to the repository's readers, so every word that a model, a repository or a person wrote is redacted and
 // inert, and it is bounded: under size pressure the evidence text shrinks first, then the proven and passed rows, and a failed requirement or a not-tested item is never dropped.
 // (Port lane L7b: the cases that went through Cloud's broker and the worker's own test-proof writer are not here; the proofs below are written out by hand in the worker's format.)
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ProofTableViewSchema, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
@@ -714,6 +714,16 @@ describe("192a agent-written replies", () => {
     const table = buildProofTable(input({ realModelRun: result === undefined ? undefined : realRun(result) }));
     expect(rowOf(table, "1.1")).toEqual({ claimId: "1.1", requirement: "The retry waits longer each time.", evidence: [{ kind: "check", label: `${words}: Unit tests`, state, ...(reason === undefined ? {} : { notProvenReason: reason }) }], result: state });
   });
+  it("keeps marked non-proving checks plain and Passed with no reply reason", () => {
+    for (const testProof of [undefined, proofFor(CODE.digest, "does_not_prove"), proofFor(OTHER.digest)]) {
+      for (const realModelRun of [undefined, realRun("failed"), realRun()]) {
+        expect(rowOf(buildProofTable(input({ testProof, realModelRun })), "1.1")).toEqual({
+          claimId: "1.1", requirement: "The retry waits longer each time.",
+          evidence: [{ kind: "check", label: "Unit tests", state: "passed" }], result: "passed",
+        });
+      }
+    }
+  });
   it("Rovara-made mocks win even when the real model agrees", () => {
     for (const realModelRun of [undefined, realRun("failed"), realRun()]) {
       expect(rowOf(buildProofTable(input({ checkDependencies: dependencies("made_by_rovara"), realModelRun })), "1.1").evidence[0]).toEqual({ kind: "check", label: "with a Rovara-made mock; not Proven: Unit tests", state: "passed", notProvenReason: "made_by_rovara" });
@@ -774,8 +784,53 @@ it("ambiguous or incomplete recorded check mappings never confirm agent replies"
   const testProof = proofFor(CODE.digest);
   testProof.items[1] = { ...testProof.items[0]!, checkId: "readiness:1" };
   const realModelRun = { schemaVersion: 1 as const, candidateDigest: CODE.digest, items: [{ checkId: "readiness:0", result: "failed" as const }, { checkId: "readiness:1", result: "passed" as const }] };
-  for (const recordedCheckIds of [["unit", "unit"], ["lint", "unit", "extra"]]) {
+  for (const [recordedCheckIds, reason] of [[["unit", "unit"], "agent_replies_unconfirmed"], [["lint", "unit", "extra"], undefined]] as const) {
     const table = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof, candidateDigest: CODE.digest, recordedCheckIds, realModelRun, checkDependencies: new Map([["unit", [{ dependencyId: "reply", trust: "simulated", replies: "task_made" }]]]) });
-    expect(rowOf(table, "1.1")).toMatchObject({ result: "passed", evidence: [{ state: "passed", notProvenReason: "agent_replies_unconfirmed" }] });
+    expect(rowOf(table, "1.1")).toMatchObject({ result: "passed", evidence: [{ state: "passed" }] });
+    expect(rowOf(table, "1.1").evidence[0]?.notProvenReason).toBe(reason);
+    if (reason === undefined) expect(rowOf(table, "1.1").evidence[0]?.label).toBe("Unit tests");
   }
+});
+
+
+it("keeps all three reasons and the Warning within four page lines, dropping only the count", () => {
+  const ids = ["unit", "lint", "third"];
+  const proposed = ids.map((id) => check(id, id));
+  const nextPlan = plan({ checks: { proposed, proves: { unit: ["1.1"], lint: ["2"], third: ["3"] } } });
+  const workflow = workflowWith({ checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed },
+    verification: { candidateDigest: CODE.digest, producer: "test", environmentId: "ci", recordedAt: now, results: passing(...ids) } });
+  const testProof: TestProof = { ...proofFor(CODE.digest), items: [
+    ...ids.map((_, i) => ({ ...proofFor(CODE.digest).items[0]!, checkId: `readiness:${i}` })),
+    { ...proofFor(CODE.digest, "does_not_prove").items[0]!, label: "vacuous" },
+  ] };
+  const context = { plan: nextPlan, testProof,
+    checkDependencies: new Map([
+      ["unit", [{ dependencyId: "mock", trust: "made_by_rovara" as const }]],
+      ["lint", [{ dependencyId: "reply", trust: "simulated" as const, replies: "task_made" as const }]],
+      ["third", [{ dependencyId: "reply", trust: "simulated" as const, replies: "task_made" as const }]],
+    ]),
+    realModelRun: { schemaVersion: 1 as const, candidateDigest: CODE.digest, items: [{ checkId: "readiness:2", result: "failed" as const }] },
+  };
+  const lines = ProofTableViewSchema.parse(proofTableView(workflow, context)).testProofLines;
+  expect(lines).toEqual([
+    "Checks passing with a Rovara-made mock are not Proven.",
+    "Checks passing on scripted replies written in this task are not Proven until the real model agrees: check them.",
+    "Checks passing on scripted replies written in this task are not Proven: the real model did not agree.",
+    "with a Rovara-made mock; not Proven: Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)",
+  ]);
+  const body = bodyOf(context, workflow);
+  expect(body.indexOf("Test proof:")).toBeLessThan(body.indexOf("Warning:"));
+});
+
+it("pins legacy table, PR body and page bytes for ordinary, missing and malformed proofs", () => {
+  const hashes = [proofFor(CODE.digest), undefined, { invalid: true }].map((testProof) => {
+    const context = { plan: plan(), testProof: testProof as TestProof | undefined };
+    const table = buildProofTable({ ...context, checkResults: passing("unit", "lint"), scenarioRows: [], candidateDigest: CODE.digest, recordedCheckIds: SELECTED });
+    return createHash("sha256").update(JSON.stringify({ table, body: bodyOf(context), page: proofTableView(workflowWith(), context) })).digest("hex");
+  });
+  expect(hashes).toEqual([
+    "b8b353f5e2bb947fdce313b2791caf7f25ea6f35f049432b10c020817e59629c",
+    "1fc846f57ff447087a27664b34d667a381127ad97a87d804034642f1deeed3ba",
+    "1fc846f57ff447087a27664b34d667a381127ad97a87d804034642f1deeed3ba",
+  ]);
 });

@@ -32,9 +32,10 @@ export function proofTableView(workflow: WorkflowSnapshot, proof: ProofContext |
         evidence: row.evidence.slice(0, 100).map((item) => ({ kind: item.kind, label: plain(item.label, 120), state: item.state })),
       })),
       notTested: table.notTested.slice(0, 200).map((item) => ({ kind: item.kind, id: plain(item.id, 64), text: plain(item.text, 300), reason: plain(item.reason, 100) })),
+      // The renderer emits count then Warning; the page keeps the Warning before the count can be cut.
       testProofLines: [
         ...proofReasonLines(table),
-        ...testProofLinesOf(proof?.testProof, workflow.candidate?.digest, { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: proof?.checkDependencies, realModelRun: proof?.realModelRun }),
+        ...testProofLinesOf(proof?.testProof, workflow.candidate?.digest, { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: proof?.checkDependencies, realModelRun: proof?.realModelRun }).reverse(),
       ].slice(0, 4).map((line) => plain(line, 600)),
     };
   } catch {

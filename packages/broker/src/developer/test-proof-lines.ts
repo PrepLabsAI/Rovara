@@ -2,7 +2,7 @@
 // test-proof.json at the end of a CHECKS run, bound to the candidate digest; this reads it at publication. Informational only: no line
 // here ever blocks a pull request. A proof bound to any other candidate, one that does not parse, and one from another workspace's
 // key are ignored. Quoted labels are redacted and made inert by the caller's `inert` (developer-tasks.ts passes inertPlanLine).
-import { TEST_PROOF_ARTIFACT, TestProofSchema, redactText, type TestProof } from "@agentx/contracts";
+import { AGENT_REPLIES_UNCONFIRMED_WORDS, TEST_PROOF_ARTIFACT, TestProofSchema, redactText, type TestProof } from "@agentx/contracts";
 import { byCreated, type OperationFacts } from "./task-records.js";
 
 const OPERATIONS_READ = 10;
@@ -26,7 +26,11 @@ function boundProof(value: unknown, candidateDigest: string | undefined): TestPr
 /** The lines for a proof bound to `candidateDigest`; none for any other, for a proof that did not run, and when nothing is worth saying. */
 export function testProofPullRequestLines(proof: unknown, candidateDigest: string | undefined, inert: (line: string) => string): string[] {
   const bound = boundProof(proof, candidateDigest);
-  if (bound === undefined || bound.status !== "checked") return [];
+  return bound === undefined ? [] : linesOfBoundProof(bound, inert);
+}
+
+function linesOfBoundProof(bound: TestProof, inert: (line: string) => string): string[] {
+  if (bound.status !== "checked") return [];
   const count = (verdict: TestProof["items"][number]["verdict"]) => bound.items.filter((item) => item.verdict === verdict).length;
   const proves = count("proves_change");
   const noRun = count("could_not_run_on_old");
@@ -72,8 +76,16 @@ export async function loadTestProofLines(
       const artifact = (await actions.artifacts(task.workspaceId, operation.id)).find((entry) => entry.name === TEST_PROOF_ARTIFACT);
       const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
       if (artifact === undefined || !artifact.objectKey.startsWith(prefix)) continue;
-      const parsed = JSON.parse(await actions.readArtifact(artifact.objectKey, PROOF_READ_BYTES)) as unknown;
-      if (boundProof(parsed, candidateDigest) !== undefined) return testProofPullRequestLines(parsed, candidateDigest, inert);
+      const raw: unknown = JSON.parse(await actions.readArtifact(artifact.objectKey, PROOF_READ_BYTES));
+      const parsed = TestProofSchema.safeParse(raw);
+      // Never revive an older proof that lacks the newest proof's unreadable reply provenance.
+      if (!parsed.success && typeof raw === "object" && raw !== null && "scriptedReplies" in raw) return [];
+      if (parsed.success && parsed.data.candidateDigest === candidateDigest) {
+        const proving = new Set(parsed.data.items.filter((item) => item.verdict === "proves_change").map((item) => item.checkId));
+        const taskMade = parsed.data.scriptedReplies?.some((facts) => facts.taskMade > 0 && proving.has(facts.checkId)) === true;
+        // This v1 path has no real-model reader. The shared v2 renderer retains its own agreement qualifier.
+        return linesOfBoundProof(parsed.data, inert).map((line) => taskMade && line.startsWith("Test proof:") ? `${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${line}` : line);
+      }
     }
   } catch {
     // The proof is a courtesy to the reader: a storage or parse fault only leaves it out.
