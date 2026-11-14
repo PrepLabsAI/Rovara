@@ -73,7 +73,11 @@ export function runOutboxConformance(name: string, harness: OutboxHarness): void
       await Promise.all([under.outbox.relay({ companyId: COMPANY }), under.outbox.relay({ companyId: COMPANY }), under.outbox.relay({ companyId: COMPANY })]);
       await under.settleIndexes?.();
       expect(await under.outbox.relay({ companyId: COMPANY })).toEqual({ delivered: 0, failed: 0, dead: 0 });
-      expect(await drain(under, "dispatch")).toEqual(["three"]);
+      const copies = await drain(under, "dispatch");
+      // Relays that overlap each hand the message over: a queue with duplicate suppression keeps one copy; one without (SQS standard) may
+      // hold several, all the same message; the consumer is idempotent on its operation, and `outboxId` identifies the copies.
+      const queue = await under.queues.queue("dispatch");
+      expect(queue.capabilities.dedupe ? copies : [...new Set(copies)]).toEqual(["three"]);
     }));
 
     it("refuses to stage the same id twice", () => withOutbox(async (under) => {
@@ -106,7 +110,7 @@ export function runOutboxConformance(name: string, harness: OutboxHarness): void
       const queue = await under.queues.queue("dispatch");
       await queue.enqueue({ body: "five", dedupeId: companyScoped(COMPANY, "OUTBOX#op-5") });
       expect(await under.outbox.relay({ companyId: COMPANY })).toEqual({ delivered: 1, failed: 0, dead: 0 });
-      // A queue that suppresses duplicates holds one copy; one that does not holds two, and the consumer drops the repeat by `outboxId`.
+      // A queue that suppresses duplicates holds one copy; one that does not holds two, and the consumer is idempotent on its operation (`outboxId` identifies the repeat).
       expect(await drain(under, "dispatch")).toEqual(queue.capabilities.dedupe ? ["five"] : ["five", "five"]);
     }));
 

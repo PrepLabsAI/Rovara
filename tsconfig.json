@@ -6,6 +6,7 @@
     { "path": "packages/model-runtime" },
     { "path": "packages/gateway" },
     { "path": "packages/broker" },
+    { "path": "packages/aws-adapters" },
     { "path": "packages/worker" },
     { "path": "packages/orchestrator" },
     { "path": "packages/mcp" },

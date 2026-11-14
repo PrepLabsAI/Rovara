@@ -28,6 +28,8 @@ export const AGENTX_RELEASE_STACKS = [
   "AgentXSlackOrchestrator",
 ] as const;
 // Deployable inputs only: the worker and Slack orchestrator images, the control-plane Lambdas, and the CDK app.
+// packages/aws-adapters is left out on purpose: the legacy production template must stay byte-identical, and the images take only that
+// package's manifest (for npm ci), whose dependency changes always arrive with package-lock.json, which is listed.
 export const AGENTX_RELEASE_TRIGGER_PATHS = [
   "environments/**",
   "infra/**",
