@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveTaskModel } from "../../packages/worker/src/task-model.js";
+import { resolveTaskModel,parseTaskModelFallbackAuthorization } from "../../packages/worker/src/task-model.js";
 
 describe("worker task model resolution", () => {
   it("leaves an unset level unset for an OpenRouter project model, so the session default applies (spec 053)", () => {
@@ -27,4 +27,11 @@ describe("worker task model resolution", () => {
     expect(resolveTaskModel(undefined, { AGENTX_MODEL_PROVIDER: "fallback", AGENTX_MODEL_ID: "fallback-model" }))
       .toMatchObject({ provider: "fallback", modelId: "fallback-model" });
   });
+});
+
+it("C53 accepts only the authorization for this operation's frozen model binding",()=>{
+ const binding={version:1 as const,stage:"build" as const,companyRevision:3,recipeDigest:"a".repeat(64)},model={provider:"amazon-bedrock",modelId:"us.anthropic.claude-sonnet-4-6"};
+ const reply={version:1,binding,model,sourcesRevision:2};
+ expect(parseTaskModelFallbackAuthorization(reply,binding)).toEqual(reply);
+ for(const raw of [{recorded:true},{...reply,allowed:true},{...reply,binding:{...binding,stage:"plan"}},{...reply,binding:{...binding,companyRevision:4}},{...reply,binding:{...binding,recipeDigest:"b".repeat(64)}}])expect(()=>parseTaskModelFallbackAuthorization(raw,binding)).toThrow("fallback authorization");
 });

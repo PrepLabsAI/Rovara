@@ -95,7 +95,7 @@ export interface CandidateChange {
  * If the headers do not pair up, or the patch was cut, the files AgentX could not read are UNPLACEABLE: placing
  * fails closed, never open.
  */
-export function parseCandidateChanges(nameStatus: string, patch: string, patchTruncated: boolean): CandidateChange[] {
+export function parseCandidateChanges(nameStatus: string, patch: string, patchTruncated: boolean, options: { exactLines?: boolean } = {}): CandidateChange[] {
   const changes: CandidateChange[] = [];
   const owners: number[] = [];
   const fields = nameStatus.split("\0");
@@ -128,6 +128,8 @@ export function parseCandidateChanges(nameStatus: string, patch: string, patchTr
     if (hunk === null) continue;
     const start = Number(hunk[1]);
     const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    // `exactLines` (changed-line coverage): a pure deletion wrote no line, so it covers none; by default it covers the lines on either side of where the removed ones were.
+    if (count === 0 && options.exactLines === true) continue;
     change.hunks.push(count === 0 ? [Math.max(1, start), start + 1] : [start, start + count - 1]);
   }
   const unread = patchTruncated ? owners[Math.max(0, header)] ?? 0 : header === owners.length - 1 ? changes.length : 0;
@@ -137,12 +139,12 @@ export function parseCandidateChanges(nameStatus: string, patch: string, patchTr
 }
 
 /** The paths and changed new-side lines from the base commit to the checked tree. */
-export async function candidateChanges(input: { directory: string; baseCommitSha: string; treeSha: string }): Promise<CandidateChange[]> {
+export async function candidateChanges(input: { directory: string; baseCommitSha: string; treeSha: string }, options: { exactLines?: boolean } = {}): Promise<CandidateChange[]> {
   checkedObjects(input);
   const objects = [input.baseCommitSha, input.treeSha, "--"];
   const { names, patch } = await withIsolatedGit(input.directory, "read", async (git) => ({
     names: await git.text([...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "--name-status", "-z", ...objects], { index: "none", maxBuffer: 16 * 1024 * 1024 }),
     patch: await readGitOutput(git.spawnSpec([...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "-U0", ...objects]), CHANGE_PATCH_MAX_BYTES),
   }));
-  return parseCandidateChanges(names, patch.bytes.subarray(0, CHANGE_PATCH_MAX_BYTES).toString("utf8"), patch.truncated);
+  return parseCandidateChanges(names, patch.bytes.subarray(0, CHANGE_PATCH_MAX_BYTES).toString("utf8"), patch.truncated, options);
 }

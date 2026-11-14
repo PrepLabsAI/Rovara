@@ -1,4 +1,5 @@
 // Moved to @agentx/contracts in feature 013 so the Slack orchestrator's turn records share the shape.
+import { SECOND_REVIEW_OPERATION_TAG } from "@agentx/contracts";
 export {
   createTaskUsageTelemetry,
   effectiveCacheRetention,
@@ -14,6 +15,10 @@ export {
  * level proves a control plane that parses one, so the level is sent only then. The usage.json and
  * result.json artifacts, which the control plane does not parse, always keep it.
  */
+/** The artifact a reviewer's usage is kept in: the first reviews' own names, and `workflow-second-review-<try>-usage.json` for the second reviewer's tries (tagged `second-review` by name; the usage event itself is never changed). */
+export const reviewUsageArtifactName = (role: string, secondReviewTry: number | undefined): string =>
+  secondReviewTry === undefined ? `workflow-review-${role.toLowerCase()}-usage.json` : `workflow-${SECOND_REVIEW_OPERATION_TAG}-${String(secondReviewTry)}-usage.json`;
+
 export function usageForControlPlane<T>(usage: T, requested: { thinkingLevel?: unknown }): T {
   if (requested.thinkingLevel !== undefined || typeof usage !== "object" || usage === null || !("thinkingLevel" in usage)) return usage;
   const rest: Record<string, unknown> = { ...usage };

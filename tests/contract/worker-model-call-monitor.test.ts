@@ -107,6 +107,8 @@ describe("sanitizeModelCallEvent on a keyed provider's failure", () => {
       text: "OpenRouter request failed; check the key's credit balance and spending limit" },
     { name: "AgentX transport: fixed text for a rejected key", provider: "anthropic", cls: "key-rejected", signal: null, action: /key/u, secret: "zzz",
       text: "Anthropic request failed; check the API key and its permissions" },
+    { name: "AgentX transport: fixed text for a key the provider does not accept (401, QA6-14)", provider: "anthropic", cls: "key-rejected", signal: null, status: 401, action: /key/u, secret: "zzz",
+      text: "Anthropic request failed; the API key was refused; check that it is valid and has not expired" },
     { name: "AgentX transport: fixed text for a 429", provider: "openai", cls: "limit-or-rate-limited", signal: null, status: 429, action: /rate limit/u, secret: "zzz",
       text: "OpenAI request failed; rate limited or out of credits; check the key's usage limits before retrying" },
     { name: "AgentX transport: fixed text for an upstream 5xx", provider: "openrouter", cls: "provider-outage", signal: null, action: /retry/u, secret: "zzz",
@@ -151,8 +153,12 @@ describe("sanitizeModelCallEvent on a keyed provider's failure", () => {
     expect(read("openai", "request failed; check credentials, model availability, rate limits and provider status")).toMatchObject({ class: "unknown", signal: null });
   });
 
-  it("gives Bedrock no text-derived facts: only its diagnostics count", () => {
-    expect(read("amazon-bedrock", "429: ThrottlingException rate limited")).toMatchObject({ class: "unknown", signal: null });
+  it("reads a Bedrock model called through the model proxy like a keyed provider (a status), but only when it has no diagnostics: the text names no error type", () => {
+    // Before 2026-11-03 this was `unknown` and the cause was dropped (the proxy answers with a status and a JSON body, never Bedrock's diagnostics).
+    expect(read("amazon-bedrock", "429: ThrottlingException rate limited")).toMatchObject({ class: "limit-or-rate-limited", signal: null, status: 429 });
+    // Bedrock's own diagnostics, when present, decide and the text is not read.
+    const direct = sanitizeModelCallEvent({ type: "message_end", message: { role: "assistant", provider: "amazon-bedrock", stopReason: "error", errorMessage: "403 not read", diagnostics: [{ details: { errorCode: "ThrottlingException", status: 429 } }] } });
+    expect(direct?.modelCall).toMatchObject({ class: "limit-or-rate-limited", signal: "ThrottlingException", status: 429 });
   });
 
   it("next actions: fix the key, add credits, wait for a limit, retry an outage", () => {

@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
-import { AgentXError, WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, redactText, type WorkerInvocation, type WorkerInvocationFeature } from "@agentx/contracts";
+import { AgentXError, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, modelFailureCodeOf, noChangeFindingsFrom, redactText, type WorkerInvocation, type WorkerInvocationFeature } from "@agentx/contracts";
+import { WORKER_IMPLEMENTED_FEATURES } from "./implemented-features.js";
 import type { OperationJournal } from "./journal.js";
 import { WorkerOperationCancelledError } from "./cancel.js";
 import {
@@ -14,6 +15,10 @@ const MAX_INVOCATION_BYTES = 1_048_576;
 
 export interface WorkerExecutor {
   execute(invocation: WorkerInvocation): Promise<unknown>;
+  /** Live steer (steer-invocation.ts): answers a `steer` invocation on the same request. Absent: the invocation is refused (the worker does not list the feature). */
+  steer?(invocation: Extract<WorkerInvocation, { kind: "steer" }>): Promise<Record<string, unknown>>;
+  /** Live interaction A2: answers a `peek` invocation (a read-only look at the working tree) on the same request. Absent: refused. */
+  peek?(invocation: Extract<WorkerInvocation, { kind: "peek" }>): Promise<Record<string, unknown>>;
   /** Explicitly implemented invocation extensions; never inferred from parser acceptance alone. */
   invocationFeatures?: readonly WorkerInvocationFeature[];
   /** Feature-specific optional runtime gates are reported independently of ordinary worker health. */
@@ -26,6 +31,11 @@ export interface WorkerExecutor {
   withheldInvocationFeatures?(): Readonly<Partial<Record<WorkerInvocationFeature, unknown>>>;
   /** Every feature `withheldInvocationFeatures` may name. If asking throws, all of these are withheld (fail closed). */
   withholdableInvocationFeatures?: readonly WorkerInvocationFeature[];
+  /**
+   * Why this worker cannot run tasks at all, found at start (for example worker scratch, worker-scratch.ts). /ping then answers the way a failed boot does (boot.sh's report_boot_failure):
+   * 503 and `{"status":"BootFailed","reason":...}`. The broker already reads that: a provisioning session fails at once, and a READY one counts it as a failed probe and is recycled.
+   */
+  bootFailure?: string;
 }
 
 export interface WorkerTerminalResult {
@@ -56,6 +66,8 @@ export interface WorkerServerState {
   activeOperations: Set<string>;
   invocationFeatures: readonly string[];
   invocationFeatureDiagnostics?: Readonly<Record<string, unknown>>;
+  /** See `WorkerExecutor.bootFailure`. */
+  bootFailure?: string;
   /** Required by the deployed worker; injectable for in-process tests. */
   invokeAuthentication?: InvokeAuthentication;
 }
@@ -71,10 +83,19 @@ export function createWorkerServerState(
     executor,
     callbacks,
     activeOperations: new Set(),
-    invocationFeatures: [...WORKER_INVOCATION_FEATURES, ...(executor.invocationFeatures ?? [])],
+    invocationFeatures: [...WORKER_IMPLEMENTED_FEATURES, ...(executor.invocationFeatures ?? [])],
     ...(executor.invocationFeatureDiagnostics === undefined ? {} : { invocationFeatureDiagnostics: executor.invocationFeatureDiagnostics }),
+    ...(executor.bootFailure === undefined ? {} : { bootFailure: executor.bootFailure }),
     ...(invokeAuthentication === undefined ? {} : { invokeAuthentication }),
   };
+}
+
+/**
+ * Whether the worker is still running an operation other than `operationId`. The worker accepts an invocation without waiting for the earlier ones, so the broker may have written
+ * an operation off as lost while it still runs here.
+ */
+export function anotherOperationActive(state: Pick<WorkerServerState, "activeOperations">, operationId: string): boolean {
+  return [...state.activeOperations].some((active) => active !== operationId);
 }
 
 /** What /ping lists: the features this build implements, less those the executor withholds right now (and why). */
@@ -89,6 +110,8 @@ export function advertisedInvocationFeatures(state: WorkerServerState): { featur
 export async function handleWorkerRequest(request: Request, state: WorkerServerState): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/ping") {
+    // Not Healthy and no feature list: the same body the boot script's failure responder serves, which the broker already treats as a worker to stop using (session-steps.ts BootFailed).
+    if (state.bootFailure !== undefined) return response(503, { status: "BootFailed", reason: state.bootFailure.slice(0, 300) });
     const { features, withheld } = advertisedInvocationFeatures(state);
     const diagnostics = { ...state.invocationFeatureDiagnostics, ...withheld };
     return response(200, {
@@ -111,6 +134,16 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
       }
       const invocation = WorkerInvocationSchema.parse(JSON.parse(text) as unknown);
       if (verified && !invocationMatchesClaims(invocation, verified.claims)) return unauthorized("invocation_mismatch");
+      // A live steer is answered on this request and is not an operation: no journal record of its own here, no background run, no terminal callback.
+      if (invocation.kind === "steer") {
+        if (state.executor.steer === undefined) return response(400, { error: "live steer is not supported by this worker" });
+        return response(200, await state.executor.steer(invocation));
+      }
+      // A peek is answered on this request and is not an operation: no journal record, no background run, no terminal callback.
+      if (invocation.kind === "peek") {
+        if (state.executor.peek === undefined) return response(400, { error: "peek is not supported by this worker" });
+        return response(200, await state.executor.peek(invocation));
+      }
       const accepted = await state.journal.accept(invocation);
       if (!accepted.duplicate) {
         state.activeOperations.add(invocation.operationId);
@@ -213,11 +246,18 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
  * Spec 051 Ruling Y: a task that ends failed or cancelled with a regression AgentX found carries its report, so the
  * broker keeps the regression standing. No other failure sends a result.
  */
-function checksResult(error: unknown): { result?: { checks?: unknown; workflowDependenciesResult?: unknown } } {
+function checksResult(error: unknown): { result?: { checks?: unknown; workflowDependenciesResult?: unknown; noChangeFindings?: unknown; workflowMode?: unknown; setupProposal?: unknown; setupRunSummary?: unknown; modelFailureCode?: unknown } } {
+  // F5: a stopped setup run's own report (its partial proposal and summary; the broker reads both again) is the whole result.
+  const setupRun = error instanceof WorkerOperationCancelledError && typeof error.setupRunResult === "object" && error.setupRunResult !== null ? error.setupRunResult as Record<string, unknown> : undefined;
+  if (setupRun?.["workflowMode"] === "SETUP_AGENT") return { result: { workflowMode: "SETUP_AGENT", ...(setupRun["setupProposal"] === undefined ? {} : { setupProposal: setupRun["setupProposal"] }), ...(setupRun["setupRunSummary"] === undefined ? {} : { setupRunSummary: setupRun["setupRunSummary"] }) } };
   const checks = typeof error === "object" && error !== null && "checks" in error ? error.checks : undefined;
   const workflowDependenciesResult = typeof error === "object" && error !== null && "workflowDependenciesResult" in error ? error.workflowDependenciesResult : undefined;
-  return checks === undefined && workflowDependenciesResult === undefined ? {} : {
-    result: { ...(checks === undefined ? {} : { checks }), ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }) },
+  // A coding run that left the code as it was carries what it found (already redacted and bounded by the run; redacted again here, as every failure's text is).
+  const noChangeFindings = typeof error === "object" && error !== null && "noChangeFindings" in error ? noChangeFindingsFrom(error.noChangeFindings) : undefined;
+  // DR-KEY-1 (B): a failed model call's fixed code (never its words), which the broker learns from.
+  const modelFailureCode = modelFailureCodeOf(error);
+  return checks === undefined && workflowDependenciesResult === undefined && noChangeFindings === undefined && modelFailureCode === undefined ? {} : {
+    result: { ...(checks === undefined ? {} : { checks }), ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }), ...(noChangeFindings === undefined ? {} : { noChangeFindings }), ...(modelFailureCode === undefined ? {} : { modelFailureCode }) },
   };
 }
 

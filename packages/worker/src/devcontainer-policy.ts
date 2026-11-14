@@ -143,7 +143,7 @@ const isBuildKitArgument = (name: string) => /^buildkit_/iu.test(name);
  * `docker build` options that reach outside the build: the host's network or extra privileges, files written to or
  * read from the worker, or another build context.
  */
-const BUILD_REFUSED = new Set(["--output", "--iidfile", "--metadata-file", "--allow", "--security-opt", "--secret", "--ssh", "--build-context", "--cache-to", "--file"]);
+const BUILD_REFUSED = new Set(["--output", "--iidfile", "--metadata-file", "--allow", "--security-opt", "--secret", "--ssh", "--build-context", "--cache-to", "--file", "--push"]);
 const BUILD_SHORT = new Map([["o", "--output"], ["f", "--file"]]);
 
 function buildOptionsRefusal(args: readonly string[]): string | undefined {
@@ -160,6 +160,8 @@ function buildOptionsRefusal(args: readonly string[]): string | undefined {
       if (name === "--build-arg") {
         const given = equals === -1 ? args[++index] ?? "" : arg.slice(equals + 1);
         if (isBuildKitArgument(given)) return `--build-arg ${given.split("=")[0]!.toUpperCase()}`;
+        // `--build-arg NAME` takes the value from the worker's own environment.
+        if (!hasInlineValue(given)) return "--build-arg without a value (NAME alone reads the worker's environment)";
       }
       if (name === "--network" || name === "--net") {
         const given = equals === -1 ? args[++index] ?? "" : arg.slice(equals + 1);
@@ -184,11 +186,16 @@ function substituteLocal(value: string, context: DevcontainerPolicyContext): str
 }
 
 /** Long `docker run` flags that hand the container part of the host whatever their value. */
-const ALWAYS_REFUSED = new Set(["--pid", "--security-opt", "--device", "--device-cgroup-rule", "--volumes-from", "--gpus"]);
+const ALWAYS_REFUSED = new Set(["--pid", "--security-opt", "--device", "--device-cgroup-rule", "--volumes-from", "--gpus", "--cidfile", "--label-file", "--volume-driver"]);
 /** Long flags refused when their value is `host` (and, for these three, another container's namespace). */
 const HOST_VALUE = new Map([["--ipc", true], ["--network", true], ["--net", true], ["--userns", false], ["--uts", false], ["--cgroupns", false]]);
 /** `docker run` short flags without a value; every other short flag takes one. */
 const SHORT_BOOLEAN = new Set(["d", "i", "t", "P", "q"]);
+
+/** `-e NAME` and `--env NAME` copy the variable from the worker's own environment, which `devcontainer up` inherits. */
+const ENV_WITHOUT_VALUE = "-e or --env without a value (NAME alone copies the worker's environment variable)";
+/** Whether a `NAME=value` setting carries its value: a name, an equals sign, then whatever follows (possibly empty). */
+const hasInlineValue = (setting: string) => setting.indexOf("=") >= 1;
 
 function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyContext): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
@@ -212,6 +219,10 @@ function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyCont
         const label = name === "--net" ? "--network" : name;
         if (given === "host") return `${label}=host`;
         if (HOST_VALUE.get(name) === true && given.startsWith("container:")) return `${label}=container:`;
+      } else if (name === "--env") {
+        if (!hasInlineValue(value())) return ENV_WITHOUT_VALUE;
+      } else if (name === "--env-file") {
+        return "--env-file (it reads a file of the worker)";
       } else if (name === "--volume") {
         const reason = volumeRefusal(value(), context);
         if (reason !== undefined) return reason;
@@ -231,6 +242,8 @@ function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyCont
         if (flag === "v") {
           const reason = volumeRefusal(given, context);
           if (reason !== undefined) return reason;
+        } else if (flag === "e" && !hasInlineValue(given)) {
+          return ENV_WITHOUT_VALUE;
         }
         break;
       }
@@ -244,8 +257,36 @@ function volumeRefusal(spec: string, context: DevcontainerPolicyContext): string
   // The source runs to the first colon outside a `${…}` variable.
   const source = /^(?:\$\{[^}]*\}|[^:])*/u.exec(spec)?.[0] ?? "";
   if (source.length === spec.length) return undefined;
-  if (!/^[/.~]/u.test(source) && !source.includes("${")) return undefined;
+  const named = substituteVolumeName(source, context);
+  if (!/^[/.~]/u.test(named) && !named.includes("${")) return namedVolumeRefusal(source, context);
   return bindRefusal(source, context, { allowRoot: false });
+}
+
+/** The variables of a volume's name that the devcontainer CLI fills in, and each is specific to the project or the container. */
+const VOLUME_NAME_VARIABLES = ["${devcontainerId}", "${localWorkspaceFolderBasename}"];
+/** Names of AgentX's own Docker volumes (the masks over the worker's folders, Docker's data, and the like) start with this. */
+const AGENTX_VOLUME_PREFIX = /^\s*agentx/iu;
+
+function substituteVolumeName(source: string, context: DevcontainerPolicyContext): string {
+  return substituteLocal(source, context).replaceAll("${devcontainerId}", "0");
+}
+
+/**
+ * A named volume attaches whatever volume of that name already exists on the worker host's Docker, so a name is allowed
+ * only when it carries a part specific to the project folder: ${devcontainerId} (a hash of the local folder and the
+ * config path, the same across rebuilds) or ${localWorkspaceFolderBasename} (the folder's name, which another project
+ * with the same folder name shares). It must not be one of AgentX's, by the `agentx` prefix as written or as the
+ * devcontainer CLI fills the name in. A volume without a source is anonymous and new.
+ */
+function namedVolumeRefusal(source: string, context: DevcontainerPolicyContext): string | undefined {
+  if (source === "") return undefined;
+  const name = substituteVolumeName(source, context);
+  if (name.includes("/") || name.includes("${")) return `a volume named ${source}`;
+  if (AGENTX_VOLUME_PREFIX.test(source) || AGENTX_VOLUME_PREFIX.test(name)) return `a volume named ${source} (volumes named agentx… are AgentX's own)`;
+  if (!VOLUME_NAME_VARIABLES.some((variable) => source.includes(variable))) {
+    return `a volume named ${source} (a named volume must have \${devcontainerId} or \${localWorkspaceFolderBasename} in its name, so it is specific to the project folder)`;
+  }
+  return undefined;
 }
 
 /**
@@ -282,11 +323,12 @@ function mountRefusal(mount: unknown, context: DevcontainerPolicyContext, option
   } else {
     return "a mount AgentX cannot read";
   }
-  const type = fields.type ?? "volume";
+  // Docker reads the type without regard to case, so the policy does.
+  const type = (fields.type ?? "volume").toLowerCase();
   const source = fields.source ?? fields.src;
-  if (type === "volume") return source !== undefined && source.includes("/") ? `a volume named ${source}` : undefined;
+  if (type === "volume") return source === undefined ? undefined : namedVolumeRefusal(source, context);
   if (type === "tmpfs") return undefined;
-  if (type !== "bind") return `a ${type} mount`;
+  if (type !== "bind") return `a ${fields.type} mount`;
   if (source === undefined) return "a bind mount without a source";
   return bindRefusal(source, context, options);
 }

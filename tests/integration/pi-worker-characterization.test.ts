@@ -23,12 +23,11 @@ import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
-/** A model-call note without its duration, which must be absent or 0 on the faux model. */
-const withoutZeroDuration = (notes: readonly unknown[]): Array<Record<string, unknown>> => notes.map((note) => { const { durationMs, ...rest } = note as Record<string, unknown>; return { durationMs, rest }; }).map(({ durationMs, rest }) => { expect(durationMs === undefined || durationMs === 0).toBe(true); return rest; });
-
 const keys = (value: unknown): string[] => Object.keys(value as object).sort();
 // An assistant message ended by an abort carries durationMs only when the abort lands after the message started (timing-dependent): allowed, not required. Every other key stays exact.
 const keysExceptOptionalDuration = (value: unknown): string[] => keys(value).filter((key) => key !== "durationMs");
+// A model-call note for a call cut off by the abort records durationMs 0 or, when the abort lands first, none at all (timing-dependent): allowed, not required.
+const withoutZeroDuration = (notes: readonly unknown[]): Array<Record<string, unknown>> => notes.map((note) => { const { durationMs, ...rest } = note as Record<string, unknown>; return { durationMs, rest }; }).map(({ durationMs, rest }) => { expect(durationMs === undefined || durationMs === 0).toBe(true); return rest; });
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 // structuredClone keeps a key whose value is undefined, so the key pins below see every key Pi sets.
 const snapshot = <T>(value: T): T => structuredClone(value);

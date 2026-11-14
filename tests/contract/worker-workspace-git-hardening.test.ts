@@ -344,7 +344,9 @@ describe("no worker module starts Git in a workspace repository's own git direct
     for (const path of await workerSources()) {
       const name = relative(sources, path);
       if (name === "git.ts" || name.startsWith("swebench/")) continue;
-      if ((await readFile(path, "utf8")).includes('"-C"')) offenders.push(name);
+      // `-C OUTPUT` in check-sandbox.ts is iptables' `--check <chain>` (the sealed check round's resolver-guard verify rule), not Git; any other `"-C"` is still an offender.
+      const lines = (await readFile(path, "utf8")).split("\n").filter((line) => !line.includes('"-C", "OUTPUT"'));
+      if (lines.some((line) => line.includes('"-C"'))) offenders.push(name);
     }
     expect(offenders).toEqual([]);
   });

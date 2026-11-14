@@ -1,7 +1,7 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, link, lstat, mkdir, mkdtemp, open, readdir, realpath, rm } from "node:fs/promises";
+import { access, link, lstat, mkdir, mkdtemp, open, readdir, realpath, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -66,6 +66,8 @@ export const EMPTY_GIT_DIRECTORY_ROOT = "/usr/share/agentx";
 export const EMPTY_GIT_DIRECTORY_ROOT_VARIABLE = "AGENTX_EMPTY_GIT_DIRECTORY_ROOT";
 const SCRATCH_PREFIX = "agentx-base-rules-";
 const STALE_SCRATCH_MS = 60 * 60 * 1000;
+/** The name of a test link (and of the empty file one is made from): a worker killed between making it and removing it leaves it behind. */
+const LINK_PROBE_PREFIX = "agentx-link-probe-";
 
 type Algorithm = "sha1" | "sha256";
 
@@ -126,6 +128,8 @@ export interface ReadOptions {
   maxPackFiles?: number;
   /** The most a blob whose bytes are hashed may hold. */
   maxBlobBytes?: number;
+  /** Test seam: the clock the leftover sweeps judge age by (default Date.now). A link's change time cannot be set back, so a test moves the clock instead. */
+  now?: () => number;
   /** Test seam: called once the scratch directory and its objects directory exist, before git runs. */
   onScratchReady?: (paths: { scratch: string; objects: string }) => Promise<void>;
   /**
@@ -194,10 +198,11 @@ export async function chooseScratchRoot(workspaceRoot: string | undefined, devic
  * is linked in (or, when there is none, a small file made for the purpose in the object store and removed afterwards) under a name of its own, which
  * is checked to be that file and removed. Any failure of the test means that candidate does not take a link.
  */
-async function scratchRootFor(objects: string, workspaceRoot: string | undefined, link: (source: string, target: string) => Promise<void>): Promise<string> {
+async function scratchRootFor(objects: string, workspaceRoot: string | undefined, link: (source: string, target: string) => Promise<void>, now: () => number): Promise<string> {
   const packs = join(objects, "pack");
   let source: string | undefined;
   let made: string | undefined;
+  await removeStaleLinkProbes(objects, now);
   try {
     if (await plainDirectory(packs)) {
       for (const name of (await readdir(packs)).filter((entry) => PACK_FILE.test(entry)).sort()) {
@@ -205,7 +210,7 @@ async function scratchRootFor(objects: string, workspaceRoot: string | undefined
       }
     }
     if (source === undefined) {
-      const path = join(objects, `agentx-link-probe-${String(process.pid)}-${randomBytes(6).toString("hex")}`);
+      const path = join(objects, `${LINK_PROBE_PREFIX}${String(process.pid)}-${randomBytes(6).toString("hex")}`);
       try {
         await (await open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600)).close();
         made = path;
@@ -214,7 +219,8 @@ async function scratchRootFor(objects: string, workspaceRoot: string | undefined
     }
     const canLink = async (root: string): Promise<boolean> => {
       if (source === undefined) return false;
-      const target = join(root, `agentx-link-probe-${String(process.pid)}-${randomBytes(6).toString("hex")}`);
+      await removeStaleLinkProbes(root, now);
+      const target = join(root, `${LINK_PROBE_PREFIX}${String(process.pid)}-${randomBytes(6).toString("hex")}`);
       try {
         const before = await lstat(source);
         await link(source, target);
@@ -233,14 +239,43 @@ async function scratchRootFor(objects: string, workspaceRoot: string | undefined
 }
 
 /** Removes scratch directories an earlier read left behind (a killed worker), so they cannot pile up. Best effort. */
-async function removeStaleScratch(root: string): Promise<void> {
+async function removeStaleScratch(root: string, now: () => number): Promise<void> {
   try {
     for (const name of await readdir(root)) {
       if (!name.startsWith(SCRATCH_PREFIX)) continue;
       const stat = await lstat(join(root, name)).catch(() => undefined);
-      if (stat?.isDirectory() === true && Date.now() - stat.mtimeMs > STALE_SCRATCH_MS) await rm(join(root, name), { recursive: true, force: true });
+      if (stat?.isDirectory() === true && now() - stat.mtimeMs > STALE_SCRATCH_MS) await rm(join(root, name), { recursive: true, force: true });
     }
   } catch { /* nothing to clean */ }
+  await removeStaleLinkProbes(root, now);
+}
+
+/**
+ * Removes the test links an earlier read left behind in `directory` (a killed worker): entries named like one that are older than the scratch age limit.
+ * Only a regular file goes: it is opened without following a link (and without blocking, so a pipe is passed over), checked to be a regular file, and the
+ * name is unlinked only while it still leads to that file. Links, pipes, directories and every other name are left alone. Best effort.
+ * Age is the later of the file's modification and change times: a test link to a pack shares the pack's (often old) modification time, but making the
+ * link sets its change time, so a link another read made a moment ago is never judged old.
+ */
+async function removeStaleLinkProbes(directory: string, now: () => number): Promise<void> {
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.startsWith(LINK_PROBE_PREFIX));
+  } catch { return; }
+  for (const name of names) {
+    const path = join(directory, name);
+    try {
+      const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile() || now() - Math.max(opened.mtimeMs, opened.ctimeMs) <= STALE_SCRATCH_MS) continue;
+        const named = await lstat(path);
+        if (named.isFile() && named.ino === opened.ino && named.dev === opened.dev) await unlink(path);
+      } finally {
+        await handle.close();
+      }
+    } catch { /* gone, a link, or not readable: not ours to remove */ }
+  }
 }
 
 interface Placement {
@@ -298,23 +333,71 @@ async function place(source: string, target: string, placement: Placement): Prom
   }
 }
 
+/** One entry of a verified tree: its name, mode and object id. */
+export interface TreeListingEntry { name: string; mode: number; oid: string }
+
+/** The most entries one tree may list; a larger one stops the read. */
+const MAX_TREE_ENTRIES = 100_000;
+
 /**
- * The verified rule file of `baseCommit`'s tree, by the first of `candidates` that the tree names. Throws {@link BaseObjectsUnverified} when the
- * commit, the tree or the rule file is missing, malformed, or does not hash to its id, or when the deadline passes. A commit whose tree names none
- * of the candidates gives `absent`. `limit` is the largest rule file whose bytes are returned; a larger one is still verified (its bytes are hashed
- * as they stream, so a stored size that was changed is caught), and reported by its size.
+ * Every entry of a raw tree whose bytes were already verified against the tree's id. Names are read as UTF-8; an entry git itself would refuse
+ * (an empty name, `.`, `..`, `.git`, or a name holding `/`) means the tree was tampered with and stops the read.
  */
-export async function readVerifiedBaseRuleFile(directory: string, baseCommit: string, candidates: readonly string[], limit: number, options: ReadOptions = {}): Promise<BaseRuleFile> {
+export function parseTreeListing(bytes: Buffer, hashBytes: number): TreeListingEntry[] {
+  const listed: TreeListingEntry[] = [];
+  let position = 0;
+  while (position < bytes.length) {
+    const space = bytes.indexOf(0x20, position);
+    if (space <= position) throw new BaseObjectsUnverified();
+    const mode = bytes.toString("latin1", position, space);
+    if (!/^[0-7]{5,7}$/u.test(mode)) throw new BaseObjectsUnverified();
+    const end = bytes.indexOf(0, space + 1);
+    if (end <= space + 1 || end + 1 + hashBytes > bytes.length) throw new BaseObjectsUnverified();
+    const name = bytes.toString("utf8", space + 1, end);
+    if (name === "." || name === ".." || name.toLowerCase() === ".git" || name.includes("/")) throw new BaseObjectsUnverified();
+    // A name that is not valid UTF-8 cannot be addressed by a path the resolver builds, so it is left out.
+    if (name.includes("\uFFFD")) { position = end + 1 + hashBytes; continue; }
+    listed.push({ name, mode: Number.parseInt(mode, 8), oid: bytes.toString("hex", end + 1, end + 1 + hashBytes) });
+    if (listed.length > MAX_TREE_ENTRIES) throw new BaseObjectsUnverified();
+    position = end + 1 + hashBytes;
+  }
+  const names = new Set<string>();
+  for (const entry of listed) {
+    if (names.has(entry.name)) throw new BaseObjectsUnverified();
+    names.add(entry.name);
+  }
+  return listed;
+}
+
+/**
+ * A base commit's objects, opened once and read many times: the same verified copy {@link readVerifiedBaseRuleFile} makes (one scratch directory
+ * of linked packs, a read-only empty git directory, every object hashed against its own id), kept open until `close()`. `fetchObject` returns the
+ * bytes of a commit, tree or blob only when they hash to the id asked for, and `rootTreeId` is the verified commit's tree. The overall deadline
+ * runs from `open` to `close`; every failure is {@link BaseObjectsUnverified}. The caller must `close()` (it removes the scratch directory).
+ */
+export interface VerifiedBaseObjects {
+  readonly rootTreeId: string;
+  readonly hashBytes: number;
+  fetchObject(type: "commit" | "tree" | "blob", oid: string, maximum: number, keep: number): Promise<{ size: number; bytes: Buffer | undefined }>;
+  close(): Promise<void>;
+}
+
+export async function openVerifiedBaseObjects(directory: string, baseCommit: string, options: ReadOptions = {}): Promise<VerifiedBaseObjects> {
   const algorithm = algorithmOf(baseCommit);
   const hashBytes = algorithm === "sha1" ? 20 : 32;
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), options.deadlineMs ?? OVERALL_DEADLINE_MS);
   const { signal } = controller;
   let scratch: string | undefined;
+  const cleanUp = async (): Promise<void> => {
+    clearTimeout(deadline);
+    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+  };
   try {
     const layout = await candidateLayout(directory);
-    const root = await scratchRootFor(layout.objects, options.workspaceRoot, options.linkFile ?? link);
-    await removeStaleScratch(root);
+    const now = options.now ?? Date.now;
+    const root = await scratchRootFor(layout.objects, options.workspaceRoot, options.linkFile ?? link, now);
+    await removeStaleScratch(root, now);
     scratch = await mkdtemp(join(root, SCRATCH_PREFIX));
     const objectsDirectory = join(scratch, "objects");
     await mkdir(join(objectsDirectory, "pack"), { recursive: true, mode: 0o700 });
@@ -336,21 +419,25 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
         await place(join(packs, name), join(objectsDirectory, "pack", name), placement);
       }
     }
-    const fetch = async (type: "commit" | "tree" | "blob", oid: string, maximum: number, keep: number): Promise<{ size: number; bytes: Buffer | undefined }> => {
+    const scratchDirectory = scratch;
+    const fetch = async (type: "commit" | "tree" | "blob", oid: string, maximum: number, keep: number, signal: AbortSignal): Promise<{ size: number; bytes: Buffer | undefined }> => {
+      const callPlacement: Placement = { ...placement, signal };
       // A loose object is linked in only for the object being read: one link per read, however many loose objects the workspace holds.
       let looseTarget: string | undefined;
       const loose = join(layout.objects, oid.slice(0, 2));
       if (await plainDirectory(loose)) {
         await mkdir(join(objectsDirectory, oid.slice(0, 2)), { recursive: true });
         const target = join(objectsDirectory, oid.slice(0, 2), oid.slice(2));
-        if (await place(join(loose, oid.slice(2)), target, placement)) looseTarget = target;
+        const placed = await place(join(loose, oid.slice(2)), target, callPlacement);
+        placement.copied = callPlacement.copied;
+        if (placed) looseTarget = target;
       }
       const attempt = async (): Promise<{ size: number; bytes: Buffer | undefined }> => {
-        const sizeText = (await execFile("git", ["cat-file", "-s", oid], { cwd: scratch, env, timeout: GIT_TIMEOUT_MS, signal, encoding: "utf8", maxBuffer: 64 })).stdout.trim();
+        const sizeText = (await execFile("git", ["cat-file", "-s", oid], { cwd: scratchDirectory, env, timeout: GIT_TIMEOUT_MS, signal, encoding: "utf8", maxBuffer: 64 })).stdout.trim();
         if (!/^\d{1,15}$/u.test(sizeText)) throw new BaseObjectsUnverified();
         const size = Number(sizeText);
         if (size > maximum) throw new BaseObjectsUnverified();
-        return { size, bytes: await streamVerified(scratch!, env, algorithm, type, oid, size, keep, signal) };
+        return { size, bytes: await streamVerified(scratchDirectory, env, algorithm, type, oid, size, keep, signal) };
       };
       try {
         return await attempt();
@@ -361,10 +448,46 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
         return attempt();
       }
     };
-    const commit = (await fetch("commit", baseCommit, COMMIT_BYTES, COMMIT_BYTES)).bytes!;
-    const treeId = commitTreeId(commit, hashBytes);
-    const tree = (await fetch("tree", treeId, TREE_BYTES, TREE_BYTES)).bytes!;
-    const entries = parseTreeEntries(tree, hashBytes, new Set(candidates));
+    // One deadline for opening (linking the packs, reading the commit) and a fresh one for every object read afterwards: a resolve that reads
+    // many files is not cut off by a clock that has been running since the source was opened. Reads are serialised, which the placement
+    // counters rely on.
+    let reading: Promise<unknown> = Promise.resolve();
+    const fetchObject: VerifiedBaseObjects["fetchObject"] = (type, oid, maximum, keep) => {
+      const run = reading.then(async () => {
+        const each = new AbortController();
+        const timer = setTimeout(() => each.abort(), options.deadlineMs ?? OVERALL_DEADLINE_MS);
+        try {
+          return await fetch(type, oid, maximum, keep, each.signal);
+        } catch (error) {
+          throw error instanceof BaseObjectsUnverified ? error : new BaseObjectsUnverified();
+        } finally {
+          clearTimeout(timer);
+        }
+      });
+      reading = run.catch(() => undefined);
+      return run;
+    };
+    const commit = (await fetch("commit", baseCommit, COMMIT_BYTES, COMMIT_BYTES, signal)).bytes!;
+    clearTimeout(deadline);
+    const rootTreeId = commitTreeId(commit, hashBytes);
+    return { rootTreeId, hashBytes, fetchObject, close: cleanUp };
+  } catch (error) {
+    await cleanUp();
+    throw error instanceof BaseObjectsUnverified ? error : new BaseObjectsUnverified();
+  }
+}
+
+/**
+ * The verified rule file of `baseCommit`'s tree, by the first of `candidates` that the tree names. Throws {@link BaseObjectsUnverified} when the
+ * commit, the tree or the rule file is missing, malformed, or does not hash to its id, or when the deadline passes. A commit whose tree names none
+ * of the candidates gives `absent`. `limit` is the largest rule file whose bytes are returned; a larger one is still verified (its bytes are hashed
+ * as they stream, so a stored size that was changed is caught), and reported by its size.
+ */
+export async function readVerifiedBaseRuleFile(directory: string, baseCommit: string, candidates: readonly string[], limit: number, options: ReadOptions = {}): Promise<BaseRuleFile> {
+  const objects = await openVerifiedBaseObjects(directory, baseCommit, options);
+  try {
+    const tree = (await objects.fetchObject("tree", objects.rootTreeId, TREE_BYTES, TREE_BYTES)).bytes!;
+    const entries = parseTreeEntries(tree, objects.hashBytes, new Set(candidates));
     for (const candidate of candidates) {
       const entry = entries.get(candidate);
       if (entry === undefined) continue;
@@ -372,7 +495,7 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
       // Directories and submodules are passed over, as the working-tree read passes over them.
       if (kind === 0o120000) return { kind: "symlink", candidate };
       if (kind !== 0o100000) continue;
-      const blob = await fetch("blob", entry.oid, options.maxBlobBytes ?? MAX_BLOB_BYTES, limit);
+      const blob = await objects.fetchObject("blob", entry.oid, options.maxBlobBytes ?? MAX_BLOB_BYTES, limit);
       if (blob.bytes === undefined) return { kind: "oversize", candidate, size: blob.size };
       return { kind: "file", candidate, content: blob.bytes };
     }
@@ -380,10 +503,14 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
   } catch (error) {
     throw error instanceof BaseObjectsUnverified ? error : new BaseObjectsUnverified();
   } finally {
-    clearTimeout(deadline);
-    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+    await objects.close();
   }
 }
+
+/** The most a tree may hold in bytes (the same bound the rule-file read uses). */
+export const VERIFIED_TREE_BYTES = TREE_BYTES;
+/** The most a blob whose bytes are hashed may hold. */
+export const VERIFIED_MAX_BLOB_BYTES = MAX_BLOB_BYTES;
 
 /**
  * Runs `git cat-file <type> <oid>`, hashes `<type> <size>\0` plus what it prints, and resolves with the bytes (when `size` is at most `keep`) only when

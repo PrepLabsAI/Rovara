@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { chmod, link, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -278,6 +278,146 @@ describe("the scratch directory is where a hard link from the workspace works (C
       expect(scratch.startsWith(`${join(subject.root, ".agentx-runtime", "tmp")}/`)).toBe(true);
       expect(readdirSync(subject.objects).sort()).toEqual(before);
       expect(readdirSync(join(subject.root, ".agentx-runtime", "tmp"))).toEqual([]);
+    });
+  });
+});
+
+describe("the test link that decides where the scratch directory goes leaves nothing behind and trusts nothing (C84)", () => {
+  async function withTemporaryArea<T>(body: (area: string) => Promise<T>): Promise<T> {
+    const area = await realpath(await mkdtemp(join(tmpdir(), "agentx-trusted-probe-")));
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = area;
+    try {
+      return await body(area);
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    }
+  }
+  const probes = (directory: string) => readdirSync(directory).filter((name) => name.startsWith("agentx-link-probe-"));
+  const OLD = () => new Date(Date.now() - 3 * 60 * 60 * 1000);
+
+  for (const kind of ["symlink", "FIFO"] as const) {
+    it(`the first pack swapped for a ${kind} just before the test link makes the answer no: nothing is opened, nothing hangs, and no link is left`, async () => {
+      const subject = await repository();
+      await withTemporaryArea(async (area) => {
+        git(subject.directory, "gc", "--quiet", "--prune=now");
+        const runtime = join(subject.root, ".agentx-runtime", "tmp");
+        await mkdir(runtime, { recursive: true, mode: 0o700 });
+        const decoy = join(subject.root, "decoy");
+        writeFileSync(decoy, "not a pack\n");
+        let swapped = 0;
+        const linkFile = async (source: string, target: string) => {
+          if (target.includes("agentx-link-probe-") && /\.(pack|idx)$/u.test(source)) {
+            swapped += 1;
+            await rm(source, { force: true });
+            if (kind === "FIFO") execFileSync("mkfifo", [source]); else await symlink(decoy, source);
+          }
+          await link(source, target);
+        };
+        let scratch = "";
+        const started = Date.now();
+        await unverified(read(subject, { linkFile, onScratchReady: async (paths) => { scratch = paths.scratch; } }));
+        expect(Date.now() - started).toBeLessThan(10_000);
+        // The test link ran on the swapped file, and no candidate answered yes: the scratch directory is the temporary directory's, the last resort.
+        expect(swapped).toBeGreaterThan(0);
+        expect(scratch.startsWith(`${area}/`)).toBe(true);
+        expect(probes(runtime)).toEqual([]);
+        expect(probes(area)).toEqual([]);
+        expect(readFileSync(decoy, "utf8")).toBe("not a pack\n");
+      });
+    });
+  }
+
+  it("after a run where every link fails with EXDEV no probe file is left in the objects directory, the temporary directory or the workspace's directories", async () => {
+    for (const withPacks of [true, false]) {
+      const subject = await repository();
+      await withTemporaryArea(async (area) => {
+        if (withPacks) git(subject.directory, "gc", "--quiet", "--prune=now");
+        const runtime = join(subject.root, ".agentx-runtime", "tmp");
+        await mkdir(runtime, { recursive: true, mode: 0o700 });
+        const before = readdirSync(subject.objects).sort();
+        expect(text(await read(subject, { linkFile: exdev }))).toBe(BASE_RULE);
+        expect(readdirSync(subject.objects).sort()).toEqual(before);
+        expect(probes(area)).toEqual([]);
+        expect(probes(runtime)).toEqual([]);
+        expect(existsSync(join(subject.root, ".agentx", "scratch")) ? probes(join(subject.root, ".agentx", "scratch")) : []).toEqual([]);
+        expect(readdirSync(area)).toEqual([]);
+      });
+    }
+  });
+
+  it("a runtime tmp directory with the wrong mode is skipped: nothing is made in it, and the scratch directory goes elsewhere", async () => {
+    const subject = await repository();
+    await withTemporaryArea(async () => {
+      git(subject.directory, "gc", "--quiet", "--prune=now");
+      const runtime = join(subject.root, ".agentx-runtime", "tmp");
+      await mkdir(runtime, { recursive: true });
+      await chmod(runtime, 0o755);
+      let scratch = "";
+      expect(text(await read(subject, { onScratchReady: async (paths) => { scratch = paths.scratch; } }))).toBe(BASE_RULE);
+      expect(scratch.startsWith(`${runtime}/`)).toBe(false);
+      expect(readdirSync(runtime)).toEqual([]);
+    });
+  });
+
+  it("a runtime tmp directory reached through a link is skipped: nothing is made where the link leads", async () => {
+    const subject = await repository();
+    await withTemporaryArea(async () => {
+      git(subject.directory, "gc", "--quiet", "--prune=now");
+      const elsewhere = await realpath(await mkdtemp(join(tmpdir(), "agentx-trusted-elsewhere-")));
+      await chmod(elsewhere, 0o700);
+      await mkdir(join(subject.root, ".agentx-runtime"), { recursive: true });
+      await symlink(elsewhere, join(subject.root, ".agentx-runtime", "tmp"));
+      let scratch = "";
+      expect(text(await read(subject, { onScratchReady: async (paths) => { scratch = paths.scratch; } }))).toBe(BASE_RULE);
+      expect(scratch.startsWith(`${elsewhere}/`)).toBe(false);
+      expect(readdirSync(elsewhere)).toEqual([]);
+    });
+  });
+
+  it("probe files an earlier read left behind (a killed worker) are removed once they are old by both their times, wherever probes are made", async () => {
+    const subject = await repository();
+    const outside = join(subject.root, "outside-target");
+    writeFileSync(outside, "keep\n");
+    utimesSync(outside, OLD(), OLD());
+    await withTemporaryArea(async (area) => {
+      git(subject.directory, "gc", "--quiet", "--prune=now");
+      const runtime = join(subject.root, ".agentx-runtime", "tmp");
+      await mkdir(runtime, { recursive: true, mode: 0o700 });
+      const pack = join(subject.objects, "pack", readdirSync(join(subject.objects, "pack")).find((name) => name.endsWith(".pack"))!);
+      const old = OLD();
+      const names = { stale: "agentx-link-probe-1-aaaaaaaaaaaa", recent: "agentx-link-probe-2-bbbbbbbbbbbb", link: "agentx-link-probe-3-cccccccccccc", fifo: "agentx-link-probe-4-dddddddddddd", dir: "agentx-link-probe-5-eeeeeeeeeeee", other: "unrelated-old-file" };
+      for (const directory of [runtime, area, subject.objects]) {
+        // A hard link to a pack (what a killed worker leaves in a candidate) is the stale one in the scratch candidates; an empty file is the stale one in objects.
+        if (directory === subject.objects) writeFileSync(join(directory, names.stale), ""); else await link(pack, join(directory, names.stale));
+        writeFileSync(join(directory, names.recent), "");
+        await symlink(outside, join(directory, names.link));
+        execFileSync("mkfifo", [join(directory, names.fifo)]);
+        mkdirSync(join(directory, names.dir));
+        writeFileSync(join(directory, names.other), "");
+        for (const name of [names.stale, names.other]) utimesSync(join(directory, name), old, old);
+        // Old, but not regular files: these are never touched.
+        utimesSync(join(directory, names.dir), old, old);
+      }
+      // Made a moment ago: an old modification time alone (a link to an old pack has one) does not make a leftover old, so nothing is removed yet.
+      expect(text(await read(subject, { linkFile: exdev }))).toBe(BASE_RULE);
+      for (const directory of [runtime, area, subject.objects]) {
+        const left = readdirSync(directory).filter((name) => name.startsWith("agentx-link-probe-") || name === names.other).sort();
+        expect(left).toEqual([names.stale, names.recent, names.link, names.fifo, names.dir, names.other].sort());
+      }
+      // Two hours on, the regular leftovers are removed; links, pipes, directories and other names are not. The link's target is old by then too, so
+      // only opening without following the link keeps it.
+      const later = Date.now() + 2 * 60 * 60 * 1000;
+      expect(text(await read(subject, { linkFile: exdev, now: () => later }))).toBe(BASE_RULE);
+      for (const directory of [runtime, area, subject.objects]) {
+        const left = readdirSync(directory).filter((name) => name.startsWith("agentx-link-probe-") || name === names.other).sort();
+        expect(left).toEqual([names.link, names.fifo, names.dir, names.other].sort());
+        expect(lstatSync(join(directory, names.link)).isSymbolicLink()).toBe(true);
+      }
+      expect(readFileSync(outside, "utf8")).toBe("keep\n");
+      // Removing the leftover link removed only its name: the pack is still there, and no other name of it is.
+      expect(existsSync(pack)).toBe(true);
+      expect(statSync(pack).nlink).toBe(1);
     });
   });
 });

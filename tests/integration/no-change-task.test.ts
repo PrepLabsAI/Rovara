@@ -43,6 +43,8 @@ interface ScriptOptions {
   stopReason?: string;
   /** Replaces the default artifact sink; the artifacts it accepts are still recorded. */
   artifactSink?: (artifact: WorkerArtifact) => Promise<void>;
+  /** More of the invocation's payload (a workflow mode and what goes with it). */
+  payload?: Partial<Extract<WorkerInvocation, { kind: "task" }>["payload"]>;
 }
 
 async function runScripted(steps: Step[], options: ScriptOptions = {}): Promise<Outcome> {
@@ -387,6 +389,18 @@ describe("a task that fails for another reason (#158)", () => {
   });
 });
 
+describe("a coding run that fixes a pull request that is already open (Plan 6 Task 15)", () => {
+  it("says what it is for, for each source, and an ordinary build says nothing of the kind", async () => {
+    for (const [source, reason] of [["ci", "failing CI checks"], ["conflict", "a conflict with its base branch"], ["feedback", "review comments"]] as const) {
+      const fixed = await runScripted([effect(async (repository) => { await writeFile(join(repository, "README.md"), `fixed for ${source}\n`); })],
+        { payload: { workflowMode: "IMPLEMENT", workflowFix: { source } } });
+      expect(progressMessages(fixed.events)).toContain(`AgentX is fixing the open pull request: ${reason}.`);
+    }
+    const build = await runScripted([effect(async (repository) => { await writeFile(join(repository, "README.md"), "built\n"); })], { payload: { workflowMode: "IMPLEMENT" } });
+    expect(progressMessages(build.events).some((message) => String(message).includes("fixing the open pull request"))).toBe(false);
+  });
+});
+
 describe("publishWorkspaceDiff reports whether anything changed", () => {
   it("is false for a clean repository and true once an untracked file appears", async () => {
     const { rootPath, repository } = await preparedRepository();
@@ -521,6 +535,7 @@ function taskInvocation(options: ScriptOptions = {}): Extract<WorkerInvocation, 
     payload: {
       conversationId: options.conversationId ?? randomUUID(), prompt: "update the README",
       ...(options.conversationStarted === undefined ? {} : { conversationStarted: options.conversationStarted }),
+      ...(options.payload ?? {}),
     },
   };
 }

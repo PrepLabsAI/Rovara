@@ -171,8 +171,7 @@ describe("the task plan carries pinned dependencies", () => {
 describe("the feature string and the Prove steps", () => {
   it("names the feature and lists it as an invocation feature", () => {
     expect(TEST_SERVICES_PLAN_FEATURE).toBe("task.testServices.v1");
-    // Lane L1: the public worker does not implement this yet, so its advertised list lacks it; lane L5 flips this to toContain when it ports the feature.
-    expect(WORKER_INVOCATION_FEATURES).not.toContain(TEST_SERVICES_PLAN_FEATURE);
+    expect(WORKER_INVOCATION_FEATURES).toContain(TEST_SERVICES_PLAN_FEATURE);
   });
 
   it("adds the two dependency steps after the seven that were there", () => {

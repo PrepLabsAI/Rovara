@@ -3,11 +3,13 @@
 // the workspace files it finds (tests/support/test-proof-fixture.ts), so a run on the original code really sees the original code.
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TestProofSchema, type CheckEntry, type ProjectCommand } from "../../packages/contracts/src/index.js";
 import { CheckNotRunError, type CheckPlan, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { AgentFilesRestoreError, gitOriginalCode, ORIGINAL_CODE_REF } from "../../packages/worker/src/verification/original-code.js";
 import { runTestProof } from "../../packages/worker/src/verification/test-proof.js";
+import { withTestIds } from "../../packages/worker/src/verification/test-ids.js";
+import { evidenceTests, parseTestReport } from "../../packages/worker/src/verification/test-report.js";
 import { FAKE_TEST_COMMAND, fakeTestRunner, git, passedEntry, repositoryWithCandidate } from "../support/test-proof-fixture.js";
 
 const SOURCE_1 = "export const value = 1;\n";
@@ -19,6 +21,7 @@ const exists = (path: string) => stat(path).then(() => true, () => false);
 describe("TESTPROOF", () => {
   const cleanup: string[] = [];
   afterEach(async () => {
+    vi.useRealTimers();
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
@@ -100,6 +103,10 @@ describe("TESTPROOF", () => {
 
   // 6
   it("says not checked when the run on the original code times out or is stopped, and restores the candidate", async () => {
+    // runChecks cuts a check's timeout to the budget left, and calls a timeout "budget" (not "timed_out") when it did. With a real clock one elapsed millisecond between
+    // the start of the round and the start of the check was enough to make the 60 s command's timeout look cut by the 60 s budget, and a slow runner lost that race. A
+    // clock that stands still makes the full budget available to the check, so only its own timeout can stop it. (Only Date is faked: git and the file system run on.)
+    vi.useFakeTimers({ toFake: ["Date"] });
     const made = await repository({ "src/bug.ts": SOURCE_1 }, { "src/bug.ts": SOURCE_2, "src/bug.test.ts": TEST_EXPECTS(2) });
     const slow = { ...fakeTestRunner(made.directory), runProjectCommand: async () => ({ exitCode: null, timedOut: true, stdout: "", stderr: "" }) };
     // A budget well above the check's own 60 s timeout, so the time the run takes never caps the check and the stub's timeout reads as its own.
@@ -144,8 +151,14 @@ describe("TESTPROOF", () => {
     await runner.runProjectCommand(command, new AbortController().signal);
     const reportOfNewRun = await readFile(join(made.directory, "report.json"), "utf8");
     const proof = await runTestProof(proofOptions(made, { runners: runner, plan: { source: "project", readiness: [command], projectBefore: ["unknown"] } }));
-    expect(proof.items).toEqual([expect.objectContaining({ checkId: "readiness:0", granularity: "test", test: "bug is fixed", verdict: "proves_change", reason: "assertion_failed_on_old" })]);
+    // The item names the test by its ID (file::name), the string the evidence pack and the nightly use for the same test.
+    expect(proof.items).toEqual([expect.objectContaining({ checkId: "readiness:0", granularity: "test", test: "src/bug.test.ts::bug is fixed", verdict: "proves_change", reason: "assertion_failed_on_old" })]);
     expect(await readFile(join(made.directory, "report.json"), "utf8")).toBe(reportOfNewRun);
+
+    // F1 (NH-1 re-check): the evidence pack names the new test by the same ID (file::name) the proof uses. (The pull request's Tests line that compares the two is the broker's and ports with it.)
+    const reported = parseTestReport(reportOfNewRun, "json")!;
+    const evidence = evidenceTests(await withTestIds(reported, { root: made.directory, cwd: command.cwd }), { changedTestPaths: ["src/bug.test.ts"] });
+    expect(evidence.newTests).toEqual(["src/bug.test.ts::bug is fixed"]);
   });
 
   it("does not run a check on the original code that did not pass on the new code", async () => {

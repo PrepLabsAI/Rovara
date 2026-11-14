@@ -641,7 +641,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     // without a trustworthy result, so its log tail and the code itself are kept to explain it (a refused or failed `docker run` shows in stderr and the code).
     // 124 and 130 mean the docker CLI was killed (the deadline, the caller) and its container may still be running, so nothing is read from the out directory then.
     const settled = executor.code !== 124 && executor.code !== 130 && !signal.aborted && deps.now() < deadlineAt;
-    const ownLog = executor.code === 0 || executor.code === 1 || !settled ? "" : await readExecutorOwnLog();
+    // A run that finished (exit 0 or 1) shows only the lines that explain a case that ended on a fault of its own agent step (FLK-1); one that did not shows its whole log tail.
+    const ownLog = !settled ? "" : executor.code === 0 || executor.code === 1
+      ? (await readExecutorOwnLog()).split("\n").filter((line) => line.includes("agent step fault:")).join("\n") : await readExecutorOwnLog();
     state.executorLogTail = redact(`${executor.stdout}${executor.stderr}${ownLog === "" ? "" : `\n--- executor.log (end)\n${ownLog}`}${
       executor.code === 0 || executor.code === 1 ? "" : `\n[docker run exited with code ${executor.code}]`}`);
     const logs = await admin(["logs", "--tail", "400", appName]);

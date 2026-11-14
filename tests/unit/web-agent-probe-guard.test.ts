@@ -146,6 +146,14 @@ describe("the app-start guard of web-agent-app-isolation-v1", () => {
       expect(await proxy.exited(5_000)).toBe(3);
     });
 
+    it("answers the request check even when the guard's one check beside the start is slow (a starved runner): the world a test changes right after the start is read by the request check only", async () => {
+      // Before the fix this reset the connection: the loop's first full check ran after setWorld, saw the gateway answer, and ended the app mid-request (ECONNRESET).
+      const run = await start({ intervalOff: true, loopOff: true, slowLookupMs: 400 });
+      run.setWorld({ connects: { [GUARD_GATEWAY]: "connect" } });
+      expect((await run.get("/")).status).toBe(500);
+      expect(await run.exited(5_000)).toBe(3);
+    });
+
     it("serves its own page, with the marker only once an earlier request was checked before it was answered", async () => {
       const run = await start();
       const first = await run.get(GUARD_PAGE_PATH);

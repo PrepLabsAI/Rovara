@@ -89,10 +89,21 @@ export function turnPlanIntoMarkdown(harness: StoredPlans, workspaceId: string, 
 /**
  * Finishes a planning step the way a task started before plans became structured holds it. The step first ends with a
  * structured answer (the only thing the broker accepts now), then its stored document is put back to the old form.
- * Returns the Markdown's digest.
+ * Returns the Markdown's digest. A version 2 task's plan must name a change, a file and a test (Plan 6 Task 7): pass a `plan` that does.
  */
-export async function finishPlanningWithMarkdown(harness: PlanningHarness, workspaceId: string, operationId: string, markdown: string): Promise<string> {
-  await harness.artifact(workspaceId, operationId, "plan.md", planAnswer(planDocument()));
+export async function finishPlanningWithMarkdown(harness: PlanningHarness, workspaceId: string, operationId: string, markdown: string, plan: PlanDocument = planDocument()): Promise<string> {
+  await harness.artifact(workspaceId, operationId, "plan.md", planAnswer(plan));
   await harness.finish(workspaceId, operationId, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
   return turnPlanIntoMarkdown(harness, workspaceId, operationId, markdown).sha256;
+}
+
+/** A plan that names what changes, which files and how it is tested: what a Rovara Code version 2 task's planning step must answer with (Plan 6 Task 7). */
+export function testedPlanDocument(overrides: Partial<PlanDocument> = {}): PlanDocument {
+  return planDocument({
+    claims: [
+      { id: "1", text: "Payments that fail with a timeout are retried.", evidence: [{ kind: "code", path: "payments/src/charge.ts", startLine: 10, endLine: 24, note: "Today a timeout throws." }] },
+      { id: "2", text: "A test proves a timed-out payment is retried once and never charged twice." },
+    ],
+    ...overrides,
+  });
 }

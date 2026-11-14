@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { E2EApplicationCliHostDescriptorSchema, E2EScenarioSchema, E2ERunBindingSchema, E2ERuntimeAccountRefSchema,
-  canonicalJson, type E2ERuntimeAccountRef, type E2EScenario, type E2EApplicationAccountPorts,
+  canonicalJson, buildApiSample, type E2ERuntimeAccountRef, type E2EScenario, type E2EApplicationAccountPorts,
   type E2EApplicationSupervisorPorts, type E2EApplicationPreparedEnvironment, type E2ERunInput, type ProjectSetupRunnerToolchain } from "@agentx/contracts";
 import { createE2EApplicationCaseCaptureFrame, createE2EApplicationAssertionObservationHeader,
   readValidatedE2EApplicationCliCasePlan, recordE2EApplicationCliEvidence,
@@ -31,7 +31,18 @@ const waitForNextStatePoll = async (signal: AbortSignal, milliseconds: number) =
 };
 export type E2EApiRuntimeResponse = Readonly<{ requestId: string; responseId: string; method: string; path: string; status: number;
   body: Uint8Array; contentType: string; origin: string; observedAt: string }>;
+/**
+ * API samples (proof and evidence B2): supplied only by the executor host, only when the admitted capture policy asks for them. A sample is built on an allow-list (`buildApiSample`) and stored under the
+ * executor's own size, count and credential scan; best effort, so it can change neither a verdict nor a case's evidence.
+ */
+export type E2EApiSamplePorts = Readonly<{
+  /** The scenario's approved "safe to show" JSON paths. Absent: every value in a sample is a placeholder. */
+  safePaths?: readonly string[];
+  record(input: { caseId: string; kind: "api-sample"; bytes: Uint8Array; step: number }): Promise<unknown>;
+}>;
 export type E2EApiRuntimePorts = Readonly<{
+  /** API samples; absent when the admission approves none. */
+  samples?: E2EApiSamplePorts;
   casePlans: E2EApplicationCliCasePlanReader;
   caseObservations: E2EApplicationProtectedCaseObservationReader;
   evidence: E2EApplicationCliEvidenceWriter;
@@ -73,6 +84,18 @@ export function validateE2EAPIApplicationPath(path: string): string {
 async function writeJson(ports: E2EApiRuntimePorts, caseId: string, kind: "case-capture" | "step-observation" | "assertion-observation" | "http-request" | "http-response", value: unknown, signal: AbortSignal) {
   return recordE2EApplicationCliEvidence({ writer: ports.evidence, caseId, kind,
     bytes: Buffer.from(canonicalJson(value), "utf8"), mediaType: "application/json", signal });
+}
+
+/** Records the sample of one request/response. Best effort: a sample that cannot be built, or a recorder that refuses (its budget, a credential in the sample), leaves none and changes nothing else. */
+export async function recordApiSample(input: { samples: E2EApiSamplePorts | undefined; caseId: string; step: number; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string;
+  requestBody: unknown; response: Pick<E2EApiRuntimeResponse, "status" | "body" | "contentType"> }): Promise<void> {
+  if (input.samples === undefined) return;
+  try {
+    const requestBody = input.requestBody === undefined || input.requestBody === null ? undefined : Buffer.from(JSON.stringify(input.requestBody), "utf8");
+    const built = buildApiSample({ method: input.method, path: input.path, status: input.response.status, ...(requestBody === undefined ? {} : { requestBody, requestHeaders: { "content-type": "application/json" } }),
+      responseBody: input.response.body, responseHeaders: { "content-type": input.response.contentType }, ...(input.samples.safePaths === undefined ? {} : { safePaths: input.samples.safePaths }) });
+    if (built.bytes !== undefined) await input.samples.record({ caseId: input.caseId, kind: "api-sample", bytes: built.bytes, step: input.step });
+  } catch { /* a sample that cannot be recorded leaves none */ }
 }
 
 export async function executeE2EAPIApplicationScenario(input: { caseId: string; scenario: E2EScenario; sessionRef: string; origin: string; ports: E2EApiRuntimePorts;
@@ -118,6 +141,7 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
       || response.requestId === response.responseId || responses.has(step.requestId)) {
       throw new Error("owned API client returned a response outside its exact request, origin, identifier, or body bounds");
     }
+    await recordApiSample({ samples: input.ports.samples, caseId: input.caseId, step: index, method: step.method, path, requestBody: step.body, response });
     const bodyRef = await recordE2EApplicationCliEvidence({ writer: input.ports.evidence, caseId: input.caseId,
       kind: "http-response", bytes: response.body, mediaType: "application/octet-stream", signal: input.signal });
     const responseFrameRef = await writeJson(input.ports, input.caseId, "http-response", { schemaVersion: "e2e-application-http-response/v1",

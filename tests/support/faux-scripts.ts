@@ -138,10 +138,9 @@ export function workflowModel(script: {
 }): FauxResponseStep {
   // Copied so that shifting never changes the caller's arrays.
   let lastPlan: string | undefined;
-  let beforeEdits: string[] = [];
-  let afterEdits: string[] = [];
-  let lastCoderUserText: string | undefined;
-  let editsStarted = false;
+  // A coder session's own progress through its scripted commands and writes. Keyed by session, because parts of a Rovara Code v2 plan run in sessions of their own at the
+  // same time; one shared state made them reset each other's. A call with no session id shares the one unnamed state, as before.
+  const coders = new Map<string, { beforeEdits: string[]; afterEdits: string[]; lastCoderUserText: string | undefined; editsStarted: boolean }>();
   let toolCallSequence = 0;
   const reviewRolesBySession = new Map<string, ReviewRole>();
   const queues: Record<ReviewRole, FauxResponseStep[]> = { CODE: [...(script.reviews?.CODE ?? [])], SECURITY: [...(script.reviews?.SECURITY ?? [])] };
@@ -187,26 +186,29 @@ export function workflowModel(script: {
       return typeof answer === "function" ? answer(context, options, state, model) : answer;
     }
     script.turns?.push({ role: "CODER", userText: latestUserText });
+    const coderKey = sessionId ?? "";
+    const coder = coders.get(coderKey) ?? { beforeEdits: [], afterEdits: [], lastCoderUserText: undefined, editsStarted: false };
+    coders.set(coderKey, coder);
     // Reopened implementation turns may retain planning/history messages; a genuinely fresh transcript is also a
     // boundary even when its first user message matches the prior coder turn.
-    if (openingCall || latestUserText !== lastCoderUserText) {
-      beforeEdits = [...(script.beforeEditsCommands ?? [])];
-      afterEdits = [...(script.afterEditsCommands ?? [])];
-      editsStarted = false;
-      lastCoderUserText = latestUserText;
+    if (openingCall || latestUserText !== coder.lastCoderUserText) {
+      coder.beforeEdits = [...(script.beforeEditsCommands ?? [])];
+      coder.afterEdits = [...(script.afterEditsCommands ?? [])];
+      coder.editsStarted = false;
+      coder.lastCoderUserText = latestUserText;
     }
-    if (beforeEdits.length > 0) {
-      const command = beforeEdits.shift()!;
+    if (coder.beforeEdits.length > 0) {
+      const command = coder.beforeEdits.shift()!;
       return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `before-edit-${toolCallSequence++}` })], { stopReason: "toolUse" });
     }
     const edits = typeof script.edits === "function" ? script.edits(latestUserText) : script.edits;
     // With no edits there is nothing to call a tool for, so the coder reports done straight away.
-    if (lastIsToolResult(context) && editsStarted && afterEdits.length > 0) {
-      const command = afterEdits.shift()!;
+    if (lastIsToolResult(context) && coder.editsStarted && coder.afterEdits.length > 0) {
+      const command = coder.afterEdits.shift()!;
       return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `after-edit-${toolCallSequence++}` })], { stopReason: "toolUse" });
     }
-    if ((lastIsToolResult(context) && editsStarted) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
-    editsStarted = true;
+    if ((lastIsToolResult(context) && coder.editsStarted) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
+    coder.editsStarted = true;
     return fauxAssistantMessage(
       edits.map((edit) => fauxToolCall("write", { path: edit.path, content: edit.content }, { id: `edit-${toolCallSequence++}` })),
       { stopReason: "toolUse" },
