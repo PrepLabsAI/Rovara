@@ -99,5 +99,10 @@ export function evidencePublicAiLines(context: ProofEvidenceContext | undefined,
   const bound = boundEvidenceV2(context, candidateDigest);
   if (bound === undefined || bound.pack.ai === undefined) return undefined;
   const rendering = renderEvidencePublic(bound.pack, { newer: bound.newer });
-  return [EVIDENCE_V2_HEADING, ...asMarkdown([rendering.firstLine, ...rendering.body]), ""];
+  // The shared public renderer puts AI first. Stop at its final summary line;
+  // the rest of the B12 summary is not part of this optional PR addition.
+  const end = rendering.body.findIndex(line => line.startsWith("Real-model run:"));
+  const aiLines = rendering.body.slice(0, end === -1 ? 1 : end + 1);
+  const headline = rendering.firstLine.startsWith("Worse on eval") ? [rendering.firstLine] : [];
+  return [EVIDENCE_V2_HEADING, ...asMarkdown([...headline, ...aiLines]), ""];
 }

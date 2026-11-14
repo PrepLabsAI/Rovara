@@ -1,7 +1,7 @@
 // TE-A2b: the broker's pack WRITER can write version 2. The default is still version 1 (a Cloud reader that is strict about v1 must not meet a v2 pack before the Cloud half and the TE-A1 gate exist); readers accept both.
 // The level and the result are decided here from facts the broker has (where the checks ran, how the CI reads, the checks' own outcomes); the CI part comes from TE-B2's `ciEvidenceLevel`, passed in by the caller.
 // Old v1 data keeps working: the v2 pack is made from a pack `buildEvidencePack` really built, not only a fixture.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EvidencePackSchema, EvidencePackV2Schema, readEvidencePack, readEvidencePackText, renderEvidence, type CheckEntry, type EvidencePack } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
@@ -331,4 +331,21 @@ it("AI text guard keeps fixed verdicts on sensitive IDs, excerpts and scanner fa
     expect(saved).toMatchObject({ ai: { eval: { label: "Worse on eval", questions: [], notices: ["details_withheld"] } } });
     expect(JSON.stringify(saved)).not.toContain("CANARY");
   }
+});
+
+
+it("an AI schema rejection preserves valid proof evidence but never excuses an invalid base", async () => {
+  const contracts = await import("@agentx/contracts");
+  const parse = contracts.EvidencePackV2Schema.safeParse.bind(contracts.EvidencePackV2Schema);
+  const spy = vi.spyOn(contracts.EvidencePackV2Schema, "safeParse").mockImplementationOnce(input => parse({ ...(input as object), ai: { invalid: "CANARY" } }));
+  try {
+    const w = world();
+    expect(await keepEvidence(w.deps, keepInput({ writer: sandbox }))).toMatchObject({ kept: true });
+    const value = await stored(w.blobs);
+    expect(value.ai).toBeUndefined();
+    expect(value.checks).toHaveLength(1);
+    expect(JSON.stringify(value)).not.toContain("CANARY");
+  } finally { spy.mockRestore(); }
+  const w = world();
+  expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, proof: { invalid: "CANARY" } } }))).toMatchObject({ kept: false });
 });

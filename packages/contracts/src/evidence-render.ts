@@ -258,6 +258,8 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const ai = renderAiEvidence(pack.ai, options.questionLimit, Math.max(1000, EVIDENCE_RENDER_LIMITS.textMax - [firstLine, ...body].join("\n").length - 1));
   firstLine = ai.firstLine ?? firstLine;
   body.unshift(...ai.lines);
+  // Keep verdicts and weakening flags; the existing compact pointer records omitted detail.
+  if (pack.ai !== undefined && [firstLine, ...body].join("\n").length > EVIDENCE_RENDER_LIMITS.textMax) return renderEvidence(pack, { ...options, compact: true });
   return { firstLine, producerLine, body, text: [firstLine, ...body].join("\n") };
 }
 

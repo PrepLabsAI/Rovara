@@ -84,7 +84,7 @@ describe("AI text goldens", () => {
   });
   it.each(EVAL_NOT_RUN_REASONS)("Not run %s never becomes a pass", reason => {
     const text = renderEvidence(pack(notRun(reason))).text;
-    if (reason === "no_eval_configured") expect(text).toContain("Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below.");
+    if (reason === "no_eval_configured") expect(text).toContain("Prompt changed. No eval found, so AI quality wasn't measured.");
     else { expect(text).toContain(EVAL_NOT_RUN_SENTENCES[reason].replace(/^not run: /iu, "")); expect(text).toContain("Retry from the Rovara task page"); }
     expect(text).not.toContain("Eval: No drop found");
   });
@@ -243,4 +243,71 @@ it("refuses malformed direct public AI summaries without throwing or echoing inp
   for (const bad of [null, 7, "CANARY", {}, { eval: null }, { eval: { label: "CANARY" } }]) {
     expect(renderPublicAi(bad as never)).toEqual({ lines: ["AI checks: not recorded"] });
   }
+});
+
+
+describe("Round 2 review regressions", () => {
+  it.each([true, false])("aggregate-only Worse says what fell, subset %s", subsetSupported => {
+    const qs = Array.from({ length: 20 }, (_, i) => ({ ...question(`drop${i}`), freshNew: [true, false, false] }));
+    const p = pack(artifact({ questions: qs, options: { changedPromptCalls: 1, hiddenSetUsed: false, subsetSupported, sameJudgeFamily: false } }));
+    expect(p.ai!.eval.counts).toMatchObject({ broke: 0, newlyFail: subsetSupported ? 10 : 20, flaky: subsetSupported ? 10 : 0 });
+    for (const out of [renderEvidence(p), renderEvidencePublic(p)]) {
+      expect(out.firstLine).toBe("Worse on eval: aggregate pass rate dropped");
+      expect(out.text).not.toMatch(/\b0 (?:questions? )?broke/u);
+    }
+  });
+  it.each(EVAL_NOT_RUN_REASONS)("Not run %s omits comparison counts and fix rounds in both views", reason => {
+    const p = pack(notRun(reason, false));
+    const words = `Eval: Not run: ${EVAL_NOT_RUN_SENTENCES[reason].replace(/^not run: /iu, "")}.${reason === "no_eval_configured" ? "" : " Retry from the Rovara task page"}`;
+    for (const out of [renderEvidence(p), renderEvidencePublic(p)]) {
+      expect(out.body.slice(0, 3)).toEqual(["AI checks", words, "Real-model run: Not run (not available yet)"]);
+      expect(out.text).not.toMatch(/Eval counts:|Eval fix round:|0 questions|0 broke/u);
+    }
+  });
+  it("Not run hides stored comparison metadata rather than printing counts or placeholders", () => {
+    const ai = evidenceAiFromArtifact(artifact(), digest)!;
+    ai.eval.label = "Not run"; ai.eval.notRunReason = "stopped";
+    ai.eval.catchableDrop = 10; ai.eval.fixRound = 1;
+    ai.eval.counts!.questions = 2; ai.eval.counts!.newlyFail = 1;
+    for (const out of [renderEvidence(v2Pack({ ai })), renderEvidencePublic(v2Pack({ ai }))]) {
+      expect(out.body.slice(0, 3)).toEqual(["AI checks", "Eval: Not run: the check round stopped before the eval finished. Retry from the Rovara task page", "Real-model run: Not run (not available yet)"]);
+      expect(out.text).not.toMatch(/Eval counts:|Eval fix round:|Eval sensitivity:|question details not shown|Old:|New:/u);
+    }
+  });
+  it("DEC 200 points below only when answer lines are actually shown", () => {
+    const base = "Eval: Not run. Prompt changed. No eval found, so AI quality wasn't measured.";
+    for (const oldNewLines of [undefined, [], ["", "  "], ["Old: CANARY", "New: CANARY"]]) {
+      const p = pack(notRun("no_eval_configured"), { oldNewLines });
+      const priv = renderEvidence(p); const pub = renderEvidencePublic(p);
+      expect(priv.body[1]).toBe(base + ((oldNewLines?.some(line => line.trim().length > 0) ?? false) === false ? "" : " Compare the old and new answers below."));
+      expect(pub.body[1]).toBe(base + " Details are behind sign-in.");
+      expect(pub.text).not.toMatch(/CANARY|below|Eval counts:|Eval fix round:/u);
+      expect(priv.text).not.toMatch(/Eval counts:|Eval fix round:/u);
+    }
+  });
+  it.each([["same  id", "same id"], ["x".repeat(160) + "a", "x".repeat(160) + "b"]])("colliding inert ids never borrow a category (%s)", (a, b) => {
+    const ai = evidenceAiFromArtifact(artifact({ questions: [question(a, "safety"), question(b, "ordinary"), question("certain", "refusal")] }), digest)!;
+    expect(ai.eval.label).toBe("Worse on eval");
+    expect(ai.eval.questions[0]).toMatchObject({ id: "certain", category: "refusal" });
+    expect(ai.eval.questions.slice(1).every(q => q.category === undefined)).toBe(true);
+    expect(ai.eval.notices).toContain("details_withheld");
+  });
+  it("one total rendering limit includes the AI headline and full ordinary evidence", () => {
+    const long = "🧪".repeat(300);
+    const paths = Array.from({ length: 8 }, (_, i) => `${i}${long}`);
+    const p = pack(artifact({ questions: Array.from({ length: 10 }, (_, i) => { const q = question(`q${i}`, "safety"); q.answers!.freshNew = [long, long, long]; q.answers!.old = [long, long, long]; return q; }) }));
+    p.checks = Array.from({ length: 64 }, (_, i) => ({ ...p.checks[0]!, id: `c${i}`, label: long }));
+    p.notTested = Array.from({ length: 10 }, () => ({ what: long, reason: long }));
+    p.flags = { instructionFiles: paths, ciExecutedFiles: paths };
+    p.weakening = { removedTests: paths, absentOnNew: paths, absentOnNewCount: 8, changedTestConfig: paths, changedSnapshots: paths, changedFixtures: paths, skipRise: { before: 0, after: 10 } };
+    p.dependencies = Array.from({ length: 8 }, () => ({ name: long, kind: "http", backing: "none", label: "not_available", trust: "simulated" }));
+    for (const compact of [false, true]) {
+      const out = renderEvidence(p, { compact, questionLimit: 10, rovaraProblemLine: long, timeTargetLine: long });
+      expect(out.text.length).toBeLessThanOrEqual(9000);
+      expect(out.text).toContain("Worse on eval: 10 questions broke");
+      expect(out.text).toContain("Eval counts: 10 questions");
+      expect(out.text).toContain("(safety)");
+      expect(out.text).toContain("Rovara instruction files changed");
+    }
+  });
 });

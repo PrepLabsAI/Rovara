@@ -405,5 +405,10 @@ export function evidencePackV2Of(pack: EvidencePack, writer: EvidenceV2Writer, r
     ...(writer.meters === undefined ? {} : { meters: writer.meters }),
   };
   const parsed = EvidencePackV2Schema.safeParse(v2);
-  return parsed.success ? parsed.data : undefined;
+  if (parsed.success) return parsed.data;
+  // Optional AI evidence must not discard independently valid proof evidence.
+  const withoutAi = { ...v2 };
+  delete withoutAi.ai;
+  const fallback = EvidencePackV2Schema.safeParse(withoutAi);
+  return fallback.success ? fallback.data : undefined;
 }

@@ -72,7 +72,14 @@ export function evidenceAiFromArtifact(input: unknown, candidateDigest: string, 
   const result = evalResultFromArtifact(artifact);
   const hidden = result.usedHiddenSet;
   const counts = { questions: result.casesTotal, broke: 0, newlyFail: 0, newlyPass: 0, flaky: 0, unchanged: result.casesRun - result.questions.length, excluded: result.excluded.length };
-  const category = new Map((artifact.questions ?? []).map(q => [inertEvidenceText(q.id, 160), q.category]));
+  // Result IDs are already inert. Ambiguous IDs cannot safely carry source metadata.
+  const category = new Map<string, NonNullable<typeof artifact.questions>[number]["category"] | undefined>();
+  let ambiguousCategory = false;
+  for (const q of artifact.questions ?? []) {
+    const id = inertEvidenceText(q.id, 160);
+    if (category.has(id)) { category.set(id, undefined); ambiguousCategory = true; }
+    else category.set(id, q.category);
+  }
   const priority: typeof result.questions[number][] = []; const other: typeof result.questions[number][] = [];
   for (const q of result.questions) {
     if (q.change === "broke") counts.broke++;
@@ -97,6 +104,7 @@ export function evidenceAiFromArtifact(input: unknown, candidateDigest: string, 
   const sensitivity = percentage.safeParse(safeExtras.catchableDrop);
   const notices: EvidenceAi["eval"]["notices"] = [];
   if (!hidden) {
+    if (ambiguousCategory) notices.push("details_withheld");
     if (artifact.notices?.some(n => n.code === "baseline_measuring")) notices.push("baseline_measuring");
     if (artifact.options?.subsetSupported === false) notices.push("subset_unsupported");
     if (artifact.options?.sameJudgeFamily === true) notices.push("same_judge_family");

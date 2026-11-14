@@ -341,7 +341,9 @@ describe("callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    const gitEnvironment = isolatedGitEnvironment(root, { GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "0", GIT_NOGLOB_PATHSPECS: "0", GIT_ICASE_PATHSPECS: "0" });
+    expect(Object.fromEntries(["GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"].map(key => [key, gitEnvironment[key]]))).toEqual({ GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "0", GIT_NOGLOB_PATHSPECS: "0", GIT_ICASE_PATHSPECS: "0" });
+    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: gitEnvironment });
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
     // TE-A2b is the first caller (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
@@ -358,7 +360,7 @@ describe("callers", () => {
       "packages/worker/src/verification/test-report.ts",
     ]);
     // B3 may share inert text only; the other v2 exports remain confined to the A2b callers.
-    const others = spawnSync("git", ["grep", "--untracked", "-lw", ...names.filter((name) => name !== "inertEvidenceText").flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    const others = spawnSync("git", ["grep", "--untracked", "-lw", ...names.filter((name) => name !== "inertEvidenceText").flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: gitEnvironment });
     expect([0, 1]).toContain(others.status);
     expect(others.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/")).sort()).toEqual([
       "packages/broker/src/core/proof/evidence-guard.ts",

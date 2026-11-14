@@ -267,7 +267,30 @@ describe("AI evidence public and private descriptions", () => {
       expect(text).toContain("Worse on eval: 1 question broke");
       expect(text).toContain("Eval counts: 1000 questions");
       expect(text.includes("CANARY")).toBe(repositoryKnownPrivate === true);
+      if (repositoryKnownPrivate !== true) {
+        const start = text.indexOf("## Evidence");
+        const block = text.slice(start, text.indexOf("\n## ", start + 3)).trimEnd();
+        expect(block).toBe("## Evidence\nWorse on eval: 1 question broke\n\nAI checks\n\nEval: Worse on eval\n\nEval counts: 1000 questions; 1 broke; 0 newly fail; 0 newly pass; 0 flaky; 999 unchanged; 0 excluded\n\nReal-model run: Not run (not available yet)");
+        const aiStart = text.indexOf("## Evidence");
+        expect(text.slice(aiStart)).not.toContain("Checks by trust:");
+        expect(text.slice(aiStart)).not.toContain("Checked in a sealed round");
+      }
       expect(Buffer.byteLength(text)).toBeLessThanOrEqual(PULL_REQUEST_BODY_MAX_BYTES);
+    }
+  });
+  it.each(["not_run", "done"] as const)("public non-Worse blocks contain only AI evidence (%s)", outcome => {
+    const base = aiArtifact();
+    const evalArtifact = outcome === "not_run"
+      ? { ...base, outcome, notRunReason: "no_eval_configured", questions: undefined, options: undefined, context: { aiChange: true, discovery: "not_configured", previousPasses: 0 }, evalConfigured: false }
+      : { ...base, questions: base.questions.map(q => ({ ...q, first: true, freshOld: undefined, freshNew: undefined, answers: undefined })) };
+    const read = v2Read(v1Pack(), { ...writer, evalArtifact });
+    for (const repositoryKnownPrivate of [false, undefined]) {
+      const text = body(context({ evidenceWriter: 2, repositoryKnownPrivate }, { read }));
+      const start = text.indexOf("## Evidence");
+      const block = text.slice(start, text.indexOf("\n## ", start + 3));
+      expect(block).toContain(outcome === "not_run" ? "Eval: Not run." : "Eval: No drop found");
+      expect(block.startsWith("## Evidence\nAI checks\n")).toBe(true);
+      expect(block).not.toMatch(/Verified|Checks:|Tests:|Change proof:|Dependencies:|below/u);
     }
   });
   it("shrinking never sacrifices the label, counts or the broken safety question", () => {
