@@ -88,8 +88,13 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
     const files = found.files;
     if (found.symlinks.has(path)) return "symlink";
     for (const link of found.symlinks) if (path.startsWith(`${link}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub reports a symbolic link as a parent of this path");
+    for (const [name, type] of found.entries) {
+      if (type !== "submodule") continue;
+      if (name === path) return "dir";
+      if (path.startsWith(`${name}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "a submodule is the parent of this path");
+    }
     if (files.has(path)) return "file";
-    for (const name of files.keys()) if (name.startsWith(`${path}/`)) return "dir";
+    for (const name of found.entries.keys()) if (name.startsWith(`${path}/`)) return "dir";
     return "none";
   }
   async commitFilesToBranch(repositoryUrl: string, request: CommitFilesRequest, scope: HostScope): Promise<{ revision: string; changed: boolean }> {

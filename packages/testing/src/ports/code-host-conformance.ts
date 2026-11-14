@@ -90,6 +90,18 @@ const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
       }
       expect(files.find(file => file.path === "renamed")?.previousPath).toBe("rename");
       expect(files.some(file => file.path === "unrelated")).toBe(false);
+      const revision = model.headOf(branch(1));
+      expect(await host.fileAtRevision(repository, "module", revision, scope)).toBeUndefined();
+      if (host.pathKind !== undefined) {
+        expect(await host.pathKind(repository, "module", revision, scope)).toBe("dir");
+        await expect(host.pathKind(repository, "module/child", revision, scope)).rejects.toBeDefined();
+      }
+      const pinned = await host.changedFiles(ref, 1, scope, { expectedHead: revision });
+      expect(pinned.files.find(file => file.path === "module")?.entry?.head).toBe("submodule");
+      model.commit(branch(1), { added: "later" });
+      const moved = await host.changedFiles(ref, 1, scope, { expectedHead: revision });
+      expect(moved.files.length).toBeGreaterThan(0);
+      expect(moved.files.every(file => file.entry === undefined)).toBe(true);
     },
   },
   {

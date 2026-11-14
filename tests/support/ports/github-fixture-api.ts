@@ -158,6 +158,9 @@ export class GitHubFixtureApi {
       const found = this.model.revision(revision);
       const wanted = match[1] ?? "";
       const accept = new Headers(init?.headers).get("accept") ?? "";
+      for (const [name, type] of found.entries) {
+        if (type === "submodule" && (wanted === name || wanted.startsWith(`${name}/`))) return json(200, { type, name: name.split("/").pop(), path: name, sha: gitSha(`module ${name}`) });
+      }
       // The raw media type is a file's text; any other is GitHub's JSON: a file's record, a symbolic link's, or a directory's listing.
       if (accept.includes("raw")) {
         const content = found.files.get(wanted);
@@ -170,11 +173,11 @@ export class GitHubFixtureApi {
       if (file !== undefined) return json(200, { type: "file", name: wanted.split("/").pop(), path: wanted, sha: gitSha(`blob ${file}`), encoding: "base64", content: Buffer.from(file, "utf8").toString("base64") });
       const prefix = wanted === "" ? "" : `${wanted}/`;
       const children = new Map<string, string>();
-      for (const name of [...found.files.keys(), ...found.symlinks]) {
+      for (const name of found.entries.keys()) {
         if (!name.startsWith(prefix)) continue;
         const rest = name.slice(prefix.length);
         const first = rest.split("/")[0]!;
-        children.set(first, rest.includes("/") ? "dir" : found.symlinks.has(name) ? "symlink" : "file");
+        children.set(first, rest.includes("/") ? "dir" : found.entries.get(name) === "executable" ? "file" : found.entries.get(name)!);
       }
       return children.size === 0 ? NOT_FOUND() : json(200, [...children.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([name, type]) => ({ name, path: `${prefix}${name}`, type, sha: gitSha(`entry ${prefix}${name}`) })));
     }

@@ -21,7 +21,7 @@ async function world() {
   const api = new GitHubFixtureApi(model);
   const state = {
     headEntries: [entry("AGENTS.md")], baseEntries: [entry("AGENTS.md")], files: [file("AGENTS.md")], truncated: false,
-    prHead: head, prTip: tip, mergeBase: base, failurePath: "", failureStatus: 404, rate: false, missingMergeBase: false, allowed: true, allowedCompany: scope.orgId as string,
+    prHead: head, prTip: tip, prBaseRef: "main", staleCompare: false, headAfterFiles: "", mergeBase: base, failurePath: "", failureStatus: 404, rate: false, missingMergeBase: false, allowed: true, allowedCompany: scope.orgId as string,
   };
   const requests: string[] = [];
   const server = createServer((request, response) => {
@@ -31,9 +31,9 @@ async function world() {
       let answer: Response;
       const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: state.rate ? { "retry-after": "30" } : {} });
       if (state.failurePath !== "" && (state.failurePath === "/pulls/1" ? path.endsWith(state.failurePath) : path.includes(state.failurePath))) answer = json({ message: state.rate ? "API rate limit exceeded" : "Not Found" }, state.failureStatus);
-      else if (/\/pulls\/1\/files\?/.test(path)) answer = json(state.files);
-      else if (path.endsWith("/pulls/1")) answer = json({ head: { sha: state.prHead }, base: { sha: state.prTip } });
-      else if (path.includes("/compare/")) answer = json(state.missingMergeBase ? {} : { merge_base_commit: { sha: state.mergeBase } });
+      else if (/\/pulls\/1\/files\?/.test(path)) { answer = json(state.files); if (state.files.length === 100) answer.headers.set("link", '</next>; rel="next"'); if (state.headAfterFiles !== "") state.prHead = state.headAfterFiles; }
+      else if (path.endsWith("/pulls/1")) answer = json({ head: { sha: state.prHead }, base: { sha: state.prTip, ref: state.prBaseRef } });
+      else if (path.includes("/compare/")) answer = json(state.missingMergeBase ? {} : { merge_base_commit: { sha: state.staleCompare && path.includes(state.prTip) ? tip : state.mergeBase } });
       else if (path.includes("/git/trees/")) answer = json({ tree: path.includes(head) ? state.headEntries : state.baseEntries, truncated: state.truncated });
       else {
         const chunks: Buffer[] = [];
@@ -76,10 +76,11 @@ describe("GitHub file details over local HTTP", () => {
     w.state.baseEntries = [entry("old", "120000"), entry("deleted"), ...w.state.headEntries.filter(e => !["renamed", "added"].includes(e.path))];
     w.state.files = [...w.state.headEntries.map(e => file(e.path)), file("deleted", "removed")];
     w.state.files[7] = file("renamed", "renamed", "old");
+    w.state.files[8] = file("added", "added");
     const result = await w.host.changedFiles(w.ref, 1, scope);
     const types = Object.fromEntries(result.files.map(f => [f.path, f.entry]));
     expect(types).toEqual({ plain: { head: "file", base: "file" }, legacy: { head: "file", base: "file" }, exec: { head: "executable", base: "executable" }, link: { head: "symlink", base: "symlink" }, module: { head: "submodule", base: "submodule" }, unknown: undefined, dir: undefined, renamed: { head: "executable", base: "symlink" }, added: { head: "file", base: "none" }, deleted: { head: "none", base: "file" } });
-    expect(w.requests.some(p => p.includes(`/compare/${tip}...${head}`))).toBe(true);
+    expect(w.requests.some(p => p.includes(`/compare/main...${head}`))).toBe(true);
     expect(w.requests.some(p => p.includes(`/git/trees/${base}`))).toBe(true);
     expect(w.requests.some(p => p.includes(`/git/trees/${tip}`))).toBe(false);
   });
@@ -100,8 +101,8 @@ describe("GitHub file details over local HTTP", () => {
     w.state.failurePath = failurePath;
     expect((await w.host.changedFiles(w.ref, 1, scope)).files[0]?.entry).toBeUndefined();
   });
-  it.each(["prHead", "prTip", "mergeBase"] as const)("leaves metadata unknown for malformed %s", async key => {
-    const w = await world(); w.state[key] = "main";
+  it.each(["prHead", "prBaseRef", "mergeBase"] as const)("leaves metadata unknown for malformed %s", async key => {
+    const w = await world(); w.state[key] = key === "prBaseRef" ? "" : "main";
     await expect(w.provider.getPullRequestFileRevisions(repository.url, 1, scope)).rejects.toBeDefined();
     expect((await w.host.changedFiles(w.ref, 1, scope)).files[0]?.entry).toBeUndefined();
   });
@@ -115,7 +116,7 @@ describe("GitHub file details over local HTTP", () => {
     expect((await w.host.instructionFiles!(repository, head, scope)).complete).toBe(false);
   });
   it.each([403, 429])("surfaces HTTP %s rate limits on tree, compare and files reads", async status => {
-    for (const path of ["/git/trees/", "/compare/", "/files?", "/pulls/1", "/installation", "/access_tokens"]) {
+    for (const path of [`/git/trees/${head}`, `/git/trees/${base}`, "/compare/", "/files?", "/pulls/1", "/installation", "/access_tokens"]) {
       const w = await world(); Object.assign(w.state, { failurePath: path, failureStatus: status, rate: true });
       await expect(w.host.changedFiles(w.ref, 1, scope)).rejects.toBeInstanceOf(HostRateLimitError);
     }
@@ -262,4 +263,85 @@ it("counts a cold instruction read including installation and token setup", asyn
   const w = await world();
   expect((await w.host.instructionFiles!(repository, head, scope)).complete).toBe(true);
   expect(w.requests).toHaveLength(3);
+});
+
+
+it.each([
+  ["unknown", true, true], ["added", true, true], ["added", false, false],
+  ["removed", true, true], ["removed", false, false],
+  ["modified", false, true], ["modified", true, false],
+  ["renamed", false, true], ["renamed", true, false],
+] as const)("omits inconsistent %s types (head %s, base %s)", async (status, hasHead, hasBase) => {
+  const w = await world();
+  w.state.files = [file("new", status, status === "renamed" ? "old" : undefined)];
+  w.state.headEntries = hasHead ? [entry("new")] : [];
+  w.state.baseEntries = hasBase ? [entry(status === "renamed" ? "old" : "new")] : [];
+  const page = await w.host.changedFiles(w.ref, 1, scope);
+  expect(page.files).toHaveLength(1);
+  expect(page.files[0]?.entry).toBeUndefined();
+});
+
+it("pins type metadata to the caller's head across pages", async () => {
+  const w = await world();
+  expect((await w.host.changedFiles(w.ref, 1, scope, { expectedHead: head })).files[0]?.entry).toBeDefined();
+  w.state.prHead = "e".repeat(40);
+  const before = w.requests.filter(path => path.includes("/git/trees/")).length;
+  const page = await w.host.changedFiles(w.ref, 2, scope, { expectedHead: head });
+  expect(page.files).toHaveLength(1);
+  expect(page.files[0]?.entry).toBeUndefined();
+  expect(w.requests.filter(path => path.includes("/git/trees/"))).toHaveLength(before);
+});
+
+it.each([403, 429])("preserves existing provider errors for HTTP %s rate limits", async status => {
+  for (const failurePath of ["/installation", "/access_tokens", "/git/trees/", "/files?"]) {
+    const w = await world(); Object.assign(w.state, { failurePath, failureStatus: status, rate: true });
+    const read = failurePath === "/files?"
+      ? w.provider.listPullRequestFiles(repository.url, 1, { page: 1 }, scope)
+      : failurePath === "/git/trees/" ? w.provider.listTreeAtCommit(repository.url, head, scope)
+      : w.provider.getFileAtCommit(repository.url, "AGENTS.md", head, scope);
+    await expect(read).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  }
+});
+
+it.each([403, 429])("keeps instruction-only HTTP %s rate limits neutral, including warm authorization", async status => {
+  for (const failurePath of ["/installation", "/access_tokens", "/git/trees/"]) {
+    const w = await world(); Object.assign(w.state, { failurePath, failureStatus: status, rate: true });
+    await expect(w.host.instructionFiles!(repository, head, scope)).rejects.toBeInstanceOf(HostRateLimitError);
+  }
+  const w = await world();
+  await w.host.instructionFiles!(repository, head, scope);
+  Object.assign(w.state, { failurePath: "/installation", failureStatus: status, rate: true });
+  await expect(w.host.instructionFiles!(repository, head, scope)).rejects.toBeInstanceOf(HostRateLimitError);
+});
+
+
+it("compares the current base branch instead of a stale pull request base sha", async () => {
+  const w = await world(); w.state.staleCompare = true; w.state.prBaseRef = "release/next";
+  expect(await w.provider.getPullRequestFileRevisions(repository.url, 1, scope)).toEqual({ head, base });
+  expect(w.requests.some(path => path.includes(`/compare/release%2Fnext...${head}`))).toBe(true);
+});
+
+
+it("omits all types after a push during the files read and preserves pagination", async () => {
+  const w = await world(); w.state.headAfterFiles = "e".repeat(40);
+  w.state.files = Array.from({ length: 100 }, (_, i) => file(`file-${i}`, "added"));
+  const page = await w.host.changedFiles(w.ref, 1, scope, { expectedHead: head });
+  expect(page.files).toHaveLength(100);
+  expect(page.files.every(file => file.entry === undefined)).toBe(true);
+  expect(page.nextPage).toBe(2);
+  expect(w.requests.some(path => path.includes("/git/trees/"))).toBe(false);
+});
+
+it("promotes a tagged rate limit in the metadata revision read only", async () => {
+  const w = await world(); Object.assign(w.state, { failurePath: "/installation", failureStatus: 429, rate: true });
+  const failure: unknown = await w.provider.listTreeAtCommit(repository.url, head, scope).catch(error => error as unknown);
+  expect(failure).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  w.state.failurePath = "";
+  w.provider.getPullRequestFileRevisions = async () => { throw failure; };
+  await expect(w.host.changedFiles(w.ref, 1, scope)).rejects.toBeInstanceOf(HostRateLimitError);
+});
+
+it("does not promote a non-rate instruction failure", async () => {
+  const w = await world(); w.state.failurePath = "/git/trees/";
+  await expect(w.host.instructionFiles!(repository, head, scope)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
 });

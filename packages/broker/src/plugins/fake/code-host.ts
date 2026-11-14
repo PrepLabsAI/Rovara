@@ -106,9 +106,14 @@ export class FakeCodeHost implements CodeHost {
     if (found.symlinks.has(path)) return "symlink";
     // Like a real host: a path below a symbolic link cannot be told (what the link points at is not known), so it is an error, never "none".
     for (const link of found.symlinks) if (path.startsWith(`${link}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "a symbolic link is the parent of this path");
+    for (const [name, type] of found.entries) {
+      if (type !== "submodule") continue;
+      if (name === path) return "dir";
+      if (path.startsWith(`${name}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "a submodule is the parent of this path");
+    }
     if (files.has(path)) return "file";
     // A directory is a path some file lives under.
-    for (const name of files.keys()) if (name.startsWith(`${path}/`)) return "dir";
+    for (const name of found.entries.keys()) if (name.startsWith(`${path}/`)) return "dir";
     return "none";
   }
 
@@ -240,13 +245,14 @@ export class FakeCodeHost implements CodeHost {
     });
   }
 
-  async changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope): Promise<ChangeRequestFilesPage> {
+  async changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope, options?: { expectedHead?: string }): Promise<ChangeRequestFilesPage> {
     this.checkScope(scope);
     if (!Number.isSafeInteger(page) || page < 1) throw agentXError("CONFIG_INVALID", "the page is invalid");
     const cr = this.cr(ref);
     const all = this.model.changedFiles(cr.id);
     const size = 100;
     const files = all.slice((page - 1) * size, page * size);
+    if (options?.expectedHead !== undefined && options.expectedHead !== this.model.headRevisionOf(cr)) for (const file of files) delete file.entry;
     return ({ files, ...(all.length > page * size ? { nextPage: page + 1 } : {}) });
   }
 

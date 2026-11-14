@@ -54,6 +54,8 @@ export class FakeHostModel {
   requiredChecks: string[] = [];
   /** P6: when set, the host answers every budgeted read as rate limited until this time (milliseconds). A test sets it; nothing in the model reads the real clock. */
   rateLimitedUntil: number | undefined;
+  /** Gitlink targets are revision identities, never ordinary file text. */
+  private readonly gitlinks = new Map<string, ReadonlyMap<string, string>>();
   private readonly checksByRevision = new Map<string, Check[]>();
   private readonly logs = new Map<string, string>();
   private serial = 0;
@@ -81,6 +83,10 @@ export class FakeHostModel {
     return new Date(this.clock).toISOString();
   }
 
+  private contentsOf(revision: FakeRevision): Map<string, string> {
+    return new Map([...revision.files, ...(this.gitlinks.get(revision.sha) ?? [])]);
+  }
+
   private addRevision(parents: string[], files: Map<string, string>, symlinks: ReadonlySet<string> = new Set(), types?: ReadonlyMap<string, FileEntryType>): FakeRevision {
     const entries = new Map<string, FileEntryType>([...files.keys()].map(path => [path, (types?.get(path) === "symlink" ? "file" : types?.get(path)) ?? "file"]));
     for (const path of symlinks) entries.set(path, "symlink");
@@ -88,7 +94,9 @@ export class FakeHostModel {
     const tree = sha1(`tree\n${JSON.stringify(sorted)}\ntypes ${JSON.stringify([...entries].sort(([a], [b]) => a.localeCompare(b)))}`);
     this.serial += 1;
     const sha = sha1(`commit\n${parents.join(",")}\n${tree}\n${this.serial}`);
-    const revision: FakeRevision = { sha, tree, parents, files, symlinks: new Set(symlinks), entries };
+    this.gitlinks.set(sha, new Map([...files].filter(([path]) => entries.get(path) === "submodule")));
+    const textFiles = new Map([...files].filter(([path]) => entries.get(path) !== "submodule"));
+    const revision: FakeRevision = { sha, tree, parents, files: textFiles, symlinks: new Set(symlinks), entries };
     this.revisions.set(sha, revision);
     return revision;
   }
@@ -122,14 +130,16 @@ export class FakeHostModel {
   commit(branch: string, changes: Record<string, string | null>): string {
     const parentSha = this.branches.get(branch) ?? this.headOf(this.defaultBranch);
     const parent = this.revision(parentSha);
-    const files = new Map(parent.files);
+    const files = this.contentsOf(parent);
     const symlinks = new Set(parent.symlinks);
+    const entries = new Map(parent.entries);
     for (const [path, content] of Object.entries(changes)) {
       symlinks.delete(path);
+      if (entries.get(path) === "submodule") entries.delete(path);
       if (content === null) files.delete(path);
       else files.set(path, content);
     }
-    const made = this.addRevision([parentSha], files, symlinks, parent.entries);
+    const made = this.addRevision([parentSha], files, symlinks, entries);
     this.branches.set(branch, made.sha);
     return made.sha;
   }
@@ -150,7 +160,7 @@ export class FakeHostModel {
   commitEntry(branch: string, path: string, type: FileEntryType, content: string): string {
     const parentSha = this.branches.get(branch) ?? this.headOf(this.defaultBranch);
     const parent = this.revision(parentSha);
-    const files = new Map(parent.files);
+    const files = this.contentsOf(parent);
     const symlinks = new Set(parent.symlinks);
     const entries = new Map(parent.entries);
     symlinks.delete(path);
@@ -167,7 +177,7 @@ export class FakeHostModel {
     const parent = this.revision(parentSha);
     const type = parent.entries.get(previousPath);
     if (type === undefined) throw agentXError("CONFIG_INVALID", "the rename source is absent");
-    const files = new Map(parent.files), entries = new Map(parent.entries), symlinks = new Set(parent.symlinks);
+    const files = this.contentsOf(parent), entries = new Map(parent.entries), symlinks = new Set(parent.symlinks);
     const content = files.get(previousPath);
     files.delete(previousPath); entries.delete(previousPath); symlinks.delete(previousPath);
     entries.set(path, type);
@@ -435,16 +445,17 @@ export class FakeHostModel {
       }
       return found;
     };
+    const sourceFiles = this.contentsOf(source), targetFiles = this.contentsOf(target);
     const sourceDirs = directories(source), targetDirs = directories(target);
     const knownAt = (path: string, basePath: string) => known && !sourceDirs.has(path) && !targetDirs.has(basePath);
     const removed = new Set([...target.entries.keys()].filter(path => !source.entries.has(path)));
     const out: ChangeRequestFile[] = [];
     for (const [path, type] of [...source.entries].sort(([a], [b]) => a.localeCompare(b))) {
-      const content = source.files.get(path) ?? "";
-      const before = target.files.get(path);
+      const content = sourceFiles.get(path) ?? "";
+      const before = targetFiles.get(path);
       if (target.entries.get(path) === type && (before ?? "") === content) continue;
       // Exact renames only, like a host fixture with no similarity heuristic.
-      const previousPath = target.entries.has(path) ? undefined : [...removed].find(old => target.entries.get(old) === type && (target.files.get(old) ?? "") === content);
+      const previousPath = target.entries.has(path) ? undefined : [...removed].find(old => target.entries.get(old) === type && (targetFiles.get(old) ?? "") === content);
       if (previousPath !== undefined) removed.delete(previousPath);
       const basePath = previousPath ?? path;
       const baseType = target.entries.get(basePath) ?? "none";
@@ -452,7 +463,7 @@ export class FakeHostModel {
         ...(previousPath === undefined ? {} : { previousPath }), ...(knownAt(path, basePath) ? { entry: { head: type, base: baseType } } : {}) });
     }
     for (const path of [...removed].sort()) {
-      out.push({ path, status: "removed", additions: 0, deletions: lines(target.files.get(path) ?? ""), ...(knownAt(path, path) ? { entry: { head: "none", base: target.entries.get(path)! } } : {}) });
+      out.push({ path, status: "removed", additions: 0, deletions: lines(targetFiles.get(path) ?? ""), ...(knownAt(path, path) ? { entry: { head: "none", base: target.entries.get(path)! } } : {}) });
     }
     return out;
   }
@@ -477,7 +488,7 @@ export class FakeHostModel {
     if (cr.state === "closed") return { outcome: "refused", reason: "closed" };
     if (this.headRevisionOf(cr) !== input.revision) return { outcome: "refused", reason: "head_changed" };
     if (this.mergeableState(cr) !== "clean") return { outcome: "refused", reason: "not_mergeable", hostMessage: "Required checks have not passed." };
-    const files = new Map(this.revision(input.revision).files);
+    const files = this.contentsOf(this.revision(input.revision));
     const merged = this.addRevision([this.headOf(cr.targetBranch)], files, this.revision(input.revision).symlinks, this.revision(input.revision).entries);
     this.branches.set(cr.targetBranch, merged.sha);
     cr.state = "merged";

@@ -8,9 +8,8 @@ const filenames = new Set(AI_INSTRUCTION_PATH_RULES.files.map(name => name.toLow
 const folders = new Set<string>(AI_INSTRUCTION_PATH_RULES.folders);
 const paths = new Set<string>(AI_INSTRUCTION_PATH_RULES.paths);
 
-/** Git paths use slashes. One leading ./ is accepted; backslashes, empty segments and traversal are rejected, never normalised. */
+/** Git paths use slashes. One leading ./ is accepted; backslashes are ordinary filename characters, never separators. Empty segments and traversal are rejected. */
 export function isAiInstructionPath(path: string): boolean {
-  if (path.includes("\\")) return false;
   const parts = (path.startsWith("./") ? path.slice(2) : path).toLowerCase().split("/");
   if (parts.some(part => part === "" || part === "." || part === "..")) return false;
   if (filenames.has(parts.at(-1)!)) return true;

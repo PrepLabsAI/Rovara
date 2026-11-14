@@ -144,6 +144,8 @@ export interface GitHubCodeHostProvider {
   deleteLessonsBranch?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<"deleted" | "gone">;
   /** Optional immutable tree read. Truncation is explicit; failures and rate limits throw. */
   listTreeAtCommit?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ truncated: boolean; entries: Array<{ path: string; mode: string; type: string; sha: string }> }>;
+  /** Promote only errors observed by the file-details port reads; existing client methods retain their error codes. */
+  fileDetailsError?(error: unknown): unknown;
   /** Optional PR head and merge base from a fresh PR/compare read, never the target branch tip. */
   getPullRequestFileRevisions?(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<{ head: string; base: string }>;
   getCommitTree(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string>;

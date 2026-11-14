@@ -63,6 +63,10 @@ function checkedScope(scope: HostScope): HostScope {
 }
 
 export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHubCodeHostOptions): CodeHost {
+  async function fileDetailsRead<T>(read: () => Promise<T>): Promise<T> {
+    try { return await read(); }
+    catch (error) { throw provider.fileDetailsError?.(error) ?? error; }
+  }
   const pathKindOfProvider = typeof provider.getPathKindAtCommit === "function" ? provider.getPathKindAtCommit.bind(provider) : undefined;
   const commitFilesOfProvider = typeof provider.commitFilesToBranch === "function" ? provider.commitFilesToBranch.bind(provider) : undefined;
   const findPullRequestOfProvider = typeof provider.findLessonsPullRequest === "function" ? provider.findLessonsPullRequest.bind(provider) : undefined;
@@ -202,18 +206,23 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
       return statusOf(await provider.getPullRequestStatus(ref.repository.url, pullRequestNumber(ref), checkedScope(scope), budget));
     },
 
-    async changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope): Promise<ChangeRequestFilesPage> {
+    async changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope, readOptions?: { expectedHead?: string }): Promise<ChangeRequestFilesPage> {
       const checked = checkedScope(scope);
-      const listed = await provider.listPullRequestFiles(ref.repository.url, pullRequestNumber(ref), { page }, checked);
+      const listed = await fileDetailsRead(() => provider.listPullRequestFiles(ref.repository.url, pullRequestNumber(ref), { page }, checked));
       const files = listed.files.map(fileOf);
       if (files.length > 0 && provider.listTreeAtCommit !== undefined && provider.getPullRequestFileRevisions !== undefined) {
         try {
-          const revisions = await provider.getPullRequestFileRevisions(ref.repository.url, pullRequestNumber(ref), checked);
-          const head = await readTree(ref.repository.url, revisions.head, checked, undefined, true);
-          const base = await readTree(ref.repository.url, revisions.base, checked, undefined, true);
+          const revisions = await fileDetailsRead(() => provider.getPullRequestFileRevisions!(ref.repository.url, pullRequestNumber(ref), checked));
+          if (readOptions?.expectedHead !== undefined && revisions.head !== readOptions.expectedHead) return { files, ...(listed.nextPage === undefined ? {} : { nextPage: listed.nextPage }) };
+          const head = await fileDetailsRead(() => readTree(ref.repository.url, revisions.head, checked, undefined, true));
+          const base = await fileDetailsRead(() => readTree(ref.repository.url, revisions.base, checked, undefined, true));
           for (const file of files) {
             const headType = entryAt(head, file.path), baseType = entryAt(base, file.previousPath ?? file.path);
-            if (headType !== undefined && baseType !== undefined) file.entry = { head: headType, base: baseType };
+            if (headType === undefined || baseType === undefined) continue;
+            const consistent = file.status === "added" ? headType !== "none" && baseType === "none"
+              : file.status === "removed" ? headType === "none" && baseType !== "none"
+              : (file.status === "modified" || file.status === "renamed") && headType !== "none" && baseType !== "none";
+            if (consistent) file.entry = { head: headType, base: baseType };
           }
         } catch (error) {
           if (hostRateLimitRetryAt(error) !== undefined) throw error;
@@ -228,7 +237,7 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
         const checked = checkedScope(scope);
         const max = readOptions?.max ?? 500;
         if (!Number.isSafeInteger(max) || max < 0) throw agentXError("CONFIG_INVALID", "instruction file limit is invalid");
-        return instructionList(await readTree(repository.url, revision, checked, readOptions), max);
+        return instructionList(await fileDetailsRead(() => readTree(repository.url, revision, checked, readOptions)), max);
       },
     }),
 

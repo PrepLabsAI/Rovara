@@ -373,6 +373,22 @@ export class GitHubAppCredentialProvider {
   private readonly fetchImplementation: typeof fetch;
   private readonly now: () => number;
   private readonly installations = new Map<string, Promise<{ id: number; login: string }>>();
+  private readonly fileReadLimits = new WeakMap<object, number>();
+
+  /** File-details reads opt into the neutral error without changing existing client callers or cached promises. */
+  fileDetailsError(error: unknown): unknown {
+    const retryAt = typeof error === "object" && error !== null ? this.fileReadLimits.get(error) : undefined;
+    return retryAt === undefined ? error : new GithubCompareRateLimitError(retryAt);
+  }
+
+  private async unavailableFileRead(response: Response, message: string): Promise<never> {
+    const error = agentXError("RUNTIME_UNAVAILABLE", message);
+    const body: unknown = await response.json().catch(() => undefined);
+    const retryAt = compareRateLimitRetryAt(response, body, this.now());
+    if (retryAt !== undefined) this.fileReadLimits.set(error, retryAt);
+    throw error;
+  }
+
   private readonly readTokens = new Map<string, { token: Promise<string>; expiresAt: number }>();
   private slug: string | undefined;
   /** The bounded provider of each tracking pass's budget, so one pass's reads share one installation lookup. */
@@ -788,9 +804,9 @@ export class GitHubAppCredentialProvider {
     const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
     const read = await this.trackingJson(`${root}/pulls/${number}`, token, { rateLimit: true });
     const pr = statusRecord(read.body);
-    const head = statusRecord(pr.head).sha, tip = statusRecord(pr.base).sha;
-    if (read.status !== 200 || typeof head !== "string" || typeof tip !== "string" || !/^[a-f0-9]{40}$/u.test(head) || !/^[a-f0-9]{40}$/u.test(tip)) throw agentXError("RUNTIME_UNAVAILABLE", "The change request revisions are unavailable.");
-    const compare = await this.trackingJson(`${root}/compare/${tip}...${head}?per_page=1`, token, { rateLimit: true });
+    const head = statusRecord(pr.head).sha, tip = statusRecord(pr.base).ref;
+    if (read.status !== 200 || typeof head !== "string" || typeof tip !== "string" || !/^[a-f0-9]{40}$/u.test(head) || !GitBranchNameSchema.safeParse(tip).success) throw agentXError("RUNTIME_UNAVAILABLE", "The change request revisions are unavailable.");
+    const compare = await this.trackingJson(`${root}/compare/${encodeURIComponent(tip)}...${head}?per_page=1`, token, { rateLimit: true });
     const base = statusRecord(statusRecord(compare.body).merge_base_commit).sha;
     if (compare.status !== 200 || typeof base !== "string" || !/^[a-f0-9]{40}$/u.test(base)) throw agentXError("RUNTIME_UNAVAILABLE", "The merge base is unavailable.");
     return { head, base };
@@ -806,10 +822,7 @@ export class GitHubAppCredentialProvider {
       { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" },
     );
     if (!response.ok) {
-      const body: unknown = await response.json().catch(() => undefined);
-      const retryAt = compareRateLimitRetryAt(response, body, this.now());
-      if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
-      throw agentXError("RUNTIME_UNAVAILABLE", "The pull request diff is unavailable.");
+      return this.unavailableFileRead(response, "The pull request diff is unavailable.");
     }
     const body: unknown = await response.json();
     if (!Array.isArray(body) || body.length > 100) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid pull request diff.");
@@ -1601,10 +1614,7 @@ export class GitHubAppCredentialProvider {
       { headers: githubHeaders(token), signal: AbortSignal.timeout(options?.timeoutMs ?? 30_000), redirect: "error" },
     );
     if (!response.ok) {
-      const body: unknown = await response.json().catch(() => undefined);
-      const retryAt = compareRateLimitRetryAt(response, body, this.now());
-      if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
-      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub tree listing failed");
+      return this.unavailableFileRead(response, `GitHub tree listing failed with HTTP ${response.status}`);
     }
     const body: unknown = await response.json();
     if (typeof body !== "object" || body === null || !Array.isArray((body as { tree?: unknown }).tree) || typeof (body as { truncated?: unknown }).truncated !== "boolean") throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid tree listing");
@@ -2190,10 +2200,7 @@ export class GitHubAppCredentialProvider {
       );
     }
     if (!response.ok) {
-      const body: unknown = await response.json().catch(() => undefined);
-      const retryAt = compareRateLimitRetryAt(response, body, this.now());
-      if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
-      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installation lookup failed with HTTP ${response.status}`);
+      return this.unavailableFileRead(response, `GitHub App installation lookup failed with HTTP ${response.status}`);
     }
     const body: unknown = await response.json();
     const id = body && typeof body === "object" && "id" in body ? body.id : undefined;
@@ -2501,10 +2508,7 @@ export class GitHubAppCredentialProvider {
   /** The token of a successful token response; anything else is GitHub being unavailable. */
   private async tokenOf(response: Response, issued?: Pick<GitHubTokenIssued, "installationId" | "repository" | "requested">, expiry?: { expiresAt?: string }): Promise<string> {
     if (!response.ok) {
-      const body: unknown = await response.json().catch(() => undefined);
-      const retryAt = compareRateLimitRetryAt(response, body, this.now());
-      if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
-      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installation token request failed with HTTP ${response.status}`);
+      return this.unavailableFileRead(response, `GitHub App installation token request failed with HTTP ${response.status}`);
     }
     const body: unknown = await response.json();
     if (!body || typeof body !== "object" || !("token" in body) || typeof body.token !== "string") {

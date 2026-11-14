@@ -23,10 +23,10 @@ describe("file entry contract", () => {
 });
 
 describe("instruction path matching", () => {
-  it.each(["AGENTS.md", "nested/AGENTS.override.md", "AGENT.md", "Claude.md", "CLAUDE.local.md", "GEMINI.md", "WARP.md", "SKILL.md", ".cursorrules", ".windsurfrules", ".clinerules", ".goosehints", "pkg/.github/copilot-instructions.md", "./packages/api/AGENTS.md", "apps/web/.cursor/rules/x.mdc", ".github/instructions/a.md", ".github/prompts/a.md", ".github/chatmodes/a.md", ...[".cursor", ".claude", ".windsurf", ".clinerules", ".continue", ".agents", ".codex", ".openhands", ".kilocode", ".amazonq", ".kiro", ".gemini", ".roo", ".cline", ".trae", ".junie", ".rovara"].map(folder => `nested/${folder}/deep/file`)])("matches %s", path => {
+  it.each(["weird\\dir/AGENTS.md", ".cursor\\x/AGENTS.md", ".cursor/rules\\name", "AGENTS.md", "nested/AGENTS.override.md", "AGENT.md", "Claude.md", "CLAUDE.local.md", "GEMINI.md", "WARP.md", "SKILL.md", ".cursorrules", ".windsurfrules", ".clinerules", ".goosehints", "pkg/.github/copilot-instructions.md", "./packages/api/AGENTS.md", "apps/web/.cursor/rules/x.mdc", ".github/instructions/a.md", ".github/prompts/a.md", ".github/chatmodes/a.md", ...[".cursor", ".claude", ".windsurf", ".clinerules", ".continue", ".agents", ".codex", ".openhands", ".kilocode", ".amazonq", ".kiro", ".gemini", ".roo", ".cline", ".trae", ".junie", ".rovara"].map(folder => `nested/${folder}/deep/file`)])("matches %s", path => {
     expect(plugins.isAiInstructionPath?.(path)).toBe(true);
   });
-  it.each(["AGENTS.md.bak", "docs/agents.md.txt", "my.cursor/rule", "cursor/rules.md", "copilot-instructions.md", ".githubx/copilot-instructions.md", "notes.md", "foo\\AGENTS.md", ".cursor", ".github/instructions", "../AGENTS.md", "a//AGENTS.md", ".cursor\\x/AGENTS.md"])("rejects %s", path => {
+  it.each(["AGENTS.md.bak", "docs/agents.md.txt", "my.cursor/rule", "cursor/rules.md", "copilot-instructions.md", ".githubx/copilot-instructions.md", "notes.md", "foo\\AGENTS.md", ".cursor", ".github/instructions", "../AGENTS.md", "a//AGENTS.md", "packages\\api\\AGENTS.md"])("rejects %s", path => {
     expect(plugins.isAiInstructionPath?.(path)).toBe(false);
   });
 });
@@ -143,4 +143,54 @@ it("refuses a merge base when two histories have no shared ancestor", () => {
 it("refuses renaming an absent fake entry", () => {
   const model = new FakeHostModel({ ...repository, id: "1", fullName: "example/app" });
   expect(() => model.commitRename("main", "missing", "new")).toThrow();
+});
+
+
+it("omits fake types when the caller's classified head changed", async () => {
+  const model = new FakeHostModel({ ...repository, id: "1", fullName: "example/app" });
+  const host = new FakeCodeHost(model);
+  const expectedHead = model.commit("feature", { a: "first" });
+  const { cr } = model.reconcile({ sourceBranch: "feature", targetBranch: "main", title: "head" });
+  const ref = { repository, id: cr.id, url: model.crUrl(cr.id) };
+  expect((await host.changedFiles(ref, 1, scope, { expectedHead })).files[0]?.entry).toBeDefined();
+  model.commit("feature", { a: "second" });
+  const changed = await host.changedFiles(ref, 1, scope, { expectedHead });
+  expect(changed.files.length).toBeGreaterThan(0);
+  expect(changed.files.every(file => file.entry === undefined)).toBe(true);
+});
+
+it("keeps submodules out of ordinary file reads and preserves gitlink changes", async () => {
+  const model = new FakeHostModel({ ...repository, id: "1", fullName: "example/app" });
+  const host = new FakeCodeHost(model);
+  const revision = model.commitSubmodule("main", "nested/module", "a".repeat(40));
+  expect(model.revision(revision).files.has("nested/module")).toBe(false);
+  expect(await host.fileAtRevision(repository, "nested/module", revision, scope)).toBeUndefined();
+  expect(await host.pathKind(repository, "nested/module", revision, scope)).toBe("dir");
+  expect(await host.pathKind(repository, "nested", revision, scope)).toBe("dir");
+  await expect(host.pathKind(repository, "nested/module/child", revision, scope)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  const edited = model.commitSubmodule("feature", "nested/module", "b".repeat(40));
+  model.commit("feature", { ordinary: "text" });
+  const { cr } = model.reconcile({ sourceBranch: "feature", targetBranch: "main", title: "gitlink" });
+  expect(model.changedFiles(cr.id)).toEqual(expect.arrayContaining([expect.objectContaining({ path: "nested/module", status: "modified", entry: { head: "submodule", base: "submodule" } })]));
+  expect(model.revision(model.headOf("feature")).entries.get("nested/module")).toBe("submodule");
+  expect(model.revision(edited).tree).not.toBe(model.revision(revision).tree);
+  const renamed = model.commitRename("feature", "nested/module", "renamed");
+  expect(model.revision(renamed).files.has("renamed")).toBe(false);
+  expect(model.revision(renamed).entries.get("renamed")).toBe("submodule");
+  const replaced = model.commit("feature", { renamed: "ordinary file" });
+  expect(model.revision(replaced).entries.get("renamed")).toBe("file");
+  const removed = model.commit("main", { "nested/module": null });
+  expect(model.revision(removed).entries.has("nested/module")).toBe(false);
+});
+
+it("preserves submodule targets through a merge and a later diff", () => {
+  const model = new FakeHostModel({ ...repository, id: "1", fullName: "example/app" });
+  model.commitSubmodule("feature", "module", "a".repeat(40));
+  const { cr } = model.reconcile({ sourceBranch: "feature", targetBranch: "main", title: "module" });
+  expect(model.merge(cr.id, { revision: model.headOf("feature"), method: "squash" }).outcome).toBe("merged");
+  expect(model.revision(model.headOf("main")).entries.get("module")).toBe("submodule");
+  expect(model.revision(model.headOf("main")).files.has("module")).toBe(false);
+  model.commitSubmodule("next", "module", "b".repeat(40));
+  const { cr: next } = model.reconcile({ sourceBranch: "next", targetBranch: "main", title: "update module" });
+  expect(model.changedFiles(next.id)).toEqual([expect.objectContaining({ path: "module", status: "modified", entry: { head: "submodule", base: "submodule" } })]);
 });
