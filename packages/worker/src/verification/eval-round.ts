@@ -1,24 +1,15 @@
-// TE-F3 (part B): the worker's eval round. It turns the facts of one round (the runner's `rovara-measures.json`, the base score, the calls that were made) into the `eval` check for the evidence writer, through a typed seam
-// (`EvalCheckResult`, in contracts). It does NOT write evidence: the v2 writer is another lane's (A2b); and it does not run a model call: it is handed the facts of the calls (the pacing module in contracts makes them).
-//
-// WHAT IT DOES
-//   1. `planEvalRound`, before the runner runs. Trigger: a typed `{needed, reason}` (the shape of F4's `PromptChangeDecision`; the coordinator wires it); not needed means nothing is read, run or cached.
-//   2. The hidden eval set (same step): only the sealed round opens it, and the plan hands back the read-only mount for the sealed check sandbox's plan. Any other round answers "not run: the hidden eval set needs the sealed round" BEFORE
-//      anything is read or run (`hiddenEvalSetFor`, contracts). `completeEvalRound` is the part after the runner ran (3 to 5); `runEvalRound` is both in one call.
-//   3. The runner's file is read through A4's reader (`readReportPartsFile`: contained, fresh, bounded, strict UTF-8; never a guessed path). No new reader exists.
-//   4. The base score: looked up in the cache by the key of everything it depends on (Rovara's own hash of the eval files, the hidden set's hash, the settings fingerprint, the exact model version); on a miss Rovara's OWN base round runs, only with
-//      the runner's attestation of a Rovara-only checkout and a paused working sandbox, and only a clean one (no case left unrun, enough cases) fills the cache. The head round never writes the cache, so a
-//      value a coding agent could write is never cached. A base round whose eval set is not the head's is not comparable ("the eval set changed"), but its own score is still cached under its own hash.
-//   5. The verdicts, the v2 measures and the summary line come from `evalCheckResult`; what the coding agent is told comes only from `agentFeedbackFor`.
-// WHAT IT NEVER DOES: read a repository for the hidden set, hold a log, print a runner word that did not pass the inert-text function (in contracts), or mount anything (the mount spec goes back to the caller, which passes it to the
-// sealed check sandbox's plan and to nothing else).
+// Final-check eval orchestration: saved three-run baseline, fresh re-asks, exact rule.
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  EVAL_BASE_ROUND_KINDS, EVAL_MIN_QUESTIONS, EVAL_NOISE_K, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalSettingsFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
-  type BaseScoreCache, type EvalBaseAttestation, type EvalSettings, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
+  inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
+  type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
+
+// DEC 203: eval-only defaults; general task pacing remains 200 calls / $2.
+const EVAL_DEFAULT_CALL_BUDGET = 400;
+const EVAL_DEFAULT_COST_BUDGET_MICROS = 4_000_000;
 
 /** The shape of F4's `PromptChangeDecision`: whether an eval is needed, and why. */
 export interface EvalTrigger {
@@ -35,27 +26,47 @@ export interface EvalReportLocation {
   readonly nowMs?: number;
 }
 
-/** What Rovara's own base round hands back: the measures file it read (through `readEvalMeasures`), the cases behind it, and the facts of its calls. */
-export type EvalBaseRoundRead =
-  | {
-    readonly ok: true; readonly measures: MeasuresFile; readonly caseCount: number; readonly facts: EvalRoundFacts;
-    /** Rovara's own hash of the eval files in the base checkout (`hashEvalDirectory`), never a value the runner wrote. */
-    readonly evalSetHash: string;
-    /** The runner's attestation that this round ran in a Rovara-only checkout of the base commit with the working sandbox paused. Without it the score is neither cached nor compared. */
-    readonly attestation: EvalBaseAttestation;
-  }
-  | { readonly ok: false };
-
+export interface EvalQuestionPlan {
+  /** Bound by the caller to the customer's product-provider capability, never the agent's provider. */
+  readonly company: string;
+  readonly provider: "customer";
+  readonly connected: boolean;
+  readonly previousPasses: number;
+  readonly judgePin: string;
+  readonly baselineJudgePin: string;
+  /** Trusted old-set hash, when edits make it differ from the head set. */
+  readonly baseEvalSetHash?: string;
+  readonly sameJudgeFamily?: boolean;
+  readonly subsetSupported: boolean;
+  /** Hashes/category come from Rovara's trusted base/head inventory, never the report. */
+  readonly questions: ReadonlyArray<{ readonly id: string; readonly category: "ordinary" | "safety" | "refusal"; readonly baseHash: string; readonly headHash: string }>;
+  /** Conservative measured upper bounds, including any judge calls. */
+  readonly maxCallsPerQuestion: number;
+  readonly maxCostMicrosPerQuestion: number;
+  readonly callsAlreadyUsed?: number;
+  readonly costAlreadyUsedMicros?: number;
+  /** Explicit project budget, supplied from the approved health-check estimate when available.
+   * Missing dimensions use the DEC 203 eval-only default: 400 calls / $4 per task.
+   * Customer ModelEgress still enforces the monthly cap. */
+  readonly limits?: Partial<Pick<EvalPacingLimits, "maxCalls" | "maxCostMicros">>;
+  /** Runs through F1's customer ModelEgress and F3 pacing; resolves only after all calls joined.
+   * Reports are read by A4. No key, response header, error or stdout belongs in this return value. */
+  readonly run: (request: { readonly side: "old" | "new"; readonly ids: readonly string[]; readonly runs: 1 | 2 | 3 }) => Promise<{
+    readonly report: EvalReportLocation; readonly facts: EvalRoundFacts;
+    readonly calls: number; readonly costMicros: number; readonly changedPromptCalls: number;
+    readonly attestation?: EvalBaseAttestation;
+  }>;
+}
 export interface EvalRoundInput {
+  readonly tier?: { readonly reasons: ReadonlyArray<{ readonly code: string; readonly path?: string }> };
+  /** Discovery explicitly found no configured eval; absence of a plan alone is not proof. */
+  readonly evalConfigured?: boolean;
+  readonly questionPlan?: EvalQuestionPlan;
   readonly trigger: EvalTrigger;
   readonly roundKind: EvalRoundKind;
-  readonly report: EvalReportLocation;
   /** Everything the base score depends on except the two hashes (the eval set's comes from the runner's file, the hidden set's from the source). */
   readonly key: Omit<EvalBaseCacheKeyParts, "evalSetHash" | "hiddenSetHash" | "settingsFingerprint">;
-  /** How the eval was run (the runs, the seed, the repeats, the image and the route); `k` and the minimum questions are added here. Part of the cache key. */
-  readonly settings: Omit<EvalSettings, "k" | "minQuestions">;
-  /** The fewest cases that must stand behind a score (default `EVAL_MIN_QUESTIONS`); also applied to the base round. */
-  readonly minQuestions?: number;
+  readonly settings: { readonly imageDigest: string; readonly route: string };
   /**
    * Rovara's OWN hash of the head's eval files (`hashEvalDirectory`). Required: the hash the runner writes in its file is a claim, not evidence, and when this is missing the round refuses to compare. A hash in the runner's file
    * that differs from this one is "the eval set changed".
@@ -66,13 +77,6 @@ export interface EvalRoundInput {
   readonly cache: BaseScoreCache;
   /** The project's hidden eval set, when it keeps one. */
   readonly hiddenSet?: HiddenEvalSetSource;
-  /** Rovara's own base round (the base commit, the same command and model). Called only on a cache miss. */
-  readonly runBaseRound: () => Promise<EvalBaseRoundRead>;
-  /** The facts of the head round's model calls (counts only). */
-  readonly facts: EvalRoundFacts;
-  readonly capMicros?: number;
-  /** Today as `YYYY-MM-DD`, for the cache record. */
-  readonly today: () => string;
 }
 
 export type EvalRoundOutput =
@@ -81,7 +85,9 @@ export type EvalRoundOutput =
     readonly status: "done";
     /** The eval check for the evidence writer. */
     readonly result: EvalCheckResult;
-    /** What the coding agent may be told: a score and a count per measure, nothing else. */
+    /** Actual spend for this eval; omitted for private sets. Missing cost means it could not be read. */
+    readonly usage?: { readonly calls: number; readonly costMicros?: number };
+    /** Public question details, or one fixed pass/fail for a private set. */
     readonly feedback: EvalAgentFeedback;
     /** The read-only mount for the sealed check sandbox's plan: present only in the sealed round, with a hidden set. */
     readonly hiddenMount?: HiddenEvalMount;
@@ -109,8 +115,8 @@ export type EvalRoundPlan =
  * The part of the round that comes before the runner runs: the trigger and the hidden set. A round that may not see the hidden set stops here (nothing is read or run), and the sealed round gets the read-only mount for the
  * sealed check sandbox's plan (`checkSandboxPlan`'s `hiddenEvalSetPath`). Nothing else may be mounted from it.
  */
-export async function planEvalRound(input: Pick<EvalRoundInput, "trigger" | "roundKind" | "hiddenSet" | "hashHiddenSet">): Promise<EvalRoundPlan> {
-  if (!input.trigger.needed) return { status: "stopped", output: { status: "skipped", reason: input.trigger.reason } };
+export async function planEvalRound(input: Pick<EvalRoundInput, "trigger" | "tier" | "roundKind" | "hiddenSet" | "hashHiddenSet">): Promise<EvalRoundPlan> {
+  if (!input.trigger.needed && !tierRequestsEval(input.tier)) return { status: "stopped", output: { status: "skipped", reason: input.trigger.reason } };
   const { roundKind } = input;
   if (input.hiddenSet === undefined) return { status: "ready", hiddenHash: "none" };
   const hidden = await hiddenEvalSetFor(roundKind, input.hiddenSet);
@@ -158,66 +164,120 @@ export async function runEvalRound(input: EvalRoundInput): Promise<EvalRoundOutp
   return plan.status === "stopped" ? plan.output : completeEvalRound(input, plan);
 }
 
-/** The part of the round that comes after the runner ran: read its file, find or measure the base score, and build the check. */
+/** Adapter for PR #570: eval_hint is a REASON, never a new tier kind. */
+export function tierRequestsEval(tier: EvalRoundInput["tier"]): boolean { return tier?.reasons.some(reason => reason.code === "eval_hint") === true; }
+
+/** Legacy aggregate callers fail closed. The baseline is supplied by setup/background refresh (F3d).
+ * It is never manufactured from an aggregate score or a task's new-code answers. */
 export async function completeEvalRound(input: EvalRoundInput, plan: Extract<EvalRoundPlan, { status: "ready" }>): Promise<EvalRoundOutput> {
-  const { roundKind, facts } = input;
-  const hiddenHash = plan.hiddenHash;
-  const hiddenMount = plan.hiddenMount;
-  const usedHidden = hiddenMount !== undefined;
-  const mount = usedHidden ? { hiddenMount } : {};
-  const finish = (result: EvalCheckResult, cache: "hit" | "filled" | "not_filled" | "not_used"): EvalRoundOutput => done(result, cache, mount);
-  const notRun = (reason: Parameters<typeof evalNotRunResult>[0]["reason"], cache: "hit" | "filled" | "not_filled" | "not_used"): EvalRoundOutput => finish(evalNotRunResult({ roundKind, reason, facts, ...(usedHidden ? { hiddenSetUsed: true } : {}) }), cache);
-
-  const minQuestions = input.minQuestions ?? EVAL_MIN_QUESTIONS;
-  const capArgs = input.capMicros === undefined ? {} : { capMicros: input.capMicros };
-  const judge = (base: EvalBaseRecord, head: MeasuresFile): EvalCheckResult => evalCheckResult({ roundKind, head, base, facts, minQuestions, ...capArgs, ...(usedHidden ? { hiddenSetUsed: true } : {}) });
-
-  const head = await readEvalMeasures(input.report);
-  if (!head.ok) return notRun("no_measures_file", "not_used");
-  // The eval set's hash is Rovara's own, from the eval files. The runner's file may repeat it, and a different claim is a changed eval set; the runner's claim alone is never evidence.
-  const evalSetHash = input.evalSetHash;
-  if (evalSetHash === undefined) return notRun("eval_set_unknown", "not_used");
-  if (head.measures.eval_set_hash !== undefined && head.measures.eval_set_hash !== evalSetHash) return notRun("eval_set_changed", "not_used");
-
-  let settingsFingerprint: string;
-  try {
-    settingsFingerprint = evalSettingsFingerprint({ ...input.settings, k: EVAL_NOISE_K, minQuestions });
-  } catch {
-    return notRun("no_base_score", "not_used");
+  const hidden = plan.hiddenMount !== undefined;
+  let usage: { calls: number; costMicros?: number } | undefined;
+  const estimates: string[] = [];
+  let excluded: EvalCheckResult["excluded"] = [];
+  let cacheState: "hit" | "not_used" = "not_used";
+  const finish = (result: EvalCheckResult): EvalRoundOutput => {
+    const count = excluded.length;
+    const exclusionSummary = count === 0 ? "" : ` ${count} question${count === 1 ? "" : "s"} added, removed or edited: not compared.`;
+    const evidence = hidden ? result : { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...estimates], summary: result.summary + exclusionSummary };
+    const output = done(evidence, cacheState, plan.hiddenMount === undefined ? {} : { hiddenMount: plan.hiddenMount });
+    return output.status === "done" && !hidden && usage !== undefined ? { ...output, usage } : output;
+  };
+  const refuse = (reason: EvalNotRunReason): EvalRoundOutput => finish(evalNotRunResult({ roundKind: input.roundKind, reason, hiddenSetUsed: hidden }));
+  if (input.evalConfigured === false && tierRequestsEval(input.tier)) {
+    const result = evalNotRunResult({ roundKind: input.roundKind, reason: "no_eval_configured", hiddenSetUsed: hidden });
+    const notice = "Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below.";
+    return finish({ ...result, notices: [notice], summary: notice, disposition: { ...result.disposition, retry: false } });
   }
-  const parts: EvalBaseCacheKeyParts = { ...input.key, evalSetHash, hiddenSetHash: hiddenHash, settingsFingerprint };
-  let cached: EvalBaseRecord | undefined;
-  try {
-    evalBaseCacheKey(parts);
-    cached = await input.cache.read(parts);
-  } catch {
-    cached = undefined;
+  const config = input.questionPlan;
+  if (config === undefined) return refuse("question_data_missing");
+  if (!input.trigger.needed && !tierRequestsEval(input.tier)) return { status: "skipped", reason: input.trigger.reason };
+  if (input.roundKind !== "check_sealed" && input.roundKind !== "check_unsealed") return refuse(hidden ? "hidden_set_needs_sealed_round" : "refused");
+  if (hidden && input.roundKind !== "check_sealed") return refuse("hidden_set_needs_sealed_round");
+  if (!config.connected) return refuse("no_product_key");
+  if (config.company !== input.key.company || config.provider !== "customer") return refuse("refused");
+  if (!Number.isSafeInteger(config.previousPasses) || config.previousPasses < 0 || config.previousPasses >= 2) return refuse("round_limit");
+  if (!/^[a-f0-9]{64}$/u.test(config.judgePin) || config.judgePin !== config.baselineJudgePin) return refuse("judge_changed");
+  if (input.evalSetHash === undefined) return refuse("eval_set_unknown");
+  const definitions = config.questions;
+  if (definitions.length > EVAL_QUESTION_LIMIT || new Set(definitions.map(q => q.id)).size !== definitions.length || definitions.some(q => !/^[a-f0-9]{64}$/u.test(q.baseHash) || !/^[a-f0-9]{64}$/u.test(q.headHash))) return refuse("invalid_question_data");
+  const parts: EvalBaseCacheKeyParts = { ...input.key, evalSetHash: config.baseEvalSetHash ?? input.evalSetHash, hiddenSetHash: plan.hiddenHash,
+    settingsFingerprint: evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: input.settings.imageDigest, route: input.settings.route, judgePin: config.judgePin })) };
+  let base: EvalBaseRecord | undefined;
+  try { evalBaseCacheKey(parts); base = await input.cache.read(parts); } catch { return refuse("no_base_score"); }
+  const parsedBase = EvalBaseRecordSchema.safeParse(base);
+  if (!parsedBase.success || parsedBase.data.questions === undefined) return refuse("no_base_score");
+  base = parsedBase.data;
+  cacheState = "hit";
+  const byId = new Map(base.questions!.map(q => [q.id, q]));
+  const headIds = new Set(definitions.map(q => q.id));
+  excluded = [
+    ...definitions.filter(q => !byId.has(q.id) || q.baseHash !== q.headHash).map(q => ({ id: inertEvidenceText(q.id, 160), reason: "edited" as const })),
+    ...base.questions!.filter(q => !headIds.has(q.id)).map(q => ({ id: inertEvidenceText(q.id, 160), reason: "edited" as const })),
+  ];
+  const untouched = definitions.filter(q => byId.has(q.id) && q.baseHash === q.headHash);
+  if (untouched.length === 0) return refuse("too_few_questions");
+  const maxCalls = config.limits?.maxCalls ?? EVAL_DEFAULT_CALL_BUDGET;
+  const maxCost = config.limits?.maxCostMicros ?? EVAL_DEFAULT_COST_BUDGET_MICROS;
+  let calls = config.callsAlreadyUsed ?? 0; let cost = config.costAlreadyUsedMicros ?? 0;
+  const whole = (v: number): boolean => Number.isSafeInteger(v) && v >= 0;
+  if (![maxCalls, maxCost, calls, cost, config.maxCallsPerQuestion, config.maxCostMicrosPerQuestion].every(whole) || config.maxCallsPerQuestion < 1 || config.maxCostMicrosPerQuestion < 1) return refuse("cap");
+  const initialCalls = calls; const initialCost = cost;
+  let costKnown = true;
+  let changedPromptCalls = 0;
+  let stop: EvalNotRunReason | undefined;
+  const fits = (questionRuns: number): boolean => calls + questionRuns * config.maxCallsPerQuestion <= maxCalls && cost + questionRuns * config.maxCostMicrosPerQuestion <= maxCost;
+  const reserve = (stage: "first run" | "re-asks" | "second look", questionRuns: number): boolean => {
+    const estimatedCalls = questionRuns * config.maxCallsPerQuestion;
+    const estimatedCost = questionRuns * config.maxCostMicrosPerQuestion;
+    if (!Number.isSafeInteger(estimatedCalls) || !Number.isSafeInteger(estimatedCost)) { stop = "cap"; return false; }
+    estimates.push(`Eval ${stage} estimate: ${estimatedCalls} calls, ${estimatedCost} microdollars.`);
+    if (!fits(questionRuns)) { stop = "cap"; return false; }
+    return true;
+  };
+  const run = async (side: "old" | "new", ids: readonly string[], runs: 1 | 2 | 3): Promise<Map<string, EvalQuestionSamples> | undefined> => {
+    if (stop !== undefined) return undefined;
+    try {
+      const output = await config.run({ side, ids, runs });
+      if (side === "old" && (!isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit)) { stop = "base_round_unattested"; return undefined; }
+      if (!whole(output.calls) || !whole(output.changedPromptCalls) || output.changedPromptCalls > output.calls) { stop = "invalid_question_data"; return undefined; }
+      calls += output.calls;
+      if (whole(output.costMicros)) cost += output.costMicros; else costKnown = false;
+      usage = { calls: calls - initialCalls, ...(costKnown ? { costMicros: cost - initialCost } : {}) };
+      // Spending can stop further work, but cannot discard fully answered failures.
+      if (!costKnown || output.calls > ids.length * runs * config.maxCallsPerQuestion || output.costMicros > ids.length * runs * config.maxCostMicrosPerQuestion || calls > maxCalls || cost > maxCost || output.facts.overrunStop) stop = "cap";
+      if (output.facts.notRun > 0 || output.facts.run !== ids.length * runs || output.calls < 1) {
+        stop = EVAL_NOT_RUN_CLASSES.find(reason => (output.facts.byClass[reason] ?? 0) > 0) ?? "provider_error"; return undefined;
+      }
+      const read = await readEvalMeasures(output.report);
+      if (!read.ok || read.measures.questions === undefined) { stop = "no_measures_file"; return undefined; }
+      if (read.measures.eval_set_hash !== undefined && read.measures.eval_set_hash !== (side === "old" ? parts.evalSetHash : input.evalSetHash)) { stop = "eval_set_changed"; return undefined; }
+      const rows = read.measures.questions;
+      const map = new Map(rows.map(row => [row.id, row]));
+      if (rows.length !== ids.length || ids.some(id => map.get(id)?.samples.length !== runs)) { stop = "invalid_question_data"; return undefined; }
+      if (side === "new") changedPromptCalls += output.changedPromptCalls;
+      return map;
+    } catch { stop = "provider_error"; return undefined; }
+  };
+  // Whole-set-only runners still execute the head inventory; excluded answers never enter the comparison.
+  const ids = (config.subsetSupported ? untouched : definitions).map(q => q.id);
+  if (!reserve("first run", ids.length)) return refuse("cap");
+  const first = await run("new", ids, 1);
+  if (first === undefined) return refuse(stop ?? "provider_error");
+  let questions: EvalQuestionComparison[] = untouched.map(q => ({ id: q.id, category: q.category, old: byId.get(q.id)!.samples, first: first.get(q.id)!.samples[0]!, edited: q.baseHash !== q.headHash }));
+  const judge = (): EvalCheckResult => evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true });
+  if (config.subsetSupported) {
+    const suspects = evalSuspects(questions); const selected = [...suspects.down, ...suspects.up];
+    if (selected.length > 0 && reserve("re-asks", 6 * selected.length)) {
+      const old = await run("old", selected, 3); const newer = old === undefined ? undefined : await run("new", selected, 3);
+      questions = questions.map(q => ({ ...q, freshOld: old?.get(q.id)?.samples, freshNew: newer?.get(q.id)?.samples }));
+    }
   }
-  if (cached !== undefined) return finish(judge(cached, head.measures), "hit");
-
-  // A miss: Rovara's own base round. It counts only with the runner's attestation that it ran in a Rovara-only checkout with the working sandbox paused; its scores are cached only when the round was clean (no case left
-  // unrun, enough cases) and only under the eval set hash Rovara computed for the BASE checkout.
-  let base: EvalBaseRoundRead;
-  try {
-    base = await input.runBaseRound();
-  } catch {
-    base = { ok: false };
+  // A confirmed failure survives an outage/cap on later work. Never turn it into Not run.
+  if (judge().label !== "Worse on eval" && stop === undefined && evalNeedsSecondLook(questions)) {
+    const more = reserve("second look", 2 * ids.length) ? await run("new", ids, 2) : undefined;
+    questions = questions.map(q => ({ ...q, moreNew: more?.get(q.id)?.samples }));
   }
-  if (!base.ok) return notRun("no_base_score", "not_filled");
-  const attested = isEvalBaseAttestation(base.attestation) && base.attestation.baseCommit === parts.baseCommit;
-  if (!attested) return notRun("base_round_unattested", "not_filled");
-  if (base.facts.run < minQuestions) return notRun("too_few_questions", "not_filled");
-  const baseHash = base.evalSetHash;
-  let cache: "filled" | "not_filled" = "not_filled";
-  let record: EvalBaseRecord | undefined;
-  if (typeof baseHash === "string" && base.facts.notRun === 0 && (EVAL_BASE_ROUND_KINDS as readonly string[]).includes(roundKind)) {
-    record = { schemaVersion: 1, measures: base.measures.measures, caseCount: base.caseCount, recordedOn: input.today(), roundKind: roundKind as EvalBaseRecord["roundKind"], runnerSchemaVersion: base.measures.schemaVersion };
-    const written = await input.cache.write({ ...parts, evalSetHash: baseHash }, record, { writer: "rovara_base_round", baseCommit: parts.baseCommit }).catch(() => "refused" as const);
-    if (written === "stored") cache = "filled";
-  }
-  if (baseHash !== evalSetHash) return notRun("eval_set_changed", cache);
-  // Compared even when the base round could not be cached, except when some of its cases did not run (that is not a base score).
-  if (base.facts.notRun > 0) return notRun("no_base_score", cache);
-  record ??= { schemaVersion: 1, measures: base.measures.measures, caseCount: base.caseCount, recordedOn: input.today(), roundKind: "check_unsealed", runnerSchemaVersion: base.measures.schemaVersion };
-  return finish(judge(record, head.measures), cache);
+  const judged = judge();
+  const result = { ...judged, fixRequested: judged.fixRequested && config.previousPasses === 0 };
+  return stop !== undefined && result.label !== "Worse on eval" ? refuse(stop) : finish(result);
 }

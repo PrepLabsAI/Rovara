@@ -6,12 +6,12 @@
 //   - Every key part is immutable or content-addressed (a commit id, an eval-set hash, a hidden-set hash, a command fingerprint, a catalog row, a model), and the company and project are in it. Change any one and the key
 //     changes: a miss and a fresh base run, never a stale score.
 //   - Only Rovara's own base round of that very commit writes it (`EvalBaseWriteProvenance`). A value read from a file the coding agent could write is never cached.
-//   - It holds scores and counts only (no case id, input, output or path), so it cannot leak a hidden case.
+//   - Legacy records hold aggregate scores. New records can also hold three question samples; these stay in the company-scoped store and are never returned as private-set agent feedback.
 //   - A record that is corrupt, tampered with, filed under the wrong key, another company's, or expired is a miss. A store that is down is a miss (the cache is only an optimisation).
 // The store is the existing `DocumentStore` port with company-scoped partitions (no new port, so no DECISIONS 42/63 item): partition `ORG#<company>#EVALBASE`, sort key `K#<key>`, a 30-day expiry.
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
-import { MeasuresFileEntrySchema } from "./measures-file.js";
+import { EvalQuestionRowsSchema, MeasuresFileEntrySchema } from "./measures-file.js";
 import { EVIDENCE_MEASURES_MAX } from "./evidence.js";
 import { companyScoped } from "./ports/company-scope.js";
 import { DOCUMENT_STORE_LIMITS, type DocumentStore, type StoredDocument } from "./ports/document-store.js";
@@ -31,6 +31,7 @@ export const EvalBaseRecordSchema = z.object({
   schemaVersion: z.literal(1),
   /** Per-measure base scores and their spread, as the runner reported them in Rovara's own base round. */
   measures: z.array(MeasuresFileEntrySchema).min(1).max(EVIDENCE_MEASURES_MAX),
+  questions: EvalQuestionRowsSchema.refine(rows => rows.every(row => row.samples.length === 3), "three saved runs required").optional(),
   caseCount: z.number().int().min(0).max(100_000_000),
   /** The day the base round ran. */
   recordedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
@@ -55,7 +56,7 @@ export interface EvalBaseCacheKeyParts {
   readonly model: string;
   /** The EXACT model version the eval called (the provider's snapshot or version id, not the family name). A new version is a new key: the old code is re-run only then (DECISIONS 170). */
   readonly modelVersion: string;
-  /** `evalSettingsFingerprint` of the settings the score was measured under (runs, seed, repeats, k, minimum questions, image digest, route): a different setting is a different score. */
+  /** Fingerprint of the rule, pinned judge, image and route used to measure the score. */
   readonly settingsFingerprint: string;
 }
 
@@ -71,34 +72,6 @@ const PART_RULES: ReadonlyArray<readonly [keyof EvalBaseCacheKeyParts, RegExp]> 
   ["modelVersion", /^[A-Za-z0-9._:/@+-]{1,200}$/u],
   ["settingsFingerprint", /^[a-f0-9]{64}$/u],
 ];
-
-/** What an eval's score depends on besides the code, the eval set and the model: how it was run. */
-export interface EvalSettings {
-  readonly runs: number;
-  /** The seed, fixed before the task. */
-  readonly seed: string;
-  readonly repeats: number;
-  /** k in "base +/- k x spread". */
-  readonly k: number;
-  readonly minQuestions: number;
-  /** The pinned image the runner ran in (`name@sha256:...`). */
-  readonly imageDigest: string;
-  /** The route the calls took (the catalog row and its gateway), as one plain word. */
-  readonly route: string;
-}
-const SETTINGS_DOMAIN = "rovara-eval-settings/v1\n";
-const whole = (value: unknown, max: number): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
-/** SHA-256 (hex) of the settings under a fixed domain and canonical JSON. Throws RangeError naming the setting, never its value. */
-export function evalSettingsFingerprint(settings: EvalSettings): string {
-  const held = settings as unknown as Record<string, unknown>;
-  if (!whole(held["runs"], 1_000)) throw new RangeError("the runs setting is not valid");
-  if (!whole(held["repeats"], 1_000)) throw new RangeError("the repeats setting is not valid");
-  if (!whole(held["minQuestions"], 1_000_000)) throw new RangeError("the minQuestions setting is not valid");
-  if (typeof held["k"] !== "number" || !Number.isFinite(held["k"]) || held["k"] <= 0 || held["k"] > 100) throw new RangeError("the k setting is not valid");
-  for (const name of ["seed", "imageDigest", "route"]) if (typeof held[name] !== "string" || !/^[A-Za-z0-9._:/@+-]{1,200}$/u.test(held[name])) throw new RangeError(`the ${name} setting is not valid`);
-  const { runs, seed, repeats, k, minQuestions, imageDigest, route } = settings;
-  return sha256HexOf(new TextEncoder().encode(`${SETTINGS_DOMAIN}${canonicalJson({ runs, seed, repeats, k, minQuestions, imageDigest, route })}`));
-}
 
 /** What the runner attests about a base round: it ran in a Rovara-only checkout of the base commit (nothing of the coding agent's), with the working sandbox paused. Without it a base score is neither compared nor cached. */
 export interface EvalBaseAttestation {

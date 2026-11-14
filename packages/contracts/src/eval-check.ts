@@ -1,64 +1,36 @@
-// TE-F3 (part A): what an eval check says. From the runner's head scores (`rovara-measures.json`), the base scores Rovara measured and the facts of the round, it builds the v2 evidence `measure` entries and one verdict per
-// measure, in fixed words. Pure: no clock, no randomness, no outside call.
-//
-// THE RULE (the plan block TE-F3, DECISIONS 162 layer 4): the band is base +/- k x spread, k = 2 (`EVAL_NOISE_K`, a data constant). A measure is `better` or `worse` ONLY when the head is strictly OUTSIDE the band, in the measure's
-// `direction`. Inside it, or on its edge, nothing changed ("no detectable change"). With no spread at all (the runner gave none and the base round had none, or both are zero) there is no noise estimate, and the difference is
-// not judged ("difference not judged: no noise estimate"): nothing but a measured difference outside a measured band ever reads as a change. The spread is the one MAIN's runner reported in the base round's measures file (cached with the base score); the head runner's own spread is ignored (it is the thing under test). Rovara-measured paired repeats are F3-b's.
-//
-// This layer assigns NO label. DECISIONS 170 has three: "Proven", "No regression measured (eval)" and "Improved on eval"; the last two need more than a measure outside a band (a pre-fixed minimum detectable drop, paired per-question noise, a rotating
-// holdout, coverage, categories). That is the next lane (F3-b). A `better` here is a measure beyond the band, never "Improved on eval", and nothing here is "Proven".
-//
-// Words from the runner (measure names, units) reach every printed sentence only through `inertEvidenceText`. In a round that used a hidden eval set NO runner value reaches the result: only measures Rovara's own base round knows are kept (the
-// rest are dropped entirely), their labels come from the base record, no head or base value is kept (so none reaches the summary or the v2 measures), and each measure is pass or fail (eval-hidden-set.ts rules 2 and 3).
-import type { z } from "zod";
-import { EVIDENCE_MEASURES_MAX, EvidenceMeasureSchema } from "./evidence.js";
+// Question-level eval rule (DEC 194). No noise estimates, normal approximation or minimum set size.
 import { inertEvidenceText } from "./evidence-inert.js";
-import type { EvalBaseRecord } from "./eval-base-cache.js";
 import { HIDDEN_EVAL_NEEDS_SEALED_SENTENCE, type EvalRoundKind } from "./eval-hidden-set.js";
-import { EVAL_NOT_RUN_CLASSES, EVAL_NOT_RUN_FRACTION_MAX, type EvalNotRunClass, type EvalRoundFacts } from "./eval-pacing.js";
-import type { MeasuresFile } from "./measures-file.js";
-import { NOT_RUN_SENTENCES, capSentence } from "./model-egress/classify.js";
-
-/** k in "base +/- k x spread". */
-export const EVAL_NOISE_K = 2;
-/** Fewer cases than this run: the eval cannot detect a change (DECISIONS 170: "too few questions gives not run"). A data default for the owner to confirm. */
-export const EVAL_MIN_QUESTIONS = 20;
-/** The largest magnitude a printed or stored score may have (the evidence measure's own bound). */
-const SCORE_LIMIT = 1e12;
-/** The most measures one summary line lists; the rest are counted. */
-const SUMMARY_MEASURES_LISTED = 5;
-
-export const EVAL_VERDICTS = ["no_detectable_change", "better", "worse", "not_run", "no_noise_estimate"] as const;
-export type EvalVerdict = (typeof EVAL_VERDICTS)[number];
-
-/** The words of a verdict that ran. A `not_run` verdict uses the sentence of its reason instead. */
-export const EVAL_VERDICT_WORDS: Readonly<Record<Exclude<EvalVerdict, "not_run">, string>> = {
-  no_detectable_change: "no detectable change",
-  better: "better than main beyond the noise band",
-  worse: "worse than main beyond the noise band",
-  no_noise_estimate: "difference not judged: no noise estimate",
-};
+import { EVAL_NOT_RUN_CLASSES, type EvalRoundFacts } from "./eval-pacing.js";
+import { NOT_RUN_SENTENCES } from "./model-egress/classify.js";
 
 export const EVAL_NOT_RUN_REASONS = [
-  ...EVAL_NOT_RUN_CLASSES, "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested",
+  ...EVAL_NOT_RUN_CLASSES, "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
-/** Why an eval (or one measure of it) was not run, in fixed words. The class reasons are F1-a's own sentences (the cap one without an amount: `evalNotRunResult` adds the amount when it has one). */
+/** Why an eval (or one measure of it) was not run, in fixed words. Provider reasons reuse F1-a's sentences; budget refusals name the eval budget. */
 export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> = {
+  no_eval_configured: "not run: no eval is configured",
+  no_product_key: "not run: no product AI key is connected",
+  question_data_missing: "not run: three saved old answers and complete question results are required",
+  no_changed_prompt_call: "not run: no eval call exercised the changed prompt",
+  judge_changed: "not run: the judge or scoring pin changed",
+  round_limit: "not run: two eval passes have already run for this task",
+  invalid_question_data: "not run: question results are incomplete or invalid",
   rate_limit: NOT_RUN_SENTENCES.rate_limit,
   quota: NOT_RUN_SENTENCES.quota,
   overloaded: NOT_RUN_SENTENCES.overloaded,
   key_refused: NOT_RUN_SENTENCES.key_refused,
-  cap: capSentence(),
+  cap: "Not run: over the eval budget",
   provider_error: "not run: provider error",
   refused: "not run: the model call was refused",
   too_many_not_run: "not run: too many cases hit a limit",
-  too_few_questions: "not run: too few eval questions to detect a change",
+  too_few_questions: "not run: too few untouched questions to judge",
   base_round_unattested: "not run: the base round was not attested as run in a Rovara-only checkout",
   hidden_set_needs_sealed_round: HIDDEN_EVAL_NEEDS_SEALED_SENTENCE,
   hidden_set_unavailable: "not run: the hidden eval set could not be opened",
-  no_base_score: "not run: no base score for this commit",
+  no_base_score: "not run: no saved three-run question result is available",
   partial_run: "not run: some cases were not run, so the score is not compared",
   unreadable_score: "not run: a score could not be read",
   no_measures_file: "not run: the eval wrote no readable rovara-measures.json",
@@ -66,188 +38,166 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   eval_set_unknown: "not run: the eval did not say which eval set it ran",
 };
 
-export interface EvalVerdictInput {
-  readonly direction: "up_good" | "down_good";
-  readonly base: number;
-  readonly head: number;
-  /**
-   * The noise estimate: the spread main's runner reported in the base round (not a Rovara-measured repeat: F3-b owns those). The runner's own spread for the head scores is never an input (a runner could report any spread, and a wide one would hide a real drop).
-   */
-  readonly spread?: number;
+
+export const EVAL_QUESTION_LIMIT = 1_000;
+export interface EvalAnswer { readonly pass: boolean; readonly answer: string }
+export interface EvalQuestionComparison {
+  readonly id: string;
+  readonly category: "ordinary" | "safety" | "refusal";
+  readonly old: readonly EvalAnswer[];
+  readonly first: EvalAnswer;
+  readonly freshOld?: readonly EvalAnswer[] | undefined;
+  readonly freshNew?: readonly EvalAnswer[] | undefined;
+  readonly moreNew?: readonly EvalAnswer[] | undefined;
+  readonly edited?: boolean;
 }
-export interface EvalVerdictOutput {
-  readonly verdict: EvalVerdict;
-  /** Set for `not_run`. */
-  readonly reason?: "unreadable_score";
-  /** base +/- k x spread, when a noise estimate exists. */
-  readonly band?: { readonly low: number; readonly high: number };
-  /** The spread the band was made from. */
-  readonly spread?: number;
+export interface EvalQuestionResult {
+  readonly id: string;
+  readonly change: "broke" | "newly_pass" | "newly_fail" | "flaky" | "unchanged";
+  readonly oldAnswers: readonly string[];
+  readonly newAnswers: readonly string[];
 }
-
-/** Twelve significant digits: the same edge in two float spellings (0.7 + 2 x 0.1 is 0.8999999999999999) is one edge. */
-const norm = (value: number): number => Number(value.toPrecision(12));
-const readable = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= SCORE_LIMIT;
-const readableSpread = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= SCORE_LIMIT;
-/** Words for a measure of a hidden-set round: pass or fail only. A score beyond the band reads as a pass (the hidden set gives no direction beyond "no drop"). */
-const HIDDEN_VERDICT_WORDS = { no_detectable_change: "no detectable drop on the hidden set", worse: "worse than main beyond the noise band on the hidden set" } as const;
-const clamp = (value: number): number => Math.max(-SCORE_LIMIT, Math.min(SCORE_LIMIT, value));
-
-/** One measure's verdict. Never throws; a number it cannot read (NaN, infinity, out of range, a negative spread) is `not_run`, never a change. */
-export function evalVerdictFor(input: EvalVerdictInput): EvalVerdictOutput {
-  const { base, head } = input;
-  if (!readable(base) || !readable(head) || (input.spread !== undefined && !readableSpread(input.spread))) return { verdict: "not_run", reason: "unreadable_score" };
-  const spread = input.spread ?? 0;
-  if (!(spread > 0)) return { verdict: "no_noise_estimate" };
-  const half = EVAL_NOISE_K * spread;
-  const band = { low: clamp(norm(base - half)), high: clamp(norm(base + half)) };
-  const value = norm(head);
-  const above = value > band.high;
-  const below = value < band.low;
-  if (!above && !below) return { verdict: "no_detectable_change", band, spread };
-  const better = input.direction === "up_good" ? above : below;
-  return { verdict: better ? "better" : "worse", band, spread };
-}
-
-export type EvalEvidenceMeasure = z.infer<typeof EvidenceMeasureSchema>;
-
-export interface EvalMeasureResult {
-  /** The measure's position: in the runner's file, or (hidden round) in Rovara's base record. */
-  readonly index: number;
-  /** Inert, bounded text: the runner's name, the base record's name, or "eval measure N" (a hidden-set round never shows the runner's own). */
-  readonly label: string;
-  /** Inert, bounded text, chosen like the label. */
-  readonly unit: string;
-  readonly verdict: EvalVerdict;
-  readonly reason?: EvalNotRunReason;
-  /** The fixed words for the verdict. */
-  readonly sentence: string;
-  /** The head score, when it may be shown (never for a measure whose score may include cases that did not run). */
-  readonly head?: number;
-  readonly base?: number;
-  /** The cases behind the score: always the number that RAN, from Rovara's own facts (never a number the runner wrote). */
-  readonly count: number;
-}
-
+export type EvalLabel = "Worse on eval" | "No drop found" | "Improved on eval" | "Not run";
 export interface EvalCheckResult {
   readonly kind: "eval";
   readonly roundKind: EvalRoundKind;
-  /** `ran`: the eval ran and at least one measure was judged. `not_run`: it did not, or no measure could be compared. A neutral word: never `passed` (a verdict is not a pass) and never `failed` (a difference is a measure). */
   readonly outcome: "ran" | "not_run";
-  /** Set when the whole eval was not run. */
+  readonly label: EvalLabel;
   readonly notRun?: { readonly reason: EvalNotRunReason; readonly sentence: string };
+  readonly usedHiddenSet: boolean;
   readonly casesRun: number;
   readonly casesTotal: number;
-  readonly usedHiddenSet: boolean;
-  /** The v2 evidence `measure` entries (each passes `EvidenceMeasureSchema`): only measures that have a base. */
-  /** Empty for a hidden-set round: no hidden-round value reaches the evidence. */
-  readonly measures: readonly EvalEvidenceMeasure[];
-  readonly verdicts: readonly EvalMeasureResult[];
-  /** "Eval (your runner): accuracy 0.82 fraction (main 0.8 fraction) · no detectable change". One line, inert. */
+  readonly measures: readonly never[];
+  readonly verdicts: readonly never[];
+  readonly questions: readonly EvalQuestionResult[];
+  readonly excluded: ReadonlyArray<{ readonly id: string; readonly reason: "edited" | "suspect_limit" }>;
+  readonly notices: readonly string[];
   readonly summary: string;
+  readonly fixRequested: boolean;
+  readonly disposition: { readonly draft: boolean; readonly check: "failure" | "success" | "neutral"; readonly retry: boolean };
 }
-
 export interface EvalCheckInput {
   readonly roundKind: EvalRoundKind;
-  /** The runner's head-side measures file. */
-  readonly head: MeasuresFile;
-  /** Rovara's own base round's scores; undefined when there is none. */
-  readonly base: EvalBaseRecord | undefined;
-  readonly facts: EvalRoundFacts;
-  /** The round used the hidden eval set. */
+  readonly questions?: readonly EvalQuestionComparison[];
+  readonly changedPromptCalls?: number;
+  readonly subsetSupported?: boolean;
   readonly hiddenSetUsed?: boolean;
-  /** The task's cap in micro-dollars, for the cap sentence. */
-  readonly capMicros?: number;
-  /** The fewest cases that must stand behind a score: applied to the cases that ran, to the runner's count for each measure, and to the base round's count (default `EVAL_MIN_QUESTIONS`). */
-  readonly minQuestions?: number;
+  readonly judgePinned?: boolean;
+  readonly sameJudgeFamily?: boolean;
 }
-
-const SUMMARY_PREFIX = "Eval (your runner): ";
-const CLASS_ORDER: readonly EvalNotRunClass[] = ["cap", "key_refused", "rate_limit", "quota", "overloaded", "provider_error", "refused"];
-const round2 = (value: number): string => String(Number(value.toFixed(2)));
-const inert = (text: string, max: number): string => inertEvidenceText(typeof text === "string" ? text : "", max);
-
-/** The sentence for a not-run class, with the cap amount when there is one. */
-function classSentence(word: EvalNotRunClass, capMicros: number | undefined): string {
-  return word === "cap" ? capSentence(capMicros) : word === "provider_error" || word === "refused" ? EVAL_NOT_RUN_SENTENCES[word] : NOT_RUN_SENTENCES[word];
-}
-/** The class that stopped the most cases (ties: the order cap, key refused, rate limit, quota, overloaded). */
-function dominantClass(facts: EvalRoundFacts): EvalNotRunClass | undefined {
-  let best: EvalNotRunClass | undefined;
-  for (const word of CLASS_ORDER) if ((facts.byClass[word] ?? 0) > (best === undefined ? 0 : (facts.byClass[best] ?? 0))) best = word;
-  return best;
-}
-
-/** An eval that was not run: no measure, the fixed sentence, `not_run`. */
-export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly sentence?: string; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean }): EvalCheckResult {
-  const sentence = args.sentence ?? (args.reason === "cap" ? capSentence(args.capMicros) : EVAL_NOT_RUN_SENTENCES[args.reason]);
-  return {
-    kind: "eval", roundKind: args.roundKind, outcome: "not_run", notRun: { reason: args.reason, sentence },
-    casesRun: args.facts?.run ?? 0, casesTotal: args.facts?.total ?? 0, usedHiddenSet: args.hiddenSetUsed === true, measures: [], verdicts: [], summary: `${SUMMARY_PREFIX}${sentence}`,
-  };
-}
-
-/**
- * The eval check from the runner's head measures, the base record and the round's facts. Above the not-run fraction (20% of cases) the whole eval is `not_run` with the sentence of the class that stopped most cases. Otherwise every
- * measure gets its own verdict. A measure with no matching base score (same name, unit and direction) is `not_run` and is left out of the v2 measures, which need a base. When some cases did not run, a score is compared only if
- * the runner's own count is the number of cases that ran (a score that may include unrun cases is never compared, so it can never read as a lower score), and the line says "n of N run".
- */
-export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
-  const { facts, roundKind } = input;
-  const hidden = input.hiddenSetUsed === true;
-  const minQuestions = input.minQuestions ?? EVAL_MIN_QUESTIONS;
-  if (facts.total > 0 && facts.notRun / facts.total > EVAL_NOT_RUN_FRACTION_MAX) {
-    const word = dominantClass(facts);
-    return evalNotRunResult({ roundKind, reason: "too_many_not_run", sentence: word === undefined ? EVAL_NOT_RUN_SENTENCES.too_many_not_run : classSentence(word, input.capMicros), facts, ...(hidden ? { hiddenSetUsed: true } : {}) });
-  }
-  // Too few cases ran for the eval to detect a change: not run, never a pass.
-  if (facts.run < minQuestions) return evalNotRunResult({ roundKind, reason: "too_few_questions", facts, ...(hidden ? { hiddenSetUsed: true } : {}) });
-  const verdicts: EvalMeasureResult[] = [];
-  const measures: EvalEvidenceMeasure[] = [];
-  input.head.measures.forEach((entry, index) => {
-    const match = input.base?.measures.find((candidate) => candidate.name === entry.name && candidate.unit === entry.unit && candidate.direction === entry.direction);
-    // A hidden-set round reports ONLY measures Rovara's own base round knows: a measure it does not know is dropped entirely (its name, unit and value never reach the result).
-    if (hidden && match === undefined) return;
-    // The position a measure is reported at: in a hidden round it is the measure's place in Rovara's BASE record, never its place in the runner's list (the runner would otherwise choose the position, and with it ~5 bits per measure).
-    const slot = hidden && match !== undefined && input.base !== undefined ? input.base.measures.indexOf(match) : index;
-    const label = inert(hidden ? (match?.name ?? "") : entry.name, 40);
-    const unit = inert(hidden ? (match?.unit ?? "") : entry.unit, 10);
-    // The cases behind a score are the cases that ran, from Rovara's facts: the runner's own count is only read to decide whether the score may be compared.
-    const count = facts.run;
-    const refuse = (reason: EvalNotRunReason, showHead: boolean): void => {
-      verdicts.push({ index: slot, label, unit, verdict: "not_run", reason, sentence: EVAL_NOT_RUN_SENTENCES[reason], ...(showHead && !hidden && readable(entry.value) ? { head: clamp(entry.value) } : {}), count });
-    };
-    if (entry.count !== undefined && entry.count < minQuestions) return refuse("too_few_questions", false);
-    if (facts.notRun > 0 && entry.count !== facts.run) return refuse("partial_run", false);
-    if (match === undefined) return refuse("no_base_score", true);
-    if ((match.count ?? input.base?.caseCount ?? 0) < minQuestions) return refuse("too_few_questions", false);
-    const judged = evalVerdictFor({ direction: entry.direction, base: match.value, head: entry.value, ...(match.spread === undefined ? {} : { spread: match.spread }) });
-    if (judged.verdict === "not_run") return refuse("unreadable_score", false);
-    if (hidden) {
-      // Pass or fail only: a score beyond the band reads as no drop, and no value is kept.
-      const verdict = judged.verdict === "worse" ? "worse" : judged.verdict === "no_noise_estimate" ? "no_noise_estimate" : "no_detectable_change";
-      verdicts.push({ index: slot, label, unit, verdict, sentence: verdict === "no_noise_estimate" ? EVAL_VERDICT_WORDS.no_noise_estimate : HIDDEN_VERDICT_WORDS[verdict], count });
-      return;
+const bits = (answers: readonly EvalAnswer[]): number[] => answers.map(a => Number(a.pass));
+const sum = (values: readonly number[]): number => values.reduce((a, b) => a + b, 0);
+const passes = (answers: readonly EvalAnswer[]): number => sum(bits(answers));
+const validAnswer = (a: EvalAnswer | undefined): boolean => a !== undefined && typeof a.pass === "boolean" && typeof a.answer === "string";
+const validSamples = (a: readonly EvalAnswer[] | undefined, n: number): boolean => Array.isArray(a) && a.length === n && a.every(validAnswer);
+const choose = (n: number, k: number): number => {
+  if (k < 0 || k > n) return 0;
+  let value = 1;
+  for (let i = 1; i <= k; i += 1) value = value * (n - i + 1) / i;
+  return value;
+};
+/** Exact stratified permutation tail. Each question conditions on its total passes.
+ * Matches evalsim2's convolution of hypergeometric distributions. */
+export function exactEvalTail(old: readonly (readonly number[])[], newer: readonly (readonly number[])[]): number {
+  if (old.length !== newer.length || old.length === 0 || old.length > EVAL_QUESTION_LIMIT) throw new RangeError("invalid eval samples");
+  let distribution = [1];
+  let observed = 0;
+  let offset = 0;
+  for (let i = 0; i < old.length; i += 1) {
+    const a = old[i]!; const b = newer[i]!;
+    if (a.length !== 3 || ![1, 3].includes(b.length) || [...a, ...b].some(v => v !== 0 && v !== 1)) throw new RangeError("invalid eval samples");
+    const total = sum(a) + sum(b); const n = a.length + b.length;
+    observed += sum(b);
+    const low = Math.max(0, b.length - (n - total)); const high = Math.min(b.length, total);
+    offset += low;
+    if (low === high) continue;
+    const next = Array.from({ length: distribution.length + high - low }, () => 0);
+    for (let k = low; k <= high; k += 1) {
+      const probability = choose(total, k) * choose(n - total, b.length - k) / choose(n, b.length);
+      for (let j = 0; j < distribution.length; j += 1) next[j + k - low]! += distribution[j]! * probability;
     }
-    verdicts.push({ index, label, unit, verdict: judged.verdict, sentence: EVAL_VERDICT_WORDS[judged.verdict], head: clamp(entry.value), base: match.value, count });
-    const candidate = {
-      name: entry.name, unit: match.unit, base: match.value, head: entry.value, direction: entry.direction,
-      ...(judged.spread === undefined ? {} : { spread: judged.spread }), ...(judged.band === undefined ? {} : { band: judged.band }),
-    };
-    const checked = EvidenceMeasureSchema.safeParse(candidate);
-    if (checked.success && measures.length < EVIDENCE_MEASURES_MAX) measures.push(checked.data);
-  });
-  // A hidden round lists its measures in the BASE record's order, whatever order the runner wrote them in.
-  if (hidden) verdicts.sort((left, right) => left.index - right.index);
-  if (hidden && verdicts.length === 0) return evalNotRunResult({ roundKind, reason: "no_base_score", facts, hiddenSetUsed: true });
-  const lines = verdicts.slice(0, SUMMARY_MEASURES_LISTED).map((verdict) => {
-    if (verdict.base === undefined || verdict.head === undefined) return `${verdict.label}: ${verdict.sentence}`;
-    return `${verdict.label} ${round2(verdict.head)} ${verdict.unit} (main ${round2(verdict.base)} ${verdict.unit}) \u00b7 ${verdict.sentence}`;
-  });
-  if (verdicts.length > SUMMARY_MEASURES_LISTED) lines.push(`and ${String(verdicts.length - SUMMARY_MEASURES_LISTED)} more measures`);
-  const partial = facts.notRun > 0 ? ` (${String(facts.run)} of ${String(facts.total)} run)` : "";
-  return {
-    kind: "eval", roundKind, outcome: verdicts.some((verdict) => verdict.verdict !== "not_run") ? "ran" : "not_run",
-    casesRun: facts.run, casesTotal: facts.total, usedHiddenSet: hidden, measures, verdicts, summary: `${SUMMARY_PREFIX}${lines.join("; ")}${partial}`,
+    distribution = next;
+  }
+  return Math.min(1, distribution.slice(0, Math.max(0, observed - offset + 1)).reduce((a, b) => a + b, 0));
+}
+export function evalSuspects(questions: readonly EvalQuestionComparison[]): { down: string[]; up: string[]; omitted: string[] } {
+  const down: string[] = []; const up: string[] = []; const omitted: string[] = [];
+  for (const q of questions) {
+    if (q.edited) continue;
+    const target = passes(q.old) >= 2 && !q.first.pass ? down : passes(q.old) <= 1 && q.first.pass ? up : undefined;
+    if (target === undefined) continue;
+    if (target.length < 10) target.push(q.id); else omitted.push(q.id);
+  }
+  return { down, up, omitted };
+}
+export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; readonly reason: EvalNotRunReason; readonly facts?: EvalRoundFacts; readonly capMicros?: number; readonly hiddenSetUsed?: boolean }): EvalCheckResult {
+  const sentence = EVAL_NOT_RUN_SENTENCES[args.reason];
+  return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason: args.reason, sentence }, usedHiddenSet: args.hiddenSetUsed === true,
+    casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], fixRequested: false,
+    summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}. Retry.`, disposition: { draft: false, check: "neutral", retry: true } };
+}
+/** First-look p in [.01,.2) justifies exactly two more new runs; mirror upward. */
+export function evalNeedsSecondLook(questions: readonly EvalQuestionComparison[]): boolean {
+  const qs = questions.filter(q => !q.edited);
+  if (qs.length === 0) return false;
+  const old = qs.map(q => bits(q.old)); const first = qs.map(q => [Number(q.first.pass)]);
+  const down = exactEvalTail(old, first); const up = exactEvalTail(old.map(a => a.map(v => 1 - v)), first.map(a => a.map(v => 1 - v)));
+  return (down >= .01 && down < .2) || (up >= .01 && up < .2);
+}
+export function evalCheckResult(input: EvalCheckInput): EvalCheckResult {
+  const hidden = input.hiddenSetUsed === true;
+  const refuse = (reason: EvalNotRunReason): EvalCheckResult => evalNotRunResult({ roundKind: input.roundKind, reason, hiddenSetUsed: hidden });
+  if (hidden && input.roundKind !== "check_sealed") return refuse("hidden_set_needs_sealed_round");
+  const all = input.questions;
+  if (all === undefined || all.length === 0) return refuse("question_data_missing");
+  if (all.length > EVAL_QUESTION_LIMIT || new Set(all.map(q => q.id)).size !== all.length || all.some(q => typeof q.id !== "string" || !validSamples(q.old, 3) || !validAnswer(q.first))) return refuse("invalid_question_data");
+  const excluded: Array<{ id: string; reason: "edited" | "suspect_limit" }> = all.filter(q => q.edited).map(q => ({ id: inertEvidenceText(q.id, 160), reason: "edited" }));
+  const qs = all.filter(q => !q.edited);
+  const unavailable = (reason: EvalNotRunReason): EvalCheckResult => ({ ...refuse(reason), excluded: hidden ? [] : excluded });
+  if (qs.length === 0) return unavailable("too_few_questions");
+  if (input.judgePinned === false) return unavailable("judge_changed");
+  if (!Number.isSafeInteger(input.changedPromptCalls) || input.changedPromptCalls! < 1) return unavailable("no_changed_prompt_call");
+  const suspects = evalSuspects(qs);
+  excluded.push(...suspects.omitted.map(id => ({ id: inertEvidenceText(id, 160), reason: "suspect_limit" as const })));
+  const subset = input.subsetSupported !== false;
+  const chosen = new Set(subset ? [...suspects.down, ...suspects.up] : []);
+  const fresh = qs.filter(q => chosen.has(q.id));
+  const completeFresh = fresh.every(q => validSamples(q.freshOld, 3) && validSamples(q.freshNew, 3));
+  const firstOld = qs.map(q => bits(q.old)); const firstNew = qs.map(q => [Number(q.first.pass)]);
+  const tail = (a: number[][], b: number[][], up: boolean): number => exactEvalTail(up ? a.map(v => v.map(x => 1 - x)) : a, up ? b.map(v => v.map(x => 1 - x)) : b);
+  const whole = (up: boolean): boolean => {
+    const p = tail(firstOld, firstNew, up);
+    if (p < .01) return true;
+    if (p >= .2 || !qs.every(q => validSamples(q.moreNew, 2))) return false;
+    return tail(firstOld, qs.map(q => [Number(q.first.pass), ...bits(q.moreNew!)]), up) < .01;
   };
+  const targeted = (ids: readonly string[], up: boolean): boolean => {
+    const group = fresh.filter(q => ids.includes(q.id));
+    return group.length > 0 && group.every(q => validSamples(q.freshOld, 3) && validSamples(q.freshNew, 3)) && tail(group.map(q => bits(q.freshOld!)), group.map(q => bits(q.freshNew!)), up) < .01;
+  };
+  const broke = (q: EvalQuestionComparison): boolean => chosen.has(q.id) && validSamples(q.freshOld, 3) && validSamples(q.freshNew, 3) && passes(q.freshOld!) === 3 && passes(q.freshNew!) === 0;
+  const worse = whole(false) || targeted(suspects.down, false) || qs.some(q => (q.category === "safety" || q.category === "refusal") && broke(q));
+  // Incomplete later work must never erase already-established failure.
+  if (!worse && !completeFresh) return unavailable("partial_run");
+  const improved = !worse && (whole(true) || targeted(suspects.up, true));
+  const downP = tail(firstOld, firstNew, false);
+  const downwardPending = downP >= .01 && downP < .2;
+  if (!worse && (downwardPending || (!improved && evalNeedsSecondLook(qs))) && !qs.every(q => validSamples(q.moreNew, 2))) return unavailable("partial_run");
+  let unchanged = 0;
+  const questions: EvalQuestionResult[] = qs.flatMap(q => {
+    const a = chosen.has(q.id) && validSamples(q.freshOld, 3) ? q.freshOld! : q.old;
+    const b = chosen.has(q.id) && validSamples(q.freshNew, 3) ? q.freshNew! : [q.first];
+    const mixed = (x: readonly EvalAnswer[]): boolean => passes(x) > 0 && passes(x) < x.length;
+    const change = broke(q) ? "broke" : passes(a) === 0 && passes(b) === b.length ? "newly_pass" : mixed(a) || mixed(b) ? "flaky" : passes(q.old) >= 2 && !q.first.pass ? "newly_fail" : "unchanged";
+    if (change === "unchanged") { unchanged += 1; return []; }
+    return [{ id: inertEvidenceText(q.id, 160), change, oldAnswers: a.map(x => inertEvidenceText(x.answer, 1_000)), newAnswers: b.map(x => inertEvidenceText(x.answer, 1_000)) }];
+  });
+  const label: EvalLabel = worse ? "Worse on eval" : improved ? "Improved on eval" : "No drop found";
+  const notices = [...(subset ? [] : ["Question re-asks skipped: the runner cannot run a subset."]), ...(input.sameJudgeFamily === true ? ["The judge and product use the same model family."] : [])];
+  const brokenCount = questions.filter(q => q.change === "broke").length;
+  const scope = "on questions the agent could read";
+  const summary = hidden ? `Eval: ${worse ? "Worse on eval" : "No drop found"} on private questions.` : `Eval: ${label} — ${qs.length} questions · ${brokenCount} broke · ${questions.filter(q => q.change === "newly_pass").length} newly pass · ${questions.filter(q => q.change === "flaky").length} flaky · ${unchanged} unchanged · ${scope}; on the evaluated areas. Small or noisy sets can miss changes.${label === "No drop found" ? " This check can flag repeated breaks across questions and confirmed safety or refusal breaks. A single ordinary broken question may not change the label." : ""}`;
+  return { kind: "eval", roundKind: input.roundKind, outcome: "ran", label: hidden && improved ? "No drop found" : label, usedHiddenSet: hidden, casesRun: hidden ? 0 : qs.length, casesTotal: hidden ? 0 : all.length,
+    measures: [], verdicts: [], questions: hidden ? [] : questions, excluded: hidden ? [] : excluded, notices: hidden ? [] : notices, summary, fixRequested: worse || (!hidden && brokenCount > 0),
+    disposition: { draft: false, check: worse ? "failure" : "success", retry: false } };
 }

@@ -1,16 +1,15 @@
 // TE-F3 part A: the base score cache. The key is content-addressed, so a change to any part is a miss and a fresh base run, never a stale score; the store is company-scoped; only Rovara's own base round writes it.
 import { describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DOCUMENT_STORE_LIMITS } from "../../packages/contracts/src/ports/document-store.js";
+import { DOCUMENT_STORE_LIMITS, type StoredDocument } from "../../packages/contracts/src/ports/document-store.js";
 import { COMPANY_KEY_PREFIX, companyOfKey } from "../../packages/contracts/src/ports/company-scope.js";
 import {
-  EVAL_BASE_CACHE_TTL_DAYS, EvalBaseRecordSchema, createDocumentBaseScoreCache, evalBaseCacheKey, evalCommandFingerprint, evalSettingsFingerprint, type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalSettings,
+  EVAL_BASE_CACHE_TTL_DAYS, EvalBaseRecordSchema, createDocumentBaseScoreCache, evalBaseCacheKey, evalCommandFingerprint, type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalBaseRecord,
 } from "../../packages/contracts/src/eval-base-cache.js";
 
-const SETTINGS: EvalSettings = { runs: 3, seed: "seed-1", repeats: 5, k: 2, minQuestions: 20, imageDigest: `registry.example/worker@sha256:${"c".repeat(64)}`, route: "gemini" };
 const hex = (character: string, length = 64) => character.repeat(length);
 const parts = (over: Partial<EvalBaseCacheKeyParts> = {}): EvalBaseCacheKeyParts => ({
-  company: "org_aaaaaaaaaaaaaaaaaaaa", project: "project-1", baseCommit: hex("a", 40), evalSetHash: hex("b"), hiddenSetHash: "none", commandFingerprint: evalCommandFingerprint("npm run eval"), catalogRowId: "gemini", model: "gemini-small", modelVersion: "gemini-small-2026-10-01", settingsFingerprint: evalSettingsFingerprint(SETTINGS), ...over,
+  company: "org_aaaaaaaaaaaaaaaaaaaa", project: "project-1", baseCommit: hex("a", 40), evalSetHash: hex("b"), hiddenSetHash: "none", commandFingerprint: evalCommandFingerprint("npm run eval"), catalogRowId: "gemini", model: "gemini-small", modelVersion: "gemini-small-2026-10-01", settingsFingerprint: hex("f"), ...over,
 });
 const record = (over: Partial<EvalBaseRecord> = {}): EvalBaseRecord => ({
   schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.04, count: 50 }], caseCount: 50, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1, ...over,
@@ -32,7 +31,7 @@ describe("the cache key", () => {
     ["catalog row", { catalogRowId: "openai" }],
     ["model", { model: "gemini-large" }],
     ["exact model version", { modelVersion: "gemini-small-2026-11-01" }],
-    ["settings fingerprint", { settingsFingerprint: evalSettingsFingerprint({ ...SETTINGS, runs: 4 }) }],
+    ["settings fingerprint", { settingsFingerprint: hex("e") }],
   ])("changes when the %s changes", (_name, over) => {
     expect(evalBaseCacheKey(parts(over))).not.toBe(evalBaseCacheKey(parts()));
   });
@@ -52,22 +51,6 @@ describe("the cache key", () => {
   it("fingerprints the eval command by content and with a domain, so the fingerprint is not the bare hash of the text", () => {
     expect(evalCommandFingerprint("a")).not.toBe(evalCommandFingerprint("b"));
     expect(evalCommandFingerprint("a")).toMatch(/^[a-f0-9]{64}$/u);
-  });
-});
-
-describe("the settings fingerprint", () => {
-  it.each<[string, Partial<EvalSettings>]>([
-    ["runs", { runs: 4 }], ["seed", { seed: "seed-2" }], ["repeats", { repeats: 6 }], ["k", { k: 3 }], ["minimum questions", { minQuestions: 30 }],
-    ["image digest", { imageDigest: `registry.example/worker@sha256:${"d".repeat(64)}` }], ["route", { route: "openai" }],
-  ])("changes when the %s changes", (_name, over) => {
-    expect(evalSettingsFingerprint({ ...SETTINGS, ...over })).not.toBe(evalSettingsFingerprint(SETTINGS));
-    expect(evalSettingsFingerprint(SETTINGS)).toMatch(/^[a-f0-9]{64}$/u);
-  });
-  it("refuses a setting that is not valid, naming it and never its value", () => {
-    for (const bad of [{ runs: -1 }, { runs: 1.5 }, { repeats: 10_000 }, { k: 0 }, { k: Number.NaN }, { minQuestions: -2 }, { seed: "" }, { seed: "a b" }, { imageDigest: "" }, { route: "x".repeat(300) }]) {
-      expect(() => evalSettingsFingerprint({ ...SETTINGS, ...bad })).toThrow(RangeError);
-    }
-    expect(() => evalSettingsFingerprint({ ...SETTINGS, seed: "has space" })).toThrow(/seed/u);
   });
 });
 
@@ -132,7 +115,7 @@ describe("the cache service over the document store", () => {
     const { cache } = world();
     const mine = cache("org_aaaaaaaaaaaaaaaaaaaa");
     await mine.write(parts(), record(), OWN_ROUND());
-    for (const over of [{ baseCommit: hex("c", 40) }, { evalSetHash: hex("d") }, { hiddenSetHash: hex("e") }, { commandFingerprint: evalCommandFingerprint("other") }, { catalogRowId: "openai" }, { model: "m2" }, { modelVersion: "v2" }, { settingsFingerprint: evalSettingsFingerprint({ ...SETTINGS, seed: "seed-2" }) }, { project: "p2" }] as Partial<EvalBaseCacheKeyParts>[]) {
+    for (const over of [{ baseCommit: hex("c", 40) }, { evalSetHash: hex("d") }, { hiddenSetHash: hex("e") }, { commandFingerprint: evalCommandFingerprint("other") }, { catalogRowId: "openai" }, { model: "m2" }, { modelVersion: "v2" }, { settingsFingerprint: hex("e") }, { project: "p2" }] as Partial<EvalBaseCacheKeyParts>[]) {
       expect(await mine.read(parts(over)), JSON.stringify(Object.keys(over))).toBeUndefined();
     }
   });
@@ -144,7 +127,9 @@ describe("the cache service over the document store", () => {
     const key = { pk: `${COMPANY_KEY_PREFIX}org_aaaaaaaaaaaaaaaaaaaa#EVALBASE`, sk: `K#${evalBaseCacheKey(parts())}` };
     const good = (await store.get(key))!;
     for (const broken of [{ record: "not json" }, { record: { schemaVersion: 1 } }, { record: { ...record(), measures: [{ name: "a", unit: "u", value: "NaN", direction: "up_good" }] } }, { record: null }, { company: "org_other" }]) {
-      await store.put({ item: { ...good, ...broken } });
+      // Match the JSON boundary of the real document store (optional fields are absent).
+      const item = JSON.parse(JSON.stringify({ ...good, ...broken })) as StoredDocument;
+      await store.put({ item });
       expect(await mine.read(parts()), JSON.stringify(broken)).toBeUndefined();
     }
     await store.put({ item: good });
