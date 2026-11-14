@@ -1,0 +1,254 @@
+[
+  {
+    "n": 20,
+    "rate": 0.7,
+    "mix": 1,
+    "effect": "none",
+    "worse": 0.012
+  },
+  {
+    "n": 20,
+    "rate": 0.7,
+    "mix": 1,
+    "effect": "hard20",
+    "worse": 0.6829999999999999
+  },
+  {
+    "n": 20,
+    "rate": 0.85,
+    "mix": 1,
+    "effect": "none",
+    "worse": 0.01
+  },
+  {
+    "n": 20,
+    "rate": 0.85,
+    "mix": 1,
+    "effect": "hard20",
+    "worse": 0.971
+  },
+  {
+    "n": 20,
+    "rate": 0.7,
+    "mix": 0.2,
+    "effect": "none",
+    "worse": 0.005
+  },
+  {
+    "n": 20,
+    "rate": 0.7,
+    "mix": 0.2,
+    "effect": "hard20",
+    "worse": 0.9990000000000001
+  },
+  {
+    "n": 20,
+    "rate": 0.85,
+    "mix": 0.2,
+    "effect": "none",
+    "worse": 0.004
+  },
+  {
+    "n": 20,
+    "rate": 0.85,
+    "mix": 0.2,
+    "effect": "hard20",
+    "worse": 0.9990000000000001
+  },
+  {
+    "n": 20,
+    "rate": 0.7,
+    "mix": 0.05,
+    "effect": "none",
+    "worse": 0.0
+  },
+  {
+    "n": 20,
+    "rate": 0.7,
+    "mix": 0.05,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 20,
+    "rate": 0.85,
+    "mix": 0.05,
+    "effect": "none",
+    "worse": 0.0
+  },
+  {
+    "n": 20,
+    "rate": 0.85,
+    "mix": 0.05,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 50,
+    "rate": 0.7,
+    "mix": 1,
+    "effect": "none",
+    "worse": 0.009000000000000001
+  },
+  {
+    "n": 50,
+    "rate": 0.7,
+    "mix": 1,
+    "effect": "hard20",
+    "worse": 0.938
+  },
+  {
+    "n": 50,
+    "rate": 0.85,
+    "mix": 1,
+    "effect": "none",
+    "worse": 0.012
+  },
+  {
+    "n": 50,
+    "rate": 0.85,
+    "mix": 1,
+    "effect": "hard20",
+    "worse": 0.9990000000000001
+  },
+  {
+    "n": 50,
+    "rate": 0.7,
+    "mix": 0.2,
+    "effect": "none",
+    "worse": 0.006999999999999999
+  },
+  {
+    "n": 50,
+    "rate": 0.7,
+    "mix": 0.2,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 50,
+    "rate": 0.85,
+    "mix": 0.2,
+    "effect": "none",
+    "worse": 0.005
+  },
+  {
+    "n": 50,
+    "rate": 0.85,
+    "mix": 0.2,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 50,
+    "rate": 0.7,
+    "mix": 0.05,
+    "effect": "none",
+    "worse": 0.001
+  },
+  {
+    "n": 50,
+    "rate": 0.7,
+    "mix": 0.05,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 50,
+    "rate": 0.85,
+    "mix": 0.05,
+    "effect": "none",
+    "worse": 0.001
+  },
+  {
+    "n": 50,
+    "rate": 0.85,
+    "mix": 0.05,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 200,
+    "rate": 0.7,
+    "mix": 1,
+    "effect": "none",
+    "worse": 0.023
+  },
+  {
+    "n": 200,
+    "rate": 0.7,
+    "mix": 1,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 200,
+    "rate": 0.85,
+    "mix": 1,
+    "effect": "none",
+    "worse": 0.013000000000000001
+  },
+  {
+    "n": 200,
+    "rate": 0.85,
+    "mix": 1,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 200,
+    "rate": 0.7,
+    "mix": 0.2,
+    "effect": "none",
+    "worse": 0.013000000000000001
+  },
+  {
+    "n": 200,
+    "rate": 0.7,
+    "mix": 0.2,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 200,
+    "rate": 0.85,
+    "mix": 0.2,
+    "effect": "none",
+    "worse": 0.0
+  },
+  {
+    "n": 200,
+    "rate": 0.85,
+    "mix": 0.2,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 200,
+    "rate": 0.7,
+    "mix": 0.05,
+    "effect": "none",
+    "worse": 0.006999999999999999
+  },
+  {
+    "n": 200,
+    "rate": 0.7,
+    "mix": 0.05,
+    "effect": "hard20",
+    "worse": 1.0
+  },
+  {
+    "n": 200,
+    "rate": 0.85,
+    "mix": 0.05,
+    "effect": "none",
+    "worse": 0.003
+  },
+  {
+    "n": 200,
+    "rate": 0.85,
+    "mix": 0.05,
+    "effect": "hard20",
+    "worse": 1.0
+  }
+]

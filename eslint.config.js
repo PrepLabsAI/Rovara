@@ -14,6 +14,7 @@ export default tseslint.config(
       "cdk.out/**",
       ".release-synth/**",
       "coverage/**",
+      "tests/fixtures/report-adapters/**",
       "tests/fixtures/e2e-web-api-app/**",
       "packages/verifier/assets/qualification-app/**",
       "tests/fixtures/orders-web-starter/**",

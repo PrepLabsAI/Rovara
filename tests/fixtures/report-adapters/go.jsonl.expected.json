@@ -1,0 +1,31 @@
+{
+  "format": "gotest",
+  "total": 4,
+  "passed": 1,
+  "failed": 1,
+  "skipped": 1,
+  "errored": 1,
+  "tests": [
+    {
+      "file": "cart",
+      "name": "same",
+      "status": "failed",
+      "durationMs": 12
+    },
+    {
+      "file": "cart",
+      "name": "same",
+      "status": "passed"
+    },
+    {
+      "file": "cart",
+      "name": "skip",
+      "status": "skipped"
+    },
+    {
+      "file": "cart",
+      "name": "unfinished",
+      "status": "errored"
+    }
+  ]
+}

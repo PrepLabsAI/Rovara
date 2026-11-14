@@ -11,7 +11,8 @@
 //   - a suite that failed to run (jest and vitest list it with no test results and a message) counts as one errored test, so a load failure never reads as zero failures;
 //   - every name is redacted, one plain line, and cut; at most 500 names go to the evidence, the failing ones first.
 // Pure: no file is read here. The caller reads the bytes (inside the workspace, never through a link) and passes the text.
-import { EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
+import { parseReportParts, type ReportFormatHint } from "./report-adapters.js";
+import { ABSENT_ON_NEW_MAX, EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, inertEvidenceText, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
 
 /** A report file larger than this is not read (the TESTPROOF reader's own limit). */
 export const TEST_REPORT_MAX_BYTES = 8 * 1024 * 1024;
@@ -31,9 +32,12 @@ export interface ReportedTest {
   fileGiven?: boolean;
   status: ReportedTestStatus;
   durationMs?: number;
+  /** Per-test epoch times, only when the report supplies them. */
+  startTimeMs?: number;
+  endTimeMs?: number;
 }
 export interface ParsedTestReport {
-  format: "junit" | "json" | "gotest";
+  format: "junit" | "json" | "gotest" | "trx" | "ctrf";
   total: number;
   passed: number;
   failed: number;
@@ -98,16 +102,15 @@ export function unescapeXml(text: string): string {
 export function withoutCommentsAndCdata(text: string): string | undefined {
   const pieces: string[] = [];
   let position = 0;
-  for (;;) {
-    const comment = text.indexOf("<!--", position);
-    const cdata = text.indexOf("<![CDATA[", position);
-    const start = comment === -1 ? cdata : cdata === -1 ? comment : Math.min(comment, cdata);
-    if (start === -1) break;
-    const closing = start === comment ? "-->" : "]]>";
+  const opening = /<!--|<!\[CDATA\[/g;
+  for (let match = opening.exec(text); match !== null; match = opening.exec(text)) {
+    const start = match.index;
+    const closing = match[0] === "<!--" ? "-->" : "]]>";
     const end = text.indexOf(closing, start + 4);
     if (end === -1) return undefined;
     pieces.push(text.slice(position, start));
     position = end + closing.length;
+    opening.lastIndex = position;
   }
   pieces.push(text.slice(position));
   return pieces.join("");
@@ -281,13 +284,13 @@ export function parseGoTestJson(text: string): ParsedTestReport | undefined {
   const tests: ReportedTest[] = [];
   const running = new Map<string, number>();
   const failedTestsIn = new Set<string>();
-  const failedPackages: string[] = [];
+  const failedPackages = new Set<string>();
   const key = (pkg: string, test: string): string => `${pkg}\u0000${test}`;
   for (const raw of text.split("\n")) {
     const event = goEvent(raw.trim());
     if (event === undefined) continue;
     if (event.test === undefined) {
-      if (event.action === "fail" && !failedPackages.includes(event.pkg)) failedPackages.push(event.pkg);
+      if (event.action === "fail") failedPackages.add(event.pkg);
       continue;
     }
     if (event.action === "run") { running.set(key(event.pkg, event.test), (running.get(key(event.pkg, event.test)) ?? 0) + 1); continue; }
@@ -316,14 +319,11 @@ export function parseGoTestJson(text: string): ParsedTestReport | undefined {
 }
 
 /**
- * Reads a report's text in the format its check names (`junit`, `json`) or, for `auto`, the one it looks like (JSON starts with `{`). A `go test -json` event stream is recognised by its content under `auto` and
- * `json`. Anything else, or a text over the size cap, is `undefined`: not measured.
+ * Compatibility view of the adapter table: only its tests part, never measures or an unknown measures version.
+ * Explicit legacy hints retain their meaning; auto also recognises TRX and CTRF. Unreadable or oversized input is not measured.
  */
-export function parseTestReport(text: string, format: "junit" | "json" | "auto" = "auto"): ParsedTestReport | undefined {
-  if (text.length === 0 || Buffer.byteLength(text, "utf8") > TEST_REPORT_MAX_BYTES) return undefined;
-  if (format !== "junit" && looksLikeGoTestJson(text)) return parseGoTestJson(text);
-  const kind = format === "auto" ? (text.trimStart().startsWith("{") ? "json" : "junit") : format;
-  return kind === "json" ? parseJsonReport(text) : parseJunit(text);
+export function parseTestReport(text: string, format: ReportFormatHint = "auto"): ParsedTestReport | undefined {
+  return parseReportParts(text, format)?.tests;
 }
 
 // ---- tests the change touched
@@ -355,6 +355,83 @@ export function skipRise(before: ParsedTestReport | undefined, after: ParsedTest
   return { rose: now > was, before: was, after: now };
 }
 
+/**
+ * A test id that differs from one run to the next, so it never proves a test went missing: a memory address (`<Thing object at 0x7f3a2c1b>`), or a pytest temporary directory (`pytest-of-user`, `/tmp/...`,
+ * `/var/folders/...`) that a `tmp_path` parametrization puts in the id.
+ */
+const UNSTABLE_ID = /0x[0-9a-f]{6,}|pytest-of-|\/(?:private\/)?(?:tmp|var\/folders)\//iu;
+
+/** How many tests of a report are not in a changed test file: the tests this comparison is about. */
+export function untouchedCount(report: ParsedTestReport, changedTestPaths: readonly string[]): number {
+  return report.tests.filter((test) => changedPathOf(test, changedTestPaths) === undefined).length;
+}
+
+/**
+ * Options that stop a run at its first failure (or after a few), by runner: pytest `-x`, `--exitfirst`, `--maxfail`, `--stepwise`, `--sw`; jest, vitest and mocha `--bail` and `-b`; unittest `-f` and `--failfast`; go `-failfast`;
+ * cargo `--fail-fast`; and the `--stop-on-*` and `--max-failures` family. `-b` and `-f` mean other things to a few tools: a doubtful case only means "no claim", which is the safe side.
+ */
+const STOP_EARLY_OPTION = /^(?:--exitfirst|--bail|-bail|-b|-f|--failfast|-failfast|--fail-fast|--stepwise|--stepwise-skip|--sw|--sw-skip|--stop-on-failure|--stop-on-error|--stop-on-defect|--max-failures(?:=.*)?)$/u;
+/** A pytest-style cluster of flags that take no value, one of which is `-x` (`-x`, `-xv`, `-vx`): a letter that takes a value (`-r`, `-k`, `-n`, `-m`, `-c`, `-p`) ends the cluster, so `-rx` (report letters) and `-Xmx` are not it. */
+const STOP_EARLY_CLUSTER = /^-[vqsl]*x[vqslx]*$/u;
+/** A limit on failures (`--maxfail=3`, `--bail=1`): zero means no limit. */
+const LIMIT_OPTION = /^(?:--maxfail|--bail|-bail)(?:=(.*))?$/u;
+
+function stopsEarly(args: readonly string[]): boolean {
+  for (const [index, argument] of args.entries()) {
+    if (STOP_EARLY_OPTION.test(argument) || STOP_EARLY_CLUSTER.test(argument)) return true;
+    const limit = LIMIT_OPTION.exec(argument);
+    if (limit === null) continue;
+    // `--maxfail 0` as two arguments, or `--maxfail=0`: no limit. A bare `--bail` is a limit of one.
+    const value = limit[1] ?? (argument === "--maxfail" ? args[index + 1] : undefined);
+    if (value === undefined || !/^0+$/u.test(value)) return true;
+  }
+  return false;
+}
+
+/** The ids of the tests of a report that are not in a changed test file, in report order. */
+function untouchedIds(report: ParsedTestReport, changedTestPaths: readonly string[]): string[] {
+  return report.tests.filter((test) => changedPathOf(test, changedTestPaths) === undefined).map((test) => testIdOf(test));
+}
+
+/**
+ * TE-B3: whether the run on the original code looks CUT SHORT, so that a skip count or a missing test would only be the cut: the command stops at the first failure (`-x`, `--maxfail`, `--bail`), the report holds an
+ * error outside the changed test files that this code's report does not (a collection or load error in a file the change did not touch: pytest then runs nothing), or the original run has far fewer untouched tests
+ * (under 90%) than this code's run. In the usual test-first case the NEW test fails to load on the original code and pytest runs nothing at all: that is this rule's third line, never a claim.
+ */
+export function originalRunLooksCut(before: ParsedTestReport, after: ParsedTestReport, changedTestPaths: readonly string[], args: readonly string[] = []): boolean {
+  if (stopsEarly(args)) return true;
+  const known = new Set(after.tests.map((test) => testIdOf(test)));
+  if (before.tests.some((test) => test.status === "errored" && changedPathOf(test, changedTestPaths) === undefined && !known.has(testIdOf(test)))) return true;
+  const [was, later] = [untouchedIds(before, changedTestPaths), untouchedIds(after, changedTestPaths)];
+  if (was.length * 10 < later.length * 9) return true;
+  // A bail the command line does not show (a config file's): an original run that is only the FIRST part of this code's run, in the same order, stopped where it stopped.
+  return was.length < later.length && was.every((id, index) => id === later[index]);
+}
+
+/**
+ * TE-B3: tests that RAN (passed or failed) on `before`, the run on the original code, and are not in `after` at all, by test id (give both reports in id form, `withTestIds`). A test of a changed test file is not
+ * compared (the original run shows the change's own test files, and a new test that fails to load there is not a test that went missing); an error entry is not a test that ran (a load or collection error has no test
+ * name); a test that is in `after` as skipped is not absent (`skipRise` counts it). `ids` are at most `ABSENT_ON_NEW_MAX`, in the order of the before report, each a valid id or a plain cut line; `count` is how many there
+ * are in all. Without both reports there is nothing to compare and no claim is made. One pass over each report.
+ */
+export function absentOnNew(before: ParsedTestReport | undefined, after: ParsedTestReport | undefined, changedTestPaths: readonly string[] = []): { ids: string[]; count: number } | undefined {
+  if (before === undefined || after === undefined) return undefined;
+  const now = new Set(after.tests.map((test) => testIdOf(test)));
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  let count = 0;
+  for (const test of before.tests) {
+    if (test.status !== "passed" && test.status !== "failed") continue;
+    if (changedPathOf(test, changedTestPaths) !== undefined) continue;
+    const id = testIdOf(test);
+    if (now.has(id) || seen.has(id) || UNSTABLE_ID.test(id)) continue;
+    seen.add(id);
+    count += 1;
+    if (ids.length < ABSENT_ON_NEW_MAX) ids.push(printedTestId(before.format, id));
+  }
+  return { ids, count };
+}
+
 /** The `tests` part of a check in the evidence pack (`EvidencePack.checks[].tests`). */
 export interface EvidenceTests {
   total: number;
@@ -377,12 +454,19 @@ export interface EvidenceTestsOptions {
   skippedOutside?: { before: number; after: number };
 }
 
+function printedTestId(format: ParsedTestReport["format"], id: string): string {
+  // The v1 schema disallows format characters. Preserve a visible prefix for a block opener after removing joiners.
+  return format === "trx" || format === "ctrf" ? displayLine(inertEvidenceText(id, TEST_ID_MAX).replace(/^\u200D/u, "· ")) : isValidTestId(id) ? id : displayLine(id);
+}
+
 /**
  * The evidence's view of a report: the totals, at most 500 names (failing and errored tests first, then the tests the change touched, then the rest in report order) and at most 100 new tests (a passing
  * or failing test in an added or changed test file). A name the evidence keeps is never a different test's: a duplicate name in one file keeps its first.
  */
 export function evidenceTests(report: ParsedTestReport, options: EvidenceTestsOptions = {}): EvidenceTests {
   const changed = options.changedTestPaths ?? [];
+  const newFormat = report.format === "trx" || report.format === "ctrf";
+  const printedId = (id: string): string => printedTestId(report.format, id);
   const touched = (test: ReportedTest) => changedPathOf(test, changed) !== undefined;
   const rank = (test: ReportedTest) => (test.status === "failed" || test.status === "errored" ? 0 : touched(test) ? 1 : 2);
   const ordered = report.tests.map((test, index) => ({ test, index })).sort((a, b) => rank(a.test) - rank(b.test) || a.index - b.index);
@@ -396,9 +480,11 @@ export function evidenceTests(report: ParsedTestReport, options: EvidenceTestsOp
     seen.add(id);
     const proof = touched(test) ? (options.proofByTest?.get(id) ?? options.proofByTest?.get(test.name)) : undefined;
     // An id that is not valid (hidden characters, too long, a space at an end) is shown as a plain line, cut with an ellipsis, and marked `unlisted`: it is counted, never matched against the nightly's failing set or the marks.
-    names.push({ name: isValidTestId(id) ? id : displayLine(id), ...(isValidTestId(id) ? {} : { unlisted: true as const }), status: test.status, ...(proof === undefined ? {} : { proof }), ...(test.durationMs === undefined ? {} : { durationMs: test.durationMs }) });
+    const name = printedId(id);
+    const listed = isValidTestId(id) && name === id;
+    names.push({ name, ...(listed ? {} : { unlisted: true as const }), status: test.status, ...(proof === undefined || (newFormat && !listed) ? {} : { proof }), ...(test.durationMs === undefined ? {} : { durationMs: test.durationMs }) });
   }
-  const newTests = [...new Set(report.tests.filter((test) => test.status !== "skipped" && touched(test)).map((test) => { const id = testIdOf(test); return isValidTestId(id) ? id : displayLine(id); }))].slice(0, EVIDENCE_NEW_TESTS_MAX);
+  const newTests = [...new Set(report.tests.filter((test) => test.status !== "skipped" && touched(test)).map((test) => printedId(testIdOf(test))))].slice(0, EVIDENCE_NEW_TESTS_MAX);
   return {
     total: report.total, passed: report.passed, failed: report.failed, skipped: report.skipped, errored: report.errored,
     ...(options.skippedOutside === undefined ? {} : { skippedBefore: options.skippedOutside.before, skippedAfter: options.skippedOutside.after }),

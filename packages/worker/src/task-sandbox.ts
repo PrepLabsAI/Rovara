@@ -10,7 +10,9 @@ import { containerBashOperations, runContainerCommand, type ContainerCommandOpti
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import type { CommandResult } from "./readiness.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
+import { containerGone, type QuarantinedSandbox } from "./workspace-quarantine.js";
 import { createDockerCli, taskContainerExec, type DockerCli } from "./swebench/containers.js";
+import { modelHostAddHostArgs, type ModelHostBlock } from "./model-helper-block.js";
 
 /**
  * Ruling R56: on an EC2 worker, code the task controls (the agent's shell, project setup and readiness commands, project
@@ -91,7 +93,7 @@ export const SANDBOX_PYTHON_USER_BASE_DIRECTORY = ".agentx-python";
  */
 export function sandboxCommandOptions(rootPath: string): ContainerCommandOptions {
   const base = join(resolve(rootPath), SANDBOX_PYTHON_USER_BASE_DIRECTORY);
-  return { unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base }, pathSuffix: [join(base, "bin")] };
+  return { target: "sandbox", unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base }, pathSuffix: [join(base, "bin")] };
 }
 /**
  * The environment variable that names a network the sandboxes join, made and walled by whoever starts the worker (`rovara up`, lane
@@ -205,6 +207,11 @@ export interface TaskSandboxRunInput {
   network?: { name: string; ip: string };
   /** The network named by AGENTX_SANDBOX_NETWORK (see `TASK_SANDBOX_NETWORK_ENVIRONMENT`), used instead of the shared task network. */
   sharedNetwork?: string;
+  /**
+   * TE-F1b: the by-name block of model hosts (model-helper-block.ts): `--add-host <host>:<address>` for every model host, so customer code that dials one by name reaches the model helper (or the dropped address) and never the
+   * real host. Absent: no block, as every sandbox before. The block is judged again here (a wildcard, an address that is not the helper's .9 or the dropped one, a name that is not a plain host: refused).
+   */
+  modelBlock?: ModelHostBlock;
 }
 
 /** The most DNS servers a sandbox is given (a resolver uses at most three). */
@@ -234,6 +241,7 @@ export function taskSandboxRunArgs(input: TaskSandboxRunInput): string[] {
     "--network", input.network?.name ?? input.sharedNetwork ?? TASK_SANDBOX_NETWORK,
     ...(input.network === undefined ? [] : ["--ip", input.network.ip]),
     ...dnsArgs(input.dns),
+    ...(input.modelBlock === undefined ? [] : modelHostAddHostArgs(input.modelBlock)),
     "--user", TASK_SANDBOX_USER,
     // A sandbox shares the instance with the worker: a runaway command (or a file-tool search) must not take every core or process.
     ...(sandboxCpuLimit(input.hostCpus ?? availableParallelism()) === undefined ? [] : ["--cpus", sandboxCpuLimit(input.hostCpus ?? availableParallelism())!]),
@@ -273,6 +281,12 @@ export interface TaskSandboxOptions {
   dns?: readonly string[];
   /** A network of its own (see `TaskSandboxRunInput.network`). */
   network?: { name: string; ip: string };
+  /**
+   * TE-F1b: the model block of this sandbox and, when a model helper was started for it, how to join its network and how to take it down. The helper is started BEFORE the sandbox (model-helper-network.ts `startModelHelper`), so
+   * this exists only after it is ready. This class is the WORKING sandbox: a block for a round's check sandbox (`role: "check"`) is refused at construction. The CALLER must `dispose()` the sandbox after a failed `start()`
+   * (it takes the helper down). A sandbox that cannot join the helper's network is removed and its start fails: it never runs with a block that points nowhere. `dispose()` takes the helper down after the sandbox.
+   */
+  modelBlock?: { block: ModelHostBlock; role?: "working" | "check"; attach?(container: string): Promise<void>; teardown?(): Promise<void> };
   /** Where the sandbox reports what it does not fail on; default: one JSON line on the worker's log. */
   log?: (event: Record<string, unknown>) => void;
 }
@@ -291,6 +305,7 @@ export class TaskSandbox {
   private wrappedExec: ContainerExec | undefined;
 
   constructor(private readonly options: TaskSandboxOptions) {
+    if (options.modelBlock?.role !== undefined && options.modelBlock.role !== "working") throw agentXError("CONFIG_INVALID", "a task sandbox is the working sandbox: it cannot take a model block made for a round's check sandbox");
     this.docker = options.docker ?? createDockerCli();
     this.name = `agentx-task-${options.taskId.replace(/[^a-zA-Z0-9_.-]/gu, "-")}-${randomUUID().slice(0, 8)}`;
     const exec = taskContainerExec(this.docker, this.name);
@@ -345,11 +360,29 @@ export class TaskSandbox {
     this.disposed = true;
     // Test services (TS-RUN-4): the run goes first (the sandbox leaves the services network, the helpers, the network and the run's directory go), whatever happens to the container after.
     if (this.services !== undefined) await this.services.teardown().catch(() => undefined);
-    if (this.starting === undefined) return true;
+    if (this.starting === undefined) {
+      // The model helper was started before the sandbox, so it goes even when the sandbox never started.
+      await this.options.modelBlock?.teardown?.().catch(() => undefined);
+      return true;
+    }
     // A start still in flight finishes first, so the removal sees the container it creates.
     await this.starting.catch(() => undefined);
     this.removedCleanly = await this.remove();
+    // The model helper's network cannot go while the sandbox is on it: after the removal.
+    await this.options.modelBlock?.teardown?.().catch(() => undefined);
     return this.removedCleanly;
+  }
+
+  /**
+   * A command in this sandbox could not be confirmed stopped (RunnerKillUnconfirmedError): the container is killed, removed, and checked gone or not running, so nothing in it can write the workspace
+   * it mounts. Safe to call again. True when that is verified; false means it may still run, and the workspace stays marked unsafe.
+   */
+  async quarantine(): Promise<QuarantinedSandbox> {
+    if (this.starting === undefined) return { name: this.name, verified: true };
+    await this.starting.catch(() => undefined);
+    await this.docker.run(["kill", this.name], { timeoutMs: DOCKER_CALL_TIMEOUT_MS }).catch(() => undefined);
+    await this.remove();
+    return { name: this.name, verified: await containerGone(this.docker, this.name) };
   }
 
   /** Whether the last `dispose` found the container gone (true also when nothing was started); false when `docker rm` failed, so processes in it may still run (S4-L2). */
@@ -378,12 +411,21 @@ export class TaskSandbox {
     if (this.options.network === undefined && sharedNetwork === undefined) await this.ensureNetwork();
     const maskedPaths = await hiddenWorkspaceDirectories(root);
     const result = await this.docker.run(
-      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(this.options.dns === undefined ? {} : { dns: this.options.dns }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }) }),
+      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(this.options.dns === undefined ? {} : { dns: this.options.dns }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }), ...(this.options.modelBlock === undefined ? {} : { modelBlock: this.options.modelBlock.block }) }),
       { timeoutMs: SANDBOX_START_TIMEOUT_MS },
     );
     if (result.exitCode !== 0) {
       const detail = (result.stderr || result.stdout).trim().split("\n").slice(-5).join(" ").slice(0, 800);
       throw agentXError("RUNTIME_UNAVAILABLE", `AgentX could not start the task sandbox${result.timedOut === true ? " (timed out)" : ""}: ${detail || `exit ${String(result.exitCode)}`}`);
+    }
+    // TE-F1b: dual-homed. The sandbox joins its model helper's network at its fixed address; a sandbox that cannot is removed, never left running with a block that points nowhere.
+    if (this.options.modelBlock?.attach !== undefined) {
+      try {
+        await this.options.modelBlock.attach(this.name);
+      } catch {
+        await this.remove();
+        throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not start the task sandbox: it could not join the model helper's network");
+      }
     }
     await this.prepareUserBase(root);
     // A write the file tools' helper was killed in leaves a `.agentx-file-ops-*` file; an earlier task's must not reach this one's snapshots.
