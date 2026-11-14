@@ -684,15 +684,15 @@ async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId
     developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
   });
-  const usable = new Set(listed.projects.map((project) => project.name));
+  // An administrator row also gives task access (#630), but this answer keeps naming it `administrator`, after the rest.
   const administered = (await queryAll<{ projectName?: unknown; role?: unknown }>(deps, `MEMBER#${developerId}`, "PROJECT#"))
-    .filter((membership) => membership.role === "administrator" && typeof membership.projectName === "string" && !usable.has(membership.projectName))
+    .filter((membership) => membership.role === "administrator" && typeof membership.projectName === "string")
     .map((membership) => membership.projectName as string);
   const registered = await projectsWithPolicy(deps, administered);
   return {
     displayName: developer.displayName,
     projects: [
-      ...listed.projects.map((project) => ({ name: project.name, access: project.access })),
+      ...listed.projects.filter((project) => !administered.includes(project.name)).map((project) => ({ name: project.name, access: project.access })),
       ...administered.filter((name) => registered.has(name)).sort().map((name) => ({ name, access: "administrator" as const })),
     ],
     notices: listed.notices,
