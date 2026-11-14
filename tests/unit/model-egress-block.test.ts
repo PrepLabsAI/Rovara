@@ -235,6 +235,11 @@ describe("the fixed sentences", () => {
   });
 });
 
+// TE-F2 part A's exact files (the brief's stacked lane): 14 pure contract files and 10 test files.
+const F2A_SOURCES = ["model-failure-pack", "model-families", "model-family-anthropic", "model-family-cohere", "model-family-gemini-extra", "model-family-openai-ops", "model-family-vectors", "model-render", "model-reply-provenance", "model-reply-set", "model-request-facts", "model-serve-replies", "model-served-family", "model-sse-named"];
+const F2A_TESTS = ["model-failure-pack", "model-family-anthropic", "model-family-cohere", "model-family-openai-ops", "model-replies-contracts-guard", "model-reply-provenance", "model-reply-provenance-base", "model-reply-set", "model-request-facts", "model-serve-replies"].map((name) => `tests/unit/${name}.test.ts`);
+const F2A_FILES: ReadonlySet<string> = new Set([...F2A_SOURCES.map((name) => `packages/contracts/src/${name}.ts`), ...F2A_TESTS]);
+
 describe("no callers yet", () => {
   const NEW_MODULES = ["model-catalog", "model-catalog-rows", "model-catalog-digest", "model-family-common", "model-family-gemini", "model-family-openai", "model-egress-block", "model-serve"];
   const walk = (directory: string): string[] =>
@@ -249,7 +254,8 @@ describe("no callers yet", () => {
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        // TE-F2 part A stacks on this lane: exactly these files are allowed to import F0a's modules (its own pure contracts and its tests); its guard (model-replies-contracts-guard.test.ts) proves nothing else calls them.
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || /^tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
@@ -261,7 +267,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;
