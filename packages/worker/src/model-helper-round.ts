@@ -132,7 +132,9 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
     });
     return helper;
   };
+  // `...runners` first: every member the wrapped runners have (kind, reportRoot, scopeRound, originalCode, prepareRound, freshServices, resetBetweenChecks, and any later one) reaches the caller; only these three are replaced.
   const wrapped: CheckRunners = {
+    ...runners,
     async runProjectCommand(command, signal) {
       const started = await ensure(signal);
       if (started === undefined) return runners.runProjectCommand(command, signal);
@@ -168,7 +170,5 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       }
     },
   };
-  if (runners.freshServices !== undefined) wrapped.freshServices = (signal) => runners.freshServices!(signal);
-  if (runners.resetBetweenChecks !== undefined) wrapped.resetBetweenChecks = (signal) => runners.resetBetweenChecks!(signal);
   return wrapped;
 }

@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
-import { builtinModelCatalog, findRedirectEscapes, modelHostBlockList } from "../../packages/contracts/src/index.js";
+import { NOT_SEALED_BLOCKED_BY_NAME_SENTENCE, builtinModelCatalog, findRedirectEscapes, modelHostBlockList } from "../../packages/contracts/src/index.js";
 import { modelHelperEvidence } from "../../packages/worker/src/model-helper-round.js";
 import { nameReadingRecorder } from "../support/model-escape-recorder-double.js";
 import { installModelNetworkTripwire } from "../support/model-network-tripwire.js";
@@ -86,7 +86,7 @@ describe("no request reaches a real model host during a scripted-replies run", (
     const evidence = modelHelperEvidence(summary, BLOCK_LIST);
     expect(evidence.result).toBe("not_run");
     expect(evidence.lines).toContain("not run: client ignored the redirect (called generativelanguage.googleapis.com)");
-    expect(evidence.lines).toContain("not sealed; model hosts blocked by name only");
+    expect(evidence.lines).toContain(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
     expect(evidence.lines.join("\n")).not.toMatch(/sealed(?!;)/u);
     // the honoured call still counts as a scripted call
     expect(summary.scripted.before_task).toBe(1);
@@ -97,7 +97,9 @@ describe("no request reaches a real model host during a scripted-replies run", (
     const ports = world.loop.escapePorts as { tls: number; plain: number };
     const tripwire = installModelNetworkTripwire({ resolver: new Set(BLOCK_LIST), ports: { 443: ports.tls, 80: ports.plain } });
     try {
-      await Promise.all(BLOCK_LIST.map((host) => dialTls(host)));
+      // In batches under the escape listeners' own bound (MODEL_HELPER_LIMITS.sideMaxConnections = 64 at once; a flood is dropped, not queued): the list is ~200 hosts now (code/next's catalog added the Vertex regions), and dialing all at once lost 72 of them.
+      const BATCH = 32;
+      for (let at = 0; at < BLOCK_LIST.length; at += BATCH) await Promise.all(BLOCK_LIST.slice(at, at + BATCH).map((host) => dialTls(host)));
       await settle(world, BLOCK_LIST.length);
     } finally {
       tripwire.restore();

@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { NOT_SEALED_BLOCKED_BY_NAME_SENTENCE } from "../../packages/contracts/src/index.js";
 import { CheckNotRunError, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { UNTRUSTED_MODEL_SUMMARY, parseModelHelperSummary, type ModelHelperSummary } from "../../packages/worker/src/model-helper-ledger.js";
 import {
@@ -32,7 +33,9 @@ describe("evidence", () => {
   it("hosted: says 'not sealed; model hosts blocked by name only', never 'sealed'; the laptop says exactly 'model hosts not blocked on this machine'", () => {
     const hosted = modelHelperEvidence(summary({ scripted: { before_task: 2, independent: 0, task_made: 0 }, countsTowardProof: 2 }), BLOCK);
     expect(hosted).toMatchObject({ result: "ran", countsTowardProof: 2 });
-    expect(hosted.lines[0]).toBe("not sealed; model hosts blocked by name only");
+    // the sentence is F1b's (it now also says a Google service that runs a model inside it is not blocked); it starts with the words this test pins
+    expect(hosted.lines[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
+    expect(hosted.lines[0]).toMatch(/^not sealed; model hosts blocked by name only/u);
     const laptop = modelHelperEvidence(summary({ blockState: "not_blocked_here" }), BLOCK);
     expect(laptop.lines[0]).toBe("model hosts not blocked on this machine");
     expect(laptop.lines.join("\n")).not.toContain("blocked by name");
