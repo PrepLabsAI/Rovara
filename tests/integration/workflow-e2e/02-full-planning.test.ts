@@ -195,7 +195,10 @@ describe("Suite 2: Full planning", () => {
     expect(page.body).toContain(`Not found at ${e2e.baseCommit.slice(0, 7)}`);
     await e2e.click("agentx_workflow_approve");
     await e2e.settle();
-    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    // If the workflow stops anywhere else, say why: the block reason and each review's reason are the whole story of a stage that did not pass (a bare stage/state diff once hid it).
+    const workflow = e2e.workflow();
+    const why = `${workflow.stage}/${workflow.state}; blockReason=${workflow.blockReason ?? "none"}; reviews=${JSON.stringify((workflow.reviews ?? []).map((review) => ({ role: review.role, status: review.status, failureReason: review.failureReason })))}`;
+    expect(workflow, why).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
   }, 120_000);
 
   it("2.9b says an excerpt couldn't be loaded when GitHub fails, never shows the model's copy, and Slack approval still works", async () => {

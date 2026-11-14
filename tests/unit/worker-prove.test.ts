@@ -1,6 +1,7 @@
 // Proof and test environment E3: the Prove run's sequence, failure words, bounds, and the report the broker re-reads.
 import { describe, expect, it } from "vitest";
 import { TestEnvironmentBodySchema, testEnvDigest, testEnvIsProved, type ProjectCommand, type TestEnvironmentBody } from "@agentx/contracts";
+import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
 import { proveEnvironment, type ProveCommandResult, type ProvePorts } from "../../packages/worker/src/prove.js";
 
 const sha = (letter: string) => letter.repeat(64);
@@ -44,6 +45,15 @@ function fakes(over: Partial<ProvePorts> & { results?: Record<string, Partial<Pr
 }
 const prove = (ports: ProvePorts, environment = env(), signal = new AbortController().signal, deadlineMs = 3_600_000) => proveEnvironment(ports, { proposalDigest: testEnvDigest(environment), environment, signal, deadlineMs });
 const statuses = (report: Awaited<ReturnType<typeof prove>>) => Object.fromEntries(report.steps.map((step) => [step.step, step.status]));
+
+describe("a command whose stop could not be confirmed (FIX-RUNNER-ABORT-JOIN)", () => {
+  it("is not an 'infrastructure' failure to step past: the run rejects with it, and runs no later step", async () => {
+    const ran: string[] = [];
+    const { ports } = fakes({ runCommand: (command: ProjectCommand) => { ran.push(command.executable); return Promise.reject(new RunnerKillUnconfirmedError({ kind: "local", pgid: 1 })); } });
+    await expect(prove(ports)).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
+    expect(ran).toEqual(["pip"]);
+  });
+});
 
 describe("a passing run", () => {
   it("runs the steps in order, times the full suite, records the mode used and the coverage map, and is proved", async () => {
