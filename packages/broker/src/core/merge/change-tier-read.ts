@@ -1,9 +1,9 @@
 // The change tier's input from the code host: the files of each change request of a task, read as the host reports them (never what an agent says), and the commits the tier is bound to.
 // A host that gives no patch text for a file leaves it unreadable, and the classifier then treats the file as risky (fail closed); the port is not changed.
 import { createHash } from "node:crypto";
-import type { ChangeRequestFile, CodeHost, HostScope } from "@agentx/contracts";
+import type { ChangeRequestFile, CodeHost, HostScope, PageBudget, WorkflowSnapshot } from "@agentx/contracts";
 import { changedFilesFromHostFiles, plainChangedPath } from "../proof/changed-files.js";
-import { canonicalPatchText, factKey, type DiffInput, type HeadFacts, type TierFile } from "../decisions/change-tier.js";
+import { TIER_ENTRY_KINDS, TIER_REASON_CODES, canonicalPatchText, factKey, tierFromDiff, type DiffInput, type HeadFacts, type TierEntryKind, type TierFile, type TierFileEntry, type TierReason } from "../decisions/change-tier.js";
 import { DOCS_SITE_PROBES, fileTypeOf, normalizedTierPath } from "../decisions/sensitive-list.js";
 import { changeRequestRef, readChangeRequestFiles } from "./host-port.js";
 
@@ -14,16 +14,32 @@ export interface TierReadTarget {
   number: number;
 }
 
+const isEntryKind = (value: unknown): value is TierEntryKind => typeof value === "string" && (TIER_ENTRY_KINDS as readonly string[]).includes(value);
+
+/**
+ * The file's entry type as the host reported it (DEC 182: `entry: { head, base }` on a changed file), read defensively: a host that does not report it, or reports anything malformed, gives undefined, which the
+ * classifier treats as NOT KNOWN (never as an ordinary file).
+ */
+export function entryOfHostFile(file: ChangeRequestFile): TierFileEntry | undefined {
+  const raw = (file as ChangeRequestFile & { entry?: unknown }).entry;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const { head, base } = raw as { head?: unknown; base?: unknown };
+  return isEntryKind(head) && isEntryKind(base) ? { head, base } : undefined;
+}
+
 /** The tier files of one change request's host list. The routes and response schemas the diff touches are read the way the risk rules read them. */
 export function tierFilesOfRead(repositoryId: string, read: { files: readonly ChangeRequestFile[]; complete: boolean }): { files: TierFile[]; complete: boolean } {
   const parsed = changedFilesFromHostFiles(repositoryId, read.files, read.complete);
   const api = new Set(parsed.files.filter((entry) => entry.apiShapeChanged === true).map((entry) => `${entry.renamedFrom ?? ""}\u0000${entry.path}`));
   return {
     complete: read.complete && read.files.every((file) => plainChangedPath(file.path) && (file.previousPath === undefined || plainChangedPath(file.previousPath))),
-    files: read.files.map((file) => ({
-      repository: repositoryId, path: file.path, ...(file.previousPath === undefined ? {} : { previousPath: file.previousPath }), status: file.status, additions: file.additions, deletions: file.deletions,
-      ...(file.patch === undefined ? {} : { patch: file.patch }), ...(api.has(`${file.previousPath ?? ""}\u0000${file.path}`) ? { apiShapeChanged: true } : {}),
-    })),
+    files: read.files.map((file) => {
+      const entry = entryOfHostFile(file);
+      return {
+        repository: repositoryId, path: file.path, ...(file.previousPath === undefined ? {} : { previousPath: file.previousPath }), status: file.status, additions: file.additions, deletions: file.deletions,
+        ...(file.patch === undefined ? {} : { patch: file.patch }), ...(api.has(`${file.previousPath ?? ""}\u0000${file.path}`) ? { apiShapeChanged: true } : {}), ...(entry === undefined ? {} : { entry }),
+      };
+    }),
   };
 }
 
@@ -84,6 +100,7 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
   const text = new Map<string, string>();
   const imports = new Set<string>();
   const links = new Set<string>();
+  const submodules = new Set<string>();
   const unchecked = new Set<string>();
   let importsKnown: boolean | undefined;
   let docsSite: boolean | undefined;
@@ -151,12 +168,14 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
         beforeRequest?.();
         const kind = await target.host.pathKind(ref.repository, file.path, target.headSha, scope);
         if (kind === "symlink") links.add(factKey(target.repositoryId, file.path));
+        // A changed path that is a directory at the head is a submodule (a host reads a submodule as a directory).
+        if (kind === "dir") submodules.add(factKey(target.repositoryId, file.path));
       }
       // Past the limit the kind is not asked: unknown is risky, never "not a link".
       for (const file of listed.slice(PATH_KINDS_READ_MAX)) unchecked.add(factKey(target.repositoryId, file.path));
     }
   }
-  return { text, instructionImports: imports, ...(importsKnown === undefined ? {} : { importsKnown }), links, unchecked, ...(docsSite === undefined ? {} : { docsSite }) };
+  return { text, instructionImports: imports, ...(importsKnown === undefined ? {} : { importsKnown }), links, submodules, unchecked, ...(docsSite === undefined ? {} : { docsSite }) };
 }
 
 /** What the tier is computed from: the files of every change request of the task (as the host lists them), and the facts of `readHeadFacts`. A host that cannot answer THROWS. */
@@ -164,7 +183,7 @@ export async function readTierInput(targets: ReadonlyArray<TierReadTarget & { he
   const files: TierFile[] = [];
   let complete = true;
   for (const target of targets) {
-    const read = tierFilesOfRead(target.repositoryId, await readChangeRequestFiles(target.host, changeRequestRef(target.repositoryUrl, target.number), scope, beforeRequest));
+    const read = tierFilesOfRead(target.repositoryId, await readChangeRequestFiles(target.host, changeRequestRef(target.repositoryUrl, target.number), scope, beforeRequest, target.headSha));
     complete &&= read.complete;
     files.push(...read.files);
   }
@@ -199,4 +218,281 @@ export function boundCommits(entries: ReadonlyArray<{ repositoryId: string; head
 export async function readReviewInput(targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, beforeRequest?: () => void): Promise<{ files: string[]; patchText: string; diff: DiffInput }> {
   const read = await readTierInput(targets, scope, beforeRequest);
   return { files: read.diff.files.map((file) => file.path), patchText: canonicalPatchText(read.diff.files), diff: read.diff };
+}
+
+// ---- versions pushed between checks
+
+/** How many commits are visited, in all, looking for the versions the task has already seen; past it, the commits are counted as not scanned. */
+export const UNSEEN_WALK_MAX = 20;
+/**
+ * The forms Rovara writes a head in, each anchored at the start of the check's detail: the head is read only from the first match, never from text that follows (a patch line copied into a detail can carry any sha).
+ * `review level=...` and `tier_review level=...` (the review records), `tier_questions`, and the quick checks' own forms (`docs secret scan`, `code_config tests ...`, `dependency source`, `dependency install in the test run ...`, `install_link`, `ci_file reviewer questions (...) ...`).
+ */
+const OWN_HEAD_IN_DETAIL = /^(?:(?:tier_)?review level=\w+|tier_questions|docs secret scan|install_link|dependency source|dependency install in the test run \w+|code_config tests \w+|ci_file reviewer questions \([^)]*\) (?:not )?answered) head=([a-f0-9]{40})\b/u;
+
+/**
+ * Every commit the task has seen and checked, from its own record: the heads it recorded for its pull requests (and the heads they were synced from), the base and candidate commits, the heads its tiers were bound to,
+ * and the heads named by its checks in the forms Rovara itself writes (`OWN_HEAD_IN_DETAIL`). A tier bound to a digest (several repositories) names no commit, so the pull requests' recorded heads are what count there.
+ */
+export function seenHeadsOf(workflow: Pick<WorkflowSnapshot, "pullRequests" | "reviewBase" | "candidate" | "flow">): Set<string> {
+  const seen = new Set<string>();
+  const add = (value: string | undefined): void => { if (value !== undefined && SHA40.test(value)) seen.add(value); };
+  for (const entry of workflow.pullRequests ?? []) { add(entry.headSha); add(entry.syncedFrom); }
+  for (const entry of workflow.reviewBase ?? []) add(entry.baseCommitSha);
+  for (const entry of workflow.candidate?.repositories ?? []) { add(entry.commitSha); add(entry.baseCommitSha); }
+  const flow = workflow.flow;
+  for (const tier of [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])]) { add(tier.headSha); add(tier.mergeBase); }
+  for (const check of flow?.quickChecks ?? []) add(OWN_HEAD_IN_DETAIL.exec(check.detail ?? "")?.[1]);
+  return seen;
+}
+
+/** The base commits the task recorded, by repository: the history below them is the base branch's, not the task's (a merge of the base branch brings it in as a second parent). */
+export function baseCommitsOf(workflow: Pick<WorkflowSnapshot, "reviewBase" | "candidate">): Map<string, string[]> {
+  const bases = new Map<string, string[]>();
+  const add = (repositoryId: string, value: string | undefined): void => {
+    if (value === undefined || !SHA40.test(value)) return;
+    const list = bases.get(repositoryId) ?? [];
+    if (!list.includes(value)) list.push(value);
+    bases.set(repositoryId, list);
+  };
+  for (const entry of workflow.reviewBase ?? []) add(entry.repositoryId, entry.baseCommitSha);
+  for (const entry of workflow.candidate?.repositories ?? []) add(entry.repositoryId, entry.baseCommitSha);
+  return bases;
+}
+
+/** DEC 213: the most parents a commit pushed between checks may have (an ordinary commit or a two-parent merge); a commit with more is not scanned, and the head is escalated. */
+export const COMMIT_PARENTS_MAX = 2;
+/**
+ * The most commits read from the base branch's history (its current head, and the recorded base commits, down): those commits are the base branch's, not the task's. The history is searched only for a merge's
+ * SECOND parent (where "Update branch" and a merge of the base branch bring it in), only as far as needed: the search stops as soon as that commit is found.
+ */
+export const BASE_HISTORY_READS_MAX = 40;
+/** The risky reason codes of the rules (the ones before the first standard one). */
+const RISKY_CODES: ReadonlySet<string> = new Set<string>(TIER_REASON_CODES.slice(0, TIER_REASON_CODES.indexOf("more_than_lines")));
+/** Risky reasons that do not flag one commit read on its own: an empty commit, its size (the size of the final diff is what counts), a hint, and the walk's own reasons. */
+const NOT_A_COMMIT_FLAG: ReadonlySet<string> = new Set(["no_diff_files", "large_change", "eval_hint", "incomplete_diff", "unscanned_commits", "unseen_commit_flagged"]);
+const COMMIT_SCAN_AT = new Date(0).toISOString();
+
+/** A commit pushed between checks whose own diff the rules flagged, with the risky reasons it was flagged for (paths as the host listed them; never the flagged text). */
+export interface FlaggedCommit { repositoryId: string; commit: string; reasons: TierReason[] }
+export interface UnseenCommitsRead {
+  /** Commits found between the heads and the versions the task saw. */
+  count: number;
+  /** A path ended without reaching a seen commit (the first commit), or the walk read more than `UNSEEN_WALK_MAX` commits: what was pushed is not known at all. */
+  capped: boolean;
+  /**
+   * Commits found whose own diff could not be scanned: the host has no `commitChanges` (or, for a merge, no `compareChanges`) or could not answer it, it cut a file list, or the commit has more parents than
+   * `COMMIT_PARENTS_MAX` (the head included).
+   */
+  unscanned: number;
+  /** The commits whose own diff was flagged. */
+  flagged: FlaggedCommit[];
+}
+
+type HostFilesRead = { files: readonly ChangeRequestFile[]; complete: boolean };
+
+/** The lines a patch adds (`+`) or removes (`-`), inside its hunks. */
+function changedLinesOf(patch: string | undefined, sign: "+" | "-"): Set<string> {
+  const out = new Set<string>();
+  if (patch === undefined) return out;
+  let inHunk = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("@@")) inHunk = true;
+    else if (inHunk && line.startsWith(sign)) out.add(line.slice(1));
+  }
+  return out;
+}
+
+/**
+ * A two-parent merge's OWN changes, as `git show --cc` reads them: `first` is the merge against its first parent, `second` against its second. Only the files it changed against BOTH parents are kept (the path, kind
+ * and mode rules read only those), and in each only the lines added (or removed) against both (the text rules read only those). What one parent alone brought in (a newer base branch, a side branch whose commits are
+ * walked on their own) is that side's, not the merge's. Either list cut short: not whole.
+ */
+export function mergeOwnChanges(first: HostFilesRead, second: HostFilesRead): HostFilesRead {
+  if (first.complete !== true || second.complete !== true) return { files: [], complete: false };
+  const secondByPath = new Map(second.files.map((file) => [file.path, file]));
+  const files: ChangeRequestFile[] = [];
+  for (const file of first.files) {
+    const other = secondByPath.get(file.path);
+    if (other === undefined) continue;
+    const firstPatch = file.patch;
+    const kept: ChangeRequestFile & { entry?: TierFileEntry } = {
+      path: file.path, additions: file.additions, deletions: file.deletions, ...(file.previousPath === undefined ? {} : { previousPath: file.previousPath }),
+      // A mode change against one parent only took that parent's mode, the other's file: not the merge's own.
+      status: file.status === "changed" && other.status !== "changed" ? "modified" : file.status,
+    };
+    // What the path IS: the kind the merge took from a side it did not change it against, else the first parent's reading. Not known on either side: not known.
+    const firstEntry = entryOfHostFile(file);
+    const secondEntry = entryOfHostFile(other);
+    if (firstEntry !== undefined && secondEntry !== undefined) kept.entry = secondEntry.head === secondEntry.base ? secondEntry : firstEntry;
+    if (firstPatch !== undefined) {
+      const added = changedLinesOf(other.patch, "+");
+      const removed = changedLinesOf(other.patch, "-");
+      const lines: string[] = [];
+      let additions = 0;
+      let deletions = 0;
+      let inHunk = false;
+      let dropped = false;
+      for (const line of firstPatch.split("\n")) {
+        if (line.startsWith("@@")) { inHunk = true; dropped = false; lines.push(line); continue; }
+        if (inHunk && line.startsWith("+")) { dropped = !added.has(line.slice(1)); if (!dropped) { lines.push(line); additions += 1; } continue; }
+        if (inHunk && line.startsWith("-")) { dropped = !removed.has(line.slice(1)); if (!dropped) { lines.push(line); deletions += 1; } continue; }
+        // A "no newline at end of file" marker belongs to the line before it.
+        if (inHunk && line.startsWith("\\") && dropped) continue;
+        dropped = false;
+        lines.push(line);
+      }
+      kept.patch = lines.join("\n");
+      kept.additions = additions;
+      kept.deletions = deletions;
+    }
+    files.push(kept);
+  }
+  return { files, complete: true };
+}
+
+/** The reasons one commit's own changes are flagged for (empty: clean), or undefined when its list is not whole (not scanned). A merge is given its own changes (`mergeOwnChanges`). */
+export function commitFlagsOf(repositoryId: string, read: HostFilesRead): TierReason[] | undefined {
+  const files = tierFilesOfRead(repositoryId, read);
+  if (!files.complete) return undefined;
+  const tier = tierFromDiff({ files: files.files, complete: true }, { at: COMMIT_SCAN_AT });
+  return tier.reasons.filter((reason) => RISKY_CODES.has(reason.code) && !NOT_A_COMMIT_FLAG.has(reason.code));
+}
+
+/**
+ * What the walk has already learned from a host, kept for later passes: commits never change, so a commit's parents and the scan of a commit that WAS scanned (clean or flagged) are not read again (per host and
+ * organization, the newest `SCAN_MEMORY_MAX` commits). A commit that could not be scanned is asked again.
+ */
+const SCAN_MEMORY_MAX = 2_000;
+const scanMemory = new WeakMap<object, Map<string, { parents: string[]; flags?: TierReason[] }>>();
+function rememberedOf(host: object): Map<string, { parents: string[]; flags?: TierReason[] }> {
+  let memory = scanMemory.get(host);
+  if (memory === undefined) { memory = new Map(); scanMemory.set(host, memory); }
+  return memory;
+}
+function remember(memory: Map<string, { parents: string[]; flags?: TierReason[] }>, key: string, value: { parents: string[]; flags?: TierReason[] }): void {
+  memory.delete(key);
+  memory.set(key, value);
+  if (memory.size > SCAN_MEMORY_MAX) memory.delete(memory.keys().next().value!);
+}
+
+/**
+ * The commits between each current head and the versions below it that the task saw (`seenHeadsOf`), along EVERY parent (a person's merge of another branch brings its commits in by a second parent; one first-parent line would
+ * miss them): a breadth-first walk that stops each path at a seen commit, reading at most `UNSEEN_WALK_MAX` commits in all. Those versions were pushed between two checks and no tier read them: a credential added in one and
+ * taken out in the next leaves a clean final diff. So each one is scanned on its OWN diff (DEC 213: the host's `commitChanges`, the same rules as the head's: secret-like text, risky paths, file mode and type), and only a
+ * flagged one counts against the head (`flagged`). A two-parent merge is scanned on what it adds over BOTH parents (`mergeOwnChanges`, with the host's `compareChanges` against its second parent).
+ * A merge's second parent in the base branch's history counts as seen: the commits at and below the recorded base commits, and those reachable from the base branch's CURRENT head (`target.baseBranch`, read only when
+ * needed, searched only until that commit is found, at most `BASE_HISTORY_READS_MAX` commits): GitHub's "Update branch" merges a newer base-branch head in as a second parent, and those commits were reviewed when they
+ * landed there. Every request is charged to `beforeRequest` (each page of a multi-page read too), which stops the walk (it throws) when the pass's allowance or time is used up. A host that cannot list a commit's
+ * parents THROWS (the caller leaves the record as it was); a host that cannot give a commit's changes leaves that commit `unscanned`.
+ */
+export async function unseenCommits(
+  targets: ReadonlyArray<TierReadTarget & { headSha: string; baseBranch?: string | undefined }>, seen: ReadonlySet<string>, scope: HostScope, beforeRequest?: () => void, bases: ReadonlyMap<string, readonly string[]> = new Map(),
+): Promise<UnseenCommitsRead> {
+  let count = 0;
+  let capped = false;
+  let unscanned = 0;
+  const flagged: FlaggedCommit[] = [];
+  const scopeKey = "orgId" in scope ? `org:${scope.orgId}` : `system:${scope.system}`;
+  for (const target of targets) {
+    const repository = { url: target.repositoryUrl };
+    const host = target.host;
+    const memory = rememberedOf(host);
+    const keyOf = (kind: "parents" | "scan", commit: string): string => `${scopeKey}\u0000${target.repositoryUrl}\u0000${kind}\u0000${commit}`;
+    const parentsOf = async (commit: string): Promise<string[]> => {
+      const known = memory.get(keyOf("parents", commit));
+      if (known !== undefined) return [...known.parents];
+      beforeRequest?.();
+      const parents = await host.commitParents(repository, commit, scope);
+      if (Array.isArray(parents) && parents.every((parent) => typeof parent === "string" && SHA40.test(parent))) remember(memory, keyOf("parents", commit), { parents: [...parents] });
+      return parents;
+    };
+    /**
+     * One optional read of a commit's changes: charged one unit before it is asked (the pass's time and allowance are checked first, and a used-up pass stops the walk), and one more for each page after the first. A
+     * host that cannot answer gives undefined (not scanned); the pass's own stop is thrown on.
+     */
+    const changesRead = async <T>(read: ((budget: PageBudget) => Promise<T>) | undefined): Promise<T | undefined> => {
+      if (read === undefined) return undefined;
+      beforeRequest?.();
+      let pages = 0;
+      let stop: { error: unknown } | undefined;
+      const budget: PageBudget = {
+        beforeRequest: () => {
+          pages += 1;
+          if (pages === 1 || beforeRequest === undefined) return;
+          try { beforeRequest(); } catch (error) { stop = { error }; throw error; }
+        },
+      };
+      try { return await read(budget); } catch { if (stop !== undefined) throw stop.error; return undefined; }
+    };
+    // The base branch's history, searched only for a merge's second parent and only as far as needed.
+    let base: { found: Set<string>; queue: string[]; reads: number } | undefined;
+    const inBaseHistory = async (commit: string): Promise<boolean> => {
+      if (base === undefined) {
+        const found = new Set(bases.get(target.repositoryId) ?? []);
+        base = { found, queue: [...found], reads: 0 };
+        if (found.has(commit)) return true;
+        if (target.baseBranch !== undefined) {
+          beforeRequest?.();
+          try {
+            const current = await host.baseBranchHead(repository, target.baseBranch, scope);
+            if (SHA40.test(current) && !found.has(current)) { found.add(current); base.queue.unshift(current); }
+          } catch { /* the base branch's head could not be read: its newer commits are walked as the task's */ }
+        }
+      }
+      const state = base;
+      while (!state.found.has(commit) && state.reads < BASE_HISTORY_READS_MAX && state.queue.length > 0) {
+        state.reads += 1;
+        for (const parent of await parentsOf(state.queue.shift()!)) if (!state.found.has(parent)) { state.found.add(parent); state.queue.push(parent); }
+      }
+      return state.found.has(commit);
+    };
+    /** One unseen commit, scanned on its own changes (a merge on what it adds over both parents): its parents (from the same read when it answers), and whether it was scanned. */
+    const scan = async (commit: string): Promise<string[]> => {
+      const known = memory.get(keyOf("scan", commit));
+      if (known?.flags !== undefined) {
+        if (known.flags.length > 0) flagged.push({ repositoryId: target.repositoryId, commit, reasons: known.flags });
+        return [...known.parents];
+      }
+      const answer = await changesRead(host.commitChanges === undefined ? undefined : (budget) => host.commitChanges!(repository, commit, scope, budget));
+      const read = answer !== undefined && Array.isArray(answer.parents) && answer.parents.every((parent) => typeof parent === "string" && SHA40.test(parent)) && Array.isArray(answer.files) ? answer : undefined;
+      const parents = read?.parents ?? await parentsOf(commit);
+      let flags: TierReason[] | undefined;
+      if (read !== undefined && read.complete === true && parents.length <= COMMIT_PARENTS_MAX) {
+        if (parents.length < 2) flags = commitFlagsOf(target.repositoryId, read);
+        else {
+          const second = await changesRead(host.compareChanges === undefined ? undefined : (budget) => host.compareChanges!(repository, parents[1]!, commit, scope, budget));
+          flags = second !== undefined && Array.isArray(second.files) ? commitFlagsOf(target.repositoryId, mergeOwnChanges(read, second)) : undefined;
+        }
+      }
+      if (flags === undefined) unscanned += 1;
+      else {
+        remember(memory, keyOf("scan", commit), { parents: [...parents], flags });
+        if (flags.length > 0) flagged.push({ repositoryId: target.repositoryId, commit, reasons: flags });
+      }
+      return parents;
+    };
+    // The head itself is walked from even when it was seen (tiered): its own unseen ancestors are its own reason on every pass. Its own changes are the change request's (read whole), so it is not scanned again.
+    const visited = new Set<string>([target.headSha]);
+    const queue: Array<{ commit: string; head: boolean }> = [{ commit: target.headSha, head: true }];
+    let reads = 0;
+    while (queue.length > 0) {
+      if (reads >= UNSEEN_WALK_MAX) { capped = true; break; }
+      const next = queue.shift()!;
+      const parents = next.head ? await parentsOf(next.commit) : await scan(next.commit);
+      reads += 1;
+      // A path that ends at the first commit without meeting a seen one: nothing says what was pushed.
+      if (parents.length === 0) { capped = true; continue; }
+      // More parents than the limit (an octopus merge): not scanned (counted above for an unseen one; the head's own counts here), and not walked.
+      if (parents.length > COMMIT_PARENTS_MAX) { if (next.head) unscanned += 1; continue; }
+      for (const [index, parent] of parents.entries()) {
+        if (visited.has(parent)) continue;
+        visited.add(parent);
+        if (seen.has(parent) || (index > 0 && await inBaseHistory(parent))) continue;
+        count += 1;
+        queue.push({ commit: parent, head: false });
+      }
+    }
+  }
+  return { count, capped, unscanned, flagged };
 }

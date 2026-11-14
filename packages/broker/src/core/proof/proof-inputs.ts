@@ -1,16 +1,21 @@
 // Playbook P1: what the Proof section needs from storage, read where the version 2 description is built or rewritten: the approved plan (when it is a structured one with claims), the rows of the task's
 // browser and API round for the current code, and the test proof (does a new test fail on the original code?). Informational: a fault in any of them only leaves that input out, so the description is
 // published without it; none of them can block a pull request or change a verdict.
-import type { E2EScenarioResults, WorkflowSnapshot } from "@agentx/contracts";
+import { RealModelCheckSchema, type RealModelCheck, type E2EScenarioResults, type WorkflowSnapshot } from "@agentx/contracts";
 import type { OperationFacts } from "../../developer/task-records.js";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import type { ProofContext, ProofDesignContext } from "./proof-section.js";
 import type { ProofEvidenceContext } from "./evidence-lines.js";
+import { checkIdOfProofItem } from "./proof-table.js";
+import { recordedCheckIdsOf } from "./proof-section.js";
+import { PROOF_READ_MAX_MS, withinTime } from "./proof-keep.js";
 import { loadTestProof } from "./test-proof-reader.js";
 
 export interface ProofInputsDeps {
   actions: TestProofActions;
+  /** F9 supplies the bound final result. Called once under the existing proof timeout; absent means unconfirmed. */
+  realModelRun?: ((candidateDigest: string) => Promise<RealModelCheck | undefined>) | undefined;
   /** The task's browser and API rows; read only when the workflow requires that round. */
   scenarioResults?: (() => Promise<E2EScenarioResults | undefined>) | undefined;
   /** Proof and evidence (wire-proof): the evidence kept for this code and how the pull request shows it. Present only while the proof switch is on; absent, the section is built exactly as it was. */
@@ -45,6 +50,23 @@ export async function loadProofContext(
     if (deps.design === undefined) return undefined;
     try { return await deps.design(workflow); } catch { return undefined; }
   };
-  const [testProof, scenarioRows, evidence, design] = await Promise.all([checked ? loadTestProof(deps.actions, task, digest, operations) : Promise.resolve(undefined), scenarios(), evidenceOf(), designOf()]);
-  return { plan, ...(scenarioRows === undefined ? {} : { scenarioRows }), ...(testProof === undefined ? {} : { testProof }), ...(evidence === undefined ? {} : { evidence }), ...(design === undefined ? {} : { design }) };
+  const realRunOf = async (): Promise<RealModelCheck | undefined> => {
+    if (!checked || digest === undefined || deps.realModelRun === undefined) return undefined;
+    const result = await withinTime(PROOF_READ_MAX_MS, () => Promise.resolve().then(() => deps.realModelRun!(digest)));
+    if (!result.done) return undefined;
+    const parsed = RealModelCheckSchema.safeParse(result.value);
+    return parsed.success && parsed.data.candidateDigest === digest ? parsed.data : undefined;
+  };
+  const [loadedProof, scenarioRows, evidence, design, realModelRun] = await Promise.all([checked ? loadTestProof(deps.actions, task, digest, operations) : Promise.resolve(undefined), scenarios(), evidenceOf(), designOf(), realRunOf()]);
+  let testProof = loadedProof;
+  const checkDependencies = new Map<string, readonly { dependencyId: string; trust: "simulated"; replies: "task_made" }[]>();
+  if (testProof?.scriptedReplies !== undefined) {
+    const recorded = recordedCheckIdsOf(workflow);
+    for (const facts of testProof.scriptedReplies) {
+      const checkId = checkIdOfProofItem(facts.checkId, recorded);
+      if (checkId === undefined) { testProof = undefined; checkDependencies.clear(); break; }
+      if (facts.taskMade > 0) checkDependencies.set(checkId, [{ dependencyId: "scripted_replies", trust: "simulated", replies: "task_made" }]);
+    }
+  }
+  return { plan, ...(checkDependencies.size === 0 ? {} : { checkDependencies }), ...(realModelRun === undefined ? {} : { realModelRun }), ...(scenarioRows === undefined ? {} : { scenarioRows }), ...(testProof === undefined ? {} : { testProof }), ...(evidence === undefined ? {} : { evidence }), ...(design === undefined ? {} : { design }) };
 }

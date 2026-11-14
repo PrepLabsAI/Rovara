@@ -1,14 +1,15 @@
 // Playbook P1: the requirement-to-evidence table of a Rovara Code (version 2) pull request. One row per claim of the approved plan; its evidence is the plan's checks whose `proves` names the claim
 // (a check that proves a child also covers its ancestors, as the plan self-check counts it) and the browser/API scenarios `scenarioProves` names. A pure function: it reads nothing, writes
-// nothing and calls no model. Every string it returns is redacted and inert (`inertLine`), because the claims, check labels and scenario titles are a model's words and the description is public to
+// nothing and calls no model. Every string it returns is redacted and inert (shared inert-text helpers), because the claims, check labels and scenario titles are a model's words and the description is public to
 // the repository's readers.
 //
 // A claim is NOT static-only when the plan self-check says so: `planQualityFindings` gives a `claim-static-only` finding for a claim proved only by checks that read files (`grep`, `cat`, `test`) and
 // by no check or scenario that runs the code. That finding is the plan's own notion; this module asks it and does not guess. (The finding names at most 32 claims and only leaf claims; a parent is
 // static-only when all its leaves are.)
-import { TestProofSchema, type PlanClaim, type PlanDocument, type TestProof } from "@agentx/contracts";
+import { AGENT_REPLIES_UNCONFIRMED_WORDS, AGENT_REPLIES_DISAGREED_WORDS, SCRIPTED_AI_PROOF_WORDS, type RealModelCheck, inertEvidenceText, TestProofSchema, type EvidenceTrustClass, type PlanClaim, type PlanDocument, type TestProof } from "@agentx/contracts";
 import { planQualityFindings } from "../../developer/plan-quality.js";
 import { testProofPullRequestLines } from "../../developer/test-proof-lines.js";
+import { agentReplyStatuses, type AgentRepliesStatus } from "./agent-replies.js";
 import { inertLine } from "./inert-text.js";
 
 const CLAIM_TEXT_MAX = 300;
@@ -41,6 +42,8 @@ export interface ProofEvidence {
   /** Inert and cut; a scenario's label is its title. */
   label: string;
   state: ProofEvidenceState;
+  /** Present only for a passing check excluded from Proven by its dependency provenance. */
+  notProvenReason?: "made_by_rovara" | "agent_replies_unconfirmed" | "agent_replies_disagreed";
 }
 
 export interface ProofRow {
@@ -70,6 +73,9 @@ export interface ProofTable {
 export interface ProofTableInput {
   plan: PlanDocument;
   checkResults: readonly ProofCheckResult[];
+  /** Dependencies actually used by these recorded check results, keyed by check id (not readiness index). Absent: legacy behaviour exactly. Dependency ids are never displayed. */
+  checkDependencies?: ReadonlyMap<string, readonly { dependencyId: string; trust: EvidenceTrustClass; replies?: "task_made" }[]> | undefined;
+  realModelRun?: RealModelCheck | undefined;
   scenarioRows: readonly ProofScenarioRow[];
   /** Used only when its `candidateDigest` equals `candidateDigest`; otherwise ignored, as if absent. */
   testProof: TestProof | undefined;
@@ -144,13 +150,70 @@ function boundTestProof(testProof: unknown, candidateDigest: string | undefined)
 
 const oneLine = (text: string, max: number) => inertLine(text, max);
 
+export const MOCK_PROOF_PREFIX = "with a Rovara-made mock; not Proven: ";
+export const MOCK_PROOF_EXPLANATION = "Checks passing with a Rovara-made mock are not Proven.";
+export const AGENT_REPLIES_UNCONFIRMED_EXPLANATION = "Checks passing on scripted replies written in this task are not Proven until the real model agrees: check them.";
+export const AGENT_REPLIES_DISAGREED_EXPLANATION = "Checks passing on scripted replies written in this task are not Proven: the real model did not agree.";
+const REPLY_WORDS = { confirmed: SCRIPTED_AI_PROOF_WORDS, unconfirmed: AGENT_REPLIES_UNCONFIRMED_WORDS, disagreed: AGENT_REPLIES_DISAGREED_WORDS } as const;
+type ProofProvenance = Pick<ProofTableInput, "recordedCheckIds" | "checkDependencies" | "realModelRun">;
+
+/** Keep each reason once, including when rows are folded. All words are fixed. */
+export function proofReasonLines(table: ProofTable): string[] {
+  const reasons = new Set(table.rows.flatMap((row) => row.evidence.flatMap((item) => item.notProvenReason ?? [])));
+  return [
+    ...(reasons.has("made_by_rovara") ? [MOCK_PROOF_EXPLANATION] : []),
+    ...(reasons.has("agent_replies_unconfirmed") ? [AGENT_REPLIES_UNCONFIRMED_EXPLANATION] : []),
+    ...(reasons.has("agent_replies_disagreed") ? [AGENT_REPLIES_DISAGREED_EXPLANATION] : []),
+  ];
+}
+
+function mappedReplyStatuses(proof: TestProof | undefined, provenance: ProofProvenance): ReadonlyMap<string, AgentRepliesStatus> {
+  // Ambiguous or incomplete recorded identities cannot attest the named workflow check.
+  if (proof === undefined || !proofMatchesRecorded(proof, provenance.recordedCheckIds)) return new Map();
+  if (new Set(provenance.recordedCheckIds).size !== provenance.recordedCheckIds?.length) return new Map();
+  const statuses = agentReplyStatuses(proof, provenance.realModelRun);
+  const mapped = new Map<string, AgentRepliesStatus>();
+  for (const [id, value] of statuses) {
+    const checkId = checkIdOfProofItem(id, provenance.recordedCheckIds);
+    if (checkId !== undefined) mapped.set(checkId, value);
+  }
+  return mapped;
+}
+
+function replyStatus(checkId: string, provenance: ProofProvenance, statuses: ReadonlyMap<string, AgentRepliesStatus>): AgentRepliesStatus | undefined {
+  const dependencies = provenance.checkDependencies?.get(checkId);
+  if (dependencies === undefined || !dependencies.some((dependency) => dependency.replies !== undefined)) return undefined;
+  // Runtime callers do not get to treat an unknown provenance as an ordinary pre-task reply.
+  if (dependencies.some((dependency) => dependency.replies !== undefined && dependency.replies !== "task_made")) return "unconfirmed";
+  return statuses.get(checkId) ?? "unconfirmed";
+}
+
+/** Qualify aggregate old-code claims when any proving item maps to an explicitly Rovara-made dependency. No provenance leaves legacy words unchanged. */
+export function testProofQualifier(testProof: unknown, candidateDigest: string | undefined, provenance: ProofProvenance = {}): string {
+  const proof = boundTestProof(testProof, candidateDigest);
+  const usesMock = proof?.items.some((item) => {
+    const checkId = checkIdOfProofItem(item.checkId, provenance.recordedCheckIds);
+    return item.verdict === "proves_change" && checkId !== undefined && provenance.checkDependencies?.get(checkId)?.some((dependency) => dependency.trust === "made_by_rovara") === true;
+  });
+  if (usesMock === true) return MOCK_PROOF_PREFIX;
+  const statuses = mappedReplyStatuses(proof, provenance);
+  const replies = new Set((proof?.items ?? []).filter((item) => item.verdict === "proves_change").flatMap((item) => {
+    const checkId = checkIdOfProofItem(item.checkId, provenance.recordedCheckIds);
+    const status = checkId === undefined ? undefined : replyStatus(checkId, provenance, statuses);
+    return status === undefined ? [] : [status];
+  }));
+  const status = replies.has("disagreed") ? "disagreed" : replies.has("unconfirmed") ? "unconfirmed" : replies.has("confirmed") ? "confirmed" : undefined;
+  return status === undefined ? "" : `${REPLY_WORDS[status]}: `;
+}
+
 /**
  * The test-proof lines (#412's, from `testProofPullRequestLines`) for a proof bound to `candidateDigest`, made inert; none for any other proof. The pull request's Tests section lists them (once) and so does the task page's
  * proof block; the Proof table does not repeat them.
  */
-export function testProofLinesOf(testProof: unknown, candidateDigest: string | undefined): string[] {
+export function testProofLinesOf(testProof: unknown, candidateDigest: string | undefined, provenance: ProofProvenance = {}): string[] {
   const proof = boundTestProof(testProof, candidateDigest);
-  return proof === undefined ? [] : testProofPullRequestLines(proof, candidateDigest, (line) => inertLine(line, TEST_PROOF_LINE_MAX));
+  const qualifier = testProofQualifier(proof, candidateDigest, provenance);
+  return proof === undefined ? [] : testProofPullRequestLines(proof, candidateDigest, (line) => inertLine(line, TEST_PROOF_LINE_MAX)).map((line) => `${qualifier}${line}`);
 }
 
 const PARTLY_IDS_MAX = 30;
@@ -189,6 +252,7 @@ export function buildProofTable(input: ProofTableInput): ProofTable {
     return result.status === "PASS" ? "passed" : result.status === "FAILED" ? "failed" : "not_checked";
   };
   const provesChange = new Set((proof !== undefined && proofMatchesRecorded(proof, input.recordedCheckIds) ? proof.items : []).filter((item) => item.verdict === "proves_change").flatMap((item) => checkIdOfProofItem(item.checkId, input.recordedCheckIds) ?? []));
+  const replyStatuses = mappedReplyStatuses(proof, input);
   const checkOrder = [...new Set([...proposed.map((check) => check.id), ...Object.keys(proves)])];
 
   const rowOfScenario = new Map(input.scenarioRows.map((row) => [row.scenarioId, row]));
@@ -212,7 +276,17 @@ export function buildProofTable(input: ProofTableInput): ProofTable {
     for (const checkId of checkOrder) {
       if (!(proves[checkId] ?? []).some((id) => covered.has(id))) continue;
       const state = stateOfCheck(checkId);
-      evidence.push({ kind: "check", label: oneLine(labelOfCheck.get(checkId) ?? checkId, LABEL_MAX), state: state === "passed" && provesChange.has(checkId) ? "proven" : state });
+      const madeByRovara = state === "passed" && input.checkDependencies?.get(checkId)?.some((dependency) => dependency.trust === "made_by_rovara") === true;
+      const replies = state === "passed" ? replyStatus(checkId, input, replyStatuses) : undefined;
+      const replyReason = replies === "unconfirmed" ? "agent_replies_unconfirmed" : replies === "disagreed" ? "agent_replies_disagreed" : undefined;
+      const reason = madeByRovara ? "made_by_rovara" : replyReason;
+      const label = labelOfCheck.get(checkId) ?? checkId;
+      evidence.push({
+        kind: "check",
+        label: madeByRovara ? inertEvidenceText(`${MOCK_PROOF_PREFIX}${label}`, LABEL_MAX) : replies === undefined ? oneLine(label, LABEL_MAX) : inertEvidenceText(`${REPLY_WORDS[replies]}: ${label}`, LABEL_MAX),
+        state: state === "passed" && provesChange.has(checkId) && reason === undefined ? "proven" : state,
+        ...(reason === undefined ? {} : { notProvenReason: reason }),
+      });
     }
     for (const [scenarioId, ids] of Object.entries(scenarioProves)) {
       if (!ids.some((id) => covered.has(id))) continue;
