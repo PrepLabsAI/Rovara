@@ -100,6 +100,7 @@ import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import { localBashOperations, taskSandboxFor, taskShellSelection, type TaskSandbox, type TaskShellSelection } from "./task-sandbox.js";
 import { withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
 import { startTaskTestServices, withTestServices, type TestServicesConfig } from "./test-services-run.js";
+import { modelHelperPlanFor, withModelHelperRound, type ModelHelperRoundSource } from "./model-helper-round.js";
 import type { FixtureSetCallback } from "./fixture-delivery.js";
 
 export interface TaskInvocationResult {
@@ -174,6 +175,8 @@ export interface TaskInvocationDependencies {
   devcontainerCli?: DevcontainerCli;
   /** The runners AgentX's checks use; tests supply fakes. Default: as preparation and the agent's shell run. */
   checkRunners?: CheckRunners;
+  /** TE-F2 part B: the scripted-replies model helper beside each check round (model-helper-round.ts). Absent: nothing changes. The hosted wiring is F1-b's, the laptop's is `localModelHelperPlan`. */
+  modelHelperRound?: ModelHelperRoundSource;
   /** Each check round's budget; tests supply short ones. Default: CHECK_ROUND_BUDGET_MS (P-3). */
   checkBudgetMs?: () => number;
   /** D-16: the original code for before results; tests supply a fake. Default: each repository's preparation commit. */
@@ -509,11 +512,11 @@ async function runTask(
   if (invocation.payload.nightlyRun !== undefined) {
     return runNightlyInvocation(invocation, {
       rootPath: canonicalRoot, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, nightlyResult: dependencies.nightlyResult,
-      runners: scopeChecks(dependencies.checkRunners ?? createCheckRunners({
+      runners: scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }), ...(sandbox === undefined ? {} : { sandbox }), ...(localShell ? { local: true } : {}),
-      })),
+      }))),
     }, manifest);
   }
   // Spec 051 Ruling L: the check history as it was before the agent ran. The agent can write to .agentx, so every
@@ -557,13 +560,13 @@ async function runTask(
         : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
         ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
-      const runners = scopeChecks(withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+      const runners = scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(sandbox === undefined ? {} : { sandbox }),
         ...(localShell ? { local: true } : {}),
-      })));
+      }))));
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
@@ -797,12 +800,12 @@ async function runTask(
     // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
     ...(containerPaths === undefined ? {} : { cdTarget: (target: string) => workspaceRelativeCdTarget(target, containerPaths, canonicalRoot) }),
   });
-  const checkRunners = scopeChecks(withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+  const checkRunners = scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
     rootPath: canonicalRoot,
     ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(localShell ? { local: true } : {}),
-  })));
+  }))));
   const checkBudgetMs = dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS);
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;

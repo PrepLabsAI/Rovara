@@ -706,9 +706,16 @@ function pathStatement(command: ContainerGroupCommand): string {
   return `export PATH="$PATH":${quoted}; `;
 }
 
-/** `unset NAME ...;` for the names the command does not set itself, or "" when there are none. */
+/**
+ * `unset NAME ...;` for the names the command does not set itself, or "" when there are none. Keyed on the VALUE: a name the command gives a value is not unset; a name whose value is `undefined` (a variable a caller wants
+ * REMOVED, such as the model helper round's credential names) is unset here and is never passed as an argument (`remoteEnvArgs`).
+ */
 function unsetStatement(command: ContainerGroupCommand): string {
-  const names = (command.unsetEnvironment ?? []).filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) && !Object.hasOwn(command.env ?? {}, name));
+  const env = command.env ?? {};
+  const valid = (name: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(name);
+  const listed = (command.unsetEnvironment ?? []).filter((name) => valid(name) && env[name] === undefined);
+  const removed = Object.keys(env).filter((name) => valid(name) && env[name] === undefined && !listed.includes(name)).sort();
+  const names = [...listed, ...removed];
   return names.length === 0 ? "" : `unset ${names.join(" ")}; `;
 }
 
@@ -923,7 +930,8 @@ export function fullConfigurationFromOutput(result: DevcontainerProcess): Devcon
 
 /** Variables set in the devcontainer for one exec only: a project command's `env` (#54), pi's PI_* variables. */
 function remoteEnvArgs(env: Readonly<Record<string, string>> | undefined): string[] {
-  return Object.entries(env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]);
+  // A value that is `undefined` means "remove this variable" (see `unsetStatement`): it is never written as the text "undefined".
+  return Object.entries(env ?? {}).flatMap(([name, value]) => (value === undefined ? [] : ["--remote-env", `${name}=${value}`]));
 }
 
 function targetArgs(target: DevcontainerTarget): string[] {
