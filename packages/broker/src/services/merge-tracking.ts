@@ -51,9 +51,11 @@ export const TRACKING_FAILURE_MAX_MS = TRACKING_HEARTBEAT_MINUTES * 60_000;
 export const SWEEP_MAX_ROWS = 10;
 export const SWEEP_MAX_REQUESTS = 256;
 export const SWEEP_MAX_MS = 20_000;
-/** One task's lighter-flow checks: their own allowance of requests, and time for the reviewer calls (each bounded on its own). */
+/** One task's lighter-flow checks: their own allowance of requests, and at most this much of a pass's time (the reviewer calls are bounded on their own). */
 export const TIER_CHECKS_MAX_REQUESTS = 256;
-export const TIER_CHECKS_MAX_MS = 10 * 60_000;
+export const TIER_CHECKS_MAX_MS = 4 * 60_000;
+/** One tier pass, all tasks together: the rest wait for the next pass (they are taken oldest run first). */
+export const TIER_PASS_MAX_MS = 10 * 60_000;
 /** What the task says when its pull request ended at a head Rovara did not check. */
 export const MERGED_OUTSIDE = "The pull request was merged with commits Rovara did not check, so this is not a merge of the code Rovara checked. Look at what was merged, then close this task.";
 export const CLOSED_OUTSIDE = "The pull request was closed on the code host with commits Rovara did not check. Look at it there, then close this task.";
@@ -187,7 +189,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     // A pull request seen "changed outside Rovara" has no recorded head, so its head reads as someone else's and it is never called ready.
     recordedHead: recordedHeadOf(flow),
     // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
-    readyHold: (task) => scopeHoldOf(flow, task),
+    readyHold: (task, current) => scopeHoldOf(flow, task, current),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 
@@ -289,19 +291,33 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     }
   };
 
-  /** The tasks the sweep found owing the lighter flow's checks; `tierChecks` takes them one at a time, each with its own allowance. */
-  const tierDue = new Set<string>();
+  /**
+   * The tasks the sweep found owing the lighter flow's checks are kept as rows (`TIER_CHECKS_DUE`), so a host that only sweeps (or a short-lived one) still runs the tier pass later. The pass takes them oldest
+   * run first (round robin), each with its own allowance and a share of the pass's time; a row goes only once its task was checked (or owes nothing), never before a code host's pause is honoured.
+   */
+  const tierDueKey = (taskId: string) => ({ pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` });
+  const markTierDue = async (taskId: string): Promise<void> => {
+    await store.put({ item: { ...tierDueKey(taskId), entityType: "TIER_CHECKS_DUE", taskId, lastRunAt: 0, dueAt: now() }, condition: when.absent() }).catch(() => undefined);
+  };
   let tierRunning: Promise<number> | undefined;
   const runTierPass = async (): Promise<number> => {
+    const rows = (await queryAll(store, { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
+      .sort((left, right) => Number(left["lastRunAt"] ?? 0) - Number(right["lastRunAt"] ?? 0));
+    const passEnds = now() + TIER_PASS_MAX_MS;
     let ran = 0;
-    for (const taskId of [...tierDue]) {
-      tierDue.delete(taskId);
+    for (const row of rows) {
       if (cooldownUntil !== undefined && now() < cooldownUntil) break;
+      const left = passEnds - now();
+      if (left <= 0) break;
+      const taskId = typeof row["taskId"] === "string" ? row["taskId"] : "";
+      if (taskId === "") continue;
       const task = await readTask(flow, taskId).catch(() => undefined);
-      if (task === undefined) continue;
-      const { budget, stop } = createReadBudget(now, { requests: TIER_CHECKS_MAX_REQUESTS, ms: TIER_CHECKS_MAX_MS });
+      if (task === undefined || task.closedAt !== undefined) { await store.delete({ key: tierDueKey(taskId) }).catch(() => undefined); continue; }
+      // Each task's share: its own requests, and at most a fixed part of the pass's time, so one slow task cannot hold the others back.
+      const { budget, stop } = createReadBudget(now, { requests: TIER_CHECKS_MAX_REQUESTS, ms: Math.min(TIER_CHECKS_MAX_MS, left) });
+      let outcome: Awaited<ReturnType<typeof runTierChecks>> | undefined;
       try {
-        if ((await runTierChecks(flow, task, budget.beforeRequest)) === "unavailable") await options.flow.store.update({ key: recoveryRowKey(taskId), ops: [change.set("nextAttemptAt", now() + pollMs)], condition: when.present() }).catch(() => undefined);
+        outcome = await runTierChecks(flow, task, budget.beforeRequest);
         ran += 1;
       } catch (error) {
         const limitedUntil = hostRateLimitRetryAt(error);
@@ -310,6 +326,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       } finally {
         stop();
       }
+      if (outcome === "checked" || outcome === "not_owed") await store.delete({ key: tierDueKey(taskId) }).catch(() => undefined);
+      else await store.update({ key: tierDueKey(taskId), ops: [change.set("lastRunAt", now())], condition: when.present() }).catch(() => undefined);
     }
     return ran;
   };
@@ -346,7 +364,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
           const task = await readTask(flow, row.taskId);
           if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
           // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
-          if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) tierDue.add(row.taskId);
+          if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(row.taskId);
           result = await reconcileTrackingTask(deps, row.taskId, budget);
         } catch (error) {
           const limitedUntil = hostRateLimitRetryAt(error);

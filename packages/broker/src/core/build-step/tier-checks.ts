@@ -11,7 +11,7 @@
 import { change, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import {
-  DOCS_ROUTE_LINES_MAX, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
+  DOCS_ROUTE_LINES_MAX, higherLevel, plannedPathsExceeded, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
 } from "../decisions/change-tier.js";
 import { floorOwed, reviewTextOf, withoutTierReviews } from "../decisions/tier-floor-state.js";
 import { applyReviewerFloor, recordReviewerFloor, type ReviewerFloorResult } from "../decisions/tier-reviewer.js";
@@ -24,9 +24,13 @@ import { flowIs } from "../task-flow/flow-guard.js";
 import { taskKey } from "../task-flow/keys.js";
 import { readTask } from "../task-flow/reads.js";
 import type { TaskRecord } from "../task-flow/records.js";
-import { failedQuickCheck, ownQuickChecks, quickCheckEntry, withQuickChecks } from "../task-flow/stage-selection.js";
+import { failedQuickCheck, namedPaths, ownQuickChecks, quickCheckEntry, withQuickChecks } from "../task-flow/stage-selection.js";
 import { iso, log } from "../task-flow/support.js";
-import { askScopeQuestion, isOutageReason, scopeBanner, scopeHolds, withScopeBanner } from "./scope-question.js";
+import { isOutageReason, planScopeQuestion, readScopeQuestion, scopeBanner, scopeHolds, withScopeBanner, type ScopeQuestionRecord } from "./scope-question.js";
+import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { textReaderOf } from "./plan-input.js";
+import { pathsIn, planFiles } from "../decisions/plan-facts.js";
+import { fileTypeOf } from "../decisions/sensitive-list.js";
 import { pullRequestRecordKey, pullRequestRecordOf } from "./records.js";
 import { checkingModelOf, runCodeReview, runGrownReviews, tierReviewerOf, type CheckingModel, type GrownReviewResult, type TierReviewPurpose } from "./tier-review-calls.js";
 import { createHash } from "node:crypto";
@@ -161,7 +165,20 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       const recorded = recordTier(current, { ...tier, level: "standard", reasons: [{ code: "docs_large", path: `${String(docsLines)} changed document lines in all` }, ...tier.reasons].slice(0, 50) });
       return tierRank(recorded.tier.level) > tierRank(planned) ? recordGrowth(recorded.flow, planned, recorded.tier.level, at) : recorded.flow;
     };
-    let draft = withDocsTotal(withTier(flow));
+    // The plan's own files: a code file the plan (or the request and Understand) did not name is at least standard; in a change planned as documents only, it is risky (and so asks the scope question).
+    const plannedFiles = await plannedPathsOf(deps, workflow, task.requestText);
+    const firstEstimate = [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])].find((tier) => tier.source === "estimate");
+    const outside = plannedFiles === undefined ? [] : plannedPathsExceeded(plannedFiles, read.diff.files).filter((path) => fileTypeOf(path) !== "prose" && read.diff.files.some((file) => file.path === path));
+    const docsPlan = firstEstimate !== undefined && firstEstimate.kinds.length > 0 && firstEstimate.kinds.every((kind) => kind === "docs");
+    const withPlanScope = (current: WorkflowFlow | undefined): WorkflowFlow | undefined => {
+      const tier = current?.tier;
+      if (current === undefined || tier === undefined || tier.headSha !== head || outside.length === 0) return current;
+      const level: TierLevel = docsPlan ? "risky" : tierRank(tier.level) >= tierRank("standard") ? tier.level : "standard";
+      if (tierRank(level) <= tierRank(tier.level) && tier.reasons.some((reason) => reason.code === "outside_plan_code")) return current;
+      const recorded = recordTier(current, { ...tier, level: higherLevel(tier.level, level), reasons: [...outside.slice(0, 5).map((path) => ({ code: "outside_plan_code", path: path.slice(0, 200) })), ...tier.reasons].slice(0, 50) });
+      return tierRank(recorded.tier.level) > tierRank(planned) ? recordGrowth(recorded.flow, planned, recorded.tier.level, at) : recorded.flow;
+    };
+    let draft = withPlanScope(withDocsTotal(withTier(flow)));
     const checking = await checkingModelOf(deps, task.workspaceId);
     // Every reviewer call is counted against the task's spend when the install meters it; a refusal is an unavailable reviewer (fail closed).
     const meterFor = (purpose: TierReviewPurpose) => (deps.tierReviewMeter === undefined ? undefined : () => deps.tierReviewMeter!({ taskId: task.taskId, purpose, model: checking.model, promptChars: input.patchText.length }));
@@ -213,28 +230,33 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       const passed = grown.result.completed && grown.result.mustFix === 0;
       if (!passed) {
         const noted = withQuickChecks(current, [quickCheckEntry({ kind: "code_config", outcome: "failed", at,
-          detail: `${reviewAttempt(grown.level, head)} ${grown.result.completed ? `${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed` : `did not run (${grown.result.failure ?? "unknown"})`}` })]);
+          detail: `${reviewAttempt(grown.level, head)} ${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed${grown.result.completed ? "" : `; did not run (${grown.result.failure ?? "unknown"})`}` })]);
         return withoutTierReviews(noted, head);
       }
       const noted = withQuickChecks(current, [quickCheckEntry({ kind: "code_config", outcome: passed ? "passed" : "failed", at,
-        detail: `${reviewAttempt(grown.level, head)} ${grown.result.completed ? `${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed` : `did not run (${grown.result.failure ?? "unknown"})`}` })]);
+        detail: `${reviewAttempt(grown.level, head)} ${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed${grown.result.completed ? "" : `; did not run (${grown.result.failure ?? "unknown"})`}` })]);
       // Only reviews that ran, both, at the grown level, on this head, with nothing to fix, are recorded as the review of that tier.
       return passed ? recordTierReview(noted, { level: grown.level, headSha: head, findings: grown.result.findings, mustFix: grown.result.mustFix, at }) : noted;
     };
-    // Written under the record read; another writer that got in first gets the same results applied to its record.
+    const headTier = tierFromDiff(read.diff, { ...bound, at, head: read.head });
+    const earlierQuestion = await readScopeQuestion(deps, task.taskId);
+    let scoped: ReturnType<typeof planScopeQuestion> = { asked: false };
+    // Written under the record read, with the scope question in the SAME commit; another writer that got in first gets the same results applied to its record.
     let current: WorkflowSnapshot = workflow;
     let written = false;
     let finalFlow: WorkflowFlow | undefined = flow;
     for (let attempt = 0; attempt < WRITE_ATTEMPTS && !written; attempt += 1) {
       const base = current.flow;
-      const tiered = withDocsTotal(withTier(base));
+      const tiered = withPlanScope(withDocsTotal(withTier(base)));
       const next = withReview(withChecks(floor === undefined ? tiered : recordReviewerFloor(tiered, floor, at) ?? tiered));
       finalFlow = next ?? base;
-      if (next === undefined || JSON.stringify(next) === JSON.stringify(base)) { written = true; break; }
-      written = await deps.store.update({
-        key: taskKey(task.taskId), ops: [change.set(["workflow", "flow"], JSON.parse(JSON.stringify(next)) as never)],
-        condition: when.and(when.notExists("closedAt"), flowIs(base)),
-      }).then((result) => result.applied).catch(() => false);
+      scoped = finalFlow === undefined ? { asked: false } : planScopeQuestion(attempt === 0 ? earlierQuestion : await readScopeQuestion(deps, task.taskId), task, { flow: finalFlow, headTier, files: read.diff.files, head, at });
+      const flowChanged = next !== undefined && JSON.stringify(next) !== JSON.stringify(base);
+      if (!flowChanged && scoped.item === undefined) { written = true; break; }
+      written = await deps.store.transact([
+        ...(flowChanged ? [{ kind: "update" as const, key: taskKey(task.taskId), ops: [change.set(["workflow", "flow"], JSON.parse(JSON.stringify(next)) as never)], condition: when.and(when.notExists("closedAt"), flowIs(base)) }] : []),
+        ...(scoped.item === undefined ? [] : [scoped.item]),
+      ]).then((result) => result.applied).catch(() => false);
       if (!written) {
         const again = await readTask(deps, task.taskId);
         if (again?.workflow === undefined || again.closedAt !== undefined) break;
@@ -243,7 +265,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     }
     if (!written) return "unavailable";
     // A small change that grew to risky: the scope question (from the head's own deterministic reasons), the banner on the pull request, and the notice, once per question.
-    if (finalFlow !== undefined) await scopeStep(deps, task, { flow: finalFlow, headTier: tierFromDiff(read.diff, { ...bound, at, head: read.head }), files: read.diff.files, head, at, targets });
+    if (finalFlow !== undefined && scoped.question !== undefined) await scopeNotice(deps, task, { flow: finalFlow, question: scoped.question, asked: scoped.asked, at, targets });
     // The person is told what grew, once per head and level (the review's own record says whether it passed).
     if (grown !== undefined && task.sessionId !== undefined && draft?.tier !== undefined) {
       const sentence = tierGrowthSentence(draft.tier, (path) => inertLine(path, 80));
@@ -262,18 +284,15 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
   }
 }
 
-/** The scope question of a change that grew to risky, the banner at the top of its pull request description (only a description Rovara wrote and nobody edited since), and the person's notice. Best effort: a failure here changes no record the merge reads. */
-async function scopeStep(deps: TaskFlowDeps, task: TaskRecord, input: { flow: WorkflowFlow; headTier: ChangeTier; files: readonly TierFile[]; head: string; at: string; targets: ReadonlyArray<TierReadTarget & { headSha: string }> }): Promise<void> {
+/** The banner at the top of the pull request description (only a description Rovara wrote and nobody edited since) and the person's notice, once per question. Best effort: the question itself is already recorded. */
+async function scopeNotice(deps: TaskFlowDeps, task: TaskRecord, input: { flow: WorkflowFlow; question: ScopeQuestionRecord; asked: boolean; at: string; targets: ReadonlyArray<TierReadTarget & { headSha: string }> }): Promise<void> {
   try {
-    const { asked, question } = await askScopeQuestion(deps, task, input);
-    if (question === undefined) return;
-    const held = scopeHolds(input.flow, question);
-    const banner = scopeBanner(question, held);
+    const { question, asked } = input;
+    const banner = scopeBanner(question, scopeHolds(input.flow, question));
     for (const target of input.targets) {
       const record = await pullRequestRecordOf(deps, task.workspaceId, target.repositoryId, target.number);
       const ref = changeRequestRef(target.repositoryUrl, target.number);
       const now = await target.host.getChangeRequest(ref, { orgId: deps.companyId });
-      // Only a description Rovara wrote and nobody edited since (a person's words stay theirs); the banner is replaced in place.
       if (record === undefined || (now.body !== record.body)) continue;
       const body = withScopeBanner(now.body ?? "", banner);
       if (body === now.body) continue;
@@ -288,6 +307,15 @@ async function scopeStep(deps: TaskFlowDeps, task: TaskRecord, input: { flow: Wo
       await new SessionStore(deps.store).appendEvent(deps.companyId, task.sessionId, { eventId, at: input.at, type: "status", actor: { kind: "system" }, text });
     }
   } catch (error) {
-    log(deps, { event: "tier_checks.scope_step_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    log(deps, { event: "tier_checks.scope_notice_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
   }
+}
+
+/** The files the plan names (a structured plan's cited files, the paths a Markdown plan's words name) and the files the request and Understand's reading name. Undefined: the plan cannot be read (nothing is judged by it). */
+async function plannedPathsOf(deps: TaskFlowDeps, workflow: WorkflowSnapshot, requestText: string | undefined): Promise<string[] | undefined> {
+  const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+  if (artifact === undefined) return undefined;
+  const loaded = await loadWorkflowDocument(textReaderOf(deps.artifacts), artifact, {}).catch(() => undefined);
+  if (loaded === undefined) return undefined;
+  return [...new Set([...(loaded.format === "structured" ? planFiles(loaded.plan) : []), ...pathsIn(loaded.markdown), ...namedPaths(requestText, workflow.intent?.assessment)])];
 }
