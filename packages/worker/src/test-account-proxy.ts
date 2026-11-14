@@ -10,7 +10,8 @@
 //   - `not_connect`: anything but CONNECT (a plain HTTP request through the proxy would show its body to it);
 //   - `bad_request`: a CONNECT target that is not exactly `host:443`, with userinfo, a path, a space or a control character in it;
 //   - `ip_literal`: a target that is or could be read as an address: dotted, short, decimal, hex or octal IPv4, any IPv6, a name whose last label has no letter, `localhost`, a name with no dot;
-//   - `denied`: a name on the production deny list (the caller passes the check; the account was also checked at save and at every run, so this is the third look);
+//   - `denied`: a name on the production deny list (the caller passes the check; the account was also checked at save and at every run, so this is the third look), or an AI model service (FIX-0518: a test account is never for one,
+//     because this proxy resolves names itself, outside the sandbox's hosts file, and would carry real model calls past the model helper; a list that holds one is refused when the proxy is made, and a CONNECT to one is refused first);
 //   - `not_allowed`: a name that is not on the list of THIS run's accounts' hosts (at most 8, exact names, no wildcard);
 //   - `cap`: more connections than the run's cap (`maxConnections`, from the account: default 2,000), or more at once than `maxConcurrent`;
 //   - `private_address`: a name that RESOLVES to a loopback, private, link-local, shared (100.64/10), metadata, multicast or reserved address (any one of its answers is enough). The proxy connects to the address it
@@ -27,7 +28,7 @@ import { lookup } from "node:dns/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { connect as netConnect, isIP, type Socket } from "node:net";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
-import { TEST_ACCOUNT_LIMITS, TEST_ACCOUNT_LIMIT_DEFAULTS, prodDenyMatchesHost, type TestEnvProdDeny } from "@agentx/contracts";
+import { TEST_ACCOUNT_LIMITS, TEST_ACCOUNT_LIMIT_DEFAULTS, TEST_ACCOUNT_MODEL_HOST_SENTENCE, isTestAccountModelHost, prodDenyMatchesHost, type TestEnvProdDeny } from "@agentx/contracts";
 
 export const PROXY_PORT = 443;
 export const PROXY_LISTEN_PORT = 3128;
@@ -154,6 +155,8 @@ const callerAddress = (raw: string | undefined): string => (raw ?? "").replace(/
 export interface TestAccountProxyOptions {
   /** The hosts of the accounts THIS run may use: exact names, at most 8. */
   hosts: readonly string[];
+  /** The company's own model gateway hosts: refused like any AI model host (FIX-0518). */
+  modelGatewayHosts?: readonly string[];
   /** The production deny check (a closure over the company's list: `denyChecker`). True for a name that must never be reached. */
   isDenied: (host: string) => boolean;
   /** The cap on connections for this run. */
@@ -206,6 +209,8 @@ function validate(options: TestAccountProxyOptions): { hosts: Set<string> } {
   if (options.hosts.length === 0 || options.hosts.length > TEST_ACCOUNT_LIMITS.hosts) throw new RangeError("the proxy takes 1 to 8 hosts");
   const hosts = new Set<string>();
   for (const raw of options.hosts) {
+    // FIX-0518, fail closed: an account that somehow holds an AI model host (any case, a trailing dot, a name under an Azure-style suffix) never gets a proxy. Checked on the raw text, before the plain-name rule.
+    if (isTestAccountModelHost(raw, { gatewayHosts: options.modelGatewayHosts ?? [] })) throw new RangeError(TEST_ACCOUNT_MODEL_HOST_SENTENCE);
     const name = proxyHostName(raw);
     // The names in an allow-list are the same plain names the proxy accepts: a wildcard, an address or a port in the list is a mistake, refused when the proxy is made.
     if (name === undefined || name !== raw) throw new RangeError("a proxy host is a plain lower-case name");
@@ -262,6 +267,8 @@ export async function startTestAccountProxy(options: TestAccountProxyOptions): P
     if ("refusal" in target) return refuse(client, target.refusal);
     const { host } = target;
     if (options.isDenied(host)) return refuse(client, "denied");
+    // FIX-0518: an AI model host is never reached through a test account, listed or not.
+    if (isTestAccountModelHost(host, { gatewayHosts: options.modelGatewayHosts ?? [] })) return refuse(client, "denied");
     if (!hosts.has(host)) return refuse(client, "not_allowed");
     if (accepted >= options.maxConnections || active >= maxConcurrent) return refuse(client, "cap");
     accepted += 1;
@@ -369,6 +376,7 @@ interface HelperConfig {
   port: number;
   sources: string[];
   state: string;
+  modelGatewayHosts: string[];
 }
 
 function readHelperConfig(path: string): HelperConfig {
@@ -376,6 +384,7 @@ function readHelperConfig(path: string): HelperConfig {
   if (!Array.isArray(raw.hosts) || raw.deny === undefined || typeof raw.listen !== "string" || !Array.isArray(raw.sources) || typeof raw.state !== "string") throw new Error("the proxy's config is incomplete");
   return {
     hosts: raw.hosts, deny: raw.deny, maxConnections: raw.maxConnections ?? TEST_ACCOUNT_LIMIT_DEFAULTS.maxConnectionsPerRun, listen: raw.listen, port: raw.port ?? PROXY_LISTEN_PORT, sources: raw.sources, state: raw.state,
+    modelGatewayHosts: Array.isArray(raw.modelGatewayHosts) ? raw.modelGatewayHosts.filter((host): host is string => typeof host === "string") : [],
   };
 }
 
@@ -385,7 +394,7 @@ export async function main(argv: readonly string[] = process.argv): Promise<void
   const path = at < 0 ? undefined : argv[at + 1];
   if (path === undefined || path.startsWith("--")) throw new Error("missing --config");
   const config = readHelperConfig(path);
-  const proxy = await startTestAccountProxy({ hosts: config.hosts, isDenied: denyChecker(config.deny), maxConnections: config.maxConnections, listenAddress: config.listen, listenPort: config.port, allowedSources: config.sources });
+  const proxy = await startTestAccountProxy({ hosts: config.hosts, isDenied: denyChecker(config.deny), maxConnections: config.maxConnections, listenAddress: config.listen, listenPort: config.port, allowedSources: config.sources, modelGatewayHosts: config.modelGatewayHosts });
   let written = "";
   const flush = (): void => {
     const next = JSON.stringify(proxy.snapshot());

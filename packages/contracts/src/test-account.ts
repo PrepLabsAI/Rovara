@@ -11,6 +11,8 @@
 //   - a host is a plain lower-case name that can never be read as an address (never a wildcard, a port, or a short or hex spelling of an IP: one rule, shared with dependency families); an AWS account's
 //     hosts are exactly the regional endpoints of the services it approves; a vendor's production host is refused where the vendor has a sandbox host (`testAccountHostProblems`);
 //   - an AWS account is a role, with actions from a fail-closed data-plane allow-list (`TEST_ACCOUNT_AWS_ACTIONS`) and resources that name what they cover, in the role's own partition, region and account;
+//   - a host is never an AI model service (FIX-0518): the schema refuses a catalog model host, its Azure suffix forms, any case and a trailing dot, with one fixed sentence, and `testAccountProdProblems` finds one in a
+//     stored record at use time (`test-account-model-hosts.ts`);
 //   - every host, role and resource is checked against the production deny list, and an account may not be used while the list is empty (`testAccountProdProblems`);
 //   - an account is active only with two distinct people's fresh-sign-in approvals, or the sole-owner exception, each approving exactly this record (an approval carries the digest of what it approved,
 //     so widening a record needs fresh approvals), and then only until an expiry at most 90 days after the last such approval (a company may set fewer days, never more).
@@ -22,6 +24,7 @@ import { EnvNameSchema, FamilyIdSchema, TestAccountIdSchema, TestEnvRegionSchema
 import { AWS_KEY_ID, TestServiceHostSchema, looksLikeSecretValue, reservedDependencyEnvName } from "./test-services-shared.js";
 import { normalizeDenyHost, prodDenyIsEmpty, prodDenyMatchesArn, prodDenyMatchesHost, type TestEnvProdDeny } from "./test-environment-prod-deny.js";
 import { sha256Hex } from "./web-hash.js";
+import { TEST_ACCOUNT_MODEL_HOST_SENTENCE, isTestAccountModelHost, testAccountModelHostProblems } from "./test-account-model-hosts.js";
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 function line(max: number, min = 1) {
@@ -443,6 +446,19 @@ export function testAccountApprovalsSatisfied(qualifying: readonly TestAccountAp
 const DAY_MS = 86_400_000;
 const latestAt = (approvals: readonly TestAccountApproval[]): number => Math.max(0, ...approvals.map((approval) => Date.parse(approval.at)));
 
+/**
+ * A test account's host: the shared host rule, and never an AI model service (FIX-0518). The model check runs first and on the raw text, so a case variant or a trailing dot gets the model sentence, not the generic
+ * "lower-case host name" one. The sentence never repeats the host.
+ */
+const TestAccountHostSchema = z.string().superRefine((host, context) => {
+  if (isTestAccountModelHost(host)) {
+    context.addIssue({ code: "custom", message: TEST_ACCOUNT_MODEL_HOST_SENTENCE });
+    return;
+  }
+  const shared = TestServiceHostSchema.safeParse(host);
+  if (!shared.success) for (const issue of shared.error.issues) context.addIssue({ code: "custom", message: issue.message });
+});
+
 const TestAccountObjectSchema = z
   .object({
     id: TestAccountIdSchema,
@@ -456,7 +472,7 @@ const TestAccountObjectSchema = z
     secretRef: SecretRefSchema.optional(),
     aws: TestAccountAwsSchema.optional(),
     /** The proxy's allow-list for this account. */
-    hosts: z.array(TestServiceHostSchema).min(1).max(TEST_ACCOUNT_LIMITS.hosts),
+    hosts: z.array(TestAccountHostSchema).min(1).max(TEST_ACCOUNT_LIMITS.hosts),
     /** The variables the test reads its secret from (`PAYMENTS_API_KEY`). */
     envNames: z.array(EnvNameSchema).max(TEST_ACCOUNT_LIMITS.envNames),
     limits: z
@@ -480,6 +496,8 @@ export interface TestAccountSchemaOptions {
   env?: string;
   /** A company's shorter expiry, in whole days from 1 to 90. A longer one is refused when the schema is made, never silently capped. */
   maxExpiryDays?: number;
+  /** A company's own model gateway hosts (the catalog's company rows): an account for one is refused like any model host. */
+  gatewayHosts?: readonly string[];
 }
 
 function expiryDaysFor(options: TestAccountSchemaOptions): number {
@@ -510,6 +528,9 @@ export function testAccountSchemaFor(options: TestAccountSchemaOptions = {}) {
       if (parts !== undefined && options.env !== undefined && parts.env !== options.env) problem(["secretRef"], "the reference points into this install's environment");
     }
     if (new Set(account.hosts).size !== account.hosts.length) problem(["hosts"], "a host is listed once");
+    // The company's own gateway hosts (the built-in catalog's are refused by the host schema itself).
+    const gatewayHosts = options.gatewayHosts ?? [];
+    if (gatewayHosts.length > 0) for (const index of testAccountModelHostProblems(account.hosts, { gatewayHosts })) if (!isTestAccountModelHost(account.hosts[index])) problem(["hosts", index], TEST_ACCOUNT_MODEL_HOST_SENTENCE);
     if (account.aws !== undefined) {
       // Every host is the regional endpoint of a service the account approves, exactly: no bucket subdomain, no API-gateway host, no extra label.
       const endpoints = new Set(testAccountAwsEndpointHosts(account.aws));
@@ -557,17 +578,18 @@ export function isTestAccountUsableAt(record: TestAccount, now: Date | number | 
 
 // ---- the production deny list (6.3: at save and at every run)
 
-export type TestAccountProdProblem = { kind: "prod_host" | "prod_arn" | "prod_account" | "prod_deny_missing" | "prod_shaped_host" | "vendor_production_host" | "rovara_account"; field: string };
+export type TestAccountProdProblem = { kind: "prod_host" | "prod_arn" | "prod_account" | "prod_deny_missing" | "prod_shaped_host" | "vendor_production_host" | "rovara_account" | "model_host"; field: string };
 
 /**
  * Everything in the account that names production, as fixed codes with the field they were found in: a host on the deny list or one that looks like production, a role or resource on it, an account
  * that is Rovara's own, or `prod_deny_missing` when the company has listed nothing at all (an account reaches a real remote, so the list must exist first). Empty: nothing found. `alsoDeny` is the list
  * the approved environment had, so removing an entry in the same change that points at it hides nothing.
  */
-export function testAccountProdProblems(account: TestAccount, deny: TestEnvProdDeny, options: { alsoDeny?: TestEnvProdDeny; rovaraAccountIds?: readonly string[] } = {}): TestAccountProdProblem[] {
+export function testAccountProdProblems(account: TestAccount, deny: TestEnvProdDeny, options: { alsoDeny?: TestEnvProdDeny; rovaraAccountIds?: readonly string[]; modelGatewayHosts?: readonly string[] } = {}): TestAccountProdProblem[] {
   const lists = options.alsoDeny === undefined ? [deny] : [deny, options.alsoDeny];
-  if (lists.every((list) => prodDenyIsEmpty(list))) return [{ kind: "prod_deny_missing", field: "prodDeny" }];
-  const found: TestAccountProdProblem[] = [];
+  // FIX-0518: an account for an AI model service is refused at every use, whatever else is true (the production list may be empty, the record may not have come through today's schema). First, so nothing returns past it.
+  const found: TestAccountProdProblem[] = testAccountModelHostProblems(account.hosts, { gatewayHosts: options.modelGatewayHosts ?? [] }).map((index) => ({ kind: "model_host" as const, field: `hosts[${String(index)}]` }));
+  if (lists.every((list) => prodDenyIsEmpty(list))) return [...found, { kind: "prod_deny_missing", field: "prodDeny" }];
   account.hosts.forEach((host, index) => {
     if (lists.some((list) => prodDenyMatchesHost(list, host))) found.push({ kind: "prod_host", field: `hosts[${String(index)}]` });
   });

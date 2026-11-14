@@ -36,7 +36,7 @@ The config file (JSON, `version: 1`) names the adapters to load:
 {
   "version": 1,
   "plugins": [
-    { "point": "storage", "name": "sqlite", "module": "@rovara/plugin-sqlite", "settings": { "path": ".rovara/state.db" } },
+    { "point": "storage", "name": "sqlite", "module": "@rovara/plugin-sqlite", "settings": { "path": "state.db" } },
     { "point": "queue", "name": "sqlite", "module": "@rovara/plugin-sqlite" },
     { "point": "channel", "name": "whatsapp", "module": "./adapters/whatsapp.js", "enabled": false }
   ]
@@ -201,9 +201,13 @@ at least once; neither orders messages across calls, so nothing may rely on the 
 SQLite `Queue`. They are plug-ins for the registry. `rovara up` registers them as the `storage` and `queue` defaults in `~/.rovara/state.db` with the task flow's indexes (lane L9-wire); a config entry like these replaces them, and then must keep `TASK_FLOW_INDEXES`:
 
 ```json
-{ "point": "storage", "name": "sqlite", "module": "@agentx/local-adapters/storage", "settings": { "path": ".rovara/state.db", "indexes": [] } },
-{ "point": "queue", "name": "sqlite", "module": "@agentx/local-adapters/queue", "settings": { "path": ".rovara/state.db" } }
+{ "point": "storage", "name": "sqlite", "module": "@agentx/local-adapters/storage", "settings": { "path": "state.db", "indexes": [] } },
+{ "point": "queue", "name": "sqlite", "module": "@agentx/local-adapters/queue", "settings": { "path": "state.db" } }
 ```
+
+A relative `path` (like `state.db`) is kept in the state folder, `~/.rovara`, whatever folder you start Rovara from; an absolute path is used as it is.
+A path inside a git work tree is refused at start (the check follows symbolic links and reads the folders itself, so a `GIT_DIR` in your environment cannot change it):
+choose a path outside any git repository. A database that an older version made where you started Rovara (inside a repository, say) is not moved or deleted; the start is refused with the old and the new path until you stop Rovara and move all three files (`state.db`, `-wal` and `-shm`) to the new place, or delete them on purpose, or give an absolute path outside any repository.
 
 The store plug-in always keeps `OUTBOX_PENDING_INDEX`, and `ttlAttribute` is `expiresAt` unless set (`null` turns expiry off); `indexes`
 adds the core's other indexes. The queue may share the store's file (two connections) or use its own. Both plug-ins refuse a setting they do not know, and a
