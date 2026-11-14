@@ -145,7 +145,7 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   const reports = new Map<number, ReportFile>();
   for (const index of runIndexes) {
     const spec = reportSpecOf(commands[index]!);
-    const path = spec === undefined ? undefined : await safeReportPath(options.rootPath, commands[index]!, spec);
+    const path = spec === undefined ? undefined : await safeReportPath(options.runners.reportRoot?.() ?? options.rootPath, commands[index]!, spec);
     if (spec === undefined || path === undefined) continue;
     const before = await readBytes(path);
     if (before.state !== "unreadable") reports.set(index, { spec, path, before });
@@ -161,11 +161,14 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   let unconfirmedStop = false;
   try {
     ran = await originalCode.run(async () => {
-      for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
+      if (options.runners.reportRoot === undefined) for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
       const round = await runChecks(subPlan, options.runners, { budgetMs, signal: options.signal });
       // Read while the original code is shown, before the files are put back.
       const oldReports = new Map<number, ReadResult>();
-      for (const [index, report] of reports) oldReports.set(index, await readBytes(report.path));
+      for (const [index, report] of reports) {
+        const path = options.runners.reportRoot === undefined ? report.path : await safeReportPath(options.runners.reportRoot(), commands[index]!, report.spec);
+        oldReports.set(index, path === undefined ? { state: "missing" } : await readBytes(path));
+      }
       return { entries: round.entries, oldReports };
     });
   } catch (error) {
@@ -176,7 +179,7 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     }
     return result("not_checked", options.signal.aborted ? "stopped" : "original_code_unavailable", changedTests, items);
   } finally {
-    if (!unconfirmedStop) for (const report of reports.values()) await restoreFile(report);
+    if (!unconfirmedStop && options.runners.reportRoot === undefined) for (const report of reports.values()) await restoreFile(report);
   }
 
   const perCheck: TestProofItem[] = [];

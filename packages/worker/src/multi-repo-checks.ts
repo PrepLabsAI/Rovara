@@ -1,9 +1,9 @@
 // TE-R1: a worker-only, candidate-bound execution scope. Nothing here changes the candidate identity or preparation contracts.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readlink, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readlink, readdir, opendir, rmdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { matchTestCommand, parseCommandLine, type ProjectCommand } from "@agentx/contracts";
+import { matchTestCommand, parseCommandLine, ProjectCommandSchema, type ProjectCommand } from "@agentx/contracts";
 import { createPartWorkingCopy } from "./parallel-parts-git.js";
 import { snapshotTree, withIsolatedGit, isSafeRefName } from "./isolated-git.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
@@ -11,7 +11,8 @@ import { runIsolatedGit } from "./isolated-repository.js";
 import { wireMultiRepoDependencies } from "./multi-repo-wiring.js";
 import { coverageSpecsOf } from "./verification/cobertura-lcov-coverage.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
-import { openDirectory } from "./candidate-fs.js";
+import { currentWorkspaceSafety } from "./workspace-safety.js";
+import { openDirectory, type HeldDirectory } from "./candidate-fs.js";
 import { CheckNotRunError, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { gitOriginalCode, isUnconfirmedStop, type OriginalCodeRepository } from "./verification/original-code.js";
 import { readContainedReport } from "./verification/report-file.js";
@@ -37,26 +38,41 @@ function inside(root: string, path: string): string {
 /** Every round is fresh. The AsyncLocalStorage carries only the old-code selection, never a wired tree or a candidate identity. */
 export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners): CheckRunners {
   const phase = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
+  let reports = join(resolve(typeof input?.rootPath === "string" ? input.rootPath : "."), ".agentx", "multi-repo-reports", randomUUID());
   return {
     ...base,
-    originalCode: (repositories) => ({ run: (work) => phase.run(repositories, work) }),
-    async scopeRound(plan, signal, run) {
+    reportRoot: () => reports,
+    originalCode: (repositories) => ({ run: async (work) => { const candidateReports = reports; try { return await phase.run(repositories, work); } finally { reports = candidateReports; } } }),
+    async scopeRound(plan, signal, run, remainingMs) {
+      const checkTime = () => { if (signal.aborted || remainingMs() <= 0) throw new Error("aborted"); };
+      validateInput(input);
       const workspace = await openDirectory(resolve(input.rootPath));
       let root: string | undefined;
       let unconfirmed = false;
       try {
+        checkTime();
         const ids = new Set<string>();
         const sources: string[] = [];
         for (const repository of input.repositories) {
           const source = inside(workspace.path, repository.path);
+          const first = relative(workspace.path, source).split(sep)[0]!;
+          if (first === ".agentx" || first.startsWith(".agentx-")) throw new Error("multi-repository repository path uses worker state");
           const canonical = await realpath(source);
           if (canonical !== source || source === workspace.path || ids.has(repository.repositoryId) || sources.some((other) => other === source || source.startsWith(`${other}${sep}`) || other.startsWith(`${source}${sep}`))) throw new Error("multi-repository paths must be distinct contained repositories");
           ids.add(repository.repositoryId); sources.push(source);
         }
+        try { await sweepRoots(workspace, checkTime); } catch (error) {
+          if (error instanceof Error && (error.message === "aborted" || error.message === "multi-repository leftover sweep limit exceeded")) throw error;
+          // eslint-disable-next-line preserve-caught-error -- Neither the refusal nor its cause may disclose customer paths.
+          throw new Error("multi-repository leftover sweep is unavailable");
+        }
         root = await mkdtemp(join(workspace.path, ".agentx-check-"));
+        activeRoots.add(root);
         const copies = new Map<string, string>();
+        let copiedBytes = 0;
+        let copiedFiles = 0;
         for (const repository of input.repositories) {
-          if (signal.aborted) throw new Error("aborted");
+          checkTime();
           const source = inside(workspace.path, repository.path);
           const destination = inside(root, repository.path);
           // Matching task branch for affected repositories, pinned base for the others. Dirty candidate files are retained in both cases.
@@ -67,19 +83,32 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
             if (head !== selected) throw new Error("multi-repository checkout does not match the selected branch or base");
             const tree = await snapshotTree(git, head, repository.baseCommit);
             if (repository.taskBranch === undefined && tree !== (await git.text(["rev-parse", `${repository.baseCommit}^{tree}`])).trim()) throw new Error("multi-repository unaffected repository differs from its base");
+            // Measure the candidate tree once, with one shared limit across all repositories.
+            const listing = await git.text(["ls-tree", "-r", "-l", "-z", tree], { signal, timeout: Math.max(1, remainingMs()), maxBuffer: 8 * 1024 * 1024 });
+            for (const entry of listing.split("\0").filter(Boolean)) {
+              const size = /^\d+ blob [a-f0-9]{40} +([0-9]+)\t/u.exec(entry)?.[1];
+              if (size === undefined) throw new Error("multi-repository checkout contains unsupported entries");
+              copiedBytes += Number(size);
+              if (++copiedFiles > 50_000 || copiedBytes > 512 * 1024 * 1024) throw new Error("multi-repository checkout exceeds round limits");
+            }
+            checkTime();
             return tree;
           });
+          checkTime();
           const copy = await createPartWorkingCopy({ rootPath: root, repositoryDirectory: source, repositoryId: `repo-${copies.size}`, itemId: randomUUID(), treeSha: tree });
           await mkdir(dirname(destination), { recursive: true });
           await rename(copy.directory, destination);
           copies.set(source, destination);
+          checkTime();
         }
         const old = phase.getStore();
         // Coverage overrides index the full candidate plan. Old-code test/SARIF subsets only carry their own command-declared reports.
         const coveragePaths = old === undefined ? input.coveragePaths : undefined;
         const execute = async () => {
+          checkTime();
           await remapLinks(root!, copies);
-          const wiring = await wireMultiRepoDependencies(input, root!);
+          checkTime();
+          const wiring = await wireMultiRepoDependencies(input, root!, old !== undefined);
           const mapped = (command: ProjectCommand): ProjectCommand => ({ ...wiring.command(command), cwd: relative(workspace.path, inside(root!, command.cwd)) });
           let snapshots: Map<string, string> | undefined;
           const scoped: CheckRunners = {
@@ -104,15 +133,21 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
               return { exitCode: result.exitCode, timedOut: result.timedOut, output: `${result.stdout}${result.stderr}` };
             },
             async prepareRound(stop) {
+              const setupCommand = (command: ProjectCommand) => {
+                checkTime();
+                return mapped({ ...command, timeoutSeconds: Math.min(command.timeoutSeconds, remainingMs() / 1_000) });
+              };
               for (const command of wiring.setup) {
-                const result = await base.runProjectCommand(mapped(command), stop);
+                const result = await base.runProjectCommand(setupCommand(command), stop);
                 if (result.exitCode !== 0 || result.timedOut) throw new Error("multi-repository setup failed");
               }
               snapshots = await captureTrees(copies.values());
               for (const command of input.setup) {
-                const result = await base.runProjectCommand(mapped(command), stop);
+                const result = await base.runProjectCommand(setupCommand(command), stop);
                 if (result.exitCode !== 0 || result.timedOut) throw new Error("multi-repository setup failed");
               }
+              checkTime();
+              await wiring.link();
               // Checkout and setup can give old reports fresh mtimes. Only a check may produce a forwarded report.
               await discardReports(plan, root!, coveragePaths);
             },
@@ -121,8 +156,17 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
           const started = Date.now();
           const result = await run(scoped);
           if (unconfirmed) throw new RunnerKillUnconfirmedError({ kind: base.kind ?? "local" });
-          if (snapshots !== undefined && result.entries.some((entry) => entry.after === "passed" || entry.after === "failed")) await assertNoSourceDrift(copies.values(), snapshots, reportPaths(plan, root!, coveragePaths));
-          await preserveReports(plan, root!, workspace.path, started, result.entries.some((entry) => entry.after === "passed" || entry.after === "failed"), coveragePaths);
+          if (snapshots !== undefined && result.entries.some((entry) => entry.after === "passed" || entry.after === "failed")) await assertNoSourceDrift(copies.values(), snapshots, new Set([...reportPaths(plan, root!, coveragePaths), ...wiring.generated]));
+          let reportDirectory: HeldDirectory | undefined;
+          try {
+            reportDirectory = await workspace.subdirectory(".agentx", true);
+            const parent = (await reportDirectory!.subdirectory("multi-repo-reports", true))!;
+            await reportDirectory!.close(); reportDirectory = parent;
+            const round = (await reportDirectory.subdirectory(randomUUID(), true))!;
+            reports = round.path;
+            await round.close();
+          } catch { throw new Error("multi-repository report location is unavailable"); } finally { await reportDirectory?.close(); }
+          await preserveReports(plan, root!, reports, started, result.entries.some((entry) => entry.after === "passed" || entry.after === "failed"), coveragePaths);
           return wiring.notes.length === 0 ? result : { ...result, entries: result.entries.map((entry) => ({ ...entry, output: entry.after === "not_run" ? entry.output : `${wiring.notes.join("\n")}\n${entry.output}` })) };
         };
         return old === undefined ? await execute() : await gitOriginalCode(old.map((repository) => {
@@ -135,7 +179,10 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
         throw error;
       } finally {
         // runChecks joins every aborted command. If it could not confirm a stop, workspace quarantine owns recovery; never race a late writer.
-        if (root !== undefined && !unconfirmed) await rm(root, { recursive: true, force: true });
+        if (root !== undefined && !unconfirmed && currentWorkspaceSafety()?.unsafe !== true) {
+          await rm(root, { recursive: true, force: true });
+          activeRoots.delete(root);
+        }
         await workspace.close();
       }
     },
@@ -153,7 +200,7 @@ async function remapLinks(root: string, copies: ReadonlyMap<string, string>, dir
       for (const [source, destination] of copies) if (target === source || target.startsWith(`${source}${sep}`)) mapped = join(destination, relative(source, target));
       if (mapped !== root && !mapped.startsWith(`${root}${sep}`)) throw new Error("multi-repository link leaves the check root");
       if (mapped !== target) { await unlink(path); await symlink(relative(directory, mapped), path); }
-      const actual = await realpath(path);
+      const actual = await realpath(path).catch(() => { throw new Error("multi-repository link target is unavailable"); });
       if (actual !== root && !actual.startsWith(`${root}${sep}`)) throw new Error("multi-repository link leaves the check root");
     }
   }
@@ -201,9 +248,21 @@ async function discardReports(plan: CheckPlan, root: string, coverage?: Readonly
 }
 
 async function preserveReports(plan: CheckPlan, root: string, destination: string, started: number, checked: boolean, coverage?: ReadonlyArray<string | undefined>): Promise<void> {
+  const pending: Array<{ path: string; bytes: Buffer }> = [];
+  let bytes = 0;
   for (const source of reportPaths(plan, root, coverage)) {
     const path = reportRelativePath(root, source);
-    const read = checked ? await readContainedReport({ root, cwd: ".", argument: path, maxBytes: 16 * 1024 * 1024, notBeforeMs: started }) : { ok: false as const };
+    const read = checked ? await readContainedReport({ root, cwd: ".", argument: path, maxBytes: 16 * 1024 * 1024 - bytes, notBeforeMs: started }) : { ok: false as const };
+    if (!read.ok) {
+      if ("reason" in read && read.reason === "too_large") throw new Error("multi-repository reports exceed round limits");
+      continue;
+    }
+    bytes += read.bytes.length;
+    pending.push({ path, bytes: read.bytes });
+  }
+  // Validate the complete bounded batch before writing any artifact.
+  for (const report of pending) {
+    const { path } = report;
     const target = inside(destination, path);
     let parent = await openDirectory(destination);
     try {
@@ -213,12 +272,72 @@ async function preserveReports(plan: CheckPlan, root: string, destination: strin
       }
       const existing = await lstat(parent.entry(basename(target))).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return undefined; });
       if (existing !== undefined && !existing.isFile()) throw new Error("multi-repository report destination is not a regular file");
-      if (!read.ok) { await rm(parent.entry(basename(target)), { force: true }); continue; }
       const temporary = parent.entry(`.agentx-report-${randomUUID()}`);
       try {
-        await writeFile(temporary, read.bytes, { flag: "wx", mode: 0o600 });
+        await writeFile(temporary, report.bytes, { flag: "wx", mode: 0o600 });
         await rename(temporary, parent.entry(basename(target)));
       } finally { await rm(temporary, { force: true }); }
     } finally { await parent.close(); }
   }
+}
+
+// Active and unconfirmed roots are left to their owning round/quarantine, including concurrent rounds in this worker.
+const activeRoots = new Set<string>();
+
+/** Bounded recovery of crash leftovers; held directories prevent a link swap from redirecting deletion. */
+async function sweepRoots(workspace: HeldDirectory, checkTime: () => void): Promise<void> {
+  let entries = 0;
+  let roots = 0;
+  const count = () => { checkTime(); if (++entries > 8_192) throw new Error("multi-repository leftover sweep limit exceeded"); };
+  const empty = async (directory: HeldDirectory, depth: number): Promise<void> => {
+    if (depth > 64) throw new Error("multi-repository leftover sweep limit exceeded");
+    const stream = await opendir(directory.descriptorPath ?? directory.path);
+    for await (const entry of stream) {
+      count();
+      if (entry.isDirectory()) {
+        const child = await directory.subdirectory(entry.name, false);
+        if (child === undefined) continue;
+        try { await empty(child, depth + 1); } finally { await child.close(); }
+        await rmdir(directory.entry(entry.name));
+      } else await unlink(directory.entry(entry.name));
+    }
+  };
+  const stream = await opendir(workspace.descriptorPath ?? workspace.path);
+  for await (const entry of stream) {
+    count();
+    if (!entry.name.startsWith(".agentx-check-") || activeRoots.has(join(workspace.path, entry.name))) continue;
+    if (++roots > 64) throw new Error("multi-repository leftover sweep limit exceeded");
+    if (entry.isDirectory()) {
+      const child = await workspace.subdirectory(entry.name, false);
+      if (child === undefined) continue;
+      try { await empty(child, 0); } finally { await child.close(); }
+      await rmdir(workspace.entry(entry.name));
+    } else await unlink(workspace.entry(entry.name));
+  }
+}
+
+/** Bound the worker injection at runtime too: callers in JavaScript need the same fixed refusals. */
+function validateInput(input: MultiRepoChecks): void {
+  const invalid = () => { throw new Error("multi-repository input is invalid"); };
+  const array = (value: unknown): value is readonly unknown[] => Array.isArray(value);
+  if (input === null || typeof input !== "object" || typeof input.rootPath !== "string" || !array(input.repositories) || !array(input.dependencies) || !array(input.setup)) return invalid();
+  if (input.repositories.length === 0 || input.repositories.length > 64 || input.dependencies.length + input.setup.length > 64 || (input.coveragePaths?.length ?? 0) > 64) throw new Error("multi-repository input exceeds round limits");
+  let bytes = Buffer.byteLength(input.rootPath);
+  for (const repository of input.repositories) {
+    if (repository === null || typeof repository !== "object" || typeof repository.repositoryId !== "string" || typeof repository.path !== "string" || typeof repository.baseCommit !== "string" || (repository.taskBranch !== undefined && typeof repository.taskBranch !== "string")) return invalid();
+    bytes += Buffer.byteLength(repository.repositoryId) + Buffer.byteLength(repository.path) + Buffer.byteLength(repository.baseCommit) + Buffer.byteLength(repository.taskBranch ?? "");
+  }
+  for (const edge of input.dependencies) {
+    if (edge === null || typeof edge !== "object" || typeof edge.consumer !== "string" || typeof edge.provider !== "string" || typeof edge.language !== "string") return invalid();
+    bytes += Buffer.byteLength(edge.consumer) + Buffer.byteLength(edge.provider) + Buffer.byteLength(edge.language);
+  }
+  for (const command of input.setup) {
+    if (!ProjectCommandSchema.safeParse(command).success) return invalid();
+    bytes += Buffer.byteLength(JSON.stringify(command));
+  }
+  if (input.coveragePaths !== undefined) {
+    if (!array(input.coveragePaths) || input.coveragePaths.some((path) => path !== undefined && typeof path !== "string")) return invalid();
+    for (const path of input.coveragePaths) bytes += Buffer.byteLength(path ?? "");
+  }
+  if (bytes > 2 * 1024 * 1024) throw new Error("multi-repository input exceeds round limits");
 }
