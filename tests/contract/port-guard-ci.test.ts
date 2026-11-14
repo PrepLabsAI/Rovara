@@ -41,6 +41,13 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     expect(run).toMatch(/[0-9a-f]{64} {2}\S+gitleaks\.tar\.gz" \| sha256sum --check/);
   });
 
+  it("installs the same pinned gitleaks in the test job, so the secret-scan tests in port-guard.test.ts run there and do not fail for a missing scanner", async () => {
+    const { jobs } = await workflow();
+    const install = (name: string) => jobs[name]!.steps.find((step) => /^Install gitleaks/.test(step.name ?? ""))?.run;
+    expect(install("test")).toBeDefined();
+    expect(install("test")).toBe(install("port-guard"));
+  });
+
   it("gives no other job a secret or a wider permission than before", async () => {
     const source = await readFile(".github/workflows/ci.yml", "utf8");
     expect([...source.matchAll(/secrets\.([A-Z_]+)/g)].map((match) => match[1])).toEqual(["GITHUB_TOKEN"]);
