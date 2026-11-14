@@ -1,0 +1,5 @@
+{"Action":"run","Package":"cart","Test":"same","Time":"2026-01-01T00:00:00Z"}
+{"Action":"fail","Package":"cart","Test":"same","Elapsed":0.012,"Time":"2026-01-01T00:00:00.012Z"}
+{"Action":"pass","Package":"cart","Test":"same"}
+{"Action":"skip","Package":"cart","Test":"skip"}
+{"Action":"run","Package":"cart","Test":"unfinished"}

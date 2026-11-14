@@ -22,7 +22,7 @@ import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { testIdResolver, withTestIds, type TestIdContext } from "./test-ids.js";
 import { absentOnNew, displayLine, originalRunLooksCut, parseTestReport, skipRise } from "./test-report.js";
-import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
+import { isUnconfirmedStop, isWorkspaceUnsafe, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
 export const TEST_PROOF_CAP_MS = 10 * 60_000;
@@ -146,7 +146,7 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   const reports = new Map<number, ReportFile>();
   for (const index of runIndexes) {
     const spec = reportSpecOf(commands[index]!);
-    const path = spec === undefined ? undefined : await safeReportPath(options.rootPath, commands[index]!, spec);
+    const path = spec === undefined ? undefined : await safeReportPath(options.runners.reportRoot?.() ?? options.rootPath, commands[index]!, spec);
     if (spec === undefined || path === undefined) continue;
     const before = await readBytes(path);
     if (before.state !== "unreadable") reports.set(index, { spec, path, before });
@@ -154,25 +154,33 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
 
   const subPlan: CheckPlan = { source: "project", readiness: runIndexes.map((index) => commands[index]!), projectBefore: runIndexes.map(() => "unknown" as const) };
   // Every repository shows its original tree (an empty overlay when it has no changed test), so old and new code are never mixed across repositories.
-  const originalCode = (options.originalCode ?? gitOriginalCode)(perRepository
+  const originalCode = (options.originalCode ?? options.runners.originalCode ?? gitOriginalCode)(perRepository
     .map(({ repository, changed }) => ({ directory: repository.directory, commit: repository.startCommit, overlay: changed.paths })));
   const budgetMs = Math.max(0, Math.min(options.capMs ?? TEST_PROOF_CAP_MS, options.budgetMs));
   let ran: { entries: CheckEntry[]; oldReports: Map<number, ReadResult> };
+  // A stop that could not be confirmed: the report files are not put back either, because a command that may still be running would write over them.
+  let unconfirmedStop = false;
   try {
     ran = await originalCode.run(async () => {
-      for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
+      if (options.runners.reportRoot === undefined) for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
       const round = await runChecks(subPlan, options.runners, { budgetMs, signal: options.signal });
       // Read while the original code is shown, before the files are put back.
       const oldReports = new Map<number, ReadResult>();
-      for (const [index, report] of reports) oldReports.set(index, await readBytes(report.path));
+      for (const [index, report] of reports) {
+        const path = options.runners.reportRoot === undefined ? report.path : await safeReportPath(options.runners.reportRoot(), commands[index]!, report.spec);
+        oldReports.set(index, path === undefined ? { state: "missing" } : await readBytes(path));
+      }
       return { entries: round.entries, oldReports };
     });
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) {
+      unconfirmedStop = isUnconfirmedStop(error);
+      throw error;
+    }
     return result("not_checked", options.signal.aborted ? "stopped" : "original_code_unavailable", changedTests, items);
   } finally {
-    for (const report of reports.values()) await restoreFile(report);
+    if (!unconfirmedStop && options.runners.reportRoot === undefined) for (const report of reports.values()) await restoreFile(report);
   }
 
   const perCheck: TestProofItem[] = [];

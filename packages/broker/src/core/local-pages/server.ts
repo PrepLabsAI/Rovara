@@ -290,7 +290,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     return [...value].length > TEXT_MAX ? [...value].slice(0, TEXT_MAX).join("") : value;
   };
   const tokenPageIsFresh = (request: Req): boolean => now() - request.session.createdAt <= SCRIPT_TOKEN_FRESH_MS;
-  const offerOf = (request: Req, kind: "plan" | "design" | "test-environment" | "setup" | "automation"): ApprovalOffer | undefined => {
+  const offerOf = (request: Req, kind: ApprovalOffer["kind"]): ApprovalOffer | undefined => {
     const revision = Number(request.form?.get("revision"));
     const requestId = request.form?.get("requestId") ?? "";
     const artifactDigest = request.form?.get("digest") ?? "";
@@ -722,7 +722,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const view = await options.data.getSetupPage?.(match[1] ?? "");
       return view === undefined ? notFound() : page(request, (context) => renderSetupPage(context, view));
     } },
-    { method: "POST", pattern: new RegExp(`^/setup/(${PROJECT})/(start|stop|command|confirm|discard|check|host|forget|apply)$`), handle: async (request, match) => {
+    { method: "POST", pattern: new RegExp(`^/setup/(${PROJECT})/(start|stop|command|confirm|discard|check|host|forget|apply|eval)$`), handle: async (request, match) => {
       const project = match[1] ?? "";
       const verb = match[2] ?? "";
       const back = `${request.base}/setup/${project}`;
@@ -769,6 +769,13 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
           if (actions.setupDecideHost === undefined || offer === undefined || (decision !== "approve" && decision !== "reject") || !/^[A-Za-z0-9.-]{1,300}$/u.test(host)) return redirect(`${back}?n=invalid`);
           if (!verified(request, { action: "setup.host", subject: `${project}:${host}`, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${back}?n=form`);
           return done(await actions.setupDecideHost({ project, host, decision, approval: offer, proof: proofFor(request, offer) }));
+        }
+        case "eval": {
+          const offer = offerOf(request, "setup-eval-spend");
+          const decision = request.form?.get("decision");
+          if (actions.setupDecideEval === undefined || offer === undefined || (decision !== "approve" && decision !== "reject")) return redirect(`${back}?n=invalid`);
+          if (!verified(request, { action: "setup.eval", subject: project, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${back}?n=form`);
+          return done(await actions.setupDecideEval({ project, decision, approval: offer, proof: proofFor(request, offer) }));
         }
         default: {
           const offer = offerOf(request, "setup");

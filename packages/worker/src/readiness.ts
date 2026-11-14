@@ -1,4 +1,7 @@
 import { agentXError, type ProjectCommand, type WorkspaceStatus } from "@agentx/contracts";
+import { discoverEvals, type EvalDiscovery } from "./verification/eval-discovery.js";
+import { type EvalHealthInput, type EvalHealthResult } from "./verification/eval-health.js";
+import { type EvalBaselines } from "./verification/eval-baseline-refresh.js";
 import { storedCommandOutput } from "./command-failure.js";
 
 export interface CommandResult {
@@ -23,9 +26,12 @@ export interface ReadinessResult extends CommandResult {
 }
 
 export async function evaluateReadiness(
-  input: { rootPath: string; commands: readonly ProjectCommand[] },
+  input: { rootPath: string; commands: readonly ProjectCommand[];
+    /** Trusted setup seam. Cloud supplies persisted selection/approval later; never read this from project config. */
+    evalSetup?: { health?: EvalHealthInput; baselines?: EvalBaselines };
+  },
   runner: ReadinessCommandRunner,
-): Promise<{ ready: boolean; results: ReadinessResult[] }> {
+): Promise<{ ready: boolean; results: ReadinessResult[]; eval?: { discovery: EvalDiscovery; message: string; measurement: Promise<EvalHealthResult | { status: "cached" }> } }> {
   const results: ReadinessResult[] = [];
   for (const [index, command] of input.commands.entries()) {
     try {
@@ -49,7 +55,15 @@ export async function evaluateReadiness(
       });
     }
   }
-  return { ready: results.every((result) => result.ready), results };
+  const ready = results.every((result) => result.ready);
+  if (input.evalSetup === undefined) return { ready, results };
+  const discovery = await discoverEvals(input.rootPath);
+  const { health, baselines } = input.evalSetup;
+  const measurement = health === undefined || baselines === undefined
+    ? Promise.resolve({ status: "not_run" as const, message: "Not run: trusted eval setup capabilities are not connected." })
+    : baselines.afterMerge(health);
+  // The host owns this promise: readiness and the first task do not wait on model calls.
+  return { ready, results, eval: { discovery, message: health === undefined || baselines === undefined ? "Eval health check is not connected" : "baseline still being measured", measurement } };
 }
 
 export function assertWorkspaceReady(status: WorkspaceStatus): void {

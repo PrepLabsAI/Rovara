@@ -16,3 +16,4 @@ export { createSessionService, type SessionService, type SessionServiceOptions }
 export { createNoticeService, type NoticeService, type NoticeServiceOptions } from "./notices.js";
 export { createDecisionService, type DecisionService, type DecisionServiceOptions } from "./decisions.js";
 export { createCallbackHandler as createCallbackService, type CallbackDeps as CallbackServiceOptions } from "./callbacks.js";
+export { createSessionActionsService, type SessionActionsService, type SessionActionsServiceOptions } from "./session-actions.js";
