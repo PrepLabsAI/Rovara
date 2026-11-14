@@ -50,7 +50,9 @@ describe("fake file details", () => {
     ]));
     expect(page.files.some(f => f.path === "unrelated")).toBe(false);
     expect(page.files.find(f => f.path === "renamed")?.previousPath).toBe("rename");
-    expect(page.files.every(f => f.patch === undefined)).toBe(true);
+    // Since code/next gave the fake a patch for changed text, only text changes carry one; renames and mode-only changes do not.
+    expect(page.files.find(f => f.path === "plain")?.patch).toContain("+new");
+    expect(["renamed", "mode", "gone"].every(path => page.files.find(f => f.path === path)?.patch === undefined)).toBe(true);
     model.commit("feature", { mode: "edited later" });
     expect(model.revision(model.headOf("feature")).entries.get("mode")).toBe("executable");
   });

@@ -51,6 +51,17 @@ describe("the model host test", () => {
 });
 
 describe("saving a test account for a model host", () => {
+  it.each(["models.inference.ai.azure.com", "models.ai.azure.com", "deployment.eastus2.models.ai.azure.com", "deployment.models.ai.azure.com", "DEPLOYMENT.EASTUS2.MODELS.AI.AZURE.COM."])("refuses Azure AI inference at save and stored-account use: %s", (host) => {
+    expect(isTestAccountModelHost(host)).toBe(true);
+    expect(messages(host)).toContain(TEST_ACCOUNT_MODEL_HOST_SENTENCE);
+    expect(testAccountProdProblems(record(host) as never, DENY)).toEqual([{ kind: "model_host", field: "hosts[0]" }]);
+  });
+  it("does not refuse Azure AI inference look-alikes or Microsoft login", () => {
+    for (const host of ["notmodels.ai.azure.com", "models.ai.azure.com.example.com", "models.inference.ai.azure.com.example.com", "login.microsoftonline.com"]) {
+      expect(isTestAccountModelHost(host), host).toBe(false);
+      expect(save(host).success, host).toBe(true);
+    }
+  });
   it("refuses every catalog host, each with the fixed sentence at its own position", () => {
     for (const host of catalogHosts) {
       const result = save(host);

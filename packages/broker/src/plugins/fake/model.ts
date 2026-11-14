@@ -432,6 +432,13 @@ export class FakeHostModel {
   // ---- reads
 
   changedFiles(id: string): ChangeRequestFile[] {
+    // Like a real host the fake gives the text of each change (every line of the old file removed, every line of the new one added), so what reads it sees a patch.
+    const textLines = (text: string): string[] => text.split("\n").filter((line, index, all) => !(index === all.length - 1 && line === ""));
+    const patchOf = (before: string | undefined, after: string): string => {
+      const old = before === undefined ? [] : textLines(before);
+      const now = textLines(after);
+      return `@@ -${old.length === 0 ? "0,0" : `1,${String(old.length)}`} +1,${String(now.length)} @@\n${[...old.map((line) => `-${line}`), ...now.map((line) => `+${line}`)].join("\n")}`;
+    };
     const cr = this.cr(id);
     const source = this.revision(this.headRevisionOf(cr));
     const targetSha = cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch);
@@ -459,8 +466,8 @@ export class FakeHostModel {
       if (previousPath !== undefined) removed.delete(previousPath);
       const basePath = previousPath ?? path;
       const baseType = target.entries.get(basePath) ?? "none";
-      out.push({ path, status: previousPath !== undefined ? "renamed" : baseType === "none" ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before),
-        ...(previousPath === undefined ? {} : { previousPath }), ...(knownAt(path, basePath) ? { entry: { head: type, base: baseType } } : {}) });
+      out.push({ path, status: previousPath !== undefined ? "renamed" : baseType === "none" ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before), ...(previousPath !== undefined ? { previousPath } : before !== content ? { patch: patchOf(before, content) } : {}),
+        ...(knownAt(path, basePath) ? { entry: { head: type, base: baseType } } : {}) });
     }
     for (const path of [...removed].sort()) {
       out.push({ path, status: "removed", additions: 0, deletions: lines(targetFiles.get(path) ?? ""), ...(knownAt(path, path) ? { entry: { head: "none", base: target.entries.get(path)! } } : {}) });

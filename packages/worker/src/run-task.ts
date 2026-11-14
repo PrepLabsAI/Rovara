@@ -69,7 +69,10 @@ import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/re
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { RunFindings, type FindingsRecorder } from "./no-change-findings.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
-import { AgentFilesRestoreError, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
+import { currentWorkspaceSafety } from "./workspace-safety.js";
+import { RunnerKillUnconfirmedError } from "./collected-process.js";
+import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine.js";
+import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { runTestProof, serializeTestProof } from "./verification/test-proof.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
@@ -225,15 +228,30 @@ export async function runTaskInvocation(
 ): Promise<TaskInvocationResult> {
   // The task sandbox, when there is one, is removed when the task ends, whether it succeeded, failed or was cancelled.
   const sandboxes: TaskSandbox[] = [];
-  try {
-    return await runTask(untrustedInvocation, dependencies, sandboxes);
-  } finally {
-    for (const sandbox of sandboxes) {
-      await sandbox.dispose().catch((error: unknown) => {
-        console.log(JSON.stringify({ component: "worker", event: "task-sandbox.remove.failed", container: sandbox.name, reason: error instanceof Error ? error.message : String(error) }));
-      });
+  // FIX-RUNNER-ABORT-JOIN: the latch for "a command we stopped may still be writing the workspace" (workspace-safety.ts), normally opened by main.ts around every invocation; opened here when a caller (a test) did not.
+  return withWorkspaceGuard(dependencies.rootPath, async (safety) => {
+    safety.quarantinables.push(sandboxes);
+    try {
+      return await runTask(untrustedInvocation, dependencies, sandboxes);
+    } finally {
+      await safety.pending;
+      for (const sandbox of sandboxes) {
+        await sandbox.dispose().catch((error: unknown) => {
+          console.log(JSON.stringify({ component: "worker", event: "task-sandbox.remove.failed", container: sandbox.name, reason: error instanceof Error ? error.message : String(error) }));
+        });
+      }
     }
-  }
+  });
+}
+
+/**
+ * FIX-RUNNER-ABORT-JOIN: throws when any command of this task was stopped without the stop being confirmed. Read before the run's reads and writes of the workspace
+ * (the evidence, the diff, the candidate, the check history), never trusting the exception to have travelled: Pi turns a throwing shell tool into a tool result, and a hook that
+ * catches everything reports "error" and goes on.
+ */
+function assertWorkspaceSafe(): void {
+  const safety = currentWorkspaceSafety();
+  if (safety?.unsafe === true) throw safety.failure ?? new RunnerKillUnconfirmedError(safety.unconfirmed[0] ?? { kind: "local" });
 }
 
 async function runTask(
@@ -278,6 +296,8 @@ async function runTask(
   }
   // The checks above read nothing in the workspace, so a stale PR feedback approval stops the run before anything is read or any program is stopped.
   const canonicalRoot = await realpath(resolve(dependencies.rootPath));
+  // A command of an earlier task that could not be confirmed stopped may still be writing this workspace: nothing here reads or writes it until it is reset (workspace-quarantine.ts).
+  await assertWorkspaceReset(canonicalRoot, dependencies.docker === undefined ? {} : { docker: dependencies.docker });
   // AgentX's rerun of the project's checks (CHECKS) stops first too, and then starts the project's dev container fresh, through the same checked start as ever.
   if (mode !== undefined && STOPS_PROGRAMS_FIRST_MODES.has(mode)) {
     await stopProgramsBeforeReading(canonicalRoot, dependencies.stopBeforeReading, mode === "CHECKS" ? "run the checks" : "read the workspace").catch((error: unknown) => reportFeedbackReviewStartFailure(error));
@@ -419,6 +439,8 @@ async function runTask(
     if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
     const root = canonicalRoot;
     const stop = new AbortController();
+    // An unconfirmed stop anywhere in the task ends the checks: nothing runs on, and the run's ending reads nothing (workspace-safety.ts).
+    currentWorkspaceSafety()?.onUnsafe(() => stop.abort());
     const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
     const events = new EventBatcher(dependencies.eventSink);
     try {
@@ -532,6 +554,7 @@ async function runTask(
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
+      assertWorkspaceSafe();
       const roundSpentMs = Date.now() - roundStarted;
       const status = round.stopped ? "not_verified" : reportStatus(round.entries);
       const checks: CheckReport = {
@@ -1048,6 +1071,9 @@ async function runTask(
     let evidenceFailure: unknown;
     let evidenceAttempted = false;
     let diffAttempted = false;
+    // FIX-RUNNER-ABORT-JOIN: set when the run failed because a stopped command could not be confirmed stopped (or the agent's files could not be put back): it
+    // may still be writing the workspace, so the ending reads and writes nothing in it (no evidence read, no diff, no check-history restore).
+    let workspaceUnsafe = false;
     const reportUnsaved = async (name: string): Promise<void> => {
       await events.append("progress", { message: `AgentX could not save ${name} for this task.` }).catch(() => undefined);
     };
@@ -1098,6 +1124,7 @@ async function runTask(
         throw agentXError("OPERATION_INTERRUPTED", "workspace changed before the retained ordered-work candidate could be checked");
       }
       const round = await runChecks(plan, checkRunners, { budgetMs: checkBudgetMs(), signal: verificationStop.signal });
+      assertWorkspaceSafe();
       const candidateAfter = await readCandidateRepositories(repositories);
       const candidateUnchanged = createCandidateManifest(candidateBefore).digest === createCandidateManifest(candidateAfter).digest;
       if (!candidateUnchanged) {
@@ -1172,6 +1199,8 @@ async function runTask(
       const stepStartedAt = Date.now();
       const stepLimitMs = agentStep?.timeoutMs;
       const stepHandle = { abort: async () => { verificationStop.abort(); await Promise.all([session, ...partSessions].map((open) => open.abort().catch(() => undefined))); } };
+      // An unconfirmed stop anywhere in the task stops the agent and its checks: the run ends on the latch, not on what the exception became on its way through Pi.
+      currentWorkspaceSafety()?.onUnsafe(() => { void stepHandle.abort().catch(() => undefined); });
       const promptWithinStep = async (text: string, on: PiSessionHandle = session): Promise<void> => {
         if (stepLimitMs === undefined) return on.prompt(text);
         const left = stepLimitMs - (Date.now() - stepStartedAt);
@@ -1197,6 +1226,8 @@ async function runTask(
           monitor.endCall();
           await flushDiagnostics().catch(() => undefined);
         }
+        // Before anything else decides the outcome: a stop that could not be confirmed (an agent shell command, a check) ends the run, whatever Pi made of it.
+        assertWorkspaceSafe();
         // An abort can end the prompt without an error; the guard's reason is the task's outcome.
         if (loopStop !== undefined) throw loopStop;
         // A cancel during AgentX's checks ends the prompt normally, after the agent's last turn completed.
@@ -1456,6 +1487,7 @@ async function runTask(
         }
       }
       if (designReviewBinding !== undefined) {
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN_CRITIQUE" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN_CRITIQUE" };
@@ -1466,6 +1498,7 @@ async function runTask(
         monitor.stop();
         if (critique === undefined) throw agentXError("OPERATION_INTERRUPTED", "the plan check produced no answer");
         await artifactSink({ name: PLAN_CRITIQUE_ARTIFACT, mediaType: "text/markdown; charset=utf-8", content: critique });
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN_CRITIQUE" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN_CRITIQUE" };
@@ -1478,6 +1511,7 @@ async function runTask(
         monitor.stop();
         const diagnosisAnswer = (finalText ?? "").trim();
         if (diagnosisAnswer === "") throw agentXError("OPERATION_INTERRUPTED", "the diagnosis run produced no answer");
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "SETUP_DRAFT" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "SETUP_DRAFT", diagnosisAnswer: cutDiagnosisAnswer(diagnosisAnswer) };
@@ -1493,6 +1527,7 @@ async function runTask(
         }
         monitor.stop();
         if (!read.ok) throw agentXError("OPERATION_INTERRUPTED", "the setup draft run produced no readable proposal");
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "SETUP_DRAFT" });
         const detected = invocation.payload.testEnvDetect === true ? await testEnvDraftResult({ rootPath: canonicalRoot, repositories: manifest.repositories, setupProposal: read.proposal, ...(invocation.payload.testEnvRecipes === undefined ? {} : { recipes: invocation.payload.testEnvRecipes }) }) : {};
@@ -1508,6 +1543,7 @@ async function runTask(
         }
         monitor.stop();
         if (!read.ok) throw agentXError("OPERATION_INTERRUPTED", "the spec write run produced no readable spec");
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "SPEC_WRITE" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "SPEC_WRITE", specDraft: read.draft };
@@ -1585,6 +1621,8 @@ async function runTask(
             } catch (error) {
               if (verificationStop.signal.aborted && dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
               if (error instanceof WorkerOperationCancelledError) throw error;
+              // The dry run is informational and never fails the planning run, except for a stop that could not be confirmed: that command may still be running.
+              if (isWorkspaceUnsafe(error)) throw error;
             }
             if (dryRun !== undefined) await emit("progress", { message: "AgentX tried the proposed checks on the code as the task started.", planDryRun: dryRun });
           }
@@ -1598,6 +1636,7 @@ async function runTask(
             planGroundingSource = await exportBaselineSource({ signal: verificationStop.signal, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) });
           }
         }
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN", ...(planGroundingSource === undefined ? {} : { workflowBaselineSource: planGroundingSource }) };
@@ -1608,6 +1647,7 @@ async function runTask(
         monitor.stop();
         await artifactSink({ name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify(assessment) });
         await publishEvidence();
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "UNDERSTAND" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "UNDERSTAND" };
@@ -1664,6 +1704,7 @@ async function runTask(
           if (secondReview?.report !== undefined) secondReview = { ...secondReview, report: { ...secondReview.report, status: "UNKNOWN", findings: [] } };
         }
         await publishEvidence();
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", {
           status: "SUCCEEDED", conversationId, workflowMode: "REVIEW",
@@ -1673,6 +1714,7 @@ async function runTask(
         });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "REVIEW", workflowCandidateRepositories: beforeReview.repositories, workflowReviews: reports, ...(secondReview === undefined ? {} : { workflowSecondReview: secondReview }), ...(specReviewResult === undefined ? {} : { specReview: specReviewResult }) };
       } else {
+      assertWorkspaceSafe();
       diffAttempted = true;
       const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, artifactSink);
       await publishEvidence();
@@ -1770,6 +1812,7 @@ async function runTask(
       };
       }
     } catch (error) {
+      workspaceUnsafe = isWorkspaceUnsafe(error) || currentWorkspaceSafety()?.unsafe === true;
       if (loopStop === undefined && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
         outcome = "CANCELLED";
         taskFailure = new WorkerOperationCancelledError(invocation.operationId);
@@ -1803,7 +1846,7 @@ async function runTask(
       }
       // Best effort, like usage: a failed task keeps what it did, for the member and for debugging.
       // A cancelled task does not wait for git to diff the workspace; its evidence is cheap.
-      if (!evidenceAttempted) {
+      if (!evidenceAttempted && !workspaceUnsafe) {
         try {
           await publishEvidence();
         } catch (artifactError) {
@@ -1819,7 +1862,7 @@ async function runTask(
           await reportUnsaved("checks.json");
         }
       }
-      if (!planning && !understanding && !diffAttempted && outcome !== "CANCELLED") {
+      if (!planning && !understanding && !diffAttempted && outcome !== "CANCELLED" && !workspaceUnsafe) {
         try {
           await publishWorkspaceDiff(dependencies.rootPath, artifactSink);
         } catch (artifactError) {
@@ -1829,7 +1872,9 @@ async function runTask(
       }
     }
 
-    if (!planning && !understanding) await restoreHistory();
+    // Whatever ended the run (a latch set while the ending itself ran, a path that kept its own error): nothing is written into a workspace a stopped command may still be writing.
+    workspaceUnsafe ||= currentWorkspaceSafety()?.unsafe === true;
+    if (!planning && !understanding && !workspaceUnsafe) await restoreHistory();
     await flushDiagnostics().catch(() => undefined);
 
     let telemetryFailure = evidenceFailure;
@@ -2074,7 +2119,7 @@ async function runTestProofStep(input: {
     }
     return proof;
   } catch (error) {
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     await input.events.append("progress", { message: "AgentX could not check the new tests against the original code." }).catch(() => undefined);
     return undefined;
   }

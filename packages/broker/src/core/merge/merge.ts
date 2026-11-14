@@ -53,15 +53,22 @@ import {
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
+import {
+  canonicalPatchText, needsReviewerFloor, patchDigestOf, planningLevelOf, skippedPlanning, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
+} from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
+import { scopeHoldOf } from "../build-step/scope-question.js";
+import { inertLine } from "../proof/inert-text.js";
+import { flowIs } from "../task-flow/flow-guard.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
-import { approvalReviewsOf, changeRequestRef, changedPathsOf, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
+import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-read.js";
+import { approvalReviewsOf, changeRequestRef, changedPathsOf, isHostRateLimit, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
 import { DEFAULT_CI_MODE, PERMISSION_LOOKUPS_MAX, ciAllowsMerge, ciCountsAsPassing, readBranch, readCi, tracksMerge, unreadableSinceOf, type ProjectCiMode } from "./merge-tracking.js";
 import type { MergePeople } from "./people.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergeTask, SessionTimeline } from "./seams.js";
-import { plain, readMergeTracking } from "./store.js";
+import { plain, readMergeTracking, taskRecordKey } from "./store.js";
 
 /** The kind of approval a merge asks for (`ApprovalRequest.kind`). */
 export const MERGE_APPROVAL_KIND = "merge";
@@ -375,11 +382,14 @@ export interface PreparedMerge {
   /** The merge method the digest was made with: the press merges by this one or not at all. */
   mergeMethod: CodeSettings["mergeMethod"];
   risk: MergeRisk;
+  /** The change tier the task carried when the request was made (absent when it carries none): the tier the person approves at. The press refuses when the change has grown past it. */
+  tier?: TierLevel | undefined;
 }
 
 /** The digest a proof is bound to: the exact pull requests and heads, the merge method and the risk level the person is shown. A change to any of them is a new question. */
-export function mergeArtifactDigest(subject: MergeSubject, method: CodeSettings["mergeMethod"], risk: MergeRisk["level"]): string {
-  return createHash("sha256").update(JSON.stringify({ kind: MERGE_APPROVAL_KIND, taskId: subject.taskId, method, risk, pullRequests: byRepository(subject.pullRequests) })).digest("hex");
+export function mergeArtifactDigest(subject: MergeSubject, method: CodeSettings["mergeMethod"], risk: MergeRisk["level"], tier?: TierLevel): string {
+  // The tier is in the digest only when the task carries one, so the digest of every task from before the change tier is the one it always was.
+  return createHash("sha256").update(JSON.stringify({ kind: MERGE_APPROVAL_KIND, taskId: subject.taskId, method, risk, ...(tier === undefined ? {} : { tier }), pullRequests: byRepository(subject.pullRequests) })).digest("hex");
 }
 
 const changeText = (repository: string, number: number, method: string): string => `Merge ${repository} pull request ${String(number)} (${method})`;
@@ -401,6 +411,8 @@ export async function prepareMerge(
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
   if (!tracksMerge(task.workflow)) throw agentXError("CONFIG_INVALID", "This task's pull requests are merged on the code host.");
   const tracked = task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot };
+  // A small change that grew to risky is merged only once a person kept it and the risky reviews passed, whatever the code host says about its draft.
+  if (await scopeHoldOf({ store: deps.store }, tracked)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
   const items = await readMergeTracking(deps.store, tracked.taskId, tracked.orgId);
 
   // The heads the person was shown must be the heads Rovara would merge: checked first, so a push since never reads as some other problem and never merges.
@@ -431,12 +443,13 @@ export async function prepareMerge(
     pullRequests: byRepository(open.map((entry) => ({ repositoryId: entry.repositoryId, number: entry.number, headSha: heads.get(pullRequestKey(entry))! }))),
   };
   const risk = riskOfTask(tracked.workflow, items);
+  const tier = tracked.workflow.flow?.tier?.level;
   const request: ApprovalRequest = {
     companyId: tracked.orgId, requestId: input.requestId, kind: MERGE_APPROVAL_KIND, subject: { type: "task", id: tracked.taskId }, projectName: tracked.project,
-    revision: tracked.workflow.revision, artifactDigest: mergeArtifactDigest(subject, checked.settings.mergeMethod, risk.level), risk: risk.level,
+    revision: tracked.workflow.revision, artifactDigest: mergeArtifactDigest(subject, checked.settings.mergeMethod, risk.level, tier), risk: risk.level,
   };
   return {
-    request, requirement: await deps.approvers.requirement(request), subject, risk, mergeMethod: checked.settings.mergeMethod,
+    request, requirement: await deps.approvers.requirement(request), subject, risk, mergeMethod: checked.settings.mergeMethod, ...(tier === undefined ? {} : { tier }),
     changes: subject.pullRequests.map((pr) => changeText(pr.repositoryId, pr.number, checked.settings.mergeMethod)),
   };
 }
@@ -473,8 +486,10 @@ export async function pressMerge(
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
   // The task must still be at the revision the person approved, and merged by the method they were shown.
   if (task.workflow.revision !== prepared.request.revision) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+  // Read again right before the merge: the hold may have come back (a new push asked the question again).
+  if (await scopeHoldOf({ store: deps.store }, task)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
   const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
-    decidedBy: verdict.approver.personId, occurrence: input.requestId, proof: input.proof, method: verdict.method, mergeMethod: prepared.mergeMethod, requestId: input.requestId,
+    decidedBy: verdict.approver.personId, occurrence: input.requestId, proof: input.proof, method: verdict.method, mergeMethod: prepared.mergeMethod, requestId: input.requestId, tier: prepared.tier,
   });
   return { status: "MERGED", pullRequests: merged };
 }
@@ -492,7 +507,7 @@ function refusalWords(result: Extract<MergeResult, { outcome: "refused" }>): str
 }
 
 async function mergeableNow(
-  deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, subject: MergeSubject, presserPersonId: string,
+  deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, subject: MergeSubject, presserPersonId: string, shownTier?: TierLevel,
 ): Promise<{ plan: Array<{ entry: PullRequestEntry; url: string; codeHost: CodeHost; headSha: string }>; settings: CodeSettings; alreadyMerged: boolean; mergedBefore: string[]; entries: PullRequestEntry[] }> {
   // The request lists the pull requests that were unmerged when it was made. Those that merged since (a half merge being finished) are not in the way; one that is new is.
   const required = requiredPullRequests(task.workflow);
@@ -512,6 +527,7 @@ async function mergeableNow(
   const bases = new Map<string, string>();
   const codeOwners = new Map<string, CodeOwnerVerdict>();
   const plan: Array<{ entry: PullRequestEntry; url: string; codeHost: CodeHost; headSha: string }> = [];
+  const tierTargets: Array<TierReadTarget & { headSha: string }> = [];
   const items = new Map((await readMergeTracking(deps.store, task.taskId, task.orgId)).map((item) => [pullRequestKey(item), item]));
   for (const [index, entry] of entries.entries()) {
     const key = pullRequestKey(entry);
@@ -537,6 +553,7 @@ async function mergeableNow(
     const base = await deps.host.recordedBase(task.workspaceId, entry.repositoryId, entry.number);
     if (base !== undefined) bases.set(key, base);
     plan.push({ entry, url, codeHost: home.codeHost, headSha: status.headRevision });
+    tierTargets.push({ host: home.codeHost, repositoryId: entry.repositoryId, repositoryUrl: url, number: entry.number, headSha: status.headRevision });
   }
   const mergedBefore = [...mergedByWorkflow, ...facts.filter((fact) => fact.state === "merged").map((fact) => fact.repositoryId)];
   if (facts.every((fact) => fact.state === "merged")) return { plan: [], settings, alreadyMerged: true, mergedBefore, entries };
@@ -547,8 +564,89 @@ async function mergeableNow(
     allowSelfApproval: settings.allowSelfApproval, requesterName: requesterNameOf(task), codeOwners, ...(wait === undefined ? {} : { secondReviewWait: wait }),
   });
   if (!readiness.ready) throw agentXError("MERGE_NOT_READY", readiness.message);
+  // The change tier is computed again, from the host's view of the change as it is now: a change that has grown past the tier the person approved at is not merged.
+  // Never skipped: a task with no recorded tier (one that was in flight before the tier existed, or that never had a plan) is judged as if approved at the lowest tier, so anything above small is a growth.
+  await tierGate(deps, task, tierTargets.filter((_, index) => facts[index]!.state !== "merged"), scope, shownTier);
   return { plan: plan.filter((_, index) => facts[index]!.state !== "merged"), settings, alreadyMerged: false, mergedBefore, entries };
 }
+
+const SCOPE_HELD = "This change grew from small to risky, so it waits for a person to keep, remove or stop it, and for the code and security reviews to pass.";
+const FLOOR_OWED = "A reviewer has not yet answered the security questions for the current version of this change, so it can't be merged yet.";
+const HEAD_UNBOUND = "Rovara couldn't tell exactly which version of the code this is, so nothing was merged.";
+const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code host just now, so nothing was merged. Try again in a moment.";
+
+/**
+ * Recomputes the change tier at merge, from the code host's view of the change (never from the stored tier or an agent's word). The tier never goes down: the recorded tier and the new one are raised together. The merge is refused,
+ * in plain words naming what grew, when the result is higher than EITHER the tier the person approved at (`shown`; none recorded counts as small) OR the tier the planning steps were chosen at (the estimate, when steps were skipped).
+ * A growth is STICKY: it is recorded (`grewAfterBuild`), and from then on the merge needs the review steps of the higher tier to have run on the CURRENT head (`tierReviewRecorded`); a second press does not clear it, and a push
+ * makes the record stale. The record is written under `flowIs`, so a lost race is refused, and a whole-workflow writer that read the task earlier carries the stored record forward (flow-guard.ts). A host that cannot be read
+ * refuses the merge too, and records nothing. When the lighter flow skipped planning steps (`flow.skippedSteps`), a small change also needs the reviewer's questions on the record for the current head and patch; a task that ran the whole plan does not.
+ */
+/** Exported for the tests of its refusals (a head that cannot be bound); `pressMerge` is the one caller. */
+export async function tierGate(
+  deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, shown: TierLevel | undefined,
+): Promise<void> {
+  let input: Awaited<ReturnType<typeof readTierInput>>;
+  try {
+    input = await readTierInput(targets, scope);
+  } catch (error) {
+    if (isHostRateLimit(error)) throw error;
+    deps.host.log?.("merge.tier_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    throw agentXError("MERGE_NOT_READY", TIER_UNREADABLE);
+  }
+  // The head must not have moved while the files were read: the tier is for the code that would be merged.
+  try {
+    for (const target of targets) {
+      const status = await target.host.changeRequestStatus(changeRequestRef(target.repositoryUrl, target.number), scope);
+      if (status.state !== "merged" && status.headRevision !== target.headSha) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+    }
+  } catch (error) {
+    if (isHostRateLimit(error) || (error instanceof Error && "code" in error && (error as { code?: string }).code === "MERGE_NOT_READY")) throw error;
+    deps.host.log?.("merge.tier_head_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    throw agentXError("MERGE_NOT_READY", TIER_UNREADABLE);
+  }
+  const at = new Date(deps.now()).toISOString();
+  const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: task.workflow.reviewBase?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
+  // A tier that cannot be bound to the head is not a tier: records of reviews are for a head, and there is none to compare.
+  if (bound.headSha === undefined) throw agentXError("MERGE_NOT_READY", HEAD_UNBOUND);
+  const patchDigest = patchDigestOf(canonicalPatchText(input.diff.files));
+  const fresh = tierFromDiff(input.diff, { ...bound, at, head: input.head });
+  const approvedAt: TierLevel = shown ?? "small";
+  // What the record says is judged against the task as it is NOW: a growth is written until it is on the record, however often another writer got in first.
+  let current: WorkflowSnapshot = task.workflow;
+  let verdict: "ok" | "grew" | "owed" | "floor" = "ok";
+  let raised = raiseTier(current.flow?.tier, fresh);
+  for (let attempt = 0; attempt < GROWTH_WRITE_ATTEMPTS; attempt += 1) {
+    const flow = current.flow;
+    raised = raiseTier(flow?.tier, fresh);
+    const planned = planningLevelOf(flow);
+    // The checks of the higher tier have run on this very head: nothing is owed.
+    const covered = tierReviewRecorded(flow, raised.level, bound.headSha);
+    const grew = !covered && (tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised)));
+    const owed = !covered && !grew && flow?.grewAfterBuild !== undefined && !tierReviewRecorded(flow, flow.grewAfterBuild.to, bound.headSha);
+    const floor = !grew && !owed && skippedPlanning(flow) && needsReviewerFloor(raised) && !reviewerFloorRecorded(flow, bound.headSha, patchDigest);
+    verdict = grew ? "grew" : owed ? "owed" : floor ? "floor" : "ok";
+    const recorded = recordTier(flow, { ...fresh, source: "merge" });
+    const from: TierLevel = planned !== undefined && tierRank(planned) < tierRank(approvedAt) ? planned : approvedAt;
+    const next = grew ? recordGrowth(recorded.flow, from, recorded.tier.level, at) : recorded.flow;
+    // Under the revision and the record this tier was computed against. The revision does not move: a row of the step in flight waits for it.
+    const written = await deps.store.update({
+      key: taskRecordKey(task.taskId),
+      ops: [change.set(["workflow", "flow"], plain(next) as never)],
+      condition: when.and(when.eq(["workflow", "revision"], current.revision), when.notExists("closedAt"), flowIs(flow)),
+    }).then((result) => result.applied).catch(() => false);
+    if (written || verdict !== "grew") break;
+    // The growth did not land (another writer got in first): read the task again and write it again.
+    const again = await deps.host.loadTask(task.taskId).catch(() => undefined);
+    if (again?.workflow === undefined) break;
+    current = again.workflow;
+  }
+  if (verdict === "grew" || verdict === "owed") throw agentXError("MERGE_NOT_READY", tierGrowthSentence(raised, (path) => inertLine(path, 80)));
+  if (verdict === "floor") throw agentXError("MERGE_NOT_READY", FLOOR_OWED);
+}
+
+/** How many times a growth is written before the refusal is given without it. */
+const GROWTH_WRITE_ATTEMPTS = 5;
 
 /**
  * Whether a code owner approved, for one pull request: nothing is asked of the host when it does not read code owners or the repository has no CODEOWNERS file. Anything unreadable fails closed.
@@ -675,9 +773,9 @@ const hashNumber = (seed: string): number => Number.parseInt(createHash("sha256"
  */
 async function mergeTask(
   deps: MergeDependencies, tracked: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, subject: MergeSubject,
-  who: { decidedBy: string; occurrence: string; proof: ApprovalProof; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string },
+  who: { decidedBy: string; occurrence: string; proof: ApprovalProof; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string; tier?: TierLevel | undefined },
 ): Promise<Array<{ repositoryId: string; number: number }>> {
-  const { plan, settings, alreadyMerged, mergedBefore, entries } = await mergeableNow(deps, tracked, subject, who.decidedBy);
+  const { plan, settings, alreadyMerged, mergedBefore, entries } = await mergeableNow(deps, tracked, subject, who.decidedBy, who.tier);
   // The method the person was shown is the method used: a setting changed since is a new question.
   if (settings.mergeMethod !== who.mergeMethod) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (alreadyMerged) return entries.map((entry) => ({ repositoryId: entry.repositoryId, number: entry.number }));

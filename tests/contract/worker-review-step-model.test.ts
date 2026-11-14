@@ -52,7 +52,11 @@ describe("the review step's model in an actual worker invocation", () => {
       const session = await resolveTaskSessionModel(payload, undefined, { AGENTX_MODEL_PROVIDER: "install", AGENTX_MODEL_ID: "install-default" });
       const result = await runTaskInvocation({
         protocolVersion: 1 as const, kind: "task" as const, operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64), payload,
-      }, { rootPath, model: session.model, piAdapter: adapter, eventSink: async () => undefined, artifactSink: async () => undefined });
+      }, {
+        rootPath, model: session.model, piAdapter: adapter, eventSink: async () => undefined, artifactSink: async () => undefined,
+        // This fixture starts no workspace processes or containers. Keep the model-dispatch test independent of the host's process table and Docker daemon.
+        stopBeforeReading: { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) },
+      });
 
       expect(created.length).toBeGreaterThanOrEqual(2);
       expect(created.every((model) => model.provider === dispatched.provider && model.modelId === dispatched.modelId), JSON.stringify(created)).toBe(true);
