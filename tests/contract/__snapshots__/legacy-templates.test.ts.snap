@@ -337,6 +337,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "Complete Secrets Manager ARN containing the GitHub App private key PEM",
       "Type": "String",
     },
+    "McpConfirmElicitation": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "enabled",
+      "Description": "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)",
+      "Type": "String",
+    },
     "OidcAudience": {
       "Type": "String",
     },
@@ -404,6 +413,42 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       ],
       "Default": "disabled",
       "Description": "enabled: Slack conversations go through the channel API as the built-in Slack adapter (spec 062 Phase 7); disabled: Slack's own queue, as before",
+      "Type": "String",
+    },
+    "TaskPeopleChangesEnabled": {
+      "AllowedValues": [
+        "true",
+        "false",
+      ],
+      "Default": "false",
+      "Description": "Whether task people role changes are enabled in this environment",
+      "Type": "String",
+    },
+    "TaskPeoplePrivateInvitationsEnabled": {
+      "AllowedValues": [
+        "true",
+        "false",
+      ],
+      "Default": "false",
+      "Description": "Whether task people may invite members to private channels in this environment",
+      "Type": "String",
+    },
+    "TaskPeoplePublicInvitationsEnabled": {
+      "AllowedValues": [
+        "true",
+        "false",
+      ],
+      "Default": "false",
+      "Description": "Whether task people may invite members to public channels in this environment",
+      "Type": "String",
+    },
+    "WorkflowDependenciesEnabled": {
+      "AllowedValues": [
+        "true",
+        "false",
+      ],
+      "Default": "false",
+      "Description": "Whether bounded serial task work breakdowns are enabled in this environment",
       "Type": "String",
     },
     "WorkspaceKmsKeyArn": {
@@ -575,9 +620,22 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "ADMIN_VALUES": {
               "Ref": "AdminValues",
             },
+            "AGENTX_ALARM_PREFIX": "AgentX",
             "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-production-e2e-mock-runtime-v1",
             "AGENTX_ENV": "production",
             "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-production-project-setup-runtime-v1",
+            "AGENTX_TASK_PEOPLE_CHANGES_ENABLED": {
+              "Ref": "TaskPeopleChangesEnabled",
+            },
+            "AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED": {
+              "Ref": "TaskPeoplePrivateInvitationsEnabled",
+            },
+            "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED": {
+              "Ref": "TaskPeoplePublicInvitationsEnabled",
+            },
+            "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED": {
+              "Ref": "WorkflowDependenciesEnabled",
+            },
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
             },
@@ -588,10 +646,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Ref": "ChannelAdapters",
             },
             "CHANNEL_ADAPTER_SECRET_PREFIX": "agentx/production/",
+            "CHATGPT_CONNECTION_KEY_ARN": {
+              "Fn::GetAtt": [
+                "ChatGptConnectionKey03C49F9D",
+                "Arn",
+              ],
+            },
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
-            "DEVELOPER_API_SCOPE": "linking",
             "DEVELOPER_IDENTITY_FUNCTION_ARN": {
               "Fn::GetAtt": [
                 "DeveloperSignInFunction10B62B05",
@@ -642,6 +705,37 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": {
               "Ref": "GitHubAppPrivateKeySecretArn",
             },
+            "HEALTH_DEAD_LETTER_QUEUES": {
+              "Fn::Join": [
+                "",
+                [
+                  "{"dispatch":"",
+                  {
+                    "Ref": "DispatchDeadLetterQueue3E30F4B8",
+                  },
+                  "","slack-requests":"",
+                  {
+                    "Ref": "SlackRequestDeadLetterQueueBBBDDF4E",
+                  },
+                  "","developer-notices":"",
+                  {
+                    "Ref": "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                  },
+                  "","developer-notice-stream":"",
+                  {
+                    "Ref": "DeveloperTaskNotifierStreamFailureQueue58891933",
+                  },
+                  "","channel-events":"",
+                  {
+                    "Ref": "ChannelApiEventDeadLettersE21C25D1",
+                  },
+                  ""}",
+                ],
+              ],
+            },
+            "MCP_CONFIRM_ELICITATION": {
+              "Ref": "McpConfirmElicitation",
+            },
             "OIDC_ISSUER": {
               "Ref": "OidcIssuer",
             },
@@ -665,6 +759,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_TEAM_ID": {
               "Ref": "SlackTeamId",
+            },
+            "SLACK_THREADS_TABLE_NAME": {
+              "Ref": "SlackThreads36E14C1E",
             },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
@@ -695,6 +792,25 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
       },
       "Type": "AWS::Lambda::Function",
+    },
+    "BrokerEventInvokeConfig7F5E47E2": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "SlackHandOffFailureQueue0ACCAF94",
+                "Arn",
+              ],
+            },
+          },
+        },
+        "FunctionName": {
+          "Ref": "BrokerE1355FD6",
+        },
+        "Qualifier": "$LATEST",
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig",
     },
     "BrokerIntegration": {
       "Properties": {
@@ -1393,6 +1509,43 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
             },
             {
+              "Action": "dynamodb:ConditionCheckItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVELOPER#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "TASK#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": [
                 "dynamodb:PutItem",
                 "dynamodb:UpdateItem",
@@ -1409,6 +1562,110 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Resource": {
                 "Fn::GetAtt": [
                   "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChatGptConnectionKey03C49F9D",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "cloudwatch:DescribeAlarms",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":cloudwatch:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":alarm:AgentX*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "DispatchDeadLetterQueue3E30F4B8",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::GetAtt": [
+                    "SlackRequestDeadLetterQueueBBBDDF4E",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::GetAtt": [
+                    "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::GetAtt": [
+                    "DeveloperTaskNotifierStreamFailureQueue58891933",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::GetAtt": [
+                    "ChannelApiEventDeadLettersE21C25D1",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackHandOffFailureQueue0ACCAF94",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "THREAD#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackThreads36E14C1E",
                   "Arn",
                 ],
               },
@@ -1876,6 +2133,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
+            "ADMIN_CHANGES": "enabled",
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -2354,6 +2612,38 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 ],
               },
             },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "slackUserId",
+                    "share",
+                    "workflow",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -2673,6 +2963,44 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::DynamoDB::Table",
       "UpdateReplacePolicy": "Delete",
     },
+    "ChatGptConnectionKey03C49F9D": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "AgentX: seals developers' Sign in with ChatGPT tokens",
+        "EnableKeyRotation": true,
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PendingWindowInDays": 7,
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
+    },
     "ConnectorBrokenAlarmBE25C37B": {
       "Properties": {
         "AlarmActions": [
@@ -2857,6 +3185,39 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Ref": "AdminValues",
             },
             "AGENTX_ENV": "production",
+            "BUILT_IN_ADAPTER": {
+              "Ref": "SlackViaChannel",
+            },
+            "BUILT_IN_ADAPTER_CALLBACK_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-events",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_CHANNEL": "slack",
+            "BUILT_IN_ADAPTER_COMMANDS_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-commands",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
             "DEVELOPER_OIDC_CLIENT_ID": {
               "Ref": "DeveloperOidcClientId",
             },
@@ -2905,11 +3266,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "Arn",
               ],
             },
+            "MCP_CONFIRM_ELICITATION": {
+              "Ref": "McpConfirmElicitation",
+            },
+            "SLACK_ADAPTER_TEAM_ID": {
+              "Ref": "SlackTeamId",
+            },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
             },
             "SLACK_TEAM_ID": {
               "Ref": "SlackTeamId",
+            },
+            "SLACK_VIA_CHANNEL": {
+              "Ref": "SlackViaChannel",
             },
           },
         },
@@ -3106,6 +3476,16 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 ],
               },
             },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -3244,6 +3624,667 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
       },
       "Type": "AWS::KMS::Alias",
+    },
+    "DeveloperTaskNotifierFunction551419CC": {
+      "DependsOn": [
+        "DeveloperTaskNotifierFunctionServiceRoleDefaultPolicyB88ED8BD",
+        "DeveloperTaskNotifierFunctionServiceRole7247721D",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "AGENTX_METRICS_NAMESPACE": "AgentX",
+            "AGENTX_TASK_PEOPLE_CHANGES_ENABLED": {
+              "Ref": "TaskPeopleChangesEnabled",
+            },
+            "ARTIFACT_BUCKET_NAME": {
+              "Ref": "Artifacts82DD59A1",
+            },
+            "BUILT_IN_ADAPTER": {
+              "Ref": "SlackViaChannel",
+            },
+            "BUILT_IN_ADAPTER_CALLBACK_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-events",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_CHANNEL": "slack",
+            "BUILT_IN_ADAPTER_COMMANDS_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-commands",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
+            "CONTROL_PLANE_URL": {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "NOTICE_QUEUE_URL": {
+              "Ref": "DeveloperTaskNotifierNoticeQueue56CA42FC",
+            },
+            "SLACK_ADAPTER_TEAM_ID": {
+              "Ref": "SlackTeamId",
+            },
+            "SLACK_SECRET_ARN": {
+              "Ref": "SlackSecretEA96F13F",
+            },
+            "SLACK_VIA_CHANNEL": {
+              "Ref": "SlackViaChannel",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "DeveloperTaskNotifierFunctionLogs414F7789",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "DeveloperTaskNotifierFunctionServiceRole7247721D",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "DeveloperTaskNotifierFunctionLogs414F7789": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperTaskNotifierFunctionServiceRole7247721D": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "DeveloperTaskNotifierFunctionServiceRoleDefaultPolicyB88ED8BD": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SlackSecretEA96F13F",
+              },
+            },
+            {
+              "Action": "s3:GetObject",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/private/*/*/*/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/private/task-closeouts/*/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:ListStreams",
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "dynamodb:DescribeStream",
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "StreamArn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierNoticeQueue56CA42FC",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierNoticeQueue56CA42FC",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                    "WORKSPACE#*",
+                    "OPERATION#*",
+                    "CHATGPT_NOTICE#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "WORKFLOW_DISPATCH",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "CHATGPT_NOTICE#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SHARED_TASK#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ADMIN_CHANGE#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierStreamFailureQueue58891933",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "DeveloperTaskNotifierFunctionServiceRoleDefaultPolicyB88ED8BD",
+        "Roles": [
+          {
+            "Ref": "DeveloperTaskNotifierFunctionServiceRole7247721D",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperTaskNotifierNoticeDeadLetterQueuePolicy60467B6F": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "DeveloperTaskNotifierNoticeDeadLettersAlarmFA8E61A7": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A shared task's notice exhausted its receives and is in the notice dead-letter queue. Check the developer task notifier logs for its message ID.",
+        "AlarmName": "AgentXDeveloperNoticeDeadLetters",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "DeveloperTaskNotifierNoticeQueue56CA42FC": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 86400,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 100,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 180,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperTaskNotifierNoticeQueueMappingC54DCF3B": {
+      "Properties": {
+        "BatchSize": 1,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "DeveloperTaskNotifierNoticeQueue56CA42FC",
+            "Arn",
+          ],
+        },
+        "FunctionName": {
+          "Ref": "DeveloperTaskNotifierFunction551419CC",
+        },
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures",
+        ],
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "DeveloperTaskNotifierNoticeQueuePolicy653601CD": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierNoticeQueue56CA42FC",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "DeveloperTaskNotifierNoticeQueue56CA42FC",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "DeveloperTaskNotifierStateStreamMapping8BF36AFB": {
+      "Properties": {
+        "BatchSize": 100,
+        "BisectBatchOnFunctionError": true,
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "DeveloperTaskNotifierStreamFailureQueue58891933",
+                "Arn",
+              ],
+            },
+          },
+        },
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "State1C20CC9A",
+            "StreamArn",
+          ],
+        },
+        "FilterCriteria": {
+          "Filters": [
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["DEVELOPER_TASK"]}}}}",
+            },
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["DEVELOPER_TASK_POINTER"]}}}}",
+            },
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["OPERATION"]},"status":{"S":["SUCCEEDED","FAILED","CANCELLED","INTERRUPTED"]}}}}",
+            },
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["ADMIN_CHANGE"]}}}}",
+            },
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["WORKFLOW_ACTION_REFUSAL","TASK_COMMENT_NUDGE","TASK_PEOPLE_NOTIFICATION"]}}}}",
+            },
+          ],
+        },
+        "FunctionName": {
+          "Ref": "DeveloperTaskNotifierFunction551419CC",
+        },
+        "MaximumRecordAgeInSeconds": 3600,
+        "MaximumRetryAttempts": 10,
+        "StartingPosition": "LATEST",
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "DeveloperTaskNotifierStreamFailureQueue58891933": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperTaskNotifierStreamFailureQueuePolicy1177485A": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierStreamFailureQueue58891933",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "DeveloperTaskNotifierStreamFailureQueue58891933",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "DeveloperTaskNotifierStreamFailuresAlarmCFFF092A": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A batch of state table changes could not be turned into shared task notices, so a thread may have missed updates. Check the developer task notifier logs, and the failure queue for the shard and sequence numbers.",
+        "AlarmName": "AgentXDeveloperNoticeStreamFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "DeveloperTaskNotifierStreamFailureQueue58891933",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
     },
     "DispatchDeadLetterQueue3E30F4B8": {
       "DeletionPolicy": "Delete",
@@ -7484,6 +8525,46 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::ApiGatewayV2::Route",
     },
+    "SlackHandOffFailureQueue0ACCAF94": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SlackHandOffFailuresAlarm4D063F81": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "An AgentX background request (a Slack button press or a scheduled retry) was lost: Lambda could not run it, and it is in the Slack hand-off failure queue. Check the queue, and the broker and Slack ingress logs for its task or request ID.",
+        "AlarmName": "AgentXSlackHandOffFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "SlackHandOffFailureQueue0ACCAF94",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "NumberOfMessagesSent",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
     "SlackIngress5C88FFA0": {
       "DependsOn": [
         "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
@@ -7498,6 +8579,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
+            "ADMIN_CHANGES": "enabled",
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -7507,6 +8589,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "ApiEndpoint",
               ],
             },
+            "SHARED_TASKS": "enabled",
             "SLACK_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
@@ -7666,6 +8749,25 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::Lambda::Permission",
     },
+    "SlackIngressEventInvokeConfig871542E2": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "SlackHandOffFailureQueue0ACCAF94",
+                "Arn",
+              ],
+            },
+          },
+        },
+        "FunctionName": {
+          "Ref": "SlackIngress5C88FFA0",
+        },
+        "Qualifier": "$LATEST",
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig",
+    },
     "SlackIngressIntegration": {
       "Properties": {
         "ApiId": {
@@ -7726,6 +8828,32 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::Logs::LogGroup",
       "UpdateReplacePolicy": "Delete",
+    },
+    "SlackIngressSelfInvokeB586B3A0": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackIngress5C88FFA0",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SlackIngressSelfInvokeB586B3A0",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "SlackIngressServiceRole8DA92EC7": {
       "Properties": {
@@ -7931,6 +9059,99 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Effect": "Allow",
               "Resource": {
                 "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SHARED_TASK#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "slackUserId",
+                    "share",
+                    "workflow",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackHandOffFailureQueue0ACCAF94",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "traceId",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ADMIN_CHANGE#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
               },
             },
           ],

@@ -52,11 +52,9 @@ describe("admin change infrastructure", () => {
     expect(JSON.stringify(named.toJSON())).toContain("MCP_CONFIRM_ELICITATION");
   });
 
-  it("gives the legacy template only the sign-in client changes' audit records (spec 064)", () => {
-    expect(legacy.toJSON().Parameters).not.toHaveProperty("McpConfirmElicitation");
-    // No Slack confirm presses and no AI-tool pop-up: its changes are confirmed in the CLI.
-    expect(JSON.stringify(legacy.toJSON())).not.toContain("ADMIN_CHANGE");
-    expect(JSON.stringify(legacy.toJSON())).not.toContain("MCP_CONFIRM_ELICITATION");
+  it("gives the legacy template (production) the full admin changes, as named environments have", () => {
+    expect(legacy.toJSON().Parameters).toHaveProperty("McpConfirmElicitation");
+    expect(JSON.stringify(legacy.toJSON())).toContain("MCP_CONFIRM_ELICITATION");
     expect(JSON.stringify(legacy.toJSON())).toContain("CHANGE#*");
   });
 
@@ -99,14 +97,12 @@ describe("admin change infrastructure", () => {
     }]);
   });
 
-  it("turns the ingress press path on in the named template only", () => {
-    expect(variablesOf(named, "SlackIngress")).toMatchObject({ ADMIN_CHANGES: "enabled" });
-    expect(variablesOf(legacy, "SlackIngress")).not.toHaveProperty("ADMIN_CHANGES");
+  it("turns the ingress press path on in every template", () => {
+    for (const template of [named, legacy]) expect(variablesOf(template, "SlackIngress")).toMatchObject({ ADMIN_CHANGES: "enabled" });
   });
 
   it("passes McpConfirmElicitation to DeveloperIdentity and the broker straight from the parameter", () => {
-    for (const prefix of ["Broker", "DeveloperSignInFunction"]) expect(variablesOf(named, prefix).MCP_CONFIRM_ELICITATION).toEqual({ Ref: "McpConfirmElicitation" });
-    expect(variablesOf(legacy, "Broker")).not.toHaveProperty("MCP_CONFIRM_ELICITATION");
+    for (const template of [named, legacy]) for (const prefix of ["Broker", "DeveloperSignInFunction"]) expect(variablesOf(template, prefix).MCP_CONFIRM_ELICITATION).toEqual({ Ref: "McpConfirmElicitation" });
   });
 
   it("expires admin change items by the State table's TTL in named environments", () => {

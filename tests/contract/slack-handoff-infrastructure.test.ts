@@ -51,8 +51,9 @@ describe("Slack hand-off infrastructure (Task 19)", () => {
     expect(JSON.stringify((resources[ingressId] as { DependsOn?: unknown }).DependsOn ?? [])).not.toContain("SlackIngressSelfInvoke");
   });
 
-  it("leaves the legacy template without any of it", () => {
-    legacy.resourceCountIs("AWS::Lambda::EventInvokeConfig", 0);
-    expect(Object.keys(legacy.toJSON().Resources as Record<string, unknown>).some((id) => id.startsWith("SlackHandOff") || id.startsWith("SlackIngressSelfInvoke"))).toBe(false);
+  it("gives the legacy template (production) the same hand-off", () => {
+    legacy.resourceCountIs("AWS::Lambda::EventInvokeConfig", 2);
+    expect(Object.keys(legacy.toJSON().Resources as Record<string, unknown>).some((id) => id.startsWith("SlackHandOff"))).toBe(true);
+    expect(Object.keys(legacy.toJSON().Resources as Record<string, unknown>).some((id) => id.startsWith("SlackIngressSelfInvoke"))).toBe(true);
   });
 });
