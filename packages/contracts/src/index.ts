@@ -359,3 +359,5 @@ export * from "./work-event.js";
 export * from "./work-event-node.js";
 export * from "./policy.js";
 export * from "./presets.js";
+
+export * from "./machine-size.js";
