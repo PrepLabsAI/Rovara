@@ -272,6 +272,8 @@ export * from "./sagemaker-words.js";
 export * from "./pii-scan.js";
 export * from "./sagemaker-recording.js";
 export * from "./test-answer-labels.js";
+// TE-A6 (M3a): per-test attribution, the pure join. No callers yet.
+export * from "./test-attribution.js";
 export * from "./seed-script-lock.js";
 export * from "./generated/aws-emulator-services.js";
 export * from "./aws-emulator-service-keys.js";
