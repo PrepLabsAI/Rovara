@@ -111,12 +111,12 @@ describe("Slack-only workflow, end to end in one process", () => {
     expect(await e2e.mention("Add a greet(name) function")).toBe(200);
     expect(e2e.routeCalls).toEqual(["Add a greet(name) function"]);
     const routedCard = e2e.slack.lastPostWithAction("agentx_workflow_path_quick");
-    expect(routedCard.text).toContain("Looks like a small change. I'll use Quick.");
+    expect(routedCard.text).toContain("so I'll do it as a quick change");
     expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#"))).toEqual([]);
     await e2e.click("agentx_workflow_path_quick");
     expect(e2e.slack.updates.at(-1)?.text).toContain("chose Quick.");
     // The card is retired: its suggestion kept, its buttons gone.
-    expect(JSON.stringify(e2e.slack.updates.at(-1)?.blocks)).toContain("Looks like a small change.");
+    expect(JSON.stringify(e2e.slack.updates.at(-1)?.blocks)).toContain("so I'll do it as a quick change");
     expect(JSON.stringify(e2e.slack.updates.at(-1)?.blocks)).not.toContain("\"actions\"");
     expect(e2e.workflow().path).toBe("QUICK");
     await e2e.settle();
@@ -1016,7 +1016,7 @@ describe("Slack-only workflow, end to end in one process", () => {
   it("sends the original request to the chat agent from Just answer, or a typed answer, and starts no task (Task 21)", async () => {
     const e2e = await createWorkflowE2E({ route: () => ({ kind: "large_change", outcome: "ok" }) });
     expect(await e2e.mention("Rework how greetings are stored")).toBe(200);
-    expect(e2e.slack.lastPostWithAction("agentx_workflow_path_full").text).toContain("Looks like a bigger change. I'll use Full");
+    expect(e2e.slack.lastPostWithAction("agentx_workflow_path_full").text).toContain("so I suggest Full");
     await e2e.click("agentx_workflow_path_answer");
     expect(e2e.chatQueue).toEqual([expect.objectContaining({ text: "Rework how greetings are stored", userId: MAYA.slackUserId })]);
     expect(e2e.slack.updates.at(-1)?.text).toBe(`<@${MAYA.slackUserId}> asked for an answer. I'll reply here.`);
