@@ -323,7 +323,7 @@ describe("no callers", () => {
       return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
     };
     // MOCK-PROVENANCE-IN-PROOF consumes these two shared definitions only; it does not switch on evidence v2 readers or writers.
-    const proofExports = ["EvidenceTrustClass", "inertEvidenceText"];
+    const proofExports = ["EvidenceTrustClass", "inertEvidenceText", "SCRIPTED_AI_PROOF_WORDS", "AGENT_REPLIES_UNCONFIRMED_WORDS", "AGENT_REPLIES_DISAGREED_WORDS"];
     expect(callers(names.filter((name) => !proofExports.includes(name)))).toEqual([]);
     for (const name of proofExports) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
   });
