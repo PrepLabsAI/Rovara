@@ -22,3 +22,5 @@ export * from "./run-watch.js";
 export * from "./stage-machine.js";
 export * from "./start.js";
 export * from "./support.js";
+export * from "./retry.js";
+export * from "./cancel.js";

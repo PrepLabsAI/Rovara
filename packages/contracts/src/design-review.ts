@@ -4,6 +4,7 @@
 // changes the digest of every recorded model-choice approval.
 import { z } from "zod";
 import { sha256Hex } from "./web-hash.js";
+import { FindingScaleSchema } from "./task-flow-tier.js";
 
 const PlainLine = (max: number) => z.string().min(1).max(max).refine((value) => !/[\p{Cc}\p{Cf}]/u.test(value), "must be plain text");
 const Digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -205,6 +206,8 @@ export const DesignFindingSchema = z.object({
   citations: z.array(DesignCitationSchema).min(1).max(5),
   /** "rovara": a finding the broker adds itself with no model involved (a requirement with no §3 section, a design over the size cap). Absent means "reviewers". */
   origin: z.enum(["reviewers", "rovara"]).optional(),
+  /** The lighter flow (0.5.18 reader): how serious the finding is in three words. Nothing writes it yet; `severity` stays as it is. */
+  scale: FindingScaleSchema.optional(),
   fromReviewers: z.array(ReviewerRoleSchema).max(DESIGN_REVIEW_REVIEWERS_MAX),
   rawIds: z.array(z.string().min(1).max(64)).max(DESIGN_REVIEW_REVIEWERS_MAX * 15),
   /** The reviewers' own words for every raw finding in `rawIds` (same ids). Absent only on a finding Rovara adds itself, or one stored before this field. */
