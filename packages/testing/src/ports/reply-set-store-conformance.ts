@@ -15,7 +15,6 @@ import {
   REPLY_OVERLAY_TTL_DAYS,
   REPLY_STORE_WORDS,
   ReplyStoreRefusal,
-  createRovaraIndependentDecision,
   modelReplyEntrySha256,
   modelReplySetDigest,
   type HostScope,
@@ -23,6 +22,7 @@ import {
   type ReplySetStoreService,
   type ServedModelFamily,
 } from "@agentx/contracts";
+import { createRovaraIndependentDecision } from "@agentx/contracts/independent-channel";
 import {
   COMPANY_A,
   COMPANY_B,

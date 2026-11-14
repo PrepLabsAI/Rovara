@@ -239,6 +239,8 @@ describe("the fixed sentences", () => {
 const F2A_SOURCES = ["model-failure-pack", "model-families", "model-family-anthropic", "model-family-cohere", "model-family-gemini-extra", "model-family-openai-ops", "model-family-vectors", "model-render", "model-reply-provenance", "model-reply-set", "model-request-facts", "model-serve-replies", "model-served-family", "model-sse-named"];
 const F2A_TESTS = ["model-failure-pack", "model-family-anthropic", "model-family-cohere", "model-family-openai-ops", "model-replies-contracts-guard", "model-reply-provenance", "model-reply-provenance-base", "model-reply-set", "model-request-facts", "model-serve-replies"].map((name) => `tests/unit/${name}.test.ts`);
 const F2A_FILES: ReadonlySet<string> = new Set([...F2A_SOURCES.map((name) => `packages/contracts/src/${name}.ts`), ...F2A_TESTS]);
+// TE-R2 (stacked on F2-A): its one pure contract file that imports these modules. Exact file names only.
+const R2_FILES: ReadonlySet<string> = new Set(["packages/contracts/src/model-reply-brief.ts"]);
 
 describe("no callers yet", () => {
   const NEW_MODULES = ["model-catalog", "model-catalog-rows", "model-catalog-digest", "model-family-common", "model-family-gemini", "model-family-openai", "model-egress-block", "model-serve"];
@@ -255,7 +257,7 @@ describe("no callers yet", () => {
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
         // TE-F2 part A stacks on this lane: exactly these files are allowed to import F0a's modules (its own pure contracts and its tests); its guard (model-replies-contracts-guard.test.ts) proves nothing else calls them.
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || /^tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || R2_FILES.has(file) || /^tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }

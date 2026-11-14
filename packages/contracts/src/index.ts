@@ -305,10 +305,47 @@ export * from "./model-render.js";
 export * from "./model-failure-pack.js";
 export * from "./model-families.js";
 export * from "./model-reply-provenance.js";
-export * from "./model-reply-set.js";
+// `createRovaraIndependentDecision` is NOT re-exported: it is the independent-decision mint and lives behind `@agentx/contracts/independent-channel` (TE-R2 part A, M4). A new export of model-reply-set.ts must be added here by name.
+export {
+  MODEL_REPLY_SET_VERSION,
+  MODEL_REPLY_SET_MAX_REPLIES,
+  MODEL_REPLY_SET_MAX_BYTES,
+  MODEL_REPLY_PROMPT_CONTAINS_MAX_CHARS,
+  MODEL_REPLY_SEQUENCE_MAX,
+  ModelReplyResponseSchema,
+  ModelReplyMatchSchema,
+  ModelReplySetFileSchema,
+  ModelReplySetSchema,
+  modelReplySetDigest,
+  modelReplyContentSha256,
+  parseModelReplySetFileBytes,
+  parseModelReplySetBytes,
+  modelReplyEntrySha256,
+  stampReplyProvenance,
+  decideFromBase,
+  selectModelReply,
+  modelReplyOf,
+  type ModelReplyResponse,
+  type ModelReplyMatch,
+  type ModelReplySetFile,
+  type ModelReplySet,
+  type ModelReplyFileEntry,
+  type ModelReplyEntry,
+  type ParsedReplySetFile,
+  type ParsedReplySet,
+  type ReplyProvenanceDecision,
+  type IndependentReplyDecision,
+  type DecidedFromBase,
+  type ModelCallFacts,
+  type ReplySelection,
+} from "./model-reply-set.js";
 export * from "./model-reply-store.js";
 export * from "./model-reply-store-rules.js";
 export * from "./model-serve-replies.js";
+export * from "./model-reply-brief.js";
+export * from "./model-reply-examples.js";
+export * from "./model-reply-leak-screen.js";
+export * from "./model-reply-agent.js";
 export * from "./test-account.js";
 export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";

@@ -5,7 +5,6 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   REPLY_STORE_OWN_PREFIXES,
   REPLY_STORE_WORDS,
-  createRovaraIndependentDecision,
   modelReplyEntrySha256,
   queryAll,
   replyHeadSortKey,
@@ -15,6 +14,7 @@ import {
   type ModelReplyFileEntry,
   type TransactItem,
 } from "@agentx/contracts";
+import { createRovaraIndependentDecision } from "@agentx/contracts/independent-channel";
 import { COMPANY_A } from "@agentx/testing";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createReplySetStore } from "../../packages/broker/src/core/test-env/reply-set-store.js";
