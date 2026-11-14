@@ -185,26 +185,46 @@ function weakeningPart(pack: EvidencePackV2Read): { flags: string[]; weakening: 
   return { flags: lines.flags.map(bullet), weakening: lines.weakening.length === 0 ? [] : ["Tests may be weaker:", ...lines.weakening.map(bullet)] };
 }
 
+/** What the first line is made from (TE-B12 shares it with the public summary, so both say the same words for the same facts). */
+export interface EvidenceFirstLineFacts {
+  result: unknown;
+  /** `level.reached`. */
+  reached: unknown;
+  /** `producer.isolation`. */
+  isolation: unknown;
+  /** Some check's proof rests on scripted AI replies. */
+  scripted: boolean;
+  /** The weakest stage's words, already safe to print (they are made inert here too). */
+  weakestWords?: string | undefined;
+}
+/**
+ * The first line: never better than where the checks ran. A "real run" claimed by a pack that ran in the sandbox, on a laptop or elsewhere, or whose proof rests on scripted AI replies, is worded as what it was, and a sandbox
+ * run says "not sealed".
+ */
+export function evidenceFirstLine(facts: EvidenceFirstLineFacts): string {
+  const isolation = facts.isolation as string;
+  const reached = facts.reached as string;
+  const rovaraRan = isolation === "sealed" || isolation === "sandbox";
+  // A level that is about a Rovara run or the sandbox (`rovara_real_run`, `sandbox_only`) is never worded as one when the checks ran elsewhere: a stored pack is read tolerantly, so its producer and its level can disagree.
+  const elsewhere = !rovaraRan && (reached === "rovara_real_run" || reached === "sandbox_only")
+    ? (Object.hasOwn(ELSEWHERE_LEVEL_WORDS, isolation) ? ELSEWHERE_LEVEL_WORDS[isolation as keyof typeof ELSEWHERE_LEVEL_WORDS] : UNKNOWN_PLACE_LEVEL_WORDS)
+    : undefined;
+  const level = elsewhere ?? (reached === "rovara_real_run" && facts.scripted ? SCRIPTED_AI_LEVEL_WORDS : reached === "rovara_real_run" && isolation !== "sealed" ? NOT_SEALED_LEVEL_WORDS : wordOf(EVIDENCE_LEVEL_WORDS, facts.reached));
+  return line([
+    wordOf(EVIDENCE_RESULT_WORDS, facts.result),
+    level,
+    ...(facts.weakestWords === undefined ? [] : [`weakest: ${inert(facts.weakestWords, 100)}`]),
+    ...(isolation === "sandbox" && !level.includes("not sealed") ? ["not sealed"] : []),
+  ].join(" · "));
+}
+
 /** The first line and the body of a v2 pack. Pure; the same pack and options always give the same text. */
 export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, options: EvidenceRenderOptions = {}): EvidenceRendering {
   const pack = input as EvidencePackV2Read;
   const isolation = pack.producer.isolation as string;
   const weakest = pack.level.weakest;
   const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
-  // The first line is never better than where the checks ran: a "real run" claimed by a pack that ran in the sandbox, on a laptop or elsewhere, or whose proof rests on scripted AI replies, is worded as what it was.
-  const reached = pack.level.reached as string;
-  const rovaraRan = isolation === "sealed" || isolation === "sandbox";
-  // A level that is about a Rovara run or the sandbox (`rovara_real_run`, `sandbox_only`) is never worded as one when the checks ran elsewhere: a stored pack is read tolerantly, so its producer and its level can disagree.
-  const elsewhere = !rovaraRan && (reached === "rovara_real_run" || reached === "sandbox_only")
-    ? (Object.hasOwn(ELSEWHERE_LEVEL_WORDS, isolation) ? ELSEWHERE_LEVEL_WORDS[isolation as keyof typeof ELSEWHERE_LEVEL_WORDS] : UNKNOWN_PLACE_LEVEL_WORDS)
-    : undefined;
-  const level = elsewhere ?? (reached === "rovara_real_run" && scripted ? SCRIPTED_AI_LEVEL_WORDS : reached === "rovara_real_run" && isolation !== "sealed" ? NOT_SEALED_LEVEL_WORDS : wordOf(EVIDENCE_LEVEL_WORDS, pack.level.reached));
-  const firstLine = line([
-    wordOf(EVIDENCE_RESULT_WORDS, pack.result),
-    level,
-    ...(weakest === undefined ? [] : [`weakest: ${inert(weakest.words, 100)}`]),
-    ...(isolation === "sandbox" && !level.includes("not sealed") ? ["not sealed"] : []),
-  ].join(" · "));
+  const firstLine = evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words });
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
   const newer = options.newer ?? noNewerEvidence();

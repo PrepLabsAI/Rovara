@@ -229,6 +229,7 @@ export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";
 export * from "./evidence-inert.js";
+export * from "./evidence-public.js";
 export * from "./evidence-render.js";
 export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
