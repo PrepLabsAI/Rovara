@@ -325,9 +325,9 @@ describe("no callers", () => {
       expect([0, 1]).toContain(found.status);
       return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
     };
-    const inertCallers = new Set(["packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/test-report.ts"]);
+    const inertCallers = new Set(["packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/test-report.ts", "packages/worker/src/verification/eval-round.ts"]);
     expect(callers(names).filter((file) => !inertCallers.has(file))).toEqual([]);
-    // These two files may share only inert text; every other v2 export remains forbidden in both.
+    // These files may share only inert text; every other v2 export remains forbidden in both.
     expect(callers(names.filter((name) => name !== "inertEvidenceText"))).toEqual([]);
   });
 });

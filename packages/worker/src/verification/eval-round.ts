@@ -2,8 +2,8 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  EVAL_PACING_DEFAULTS, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
-  type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalSettings, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
+  inertEvidenceText, EVAL_PACING_DEFAULTS, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
+  type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
 
@@ -21,17 +21,6 @@ export interface EvalReportLocation {
   readonly notBeforeMs: number | undefined;
   readonly nowMs?: number;
 }
-
-/** What Rovara's own base round hands back: the measures file it read (through `readEvalMeasures`), the cases behind it, and the facts of its calls. */
-export type EvalBaseRoundRead =
-  | {
-    readonly ok: true; readonly measures: MeasuresFile; readonly caseCount: number; readonly facts: EvalRoundFacts;
-    /** Rovara's own hash of the eval files in the base checkout (`hashEvalDirectory`), never a value the runner wrote. */
-    readonly evalSetHash: string;
-    /** The runner's attestation that this round ran in a Rovara-only checkout of the base commit with the working sandbox paused. Without it the score is neither cached nor compared. */
-    readonly attestation: EvalBaseAttestation;
-  }
-  | { readonly ok: false };
 
 export interface EvalQuestionPlan {
   /** Bound by the caller to the customer's product-provider capability, never the agent's provider. */
@@ -52,6 +41,8 @@ export interface EvalQuestionPlan {
   readonly maxCostMicrosPerQuestion: number;
   readonly callsAlreadyUsed?: number;
   readonly costAlreadyUsedMicros?: number;
+  /** Explicit project budget, supplied from the approved health-check estimate when available.
+   * Missing dimensions fall back to DEC 171: 200 calls / $2 per task. */
   readonly limits?: Partial<Pick<EvalPacingLimits, "maxCalls" | "maxCostMicros">>;
   /** Runs through F1's customer ModelEgress and F3 pacing; resolves only after all calls joined.
    * Reports are read by A4. No key, response header, error or stdout belongs in this return value. */
@@ -62,18 +53,15 @@ export interface EvalQuestionPlan {
   }>;
 }
 export interface EvalRoundInput {
-  readonly tier?: { readonly reasons: readonly string[] };
+  readonly tier?: { readonly reasons: ReadonlyArray<{ readonly code: string; readonly path?: string }> };
   /** Discovery explicitly found no configured eval; absence of a plan alone is not proof. */
   readonly evalConfigured?: boolean;
   readonly questionPlan?: EvalQuestionPlan;
   readonly trigger: EvalTrigger;
   readonly roundKind: EvalRoundKind;
-  /** @deprecated The question runner returns each fresh report location. */
-  readonly report?: EvalReportLocation;
   /** Everything the base score depends on except the two hashes (the eval set's comes from the runner's file, the hidden set's from the source). */
   readonly key: Omit<EvalBaseCacheKeyParts, "evalSetHash" | "hiddenSetHash" | "settingsFingerprint">;
-  /** Only image and route affect the new rule; legacy run/seed fields are accepted but ignored. */
-  readonly settings: Pick<EvalSettings, "imageDigest" | "route"> & Partial<Omit<EvalSettings, "imageDigest" | "route">>;
+  readonly settings: { readonly imageDigest: string; readonly route: string };
   /**
    * Rovara's OWN hash of the head's eval files (`hashEvalDirectory`). Required: the hash the runner writes in its file is a claim, not evidence, and when this is missing the round refuses to compare. A hash in the runner's file
    * that differs from this one is "the eval set changed".
@@ -84,13 +72,6 @@ export interface EvalRoundInput {
   readonly cache: BaseScoreCache;
   /** The project's hidden eval set, when it keeps one. */
   readonly hiddenSet?: HiddenEvalSetSource;
-  /** @deprecated F3d owns initial measurement and background refresh; never called during a task. */
-  readonly runBaseRound?: () => Promise<EvalBaseRoundRead>;
-  /** @deprecated Each question-run report supplies its own facts. */
-  readonly facts?: EvalRoundFacts;
-  readonly capMicros?: number;
-  /** Today as `YYYY-MM-DD`, for the cache record. */
-  readonly today?: () => string;
 }
 
 export type EvalRoundOutput =
@@ -179,22 +160,28 @@ export async function runEvalRound(input: EvalRoundInput): Promise<EvalRoundOutp
 }
 
 /** Adapter for PR #570: eval_hint is a REASON, never a new tier kind. */
-export function tierRequestsEval(tier: EvalRoundInput["tier"]): boolean { return tier?.reasons.includes("eval_hint") === true; }
+export function tierRequestsEval(tier: EvalRoundInput["tier"]): boolean { return tier?.reasons.some(reason => reason.code === "eval_hint") === true; }
 
 /** Legacy aggregate callers fail closed. The baseline is supplied by setup/background refresh (F3d).
  * It is never manufactured from an aggregate score or a task's new-code answers. */
 export async function completeEvalRound(input: EvalRoundInput, plan: Extract<EvalRoundPlan, { status: "ready" }>): Promise<EvalRoundOutput> {
   const hidden = plan.hiddenMount !== undefined;
   let usage: { calls: number; costMicros?: number } | undefined;
+  const estimates: string[] = [];
+  let excluded: EvalCheckResult["excluded"] = [];
   let cacheState: "hit" | "not_used" = "not_used";
   const finish = (result: EvalCheckResult): EvalRoundOutput => {
-    const output = done(result, cacheState, plan.hiddenMount === undefined ? {} : { hiddenMount: plan.hiddenMount });
+    const count = excluded.length;
+    const exclusionSummary = count === 0 ? "" : ` ${count} question${count === 1 ? "" : "s"} added, removed or edited: not compared.`;
+    const evidence = hidden ? result : { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...estimates], summary: result.summary + exclusionSummary };
+    const output = done(evidence, cacheState, plan.hiddenMount === undefined ? {} : { hiddenMount: plan.hiddenMount });
     return output.status === "done" && !hidden && usage !== undefined ? { ...output, usage } : output;
   };
   const refuse = (reason: EvalNotRunReason): EvalRoundOutput => finish(evalNotRunResult({ roundKind: input.roundKind, reason, hiddenSetUsed: hidden }));
   if (input.evalConfigured === false && tierRequestsEval(input.tier)) {
     const result = evalNotRunResult({ roundKind: input.roundKind, reason: "no_eval_configured", hiddenSetUsed: hidden });
-    return finish({ ...result, notices: ["Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below."] });
+    const notice = "Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below.";
+    return finish({ ...result, notices: [notice], summary: notice, disposition: { ...result.disposition, retry: false } });
   }
   const config = input.questionPlan;
   if (config === undefined) return refuse("question_data_missing");
@@ -207,7 +194,7 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   if (!/^[a-f0-9]{64}$/u.test(config.judgePin) || config.judgePin !== config.baselineJudgePin) return refuse("judge_changed");
   if (input.evalSetHash === undefined) return refuse("eval_set_unknown");
   const definitions = config.questions;
-  if (definitions.length === 0 || definitions.length > EVAL_QUESTION_LIMIT || new Set(definitions.map(q => q.id)).size !== definitions.length || definitions.some(q => !/^[a-f0-9]{64}$/u.test(q.baseHash) || !/^[a-f0-9]{64}$/u.test(q.headHash))) return refuse("invalid_question_data");
+  if (definitions.length > EVAL_QUESTION_LIMIT || new Set(definitions.map(q => q.id)).size !== definitions.length || definitions.some(q => !/^[a-f0-9]{64}$/u.test(q.baseHash) || !/^[a-f0-9]{64}$/u.test(q.headHash))) return refuse("invalid_question_data");
   const parts: EvalBaseCacheKeyParts = { ...input.key, evalSetHash: config.baseEvalSetHash ?? input.evalSetHash, hiddenSetHash: plan.hiddenHash,
     settingsFingerprint: evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: input.settings.imageDigest, route: input.settings.route, judgePin: config.judgePin })) };
   let base: EvalBaseRecord | undefined;
@@ -217,20 +204,31 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   base = parsedBase.data;
   cacheState = "hit";
   const byId = new Map(base.questions!.map(q => [q.id, q]));
-  if (base.questions!.length !== definitions.length || byId.size !== definitions.length || definitions.some(q => byId.get(q.id)?.samples.length !== 3)) return refuse("invalid_question_data");
-  // Reserve the entire adaptive envelope BEFORE ANY call: 3 new whole runs, up to ten
-  // suspects in each direction with 3 fresh old + 3 fresh new answers. Caps are per task.
-  const n = definitions.length;
-  const questionRuns = 3 * n + (config.subsetSupported ? 6 * Math.min(n, 20) : 0);
+  const headIds = new Set(definitions.map(q => q.id));
+  excluded = [
+    ...definitions.filter(q => !byId.has(q.id) || q.baseHash !== q.headHash).map(q => ({ id: inertEvidenceText(q.id, 160), reason: "edited" as const })),
+    ...base.questions!.filter(q => !headIds.has(q.id)).map(q => ({ id: inertEvidenceText(q.id, 160), reason: "edited" as const })),
+  ];
+  const untouched = definitions.filter(q => byId.has(q.id) && q.baseHash === q.headHash);
+  if (untouched.length === 0) return refuse("too_few_questions");
   const maxCalls = config.limits?.maxCalls ?? EVAL_PACING_DEFAULTS.maxCalls;
   const maxCost = config.limits?.maxCostMicros ?? EVAL_PACING_DEFAULTS.maxCostMicros;
   let calls = config.callsAlreadyUsed ?? 0; let cost = config.costAlreadyUsedMicros ?? 0;
   const whole = (v: number): boolean => Number.isSafeInteger(v) && v >= 0;
-  if (![maxCalls, maxCost, calls, cost, config.maxCallsPerQuestion, config.maxCostMicrosPerQuestion].every(whole) || config.maxCallsPerQuestion < 1 || config.maxCostMicrosPerQuestion < 1 || calls + questionRuns * config.maxCallsPerQuestion > maxCalls || cost + questionRuns * config.maxCostMicrosPerQuestion > maxCost) return refuse("cap");
+  if (![maxCalls, maxCost, calls, cost, config.maxCallsPerQuestion, config.maxCostMicrosPerQuestion].every(whole) || config.maxCallsPerQuestion < 1 || config.maxCostMicrosPerQuestion < 1) return refuse("cap");
   const initialCalls = calls; const initialCost = cost;
   let costKnown = true;
   let changedPromptCalls = 0;
   let stop: EvalNotRunReason | undefined;
+  const fits = (questionRuns: number): boolean => calls + questionRuns * config.maxCallsPerQuestion <= maxCalls && cost + questionRuns * config.maxCostMicrosPerQuestion <= maxCost;
+  const reserve = (stage: "first run" | "re-asks" | "second look", questionRuns: number): boolean => {
+    const estimatedCalls = questionRuns * config.maxCallsPerQuestion;
+    const estimatedCost = questionRuns * config.maxCostMicrosPerQuestion;
+    if (!Number.isSafeInteger(estimatedCalls) || !Number.isSafeInteger(estimatedCost)) { stop = "cap"; return false; }
+    estimates.push(`Eval ${stage} estimate: ${estimatedCalls} calls, ${estimatedCost} microdollars.`);
+    if (!fits(questionRuns)) { stop = "cap"; return false; }
+    return true;
+  };
   const run = async (side: "old" | "new", ids: readonly string[], runs: 1 | 2 | 3): Promise<Map<string, EvalQuestionSamples> | undefined> => {
     if (stop !== undefined) return undefined;
     try {
@@ -255,21 +253,23 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
       return map;
     } catch { stop = "provider_error"; return undefined; }
   };
-  const ids = definitions.map(q => q.id);
+  // Whole-set-only runners still execute the head inventory; excluded answers never enter the comparison.
+  const ids = (config.subsetSupported ? untouched : definitions).map(q => q.id);
+  if (!reserve("first run", ids.length)) return refuse("cap");
   const first = await run("new", ids, 1);
   if (first === undefined) return refuse(stop ?? "provider_error");
-  let questions: EvalQuestionComparison[] = definitions.map(q => ({ id: q.id, category: q.category, old: byId.get(q.id)!.samples, first: first.get(q.id)!.samples[0]!, edited: q.baseHash !== q.headHash }));
+  let questions: EvalQuestionComparison[] = untouched.map(q => ({ id: q.id, category: q.category, old: byId.get(q.id)!.samples, first: first.get(q.id)!.samples[0]!, edited: q.baseHash !== q.headHash }));
   const judge = (): EvalCheckResult => evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true });
   if (config.subsetSupported) {
     const suspects = evalSuspects(questions); const selected = [...suspects.down, ...suspects.up];
-    if (selected.length > 0) {
+    if (selected.length > 0 && reserve("re-asks", 6 * selected.length)) {
       const old = await run("old", selected, 3); const newer = old === undefined ? undefined : await run("new", selected, 3);
       questions = questions.map(q => ({ ...q, freshOld: old?.get(q.id)?.samples, freshNew: newer?.get(q.id)?.samples }));
     }
   }
   // A confirmed failure survives an outage/cap on later work. Never turn it into Not run.
   if (judge().label !== "Worse on eval" && stop === undefined && evalNeedsSecondLook(questions)) {
-    const more = await run("new", ids, 2);
+    const more = reserve("second look", 2 * ids.length) ? await run("new", ids, 2) : undefined;
     questions = questions.map(q => ({ ...q, moreNew: more?.get(q.id)?.samples }));
   }
   const judged = judge();

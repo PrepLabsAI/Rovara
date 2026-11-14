@@ -56,7 +56,7 @@ export interface EvalBaseCacheKeyParts {
   readonly model: string;
   /** The EXACT model version the eval called (the provider's snapshot or version id, not the family name). A new version is a new key: the old code is re-run only then (DECISIONS 170). */
   readonly modelVersion: string;
-  /** `evalSettingsFingerprint` of the settings the score was measured under (runs, seed, repeats, k, minimum questions, image digest, route): a different setting is a different score. */
+  /** Fingerprint of the rule, pinned judge, image and route used to measure the score. */
   readonly settingsFingerprint: string;
 }
 
@@ -72,34 +72,6 @@ const PART_RULES: ReadonlyArray<readonly [keyof EvalBaseCacheKeyParts, RegExp]> 
   ["modelVersion", /^[A-Za-z0-9._:/@+-]{1,200}$/u],
   ["settingsFingerprint", /^[a-f0-9]{64}$/u],
 ];
-
-/** What an eval's score depends on besides the code, the eval set and the model: how it was run. */
-export interface EvalSettings {
-  readonly runs: number;
-  /** The seed, fixed before the task. */
-  readonly seed: string;
-  readonly repeats: number;
-  /** k in "base +/- k x spread". */
-  readonly k: number;
-  readonly minQuestions: number;
-  /** The pinned image the runner ran in (`name@sha256:...`). */
-  readonly imageDigest: string;
-  /** The route the calls took (the catalog row and its gateway), as one plain word. */
-  readonly route: string;
-}
-const SETTINGS_DOMAIN = "rovara-eval-settings/v1\n";
-const whole = (value: unknown, max: number): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
-/** SHA-256 (hex) of the settings under a fixed domain and canonical JSON. Throws RangeError naming the setting, never its value. */
-export function evalSettingsFingerprint(settings: EvalSettings): string {
-  const held = settings as unknown as Record<string, unknown>;
-  if (!whole(held["runs"], 1_000)) throw new RangeError("the runs setting is not valid");
-  if (!whole(held["repeats"], 1_000)) throw new RangeError("the repeats setting is not valid");
-  if (!whole(held["minQuestions"], 1_000_000)) throw new RangeError("the minQuestions setting is not valid");
-  if (typeof held["k"] !== "number" || !Number.isFinite(held["k"]) || held["k"] <= 0 || held["k"] > 100) throw new RangeError("the k setting is not valid");
-  for (const name of ["seed", "imageDigest", "route"]) if (typeof held[name] !== "string" || !/^[A-Za-z0-9._:/@+-]{1,200}$/u.test(held[name])) throw new RangeError(`the ${name} setting is not valid`);
-  const { runs, seed, repeats, k, minQuestions, imageDigest, route } = settings;
-  return sha256HexOf(new TextEncoder().encode(`${SETTINGS_DOMAIN}${canonicalJson({ runs, seed, repeats, k, minQuestions, imageDigest, route })}`));
-}
 
 /** What the runner attests about a base round: it ran in a Rovara-only checkout of the base commit (nothing of the coding agent's), with the working sandbox paused. Without it a base score is neither compared nor cached. */
 export interface EvalBaseAttestation {

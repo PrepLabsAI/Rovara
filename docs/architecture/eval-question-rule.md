@@ -20,11 +20,15 @@ neutral Not run notice. F3d supplies the baseline and later re-keys it to eval
 inputs. Until then the company/project, exact model version, base commit, eval
 hash, hidden-set hash and command key remain. When questions change, the worker
 uses the trusted old-set hash for cache/old reports and the head hash for new
-reports, while excluding each edited question from the comparison. The settings fingerprint uses the
+reports, while excluding each added, removed or edited question from the comparison.
+The untouched intersection is scored; only an empty intersection is too few to judge.
+Exclusions are named and counted. Subset-capable runners skip excluded questions;
+whole-set-only runners still execute the head inventory and discard excluded answers. The settings fingerprint uses the
 question-rule version, image, route and judge pin, not a user-chosen seed or noise
 setting. The worker never writes a task's new-code answers into the baseline.
 
-The first new run covers every question. At most ten downward suspects and ten
+The first new run covers every untouched question (the full head set when the
+runner cannot select a subset). At most ten downward suspects and ten
 upward suspects get three fresh old and three fresh new answers. Only those
 fresh answers enter the targeted exact test. The whole-set test conditions on
 each question's total passes and convolves its hypergeometric distribution;
@@ -41,20 +45,27 @@ request. The disposition is always a normal PR: failure for Worse, success for a
 completed no-drop/improvement check, neutral with Retry for Not run. The lane's
 own development PR is a draft for review; that is separate from this product rule.
 
-Before any task call, the worker checks the entire possible adaptive envelope:
-`3*N + 6*min(N,20)` question-runs with subset support, or `3*N` without it, times
-the measured conservative call/cost bounds (including judge calls). Existing task
-spend is included; defaults remain 200 calls and $2. This conservative reservation
-can refuse an eval whose typical path would fit. No call is made on that refusal.
-An outage or cap on later work never erases an already established Worse result.
+The explicit per-project `questionPlan.limits` input carries the approved
+health-check budget when available; absent dimensions retain 200 calls and $2.
+Before the first run, reserve N question-runs using measured upper call/cost
+bounds (including judge calls). Once suspects are known, reserve six runs per
+selected suspect before either side is re-asked. Reserve 2N only if a whole-set
+second look is needed. Reservations include prior passes and actual spend. After each invocation,
+actual spend is checked; an overrun stops further calls. A stage that cannot fit starts no calls
+and returns Not run/cap unless Worse has already been established. Public results
+include the estimated calls and cost for every attempted stage, including refused
+stages; private results reveal none. The saved baseline costs no task calls.
 
 Public PR summary text contains fixed words and counts only. Signed-in evidence
-and public-question agent feedback contain bounded inert question/answer text.
+and public-question agent feedback contain bounded inert text for changed, broken
+and flaky questions only; unchanged questions are summarised as a count. No-drop
+text explains repeated breaks and strict categories without inventing measured
+power; project-specific detection power awaits the F3d health-check producer.
 Private sets retain the sealed-only mount guard; feedback is a single fixed
 pass/fail and the result carries no question identities, positions or counts.
 No private set is derived from repository questions.
 
 PR #570 is not in this stack. `tierRequestsEval` accepts its `eval_hint` reason
-string, without adding a tier kind or another prompt filename classifier.
+objects (`{code, path?}`), without adding a tier kind or another prompt filename classifier.
 
-When discovery explicitly supplies `evalConfigured: false` and the tier has `eval_hint`, evidence includes: "Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below." The round is neutral/Not run and spends nothing. An absent question plan alone does not establish that no eval exists. Side-by-side answers are a separate lane, absent from this base; this adapter emits only the notice.
+When discovery explicitly supplies `evalConfigured: false` and the tier has `eval_hint`, evidence includes: "Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below." The round is neutral/Not run and spends nothing; the notice stands alone with no Retry. An absent question plan alone does not establish that no eval exists. Side-by-side answers are a separate lane, absent from this base; this adapter emits only the notice.

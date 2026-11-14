@@ -15,7 +15,7 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 const hash = "b".repeat(64);
 const samples = (pass: boolean, count: number) => Array.from({ length: count }, () => ({ pass, answer: pass ? "old answer" : "new answer" }));
-async function setup(n = 3) {
+async function setup(n = 3, newPass = false) {
   const root = await mkdtemp(join(process.env["TMPDIR"] ?? process.cwd(), "te-f3c-round-")); roots.push(root);
   const ids = Array.from({ length: n }, (_, i) => `q${i}`);
   const record: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", direction: "up_good", value: 1 }], caseCount: n, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1, questions: ids.map(id => ({ id, samples: samples(true, 3) })) };
@@ -24,9 +24,9 @@ async function setup(n = 3) {
   const input: EvalRoundInput = {
     trigger: { needed: true, reason: "changes" }, roundKind: "check_unsealed",
     key: { company: "org-a", project: "project-a", baseCommit: "a".repeat(40), commandFingerprint: evalCommandFingerprint("eval"), catalogRowId: "gemini", model: "model-a", modelVersion: "version-a" },
-    settings: { runs: 3, seed: "legacy", repeats: 3, imageDigest: "image", route: "customer" },
-    evalSetHash: hash, report: { root, cwd: ".", argument: "unused.json", notBeforeMs: Date.now() - 1000 }, facts: evalFactsAllRun(n),
-    cache: { read: async () => record, write: async () => "stored" }, runBaseRound: async () => ({ ok: false }), today: () => "2026-11-13",
+    settings: { imageDigest: "image", route: "customer" },
+    evalSetHash: hash,
+    cache: { read: async () => record, write: async () => "stored" },
     questionPlan: {
       company: "org-a", provider: "customer", connected: true, previousPasses: 0,
       judgePin: hash, baselineJudgePin: hash, subsetSupported: true,
@@ -34,11 +34,11 @@ async function setup(n = 3) {
       maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
       run: async request => {
         requests.push(request);
-        const fail = request.side === "new";
+        const fail = request.side === "new" && !newPass;
         const path = `run-${requests.length}.json`;
         await writeFile(join(root, path), JSON.stringify({ schemaVersion: 1, measures: record.measures, questions: request.ids.map(id => ({ id, samples: samples(!fail, request.runs) })) }));
         const changed = first && request.side === "new"; first = false;
-        return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: input.key.baseCommit }), report: { root, cwd: ".", argument: path, notBeforeMs: Date.now() - 1000 }, facts: evalFactsAllRun(request.ids.length * request.runs), calls: request.ids.length * request.runs, costMicros: 100 * request.ids.length * request.runs, changedPromptCalls: changed ? n : 0 };
+        return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: input.key.baseCommit }), report: { root, cwd: ".", argument: path, notBeforeMs: Date.now() - 1000 }, facts: evalFactsAllRun(request.ids.length * request.runs), calls: request.ids.length * request.runs, costMicros: 100 * request.ids.length * request.runs, changedPromptCalls: changed ? request.ids.length : 0 };
       },
     },
   };
@@ -53,7 +53,7 @@ describe("worker question round", () => {
   });
   it("accepts tier eval_hint reasons, never a kind or a duplicate filename classifier", async () => {
     const { input, requests } = await setup();
-    expect(await runEvalRound({ ...input, trigger: { needed: false, reason: "none_found" }, tier: { reasons: ["eval_hint"] } })).toMatchObject({ status: "done", result: { label: "Worse on eval" } });
+    expect(await runEvalRound({ ...input, trigger: { needed: false, reason: "none_found" }, tier: { reasons: [{ code: "eval_hint", path: "prompts/product.md" }] } })).toMatchObject({ status: "done", result: { label: "Worse on eval" } });
     expect(requests.length).toBeGreaterThan(0);
     requests.length = 0;
     expect(await runEvalRound({ ...input, trigger: { needed: false, reason: "none_found" }, tier: { reasons: [] } })).toEqual({ status: "skipped", reason: "none_found" });
@@ -99,7 +99,9 @@ it("preserves first-look Worse after a provider failure on re-asks", async () =>
 });
 it("whole-set second look works without subsets and a missing later report cannot become No drop", async () => {
   const { input, requests } = await setup(2); const plan = input.questionPlan!;
-  expect(await runEvalRound({ ...input, questionPlan: { ...plan, subsetSupported: false } })).toMatchObject({ result: { label: "Worse on eval", notices: ["Question re-asks skipped: the runner cannot run a subset."] } });
+  const withoutSubsets = await runEvalRound({ ...input, questionPlan: { ...plan, subsetSupported: false } });
+  expect(withoutSubsets).toMatchObject({ result: { label: "Worse on eval" } });
+  if (withoutSubsets.status === "done") expect(withoutSubsets.result.notices).toContain("Question re-asks skipped: the runner cannot run a subset.");
   expect(requests.map(r => [r.side, r.runs])).toEqual([["new", 1], ["new", 2]]);
   expect(await runEvalRound({ ...input, questionPlan: { ...plan, subsetSupported: false, run: request => request.runs === 2 ? Promise.reject(new Error("outage")) : plan.run(request) } })).toMatchObject({ result: { label: "Not run" } });
 });
@@ -128,8 +130,9 @@ it("validates the cached samples before spending, even with a custom cache adapt
 it("pacing caps include earlier task spend and both permitted passes", async () => {
   const { input, requests } = await setup(1); const plan = input.questionPlan!;
   expect(await runEvalRound({ ...input, questionPlan: { ...plan, previousPasses: 1, callsAlreadyUsed: 195 } })).toMatchObject({ result: { notRun: { reason: "cap" } } });
-  expect(requests).toHaveLength(0);
-  expect(await runEvalRound({ ...input, questionPlan: { ...plan, previousPasses: 1 } })).toMatchObject({ result: { label: "No drop found" } });
+  expect(requests).toEqual([{ side: "new", ids: ["q0"], runs: 1 }]);
+  const second = await setup(1);
+  expect(await runEvalRound({ ...second.input, questionPlan: { ...second.input.questionPlan!, previousPasses: 1 } })).toMatchObject({ result: { label: "No drop found" } });
 });
 
 it("requests just one fix round, then reports the remaining break without another fix request", async () => {
@@ -184,7 +187,7 @@ it("reports actual calls and cost for public questions and no numeric usage for 
   expect(await runEvalRound(publicRound.input)).toMatchObject({ usage: { calls: 21, costMicros: 2100 } });
   const { root, input } = await setup(3);
   const result = await runEvalRound({ ...input, roundKind: "check_sealed", hiddenSet: { exists: async () => true, open: async () => ({ hostPath: root, hash }) }, hashHiddenSet: async () => hash });
-  expect(result).toMatchObject({ status: "done", feedback: { pass: false }, result: { questions: [], casesRun: 0 } });
+  expect(result).toMatchObject({ status: "done", feedback: { pass: false }, result: { questions: [], casesRun: 0, casesTotal: 0, excluded: [], notices: [] } });
   expect(result).not.toHaveProperty("usage");
 });
 
@@ -213,11 +216,11 @@ it("shows the no-eval prompt-change notice only when absence is known", async ()
   const { input, requests } = await setup();
   const { questionPlan, ...withoutPlan } = input;
   expect(questionPlan).toBeDefined();
-  const absent = { ...withoutPlan, tier: { reasons: ["eval_hint"] }, evalConfigured: false, trigger: { needed: false, reason: "none_found" as const } };
+  const absent = { ...withoutPlan, tier: { reasons: [{ code: "eval_hint", path: "prompts/product.md" }] }, evalConfigured: false, trigger: { needed: false, reason: "none_found" as const } };
   const notice = "Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below.";
-  expect(await runEvalRound(absent)).toMatchObject({ status: "done", result: { label: "Not run", notices: [notice], disposition: { check: "neutral", retry: true } } });
+  expect(await runEvalRound(absent)).toMatchObject({ status: "done", result: { label: "Not run", notices: [notice], summary: notice, disposition: { check: "neutral", retry: false } } });
   expect(requests).toEqual([]);
-  expect(await runEvalRound({ ...withoutPlan, tier: { reasons: ["eval_hint"] } })).toMatchObject({ result: { notices: [] } });
+  expect(await runEvalRound({ ...withoutPlan, tier: { reasons: [{ code: "eval_hint", path: "prompts/product.md" }] } })).toMatchObject({ result: { notices: [] } });
   expect(await runEvalRound({ ...absent, tier: { reasons: [] } })).toEqual({ status: "skipped", reason: "none_found" });
 });
 
@@ -239,6 +242,101 @@ it.each(["calls", "coverage_negative", "coverage_excess", "report_hash", "report
       return output;
     } },
   });
-  expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: mode === "report_hash" ? "eval_set_changed" : mode === "report_missing" ? "no_measures_file" : "invalid_question_data" } } });
+  expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: mode === "report_hash" ? "eval_set_changed" : mode === "report_missing" ? "no_measures_file" : mode === "baseline_ids" ? "too_few_questions" : "invalid_question_data" } } });
   expect(requests).toHaveLength(mode === "baseline_ids" ? 0 : 1);
+});
+
+// Removing per-stage reservation must spend past the approved limit and fail these cases.
+it("runs a 50-question cached eval inside the default cap and reports stage estimates", async () => {
+  const { input, requests } = await setup(50);
+  const result = await runEvalRound(input);
+  expect(result).toMatchObject({ result: { label: "Worse on eval" }, usage: { calls: 110 } });
+  expect(requests.map(r => r.ids.length * r.runs)).toEqual([50, 30, 30]);
+  if (result.status === "done") expect(result.result.notices).toEqual(expect.arrayContaining([
+    "Eval first run estimate: 50 calls, 5000 microdollars.",
+    "Eval re-asks estimate: 60 calls, 6000 microdollars.",
+  ]));
+});
+it.each(["calls", "cost"] as const)("reserves actual suspects before either re-ask using project %s budget", async dimension => {
+  const { input, requests } = await setup(1); const plan = input.questionPlan!;
+  const limits = dimension === "calls" ? { maxCalls: 6 } : { maxCostMicros: 600 };
+  const result = await runEvalRound({ ...input, questionPlan: { ...plan, limits } });
+  expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap" } }, usage: { calls: 1 } });
+  expect(requests).toEqual([{ side: "new", ids: ["q0"], runs: 1 }]);
+  if (result.status === "done") expect(result.result.notices).toContain("Eval re-asks estimate: 6 calls, 600 microdollars.");
+});
+it("checks the second-look budget before spending and preserves established Worse at a cap", async () => {
+  const { input, requests } = await setup(2);
+  const result = await runEvalRound({ ...input, questionPlan: { ...input.questionPlan!, subsetSupported: false, limits: { maxCalls: 5 } } });
+  expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap" } }, usage: { calls: 2 } });
+  expect(requests).toHaveLength(1);
+  if (result.status === "done") expect(result.result.notices).toContain("Eval second look estimate: 4 calls, 400 microdollars.");
+  const broken = await setup(4);
+  expect(await runEvalRound({ ...broken.input, questionPlan: { ...broken.input.questionPlan!, limits: { maxCalls: 4 } } })).toMatchObject({ result: { label: "Worse on eval" }, usage: { calls: 4 } });
+  expect(broken.requests).toHaveLength(1);
+});
+it.each(["added", "removed", "edited"] as const)("scores untouched questions when one is %s", async change => {
+  const { input, requests } = await setup(5); const plan = input.questionPlan!;
+  const questions = change === "removed" ? plan.questions.slice(1) : change === "added" ? [...plan.questions, { ...plan.questions[0]!, id: "added" }] : plan.questions.map((q, i) => i === 0 ? { ...q, headHash: "c".repeat(64) } : q);
+  const result = await runEvalRound({ ...input, questionPlan: { ...plan, questions } });
+  expect(result).toMatchObject({ result: { label: "Worse on eval", casesRun: change === "added" ? 5 : 4, excluded: [{ id: change === "added" ? "added" : "q0", reason: "edited" }] } });
+  if (result.status === "done") expect(result.result.summary).toContain("1 question added, removed or edited: not compared.");
+  expect(requests[0]!.ids).toEqual(change === "added" ? ["q0", "q1", "q2", "q3", "q4"] : ["q1", "q2", "q3", "q4"]);
+});
+it("reports no untouched questions without spending after every question is removed", async () => {
+  const { input, requests } = await setup(1);
+  expect(await runEvalRound({ ...input, questionPlan: { ...input.questionPlan!, questions: [] } })).toMatchObject({ result: { label: "Not run", notRun: { reason: "too_few_questions", sentence: "not run: too few untouched questions to judge" }, excluded: [{ id: "q0", reason: "edited" }] } });
+  expect(requests).toEqual([]);
+});
+it.each(["overrun", "unknown_cost"])("a final fresh-run %s stop cannot become a successful no-drop result", async mode => {
+  const { input } = await setup(1); const plan = input.questionPlan!;
+  expect(await runEvalRound({ ...input, questionPlan: { ...plan, run: async request => {
+    const output = await plan.run(request);
+    return request.side === "new" && request.runs === 3 ? { ...output, ...(mode === "overrun" ? { facts: { ...output.facts, overrunStop: true } } : { costMicros: NaN }) } : output;
+  } } })).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap" }, disposition: { check: "neutral" } } });
+});
+it("rechecks the budget after old re-asks before new re-asks", async () => {
+  const { input, requests } = await setup(1); const plan = input.questionPlan!;
+  expect(await runEvalRound({ ...input, questionPlan: { ...plan, limits: { maxCalls: 7 }, run: async request => {
+    const output = await plan.run(request);
+    return request.side === "old" ? { ...output, calls: 4 } : output;
+  } } })).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap" } } });
+  expect(requests.map(r => r.side)).toEqual(["new", "old"]);
+});
+
+it("runs an unchanged 50-question control and respects an explicit project call budget above the fallback", async () => {
+  const control = await setup(50, true);
+  expect(await runEvalRound(control.input)).toMatchObject({ result: { label: "No drop found", questions: [] }, feedback: { questions: [] }, usage: { calls: 50 } });
+  expect(control.requests).toHaveLength(1);
+  const large = await setup(201, true);
+  expect(await runEvalRound(large.input)).toMatchObject({ result: { notRun: { reason: "cap" } } });
+  expect(large.requests).toEqual([]);
+  expect(await runEvalRound({ ...large.input, questionPlan: { ...large.input.questionPlan!, limits: { maxCalls: 201 } } })).toMatchObject({ result: { label: "No drop found" }, usage: { calls: 201 } });
+});
+
+it.each(["maxCallsPerQuestion", "maxCostMicrosPerQuestion"] as const)("refuses unsafe %s stage estimates without printing rounded numbers", async dimension => {
+  const { input, requests } = await setup(2);
+  const result = await runEvalRound({ ...input, questionPlan: { ...input.questionPlan!, [dimension]: Number.MAX_SAFE_INTEGER } });
+  expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap" }, notices: [] } });
+  expect(requests).toEqual([]);
+});
+it("inerts excluded identities before they enter the result and bounds megabyte input", async () => {
+  const { input } = await setup(1); const plan = input.questionPlan!;
+  const hostile = "[a[b]](https://evil.test) ![image][r]\n[r]: https://evil.test\n@team #123 <img>\n# title\n> quote\n---\n```js\n~~~\u200b\ufe0f" + "x".repeat(1_048_576);
+  const result = await runEvalRound({ ...input, questionPlan: { ...plan, questions: [...plan.questions, { ...plan.questions[0]!, id: hostile }] } });
+  expect(result).toMatchObject({ result: { label: "No drop found", excluded: [{ reason: "edited" }] } });
+  if (result.status === "done") {
+    const text = JSON.stringify(result.result.excluded);
+    expect(text.length).toBeLessThan(400);
+    for (const active of ["https://evil.test", "@team", "#123", "<img>", "\u200b", "\ufe0f"]) expect(text).not.toContain(active);
+  }
+});
+
+it.each(["added", "edited"] as const)("a whole-set-only runner still receives the full head set when a question is %s", async change => {
+  const { input, requests } = await setup(5); const plan = input.questionPlan!;
+  const questions = change === "added" ? [...plan.questions, { ...plan.questions[0]!, id: "added" }] : plan.questions.map((q, i) => i === 0 ? { ...q, headHash: "c".repeat(64) } : q);
+  const result = await runEvalRound({ ...input, questionPlan: { ...plan, subsetSupported: false, questions } });
+  expect(result).toMatchObject({ result: { label: "Worse on eval", casesRun: change === "added" ? 5 : 4 } });
+  expect(requests).toEqual([{ side: "new", ids: questions.map(q => q.id), runs: 1 }]);
+  expect(result).toMatchObject({ usage: { calls: questions.length } });
 });
