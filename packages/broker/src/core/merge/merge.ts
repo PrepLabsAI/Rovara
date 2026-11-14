@@ -57,6 +57,7 @@ import {
   canonicalPatchText, needsReviewerFloor, patchDigestOf, planningLevelOf, skippedPlanning, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
 } from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
+import { scopeHoldOf } from "../build-step/scope-question.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
@@ -410,6 +411,8 @@ export async function prepareMerge(
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
   if (!tracksMerge(task.workflow)) throw agentXError("CONFIG_INVALID", "This task's pull requests are merged on the code host.");
   const tracked = task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot };
+  // A small change that grew to risky is merged only once a person kept it and the risky reviews passed, whatever the code host says about its draft.
+  if (await scopeHoldOf({ store: deps.store }, tracked)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
   const items = await readMergeTracking(deps.store, tracked.taskId, tracked.orgId);
 
   // The heads the person was shown must be the heads Rovara would merge: checked first, so a push since never reads as some other problem and never merges.
@@ -483,6 +486,8 @@ export async function pressMerge(
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
   // The task must still be at the revision the person approved, and merged by the method they were shown.
   if (task.workflow.revision !== prepared.request.revision) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+  // Read again right before the merge: the hold may have come back (a new push asked the question again).
+  if (await scopeHoldOf({ store: deps.store }, task)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
   const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
     decidedBy: verdict.approver.personId, occurrence: input.requestId, proof: input.proof, method: verdict.method, mergeMethod: prepared.mergeMethod, requestId: input.requestId, tier: prepared.tier,
   });
@@ -565,6 +570,7 @@ async function mergeableNow(
   return { plan: plan.filter((_, index) => facts[index]!.state !== "merged"), settings, alreadyMerged: false, mergedBefore, entries };
 }
 
+const SCOPE_HELD = "This change grew from small to risky, so it waits for a person to keep, remove or stop it, and for the code and security reviews to pass.";
 const FLOOR_OWED = "A reviewer has not yet answered the security questions for the current version of this change, so it can't be merged yet.";
 const HEAD_UNBOUND = "Rovara couldn't tell exactly which version of the code this is, so nothing was merged.";
 const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code host just now, so nothing was merged. Try again in a moment.";

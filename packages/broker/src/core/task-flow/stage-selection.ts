@@ -116,7 +116,7 @@ export function afterUnderstand(input: {
   const paths = namedPaths(input.requestText, assessment);
   // Nothing named: nothing is known of the size yet; the plan's estimate decides (an unknown here is not written as the level planning was chosen at).
   if (paths.length === 0) return considered;
-  const estimate = estimateTier({ plannedPaths: paths, requestText: input.requestText }, { at: input.at });
+  const estimate = wordsRaised(estimateTier({ plannedPaths: paths, requestText: input.requestText }, { at: input.at }), [input.requestText, assessment.restatement, ...assessment.assumptions]);
   const reviewOn = considered.designReview !== undefined && assessed.designReview === undefined;
   const fullPath = (reviewOn ? assessed : considered).path === "FULL";
   const planned: FlowSkippableStep[] = [...(reviewOn ? ["design_review" as const] : []), ...(reviewOn || fullPath ? ["requirements_approval" as const, "design_approval" as const] : [])];
@@ -162,12 +162,13 @@ export function smallPlanRoute(input: {
   const paths = [...new Set([...(input.plan === undefined ? [] : planFiles(input.plan)), ...namedPaths(input.requestText, assessment)])];
   // The plan's own words count against it, never for it: its sensitive words (the classifier's list, read over the plan as over the request), a path it names that the estimate's files do not hold, and, for
   // a documents-only estimate, words for code. What the plan says about itself ("docs only") is never read as a reason to lower anything.
-  const estimate = planRaised(estimateTier({ plannedPaths: paths, requestText: [input.requestText ?? "", input.planText ?? ""].join("\n") }, { at: input.at }), paths, input.planText, input.requestText);
+  const estimate = wordsRaised(planRaised(estimateTier({ plannedPaths: paths, requestText: [input.requestText ?? "", input.planText ?? ""].join("\n") }, { at: input.at }), paths, input.planText, input.requestText), [input.requestText, input.planText]);
   const before = tiersOf(submitted.flow);
   const recorded = recordTier(submitted.flow, estimate).flow;
   const planned: FlowSkippableStep[] = [...(submitted.stage === "PLAN_CRITIQUE" ? ["plan_check" as const] : []), "plan_approval"];
   // A run expected to cost more than the medium line goes to a person, whatever its size (the cost-graded plan approval); a plan that could not be read skips nothing.
-  if (input.planText === undefined || (input.costHighUsd ?? 0) > DECISION_PLAN_COST_MEDIUM_USD) return { workflow: { ...submitted, flow: recorded }, skipped: [] };
+  // An estimate that could not be made (a store that did not answer) keeps the approval too: unknown is never cheap.
+  if (input.planText === undefined || input.costHighUsd === undefined || input.costHighUsd > DECISION_PLAN_COST_MEDIUM_USD) return { workflow: { ...submitted, flow: recorded }, skipped: [] };
   const selection = selectStages({ estimate, recorded: before, planned, lighterFlow: true });
   if (selection.skip.length === 0) return { workflow: { ...submitted, flow: recorded }, skipped: [] };
   const advance = advanceStage(submitted, "IMPLEMENT");
@@ -229,4 +230,13 @@ export function toFull(workflow: WorkflowSnapshot): WorkflowSnapshot {
   const intent = workflow.intent;
   const assessment = intent?.assessment?.kind === "ready" ? { ...intent.assessment, path: "FULL" as const } : intent?.assessment;
   return WorkflowSnapshotSchema.parse({ ...workflow, path: "FULL", reviewPhase: "REQUIREMENTS", ...(intent === undefined ? {} : { intent: { ...intent, ...(assessment === undefined ? {} : { assessment }) } }) });
+}
+
+/** Words of a sensitive area the classifier's own list does not hold yet (sessions, roles, admin, tokens in cookies, cross-origin rules, access guards): a request or plan that says one is at least standard. */
+const MORE_SENSITIVE_WORDS = /\b(?:sessions?|roles?|admins?|administrators?|jwts?|cookies?|cors|permissions?|authori[sz]\w*|guards?|verif(?:y|ies|ied|ication)|csrf|xsrf)\b/iu;
+
+/** The estimate raised to at least standard by those words (only up). */
+export function wordsRaised(estimate: FlowTier, texts: ReadonlyArray<string | undefined>): FlowTier {
+  if (estimate.level !== "small" || !texts.some((text) => text !== undefined && MORE_SENSITIVE_WORDS.test(text))) return estimate;
+  return { ...estimate, level: "standard", reasons: [{ code: "request_mentions_sensitive_area" }, ...estimate.reasons].slice(0, 50) };
 }

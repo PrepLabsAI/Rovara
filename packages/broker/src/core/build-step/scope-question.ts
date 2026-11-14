@@ -6,14 +6,20 @@
 //     never from a model's text; what the agent said about the change is shown only as "written by the agent, not checked";
 //   - a change Rovara could not check (the reviewer did not answer, the patch was too large or unreadable) is said to be that, honestly, with Retry; it is never said to touch an area it may not touch;
 //   - a change whose extra files were removed again is not asked about (the question is about what will land), but the risky reviews are still owed on its head;
-//   - Keep marks the pull request ready only once the risky reviews passed on the current head. Keep is a person's own act: a laptop API token, an AI tool (MCP), a script or a chat press cannot give it
-//     (a chat opens the web page for it); any of them may answer Remove or Stop;
-//   - the hold is the draft: the code host refuses to merge a draft, and so does Rovara's merge press. A person who marks it ready on the code host is seen and noted, not undone.
+//   - a change that grew to risky always has a record: when no rule names a file (risky by size, or by the reviewer's own text), the changed files are named; a missing record holds;
+//   - Keep marks the pull request ready only once the risky reviews passed on the current head. Keep is a person's own act, proven to the server by an approval proof of a strong method (a fresh session,
+//     as the merge press asks): a laptop API token, an AI tool (MCP), a script or a chat press cannot give it (a chat opens the web page for it); a proof of any accepted method may answer Remove or Stop.
+//     Who may answer is the approvers adapter's rule, worked out on the server, never a list the caller hands in;
+//   - a Keep is for exactly the files and the content it was given for: new content in the same files asks again;
+//   - the hold is the draft AND Rovara's merge press: neither merges while the question is open (a person who marks the draft ready on the code host is noted; the press still refuses).
 //
 // The record lives beside the task (`SCOPE_QUESTION`), not in the workflow's strict `flow` record. This module is the Code API Cloud shows on the web and in Slack: `scopeQuestionOf`, `answerScopeQuestion`, `retryScopeChecks`.
-import { change, when, type FlowTier, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
+import { createHash } from "node:crypto";
+import { approvalProofKey, change, when, type ApprovalProof, type ApprovalRequest, type Approvers, type FlowTier, type TransactItem, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 import { TIER_QUESTIONS } from "../decisions/tier-reviewer.js";
-import { TIER_REASON_CODES, planningLevelOf, skippedPlanning, tierGrowthPhrase, tierReviewRecorded, type TierFile } from "../decisions/change-tier.js";
+import { TIER_REASON_CODES, planningLevelOf, skippedPlanning, tierGrowthPhrase, tierRank, tierReviewRecorded, type TierFile } from "../decisions/change-tier.js";
+import { strictMethodsFor } from "../decisions/strong-methods.js";
+import { boundCommits } from "../merge/change-tier-read.js";
 import { inertLine } from "../proof/inert-text.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { flowIs } from "../task-flow/flow-guard.js";
@@ -29,75 +35,86 @@ export const scopeQuestionKey = (taskId: string) => ({ pk: `DEVTASK#${taskId}`, 
 export const SCOPE_CHOICES = ["keep", "remove", "stop"] as const;
 export type ScopeChoice = (typeof SCOPE_CHOICES)[number];
 
-/** How the person answering is signed in. Only a person's own session may Keep. */
-export type ScopeCredential = "session" | "api_token" | "tool" | "script" | "chat";
-
 export interface ScopeFile { path: string; additions: number; deletions: number; area: string }
 
 export interface ScopeQuestionRecord {
   taskId: string;
-  /** "scope": it grew into a sensitive area (files named); "couldnt_check": Rovara could not check it. */
+  /** "scope": it grew into an area a person should judge (files named); "couldnt_check": Rovara could not check it. */
   kind: "scope" | "couldnt_check";
-  /** Open until answered; a new set of files asks again (the version moves). */
-  state: "open" | "kept" | "removing" | "stopped" | "superseded";
+  /** Open until answered; new files, or new content in the same files, ask again (the version moves). */
+  state: "open" | "kept" | "stopped" | "superseded";
   version: number;
   headSha: string;
   /** The person's request, as plain text (what they asked for). */
   request: string;
   /** The area in plain words, from the deterministic reasons. */
   area: string;
+  /** The files shown (at most 20). */
   files: ScopeFile[];
+  /** A digest of EVERY named file and its patch text: a Keep is for exactly this content. */
+  contentDigest: string;
   /** What the agent said about the change: shown only as "written by the agent, not checked". */
   agentReason?: string;
   askedAt: string;
-  answer?: { choice: ScopeChoice; personId: string; method: string; credential: ScopeCredential; headSha: string; at: string };
+  answer?: { choice: ScopeChoice; personId: string; method: string; proofId: string; headSha: string; at: string };
 }
 
 /** The reasons that say Rovara could not check the change (not that it touches a sensitive area). */
 const COULDNT_CHECK = new Set(["reviewer_unavailable", "reviewer_malformed", "reviewer_too_large", "reviewer_empty_patch", "reviewer_unbound", "reviewer_unanswered", "incomplete_diff", "no_diff_files", "too_many_files",
   "unreadable_content", "link_kind_unknown", "docs_unread", "path_too_long"]);
-/** The reason codes that make a tier risky (P1's list, in its order: the risky ones come before the first standard one). */
-const RISKY_CODES: ReadonlySet<string> = new Set<string>(TIER_REASON_CODES.slice(0, TIER_REASON_CODES.indexOf("more_than_lines")));
+/** The reason codes that name a file a person should judge: P1's risky ones (before the first standard one), and the lighter flow's own "code the plan did not name". */
+const NAMING_CODES: ReadonlySet<string> = new Set<string>([...TIER_REASON_CODES.slice(0, TIER_REASON_CODES.indexOf("more_than_lines")), "outside_plan_code"]);
 
-/** A reason that says only that a reviewer could not run (an outage): it holds the head it happened on, and Retry may take it off. */
+/** A reason that says only that a reviewer could not run (an outage, with nothing found that must be fixed): it holds the head it happened on, and Retry may take it off. */
 export const isOutageReason = (reason: { code: string; path?: string | undefined }): boolean =>
-  reason.code === "reviewer_unavailable" || (reason.code === "quick_check_failed" && /did not run \((?:unavailable|refused)\)/u.test(reason.path ?? ""));
+  reason.code === "reviewer_unavailable" || (reason.code === "quick_check_failed" && /did not run \((?:unavailable|refused)\)/u.test(reason.path ?? "") && !/\b[1-9]\d* must be fixed/u.test(reason.path ?? ""));
 
 /** Whether the task grew from a small plan to risky (the case the question is for). */
 export function grewToRisky(flow: WorkflowFlow | undefined): boolean {
   return skippedPlanning(flow) && planningLevelOf(flow) === "small" && flow?.tier?.level === "risky";
 }
 
+const digestOf = (parts: readonly string[]): string => createHash("sha256").update(parts.join("\u0000")).digest("hex");
+
 /**
- * What the question is about, for the current head: the files of the deterministic risky reasons of the head's OWN diff tier (`headTier`), each with its lines and its area; a raise by the reviewer's fixed
- * questions names the question (its fixed words) and the changed files; a raise for what could not be checked names nothing. Undefined: nothing to ask (the extra files were removed again).
+ * What the question is about, for the current head:
+ *   - the files of the deterministic risky reasons of the head's OWN diff tier (`headTier`), each with its lines and its area;
+ *   - a raise by the reviewer's fixed questions: the question's fixed words and the changed files;
+ *   - what could not be checked: nothing is named;
+ *   - risky with no file named (by size, or by the reviewer's own text in its answer): the changed files, under the reason's plain words.
+ * Undefined: nothing to ask on this head (the extra files were removed again).
  */
-export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly TierFile[]): { kind: ScopeQuestionRecord["kind"]; area: string; files: ScopeFile[] } | undefined {
-  const linesOf = (path: string) => files.find((file) => file.path === path) ?? { additions: 0, deletions: 0 };
-  const named = headTier.reasons.filter((reason) => RISKY_CODES.has(reason.code) && !COULDNT_CHECK.has(reason.code) && reason.path !== undefined);
+export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly TierFile[]): { kind: ScopeQuestionRecord["kind"]; area: string; files: ScopeFile[]; contentDigest: string } | undefined {
+  const fileOf = (path: string) => files.find((file) => file.path === path);
+  const asFiles = (entries: ReadonlyArray<{ path: string; area: string }>) => entries.map((entry) => ({ path: inertLine(entry.path, 200), additions: fileOf(entry.path)?.additions ?? 0, deletions: fileOf(entry.path)?.deletions ?? 0, area: entry.area }));
+  const digest = (paths: readonly string[]) => digestOf([...new Set(paths)].sort().map((path) => `${path}\u0001${fileOf(path)?.patch ?? "(no patch)"}`));
+  const ownTier = flow.tier?.headSha === headTier.headSha ? flow.tier : undefined;
+  const reasonsHere = [...headTier.reasons, ...(ownTier?.reasons ?? [])];
+  const named = reasonsHere.filter((reason) => NAMING_CODES.has(reason.code) && !COULDNT_CHECK.has(reason.code) && reason.path !== undefined && fileOf(reason.path) !== undefined);
   if (named.length > 0) {
-    const seen = new Set<string>();
-    const out: ScopeFile[] = [];
-    for (const reason of named) {
-      if (seen.has(reason.path!)) continue;
-      seen.add(reason.path!);
-      const counted = linesOf(reason.path!);
-      out.push({ path: inertLine(reason.path!, 200), additions: counted.additions, deletions: counted.deletions, area: tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path) });
-    }
-    return { kind: "scope", area: [...new Set(out.map((file) => file.area))].join(", "), files: out.slice(0, 20) };
+    const seen = new Map<string, string>();
+    for (const reason of named) if (!seen.has(reason.path!)) seen.set(reason.path!, reason.code === "outside_plan_code" ? "code the plan did not name" : tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path));
+    const all = [...seen.entries()].map(([path, area]) => ({ path, area }));
+    return { kind: "scope", area: [...new Set(all.map((file) => file.area))].join(", "), files: asFiles(all).slice(0, 20), contentDigest: digest(all.map((file) => file.path)) };
   }
-  // Raised by the reviewer's fixed questions on this head: the question's own words (never the reviewer's reason) and the changed files.
-  const tier = flow.tier;
-  const flagged = (tier?.headSha === headTier.headSha ? tier?.reasons ?? [] : []).filter((reason) => reason.code.startsWith("reviewer_") && !COULDNT_CHECK.has(reason.code) && reason.code !== "reviewer_text_instructions");
+  const changed = files.map((file) => ({ path: file.path, area: "changed file" }));
+  const flagged = (ownTier?.reasons ?? []).filter((reason) => reason.code.startsWith("reviewer_") && !COULDNT_CHECK.has(reason.code) && reason.code !== "reviewer_text_instructions");
   if (flagged.length > 0) {
     const questions = flagged.map((reason) => TIER_QUESTIONS.find((question) => `reviewer_${question.id}` === reason.code)?.text).filter((text): text is string => text !== undefined);
     return {
       kind: "scope", area: questions.length === 0 ? "something the reviewer's fixed questions flagged" : `what the reviewer's fixed questions flagged: ${questions.join(" ")}`,
-      files: files.slice(0, 20).map((file) => ({ path: inertLine(file.path, 200), additions: file.additions, deletions: file.deletions, area: "changed file" })),
+      files: asFiles(changed).slice(0, 20), contentDigest: digest(changed.map((file) => file.path)),
     };
   }
-  const couldnt = [...headTier.reasons, ...(tier?.headSha === headTier.headSha ? tier?.reasons ?? [] : [])].some((reason) => COULDNT_CHECK.has(reason.code));
-  return couldnt ? { kind: "couldnt_check", area: "Rovara could not check this change", files: [] } : undefined;
+  // Only this head's own reasons: the head's diff tier, and the reviewer's text found on this head (a sticky reason from an earlier head is about files that may be gone).
+  const risky = [...headTier.reasons.filter((reason) => !COULDNT_CHECK.has(reason.code) && NAMING_CODES.has(reason.code)), ...(ownTier?.reasons ?? []).filter((reason) => reason.code === "reviewer_text_instructions")];
+  if (risky.length > 0) {
+    // Risky with no file a rule names (its size, or text in the reviewer's own answer): the changed files, under the reason's plain words (never the reviewer's text).
+    const area = risky[0]!.code === "reviewer_text_instructions" ? "text in the reviewer's answer that tries to tell the reader what to do" : tierGrowthPhrase({ level: "risky", reasons: [{ code: risky[0]!.code }] }, (path) => path);
+    return { kind: "scope", area, files: asFiles(changed).slice(0, 20), contentDigest: digest(changed.map((file) => file.path)) };
+  }
+  const couldnt = reasonsHere.some((reason) => COULDNT_CHECK.has(reason.code) || isOutageReason(reason));
+  return couldnt ? { kind: "couldnt_check", area: "Rovara could not check this change", files: [], contentDigest: digest([]) } : undefined;
 }
 
 const plainRequest = (text: string | undefined): string => inertLine((text ?? "").replace(/\s+/gu, " ").trim(), 300);
@@ -109,48 +126,65 @@ export async function readScopeQuestion(deps: Pick<TaskFlowDeps, "store">, taskI
 }
 
 /**
- * The question asked (or kept as it is) for this pass of the lighter flow's checks. A new set of files on a later head asks again: the version moves and the earlier answer no longer counts. A head whose
- * extra files are gone supersedes an open question. Written with a condition on the version read, so two passes cannot both ask.
+ * The question for this pass (pure): asked, kept as it is, or superseded. New files or new content in the same files ask again (the version moves and an earlier answer no longer counts). The write is returned
+ * as one item for the caller's transaction (with the review record, in the same commit), conditioned on the version read.
  */
-export async function askScopeQuestion(deps: Pick<TaskFlowDeps, "store" | "now">, task: TaskRecord, input: { flow: WorkflowFlow; headTier: FlowTier; files: readonly TierFile[]; head: string; at: string }): Promise<{ asked: boolean; question?: ScopeQuestionRecord }> {
-  const earlier = await readScopeQuestion(deps, task.taskId);
+export function planScopeQuestion(earlier: ScopeQuestionRecord | undefined, task: Pick<TaskRecord, "taskId" | "requestText">, input: { flow: WorkflowFlow; headTier: FlowTier; files: readonly TierFile[]; head: string; at: string }): { item?: TransactItem; question?: ScopeQuestionRecord; asked: boolean } {
   const scope = grewToRisky(input.flow) ? scopeOf(input.flow, input.headTier, input.files) : undefined;
-  const sameFiles = (left: readonly ScopeFile[], right: readonly ScopeFile[]) => JSON.stringify(left.map((file) => file.path).sort()) === JSON.stringify(right.map((file) => file.path).sort());
   let next: ScopeQuestionRecord | undefined;
   if (scope === undefined) {
-    if (earlier === undefined || earlier.state !== "open") return earlier === undefined ? { asked: false } : { asked: false, question: earlier };
+    if (earlier === undefined || earlier.state !== "open") return { ...(earlier === undefined ? {} : { question: earlier }), asked: false };
     next = { ...earlier, state: "superseded", headSha: input.head };
-  } else if (earlier !== undefined && earlier.kind === scope.kind && sameFiles(earlier.files, scope.files) && earlier.state !== "superseded") {
-    // The same question: its answer stands (a Keep is for these files), bound now to the current head.
-    if (earlier.headSha === input.head) return { asked: false, question: earlier };
+  } else if (earlier !== undefined && earlier.kind === scope.kind && earlier.contentDigest === scope.contentDigest && earlier.state !== "superseded") {
+    // The same files with the same content: the answer stands, bound now to the current head.
+    if (earlier.headSha === input.head) return { question: earlier, asked: false };
     next = { ...earlier, headSha: input.head };
   } else {
-    next = {
-      taskId: task.taskId, kind: scope.kind, state: "open", version: (earlier?.version ?? 0) + 1, headSha: input.head, request: plainRequest(task.requestText), area: scope.area, files: scope.files, askedAt: input.at,
-    };
+    next = { taskId: task.taskId, kind: scope.kind, state: "open", version: (earlier?.version ?? 0) + 1, headSha: input.head, request: plainRequest(task.requestText), area: scope.area, files: scope.files, contentDigest: scope.contentDigest, askedAt: input.at };
   }
-  const written = await deps.store.put({
-    item: { ...scopeQuestionKey(task.taskId), entityType: "SCOPE_QUESTION", question: JSON.parse(JSON.stringify(next)) as never, version: next.version },
-    condition: earlier === undefined ? when.absent() : when.eq("version", earlier.version),
-  }).then((result) => result.applied).catch(() => false);
-  return { asked: written && next.state === "open" && next.version !== earlier?.version, ...(written ? { question: next } : earlier === undefined ? {} : { question: earlier }) };
+  return {
+    item: { kind: "put", item: { ...scopeQuestionKey(task.taskId), entityType: "SCOPE_QUESTION", question: JSON.parse(JSON.stringify(next)) as never, version: next.version }, condition: earlier === undefined ? when.absent() : when.eq("version", earlier.version) },
+    question: next, asked: next.state === "open" && next.version !== earlier?.version,
+  };
 }
 
-/** Whether the pull request must stay a draft: the task grew to risky and either its question is not answered with Keep, or the risky reviews have not passed on the current head. */
-export function scopeHolds(flow: WorkflowFlow | undefined, question: ScopeQuestionRecord | undefined): boolean {
+/** The tier-question record of exactly this head (any patch): the floor answered for it. */
+const floorAnsweredFor = (flow: WorkflowFlow | undefined, head: string): boolean => (flow?.quickChecks ?? []).some((check) => check.detail?.startsWith(`tier_questions head=${head} `) === true);
+
+/**
+ * Whether the pull request must stay a draft (and Rovara's press refuse it). For a task that skipped planning, when the head the host shows is given: until the tier on record is for that head, the floor
+ * answered for it (a small change), and the review of a grown tier ran on it. And for a change that grew to risky: until the risky reviews passed and a person kept it (a missing record holds).
+ */
+export function scopeHolds(flow: WorkflowFlow | undefined, question: ScopeQuestionRecord | undefined, head?: string): boolean {
+  if (!skippedPlanning(flow)) return false;
+  if (head !== undefined) {
+    const tier = flow?.tier;
+    if (tier === undefined || tier.source === "estimate" || tier.headSha !== head) return true;
+    if (tier.level === "small" && !floorAnsweredFor(flow, head)) return true;
+    const planned = planningLevelOf(flow) ?? "small";
+    if (tierRank(tier.level) > tierRank(planned) && !tierReviewRecorded(flow, tier.level, head)) return true;
+  }
   if (!grewToRisky(flow)) return false;
-  const head = flow?.tier?.headSha;
-  if (!tierReviewRecorded(flow, "risky", head)) return true;
-  if (question === undefined || question.state === "superseded") return false;
+  if (!tierReviewRecorded(flow, "risky", flow?.tier?.headSha)) return true;
+  if (question === undefined) return true;
+  if (question.state === "superseded") return false;
   return question.state !== "kept";
 }
 
-/** The hold for merge tracking (a draft is not marked ready while it holds). Read fresh; a read that fails holds. */
-export async function scopeHoldOf(deps: Pick<TaskFlowDeps, "store">, task: { taskId: string; workflow?: WorkflowSnapshot | undefined }): Promise<boolean> {
+/** The head a task's tier is bound to when one pull request shows `current` (several repositories: the digest of every open pull request's head, with this one's as the host shows it). */
+function boundHead(workflow: WorkflowSnapshot | undefined, current: { repositoryId: string; headSha: string }): string | undefined {
+  const open = (workflow?.pullRequests ?? []).filter((entry) => entry.state === "OPEN" || entry.state === "UNKNOWN");
+  const entries = open.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.repositoryId === current.repositoryId ? current.headSha : entry.headSha ?? "", baseCommitSha: workflow?.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }));
+  return boundCommits(entries.length === 0 ? [{ repositoryId: current.repositoryId, headSha: current.headSha }] : entries).headSha;
+}
+
+/** The hold, read fresh. `current`: the pull request and the head the host shows now (merge tracking); absent: the scope rule only (the merge press, which recomputes the tier itself). A read that fails holds. */
+export async function scopeHoldOf(deps: Pick<TaskFlowDeps, "store">, task: { taskId: string; workflow?: WorkflowSnapshot | undefined }, current?: { repositoryId: string; headSha: string }): Promise<boolean> {
   try {
-    return scopeHolds(task.workflow?.flow, await readScopeQuestion(deps, task.taskId));
+    const head = current === undefined ? undefined : boundHead(task.workflow, current) ?? "unbound";
+    return scopeHolds(task.workflow?.flow, await readScopeQuestion(deps, task.taskId), head);
   } catch {
-    return grewToRisky(task.workflow?.flow);
+    return skippedPlanning(task.workflow?.flow);
   }
 }
 
@@ -183,14 +217,28 @@ export interface ScopeQuestionView {
   question: ScopeQuestionRecord;
   /** The risky reviews on the current head: running (not recorded yet), passed, or failed (a review found something to fix, or could not run). */
   reviews: "running" | "passed" | "failed";
-  /** Whether the pull request is held as a draft now. */
+  /** Whether the pull request is held now. */
   held: boolean;
-  /** The choices this caller may make (Keep only from a person's own session). */
+  /** The choices on offer (Keep needs a strong method's proof; the server checks it whatever is shown). */
   choices: ScopeChoice[];
+  /** The approval request a proof must be made for, one per choice offered: the surface collects the proof (a fresh session for Keep) for exactly this request. */
+  requests: Partial<Record<ScopeChoice, ApprovalRequest>>;
 }
 
-/** The task's scope question and where it stands, for a caller signed in as `credential`. */
-export async function scopeQuestionOf(deps: Pick<TaskFlowDeps, "store">, taskId: string, credential: ScopeCredential = "session"): Promise<ScopeQuestionView | undefined> {
+/**
+ * The approval request of one answer. Keep is a high-risk request (only a strong method, a fresh session, can prove it); Remove and Stop are medium. Bound to the question's version and content, so a
+ * proof for an older question answers nothing.
+ */
+export function scopeApprovalRequest(input: { companyId: string; task: Pick<TaskRecord, "taskId" | "project">; question: ScopeQuestionRecord; choice: ScopeChoice }): ApprovalRequest {
+  return {
+    companyId: input.companyId, requestId: `scope-${input.choice}-${input.task.taskId}-${String(input.question.version)}`.slice(0, 128), kind: input.choice === "keep" ? "scope_keep" : "scope_answer",
+    subject: { type: "task", id: input.task.taskId }, projectName: input.task.project, revision: input.question.version,
+    artifactDigest: digestOf([input.task.taskId, String(input.question.version), input.question.contentDigest, input.choice]), risk: input.choice === "keep" ? "high" : "medium",
+  };
+}
+
+/** The task's scope question and where it stands. */
+export async function scopeQuestionOf(deps: Pick<TaskFlowDeps, "store" | "companyId">, taskId: string): Promise<ScopeQuestionView | undefined> {
   const task = await readTask(deps, taskId);
   const question = await readScopeQuestion(deps, taskId);
   if (task === undefined || question === undefined) return undefined;
@@ -198,53 +246,62 @@ export async function scopeQuestionOf(deps: Pick<TaskFlowDeps, "store">, taskId:
   const head = flow?.tier?.headSha;
   const failed = (flow?.quickChecks ?? []).some((check) => !(check.detail ?? "").startsWith("tier_") && check.outcome === "failed" && (check.detail ?? "").includes(`review level=risky head=${head ?? ""}`));
   const reviews = tierReviewRecorded(flow, "risky", head) ? "passed" : failed ? "failed" : "running";
-  const open = question.state === "open";
-  const choices: ScopeChoice[] = !open ? [] : question.kind === "couldnt_check" ? ["stop"] : credential === "session" ? ["remove", "keep", "stop"] : ["remove", "stop"];
-  return { question, reviews, held: scopeHolds(flow, question), choices };
+  const choices: ScopeChoice[] = question.state !== "open" ? [] : question.kind === "couldnt_check" ? ["stop"] : ["remove", "keep", "stop"];
+  const requests = Object.fromEntries(choices.map((choice) => [choice, scopeApprovalRequest({ companyId: deps.companyId, task, question, choice })]));
+  return { question, reviews, held: scopeHolds(flow, question), choices, requests };
 }
 
 export type ScopeAnswerResult = { status: "recorded"; question: ScopeQuestionRecord } | { status: "refused"; sentence: string };
 
 /**
- * A person's answer. Who may answer: the task's requester and the project approvers the caller names. Keep needs a person's own session (an API token, an AI tool, a script or a chat cannot Keep). Stop closes
- * the task. Remove is not built yet: it is refused with what to do instead. The answer is bound to the head and the version it was given for: a newer question is not answered by it.
+ * A person's answer, proven to the server. The proof is checked like the merge press checks its own: a method the approvers adapter lists, verified by the adapter (which also says who may answer: the
+ * requester and the project approvers, by its own rule), used once. Keep needs a strong method (a fresh session): an API token, an AI tool, a script or a chat press cannot Keep, and may Remove or Stop.
+ * Stop closes the task. Remove is not built yet: it is refused with what to do instead.
  */
-export async function answerScopeQuestion(deps: TaskFlowDeps, input: { taskId: string; version: number; choice: ScopeChoice; by: { personId: string; method: string; credential: ScopeCredential }; approvers?: readonly string[] }): Promise<ScopeAnswerResult> {
+export async function answerScopeQuestion(deps: TaskFlowDeps & { approvers: Approvers }, input: { taskId: string; choice: ScopeChoice; proof: ApprovalProof }): Promise<ScopeAnswerResult> {
   const task = await readTask(deps, input.taskId);
   const question = await readScopeQuestion(deps, input.taskId);
   if (task === undefined || question === undefined || task.closedAt !== undefined) return { status: "refused", sentence: "There is no question waiting on this task." };
-  if (question.version !== input.version || question.state !== "open") return { status: "refused", sentence: "This question changed or was already answered. Open the task page to see it as it is now." };
-  if (input.by.personId !== task.developerId && !(input.approvers ?? []).includes(input.by.personId)) return { status: "refused", sentence: "Only the person who asked for this change, or a project approver, can answer this." };
+  if (question.state !== "open") return { status: "refused", sentence: "This question changed or was already answered. Open the task page to see it as it is now." };
   if (input.choice === "keep" && question.kind === "couldnt_check") return { status: "refused", sentence: "Rovara could not check this change yet, so there is nothing to keep. Retry the check, or stop the task." };
-  if (input.choice === "keep" && input.by.credential !== "session") {
-    log(deps, { event: "scope_question.keep_refused", taskId: input.taskId, credential: input.by.credential });
-    return { status: "refused", sentence: "Keeping these files needs a person on the task page. An API token, an AI tool, a script or a chat can remove them or stop the task, but not keep them." };
-  }
   if (input.choice === "remove") return { status: "refused", sentence: "Remove isn't available yet. Push a change that takes these files out, or stop the task." };
+  const request = scopeApprovalRequest({ companyId: deps.companyId, task, question, choice: input.choice });
+  const requirement = await deps.approvers.requirement(request);
+  const strong = input.choice === "keep" ? strictMethodsFor("approve", "high", requirement) ?? [] : undefined;
+  const keepRefused = { status: "refused" as const, sentence: "Keeping these files needs a person signed in on the task page. An API token, an AI tool, a script or a chat can remove them or stop the task, but not keep them." };
+  if (!requirement.methods.includes(input.proof.method)) return { status: "refused", sentence: "This answer was not proven in a way Rovara accepts." };
+  if (strong !== undefined && !strong.includes(input.proof.method)) { log(deps, { event: "scope_question.keep_refused", taskId: input.taskId, method: input.proof.method }); return keepRefused; }
+  const verdict = await deps.approvers.verify(request, input.proof);
+  if (!verdict.approved) return { status: "refused", sentence: verdict.reason === "other_content" || verdict.reason === "other_revision" ? "This question changed while you answered. Open the task page to see it as it is now." : "Only the person who asked for this change, or a project approver, can answer this." };
+  if (!requirement.methods.includes(verdict.method) || (strong !== undefined && !strong.includes(verdict.method))) return keepRefused;
   const at = iso(deps);
-  const answered: ScopeQuestionRecord = { ...question, state: input.choice === "keep" ? "kept" : "stopped", answer: { choice: input.choice, personId: input.by.personId, method: input.by.method, credential: input.by.credential, headSha: question.headSha, at } };
-  const written = await deps.store.put({
-    item: { ...scopeQuestionKey(input.taskId), entityType: "SCOPE_QUESTION", question: JSON.parse(JSON.stringify(answered)) as never, version: question.version },
-    condition: when.and(when.eq("version", question.version)),
-  }).then((result) => result.applied).catch(() => false);
-  if (!written) return { status: "refused", sentence: "This question changed while you answered. Open the task page to see it as it is now." };
-  log(deps, { event: "scope_question.answered", taskId: input.taskId, choice: input.choice, method: input.by.method, credential: input.by.credential, version: question.version });
-  if (input.choice === "stop") await closeLoadedTask(deps, task, input.by.personId).catch((error: unknown) => log(deps, { event: "scope_question.stop_failed", taskId: input.taskId, error: error instanceof Error ? error.name : "unknown" }));
+  const answered: ScopeQuestionRecord = { ...question, state: input.choice === "keep" ? "kept" : "stopped", answer: { choice: input.choice, personId: verdict.approver.personId, method: verdict.method, proofId: verdict.proofId, headSha: question.headSha, at } };
+  const written = await deps.store.transact([
+    { kind: "put", item: { ...scopeQuestionKey(input.taskId), entityType: "SCOPE_QUESTION", question: JSON.parse(JSON.stringify(answered)) as never, version: question.version }, condition: when.eq("version", question.version) },
+    // A proof is used once.
+    { kind: "put", item: { pk: `APPROVAL_PROOF#${approvalProofKey(input.proof)}`, sk: "USED", entityType: "APPROVAL_PROOF_USED", requestId: request.requestId, at }, condition: when.absent() },
+  ]).then((result) => result.applied).catch(() => false);
+  if (!written) return { status: "refused", sentence: "This question changed while you answered, or this proof was already used. Open the task page to see it as it is now." };
+  log(deps, { event: "scope_question.answered", taskId: input.taskId, choice: input.choice, method: verdict.method, version: question.version });
+  if (input.choice === "stop") await closeLoadedTask(deps, task, verdict.approver.personId).catch((error: unknown) => log(deps, { event: "scope_question.stop_failed", taskId: input.taskId, error: error instanceof Error ? error.name : "unknown" }));
   return { status: "recorded", question: answered };
 }
 
 /**
- * Retry after Rovara could not check the change: the reviewer outage of the current head is taken off the record (the tier it raised goes back to the head's own tier, kept in the history), and the failed
- * attempts of the current head are cleared, so the next pass asks the reviewer again. A raise by a reviewer's answer (a yes) or by the change itself is never taken off.
+ * Retry after Rovara could not check the change: the reviewer outage of the current head is taken off the record (the tier it raised goes back to the head's own tier, kept in the history), and the attempts
+ * of the current head that did not run are cleared, so the next pass asks again. Refused when any review of the head found something that must be fixed: that is not an outage, and a re-run must not wash it out.
+ * A raise by a reviewer's answer (a yes) or by the change itself is never taken off.
  */
-export async function retryScopeChecks(deps: Pick<TaskFlowDeps, "store" | "now">, taskId: string): Promise<"retrying" | "nothing_to_retry"> {
+export async function retryScopeChecks(deps: Pick<TaskFlowDeps, "store" | "now">, taskId: string): Promise<"retrying" | "nothing_to_retry" | "refused_must_fix"> {
   const task = await readTask(deps, taskId);
   const flow = task?.workflow?.flow;
   const tier = flow?.tier;
   if (task === undefined || flow === undefined || tier === undefined) return "nothing_to_retry";
-  const outage = tier.reasons.length > 0 && tier.reasons.every(isOutageReason);
   const head = tier.headSha;
-  const failedHere = (flow.quickChecks ?? []).filter((check) => !(check.detail ?? "").startsWith("tier_") && check.outcome === "failed" && /did not run/u.test(check.detail ?? "") && head !== undefined && (check.detail ?? "").includes(`head=${head}`));
+  const own = (flow.quickChecks ?? []).filter((check) => !(check.detail ?? "").startsWith("tier_") && head !== undefined && (check.detail ?? "").includes(`head=${head}`));
+  if (own.some((check) => check.outcome === "failed" && /\b[1-9]\d* must be fixed/u.test(check.detail ?? ""))) return "refused_must_fix";
+  const outage = tier.reasons.length > 0 && tier.reasons.every(isOutageReason);
+  const failedHere = own.filter((check) => check.outcome === "failed" && /did not run/u.test(check.detail ?? ""));
   if (!outage && failedHere.length === 0) return "nothing_to_retry";
   const before = outage ? [...(flow.tierHistory ?? [])].reverse().find((entry) => entry.headSha === head && entry.level !== "risky") : undefined;
   const { grewAfterBuild: _grew, ...rest } = flow;

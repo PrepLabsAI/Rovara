@@ -129,7 +129,7 @@ export interface MergeTrackingDependencies {
   /** The project's real-check mode (TE-B2): what "No CI" and unreadable CI mean for marking ready. `DEFAULT_CI_MODE` when not given. */
   ciMode?(task: TrackedTask): Promise<ProjectCiMode> | ProjectCiMode;
   /** Whether the task's draft must stay a draft (a small change that grew to risky, not yet kept by a person or not yet reviewed at risky). Absent: nothing holds it. */
-  readyHold?(task: TrackedTask): Promise<boolean>;
+  readyHold?(task: TrackedTask, current: { repositoryId: string; headSha: string }): Promise<boolean>;
   /** The org's autonomy for Rovara Code, for the deciders; `prepare` when not given. */
   autonomy?(task: TrackedTask): Promise<Autonomy> | Autonomy;
   /**
@@ -446,6 +446,9 @@ const inertLine = (text: string): string => text.replace(/[\p{Cc}\p{Cf}@]/gu, " 
  * Follows every pull request of the task once: reads GitHub, keeps the tracking items, marks a draft ready for review and asks for the project's reviewers, and runs
  * `nextMergeAction`. Returns `gone` for a task that is closed, finished, not tracked or has no org, `changed` when an item or the workflow was written, else `unchanged`.
  */
+/** The held pull requests a person marked ready on the code host, logged once each (per process). */
+const heldNotDraftLogged = new Set<string>();
+
 export async function trackPullRequest(deps: MergeTrackingDependencies, taskId: string): Promise<TrackResult> {
   return (await trackTask(deps, taskId)).result;
 }
@@ -591,8 +594,14 @@ async function trackOne(
     && (status.draft ? ciAllowsReady(ci.ci, ciMode) : ciAllowsMerge(ci.ci))
     && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING";
   // A change that grew to risky stays a draft until a person keeps it and the risky reviews pass: it is not marked ready, and one a person marked ready on the code host is noted (it cannot be undone from here).
-  const held = deps.readyHold === undefined ? false : await deps.readyHold(task).catch(() => true);
-  if (held && status.state === "open" && !status.draft) deps.log?.("merge_tracking.held_pull_request_not_draft", { taskId: task.taskId, number: pullRequest.number });
+  // A task that skipped planning is also held until its tier, its reviewer's questions and any grown review are on the record for the head the host shows (never ready on a stale or untiered head).
+  const held = deps.readyHold === undefined ? false : await deps.readyHold(task, { repositoryId: pullRequest.repositoryId, headSha: status.headRevision }).catch(() => true);
+  const heldKey = `${task.taskId}#${String(pullRequest.number)}#${status.headRevision}`;
+  if (held && status.state === "open" && !status.draft && !heldNotDraftLogged.has(heldKey)) {
+    if (heldNotDraftLogged.size > 1_000) heldNotDraftLogged.clear();
+    heldNotDraftLogged.add(heldKey);
+    deps.log?.("merge_tracking.held_pull_request_not_draft", { taskId: task.taskId, number: pullRequest.number });
+  }
   let readyNow = false;
   let asked = false;
   let markedReady = false;
