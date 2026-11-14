@@ -75,7 +75,7 @@ import { currentWorkspaceSafety } from "./workspace-safety.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine.js";
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
-import { runTestProof, serializeTestProof } from "./verification/test-proof.js";
+import { runTestProof, serializeTestProof, withScriptedReplyFacts } from "./verification/test-proof.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
@@ -100,7 +100,7 @@ import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import { localBashOperations, taskSandboxFor, taskShellSelection, type TaskSandbox, type TaskShellSelection } from "./task-sandbox.js";
 import { withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
 import { startTaskTestServices, withTestServices, type TestServicesConfig } from "./test-services-run.js";
-import { modelHelperPlanFor, withModelHelperRound, type ModelHelperRoundSource } from "./model-helper-round.js";
+import { modelHelperPlanFor, modelHelperReplyCollector, withModelHelperRound, type ModelHelperRoundSource } from "./model-helper-round.js";
 import type { FixtureSetCallback } from "./fixture-delivery.js";
 
 export interface TaskInvocationResult {
@@ -401,6 +401,7 @@ async function runTask(
   const testServices = await startTaskTestServices({ plan: step?.kind === "agent" ? undefined : invocation.payload.testEnvironment, mode, sandbox, devcontainer: devcontainer !== undefined, nightly: invocation.payload.nightlyRun !== undefined, operationId: invocation.operationId, rootPath: canonicalRoot,
     repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), config: dependencies.testServices, artifactSink: dependencies.artifactSink, cancellation: dependencies.cancellationController, fixtureSet: dependencies.fixtureSet })
     .catch((error: unknown) => reportFeedbackReviewStartFailure(error));
+  const replyCollector = modelHelperReplyCollector();
   const scopeChecks = (runners: CheckRunners): CheckRunners => {
     const multi = dependencies.multiRepoChecks;
     if (multi === undefined) return runners;
@@ -512,7 +513,7 @@ async function runTask(
   if (invocation.payload.nightlyRun !== undefined) {
     return runNightlyInvocation(invocation, {
       rootPath: canonicalRoot, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, nightlyResult: dependencies.nightlyResult,
-      runners: scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), dependencies.checkRunners ?? createCheckRunners({
+      runners: scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }), ...(sandbox === undefined ? {} : { sandbox }), ...(localShell ? { local: true } : {}),
@@ -560,7 +561,7 @@ async function runTask(
         : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
         ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
-      const runners = scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+      const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }),
@@ -570,6 +571,7 @@ async function runTask(
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
+      const candidateReplyFacts = replyCollector.take();
       assertWorkspaceSafe();
       const roundSpentMs = Date.now() - roundStarted;
       const status = round.stopped ? "not_verified" : reportStatus(round.entries);
@@ -628,7 +630,7 @@ async function runTask(
         // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
-        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events);
+        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, withScriptedReplyFacts(testProof, plan.source, candidateReplyFacts), events);
       }
       // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
       if (invocation.payload.evalRequest !== undefined) {
@@ -800,7 +802,7 @@ async function runTask(
     // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
     ...(containerPaths === undefined ? {} : { cdTarget: (target: string) => workspaceRelativeCdTarget(target, containerPaths, canonicalRoot) }),
   });
-  const checkRunners = scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+  const checkRunners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
     rootPath: canonicalRoot,
     ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
     ...(sandbox === undefined ? {} : { sandbox }),
