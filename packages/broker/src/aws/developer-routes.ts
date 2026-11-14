@@ -43,6 +43,10 @@ import {
   type DeveloperWorkspacesResponse,
   type EndDeveloperSessionsRequest,
   type EndDeveloperSessionsResponse,
+  SetMyNameBodySchema,
+  type SetDisplayNameRequest,
+  type SetDisplayNameResponse,
+  type SetMyNameResponse,
   type SlackAuthCheckRequest,
   type SlackAuthCheckResponse,
   type SlackChannelBinding,
@@ -118,6 +122,8 @@ export interface DeveloperApiConfiguration {
   slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
   /** Spec 025 E9: an admin ends a developer's sign-in sessions, through DeveloperIdentity (the broker only reads the sign-in table). */
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
+  /** #634: a person sets their own name, through DeveloperIdentity (the broker only reads the sign-in table). */
+  setDisplayName?: (request: SetDisplayNameRequest) => Promise<SetDisplayNameResponse>;
   /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
   signInClients?: SignInClientRegistry;
   /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
@@ -179,7 +185,7 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
   request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
+    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -331,6 +337,38 @@ export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) 
     if (answer.ok || answer.error === "not_found" || answer.error === "invalid_request") return answer;
     return { ok: false, error: "unavailable" };
   };
+}
+
+/** #634: a person's chosen name, through DeveloperIdentity. not_found and invalid_request are answers; every other failure is unavailable. */
+export function setDisplayNameThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: SetDisplayNameRequest) => Promise<SetDisplayNameResponse> {
+  return async (request) => {
+    const answer = await identityInvoke(invoke, request, (reply): SetDisplayNameResponse | undefined => {
+      if (reply.ok === true && typeof reply.name === "string") return { ok: true, name: reply.name };
+      if (reply.ok === false && (reply.error === "not_found" || reply.error === "invalid_request")) return { ok: false, error: reply.error };
+      return undefined;
+    }, "developer.set_display_name");
+    if (answer.ok || answer.error === "not_found" || answer.error === "invalid_request") return answer;
+    return { ok: false, error: "unavailable" };
+  };
+}
+
+/**
+ * #634 (ported from Rovara Cloud's release 0.4.16, abd4a061d): `PUT /v1/dev/me/name`, the signed-in person sets their own name. The person is the
+ * verified caller, never anything the body carries; the body is the name alone (`SetMyNameBodySchema`). A sign-in then leaves the name alone.
+ */
+async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest): Promise<SetMyNameResponse> {
+  const body = SetMyNameBodySchema.safeParse(jsonBody(request));
+  if (!body.success) throw agentXError("CONFIG_INVALID", `name: ${body.error.issues[0]?.message ?? "give a name of 1 to 80 characters"}`);
+  const set = deps.developer.setDisplayName;
+  if (set === undefined) throw agentXError("NOT_FOUND", "choosing your own name is not set up in this deployment");
+  const answer = await set({ kind: "set-display-name", developerId: caller.developerId, name: body.data.name });
+  if (answer.ok) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.display_name_chosen", developerId: caller.developerId }));
+    return { name: answer.name, nameChosen: true };
+  }
+  if (answer.error === "not_found") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  if (answer.error === "invalid_request") throw agentXError("CONFIG_INVALID", "name: give a name of 1 to 80 characters, with no email address");
+  throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach its sign-in service; try again");
 }
 
 /** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
@@ -670,15 +708,15 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   }
   const access = await projectsAPersonUses(deps, developerId);
   if (access === undefined) throw refused();
-  return { developerId, displayName: access.displayName, administrator, projects: access.projects, notices: access.notices };
+  return { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices };
 }
 
 /**
  * The projects a person may use now, as the access check answers them: task access (developer grants and channels),
  * then (spec 065) the registered projects they administer. Undefined for an unknown or revoked developer.
  */
-async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId: string): Promise<{ displayName: string; projects: AccessCheckResponse["projects"]; notices: string[] } | undefined> {
-  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
+async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId: string): Promise<{ displayName: string; nameChosen: boolean; projects: AccessCheckResponse["projects"]; notices: string[] } | undefined> {
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "displayNameChosen" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
   if (developer === undefined || developer.revoked) return undefined;
   const listed = await listProjects(deps, {
     developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
@@ -691,6 +729,7 @@ async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId
   const registered = await projectsWithPolicy(deps, administered);
   return {
     displayName: developer.displayName,
+    nameChosen: developer.displayNameChosen === true,
     projects: [
       ...listed.projects.filter((project) => !administered.includes(project.name)).map((project) => ({ name: project.name, access: project.access })),
       ...administered.filter((name) => registered.has(name)).sort().map((name) => ({ name, access: "administrator" as const })),
@@ -1219,6 +1258,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   const caller = await authenticateCaller(deps, request.headers.authorization);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
+  if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
   if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
     return routeDeveloperTaskRequest(developerTaskRouteDependencies(deps, caller), caller, request, url);
@@ -1244,9 +1284,11 @@ export async function routeLinkingRequest(deps: DeveloperRouteDependencies, requ
   const projects = request.method === "GET" && url.pathname === "/v1/dev/projects";
   const workspaces = request.method === "GET" && url.pathname === "/v1/dev/workspaces";
   const links = url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/");
-  if (!projects && !workspaces && !links) throw agentXError("NOT_FOUND", "route not found");
+  const name = request.method === "PUT" && url.pathname === "/v1/dev/me/name";
+  if (!projects && !workspaces && !links && !name) throw agentXError("NOT_FOUND", "route not found");
   const caller = await authenticateCaller(deps, request.headers.authorization);
   if (projects) return listProjects(deps, caller);
+  if (name) return setMyName(deps, caller, request);
   if (workspaces) return listWorkspaces(deps, caller);
   return routeOwnChannelLinks(deps, caller, request, url);
 }

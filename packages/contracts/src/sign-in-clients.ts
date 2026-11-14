@@ -96,6 +96,8 @@ export type AccessCheckRequest = z.infer<typeof AccessCheckRequestSchema>;
 export interface AccessCheckResponse {
   developerId: string;
   displayName: string;
+  /** #634: true once the person chose their own name (`PUT /v1/dev/me/name`); false while it is the sign-in provider's. */
+  nameChosen: boolean;
   administrator: boolean;
   /** `administrator` (spec 065): a project the person administers, which task access alone does not list. */
   projects: Array<{ name: string; access: "granted" | "channel" | "administrator" }>;
