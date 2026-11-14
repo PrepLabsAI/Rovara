@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WORKER_INVOCATION_FEATURES, type JsonValue, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKER_INVOCATION_FEATURES, captureEvalRoundEvidence, type JsonValue, type WorkflowSnapshot } from "@agentx/contracts";
 import { startChecksRerun } from "../../packages/broker/src/core/build-step/start.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
@@ -41,6 +41,22 @@ describe("eval CHECKS dispatch", () => {
     const w = await world(true);
     w.h.deps.store.query = async () => ({ items: [{ pk: "workspace", sk: "operation", id: "op-1", kind: "task", status: "SUCCEEDED", createdAt: "2026-11-14T00:00:00Z", dispatch: { payload: { evalRequest: { aiChange: true } } } }] });
     expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
+  });
+  it.each([0, 1, 2])("finds prior evals in a long task with %s completed passes", async passes => {
+    const w = await world(true); let queries = 0; let gets = 0; let reads = 0;
+    const operations = Array.from({ length: 120 }, (_, i) => ({ pk: "workspace", sk: `OPERATION#op-${i}`, id: `op-${i}`, kind: "task", status: "SUCCEEDED", createdAt: new Date(Date.UTC(2026, 10, 14, 0, 0, i)).toISOString(),
+      ...(i < passes ? { dispatch: { payload: { evalRequest: { aiChange: true } } } } : {}) }));
+    w.h.deps.store.query = async () => { const start = queries++ * 100; return { items: operations.slice(start, start + 100), ...(start === 0 ? { cursor: "next" } : {}) }; };
+    w.h.deps.store.get = async key => { gets++; const id = key.sk.split("#")[1]!; return { ...key, objectKey: `private/${w.task.ownerKey}/${w.task.workspaceId}/${id}/eval-round.json` }; };
+    w.h.deps.artifacts = { get: async objectKey => {
+      reads++; const pass = objectKey.includes("/op-0/") ? 1 : 2;
+      return Buffer.from(JSON.stringify({ schemaVersion: 1, candidateDigest: "a".repeat(64), roundKind: "check_unsealed", evalPass: pass, outcome: "done", usage: { calls: 4, costMicros: 40 }, cache: "hit", evalConfigured: true,
+        ...captureEvalRoundEvidence({ context: { aiChange: true, discovery: "configured", previousPasses: (pass - 1) as 0 | 1 }, comparison: { questions: [{ id: "q", category: "ordinary", old: Array.from({ length: 3 }, () => ({ pass: true, answer: "yes" })), first: { pass: false, answer: "no" } }], changedPromptCalls: 1 } }) }));
+    } };
+    const request = await evalRequestForChecks(w.h.deps, w.task, w.workflow);
+    if (passes === 2) expect(request).toBeUndefined();
+    else expect(request).toEqual({ aiChange: true, reason: "eval_hint", evalPass: passes + 1, callsAlreadyUsed: passes * 4, costAlreadyUsedMicros: passes * 40 });
+    expect(queries).toBe(2); expect(gets).toBe(passes); expect(reads).toBe(passes);
   });
   it.each([true, false])("runs the real checks dispatcher with eval feature %s", async feature => {
     const w = await world(feature);

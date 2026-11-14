@@ -5,7 +5,6 @@ import { byCreated, type OperationFacts } from "../../developer/task-records.js"
 import { withinTime, PROOF_READ_MAX_MS } from "./proof-keep.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import type { TaskRecord } from "../task-flow/records.js";
-const OPERATIONS_READ = 10;
 const OPERATIONS_INPUT_MAX = 10_000;
 const LISTINGS_TOTAL_MAX = 1_000;
 const component = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/u.test(value);
@@ -21,9 +20,9 @@ async function readRounds(actions: TestProofActions, task: { ownerKey: string; w
       if (!active || !array(input) || input.length > OPERATIONS_INPUT_MAX) return undefined;
       if (input.some(op => typeof op !== "object" || op === null || !component(op.id) || typeof op.kind !== "string" || op.kind.length > 32 || typeof op.createdAt !== "string" || op.createdAt.length > 64 || !Number.isFinite(Date.parse(op.createdAt)) || (op.fence !== undefined && (!Number.isSafeInteger(op.fence) || op.fence < 0)))) return undefined;
       const taskOperations = input.filter(op => op.kind === "task");
-      // Rendering may inspect a recent window; authorizing spend requires complete accounting.
-      if (digest === undefined && taskOperations.length > OPERATIONS_READ) return undefined;
-      const newest = taskOperations.sort(byCreated).reverse().slice(0, OPERATIONS_READ);
+      // Include earlier CHECKS rounds even after long implementation/fix histories.
+      // Metadata, listings, bytes and elapsed time each retain one total bound.
+      const newest = taskOperations.sort(byCreated).reverse();
       const rounds: EvalRoundArtifact[] = []; let bytesLeft = EVAL_ROUND_ARTIFACT_MAX_BYTES; let itemsLeft = LISTINGS_TOTAL_MAX;
       for (const operation of newest) {
         if (!active) return undefined;
@@ -51,11 +50,17 @@ async function readRounds(actions: TestProofActions, task: { ownerKey: string; w
     return result.done ? result.value : undefined;
   } finally { active = false; }
 }
-/** Newest matching artifact wins. A fault anywhere in the inspected input refuses the whole read. */
+/** Newest matching artifact wins. Missing/refused evidence yields a fixed Not run notice,
+ * with unknown cost; it is never used to authorize spend by evalRoundsSoFar. */
 export async function loadEvalRound(actions: TestProofActions, task: { ownerKey: string; workspaceId: string }, candidateDigest: string | undefined, operations?: readonly OperationFacts[]): Promise<EvalRoundArtifact | undefined> {
   if (typeof candidateDigest !== "string" || !/^[a-f0-9]{64}$/u.test(candidateDigest)) return undefined;
   const rounds = await readRounds(actions, task, operations, candidateDigest);
-  return rounds?.find(a => a.candidateDigest === candidateDigest);
+  return rounds?.find(a => a.candidateDigest === candidateDigest) ?? {
+    schemaVersion: 1, candidateDigest, roundKind: "working", evalPass: 1,
+    outcome: "not_run", notRunReason: "invalid_question_data",
+    context: { aiChange: true, discovery: "unknown", previousPasses: 0 },
+    excluded: [], notices: [], usage: { calls: 0 }, cache: "not_used",
+  };
 }
 /** Failed attempts consume budget too. Private or unreadable accounting cannot authorize another pass. */
 export async function evalRoundsSoFar(actions: TestProofActions, task: { ownerKey: string; workspaceId: string }, operations?: readonly OperationFacts[]): Promise<EvalRoundsSoFar | undefined> {
@@ -105,6 +110,8 @@ export async function evalRequestForChecks(
       return found;
     },
     async artifacts(workspaceId, operationId) {
+      // Only dispatched eval attempts can have usage to account for.
+      if (!requested.has(operationId)) return [];
       const row = await deps.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `ARTIFACT#${operationId}#${EVAL_ROUND_ARTIFACT}` });
       if (row === undefined) {
         if (requested.has(operationId)) throw new Error("eval evidence unavailable");
