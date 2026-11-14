@@ -296,3 +296,5 @@ export * from "./runner.js";
 
 export * from "./task-status.js";
 export * from "./notification-prefs.js";
+
+export * from "./machine-size.js";
