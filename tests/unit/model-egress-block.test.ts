@@ -255,7 +255,8 @@ describe("no callers yet", () => {
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
         // TE-F2 part A stacks on this lane: exactly these files are allowed to import F0a's modules (its own pure contracts and its tests); its guard (model-replies-contracts-guard.test.ts) proves nothing else calls them.
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || /^tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        // TE-F1a (the first caller, by design: it is built on F0a) lives in `packages/contracts/src/model-egress/`, `packages/testing/` and its own tests.
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || file === "packages/contracts/src/model-reply-check.ts" || file === "packages/contracts/src/model-reply-check-store.ts" || F2A_FILES.has(file) || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
@@ -267,7 +268,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ...F2A_TESTS.map((file) => `:!${file}`), ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ":!tests/unit/model-egress-*.test.ts"], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

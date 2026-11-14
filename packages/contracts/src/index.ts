@@ -291,6 +291,8 @@ export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
+// TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
+export * from "./model-egress/index.js";
 export * from "./model-serve.js";
 // TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
 export * from "./model-sse-named.js";
@@ -361,3 +363,9 @@ export * from "./work-event.js";
 export * from "./work-event-node.js";
 export * from "./policy.js";
 export * from "./presets.js";
+
+// TE-F11: additive reply health and expiring probes; no evidence or production callers.
+export * from "./model-reply-check.js";
+export * from "./model-reply-check-read.js";
+export * from "./model-reply-check-shape.js";
+export * from "./model-reply-check-store.js";
