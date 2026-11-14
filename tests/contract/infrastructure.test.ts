@@ -482,6 +482,10 @@ describe("production release pipeline", () => {
     expect(buildSpec).not.toMatch(/--skip-checks|--allow-dirty/);
     expect(buildSpec).toContain("sha256sum -c");
     expect(buildSpec).toContain("awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip");
+    // The port guard's tests run the real secret scan: the release machine has the same pinned gitleaks as CI, checked before use.
+    expect(buildSpec).toContain("gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz");
+    expect(buildSpec).toContain('echo \\"${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -');
+    expect(buildSpec).toContain("/opt/gitleaks:$PATH");
   });
 
   it("keeps the release project outside the broker's CodeBuild gate allow-list", () => {
