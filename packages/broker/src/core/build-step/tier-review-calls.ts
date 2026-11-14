@@ -162,10 +162,11 @@ export async function runGrownReviews(input: { call: TierReviewCall; model: Chec
   for (const role of ["code_review", "security_review"] as const) {
     results.push(await oneReview(input.call, input.model.model, role, grownReviewPrompt(role, input.level, input.files, input.patchText), input.timeoutMs ?? REVIEW_TIMEOUT_MS, input.meter === undefined ? undefined : () => input.meter!(role)));
   }
-  const failed = results.find((result) => !result.completed);
+  // Every review that did not complete says why (one word each, in order): a malformed answer is never hidden behind an outage of the other.
+  const failures = [...new Set(results.filter((result) => !result.completed).map((result) => result.failure ?? "unknown"))];
   return {
-    completed: failed === undefined, findings: results.reduce((sum, result) => sum + result.findings, 0), mustFix: results.reduce((sum, result) => sum + result.mustFix, 0),
-    ...(failed === undefined ? {} : { failure: failed.failure }),
+    completed: failures.length === 0, findings: results.reduce((sum, result) => sum + result.findings, 0), mustFix: results.reduce((sum, result) => sum + result.mustFix, 0),
+    ...(failures.length === 0 ? {} : { failure: failures.join(", ") }),
   };
 }
 

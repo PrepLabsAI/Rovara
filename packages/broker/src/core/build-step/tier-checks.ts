@@ -168,8 +168,8 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // The plan's own files: a code file the plan (or the request and Understand) did not name is at least standard; in a change planned as documents only, it is risky (and so asks the scope question).
     const plannedFiles = await plannedPathsOf(deps, workflow, task.requestText);
     const firstEstimate = [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])].find((tier) => tier.source === "estimate");
-    const outside = plannedFiles === undefined ? [] : plannedPathsExceeded(plannedFiles, read.diff.files).filter((path) => fileTypeOf(path) !== "prose" && read.diff.files.some((file) => file.path === path) && !testOfPlannedFile(path, plannedFiles));
     const docsPlan = firstEstimate !== undefined && firstEstimate.kinds.length > 0 && firstEstimate.kinds.every((kind) => kind === "docs");
+    const outside = plannedFiles === undefined ? [] : plannedPathsExceeded(plannedFiles, read.diff.files).filter((path) => fileTypeOf(path) !== "prose" && read.diff.files.some((file) => file.path === path) && !(!docsPlan && testOfPlannedFile(path, plannedFiles)));
     const withPlanScope = (current: WorkflowFlow | undefined): WorkflowFlow | undefined => {
       const tier = current?.tier;
       if (current === undefined || tier === undefined || tier.headSha !== head || outside.length === 0) return current;
@@ -218,7 +218,14 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const level = draft?.tier?.level;
     const grew = level !== undefined && (tierRank(level) > tierRank(planned) || draft?.grewAfterBuild !== undefined);
     // A review that could not run (an outage, nothing found) is run again on a later pass, once the reviewer is back: it gave no answer, so running it again cannot shop for one. One that ran is not.
-    const attempted = level !== undefined && ownQuickChecks(draft).some((check) => check.detail?.includes(reviewAttempt(level, head)) === true && !isOutageEntry(check));
+    // At most `REVIEW_RUNS_MAX` runs on one head, each a while after the one before (10, 20, 40 minutes...); then only Retry or a new push runs it again.
+    const nowMs = Date.parse(at);
+    const attempted = level !== undefined && ownQuickChecks(draft).some((check) => {
+      if (check.detail?.includes(reviewAttempt(level, head)) !== true) return false;
+      if (!isOutageEntry(check)) return true;
+      const runs = runsOf(check);
+      return runs >= REVIEW_RUNS_MAX || nowMs - Date.parse(check.at) < REVIEW_RERUN_WAIT_MS * 2 ** (runs - 1);
+    });
     // A failed check of this head (a failed review included) holds it: nothing is asked again for it, and no review record is written while it stands.
     if (grew && level !== "small" && draft?.tier?.headSha === head && !tierReviewRecorded(draft, level, head) && !attempted && blockingFailure(draft, head) === undefined && call !== undefined) {
       grown = { level, result: await runGrownReviews({ call, model: checking, level, files: input.files, patchText: input.patchText, meter: (purpose) => meterFor(purpose)?.() ?? Promise.resolve(true) }) };
@@ -230,8 +237,10 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       if (failedBefore) return withoutTierReviews(current, head);
       const passed = grown.result.completed && grown.result.mustFix === 0;
       if (!passed) {
+        const earlier = ownQuickChecks(current).find((check) => check.detail?.includes(reviewAttempt(grown.level, head)) === true && isOutageEntry(check));
+        const runs = (earlier === undefined ? 0 : runsOf(earlier)) + 1;
         const noted = withQuickChecks(current, [quickCheckEntry({ kind: "code_config", outcome: "failed", at,
-          detail: `${reviewAttempt(grown.level, head)} ${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed${grown.result.completed ? "" : `; did not run (${grown.result.failure ?? "unknown"})`}` })]);
+          detail: `${reviewAttempt(grown.level, head)} ${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed${grown.result.completed ? "" : `; did not run (${grown.result.failure ?? "unknown"}); runs=${String(runs)}`}` })]);
         return withoutTierReviews(noted, head);
       }
       const noted = withQuickChecks(current, [quickCheckEntry({ kind: "code_config", outcome: passed ? "passed" : "failed", at,
@@ -328,7 +337,8 @@ async function plannedPathsOf(deps: TaskFlowDeps, workflow: WorkflowSnapshot, re
 /** A grown review that could not run (an outage) and found nothing that must be fixed: it holds nothing by itself, and is run again. */
 function isOutageEntry(check: FlowQuickCheck): boolean {
   const detail = check.detail ?? "";
-  return check.outcome === "failed" && /\breview level=/u.test(detail) && /did not run \((?:unavailable|refused)\)/u.test(detail) && /\b0 must be fixed/u.test(detail);
+  const kinds = /did not run \(([^)]*)\)/u.exec(detail)?.[1]?.split(", ") ?? [];
+  return check.outcome === "failed" && /\breview level=/u.test(detail) && kinds.length > 0 && kinds.every((kind) => kind === "unavailable" || kind === "refused") && /\b0 must be fixed/u.test(detail);
 }
 
 /** A failed check of this head that blocks it: every failed own entry except an outage of a review (which is run again). */
@@ -336,23 +346,53 @@ function blockingFailure(flow: WorkflowFlow | undefined, head: string): FlowQuic
   return ownQuickChecks(flow).find((check) => check.outcome === "failed" && (check.detail ?? "").includes(`head=${head}`) && !isOutageEntry(check));
 }
 
+/** The extensions of test code (a shell script, a JSON or YAML file named like a test is not one). */
+const TEST_EXTENSIONS = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rb|java|kt|kts|rs|cs|swift|php|scala|ex|exs|c|cc|cpp|h|hpp)$/u;
+const TEST_FOLDERS = new Set(["tests", "test", "__tests__", "spec"]);
+/** The usual buckets inside a tests folder (`tests/unit/...`). */
+const TEST_BUCKETS = new Set(["unit", "integration", "e2e", "functional"]);
+/** The usual source folders a tests folder mirrors (`src/a.ts` is tested by `tests/a.test.ts`). */
+const SOURCE_FOLDERS = new Set(["src", "lib", "app"]);
+
 /**
- * Whether a file is the test of a file the plan names: a test file (`*.test.*`, `*.spec.*`, `*_test.*`, `test_*`) whose name is the planned file's, beside it or under a tests folder (the `tests/` mirror).
- * The plan's test is part of the plan; a lock file a planned manifest changes is covered already (`plannedPathsExceeded`).
+ * Whether a file is the test of a CODE file the plan names: test code (`*.test.*`, `*.spec.*`, `*_test.*`, `test_*`, with a code extension) with the planned file's name, either beside it, or in the tests
+ * folder of the same package at the mirrored path (`src/a.ts` and `tests/a.test.ts`, `tests/unit/a.test.ts` or `tests/src/a.test.ts`; `packages/ui/src/a.ts` and `packages/ui/test/a.test.ts`). Never for a
+ * planned document. A lock file a planned manifest changes is covered already (`plannedPathsExceeded`).
  */
 export function testOfPlannedFile(path: string, planned: readonly string[]): boolean {
+  if (!TEST_EXTENSIONS.test(path)) return false;
   const parts = path.split("/");
   const name = parts.at(-1) ?? "";
-  const folder = parts.slice(0, -1).join("/");
-  const match = /^(?:test_)?(.+?)(?:[._-](?:test|spec))?\.[A-Za-z0-9]+$/u.exec(name);
+  const folder = parts.slice(0, -1);
   const isTest = /(?:^test_|[._-](?:test|spec)\.[A-Za-z0-9]+$)/u.test(name);
-  if (match === null || !isTest) return false;
+  const match = /^(?:test_)?(.+?)(?:[._-](?:test|spec))?\.[A-Za-z0-9]+$/u.exec(name);
+  if (!isTest || match === null) return false;
   const stem = match[1]!;
-  const inTests = parts.some((part) => part === "tests" || part === "test" || part === "__tests__" || part === "spec");
   return planned.some((entry) => {
+    if (fileTypeOf(entry) !== "code") return false;
     const plannedParts = entry.split("/");
-    const plannedName = plannedParts.at(-1) ?? "";
-    const plannedStem = plannedName.replace(/\.[A-Za-z0-9]+$/u, "");
-    return plannedStem === stem && (plannedParts.slice(0, -1).join("/") === folder || inTests);
+    if ((plannedParts.at(-1) ?? "").replace(/\.[A-Za-z0-9]+$/u, "") !== stem) return false;
+    const plannedFolder = plannedParts.slice(0, -1);
+    if (plannedFolder.join("/") === folder.join("/")) return true;
+    const at = folder.findIndex((part) => TEST_FOLDERS.has(part));
+    if (at < 0) return false;
+    const root = folder.slice(0, at);
+    let rest = folder.slice(at + 1);
+    if (rest.length > 0 && TEST_BUCKETS.has(rest[0]!)) rest = rest.slice(1);
+    // The same package: the tests folder sits where the planned file's package starts.
+    if (root.some((part, index) => plannedFolder[index] !== part)) return false;
+    let remainder = plannedFolder.slice(root.length);
+    if (remainder.length > 0 && SOURCE_FOLDERS.has(remainder[0]!) && rest[0] !== remainder[0]) remainder = remainder.slice(1);
+    return rest.join("/") === remainder.join("/");
   });
+}
+
+/** How many times a review that could not run is run on one head before only Retry or a new push runs it again, and the wait before the second run (doubling after it). */
+const REVIEW_RUNS_MAX = 3;
+const REVIEW_RERUN_WAIT_MS = 10 * 60_000;
+
+/** The runs an outage entry counts (an entry from before the count was kept is one run). */
+function runsOf(check: FlowQuickCheck): number {
+  const found = /\bruns=(\d+)/u.exec(check.detail ?? "");
+  return found === null ? 1 : Number(found[1]);
 }
