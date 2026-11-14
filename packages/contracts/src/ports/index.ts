@@ -13,6 +13,7 @@ export * from "./learning.js";
 export * from "./model-keys.js";
 export * from "./model-provider.js";
 export * from "./secrets.js";
+export * from "./cloud-account.js";
 export * from "./image-registry.js";
 export * from "./scheduler.js";
 export * from "./realtime.js";

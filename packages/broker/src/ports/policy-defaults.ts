@@ -4,6 +4,7 @@
 import { createUnavailableImageRegistry } from "./fake-image-registry.js";
 import { createUnavailableScheduler } from "./fake-scheduler.js";
 import { createUnavailableEmailSender } from "./email.js";
+import { createUnavailableCloudAccount } from "./cloud-account.js";
 import { createInProcessRealtime } from "./realtime.js";
 import { costMicrosOf, type ModelPrices } from "../core/cost/price-table.js";
 import { checkCommentProof, type CommentRequestContext, type FetchedComment } from "../core/pr-commands/comment-checks.js";
@@ -284,4 +285,5 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   // configured, so a person's email choice reads as unavailable and notices go through the channel adapters. No `team-record-source` is registered: Code keeps no team record.
   registry.register("realtime", "in-process", createInProcessRealtime(), { isDefault: true });
   registry.register("email", "none", createUnavailableEmailSender(), { isDefault: true });
+  registry.register("cloud-account", "none", createUnavailableCloudAccount(), { isDefault: true });
 }

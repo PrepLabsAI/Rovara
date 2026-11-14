@@ -23,6 +23,7 @@ import type { ImageRegistry } from "./image-registry.js";
 import type { ObjectStorage } from "./object-storage.js";
 import type { OutboundEventsAdapter } from "./outbound-events.js";
 import type { SecretStore } from "./secrets.js";
+import type { CloudAccount } from "./cloud-account.js";
 import type { MonitoringAdapter } from "./monitoring.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
@@ -66,6 +67,8 @@ export const PLUGIN_POINTS = [
   "model-provider",
   /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
   "secrets",
+  /** Company-scoped, short-lived credentials for one purpose; owner-configured only, with broker rights. */
+  "cloud-account",
   /** Where a project's saved environment image lives (login for one repository, list, delete). Code: a registry container on the owner's Docker; Cloud: its cloud registry. */
   "image-registry",
   /** When something is due (the nightly test run). The scheduler only says when; the core decides what starts. Code: a local timer; Cloud: its cloud scheduler. */
@@ -105,6 +108,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   "outbound-events": "many",
   "model-provider": "many",
   secrets: "one",
+  "cloud-account": "one",
   "image-registry": "one",
   scheduler: "one",
   realtime: "one",
@@ -189,6 +193,7 @@ export interface PluginPointTypes {
   "outbound-events": OutboundEventsAdapter;
   "model-provider": ModelProviderAdapter;
   secrets: SecretStore;
+  "cloud-account": CloudAccount;
   "image-registry": ImageRegistry;
   scheduler: Scheduler;
   realtime: RealtimePublisher;
