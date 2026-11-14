@@ -15,7 +15,7 @@ it("finds measures, JUnit cases, tools and eval folders without choosing one", a
   expect(found.candidates).toEqual(expect.arrayContaining([
     expect.objectContaining({ path: "rovara-measures.json", questions: 1, perQuestion: true }),
     expect.objectContaining({ path: "junit.xml", questions: 2, perQuestion: true }),
-    expect.objectContaining({ path: "evals/refund/promptfooconfig.yaml", tool: "promptfoo" }),
+    expect.objectContaining({ path: "evals/refund", tool: "promptfoo" }),
   ]));
   expect(found.message).toContain("Confirm an eval or point to the right one");
 });
@@ -70,4 +70,29 @@ it("records a reason for every omitted entry within the bounded scan", async () 
   await Promise.all(Array.from({ length: 110 }, (_, i) => symlink("missing-target", join(path, `link-${i}`))));
   const result = await discoverEvals(path);
   expect(result.omitted).toHaveLength(110); expect(result.status).toBe("incomplete");
+});
+
+it("deduplicates nested config, reports and support folders to their eval roots", async () => {
+  const path = await root();
+  await mkdir(join(path, "evals/refund/fixtures/prompts"), { recursive: true });
+  await mkdir(join(path, "evals/refund/results"));
+  await mkdir(join(path, "evals/search/data"), { recursive: true });
+  await mkdir(join(path, "packages/app/evaluations/data"), { recursive: true });
+  await writeFile(join(path, "evals/refund/promptfooconfig.yaml"), "tests: []");
+  await writeFile(join(path, "evals/refund/results/junit.xml"), '<testsuite tests="2"><testcase name="a"/><testcase name="b"/></testsuite>');
+  const result = await discoverEvals(path);
+  expect(result.status).toBe("found"); expect(result.omitted).toEqual([]);
+  expect(result.candidates).toEqual([
+    expect.objectContaining({ path: "evals/refund", tool: "promptfoo", questions: 2, perQuestion: true }),
+    expect.objectContaining({ path: "evals/search", tool: "eval folder" }),
+    expect.objectContaining({ path: "packages/app/evaluations/data", tool: "eval folder" }),
+  ]);
+  expect(result.candidates[0]!.label).toBe("Found: evals/refund (2 questions, promptfoo)");
+});
+it("keeps question metadata when a nested config is discovered after the report", async () => {
+  const path = await root(); await mkdir(join(path, "evals/refund/config"), { recursive: true });
+  await writeFile(join(path, "evals/refund/junit.xml"), '<testsuite tests="1"><testcase name="a"/></testsuite>');
+  await writeFile(join(path, "evals/refund/config/promptfooconfig.yaml"), "tests: []");
+  const result = await discoverEvals(path);
+  expect(result.candidates).toEqual([expect.objectContaining({ path: "evals/refund", tool: "promptfoo", perQuestion: true, questions: 1 })]);
 });

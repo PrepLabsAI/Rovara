@@ -1,5 +1,5 @@
 import { EvalBaseRecordSchema, evalBaseCacheKey } from "@agentx/contracts";
-import { runEvalHealth, type EvalHealthInput, type EvalHealthResult } from "./eval-health.js";
+import { evalHealthKey, runEvalHealth, type EvalHealthInput, type EvalHealthResult } from "./eval-health.js";
 export interface EvalBaselines {
   /** Start after each merge to main. The host owns and MUST join the returned promise on shutdown. */
   afterMerge(input: EvalHealthInput): Promise<EvalHealthResult | { status: "cached" }>;
@@ -11,12 +11,12 @@ export function createEvalBaselines(): EvalBaselines {
   const running = new Map<string, Promise<EvalHealthResult | { status: "cached" }>>();
   const afterMerge: EvalBaselines["afterMerge"] = input => {
     let key: string;
-    try { key = evalBaseCacheKey(input.key); } catch { return Promise.resolve({ status: "not_run", message: "Not run: baseline identity could not be read." }); }
+    try { key = evalBaseCacheKey(evalHealthKey(input)); } catch { return Promise.resolve({ status: "not_run", message: "Not run: baseline identity could not be read." }); }
     const existing = running.get(key);
     if (existing !== undefined) return existing;
     const work = (async () => {
       try {
-        const base = EvalBaseRecordSchema.safeParse(await input.cache.read(input.key));
+        const base = EvalBaseRecordSchema.safeParse(await input.cache.read(evalHealthKey(input)));
         if (base.success && base.data.questions !== undefined) return { status: "cached" as const };
         return await runEvalHealth(input);
       } catch { return { status: "not_run" as const, message: "Not run: baseline could not be read." }; }
@@ -29,7 +29,7 @@ export function createEvalBaselines(): EvalBaselines {
     afterMerge,
     async forTask(input) {
       try {
-        if (running.has(evalBaseCacheKey(input.key))) return "measuring";
+        if (running.has(evalBaseCacheKey(evalHealthKey(input)))) return "measuring";
         const result = await afterMerge(input);
         return result.status === "cached" || (result.status === "measured" && result.baseline === "stored") ? "ready" : "unavailable";
       } catch { return "unavailable"; }

@@ -9,12 +9,22 @@ const tools: Readonly<Record<string, string>> = { "promptfooconfig.yaml": "promp
 /** Discovery never executes config. Paths are selection data; only the inert label is display text.
  * Reports are evidence of shape, not fresh scores. A4 still validates every measured run separately. */
 export async function discoverEvals(root: string, options: { maxEntries?: number } = {}): Promise<EvalDiscovery> {
-  const candidates: EvalCandidate[] = []; const omitted: string[] = [];
+  const byRoot = new Map<string, EvalCandidate>(); const omitted: string[] = [];
   const max = options.maxEntries ?? 2_000;
   let visited = 0;
   const omit = (path: string, reason: string): void => { omitted.push(`${inertEvidenceText(path, 160)}: ${reason}`); };
   const add = (path: string, tool: string, extra: { perQuestion?: boolean; questions?: number } = {}): void => {
-    candidates.push({ path, tool, ...extra, label: `Found: ${inertEvidenceText(path, 300)} (${extra.questions === undefined ? "question count unknown" : `${extra.questions} questions`}, ${tool})` });
+    // An eval container's direct children are suites; deeper folders/configs/reports
+    // describe that same suite, rather than additional choices at setup.
+    const folders = path.split("/");
+    if (tool !== "eval folder") folders.pop();
+    const container = folders.findIndex(part => /^(?:evals?|evaluations)$/u.test(part));
+    const rootPath = container < 0 ? path : folders.slice(0, container + 2).join("/");
+    const previous = byRoot.get(rootPath);
+    const rank = (name: string): number => name === "eval folder" ? 0 : ["JUnit", "measures"].includes(name) ? 1 : 2;
+    const selectedTool = previous !== undefined && rank(previous.tool) >= rank(tool) ? previous.tool : tool;
+    const details = extra.perQuestion === true || previous?.perQuestion === undefined ? extra : { perQuestion: previous.perQuestion, ...(previous.questions === undefined ? {} : { questions: previous.questions }) };
+    byRoot.set(rootPath, { path: rootPath, tool: selectedTool, ...details, label: `Found: ${inertEvidenceText(rootPath, 300)} (${details.questions === undefined ? "question count unknown" : `${details.questions} questions`}, ${selectedTool})` });
   };
   const walk = async (relative: string, depth: number): Promise<void> => {
     if (visited >= max) { omit(relative || ".", "inventory limit reached"); return; }
@@ -28,7 +38,7 @@ export async function discoverEvals(root: string, options: { maxEntries?: number
       const info = await lstat(join(root, path));
       if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) { omit(path, "not a plain file or folder"); continue; }
       if (info.isDirectory()) {
-        if (/^(?:evals?|evaluations)(?:\/|$)/u.test(path) || /(?:^|\/)(?:evals?|evaluations)$/u.test(path)) add(path, "eval folder");
+        if (/(?:^|\/)(?:evals?|evaluations)(?:\/[^/]+)?$/u.test(path)) add(path, "eval folder");
         if (depth >= 6) omit(path, "folder depth limit reached"); else children.push(path);
       } else if (Object.hasOwn(tools, entry.name)) add(path, tools[entry.name]!);
       else if (entry.name === "rovara-measures.json" || /^(?:junit|eval[-_.].*)\.xml$/iu.test(entry.name)) {
@@ -49,6 +59,7 @@ export async function discoverEvals(root: string, options: { maxEntries?: number
     if (!Number.isSafeInteger(max) || max < 1 || max > 2_000 || !(await lstat(root)).isDirectory()) throw new Error("invalid inventory");
     await walk("", 0);
   } catch { omit(".", "inventory could not be read"); }
+  const candidates = [...byRoot.values()].filter(candidate => candidate.tool !== "eval folder" || ![...byRoot.keys()].some(path => path.startsWith(`${candidate.path}/`)));
   candidates.sort((a, b) => a.path.localeCompare(b.path));
   const status = omitted.length > 0 ? "incomplete" : candidates.length > 0 ? "found" : "none";
   const message = status === "none" ? NO_EVAL : `${status === "incomplete" ? "Some eval locations could not be checked. " : ""}Confirm an eval or point to the right one. Nothing is run until its call estimate is approved.`;

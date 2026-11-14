@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { attestRovaraOnlyBaseCheckout, ModelEgressFrameSchema, type ModelEgressClass } from "@agentx/contracts";
 import { createDocumentBaseScoreCache, evalCommandFingerprint, type EvalBaseCacheKeyParts } from "../../packages/contracts/src/eval-base-cache.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
 import { runEvalHealth, type EvalHealthInput } from "../../packages/worker/src/verification/eval-health.js";
 import type { ModelEgressFrame } from "../../packages/contracts/src/model-egress/frame.js";
 import type { EvalSpendApproval, MonthlyMeter } from "../../packages/contracts/src/ports/eval-health.js";
@@ -9,8 +10,9 @@ import type { EvalSpendApproval, MonthlyMeter } from "../../packages/contracts/s
 import { fakeModelEgressWorld, COMPANY_A, COMPANY_B } from "../../packages/testing/src/ports/model-egress-world.js";
 import { validFrame } from "../../packages/testing/src/ports/model-egress-conformance.js";
 const frame = {} as ModelEgressFrame; // The fake meter makes no provider request.
+const settings = { imageDigest: "image", route: "customer" };
 const company = "org_aaaaaaaaaaaaaaaaaaaa";
-const key: EvalBaseCacheKeyParts = { company, project: "p", baseCommit: "a".repeat(40), codeHash: "b".repeat(64), judgePin: "c".repeat(64), evalSetHash: "d".repeat(64), hiddenSetHash: "none", commandFingerprint: evalCommandFingerprint("eval"), catalogRowId: "model", model: "model", modelVersion: "version-1", settingsFingerprint: "e".repeat(64) };
+const key: EvalBaseCacheKeyParts = { company, project: "p", baseCommit: "a".repeat(40), codeHash: "b".repeat(64), judgePin: "c".repeat(64), evalSetHash: "d".repeat(64), hiddenSetHash: "none", commandFingerprint: evalCommandFingerprint("eval"), catalogRowId: "model", model: "model", modelVersion: "version-1", settingsFingerprint: evalSettingsFingerprint(settings, "c".repeat(64)) };
 function world() {
   const ledger: Array<{ company: string; provider: string }> = [];
   const cache = createDocumentBaseScoreCache(new MemoryDocumentStore(), { companyId: company });
@@ -21,7 +23,7 @@ function world() {
     call: async () => { ledger.push({ company: request.approval.company, provider: request.approval.provider }); return { class: "ok" as const, calls: 1, costMicros: 10 }; },
     close: async () => {},
   }) };
-  const input: EvalHealthInput = { key, selection: "evals/refund", questionIds: ["one", "two"], maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 10, approval, meter, cache,
+  const input: EvalHealthInput = { key, settings, selection: "evals/refund", questionIds: ["one", "two"], maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 10, approval, meter, cache,
     run: async ({ run, call }) => {
       await call(frame); await call(frame);
       return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: key.baseCommit }), seconds: 2,
@@ -110,11 +112,24 @@ it("retains an honest measured result if only saving the baseline is refused", a
   expect(await runEvalHealth(w.input)).toMatchObject({ status: "measured", baseline: "refused", passRate: 5 / 6 });
 });
 it("fits the closest whole three-run estimate under the default caps", async () => {
-  const w = world(); w.input.questionIds = ["one"]; w.input.maxCallsPerQuestion = 66; w.input.maxCostMicrosPerQuestion = 666_666;
+  const w = world(); w.input.questionIds = ["one"]; w.input.maxCallsPerQuestion = 133; w.input.maxCostMicrosPerQuestion = 1_333_333; w.grant.maxCalls = 400; w.grant.maxCostMicros = 4_000_000;
   let request: unknown;
   w.input.meter = { reserve: async r => { request = r; return undefined; } };
   await runEvalHealth(w.input);
-  expect(request).toMatchObject({ calls: 198, costMicros: 1_999_998 });
+  expect(request).toMatchObject({ calls: 399, costMicros: 3_999_999 });
+});
+// A 200-call fallback refuses the ordinary judged suite before any run.
+it("measures a 50-question judged eval within the shared eval default budget", async () => {
+  const w = world(); const ids = Array.from({ length: 50 }, (_, i) => `q${i}`);
+  w.grant.maxCalls = 400; w.grant.maxCostMicros = 4_000_000;
+  w.input.questionIds = ids; w.input.maxCallsPerQuestion = 2; w.input.maxCostMicrosPerQuestion = 20_000;
+  w.input.run = async ({ call }) => {
+    for (let i = 0; i < ids.length; i++) { await call(frame); await call(frame); }
+    return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: key.baseCommit }), seconds: 1,
+      measures: { schemaVersion: 1, source: "project_runner", eval_set_hash: key.evalSetHash, measures: [{ name: "score", unit: "fraction", direction: "up_good", value: 0 }], questions: ids.map(id => ({ id, samples: [{ pass: false, answer: "failed" }] })) } };
+  };
+  expect(await runEvalHealth(w.input)).toMatchObject({ status: "measured", baseline: "stored", questionCount: 50, callsPerRun: [100, 100, 100] });
+  expect(w.ledger).toHaveLength(300);
 });
 it("accepts 1,000 questions with an explicitly approved larger cap", async () => {
   const w = world(); w.input.questionIds = Array.from({ length: 1000 }, (_, i) => `q${i}`);
@@ -136,7 +151,7 @@ it("does not save when joining the metered provider capability fails", async () 
 });
 it.each(["calls", "cost"])("keeps default %s caps even with a larger approved estimate", async field => {
   const w = world(); w.grant.maxCalls = 1000; w.grant.maxCostMicros = 10_000_000;
-  if (field === "calls") w.input.maxCallsPerQuestion = 34; else w.input.maxCostMicrosPerQuestion = 400_000;
+  if (field === "calls") w.input.maxCallsPerQuestion = 67; else w.input.maxCostMicrosPerQuestion = 666_667;
   expect((await runEvalHealth(w.input)).status).toBe("not_run"); expect(w.ledger).toHaveLength(0);
 });
 it("measures and saves all 1,000 questions with the configured cap", async () => {

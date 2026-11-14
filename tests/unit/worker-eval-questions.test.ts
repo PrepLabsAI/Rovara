@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { runEvalHealth } from "../../packages/worker/src/verification/eval-health.js";
+import { runEvalHealth, type EvalHealthInput } from "../../packages/worker/src/verification/eval-health.js";
+import { createEvalBaselines } from "../../packages/worker/src/verification/eval-baseline-refresh.js";
 import { runEvalRound, type EvalRoundInput } from "../../packages/worker/src/verification/eval-round.js";
 import { evalFactsAllRun } from "../../packages/contracts/src/eval-pacing.js";
 import { evalCommandFingerprint, type EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
@@ -263,9 +264,9 @@ it("takes a fresh baseline in-task only on a cache miss and reads it again befor
 });
 it("compares a task against the actual dependency-keyed three-run setup baseline", async () => {
   const { input, record } = await setup(3); const plan = input.questionPlan!;
-  const key = { ...input.key, codeHash: "e".repeat(64), judgePin: plan.judgePin, evalSetHash: hash, hiddenSetHash: "none", settingsFingerprint: evalCommandFingerprint(JSON.stringify({ rule: "question-exact-v1", imageDigest: input.settings.imageDigest, route: input.settings.route, judgePin: plan.judgePin })) };
+  const key = { ...input.key, codeHash: "e".repeat(64), judgePin: plan.judgePin, evalSetHash: hash, hiddenSetHash: "none", settingsFingerprint: "f".repeat(64) };
   const cache = createDocumentBaseScoreCache(new MemoryDocumentStore(), { companyId: key.company });
-  const measured = await runEvalHealth({ key, selection: "eval", cache, questionIds: plan.questions.map(q => q.id), maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
+  const healthInput: EvalHealthInput = { key, settings: input.settings, selection: "eval", cache, questionIds: plan.questions.map(q => q.id), maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
     approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "admin", provider: "customer", connected: true, maxCalls: 200, maxCostMicros: 2_000_000 }) },
     meter: { reserve: async () => ({ call: async () => ({ class: "ok" as const, calls: 1, costMicros: 10 }), close: async () => {} }) },
     run: async ({ call }) => {
@@ -274,9 +275,16 @@ it("compares a task against the actual dependency-keyed three-run setup baseline
       return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: key.baseCommit }), seconds: 1,
         measures: { schemaVersion: 1, source: "project_runner", eval_set_hash: hash, measures: record.measures, questions: record.questions!.map(q => ({ id: q.id, samples: [q.samples[0]!] })) } };
     },
-  });
+  };
+  const measured = await runEvalHealth(healthInput);
   expect(measured.status).toBe("measured");
   expect(await runEvalRound({ ...input, key, cache })).toMatchObject({ cache: "hit", result: { label: "Worse on eval" } });
+  const baselines = createEvalBaselines();
+  expect(await baselines.afterMerge(healthInput)).toEqual({ status: "cached" });
+  for (const settings of [{ ...input.settings, imageDigest: "other-image" }, { ...input.settings, route: "other-route" }]) {
+    expect(await runEvalRound({ ...input, key, settings, cache })).toMatchObject({ result: { notRun: { reason: "no_base_score" } } });
+  }
+  expect(await runEvalRound({ ...input, key, cache, questionPlan: { ...plan, judgePin: "a".repeat(64), baselineJudgePin: "a".repeat(64) } })).toMatchObject({ result: { notRun: { reason: "no_base_score" } } });
 });
 // Removing per-stage reservation must spend past the approved limit and fail these cases.
 it("runs a 50-question cached eval inside the default cap and reports stage estimates", async () => {

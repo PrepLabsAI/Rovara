@@ -6,12 +6,16 @@ const key = { company: "org_aaaaaaaaaaaaaaaaaaaa", project: "p", baseCommit: "a"
 it("lets the first task proceed while main is measured and joins the refresh", async () => {
   let finish!: () => void;
   const gate = new Promise<void>(resolve => { finish = resolve; }); let reads = 0;
-  const input = { key, cache: { read: async () => { reads++; await gate; return undefined; } } } as unknown as EvalHealthInput;
+  const input = { key, settings: { imageDigest: "image", route: "customer" }, cache: { read: async () => { reads++; await gate; return undefined; } } } as unknown as EvalHealthInput;
   const service = createEvalBaselines();
   const refreshing = service.afterMerge(input);
-  expect(await service.forTask(input)).toBe("measuring");
-  expect(reads).toBe(1);
-  finish(); expect((await refreshing).status).toBe("not_run");
+  let state: string | undefined;
+  const task = service.forTask(input).then(result => { state = result; });
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(state).toBe("measuring"); expect(reads).toBe(1);
+  } finally { finish(); await Promise.all([refreshing, task]); }
+  expect((await refreshing).status).toBe("not_run");
   expect(await service.forTask(input)).toBe("unavailable");
 });
 it("uses the existing readiness path and refuses unwired eval capabilities without affecting readiness", async () => {
@@ -22,7 +26,7 @@ it("uses the existing readiness path and refuses unwired eval capabilities witho
 });
 it("reuses complete cached questions and isolates in-flight work by company", async () => {
   const record = { schemaVersion: 1, measures: [{ name: "pass", unit: "fraction", value: 1, direction: "up_good" }], questions: [{ id: "q", samples: Array.from({ length: 3 }, () => ({ pass: true, answer: "a" })) }], caseCount: 1, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1 };
-  const input = { key, cache: { read: async () => record } } as unknown as EvalHealthInput;
+  const input = { key, settings: { imageDigest: "image", route: "customer" }, cache: { read: async () => record } } as unknown as EvalHealthInput;
   const service = createEvalBaselines();
   expect(await service.afterMerge(input)).toEqual({ status: "cached" });
   expect(await service.forTask(input)).toBe("ready");
@@ -31,4 +35,17 @@ it("reuses complete cached questions and isolates in-flight work by company", as
   const first = service.afterMerge({ ...input, key: { ...key, codeHash: "1".repeat(64) }, cache: { ...input.cache, read: async () => { await pending; return undefined; } } });
   expect(await service.forTask({ ...input, key: { ...key, company: "org_bbbbbbbbbbbbbbbbbbbb", codeHash: "1".repeat(64) } })).toBe("ready");
   finish(); await first;
+});
+
+it("does not share an in-flight baseline across different runner settings", async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const input = { key, settings: { imageDigest: "image", route: "customer" }, cache: { read: async () => { await gate; return undefined; } } } as unknown as EvalHealthInput;
+  const service = createEvalBaselines(); const first = service.afterMerge(input);
+  let otherRead = false;
+  const other = service.afterMerge({ ...input, settings: { ...input.settings, route: "different" }, cache: { ...input.cache, read: async () => { otherRead = true; return undefined; } } });
+  try {
+    expect(other).not.toBe(first); expect(otherRead).toBe(true);
+    expect((await other).status).toBe("not_run");
+  } finally { finish(); await Promise.all([first, other]); }
 });
