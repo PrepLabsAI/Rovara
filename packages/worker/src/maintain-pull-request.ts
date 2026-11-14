@@ -1,8 +1,10 @@
+import { assertPushCarriesNoRovaraWorkingFiles, unstageRovaraWorkingFiles } from "./never-commit-guard.js";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   AgentXError,
   CONFLICT_PATHS_MAX,
+  ROVARA_NEVER_COMMIT_EXCLUDE,
   WORKFLOW_FIX_DROPS_BASE_CHANGES,
   PullRequestLifecycleResultSchema,
   WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE,
@@ -143,11 +145,12 @@ export async function maintainPullRequest(options: {
     }
     let workspaceTree: string;
     if (reviewedTree === undefined) {
-      await git(repositoryPath, ["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC]);
+      await git(repositoryPath, ["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE]);
+      await unstageRovaraWorkingFiles((args) => git(repositoryPath, args), remoteHead);
       workspaceTree = (await git(repositoryPath, ["write-tree"])).trim();
     } else {
       // In a temporary index, as the reviewed tree was computed, so the real index is untouched.
-      workspaceTree = await temporaryIndexTree({ directory: repositoryPath });
+      workspaceTree = await temporaryIndexTree({ directory: repositoryPath }, invocation.payload.workflowBaseCommit);
       if (workspaceTree !== reviewedTree) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
     }
     const publishedTree = (await git(repositoryPath, ["rev-parse", `${remoteHead}^{tree}`])).trim();
@@ -233,7 +236,8 @@ export async function maintainPullRequest(options: {
         // The merge's files stay as it left them (markers in the conflicting ones, the base's new files in place), and the branch of the workspace moves to a local merge commit of them (parents: the
         // head, then the base commit; never pushed). A candidate cannot be captured from a repository with unmerged index entries, and one is compared with the base commit it is reviewed against,
         // which the workspace's history must therefore hold; the coder resolving the files by editing them, as it edits anything, must not also have to mark each one in Git.
-        await git(repositoryPath, ["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC]);
+        await git(repositoryPath, ["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE]);
+        await unstageRovaraWorkingFiles((args) => git(repositoryPath, args), remoteHead);
         const markedTree = (await git(repositoryPath, ["write-tree"])).trim();
         const marked = (await git(repositoryPath, [
           "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
@@ -388,6 +392,8 @@ async function validateCandidate(
  */
 async function push(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>) {
   assertCredentialFreeRemote(url);
+  // TE-B9: no push carries any of Rovara's own working files (`ROVARA_NEVER_COMMIT`), whatever the workspace layout.
+  await assertPushCarriesNoRovaraWorkingFiles((args) => git(directory, args), "HEAD");
   await credentialedGit(directory, ["push", "--porcelain", url, `HEAD:refs/heads/${branch}`], credential, "Git push failed",
     { mode: "read", refs: true, after: ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"] });
 }

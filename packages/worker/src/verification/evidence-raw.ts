@@ -16,7 +16,7 @@ import { candidateChanges } from "./diff.js";
 import { changedMigrationFiles, migrationDirectionOf, migrationEvidence } from "./migration-check.js";
 import { readContainedReport } from "./report-file.js";
 import { SARIF_REPORT_MAX_BYTES, findingsPart, newFindings, parseSarif, readsPrebuiltState, sameFindings, sarifPathOf, unverifiedPart, type ParsedSarif } from "./sarif.js";
-import { AgentFilesRestoreError } from "./original-code.js";
+import { isWorkspaceUnsafe } from "./original-code.js";
 import { runBaselineScans, type BaselineRun, type BaselineScan } from "./sarif-baseline.js";
 import { changedTestFiles, readCheckReport, type TestProofRepository } from "./test-proof.js";
 import { withIsolatedGit } from "../isolated-git.js";
@@ -149,7 +149,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     if (asking.length > 0 && input.baselineScans !== undefined) {
       baselines = await input.baselineScans(asking.map((scan): BaselineScan => ({ index: scan.index, command: scan.command, argument: scan.argument, path: scan.path, candidateBytes: scan.candidateBytes }))).catch((error: unknown) => {
         // The one fault that must stop the task is not swallowed: the agent's files are not back.
-        if (error instanceof AgentFilesRestoreError) throw error;
+        if (isWorkspaceUnsafe(error)) throw error;
         return new Map<number, string>();
       });
     }
@@ -216,7 +216,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     if (!parsed.success) return undefined;
     return Buffer.byteLength(JSON.stringify(parsed.data), "utf8") > EVIDENCE_RAW_MAX_BYTES ? undefined : parsed.data;
   } catch (error) {
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     return undefined;
   }
 }
@@ -269,7 +269,7 @@ export async function saveEvidenceRaw(input: {
     return true;
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     return false;
   }
 }

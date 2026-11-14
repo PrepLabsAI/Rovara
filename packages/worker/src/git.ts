@@ -50,6 +50,8 @@ const UNSAFE_GIT_VARIABLES = [
   "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_SSH",
   "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_ALLOW_PROTOCOL", "GIT_PROXY_COMMAND", "GIT_CONFIG", "GIT_COMMON_DIR",
   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_TEMPLATE_DIR",
+  // How Git reads a pathspec: any of these would change what `:(glob)` and `:(exclude)` mean (the never-commit list, never-commit-guard.ts).
+  "GIT_LITERAL_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
 ] as const;
 
 /** Git LFS's standard driver: the only filter a repository keeps under AgentX's own Git calls. */
