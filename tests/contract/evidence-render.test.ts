@@ -7,6 +7,7 @@ import {
   EVIDENCE_ISOLATIONS, EVIDENCE_LEVELS, EVIDENCE_RENDER_LIMITS, NEWER_EVIDENCE_WORDS, evidencePackV1ToV2, inertEvidenceText, readEvidencePack, renderEvidence, renderEvidenceRead, type EvidencePackV2,
 } from "../../packages/contracts/src/index.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
+import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const withLevel = (reached: string, isolation = "sealed", result = "verified"): EvidencePackV2 => v2Pack({ level: { reached, required: [] }, producer: { edition: "cloud", isolation }, result });
@@ -306,7 +307,7 @@ describe("inert text", () => {
 });
 
 describe("no callers", () => {
-  it("nothing outside packages/contracts uses any export the evidence pack v2 lane added yet", () => {
+  it("only the offline SageMaker generator reuses trust words outside contracts; no other v2 callers", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
     const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
@@ -317,9 +318,15 @@ describe("no callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
+    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
-    expect(hits.filter((file) => !file.startsWith("packages/contracts/"))).toEqual([]);
+    const mock = "packages/broker/src/core/test-env/sagemaker-mock.ts";
+    expect(hits.filter((file) => !file.startsWith("packages/contracts/"))).toEqual([mock]);
+    const mockSource = readFileSync(`${root}/${mock}`, "utf8");
+    expect(names.filter((name) => new RegExp(`\\b${name}\\b`, "u").test(mockSource))).toEqual(["EVIDENCE_TRUST_CLASS_WORDS"]);
+    const wired = spawnSync("git", ["grep", "--untracked", "-l", "-e", "sagemaker-contract", "-e", "sagemaker-mock", "-e", "generateSageMakerMock", "-e", "findSageMakerContract", "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect(wired.status).toBe(0);
+    expect(wired.stdout.trim().split("\n").sort()).toEqual(["packages/broker/src/core/test-env/sagemaker-contract.md", "packages/broker/src/core/test-env/sagemaker-contract.ts", mock]);
   });
 });
