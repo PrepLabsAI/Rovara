@@ -90,6 +90,7 @@ export * from "./slack-blocks.js";
 export * from "./slack-forms.js";
 export * from "./text-chunks.js";
 export * from "./slack-routing.js";
+export * from "./request-intake.js";
 export * from "./templates.js";
 export * from "./turns.js";
 export * from "./usage.js";

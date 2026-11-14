@@ -3,6 +3,7 @@ import {
   VIEW_ONLY_NOTICE,
   checksReplyPrefix,
   WorkspaceClosePreflightResultSchema,
+  type QuickAutoStartRequest, type QuickAutoStartResult,
   type CommentAnsweredRequest, type ThreadNoteAnsweredRequest,
   type ThreadPrepareResult,
   type ThreadWorkspaceResult,
@@ -51,6 +52,8 @@ export interface ThreadServiceApi {
   createConversation(workspaceId: string): Promise<string>;
   /** A task thread's read-only view for answering a question (workspace mode `task-answer`); nothing is prepared or run on it. */
   taskAnswerWorkspace?(requestId: string, taskId: string, commentId?: string): Promise<ThreadWorkspaceResult>;
+  /** Decision 134: starts Quick on a clear small change (the broker checks the text first); absent where the control plane cannot. */
+  startQuickFromIntake?(input: QuickAutoStartRequest): Promise<QuickAutoStartResult>;
   /** Marks a saved task-thread note answered, so the planner's next step skips it. */
   markThreadNoteAnswered?(input: ThreadNoteAnsweredRequest): Promise<void>;
   /** Spec 061 slice 2: AgentX's answer to a task page comment, or that it could not answer. */

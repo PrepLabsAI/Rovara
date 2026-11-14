@@ -18,13 +18,15 @@ export const TRANSPORTS = {
  * changes the orchestrator's cwd every turn). OpenRouter also sends no x-session-id header, as on
  * 0.85.1. Anthropic's catalog lists server-side fallback models for some Claude models; AgentX never
  * lets another model answer for the one requested, so they are dropped (spec 054 FR-003).
+ * Pi 1.5.1 turns Anthropic message threads on by default for api.anthropic.com: the server keeps the conversation and
+ * each request sends only the new messages. Rovara sends the whole conversation every time, so threads are off here.
  */
 export function requestCompat(provider: KeyedModelProvider, compat: unknown) {
   if (provider === "openrouter") return { ...(compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false, supportsMidConvoSystemMessages: false };
   if (provider === "anthropic") {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the server-side fallbacks
     const { allowedFallbackModels: _fallbacks, ...rest } = (compat ?? {}) as AnthropicMessagesCompat;
-    return { ...rest, supportsMidConvoSystemMessages: false };
+    return { ...rest, supportsMidConvoSystemMessages: false, supportsMessageThreads: false };
   }
   return { ...(compat as OpenAIResponsesCompat | undefined), supportsMidConvoSystemMessages: false };
 }

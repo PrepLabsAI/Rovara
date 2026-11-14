@@ -22,14 +22,16 @@ export interface TaskUsageTelemetry {
   };
   cacheReadRatio: number;
   costUsd: number | null;
-  /** Set for keyed providers: OpenRouter prices are estimates, direct providers' are Pi's list prices. */
-  costSource?: "estimated" | "list-price" | "unknown";
+  /** Set for keyed providers: OpenRouter's total is its billed amount when the response carried it ("billed") and an estimate otherwise; direct providers' are Pi's list prices. */
+  costSource?: "estimated" | "billed" | "list-price" | "unknown";
 }
 
 /** The part of Pi's SessionStats usage telemetry reads; SessionStats is assignable to it. */
 export interface UsageStats {
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
   cost: number;
+  /** True when every priced usage carried the provider's own billed total (Pi's `cost.totalFromProvider`); absent when unknown. */
+  costFromProvider?: boolean;
 }
 
 const TokenCount = z.number().int().nonnegative();
@@ -44,7 +46,7 @@ export const TaskUsageTelemetrySchema = z.object({
   tokens: z.object({ input: TokenCount, output: TokenCount, cacheRead: TokenCount, cacheWrite: TokenCount, total: TokenCount }).strict(),
   cacheReadRatio: z.number().min(0).max(1),
   costUsd: z.number().nonnegative().nullable(),
-  costSource: z.enum(["estimated", "list-price", "unknown"]).optional(),
+  costSource: z.enum(["estimated", "billed", "list-price", "unknown"]).optional(),
 }).strict();
 
 export function effectiveCacheRetention(value: unknown): PiCacheRetention {
@@ -75,13 +77,14 @@ export function createTaskUsageTelemetry(
     tokens,
     cacheReadRatio: inputSideTokens === 0 ? 0 : tokens.cacheRead / inputSideTokens,
     costUsd: isKeyedModelProvider(model.provider) && stats.cost === 0 ? null : nonNegativeNumber(stats.cost, "session cost"),
-    ...(isKeyedModelProvider(model.provider) ? { costSource: costSource(model.provider, stats.cost) } : {}),
+    ...(isKeyedModelProvider(model.provider) ? { costSource: costSource(model.provider, stats.cost, stats.costFromProvider === true) } : {}),
   };
 }
 
-function costSource(provider: string, cost: number): "estimated" | "list-price" | "unknown" {
+function costSource(provider: string, cost: number, fromProvider: boolean): "estimated" | "billed" | "list-price" | "unknown" {
   if (cost <= 0) return "unknown";
-  return provider === "openrouter" ? "estimated" : "list-price";
+  if (provider !== "openrouter") return "list-price";
+  return fromProvider ? "billed" : "estimated";
 }
 
 function nonNegativeInteger(value: number, label: string): number {

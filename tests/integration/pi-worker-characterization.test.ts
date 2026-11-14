@@ -23,6 +23,9 @@ import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
+/** A model-call note without its duration, which must be absent or 0 on the faux model. */
+const withoutZeroDuration = (notes: readonly unknown[]): Array<Record<string, unknown>> => notes.map((note) => { const { durationMs, ...rest } = note as Record<string, unknown>; return { durationMs, rest }; }).map(({ durationMs, rest }) => { expect(durationMs === undefined || durationMs === 0).toBe(true); return rest; });
+
 const keys = (value: unknown): string[] => Object.keys(value as object).sort();
 // An assistant message ended by an abort carries durationMs only when the abort lands after the message started (timing-dependent): allowed, not required. Every other key stays exact.
 const keysExceptOptionalDuration = (value: unknown): string[] => keys(value).filter((key) => key !== "durationMs");
@@ -288,7 +291,7 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
     } finally { resumed.dispose(); }
   });
 
-  it("delivers a steer before the next model call, and ends an aborted turn with an error message_end and a resolved prompt", async () => {
+  it("delivers a steer before the next model call, and ends an aborted turn with an aborted message_end and a resolved prompt", async () => {
     // protects packages/worker/src/pi-session.ts (steer, abort) and the loop guard's steer (tool-loop-guard.ts, run-task.ts:142-145); guards: steering queue and abort semantics (0.99)
     const shell = recordingShell("ok\n");
     const contexts: ModelView[] = [];
@@ -315,16 +318,16 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
       expect((contexts[1]!.messages as Array<{ role: string }>).map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "user"]);
       const ends = events.filter((event) => event.type === "message_end").map((event) => event.message!);
       expect(ends.map((message) => [message.role, message.stopReason])).toEqual([
-        ["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["assistant", "error"],
+        ["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["assistant", "aborted"],
       ]);
       // Observed on 0.85.1: an abort between model calls is not stopReason "aborted". The next call fails
-      // before it streams, and Pi reports it as an error with the AbortSignal's message.
+      // before it streams, and Pi reported it as an error with the AbortSignal's message. Pi 1.5 ends it "aborted" (the worker reads both).
       const last = ends.at(-1)!;
       // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
       // Ruling F (Pi 1.1+, additive): an assistant message ended by an abort may also carry durationMs (timing-dependent, so optional here).
       expect(keysExceptOptionalDuration(last)).toEqual(["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"]);
       expect({ role: last.role, stopReason: last.stopReason, errorMessage: last.errorMessage, content: last.content }).toEqual({
-        role: "assistant", stopReason: "error", errorMessage: "This operation was aborted", content: [],
+        role: "assistant", stopReason: "aborted", errorMessage: "This operation was aborted", content: [],
       });
       expect(eventOrder(events)).toEqual([
         "agent_start", "turn_start", "message_start", "message_end",
@@ -593,7 +596,8 @@ describe("spec 051: the worker's session carries the AgentX preamble and the inl
     await runTaskInvocation(invocation, { rootPath, model: FAUX_MODEL, piAdapter, eventSink: async () => undefined, artifactSink: async () => undefined });
     expect(given).toHaveLength(1);
     const { resourceLoader } = await createWorkerResources({ cwd: rootPath, agentDirectory: join(rootPath, ".agentx/pi"), contextFiles: [], extensionFactories: given[0]! });
-    expect(resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toEqual(["<inline:agentx-verification>"]);
+    // Rovara's tool-call limit is a tool_call block, so its extension sits in front of verification (tool-loop-guard.ts); nothing else is loaded.
+    expect(resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toEqual(["<inline:rovara-tool-loop-guard>", "<inline:agentx-verification>"]);
   });
 
   it("gives the eval path's session (runSwebenchAgent through the default adapter) the same preamble", async () => {
@@ -812,7 +816,8 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       // (its provider text stays out of the task's events); the task's events carry one sanitized note for it instead.
       lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
-    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
+    // Pi 1.5 ends the model call an abort cuts short as "aborted", not "error": the task's note says "stopped", not "failed".
+    expect(withoutZeroDuration(modelCallNotes(run))).toEqual([{ outcome: "stopped", attempt: 1 }]);
     expect(run.factoryCalls).toBe(1);
     // The 5 s sleep was killed, not waited out.
     expect(run.elapsed).toBeLessThan(3_000);
@@ -830,7 +835,8 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       usageOutcome: ["CANCELLED"],
       lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
-    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
+    // Pi 1.5 ends the model call an abort cuts short as "aborted", not "error": the task's note says "stopped", not "failed".
+    expect(withoutZeroDuration(modelCallNotes(run))).toEqual([{ outcome: "stopped", attempt: 1 }]);
     expect(run.factoryCalls).toBe(1);
   });
 });

@@ -27,7 +27,7 @@ import {
   planningDeadlineMs, sanitizeModelCallEvent, type ModelCallExpiryInfo, type ModelCallNote,
 } from "./model-call-monitor.js";
 import { consoleWorkerLog, type WorkerLogSink } from "./worker-log.js";
-import { ToolLoopGuard } from "./tool-loop-guard.js";
+import { ToolLoopGuard, toolLoopGuardExtension } from "./tool-loop-guard.js";
 import {
   createWorkspacePiSession,
   openRegisteredWorkspacePiSession,
@@ -558,6 +558,8 @@ async function runTask(
 
   // The agent's shell: the devcontainer's or the sandbox's, or the local one when it was chosen.
   const agentShell = bashOperations ?? (localShell ? localBashOperations({ explicit: true }) : undefined);
+  // A model repeating the same failing call is told once, then stopped (#127), and the call past the tool-call limit is refused before it runs: the guard's extension sits in front of every call of this session.
+  const loopGuard = new ToolLoopGuard();
   let session: PiSessionHandle;
   if (registered) {
     session = await openRegisteredWorkspacePiSession(
@@ -568,7 +570,7 @@ async function runTask(
         conversationId,
         sessionFile: registered.sessionFile,
         onDiagnostic,
-        extensionFactories: planning || reviewing ? [] : [verification],
+        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing ? [] : [verification])],
         ...(reviewing ? reviewerRuleBases : {}),
         ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
@@ -580,7 +582,7 @@ async function runTask(
     session = await createWorkspacePiSession(
       {
         rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: piWorkflowModeOf(invocation.payload.workflowMode), conversationId, onDiagnostic,
-        extensionFactories: planning || reviewing ? [] : [verification],
+        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing ? [] : [verification])],
         ...(reviewing ? reviewerRuleBases : {}),
         ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
@@ -662,11 +664,15 @@ async function runTask(
       });
     },
   });
-  // A model repeating the same failing call is told once, then stopped (#127).
-  const loopGuard = new ToolLoopGuard();
   // A task whose every edit or write failed, and that changed nothing, did not do its job (#158).
   const fileChanges = new FileChangeAttempts([canonicalRoot, resolve(dependencies.rootPath)]);
   let loopStop: Error | undefined;
+  const stopForLoop = (error: Error): void => {
+    loopStop = error;
+    monitor.stop();
+    verificationStop.abort();
+    void session.abort().catch(() => undefined);
+  };
   // pi ends a turn normally even when its model call failed or was aborted; only the last assistant
   // message says so (#136).
   let lastAssistant: AssistantOutcome | undefined;
@@ -704,12 +710,11 @@ async function runTask(
       void events.append("progress", { message: "The agent repeated a failing call; AgentX told it to change approach." }).catch(() => undefined);
       void session.steer?.(action.message).catch(() => undefined);
     } else if (action.kind === "stop") {
-      loopStop = action.error;
-      monitor.stop();
-      verificationStop.abort();
-      void session.abort().catch(() => undefined);
+      stopForLoop(action.error);
     }
   });
+  // The call past the tool-call limit was refused before it ran (tool_call block); the task ends with the limit's error.
+  loopGuard.onLimit = (error) => { if (loopStop === undefined) stopForLoop(error); };
   try {
     let outcome: TaskUsageOutcome = "FAILED";
     let taskResult: TaskInvocationResult | undefined;
@@ -725,7 +730,7 @@ async function runTask(
     };
     // P-4: Pi skips agent_before_settle after an abort, so a stopped run has no report from the extension.
     // Ruling N: an extra try with no second settle and no stop keeps the first round's regression.
-    // A cancelled model call also ends with stopReason "error", so the stop is read first.
+    // A cancelled model call ends with stopReason "aborted" on Pi 1.5 (it was "error" before), so `errored` is false for it; the stop is read first all the same.
     // Ruling Y: a regression AgentX found stands through a stop, a cancel or a model error on the extra turn.
     const finalChecks = (): CheckReport => finalCheckReport({
       reported: reportedChecks,
