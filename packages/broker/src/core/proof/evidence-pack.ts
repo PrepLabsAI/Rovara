@@ -11,7 +11,7 @@ import { weakeningFactsOf } from "./weakening-flags.js";
 import { weakeningPartsOf } from "./evidence-v2-lines.js";
 import {
   ArtifactLinkSchema, ArtifactRefSchema, EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_ARTIFACT_RETENTION, EVIDENCE_CHECKS_MAX, EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_MAX_BYTES, EvidencePackSchema, EvidenceRawSchema, EvidenceViewSchema,
-  EvidencePackV2Schema, evidencePackV1ToV2,
+  EvidencePackV2Schema, evidencePackV1ToV2, evidenceAiFromArtifact, type EvidenceAiInputs,
   redactText,
   TEST_ID_MAX,
   isValidTestId,
@@ -343,7 +343,9 @@ export function serviceModeWords(mode: EvidenceEnvironment["services"][number]["
  * `pending` -> undefined, otherwise `their_ci`); it is a parameter so this lane needs nothing from TE-B2 until it merges, and the caller passes the mapping's result. `changedFiles` (the diff's files) fill the pack's
  * `flags` and `weakening` parts when the caller has them; a pull request description re-reads them from its own files anyway.
  */
-export interface EvidenceV2Writer {
+export interface EvidenceV2Writer extends EvidenceAiInputs {
+  /** Bound eval-wire artifact, loaded once by the caller under its existing read guard. */
+  evalArtifact?: unknown;
   version: 2;
   producer: EvidencePackV2["producer"];
   ciLevel?: "their_ci" | "no_ci" | "ci_not_readable" | undefined;
@@ -394,12 +396,19 @@ export function evidencePackV2Of(pack: EvidencePack, writer: EvidenceV2Writer, r
     ...(writer.repositories === undefined ? {} : { repositories: writer.repositories }),
   });
   const parts = writer.changedFiles === undefined ? {} : weakeningPartsOf(weakeningFactsOf(writer.changedFiles, pack), [], report);
+  const ai = evidenceAiFromArtifact(writer.evalArtifact, pack.candidateDigest, writer);
   const v2 = {
     ...base,
+    ...(ai === undefined ? {} : { ai }),
     ...parts,
     ...(writer.proof === undefined ? {} : { proof: writer.proof }),
     ...(writer.meters === undefined ? {} : { meters: writer.meters }),
   };
   const parsed = EvidencePackV2Schema.safeParse(v2);
-  return parsed.success ? parsed.data : undefined;
+  if (parsed.success) return parsed.data;
+  // Optional AI evidence must not discard independently valid proof evidence.
+  const withoutAi = { ...v2 };
+  delete withoutAi.ai;
+  const fallback = EvidencePackV2Schema.safeParse(withoutAi);
+  return fallback.success ? fallback.data : undefined;
 }

@@ -121,6 +121,12 @@ export function guardV2Parts(pack: EvidencePackV2, deny: TestEnvProdDeny, scan: 
       else delete out.proof;
     }
   }
+  // Inert text can add a joiner and, on a second pass, spacing after it. Scan the underlying
+  // text values, not schema keys such as newlyPass, which are not customer credentials.
+  if (out.ai !== undefined && found(evidenceTexts(out.ai).map(text => text.replace(/\u200d\s*/gu, "")))) {
+    const { oldNewLines: _lines, ...ai } = out.ai; void _lines;
+    out.ai = { ...ai, eval: { ...ai.eval, questions: [], notices: [...new Set([...ai.eval.notices, "details_withheld" as const])] } };
+  }
   if (out.weakening !== undefined && found(out.weakening)) delete out.weakening;
   if (out.flags !== undefined && found(out.flags)) delete out.flags;
   if (out.meters !== undefined && found(out.meters)) delete out.meters;

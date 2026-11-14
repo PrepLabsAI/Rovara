@@ -1,7 +1,7 @@
 // TE-A2b: the broker's pack WRITER can write version 2. The default is still version 1 (a Cloud reader that is strict about v1 must not meet a v2 pack before the Cloud half and the TE-A1 gate exist); readers accept both.
 // The level and the result are decided here from facts the broker has (where the checks ran, how the CI reads, the checks' own outcomes); the CI part comes from TE-B2's `ciEvidenceLevel`, passed in by the caller.
 // Old v1 data keeps working: the v2 pack is made from a pack `buildEvidencePack` really built, not only a fixture.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EvidencePackSchema, EvidencePackV2Schema, readEvidencePack, readEvidencePackText, renderEvidence, type CheckEntry, type EvidencePack } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
@@ -287,4 +287,65 @@ describe("TE-A2b review M4: the parts only a v2 writer adds go through the data 
     expect(pack.candidate.repositories).toHaveLength(1);
     expect(pack.notTested.some((item) => item.id === "data_guard")).toBe(false);
   });
+});
+
+// Part A consumes the eval-wire artifact; producer and verdict semantics stay in eval-wire.
+describe("AI evidence in the real keep path", () => {
+  const evalArtifact = () => ({ schemaVersion: 1, candidateDigest: DIGEST, roundKind: "check_unsealed", evalPass: 2, outcome: "done", context: { aiChange: true, discovery: "configured", previousPasses: 1 }, questions: [{ id: "q", category: "safety", edited: false, old: [true, true, true], first: false, freshOld: [true, true, true], freshNew: [false, false, false], answers: { old: ["old", "old", "old"], first: "new", freshOld: ["old", "old", "old"], freshNew: ["new", "new", "new"] } }], options: { changedPromptCalls: 1, hiddenSetUsed: false, subsetSupported: true, sameJudgeFamily: false }, excluded: [], notices: [], usage: { calls: 7 }, cache: "not_used", label: "Improved on eval" });
+  it("keeps the re-derived label, fix-round and bounded answers and leaves proof alone", async () => {
+    const w = world();
+    await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, evalArtifact: evalArtifact() } }));
+    const p = await stored(w.blobs);
+    expect(p).toMatchObject({ ai: { eval: { label: "Worse on eval", fixRound: 1, questions: [{ id: "q", old: ["old", "old", "old"], new: ["new", "new", "new"] }] }, realModelRun: { status: "not_run", reason: "not_available" } } });
+    expect(p.proof).toBeUndefined();
+  });
+  it("keeps byte-identical packs for absent or invalid metadata and v1 stays unchanged", async () => {
+    const control = world(); await keepEvidence(control.deps, keepInput({ writer: sandbox })); const before = await stored(control.blobs);
+    for (const invalidArtifact of [undefined, {}, { ...evalArtifact(), candidateDigest: "f".repeat(64) }]) {
+      const w = world(); await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, evalArtifact: invalidArtifact } }));
+      expect(await stored(w.blobs)).toEqual(before);
+    }
+  });
+  it("the data guard removes sensitive details without changing a Worse verdict", async () => {
+    const a = evalArtifact(); a.questions[0]!.answers.freshNew = Array.from({ length: 3 }, () => "person" + "@gmail.com");
+    const w = world(); await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, evalArtifact: a } }));
+    const p = await stored(w.blobs);
+    expect(p).toMatchObject({ ai: { eval: { label: "Worse on eval", questions: [], notices: ["details_withheld"] } } });
+    expect(JSON.stringify(p)).not.toContain("person@gmail.com");
+  });
+});
+
+it("AI text guard keeps fixed verdicts on sensitive IDs, excerpts and scanner faults", async () => {
+  const q = { id: "safe", category: "safety", edited: false, old: [true, true, true], first: false, freshOld: [true, true, true], freshNew: [false, false, false], answers: { old: ["old", "old", "old"], first: "new", freshOld: ["old", "old", "old"], freshNew: ["new", "new", "new"] } };
+  for (const field of ["id", "old", "new", "scan"] as const) {
+    const question = structuredClone(q);
+    const planted = ["CANARYPERSON", "gmail.com"].join("@");
+    if (field === "id") question.id = planted;
+    else if (field === "old") question.answers.freshOld = [planted, planted, planted];
+    else question.answers.freshNew = [field === "scan" ? "CANARYFAULT" : planted, "", ""];
+    const evalArtifact = { schemaVersion: 1, candidateDigest: DIGEST, roundKind: "check_unsealed", evalPass: 1, outcome: "done", context: { aiChange: true, discovery: "configured", previousPasses: 0 }, questions: [question], options: { changedPromptCalls: 1, hiddenSetUsed: false, subsetSupported: true, sameJudgeFamily: false }, excluded: [], notices: [], usage: { calls: 7 }, cache: "not_used" };
+    const w = world();
+    if (field === "scan") w.deps.scan = (text, deny) => { if (text.includes("CANARYFAULT")) throw new Error("CANARYCAUSE"); return scanTextForTests(text, deny); };
+    expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, evalArtifact } }))).toMatchObject({ kept: true });
+    const saved = await stored(w.blobs);
+    expect(saved).toMatchObject({ ai: { eval: { label: "Worse on eval", questions: [], notices: ["details_withheld"] } } });
+    expect(JSON.stringify(saved)).not.toContain("CANARY");
+  }
+});
+
+
+it("an AI schema rejection preserves valid proof evidence but never excuses an invalid base", async () => {
+  const contracts = await import("@agentx/contracts");
+  const parse = contracts.EvidencePackV2Schema.safeParse.bind(contracts.EvidencePackV2Schema);
+  const spy = vi.spyOn(contracts.EvidencePackV2Schema, "safeParse").mockImplementationOnce(input => parse({ ...(input as object), ai: { invalid: "CANARY" } }));
+  try {
+    const w = world();
+    expect(await keepEvidence(w.deps, keepInput({ writer: sandbox }))).toMatchObject({ kept: true });
+    const value = await stored(w.blobs);
+    expect(value.ai).toBeUndefined();
+    expect(value.checks).toHaveLength(1);
+    expect(JSON.stringify(value)).not.toContain("CANARY");
+  } finally { spy.mockRestore(); }
+  const w = world();
+  expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, proof: { invalid: "CANARY" } } }))).toMatchObject({ kept: false });
 });

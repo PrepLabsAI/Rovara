@@ -6,6 +6,7 @@ import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPT
 import { inertEvidenceText } from "./evidence-inert.js";
 import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
+import { renderAiEvidence } from "./evidence-ai-render.js";
 import { weakeningLines } from "./evidence-weakening.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
 
@@ -48,6 +49,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 /** Slots other lanes fill: the time-target line (TE-D9) and the "Rovara problem" line (TE-B8). Each is shown only when it is present and not blank. */
 export interface EvidenceRenderOptions {
+  questionLimit?: 10 | 5 | 2 | 0 | undefined;
   timeTargetLine?: string | undefined;
   rovaraProblemLine?: string | undefined;
   /** What `readEvidencePack` reported, for the "newer evidence" line. */
@@ -61,7 +63,7 @@ export interface EvidenceRenderOptions {
 export interface EvidenceRendering {
   /** The line a pull request or a check summary leads with. */
   firstLine: string;
-  /** Where the checks ran. Also `body[0]`. */
+  /** Where the checks ran; follows AI checks when recorded. */
   producerLine: string;
   /** Everything after the first line. */
   body: string[];
@@ -224,14 +226,16 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const isolation = pack.producer.isolation as string;
   const weakest = pack.level.weakest;
   const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
-  const firstLine = evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words });
+  let firstLine = evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words });
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
   const newer = options.newer ?? noNewerEvidence();
   const notTested = pack.notTested;
   const flagged = weakeningPart(pack);
   if (options.compact === true) {
-    const short = [producerLine, ...flagged.flags, ...slot(options.rovaraProblemLine), ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
+    const ai = renderAiEvidence(pack.ai, options.questionLimit ?? 0);
+    firstLine = ai.firstLine ?? firstLine;
+    const short = [...ai.lines, producerLine, ...flagged.flags, ...slot(options.rovaraProblemLine), ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
     return { firstLine, producerLine, body: short, text: [firstLine, ...short].join("\n") };
   }
   const body = [
@@ -251,6 +255,11 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
     ]),
     ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []),
   ];
+  const ai = renderAiEvidence(pack.ai, options.questionLimit, Math.max(1000, EVIDENCE_RENDER_LIMITS.textMax - [firstLine, ...body].join("\n").length - 1));
+  firstLine = ai.firstLine ?? firstLine;
+  body.unshift(...ai.lines);
+  // Keep verdicts and weakening flags; the existing compact pointer records omitted detail.
+  if (pack.ai !== undefined && [firstLine, ...body].join("\n").length > EVIDENCE_RENDER_LIMITS.textMax) return renderEvidence(pack, { ...options, compact: true });
   return { firstLine, producerLine, body, text: [firstLine, ...body].join("\n") };
 }
 
