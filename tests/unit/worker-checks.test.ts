@@ -14,6 +14,7 @@ import {
 } from "../../packages/worker/src/verification/checks.js";
 import { projectCheckKey, readCheckHistory, recordProjectOutcomes, type CheckHistory } from "../../packages/worker/src/verification/check-history.js";
 import type { RecordedCommand } from "../../packages/worker/src/verification/recorder.js";
+import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
 import { devcontainerBashOperations, type DevcontainerCli } from "../../packages/worker/src/devcontainer.js";
 
 const run = promisify(execFile);
@@ -320,14 +321,15 @@ describe("runChecks", () => {
     expect(runners.agent).toHaveLength(1);
   });
 
-  it("an abort returns at once even when a runner ignores its signal", async () => {
+  it("an abort is joined: a runner that ignores its signal is not confirmed stopped, so runChecks throws once its join bound passes (FIX-RUNNER-ABORT-JOIN)", async () => {
     const controller = new AbortController();
     const runners = fakeRunners({ runProjectCommand: () => new Promise(() => undefined) });
     const startedAt = Date.now();
     setTimeout(() => controller.abort(), 20);
-    const { entries } = await runChecks(planChecks([command("a"), command("b")], recorderOf([])), runners, budget(controller.signal));
-    expect(Date.now() - startedAt).toBeLessThan(120);
-    expect(entries.map((entry) => entry.after)).toEqual(["not_run", "not_run"]);
+    await expect(runChecks(planChecks([command("a"), command("b")], recorderOf([])), runners, { ...budget(controller.signal), abortJoinMs: 100 })).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
+    // Not at once: the caller's tree is not touched until the runner has reported (or the bound has passed).
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
   });
 
   it("runs nothing when the signal has already fired", async () => {
@@ -451,11 +453,18 @@ describe("createCheckRunners with a devcontainer", () => {
   /** A fake devcontainer CLI: each command runs until its client is aborted; kill execs answer at once. */
   function stoppableCli() {
     const calls: string[][] = [];
+    let endCommand: (() => void) | undefined;
     const cli: DevcontainerCli = {
       run: (args, options) => {
         calls.push([...args]);
-        if (args.some((arg) => arg.includes("kill -TERM") || arg.includes("kill -KILL"))) return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+        if (args.some((arg) => arg.includes("kill -TERM"))) {
+          // The command obeys TERM: it ends, and the local client with it. (An abort is joined, so it waits for this.)
+          endCommand?.();
+          return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+        }
+        if (args.some((arg) => arg.includes("kill -KILL"))) return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
         return new Promise((resolve) => {
+          endCommand = () => resolve({ exitCode: 143, stdout: "", stderr: "" });
           options.signal?.addEventListener("abort", () => resolve({ exitCode: null, stdout: "", stderr: "" }), { once: true });
         });
       },

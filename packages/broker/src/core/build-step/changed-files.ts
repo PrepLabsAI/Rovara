@@ -6,10 +6,13 @@
 //   - the risk and the description's list come from the CODE HOST, after the push: the files changed between the pull request's base and the pushed, checked head (`verifyPublishedChanges`);
 //   - without a verified list the risk is HIGH (`riskUntilVerified`), never lower, and says why.
 import { createHash } from "node:crypto";
-import { change, when, type ChangeRequestFile, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
+import { change, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
-import { CHANGED_PATH_PAGES, changeRequestRef } from "../merge/host-port.js";
-import { parseChangedFiles } from "../proof/changed-files.js";
+import { flowIs } from "../task-flow/flow-guard.js";
+import { boundCommits, readHeadFacts, tierFilesOfRead } from "../merge/change-tier-read.js";
+import { changeRequestRef, readChangeRequestFiles } from "../merge/host-port.js";
+import { recordGrowth, recordTier, tierFromDiff, type TierFile } from "../decisions/change-tier.js";
+import { changedFilesFromHostFiles, parseChangedFiles } from "../proof/changed-files.js";
 import { recomputeRisk, type ChangedFilesRead, type LessonsUsedSection } from "../proof/pull-request-body.js";
 import { linearIssueKeyOfBindings } from "../proof/linear-close.js";
 import { workflowPullRequestBody } from "../proof/workflow-pull-request-body.js";
@@ -68,37 +71,13 @@ export async function reportedChangedFiles(deps: Pick<TaskFlowDeps, "store" | "a
   return undefined;
 }
 
-/** A path from the host that a one-line diff header could not carry honestly (a line break or a control character) is not listed, and the list is then not complete. */
-const plainPath = (path: string): boolean => !/[\p{Cc}\p{Cf}]/u.test(path) && path.length > 0 && path.length <= 4_096;
-
 /**
  * The files one change request changes between its base and its head, as the code host reports them (`changedFiles`), in the shape the risk rules read. The host's counts are kept; the flags the risk rules
  * read from the diff (a removed or skipped test, a changed test command, a route) come from the patch the host gave for the file, when it gave one. `complete` is false when the host's list was cut or a file had a path that cannot be listed.
  */
 export async function hostChangedFiles(host: CodeHost, input: { repositoryId: string; repositoryUrl: string; number: number; scope: HostScope; beforeRequest?: (() => void) | undefined }): Promise<ChangedFilesRead> {
-  const files: ChangeRequestFile[] = [];
-  let complete = false;
-  for (let page = 1; page <= CHANGED_PATH_PAGES; page += 1) {
-    input.beforeRequest?.();
-    const read = await host.changedFiles(changeRequestRef(input.repositoryUrl, input.number), page, input.scope);
-    files.push(...read.files);
-    if (read.nextPage === undefined) { complete = true; break; }
-  }
-  const usable = files.filter((file) => plainPath(file.path) && (file.previousPath === undefined || plainPath(file.previousPath)));
-  const text = [`## ${input.repositoryId}`, "### status", "### diff", ...usable.map((file) => {
-    const from = file.previousPath ?? file.path;
-    return [`diff --git a/${from} b/${file.path}`, ...(file.status === "removed" ? ["deleted file mode 100644"] : []), `--- a/${from}`, `+++ b/${file.path}`, ...(file.patch === undefined ? [] : [file.patch.startsWith("@@") ? file.patch : `@@ -0,0 +0,0 @@\n${file.patch}`])].join("\n");
-  })].join("\n");
-  const parsed = parseChangedFiles(text);
-  const counts = new Map(usable.map((file) => [`${file.previousPath ?? ""}\u0000${file.path}`, file]));
-  return {
-    // The host's own counts replace the ones read from a patch (a file with no patch has none to read, and "unknown" is not 0).
-    files: parsed.files.map((entry) => {
-      const source = counts.get(`${entry.renamedFrom ?? ""}\u0000${entry.path}`);
-      return source === undefined ? entry : { ...entry, added: source.additions, removed: source.deletions };
-    }),
-    complete: complete && usable.length === files.length && parsed.complete,
-  };
+  const read = await readChangeRequestFiles(host, changeRequestRef(input.repositoryUrl, input.number), input.scope, input.beforeRequest);
+  return changedFilesFromHostFiles(input.repositoryId, read.files, read.complete);
 }
 
 export type VerifyOutcome = "verified" | "already" | "not_applicable" | "unavailable";
@@ -117,6 +96,11 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   if ((await deps.store.get(verifiedFilesKey(task.workspaceId, candidate.digest))) !== undefined) return "already";
   const project = await deps.projects.revision(task.project, task.startingRevision);
   const all: ChangedFilesRead["files"][number][] = [];
+  // The change tier is read from the same list the host gave: the files with the host's own patch text.
+  const tierFiles: TierFile[] = [];
+  let tierComplete = true;
+  const tierTargets: Array<Parameters<typeof readHeadFacts>[0][number]> = [];
+  let headFacts: Awaited<ReturnType<typeof readHeadFacts>> | undefined;
   let complete = true;
   const hosts: Array<{ host: CodeHost; url: string; number: number; repositoryId: string; url_: string }> = [];
   try {
@@ -128,10 +112,23 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
       const remote = await host.getChangeRequest(changeRequestRef(definition.url, pullRequest.number), { orgId: deps.companyId });
       // The head the host shows must be the head Rovara recorded and checked.
       if (remote.state !== "open" || remote.headRevision !== pullRequest.headSha) return "unavailable";
-      const read = await hostChangedFiles(host, { repositoryId: pullRequest.repositoryId, repositoryUrl: definition.url, number: pullRequest.number, scope: { orgId: deps.companyId }, beforeRequest });
+      const raw = await readChangeRequestFiles(host, changeRequestRef(definition.url, pullRequest.number), { orgId: deps.companyId }, beforeRequest);
+      const read = changedFilesFromHostFiles(pullRequest.repositoryId, raw.files, raw.complete);
+      const tierRead = tierFilesOfRead(pullRequest.repositoryId, raw);
       all.push(...read.files);
+      tierFiles.push(...tierRead.files);
       complete &&= read.complete;
+      tierComplete &&= tierRead.complete;
       hosts.push({ host, url: definition.url, number: pullRequest.number, repositoryId: pullRequest.repositoryId, url_: pullRequest.url });
+      tierTargets.push({ host, repositoryId: pullRequest.repositoryId, repositoryUrl: definition.url, number: pullRequest.number, headSha: pullRequest.headSha ?? "" });
+    }
+    // What the host knows of the code at the heads (the text of the documents, what the instruction files import, symbolic links). A host that cannot say leaves the tier unwritten and the risk high.
+    headFacts = await readHeadFacts(tierTargets, tierFiles, { orgId: deps.companyId }, beforeRequest);
+    // The head must not have moved while the files and the facts were read: the tier is for the code Rovara checked.
+    for (const target of tierTargets) {
+      beforeRequest?.();
+      const again = await target.host.getChangeRequest(changeRequestRef(target.repositoryUrl, target.number), { orgId: deps.companyId });
+      if (again.state === "open" && again.headRevision !== target.headSha) return "unavailable";
     }
   } catch (error) {
     // A host that cannot answer (a rate limit included) leaves the risk high; the caller's pause logic sees the rate limit again on its own read.
@@ -141,9 +138,16 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   }
   const read: ChangedFilesRead = { files: all, complete };
   const judged = riskFromFiles(workflow, read);
+  // The tier of the code the host shows, bound to the head commits Rovara checked and the base they were built on. It only goes up, and the growth after the build is recorded.
+  const at = iso(deps);
+  const fresh = tierFromDiff({ files: tierFiles, complete: tierComplete && hosts.length > 0 }, { ...boundCommits(pullRequests.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.headSha ?? "", baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }))), at, ...(headFacts === undefined ? {} : { head: headFacts }) });
+  const tiered = recordTier(workflow.flow, fresh);
+  const previousLevel = workflow.flow?.tier?.level;
+  const flow = tiered.grew && previousLevel !== undefined ? recordGrowth(tiered.flow, previousLevel, tiered.tier.level, at) : tiered.flow;
   const written = await deps.store.update({
-    key: taskKey(task.taskId), ops: [change.set(["workflow", "risk"], JSON.parse(JSON.stringify(judged.risk)) as never)],
-    condition: when.and(when.eq(["workflow", "revision"], workflow.revision), when.notExists("closedAt")),
+    key: taskKey(task.taskId), ops: [change.set(["workflow", "risk"], JSON.parse(JSON.stringify(judged.risk)) as never), change.set(["workflow", "flow"], JSON.parse(JSON.stringify(flow)) as never)],
+    // The revision does not move (a row of the step in flight waits for it); a writer that holds the whole older workflow is stopped by its own `flowIs` condition, and this write by the same one.
+    condition: when.and(when.eq(["workflow", "revision"], workflow.revision), when.notExists("closedAt"), flowIs(workflow.flow)),
   });
   if (!written.applied) return "unavailable";
   await deps.store.put({ item: { ...verifiedFilesKey(task.workspaceId, candidate.digest), entityType: "VERIFIED_FILES", candidateDigest: candidate.digest, complete, verifiedAt: iso(deps), files: JSON.parse(JSON.stringify(all.slice(0, 200))) as never } });
