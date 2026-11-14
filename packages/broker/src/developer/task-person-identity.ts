@@ -10,6 +10,7 @@ import {
   redactAndCap,
   type TaskPersonProofRequest,
   type TaskPersonProofResponse,
+  type DeveloperSignInMethod,
 } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../aws/admin-actions.js";
 import { ownerKeyForSubject } from "../aws/lambda.js";
@@ -21,7 +22,7 @@ export interface TaskPersonIdentity {
   developerId: string;
   slackUserId: string;
   name: string;
-  method: "slack" | "oidc";
+  method: DeveloperSignInMethod;
   issuer: string;
   subject: string;
 }

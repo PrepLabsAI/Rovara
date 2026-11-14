@@ -7,6 +7,7 @@ import {
   type SlackChannelBinding,
   type SlackRequester,
   type SlackThread,
+  type DeveloperSignInMethod,
 } from "@agentx/contracts";
 import {
   createRemoteJWKSet,
@@ -32,7 +33,7 @@ export interface AuthenticatedIdentity {
   /** Spec 025: a developer task's workspace owner (FR-017); never set with `slack`. */
   developer?: {
     developerId: string;
-    provider: "slack" | "oidc";
+    provider: DeveloperSignInMethod;
     name: string;
     client: string;
     taskId: string;
@@ -56,7 +57,7 @@ export interface ChannelConversation {
   projectName: string;
   adapter: ChannelAdapterRecord;
   /** The developer the actor is linked to, who is charged and recorded as the requester. */
-  developer: { developerId: string; provider: "slack" | "oidc"; name: string; slackUserId?: string };
+  developer: { developerId: string; provider: "slack" | "oidc" | "cloud" | "github" | "saml"; name: string; slackUserId?: string };
 }
 
 export interface JwtAuthenticatorConfig {

@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ProjectDefinitionSchema } from "../../packages/contracts/src/project.js";
+import { ProjectDefinitionSchema } from "../../packages/contracts/src/project-node.js";
 import { recordRegisteredLoopEnrollment } from "../../packages/cli/src/loop/enrollment-cli.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
 import type { Exec } from "../../packages/cli/src/loop/exec.js";

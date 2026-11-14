@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { E2EApplicationCliHostDescriptorSchema } from "./e2e-application-execution.js";
-import { E2ETargetSchema } from "./e2e.js";
+import { E2ETargetSchema } from "./e2e-node.js";
 
 /** The exact private launch sidecar consumed by the installed application CLI host. */
 export const E2EApplicationCliLaunchContextSchema = z.object({

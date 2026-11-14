@@ -156,7 +156,7 @@ import {
   slackThreadSubject,
   slackThreadUrl,
   unhandledDeploymentMode,
-  workspaceProjectIndexAttributes,
+  legacyWorkspaceProjectIndexAttributes,
   workspaceRecordFields,
   workflowRequestId,
   type Operation,
@@ -382,7 +382,7 @@ import { publicWorkspace } from "../workspaces.js";
 import { SessionManager } from "./sessions.js";
 import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
 import { workflowRunEndedReason } from "./outbox-failure.js";
-import { WORKFLOW_STEP_STAGE, blockStoppedWorkflowRun, stopBlocksWorkflowStep } from "./workflow-cancel-reconcile.js";
+import { blockStoppedWorkflowRun, stopBlocksWorkflowStep, workflowStepStage } from "./workflow-cancel-reconcile.js";
 import { autofixBlockCauseOf, autofixBlockRows, autofixRowHeld, dispatchExhaustRows, ownerStopRows } from "./workflow-autofix-dispatch-exhaust.js";
 import {
   adaptHttpApiEvent,
@@ -13433,7 +13433,7 @@ async function cancelledWorkflowStepItems(
   const values = update?.ExpressionAttributeValues;
   const key = taskKey(task.taskId);
   if (update === undefined || update.Key?.pk !== key.pk || update.Key?.sk !== key.sk
-    || values?.[":stage"] !== WORKFLOW_STEP_STAGE[target.workflowMode] || values?.[":running"] !== "RUNNING") return [];
+    || values?.[":stage"] !== workflowStepStage(target.workflowMode) || values?.[":running"] !== "RUNNING") return [];
   return items;
 }
 
@@ -14460,7 +14460,7 @@ function workspaceItem(workspace: WorkspaceInstance) {
   return {
     ...workspaceKey(workspace.id),
     entityType: "WORKSPACE",
-    ...workspaceProjectIndexAttributes(workspace),
+    ...legacyWorkspaceProjectIndexAttributes(workspace),
     ...workspace,
   };
 }

@@ -103,7 +103,8 @@ describe("Suite 3: Quick path", () => {
     // accept it" with a Retry opening that could never succeed. Now coding stops, in plain words, with Retry coding.
     expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.noCodeChanged });
     const stopped = e2e.slack.lastPostWithAction("agentx_workflow_retry_implementation");
-    expect(stopped.text).toBe("Coding finished, but no code changed, so there is nothing to check or open as a pull request. Retry coding, or close the task.");
+    // The words are the contracts' (Cloud's newer no-change wording came with the port of the contracts, lane L1).
+    expect(stopped.text).toBe(WORKFLOW_BLOCK_REASONS.noCodeChanged);
     expect(actionIds(stopped)).toEqual(["agentx_workflow_retry_implementation", "agentx_workflow_close"]);
     // (The coding run ran the project check on its own workspace, as every coding run does; nothing went on to review.)
     expect(runs(e2e)).not.toContain("REVIEW");

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { redactSecrets, redactText } from "../../packages/contracts/src/redaction.js";
+import { redactSecrets, redactText as redactOnce } from "../../packages/contracts/src/redaction.js";
+
+/** Every input this file redacts is also checked to be left as it is when redacted again. */
+const redactText = (text: string): string => {
+  const once = redactOnce(text);
+  expect(redactOnce(once), `redacting the output again: ${text}`).toBe(once);
+  return once;
+};
 import {
   EMPTY_TURN_OBSERVATION,
   TURN_TEXT_LIMIT,

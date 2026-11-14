@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { copyBoundedE2EJsonData } from "./e2e-safe-data.js";
-import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_FORM_LOGIN_AUTH_PROFILE, E2EAppRecipeSchema, E2EFormLoginSchema, E2ETargetSchema, type E2ETarget } from "./e2e.js";
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_FORM_LOGIN_AUTH_PROFILE, E2EAppRecipeSchema, E2EFormLoginSchema, E2ETargetSchema, type E2ETarget } from "./e2e-node.js";
 import { E2ERuntimeAccountRefSchema, type E2ERuntimeAccountRef } from "./e2e-application.js";
 import { E2EApplicationExternalConnectionRefSchema } from "./e2e-application-services.js";
 import { E2EApplicationServiceContractSchema } from "./e2e-application-services.js";

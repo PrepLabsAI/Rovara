@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
-import { E2EAppRecipeSchema, E2EFeaturePlanIntentSchema, E2EScenarioSchema } from "./e2e.js";
+import { E2EAppRecipeSchema, E2EFeaturePlanIntentSchema, E2EScenarioSchema } from "./e2e-node.js";
 import { isSafeE2ESourcePath } from "./e2e-source.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);

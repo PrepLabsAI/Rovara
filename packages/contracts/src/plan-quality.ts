@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { E2E_DISPLAY_ASSERTION_KINDS } from "./e2e-view.js";
+import { E2E_DISPLAY_ASSERTION_KINDS } from "./e2e-view-node.js";
+import { PLAN_ONE_SCREEN_MAX_CHARS, planTooBigSentence } from "./plan-one-screen.js";
 
 /**
  * Plan quality findings: what the broker's plan self-check says is wrong, or missing, in a coding plan that parsed.
@@ -34,6 +35,8 @@ export const PLAN_QUALITY_CODES = [
   "check-base-mismatch",
   /** A scenario that proves a Not changing entry fails on the unchanged code (written by the grounding round). */
   "scenario-base-mismatch",
+  /** The plan is more than fits on one screen (about 1,500 characters): shown on the card, never blocks and is not revised by itself. */
+  "plan-too-big",
 ] as const;
 export type PlanQualityCode = (typeof PLAN_QUALITY_CODES)[number];
 
@@ -69,6 +72,7 @@ const REVISABLE: Record<PlanQualityCode, boolean> = {
   "check-broken-on-base": true,
   "check-base-mismatch": true,
   "scenario-base-mismatch": true,
+  "plan-too-big": false,
 };
 
 const FindingIds = z.array(z.string().min(1).max(120)).max(32).optional();
@@ -86,7 +90,7 @@ export const PlanQualityFindingSchema = z.object({
   /** The most actions an agent step may take (`agent-budget-exceeded`). */
   limit: z.number().int().min(1).max(100).optional(),
   /** How many claims and Not changing entries a `checks-waived` finding leaves without proof. */
-  count: z.number().int().min(0).max(1_000).optional(),
+  count: z.number().int().min(0).max(100_000).optional(),
   targetReason: z.enum(PLAN_QUALITY_TARGET_REASONS).optional(),
   /** T7b: the scenario steps a `scenario-base-mismatch` finding names: the scenario, the assertion kind that failed and, when the verification names it, the step. Fixed fields only. */
   steps: z.array(z.object({ scenarioId: z.string().min(1).max(120), assertionKind: z.enum(E2E_DISPLAY_ASSERTION_KINDS), stepIndex: z.number().int().min(0).max(1_000).optional(), /** What the plan itself expects (its own words, escaped, at most 80 characters); never the app's value. */ expected: z.string().min(1).max(80).optional() }).strict()).max(32).optional(),
@@ -257,6 +261,11 @@ function sentences(input: PlanQualityFindingInput): { owner: string; planner: st
         planner: `scenario-base-mismatch: scenario ${idList(input.scenarioIds)}${which} fails on the unchanged app although it proves a Not changing entry. Correct its expected values from the current code.`,
       };
     }
+    case "plan-too-big":
+      return {
+        owner: planTooBigSentence(input.count ?? 0),
+        planner: `plan-too-big: the plan is about ${String(input.count ?? 0)} characters; a plan reads on one screen at ${String(PLAN_ONE_SCREEN_MAX_CHARS)}. Cut it down or split it into smaller tasks.`,
+      };
   }
 }
 

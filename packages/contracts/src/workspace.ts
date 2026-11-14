@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { agentXError } from "./errors.js";
-import { AgentXNameSchema } from "./project.js";
+import { OrgIdSchema } from "./company-scope.js";
+import { AgentXNameSchema } from "./project-node.js";
 
 export const WorkspaceStatusSchema = z.enum([
   "PREPARING",
@@ -27,6 +28,9 @@ export const StoredDeploymentModeSchema = z.enum(["instances-ebs", "demo-microvm
  * carries `workspaceProject`, so nothing else appears here; `workspaceCreatedAt` sorts a project's
  * workspaces oldest first, and the route reverses that to show the newest work first.
  *
+ * `workspaceProject` holds the project name prefixed with its org (`workspaceProjectIndexAttributes`), so two orgs'
+ * same-named projects list apart.
+ *
  * Workspace records written before this index existed carry neither attribute and so are absent
  * from it: a listing shows the workspaces created since the release that added it.
  */
@@ -35,14 +39,6 @@ export const WORKSPACE_PROJECT_INDEX = {
   partitionKey: "workspaceProject",
   sortKey: "workspaceCreatedAt",
 } as const;
-
-/** The index attributes a workspace META item is written with. */
-export function workspaceProjectIndexAttributes(workspace: { projectName: string; createdAt: string }): {
-  workspaceProject: string;
-  workspaceCreatedAt: string;
-} {
-  return { workspaceProject: workspace.projectName, workspaceCreatedAt: workspace.createdAt };
-}
 
 /** The keys a workspace META item carries for storage rather than as record fields. */
 const WORKSPACE_STORAGE_KEYS: ReadonlySet<string> = new Set([
@@ -66,6 +62,8 @@ const WorkspaceRecordSchema = z
   .object({
     id: z.string().uuid(),
     ownerKey: z.string().min(16).max(128),
+    /** The org the workspace belongs to; written on every workspace this release creates. */
+    orgId: OrgIdSchema.optional(),
     projectName: AgentXNameSchema,
     projectRevision: z.number().int().positive(),
     // Retired routing is opaque audit data; validate ARN shape without depending on its service.
@@ -212,4 +210,16 @@ export type WorkspaceClosePreflightResult = z.infer<typeof WorkspaceClosePreflig
 export function unhandledDeploymentMode(value: never): never {
   const mode: unknown = typeof value === "object" && value !== null ? (value as { deploymentMode?: unknown }).deploymentMode : value;
   throw agentXError("CONFIG_INVALID", `unsupported deployment mode ${String(mode)}`);
+}
+
+/**
+ * Public's own, company-less index attributes of a workspace META item (what the install wrote before the company scope). Cloud's `workspaceProjectIndexAttributes`
+ * (org-scoped-keys.ts) prefixes the project with its company; Code keeps both so the AWS install reads and writes the rows it already has, until the broker moves to
+ * the scoped form in lane L6 (decision 45.6).
+ */
+export function legacyWorkspaceProjectIndexAttributes(workspace: { projectName: string; createdAt: string }): {
+  workspaceProject: string;
+  workspaceCreatedAt: string;
+} {
+  return { workspaceProject: workspace.projectName, workspaceCreatedAt: workspace.createdAt };
 }

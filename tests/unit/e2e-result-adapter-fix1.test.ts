@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";
-import { E2ERoundSchema, E2ERunBindingSchema, type E2EExpectedCase } from "../../packages/contracts/src/e2e.js";
+import { E2ERoundSchema, E2ERunBindingSchema, type E2EExpectedCase } from "../../packages/contracts/src/e2e-node.js";
 import { E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, projectE2EModuleExportNames, qualifyE2ECollection, type E2ECollection, type E2ECollectionOracle } from "../../packages/verifier/src/result-adapter.js";
 import { E2EReportSchema, type E2EReport } from "../../packages/verifier/src/report-schema.js";
 import type { E2ESelectionTuple } from "../../packages/verifier/src/selection.js";

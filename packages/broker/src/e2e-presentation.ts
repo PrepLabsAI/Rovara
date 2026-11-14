@@ -1,4 +1,4 @@
-import type { E2EDisplayAgentNavigation, E2EDisplayBaseline, E2EDisplayScenario, E2EScenarioResults, E2ESharedView } from "../../contracts/src/e2e-view.js";
+import type { E2EDisplayAgentNavigation, E2EDisplayBaseline, E2EDisplayScenario, E2EScenarioResults, E2ESharedView } from "../../contracts/src/e2e-view-node.js";
 import { accountDisplayName, displayText, summarizeScenarios } from "./e2e/application-display.js";
 import { E2E_OWNER_SENTENCES } from "./e2e/owner-sentences.js";
 

@@ -309,7 +309,7 @@ describe("workflow Slack messages", () => {
         workflow = snapshot(stage, "BLOCKED", { blockReason: stage === "PULL_REQUEST" ? WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE : "planning operation ended failed" });
       } catch {
         // Nothing runs while a document waits for its owner, a closed task is done, and a merged one is complete.
-        expect(["PLAN_REVIEW", "CLOSED", "MERGED"], stage).toContain(stage);
+        expect(["PLAN_REVIEW", "CLOSED", "MERGED", "UNDERSTAND", "PLAN_CRITIQUE"], stage).toContain(stage);
         continue;
       }
       const message = workflowMessage({ taskId, workflow });

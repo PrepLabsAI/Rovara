@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
-import { CandidateManifestSchema, type CandidateManifest } from "./task-workflow.js";
+import { CandidateManifestSchema } from "./task-workflow.js";
+import { type CandidateManifest } from "./task-workflow-node.js";
 
 export type E2ESourceSnapshot = {
   candidate: CandidateManifest;

@@ -5,7 +5,7 @@ import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "../../pack
 import {
   E2EAssertionSchema, E2EExecutionPlanSchema, E2ERoundSchema, E2EScenarioSchema, E2EStepSchema,
   aggregateE2EVerification, e2eExecutionPlanDigest, projectE2EVerification,
-} from "../../packages/contracts/src/e2e.js";
+} from "../../packages/contracts/src/e2e-node.js";
 
 const target1 = { targetId: "web-1", applicationId: "app-1", runtimeProfileId: "browser-v1", accountProfileId: "account-v1", kind: "web" as const, browser: "chromium" as const, viewport: { width: 1280, height: 800 } };
 const target2 = { ...target1, targetId: "web-2", applicationId: "app-2" };

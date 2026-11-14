@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCandidateManifest } from "@agentx/contracts";
 import { inspectE2ERepository, type VerifiedE2ESourceSnapshot } from "../../packages/broker/src/e2e/discovery.js";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
-import { E2EApiMockFixtureSchema } from "../../packages/contracts/src/e2e.js";
+import { E2EApiMockFixtureSchema } from "../../packages/contracts/src/e2e-node.js";
 import { e2eApiSchemaComponentId } from "../../packages/contracts/src/e2e-application-services.js";
 import { E2EApplicationProjectContractSchema } from "../../packages/contracts/src/e2e-application-accounts.js";
 import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "../../packages/contracts/src/e2e-openapi-fixture.js";

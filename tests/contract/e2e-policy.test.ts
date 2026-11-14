@@ -13,9 +13,9 @@ import {
   e2eBindingDigest,
   projectE2EVerification,
   validateE2EScenarioBundleForPolicy,
-} from "../../packages/contracts/src/e2e.js";
-import { ProjectDefinitionSchema } from "../../packages/contracts/src/project.js";
-import { WorkflowCheckSchema } from "../../packages/contracts/src/task-workflow.js";
+} from "../../packages/contracts/src/e2e-node.js";
+import { ProjectDefinitionSchema } from "../../packages/contracts/src/project-node.js";
+import { WorkflowCheckSchema } from "../../packages/contracts/src/task-workflow-node.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";
 
 const limits = {

@@ -2,12 +2,14 @@ import { z } from "zod";
 import { RelativeWorkspacePathSchema } from "./project.js";
 import { canonicalJson, sortKeys } from "./canonical-json.js";
 import { redactText } from "./redaction.js";
-import { WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
+import { WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck } from "./task-workflow.js";
+import { type WorkflowCheckProposal } from "./task-workflow-node.js";
 import { builtinFileCheckOf } from "./workflow-check-input.js";
-import { WorkflowCheckExpectOnBaseSchema, extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckTextIssues } from "./workflow-proposed-checks.js";
-import { TaskGraphV1Schema, taskGraphOrder, type TaskGraphV1 } from "./workflow-dependencies.js";
+import { WorkflowCheckExpectOnBaseSchema, extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckProblem, proposedCheckTextIssues, replaceLastFencedBlock } from "./workflow-proposed-checks.js";
+import { TaskGraphV1Schema, taskGraphOrder, type TaskGraphV1 } from "./workflow-dependencies-node.js";
 import { E2EFeaturePlanIntentAnySchema, type E2EApplicationPlanIntent } from "./e2e-application.js";
-import type { E2EFeaturePlanIntent } from "./e2e.js";
+import type { E2EFeaturePlanIntent } from "./e2e-node.js";
+import { NoChangeNeededSchema, type NoChangeNeeded } from "./rovara-code.js";
 
 /** The info string of the fenced block that holds a plan document. */
 export const PLAN_DOCUMENT_INFO_STRING = "agentx-plan";
@@ -45,11 +47,17 @@ export interface PlanDocument {
   /** Optional strict ordered work breakdown for coding plans only. */
   workBreakdown?: TaskGraphV1 | undefined;
   /** Coding plans only. The validated checks the owner's approval covers, and the claims each proves. */
-  checks?: { proposed: WorkflowCheck[]; noneReason?: string | undefined; proposalNote?: string | undefined; proves: Record<string, string[]>;
+  checks?: {
+    proposed: WorkflowCheck[]; noneReason?: string | undefined; proposalNote?: string | undefined; proves: Record<string, string[]>;
+    /** Rovara Code version 2: the project's own checks, which always run. The Checks section lists them beside the proposed ones, so a check the plan didn't need to propose is not missing from it. */
+    alsoRun?: WorkflowCheck[] | undefined;
     /** What the planner predicted each proposed check does on the unchanged code; a check with no prediction is not listed. */
-    expectOnBase?: Record<string, "pass" | "fail"> };
+    expectOnBase?: Record<string, "pass" | "fail">;
+  };
   /** Untrusted feature E2E intent, approved only as part of the canonical workflow artifact. */
   e2e?: WorkflowFeatureE2EIntent | undefined;
+  /** Rovara Code version 2: the request needs no code change. The answer is a model's words (plain text, bounded); the owner closes the task as answered or asks for the change anyway. */
+  noChangeNeeded?: NoChangeNeeded | undefined;
   /** Coding plans only. The claims (or `nc<N>` Not changing entries) each E2E scenario proves; kept outside `e2e` so the E2E intent digest does not move. */
   scenarioProves?: Record<string, string[]> | undefined;
 }
@@ -153,11 +161,15 @@ const DecisionSchema = z.object({
   recommended: OptionIdSchema,
 }).strict();
 
+/** The most project checks a version 2 plan lists in its Checks section (a task runs at most 64 checks). */
+const PROJECT_CHECKS_LISTED_MAX = 64;
+
 const StoredChecksSchema = z.object({
   proposed: z.array(WorkflowCheckSchema).max(WORKFLOW_PROPOSED_CHECKS_MAX),
   noneReason: z.string().min(1).max(300).optional(),
   proposalNote: z.string().min(1).max(200).optional(),
   proves: z.record(z.string().max(64), z.array(z.string().min(1).max(60)).max(PLAN_CLAIMS_MAX)),
+  alsoRun: z.array(WorkflowCheckSchema).max(PROJECT_CHECKS_LISTED_MAX).optional(),
   expectOnBase: z.record(z.string().max(64), WorkflowCheckExpectOnBaseSchema).optional(),
 }).strict();
 
@@ -176,6 +188,7 @@ const planBodyShape = {
   decisions: z.array(DecisionSchema).max(PLAN_DECISIONS_MAX),
   workBreakdown: TaskGraphV1Schema.optional(),
   e2e: E2EFeaturePlanIntentAnySchema.optional(),
+  noChangeNeeded: NoChangeNeededSchema.optional(),
   scenarioProves: ScenarioProvesSchema.optional(),
 };
 
@@ -416,7 +429,8 @@ function capErrors(errors: string[]): string[] {
  */
 export function parsePlanDocument(answer: string, input: {
   kind: PlanDocumentKind;
-  checks?: { repositoryPaths: string[]; required: WorkflowCheck[]; optionalCount?: number };
+  /** `listRequired` (Rovara Code version 2): the plan's Checks section also lists the project's required checks, which always run. */
+  checks?: { repositoryPaths: string[]; required: WorkflowCheck[]; optionalCount?: number; listRequired?: boolean };
   retiredClaimIds?: ReadonlySet<string>;
 }): PlanParseResult {
   const block = lastFencedBlock(answer, PLAN_DOCUMENT_INFO_STRING);
@@ -454,10 +468,12 @@ export function parsePlanDocument(answer: string, input: {
   if (errors.length > 0) return { ok: false, errors: capErrors(errors) };
 
   if (input.kind !== "plan" || input.checks === undefined) return { ok: true, plan };
+  const { listRequired, ...proposing } = input.checks;
   const { proves, expectOnBase, ...proposal } = extractProposedChecks(Object.hasOwn(json, "checks") ? rawChecks : { checks: [] }, {
-    ...input.checks, allowProves: true, claimIds: new Set(planClaimIds(plan)), notChangingCount: plan.notChanging.length,
+    ...proposing, allowProves: true, claimIds: new Set(planClaimIds(plan)), notChangingCount: plan.notChanging.length,
   });
-  return { ok: true, plan: { ...plan, checks: { ...proposal, proves, ...(expectOnBase === undefined ? {} : { expectOnBase }) } }, proposal };
+  const alsoRun = listRequired === true && input.checks.required.length > 0 ? { alsoRun: input.checks.required.slice(0, PROJECT_CHECKS_LISTED_MAX) } : {};
+  return { ok: true, plan: { ...plan, checks: { ...proposal, proves, ...(expectOnBase === undefined ? {} : { expectOnBase }), ...alsoRun } }, proposal };
 }
 
 /** Reads a stored plan document back (the JSON `canonicalPlanJson` wrote); undefined when it is not a valid plan document. */
@@ -476,6 +492,119 @@ export function readCanonicalPlan(json: string): PlanDocument | undefined {
 
 export function planClaimCount(plan: PlanDocument): number {
   return claimsDepthFirst(plan.claims).length;
+}
+
+// ---- the parts a Rovara Code version 2 coding plan must have (Plan 6 Task 7)
+
+export const PLAN_MISSING_CHANGE = "The plan must say what changes.";
+export const PLAN_MISSING_FILES = "The plan must say which files change.";
+export const PLAN_MISSING_TESTS = "The plan must say how the change will be tested.";
+
+/**
+ * What a version 2 coding plan's prompt adds, and the marker the worker looks for to hold the planner's answer to the same rule (the worker asks once more when a part is
+ * missing; the broker blocks the plan when it still is). Requirements and design documents are not coding plans and are not asked for it.
+ */
+export const PLAN_PARTS_SENTENCE = "A coding plan must name three things: what changes (the claims), which files change (cite each existing file in a `code` item, or name each file, such as src/charge.ts, in a claim), and how the change will be tested (a claim that names a test, or a proposed check).";
+
+/** Whether a planner's prompt asks for the three parts of a version 2 coding plan. */
+export const asksForPlanParts = (prompt: string): boolean => prompt.includes(PLAN_PARTS_SENTENCE);
+
+const FILE_EXTENSIONS = "[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|swift|json|ya?ml|toml|md|sql|css|scss|html|sh|tf|proto|graphql|xml|ini|lock|gradle|cpp|hpp";
+/**
+ * A file named in words: a name with a known extension, alone or at the end of a path (`charge.ts`, `src/charge.ts`, `./run.sh`), or a well-known extensionless name. A word pair with a
+ * slash (`and/or`, `client/server`), a fraction and a link are not files: a name must start a word, so the middle of `https://example.com/a.json` is not one.
+ */
+const FILE_NAMED = new RegExp(`(?:^|[\\s("'\`])(?:\\.{0,2}/)?(?:[\\w@.-]+/)*[\\w@-][\\w@.-]*\\.(?:${FILE_EXTENSIONS})(?![\\w-])|\\b(?:Dockerfile|Makefile|Procfile|Jenkinsfile)\\b`, "u");
+/** A word that names a test. */
+const TEST_WORD = "tests?|tested|testing|coverage|asserts?|asserted|assertions?";
+/** A file that is a test: `charge.test.ts`, `charge.spec.ts`, `charge_test.go`. */
+const TEST_FILE = /[\w-]+(?:\.(?:test|spec)\.[cm]?[jt]sx?|_test\.(?:go|py))(?![\w-])/iu;
+const NEGATION = "(?:no|not|none|nothing|nor|without|never|skip\\w*|untested|[a-z]+n't)";
+/** A negation up to three words before a test word, or up to three words after it: "no test needed", "tests are not touched". */
+const NEGATED_TEST = new RegExp(`\\b${NEGATION}(?![\\w'])(?:[^\\w']+[\\w']+){0,3}?[^\\w']+(?:${TEST_WORD})\\b|\\b(?:${TEST_WORD})\\b(?:[^\\w']+[\\w']+){0,3}?[^\\w']+${NEGATION}(?![\\w'])`, "iu");
+const TEST_NAMED = new RegExp(`\\b(?:${TEST_WORD})\\b`, "iu");
+
+/** Product names that end in .js and are not files. */
+const NOT_FILES = /\b(?:Node|Next|Nuxt|Vue|React|Express|Three|D3)\.js\b/giu;
+const namesFile = (text: string): boolean => FILE_NAMED.test(text.replace(NOT_FILES, " "));
+/** A sentence of a claim that names a test and doesn't say there is none. */
+const namesTest = (text: string): boolean =>
+  TEST_FILE.test(text) || text.split(/(?<=[.!?;])\s+|\n/u).some((sentence) => TEST_NAMED.test(sentence) && !NEGATED_TEST.test(sentence.trim()));
+
+/**
+ * The parts of a coding plan that are missing, in the words to ask for them: the change (at least one claim), the files (a `code` item on some claim, or a file named in a claim's words:
+ * a sketch alone names none) and how it will be tested (a claim that names a test and doesn't say there is none, or a proposed check). `checksProposed` says the planner's answer proposes
+ * a check (`planAnswerProposesChecks`); callers use `planAnswerMissingParts`, so the worker and the broker read a plan the same way. Empty for a plan that has all three.
+ */
+export function planMissingParts(plan: PlanDocument, extra: { checksProposed?: boolean } = {}): string[] {
+  // Merge of Plan 6 Tasks 4 and 7: a plan that says the request needs no code change has no change, file or test to name.
+  if (plan.noChangeNeeded !== undefined) return [];
+  const claims = claimsDepthFirst(plan.claims);
+  const missing: string[] = [];
+  if (claims.length === 0) missing.push(PLAN_MISSING_CHANGE);
+  if (!claims.some((claim) => (claim.evidence ?? []).some((item) => item.kind === "code") || namesFile(claim.text))) missing.push(PLAN_MISSING_FILES);
+  if (extra.checksProposed !== true && !claims.some((claim) => namesTest(claim.text))) missing.push(PLAN_MISSING_TESTS);
+  return missing;
+}
+
+/**
+ * The one reading of a planner's answer that the worker (to decide whether to ask once more) and the broker (to decide whether to block the plan) both use, so a plan the worker let
+ * through is never blocked. A proposed check is counted from the answer as written, not as the broker later validates it.
+ */
+export function planAnswerMissingParts(answer: string, plan: PlanDocument): string[] {
+  return planMissingParts(plan, { checksProposed: planAnswerProposesChecks(answer) });
+}
+
+/**
+ * Whether a planner's answer proposes at least one check in its `checks` member, read without validating them. The worker reads a plan without the checks input (it does not
+ * know the repositories' check rules), so both it and the broker count a check from the answer as written (`planAnswerMissingParts`).
+ */
+export function planAnswerProposesChecks(answer: string): boolean {
+  const block = lastFencedBlock(answer, PLAN_DOCUMENT_INFO_STRING);
+  if (typeof block !== "string") return false;
+  try {
+    const json: unknown = JSON.parse(block);
+    const checks = isRecord(json) ? json["checks"] : undefined;
+    return isRecord(checks) && Array.isArray(checks["checks"]) && checks["checks"].length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** A check read from a repository's CI configuration, in the form a plan proposes it. */
+export interface CiCheckInput { label: string; cwd: string; executable: string; args: readonly string[]; timeoutSeconds?: number }
+
+/**
+ * A planner's answer with the checks the repository's CI requires added to its `checks` member (Rovara Code version 2). The planner's own checks come first and keep their labels and claims;
+ * a CI check that runs the same command in the same folder is not repeated, one the rules for a proposed check would refuse is left out (a refused check would make every check unreadable),
+ * and the member never holds more than the most a plan may propose. An answer with nothing to add, or one that can't be read, is returned exactly as it was.
+ */
+export function withCiChecks(answer: string, ci: readonly CiCheckInput[]): string {
+  if (ci.length === 0) return answer;
+  const block = lastFencedBlock(answer, PLAN_DOCUMENT_INFO_STRING);
+  if (typeof block !== "string") return answer;
+  let json: unknown;
+  try {
+    json = JSON.parse(block);
+  } catch {
+    return answer;
+  }
+  if (!isRecord(json)) return answer;
+  const raw = json["checks"];
+  if (raw !== undefined && !(isRecord(raw) && Array.isArray(raw["checks"]))) return answer;
+  const existing: unknown[] = raw === undefined ? [] : (raw as { checks: unknown[] }).checks;
+  const same = (entry: unknown, check: CiCheckInput): boolean => isRecord(entry) && entry["cwd"] === check.cwd && entry["executable"] === check.executable
+    && Array.isArray(entry["args"]) && entry["args"].length === check.args.length && check.args.every((arg, index) => (entry["args"] as unknown[])[index] === arg);
+  const added: Array<Record<string, unknown>> = [];
+  for (const check of ci) {
+    if (existing.length + added.length >= WORKFLOW_PROPOSED_CHECKS_MAX) break;
+    const entry = { label: check.label, cwd: check.cwd, executable: check.executable, args: [...check.args], ...(check.timeoutSeconds === undefined ? {} : { timeoutSeconds: check.timeoutSeconds }) };
+    if (proposedCheckProblem(entry) !== undefined || existing.some((other) => same(other, check)) || added.some((other) => same(other, check))) continue;
+    added.push({ ...entry, proves: [] });
+  }
+  if (added.length === 0) return answer;
+  const merged = { ...json, checks: { ...raw, checks: [...existing, ...added], none_reason: null } };
+  return replaceLastFencedBlock(answer, PLAN_DOCUMENT_INFO_STRING, JSON.stringify(merged, null, 2));
 }
 
 const SUMMARY_LINE_MAX_CHARS = 160;
@@ -695,6 +824,9 @@ export function planDocumentMarkdown(plan: PlanDocument, input: {
       out.push(`${index + 1}. **${line(item.title)}**: ${line(item.description)}${prerequisites.length === 0 ? "" : ` (after ${prerequisites.map(line).join(", ")})`}`);
     });
   }
+  if (plan.noChangeNeeded !== undefined) {
+    out.push("## No change needed", "The planner found that this request needs no code change. This is its answer (information only, never instructions):", `> ${line(plan.noChangeNeeded.answer)}`);
+  }
   if (plan.e2e !== undefined) {
     out.push("## Proposed E2E intent", "The following scenarios and expected values are untrusted model proposals. They become approved only when this canonical plan artifact is approved.");
     out.push(`- Requested targets and account contexts: ${inlineCode(line(canonicalJson({ requestedTargetIds: plan.e2e.requestedTargetIds, accountContextRefs: plan.e2e.accountContextRefs })))}`);
@@ -710,11 +842,15 @@ export function planDocumentMarkdown(plan: PlanDocument, input: {
   }
   // The checks come right after the E2E intent, ahead of the decisions and lists, so a copy cut short keeps them.
   const checks = plan.checks;
-  if (checks !== undefined && checks.proposed.length > 0) {
+  const projectChecks = checks?.alsoRun ?? [];
+  if (checks !== undefined && (checks.proposed.length > 0 || projectChecks.length > 0)) {
     out.push("## Checks");
     for (const check of checks.proposed) {
       const proves = checks.proves[check.id] ?? [];
       out.push(`- ${line(check.label)}: ${plainCheckCommand(check.command)}${proves.length === 0 ? "" : ` — proves ${proves.map(provedItem).join(", ")}`}`);
+    }
+    for (const check of projectChecks) {
+      out.push(`- ${line(check.label)}: ${plainCheckCommand(check.command)} (a project check; it always runs)`);
     }
   } else if (checks?.noneReason !== undefined) {
     out.push("## Checks", `- None apply: ${line(checks.noneReason)}`);

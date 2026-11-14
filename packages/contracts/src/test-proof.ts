@@ -2,6 +2,7 @@
 // CHECKS run; the broker reads it at publication and shows one or two lines in the pull request. Informational only: it never
 // changes a check result, never blocks and never sends the work back.
 import { z } from "zod";
+import { TEST_ID_MAX } from "./test-id.js";
 
 export const TEST_PROOF_ARTIFACT = "test-proof.json";
 
@@ -38,7 +39,7 @@ export const TestProofItemSchema = z.object({
   /** `check`: one verdict for the whole check. `test`: one per test, from a JUnit or JSON report the check already writes. */
   granularity: z.enum(["check", "test"]),
   /** The test's name, for a `test` item. */
-  test: z.string().min(1).max(300).optional(),
+  test: z.string().min(1).max(TEST_ID_MAX).optional(),
   verdict: TestProofVerdictSchema,
   reason: TestProofReasonSchema,
 }).strict();

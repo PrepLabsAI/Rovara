@@ -134,11 +134,12 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     }
   });
 
-  it("runs on pull requests and by hand only, never on a push to mainline, and skips a draft until it is ready", async () => {
+  it("runs on pull requests and by hand, on a push to code/next only and never on a push to mainline, and skips a draft until it is ready", async () => {
     const parsed = await workflow();
     expect(parsed.on).toEqual({
       workflow_dispatch: null,
       pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
+      push: { branches: ["code/next"] },
     });
     expect(parsed.jobs.scope!.if).toBe("github.event.pull_request.draft != true");
   });
@@ -154,7 +155,8 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     const gate = jobs.local!;
     expect(gate.name).toBeUndefined();
     expect(gate.if).toBe("always() && github.event.pull_request.draft != true");
-    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws").sort();
+    // port-guard (the Rovara Code port's check, tests/contract/port-guard-ci.test.ts) runs on code/next only; a skipped job would fail the gate on mainline's pull requests.
+    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard").sort();
     expect([...(gate.needs as string[])].sort()).toEqual(others);
     const run = gate.steps.map((step) => step.run ?? "").join("\n");
     expect(run).toContain("node scripts/ci-gate.ts");

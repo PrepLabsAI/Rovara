@@ -94,7 +94,7 @@ import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
   /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
-  since?: { slack?: number; oidc?: number };
+  since?: Partial<Record<DeveloperSignInMethod, number>>;
   signInTableName: string;
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
   /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */

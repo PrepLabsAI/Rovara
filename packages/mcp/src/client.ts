@@ -20,7 +20,9 @@ import {
   type DeveloperPullRequestResponse,
   type DeveloperTaskListItem,
   type DeveloperTaskStatus,
+  type DeveloperTaskClientView,
   type DeveloperTaskView,
+  knownTaskView,
   type ShareDeveloperTaskRequest,
   type StartDeveloperTaskRequest,
   type TaskPeopleChangeResult,
@@ -36,6 +38,8 @@ import {
 import { z } from "zod";
 import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
 
+/** An answer that carries a task, with the task read strictly (the tolerant reader's "unknown" markers are refused, as the strict schema refused them). */
+export type StrictTask<T extends { task: unknown }> = Omit<T, "task"> & { task: DeveloperTaskView };
 export interface ControlPlaneSession { baseUrl: string; accessToken: string; signInCommand: string }
 
 /** For a read inside a wait: its own deadline, and the tool call's signal, so a cancel ends it at once. */
@@ -74,8 +78,8 @@ export interface ControlPlaneClient {
   /** The owner's Retry review of a PR feedback review that could not finish. */
   retryWorkflowFeedbackReview(taskId: string, request: WorkflowFeedbackReviewRetryRequest): Promise<{ task: DeveloperTaskView; started: boolean }>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
-  closeTask(taskId: string, requestId: string, discardUnpublished?: boolean): Promise<DeveloperCloseResponse>;
-  openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
+  closeTask(taskId: string, requestId: string, discardUnpublished?: boolean): Promise<StrictTask<DeveloperCloseResponse>>;
+  openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<StrictTask<DeveloperPullRequestResponse>>;
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
   getTaskPeople(taskId: string): Promise<TaskPeopleView>;
@@ -241,7 +245,14 @@ export function httpControlPlaneClient(options: {
     }
   }
 
-  const task = (response: { task: DeveloperTaskView }) => response.task;
+  // The contracts now read a task tolerantly (a stage or outcome a newer server added reads as "unknown"); this client keeps its strict view and refuses such an answer
+  // exactly as the strict schema did before (the same ToolError).
+  const task = (response: { task: DeveloperTaskClientView }): DeveloperTaskView => {
+    const known = knownTaskView(response.task);
+    if (known === undefined) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", UNREADABLE, NEXT_STEPS.UPGRADE_REQUIRED);
+    return known;
+  };
+  const withStrictTask = <T extends { task: DeveloperTaskClientView }>(answer: T): StrictTask<T> => ({ ...answer, task: task(answer) });
   const path = (taskId: string, rest = "") => `/v1/dev/tasks/${encodeURIComponent(taskId)}${rest}`;
   return {
     configuration: async () => {
@@ -280,11 +291,11 @@ export function httpControlPlaneClient(options: {
     decideWorkflowFeedback: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/feedback-decision"), request)),
     retryWorkflowFeedbackReview: async (taskId, request) => {
       const answer = await call(DeveloperTaskResponseSchema.extend({ started: z.boolean() }), "POST", path(taskId, "/workflow/feedback-retry"), request);
-      return { task: answer.task, started: answer.started };
+      return { task: task(answer), started: answer.started };
     },
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
-    closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
-    openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
+    closeTask: async (taskId, requestId, discardUnpublished = false) => withStrictTask(await call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP })),
+    openPullRequest: async (taskId, request) => withStrictTask(await call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request)),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
     getTaskPeople: async (taskId) => (await call(TaskPeopleViewResponseSchema, "GET", path(taskId, "/people"))).view,
     getTaskPeopleRequest: async (taskId, requestId) => (await call(TaskPeopleChangeResponseSchema, "GET", path(taskId, `/people/requests/${encodeURIComponent(requestId)}`))).change,

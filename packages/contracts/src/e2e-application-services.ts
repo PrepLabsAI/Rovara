@@ -4,7 +4,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationEvidenceRefSchema } from "./e2e-application-execution.js";
 import type { E2EAppArtifactRef } from "./e2e-application.js";
 import { ProjectSetupRunnerToolchainSchema } from "./session.js";
-import type { E2ECollection, E2ERunBinding } from "./e2e.js";
+import type { E2ECollection, E2ERunBinding } from "./e2e-node.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 120) => z.string().trim().min(1).max(max);

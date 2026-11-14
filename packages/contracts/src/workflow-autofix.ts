@@ -1,3 +1,4 @@
+import { SECOND_REVIEW_BLOCK_REASON } from "./second-review.js";
 import { E2E_PROJECT_CHECK_ID } from "./e2e.js";
 import {
   E2E_APPLICATION_SEND_BACK_CODES, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX,
@@ -5,7 +6,7 @@ import {
   WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_SEND_BACK_LIMIT, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
   WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, blockingFindings, workflowApplicationEvidenceCodes, workflowAutoFixCounts, workflowAutoSpendRefusal, workflowCheckResultBroken,
   type WorkflowAutoSpend, type WorkflowSnapshot,
-} from "./task-workflow.js";
+} from "./task-workflow-node.js";
 
 /**
  * AUTOFIX policy (next milestone, T3): what Rovara does by itself when checks or reviews block, and when it asks a person.
@@ -28,16 +29,18 @@ export type AutoFixClass = "code" | "transient" | "person" | "unclear";
 export const AUTO_FIX_CODES = [
   // Code: a group the candidate broke (E2E_APPLICATION_SEND_BACK_CODES), and the rest of what new code fixes.
   "build-failed", "app-exited", "app-unhealthy", "seed-failed",
-  "e2e-assertion-failed", "check-failed", "review-findings", "regression-found", "round-refused",
+  "e2e-assertion-failed", "check-failed", "new-failing-test", "review-findings", "regression-found", "round-refused",
   // Transient: Rovara's side or the environment's, which a retry may fix.
   "deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "model-channel-unavailable", "cancelled", "evidence too large",
   "check-runner-failed", "check-not-started", "review-not-run", "review-run-failed", "provider-outage", "runner-busy",
+  // Setup and test health (SH16): the test environment, not the code, kept the checks from giving a verdict. Transient: one automatic retry, then the Fix setup card instead of the generic ask.
+  "setup-failed-in-task", "host-blocked", "build-host-offline",
   // AUTOREQUALIFY: the test machine was renewed, which only moves the approved selection to the new rows (one automatic retry approves it again).
   "runtime-renewed",
   // A person must act.
   "runtime-expired", "runtime-environment-drifted", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested",
   "runtime-unusable", "selection-changed", "accounts-changed", "plan-not-approvable", "history-rewritten", "cancelled-by-owner", "check-broken", "fails-on-original-code",
-  "review-unusable", "rule-files-unverified", "pull-request-open", "unknown-group-code", "unreadable",
+  "review-unusable", "rule-files-unverified", "leftover-processes", "setup-changed-files", "pull-request-open", "unknown-group-code", "unreadable",
   // DISPATCHEXHAUST: why a block was written outside a finished run (see `AutoFixBlockCause`): the start was tried until its budget ran out and the run was lost (Rovara's side, transient),
   // or the owner stopped the run (a person's choice, never retried).
   "dispatch-exhausted", "run-lost", "owner-stopped",
@@ -86,10 +89,22 @@ export interface AutoFixFacts {
    * The caller always lists every UNKNOWN group of the round (from the stored round); an empty or absent list means the groups are not known yet.
    */
   e2eUnknownGroups?: Readonly<Record<string, GroupOriginalResult>> | undefined;
+  /**
+   * Setup and test health (owner decision, Opus re-check M2): the checks (by ID) that failed on the original code too but ALSO have a failing test the already-failing list does not show, one the change added, or failing
+   * tests nobody named. The broker sets it from its own evidence pack, and only while the four results (`vx`) are on; absent, every mapping is today's. Such a check is the CODE's fault: it is sent back like any code
+   * fault (within the same limits: two send backs, then a person is asked), and is never "fails on the original code" (which asks a person straight away).
+   */
+  newFailingChecks?: readonly string[] | undefined;
   /** The blocked run ended RUNTIME_UNAVAILABLE with a provider-outage class. */
   providerOutage?: boolean | undefined;
   /** The runner was busy. */
   runnerBusy?: boolean | undefined;
+  /** Setup and test health (SH16): the environment's setup failed inside this task (the saved environment fell back to a fresh setup and that failed too). */
+  setupFailedInTask?: boolean | undefined;
+  /** Setup and test health (SH16): a command was stopped by a website the project's setup needs that is not allowed. */
+  hostBlocked?: boolean | undefined;
+  /** Setup and test health (SH16): the build host the environment names (a team build runner) is offline. */
+  buildHostOffline?: boolean | undefined;
   /** The owner stopped the checks (a `cancelled` group is then the owner's doing, not an infrastructure fault). */
   ownerCancelled?: boolean | undefined;
   /** DISPATCHEXHAUST: how this block came about when no finished run wrote it. When present it is the whole classification of the block: it can never be read as a fault of the code. */
@@ -156,6 +171,7 @@ function groupSignal(groupCode: string, facts: AutoFixFacts): Signal {
 
 /** What the original-code result of a failed check says. `undefined`: nothing is known about the original code. */
 function failedCheckSignal(checkId: string, facts: AutoFixFacts): Signal {
+  if (facts.newFailingChecks?.includes(checkId) === true) return code("new-failing-test");
   const original = facts.checkOriginal?.[checkId];
   if (original === "passed") return code("check-failed");
   if (original === "failed" || original === "cannot-run") return person("fails-on-original-code");
@@ -173,6 +189,8 @@ function verifySignals(workflow: WorkflowSnapshot, facts: AutoFixFacts): Signal[
   else if (reason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) signals.push(person("accounts-changed"));
   else if (reason?.startsWith(WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX) === true) signals.push(person("plan-not-approvable"));
   else if (reason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true) signals.push(workflow.e2e?.required === true ? code("round-refused") : person("unreadable"));
+  else if (reason === WORKFLOW_BLOCK_REASONS.leftoverProcesses) signals.push(person("leftover-processes"));
+  else if (reason === WORKFLOW_BLOCK_REASONS.setupChangedFiles) signals.push(person("setup-changed-files"));
   else if (reason === WORKFLOW_BLOCK_REASONS.regressionFound) signals.push(code("regression-found"));
   else if (reason === WORKFLOW_BLOCK_REASONS.checkRunnerFailed) signals.push(transient("check-runner-failed"));
   else if (reason?.startsWith(WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX) === true) {
@@ -209,7 +227,11 @@ function reviewSignals(workflow: WorkflowSnapshot): Signal[] {
   if (workflow.blockReason === WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE || workflow.blockReason === WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE) signals.push(transient("review-not-run"));
   // The base rule files did not match their ids: the same workspace gives the same answer, so a retry is a person's choice, never automatic.
   if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.ruleFilesUnverified) signals.push(person("rule-files-unverified"));
+  // Programs that earlier work left running could not be stopped: the same workspace gives the same answer, so a retry is a person's choice, never automatic.
+  if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.leftoverProcesses) signals.push(person("leftover-processes"));
   if (current === undefined) return signals;
+  // SR-1: the second review (another AI company, switch `cr`, `on`) blocked a review that passed: new code fixes it, so it is a code failure like the first review's findings, and counts in the same send-back limit.
+  if (workflow.blockReason === SECOND_REVIEW_BLOCK_REASON) signals.push(code("review-findings"));
   for (const review of (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === current)) {
     if (blockingFindings(review, workflow.acceptedFindings).length > 0) signals.push(code("review-findings"));
     else if (review.status === "FAILED" || review.status === "INTERRUPTED" || review.status === "UNKNOWN") {
@@ -223,6 +245,9 @@ function blockSignals(workflow: WorkflowSnapshot, facts: AutoFixFacts): Signal[]
   const signals = facts.blockCause !== undefined ? [facts.blockCause === "owner-stopped" ? person("owner-stopped") : transient(facts.blockCause)] : workflow.stage === "REVIEW" ? reviewSignals(workflow) : workflow.stage === "VERIFY" ? verifySignals(workflow, facts) : [];
   if (facts.providerOutage === true) signals.push(transient("provider-outage"));
   if (facts.runnerBusy === true) signals.push(transient("runner-busy"));
+  if (facts.setupFailedInTask === true) signals.push(transient("setup-failed-in-task"));
+  if (facts.hostBlocked === true) signals.push(transient("host-blocked"));
+  if (facts.buildHostOffline === true) signals.push(transient("build-host-offline"));
   if ((workflow.pullRequests?.length ?? 0) > 0) signals.push(person("pull-request-open"));
   // A blocked workflow with nothing readable is a person's: nothing is ever read as a pass.
   if (signals.length === 0) signals.push(person("unreadable"));
@@ -232,6 +257,50 @@ function blockSignals(workflow: WorkflowSnapshot, facts: AutoFixFacts): Signal[]
 /** The fixed codes and classes of what blocked this workflow, in the order found, from the fields it stores and the caller's facts. The ask card words the same codes. */
 export function classifyBlockedWorkflow(workflow: WorkflowSnapshot, facts: AutoFixFacts = {}): ReadonlyArray<{ class: AutoFixClass; code: AutoFixCode }> {
   return blockSignals(workflow, facts).map((signal) => ({ class: signal.class, code: signal.code }));
+}
+
+/** The class of every code (the signal constructors above are the source; a test drives each code through the real classifier and keeps this table equal to them). A new code is a compile error here until it is placed. */
+export const AUTO_FIX_CODE_CLASS: Readonly<Record<AutoFixCode, AutoFixClass>> = {
+  "build-failed": "code", "app-exited": "code", "app-unhealthy": "code", "seed-failed": "code", "e2e-assertion-failed": "code", "check-failed": "code", "new-failing-test": "code", "review-findings": "code", "regression-found": "code", "round-refused": "code",
+  "deadline-exceeded": "transient", "executor-failed": "transient", "executor-result-mismatch": "transient", "mock-unavailable": "transient", "model-channel-unavailable": "transient", "cancelled": "transient",
+  "evidence too large": "transient", "check-runner-failed": "transient", "check-not-started": "transient", "review-not-run": "transient", "review-run-failed": "transient", "provider-outage": "transient", "runner-busy": "transient",
+  "setup-failed-in-task": "transient", "host-blocked": "transient", "build-host-offline": "transient", "runtime-renewed": "transient",
+  "runtime-expired": "person", "runtime-environment-drifted": "transient", "model-environment-unsafe": "person", "login-failed": "person", "model-route-changed-reapprove": "person", "agent-route-not-approved": "person",
+  "model-route-not-tested": "person", "runtime-unusable": "person", "selection-changed": "person", "accounts-changed": "person", "plan-not-approvable": "person", "history-rewritten": "person", "cancelled-by-owner": "person",
+  "check-broken": "person", "fails-on-original-code": "person", "review-unusable": "person", "rule-files-unverified": "person", "leftover-processes": "person", "setup-changed-files": "person", "pull-request-open": "person",
+  "unknown-group-code": "person", "unreadable": "person", "dispatch-exhausted": "transient", "run-lost": "transient", "owner-stopped": "person",
+  "e2e-evidence-unknown": "unclear", "check-result-unknown": "unclear", "check-failed-cause-unknown": "unclear",
+};
+
+/**
+ * Setup and test health (SH16, design 4.2): the codes that mean the test ENVIRONMENT, not the code, kept the checks from giving a verdict. When Rovara asks about only these (and nothing a code caused), the ask card
+ * is the Fix setup card (`autoFixAskCard`). `fails-on-original-code` is here because its card offers Fix setup and Mark as known failing. Not here: reviews, the pull request, the AI navigation settings, the
+ * owner's own stops and the unclear faults, which stay today's ask. Replaces: the generic ask card for environment faults. The decision itself, its limits and its order do not change.
+ */
+export const AUTO_FIX_ENVIRONMENT_CODES = [
+  "deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "check-runner-failed", "check-not-started", "provider-outage", "runner-busy",
+  "setup-failed-in-task", "host-blocked", "build-host-offline", "runtime-renewed", "runtime-environment-drifted", "runtime-expired", "runtime-unusable", "login-failed", "setup-changed-files", "leftover-processes",
+  "check-broken", "fails-on-original-code",
+] as const satisfies readonly AutoFixCode[];
+const ENVIRONMENT_CODES: ReadonlySet<AutoFixCode> = new Set<AutoFixCode>(AUTO_FIX_ENVIRONMENT_CODES);
+/** At a blocked REVIEW the tests already passed: the only environment fault that still reads as one is the workspace that could not be cleaned. */
+const REVIEW_STAGE_ENVIRONMENT_CODES: ReadonlySet<AutoFixCode> = new Set<AutoFixCode>(["leftover-processes"]);
+/**
+ * The only asks that can be the Fix setup card: a fault only a person can fix, the one retry used, or the same checks failing on the original code. Every other reason (the owner's stop, an unclear fault,
+ * unreadable inputs, and the limits: send backs, total actions, spend cap, day budget, decision history) keeps the generic ask, which names the limit it hit.
+ */
+const SETUP_ASK_REASONS: readonly AutoFixAskReason[] = ["needs-a-person", "retry-limit", "original-code-also-fails"];
+
+export type AutoFixAskCard = "ask" | "fix_setup";
+
+/**
+ * Which card an ASK is shown as. Fix setup only when every code is an environment code (a pull request being open does not change that), at least one is, and the ask is for a person's fault, the used retry or a failure on the original code (`SETUP_ASK_REASONS`). A code a person's change caused (class `code`) or anything else keeps the generic ask: "Code failed" wins, and a mixed ask is not renamed.
+ */
+export function autoFixAskCard(ask: { reason: AutoFixAskReason; codes: readonly AutoFixCode[] }, stage: "VERIFY" | "REVIEW"): AutoFixAskCard {
+  if (!SETUP_ASK_REASONS.includes(ask.reason)) return "ask";
+  const environment = stage === "REVIEW" ? REVIEW_STAGE_ENVIRONMENT_CODES : ENVIRONMENT_CODES;
+  const relevant = ask.codes.filter((entry) => entry !== "pull-request-open");
+  return relevant.length > 0 && relevant.every((entry) => environment.has(entry)) ? "fix_setup" : "ask";
 }
 
 const uniqueCodes = (signals: readonly Signal[]): AutoFixCode[] => [...new Set(signals.map((signal) => signal.code))];

@@ -62,6 +62,31 @@ export function environmentConnectorSecretPrefix(env: string): string {
   return `agentx/${checked(env)}/connectors/`;
 }
 
+/**
+ * What a named environment's Lambda functions can derive from its name, so that no environment variable has to carry it (a function's
+ * variables, keys and values together, are held to 4 KB, and the broker's were over it). The infrastructure and the broker both take
+ * these from here, so the value a resource is created with and the one the code looks for cannot drift apart.
+ */
+/** The CloudWatch namespace the environment's metrics are published in. */
+export function environmentMetricsNamespace(env: string): string {
+  return `AgentX/${checked(env)}`;
+}
+
+/** The prefix of the environment's alarm names (`agentx-<env>-` plus the suffix). */
+export function environmentAlarmPrefix(env: string): string {
+  return `agentx-${checked(env)}-`;
+}
+
+/** The runtime catalog the environment's project setup records are admitted under. */
+export function environmentProjectSetupRuntimeCatalogId(env: string): string {
+  return `agentx-${checked(env)}-project-setup-runtime-v1`;
+}
+
+/** The runtime catalog the environment's end-to-end feature rounds are admitted under. */
+export function environmentE2eFeatureRuntimeCatalogId(env: string): string {
+  return `agentx-${checked(env)}-e2e-mock-runtime-v1`;
+}
+
 /** ECR pull-through cache rule prefix for `env`'s access stack. */
 export function environmentPullThroughPrefix(env: string): string {
   return `agentx-${checked(env)}`;

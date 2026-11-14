@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
-import { E2EAppRecipeSchema, type E2EAppRecipe, type E2EMissingInput } from "./e2e.js";
+import { E2EAppRecipeSchema, type E2EAppRecipe, type E2EMissingInput } from "./e2e-node.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 
 type Source = E2ESourceSnapshot["sources"][number];

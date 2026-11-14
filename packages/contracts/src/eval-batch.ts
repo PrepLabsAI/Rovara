@@ -1,6 +1,7 @@
 // Spec 052: batches of eval runs, several at once. The batch file, its record, the per-run measures
 // and the per-model summary.
 import { z } from "zod";
+import { OrgIdSchema } from "./browser-ids.js";
 import { ModelIdentifierSchema, ModelSelectionSchema, ThinkingLevelSchema } from "./models.js";
 import { SlackRequesterSchema, SlackThreadSchema } from "./slack.js";
 import {
@@ -125,6 +126,9 @@ export const EvalBatchWatchStateSchema = z.object({
 }).strict();
 
 export const EvalBatchRecordSchema = z.object({
+  /** M47 trusted scope, absent only on historical rows. */
+  orgId: OrgIdSchema.optional(),
+  developerId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   batchId: z.string().uuid(),
   file: EvalBatchFileSchema,
   createdBy: SlackRequesterSchema,

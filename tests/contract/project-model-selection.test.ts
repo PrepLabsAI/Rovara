@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ProjectDefinitionSchema } from "../../packages/contracts/src/project.js";
+import { ProjectDefinitionSchema } from "../../packages/contracts/src/project-node.js";
 import { createBroker, ensureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
