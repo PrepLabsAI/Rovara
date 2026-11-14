@@ -170,7 +170,8 @@ export function buildEvidencePack(input: EvidenceBuildInput): EvidenceBuildResul
       label: plain(entry.label, 200),
       before: entry.before, after: entry.after, class: entry.class, durationMs: entry.durationMs,
       ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
-      ...(tests === undefined ? {} : { tests: { ...tests, names: tests.names.map((name) => ({ ...name, ...testNameOf(name.name, name.unlisted === true) })), newTests: tests.newTests.map((name) => testNameOf(name, false).name) } }),
+      // TE-B3: the tests that ran before and are gone are named like the new ones: redacted again, a valid id as it is, anything else one plain cut line.
+      ...(tests === undefined ? {} : { tests: { ...tests, names: tests.names.map((name) => ({ ...name, ...testNameOf(name.name, name.unlisted === true) })), newTests: tests.newTests.map((name) => testNameOf(name, false).name), ...(tests.absentOnNew === undefined ? {} : { absentOnNew: tests.absentOnNew.map((name) => testNameOf(name, false).name) }) } }),
       ...(coverage === undefined ? {} : { coverage: { ...coverage, files: coverage.files.map((file) => ({ ...file, path: plain(file.path, 500) })) } }),
       ...(findings === undefined ? {} : { findings: { ...findings, tool: plain(findings.tool, 60), items: findings.items.map((item) => ({ ...item, ruleId: plain(item.ruleId, 100), path: plain(item.path, 500), message: item.message === "" ? "" : plain(item.message, 300) })) } }),
       ...(extra?.migrations === undefined ? {} : { migrations: { applied: extra.migrations.applied.map((name) => plain(name, 100)), rolledBack: extra.migrations.rolledBack, schemaChanges: extra.migrations.schemaChanges.map((name) => plain(name, 200)) } }),
@@ -233,6 +234,8 @@ export function buildEvidencePack(input: EvidenceBuildInput): EvidenceBuildResul
   for (const entry of checks) {
     const tests = entry.tests;
     if (tests?.skippedBefore !== undefined && tests.skippedAfter !== undefined && tests.skippedAfter > tests.skippedBefore) add({ kind: "check", id: entry.checkId, text: entry.label, reason: "more tests skipped than before" });
+    // TE-B3: a test that ran on the original code and is not in this code's report. The names are in the check's `tests` part; the row says how many.
+    if (tests?.absentOnNewCount !== undefined && tests.absentOnNewCount > 0) add({ kind: "check", id: `absent:${entry.checkId}`.slice(0, 64), text: entry.label, reason: `${tests.absentOnNewCount} ${tests.absentOnNewCount === 1 ? "test" : "tests"} ran before and not now` });
   }
   if (input.rawText !== undefined && raw === undefined) add({ kind: "environment", id: "evidence", text: "Test, coverage and scan details", reason: "could not be read" });
   // Test services: the rows come from what the broker pinned and the worker's usage record; nothing is added for a run without dependencies.
