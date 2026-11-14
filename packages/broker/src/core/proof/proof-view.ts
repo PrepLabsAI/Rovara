@@ -24,6 +24,7 @@ export function proofTableView(workflow: WorkflowSnapshot, proof: ProofContext |
     const earlier = earlierProofCheckResults(workflow);
     const table = buildProofTable({
       plan, checkResults: earlier.length > 0 ? earlier : proofCheckResults(workflow), scenarioRows: proof?.scenarioRows ?? [], testProof: proof?.testProof, candidateDigest: workflow.candidate?.digest, recordedCheckIds: recordedCheckIdsOf(workflow),
+      checkDependencies: proof?.checkDependencies,
     });
     return {
       rows: table.rows.slice(0, 50).map((row) => ({

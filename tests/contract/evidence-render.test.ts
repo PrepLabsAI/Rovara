@@ -306,7 +306,7 @@ describe("inert text", () => {
 });
 
 describe("no callers", () => {
-  it("nothing outside packages/contracts uses any export the evidence pack v2 lane added yet", () => {
+  it("only the proof table uses the trust type and inert label helper; other evidence pack v2 exports have no callers yet", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
     const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
@@ -317,9 +317,14 @@ describe("no callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
-    expect([0, 1]).toContain(found.status);
-    const hits = found.stdout.split("\n").filter((entry) => entry !== "");
-    expect(hits.filter((file) => !file.startsWith("packages/contracts/"))).toEqual([]);
+    const callers = (exports: string[]) => {
+      const found = spawnSync("git", ["grep", "--untracked", "-lw", ...exports.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
+      expect([0, 1]).toContain(found.status);
+      return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"));
+    };
+    // MOCK-PROVENANCE-IN-PROOF consumes these two shared definitions only; it does not switch on evidence v2 readers or writers.
+    const proofExports = ["EvidenceTrustClass", "inertEvidenceText"];
+    expect(callers(names.filter((name) => !proofExports.includes(name)))).toEqual([]);
+    for (const name of proofExports) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
   });
 });

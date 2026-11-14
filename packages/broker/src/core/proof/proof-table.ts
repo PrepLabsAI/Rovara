@@ -1,12 +1,12 @@
 // Playbook P1: the requirement-to-evidence table of a Rovara Code (version 2) pull request. One row per claim of the approved plan; its evidence is the plan's checks whose `proves` names the claim
 // (a check that proves a child also covers its ancestors, as the plan self-check counts it) and the browser/API scenarios `scenarioProves` names. A pure function: it reads nothing, writes
-// nothing and calls no model. Every string it returns is redacted and inert (`inertLine`), because the claims, check labels and scenario titles are a model's words and the description is public to
+// nothing and calls no model. Every string it returns is redacted and inert (shared inert-text helpers), because the claims, check labels and scenario titles are a model's words and the description is public to
 // the repository's readers.
 //
 // A claim is NOT static-only when the plan self-check says so: `planQualityFindings` gives a `claim-static-only` finding for a claim proved only by checks that read files (`grep`, `cat`, `test`) and
 // by no check or scenario that runs the code. That finding is the plan's own notion; this module asks it and does not guess. (The finding names at most 32 claims and only leaf claims; a parent is
 // static-only when all its leaves are.)
-import { TestProofSchema, type PlanClaim, type PlanDocument, type TestProof } from "@agentx/contracts";
+import { inertEvidenceText, TestProofSchema, type EvidenceTrustClass, type PlanClaim, type PlanDocument, type TestProof } from "@agentx/contracts";
 import { planQualityFindings } from "../../developer/plan-quality.js";
 import { testProofPullRequestLines } from "../../developer/test-proof-lines.js";
 import { inertLine } from "./inert-text.js";
@@ -41,6 +41,8 @@ export interface ProofEvidence {
   /** Inert and cut; a scenario's label is its title. */
   label: string;
   state: ProofEvidenceState;
+  /** Present only for a passing check excluded from Proven because it used a Rovara-made mock. */
+  notProvenReason?: "made_by_rovara";
 }
 
 export interface ProofRow {
@@ -70,6 +72,8 @@ export interface ProofTable {
 export interface ProofTableInput {
   plan: PlanDocument;
   checkResults: readonly ProofCheckResult[];
+  /** Dependencies actually used by these recorded check results, keyed by check id (not readiness index). Absent: legacy behaviour exactly. Dependency ids are never displayed. */
+  checkDependencies?: ReadonlyMap<string, readonly { dependencyId: string; trust: EvidenceTrustClass }[]> | undefined;
   scenarioRows: readonly ProofScenarioRow[];
   /** Used only when its `candidateDigest` equals `candidateDigest`; otherwise ignored, as if absent. */
   testProof: TestProof | undefined;
@@ -212,7 +216,14 @@ export function buildProofTable(input: ProofTableInput): ProofTable {
     for (const checkId of checkOrder) {
       if (!(proves[checkId] ?? []).some((id) => covered.has(id))) continue;
       const state = stateOfCheck(checkId);
-      evidence.push({ kind: "check", label: oneLine(labelOfCheck.get(checkId) ?? checkId, LABEL_MAX), state: state === "passed" && provesChange.has(checkId) ? "proven" : state });
+      const madeByRovara = state === "passed" && input.checkDependencies?.get(checkId)?.some((dependency) => dependency.trust === "made_by_rovara") === true;
+      const label = labelOfCheck.get(checkId) ?? checkId;
+      evidence.push({
+        kind: "check",
+        label: madeByRovara ? inertEvidenceText(`with a Rovara-made mock; not Proven: ${label}`, LABEL_MAX) : oneLine(label, LABEL_MAX),
+        state: state === "passed" && provesChange.has(checkId) && !madeByRovara ? "proven" : state,
+        ...(madeByRovara ? { notProvenReason: "made_by_rovara" as const } : {}),
+      });
     }
     for (const [scenarioId, ids] of Object.entries(scenarioProves)) {
       if (!ids.some((id) => covered.has(id))) continue;
