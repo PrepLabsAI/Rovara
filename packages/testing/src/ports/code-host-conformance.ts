@@ -14,6 +14,8 @@ import { rejection, SHA40, type ContractCheck } from "./plugin-contract-kit.js";
 export interface CodeHostWorld {
   /** Two companies that share raw ids on this adapter, for the isolation kit. Absent: the adapter serves one company, and the isolation checks show as skipped. */
   readonly isolation?: TwoCompanyIsolation;
+  /** The fixture explicitly opts into optional changed-file type checks. */
+  readonly fileEntries?: boolean;
   readonly host: CodeHost;
   /** The state of the host. The fake reads it directly; a real adapter's fixtures are served from it. The suite only sets state up through it. */
   readonly model: FakeHostModel;
@@ -51,6 +53,86 @@ async function openChangeRequest(world: CodeHostWorld, options: { draft?: boolea
 }
 
 const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
+  {
+    name: "never reports a wrong entry when optional metadata is present",
+    async run({ host, model, repository, scope, branch }) {
+      model.commit("main", { "mode.txt": "same", "link.txt": "old", "gone.txt": "gone" });
+      model.commit(branch(1), { "ordinary.txt": "new", "gone.txt": null });
+      model.commitExecutable(branch(1), "mode.txt", "same");
+      model.commitSymlink(branch(1), "link.txt");
+      model.commitSubmodule(branch(1), "module", "a".repeat(40));
+      const { ref } = await host.reconcileChangeRequest({ repository, sourceBranch: branch(1), targetBranch: "main", title: "file" }, scope);
+      const expected = new Map([
+        ["ordinary.txt", { head: "file", base: "none" }], ["mode.txt", { head: "executable", base: "file" }],
+        ["link.txt", { head: "symlink", base: "file" }], ["module", { head: "submodule", base: "none" }], ["gone.txt", { head: "none", base: "file" }],
+      ]);
+      const files = (await host.changedFiles(ref, 1, scope)).files;
+      expect(files.some(file => file.path === "ordinary.txt")).toBe(true);
+      for (const file of files) if (file.entry !== undefined) expect(file.entry).toEqual(expected.get(file.path));
+    },
+  },
+  {
+    name: "reports types, mode-only changes, mode with edits, type changes, deletions and renames from the merge base",
+    needs: world => world.fileEntries === true,
+    async run({ host, model, repository, scope, branch }) {
+      model.commit("main", { mode: "old", edit: "old", link: "old", gone: "removed", rename: "unique" });
+      model.commit(branch(1), { gone: null, added: "new" });
+      model.commitExecutable(branch(1), "mode", "old");
+      model.commitExecutable(branch(1), "edit", "new");
+      model.commitSymlink(branch(1), "link");
+      model.commitSubmodule(branch(1), "module", "a".repeat(40));
+      model.commitRename(branch(1), "rename", "renamed");
+      model.commit("main", { unrelated: "tip only", mode: "tip edit" });
+      const { ref } = await host.reconcileChangeRequest({ repository, sourceBranch: branch(1), targetBranch: "main", title: "types" }, scope);
+      const files = (await host.changedFiles(ref, 1, scope)).files;
+      for (const [path, head, base] of [["added", "file", "none"], ["gone", "none", "file"], ["mode", "executable", "file"], ["edit", "executable", "file"], ["link", "symlink", "file"], ["module", "submodule", "none"], ["renamed", "file", "file"]]) {
+        expect(files.find(file => file.path === path)?.entry).toEqual({ head, base });
+      }
+      expect(files.find(file => file.path === "renamed")?.previousPath).toBe("rename");
+      expect(files.some(file => file.path === "unrelated")).toBe(false);
+      const revision = model.headOf(branch(1));
+      expect(await host.fileAtRevision(repository, "module", revision, scope)).toBeUndefined();
+      if (host.pathKind !== undefined) {
+        expect(await host.pathKind(repository, "module", revision, scope)).toBe("dir");
+        await expect(host.pathKind(repository, "module/child", revision, scope)).rejects.toBeDefined();
+      }
+      const pinned = await host.changedFiles(ref, 1, scope, { expectedHead: revision });
+      expect(pinned.files.find(file => file.path === "module")?.entry?.head).toBe("submodule");
+      model.commit(branch(1), { added: "later" });
+      const moved = await host.changedFiles(ref, 1, scope, { expectedHead: revision });
+      expect(moved.files.length).toBeGreaterThan(0);
+      expect(moved.files.every(file => file.entry === undefined)).toBe(true);
+    },
+  },
+  {
+    name: "omits entry when either tree cannot be completely read",
+    needs: world => world.fileEntries === true,
+    async run({ host, model, repository, scope, branch }) {
+      const head = model.commit(branch(1), { "a.txt": "new" });
+      model.incompleteTrees.add(head);
+      const { ref } = await host.reconcileChangeRequest({ repository, sourceBranch: branch(1), targetBranch: "main", title: "unknown" }, scope);
+      expect((await host.changedFiles(ref, 1, scope)).files[0]?.entry).toBeUndefined();
+    },
+  },
+  {
+    name: "lists nested instruction paths and entry types, excludes decoys and reports incomplete or failed reads",
+    needs: ({ host }) => host.instructionFiles !== undefined,
+    async run({ host, model, repository, scope }) {
+      model.commit("main", { "packages/api/AGENTS.md": "a", "apps/web/.cursor/rules/x.mdc": "b", ".github/instructions/a.md": "c", "Claude.md": "d", "AGENTS.md.bak": "e", "docs/agents.md.txt": "f", "my.cursor/rule": "g", "cursor/rules.md": "h" });
+      model.commitSymlink("main", ".agents/link");
+      const head = model.commitSubmodule("main", ".cursor/module", "a".repeat(40));
+      const read = await host.instructionFiles!(repository, head, scope);
+      expect(read.complete).toBe(true);
+      expect(read.files.map(file => file.path).sort()).toEqual(["packages/api/AGENTS.md", "apps/web/.cursor/rules/x.mdc", ".github/instructions/a.md", "Claude.md", ".agents/link", ".cursor/module"].sort());
+      expect(read.files.find(file => file.path === ".agents/link")?.type).toBe("symlink");
+      expect(read.files.find(file => file.path === ".cursor/module")?.type).toBe("submodule");
+      expect((await host.instructionFiles!(repository, head, scope, { max: 5 })).complete).toBe(false);
+      const next = model.commit("main", {});
+      model.incompleteTrees.add(next);
+      expect((await host.instructionFiles!(repository, next, scope)).complete).toBe(false);
+      expect(await rejection(() => host.instructionFiles!(repository, "f".repeat(40), scope))).toBeDefined();
+    },
+  },
   {
     name: "advertises capabilities that fit the schema and a kind",
     async run({ host }) {

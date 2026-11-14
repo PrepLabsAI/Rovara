@@ -373,6 +373,22 @@ export class GitHubAppCredentialProvider {
   private readonly fetchImplementation: typeof fetch;
   private readonly now: () => number;
   private readonly installations = new Map<string, Promise<{ id: number; login: string }>>();
+  private readonly fileReadLimits = new WeakMap<object, number>();
+
+  /** File-details reads opt into the neutral error without changing existing client callers or cached promises. */
+  fileDetailsError(error: unknown): unknown {
+    const retryAt = typeof error === "object" && error !== null ? this.fileReadLimits.get(error) : undefined;
+    return retryAt === undefined ? error : new GithubCompareRateLimitError(retryAt);
+  }
+
+  private async unavailableFileRead(response: Response, message: string): Promise<never> {
+    const error = agentXError("RUNTIME_UNAVAILABLE", message);
+    const body: unknown = await response.json().catch(() => undefined);
+    const retryAt = compareRateLimitRetryAt(response, body, this.now());
+    if (retryAt !== undefined) this.fileReadLimits.set(error, retryAt);
+    throw error;
+  }
+
   private readonly readTokens = new Map<string, { token: Promise<string>; expiresAt: number }>();
   private slug: string | undefined;
   /** The bounded provider of each tracking pass's budget, so one pass's reads share one installation lookup. */
@@ -780,6 +796,22 @@ export class GitHubAppCredentialProvider {
     return { ...after, headTreeSha };
   }
 
+  /** The two immutable revisions used for file types. The compare answer supplies the merge base. */
+  async getPullRequestFileRevisions(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<{ head: string; base: string }> {
+    if (!Number.isSafeInteger(number) || number < 1) throw agentXError("CONFIG_INVALID", "Invalid change request.");
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.diffTokenFor(repository, scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const read = await this.trackingJson(`${root}/pulls/${number}`, token, { rateLimit: true });
+    const pr = statusRecord(read.body);
+    const head = statusRecord(pr.head).sha, tip = statusRecord(pr.base).ref;
+    if (read.status !== 200 || typeof head !== "string" || typeof tip !== "string" || !/^[a-f0-9]{40}$/u.test(head) || !GitBranchNameSchema.safeParse(tip).success) throw agentXError("RUNTIME_UNAVAILABLE", "The change request revisions are unavailable.");
+    const compare = await this.trackingJson(`${root}/compare/${encodeURIComponent(tip)}...${head}?per_page=1`, token, { rateLimit: true });
+    const base = statusRecord(statusRecord(compare.body).merge_base_commit).sha;
+    if (compare.status !== 200 || typeof base !== "string" || !/^[a-f0-9]{40}$/u.test(base)) throw agentXError("RUNTIME_UNAVAILABLE", "The merge base is unavailable.");
+    return { head, base };
+  }
+
   /** A read-only page, keeping full patches for the session boundary's redaction and byte cap. */
   async listPullRequestFiles(repositoryUrl: string, number: number, options: { page: number }, scope: GitHubTokenScope): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; nextPage?: number }> {
     if (!Number.isSafeInteger(number) || number < 1 || !Number.isSafeInteger(options.page) || options.page < 1 || options.page > 10_000) throw agentXError("CONFIG_INVALID", "Invalid diff page.");
@@ -789,7 +821,9 @@ export class GitHubAppCredentialProvider {
       `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls/${number}/files?per_page=100&page=${options.page}`,
       { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" },
     );
-    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", "The pull request diff is unavailable.");
+    if (!response.ok) {
+      return this.unavailableFileRead(response, "The pull request diff is unavailable.");
+    }
     const body: unknown = await response.json();
     if (!Array.isArray(body) || body.length > 100) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid pull request diff.");
     const files = body.map((entry: unknown): GitHubPullRequestChangedFile & { previous_filename?: string } => {
@@ -1579,11 +1613,14 @@ export class GitHubAppCredentialProvider {
       `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/git/trees/${commitSha}?recursive=1`,
       { headers: githubHeaders(token), signal: AbortSignal.timeout(options?.timeoutMs ?? 30_000), redirect: "error" },
     );
-    if (!response.ok) { await response.body?.cancel(); throw agentXError("RUNTIME_UNAVAILABLE", `GitHub tree listing failed with HTTP ${response.status}`); }
+    if (!response.ok) {
+      return this.unavailableFileRead(response, `GitHub tree listing failed with HTTP ${response.status}`);
+    }
     const body: unknown = await response.json();
     if (typeof body !== "object" || body === null || !Array.isArray((body as { tree?: unknown }).tree) || typeof (body as { truncated?: unknown }).truncated !== "boolean") throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid tree listing");
     const entries: Array<{ path: string; mode: string; type: string; sha: string }> = [];
     for (const raw of (body as { tree: unknown[] }).tree) {
+      if (typeof raw !== "object" || raw === null) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid tree entry");
       const entry = raw as { path?: unknown; mode?: unknown; type?: unknown; sha?: unknown };
       if (typeof entry.path !== "string" || typeof entry.mode !== "string" || typeof entry.type !== "string" || typeof entry.sha !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(entry.sha)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid tree entry");
       entries.push({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
@@ -2163,7 +2200,7 @@ export class GitHubAppCredentialProvider {
       );
     }
     if (!response.ok) {
-      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installation lookup failed with HTTP ${response.status}`);
+      return this.unavailableFileRead(response, `GitHub App installation lookup failed with HTTP ${response.status}`);
     }
     const body: unknown = await response.json();
     const id = body && typeof body === "object" && "id" in body ? body.id : undefined;
@@ -2470,7 +2507,9 @@ export class GitHubAppCredentialProvider {
 
   /** The token of a successful token response; anything else is GitHub being unavailable. */
   private async tokenOf(response: Response, issued?: Pick<GitHubTokenIssued, "installationId" | "repository" | "requested">, expiry?: { expiresAt?: string }): Promise<string> {
-    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installation token request failed with HTTP ${response.status}`);
+    if (!response.ok) {
+      return this.unavailableFileRead(response, `GitHub App installation token request failed with HTTP ${response.status}`);
+    }
     const body: unknown = await response.json();
     if (!body || typeof body !== "object" || !("token" in body) || typeof body.token !== "string") {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid installation token response");

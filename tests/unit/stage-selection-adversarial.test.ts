@@ -515,15 +515,25 @@ describe("T3: the reviewer sees exactly the gate's patch", () => {
     expect(await gate(h, t.taskId)).toBeUndefined();
   });
 
-  it("T3d-base-moves: the base branch moves and the diff changes; the floor runs again for the new patch", async () => {
+  it("T3d-base-moves: the base branch moves, then the task patch changes; the floor runs again for the new patch", async () => {
     const h = await launch();
     const t = await toAfterPlan(h);
-    await buildAndPublish(h, t, SMALL);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const originalFiles = h.model.changedFiles(cr.id);
     expect(questionCalls(h.reviewer)).toHaveLength(1);
+    expect(await gate(h, t.taskId)).toBeUndefined();
+    // GitHub compares the head with the merge base: advancing main alone leaves the PR's patch unchanged.
     h.model.commit("main", { "src/health.ts": "export const health = 201;\n" });
+    expect(h.model.changedFiles(cr.id)).toEqual(originalFiles);
+    expect(await gate(h, t.taskId)).toBeUndefined();
+    // A follow-up on the task branch really changes that patch, so the earlier floor cannot clear it.
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 202;\n" });
     expect(await gate(h, t.taskId)).toBeDefined();
+    expect(h.model.changedFiles(cr.id)).not.toEqual(originalFiles);
     await settle(h);
     expect(questionCalls(h.reviewer)).toHaveLength(2);
+    expect(questionCalls(h.reviewer)[0]!.prompt).not.toContain("health = 202");
+    expect(questionCalls(h.reviewer)[1]!.prompt).toContain("health = 202");
     expect(await gate(h, t.taskId)).toBeUndefined();
   });
 

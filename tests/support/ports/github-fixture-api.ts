@@ -56,7 +56,7 @@ export class GitHubFixtureApi {
       ...(cr.mergedBy === undefined ? {} : { merged_by: { login: cr.mergedBy } }), ...(cr.mergedAt === undefined ? {} : { merged_at: cr.mergedAt }),
       draft: cr.draft, title: cr.title, body: cr.body === "" ? null : cr.body, merge_commit_sha: cr.mergeRevision ?? null,
       user: { login: cr.author, id: 1, type: cr.author.endsWith("[bot]") ? "Bot" : "User" },
-      head: { ref: cr.sourceBranch, sha: head, repo: { full_name: FULL } }, base: { ref: cr.targetBranch, repo: { full_name: FULL, id: Number(this.model.id) } },
+      head: { ref: cr.sourceBranch, sha: head, repo: { full_name: FULL } }, base: { ref: cr.targetBranch, sha: this.model.headOf(cr.targetBranch), repo: { full_name: FULL, id: Number(this.model.id) } },
       mergeable_state: githubMergeableState(this.model.mergeableState(cr)), mergeable: !cr.conflicts,
       requested_reviewers: cr.requestedReviewers.filter((name) => !name.includes("/")).map((login) => ({ login, id: Number(this.model.accounts.get(login)?.hostUserId ?? "1"), type: "User" })),
       requested_teams: cr.requestedReviewers.filter((name) => name.includes("/")).map((name) => ({ slug: name.split("/")[1] })),
@@ -135,7 +135,17 @@ export class GitHubFixtureApi {
     }
     if (method === "GET" && new RegExp(`^${ROOT}/rules/branches/`).test(path)) return json(200, []);
     match = new RegExp(`^${ROOT}/compare/(.+)\\.\\.\\.([0-9a-f]{40})$`).exec(path);
-    if (method === "GET" && match) return json(200, { behind_by: 0, ahead_by: 1 });
+    if (method === "GET" && match) {
+      const target = this.model.branches.get(match[1]!) ?? match[1]!;
+      return json(200, { behind_by: 0, ahead_by: 1, merge_base_commit: { sha: this.model.mergeBase(match[2]!, target) } });
+    }
+    match = new RegExp(`^${ROOT}/git/trees/([0-9a-f]{40})$`).exec(path);
+    if (method === "GET" && match) {
+      const revision = this.model.revisions.get(match[1]!);
+      if (revision === undefined) return NOT_FOUND();
+      const modes = { file: "100644", executable: "100755", symlink: "120000", submodule: "160000" } as const;
+      return json(200, { truncated: this.model.incompleteTrees.has(revision.sha), tree: [...revision.entries].map(([path, type]) => ({ path, mode: modes[type], type: type === "submodule" ? "commit" : "blob", sha: gitSha(path) })) });
+    }
     if (method === "GET" && path === `${ROOT}/contents/.github/workflows`) {
       const files = this.revisionFor(url.searchParams.get("ref") ?? "");
       const names = files === undefined ? [] : [...this.model.revision(files).files.keys()].filter((name) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(name));
@@ -148,6 +158,9 @@ export class GitHubFixtureApi {
       const found = this.model.revision(revision);
       const wanted = match[1] ?? "";
       const accept = new Headers(init?.headers).get("accept") ?? "";
+      for (const [name, type] of found.entries) {
+        if (type === "submodule" && (wanted === name || wanted.startsWith(`${name}/`))) return json(200, { type, name: name.split("/").pop(), path: name, sha: gitSha(`module ${name}`) });
+      }
       // The raw media type is a file's text; any other is GitHub's JSON: a file's record, a symbolic link's, or a directory's listing.
       if (accept.includes("raw")) {
         const content = found.files.get(wanted);
@@ -160,11 +173,11 @@ export class GitHubFixtureApi {
       if (file !== undefined) return json(200, { type: "file", name: wanted.split("/").pop(), path: wanted, sha: gitSha(`blob ${file}`), encoding: "base64", content: Buffer.from(file, "utf8").toString("base64") });
       const prefix = wanted === "" ? "" : `${wanted}/`;
       const children = new Map<string, string>();
-      for (const name of [...found.files.keys(), ...found.symlinks]) {
+      for (const name of found.entries.keys()) {
         if (!name.startsWith(prefix)) continue;
         const rest = name.slice(prefix.length);
         const first = rest.split("/")[0]!;
-        children.set(first, rest.includes("/") ? "dir" : found.symlinks.has(name) ? "symlink" : "file");
+        children.set(first, rest.includes("/") ? "dir" : found.entries.get(name) === "executable" ? "file" : found.entries.get(name)!);
       }
       return children.size === 0 ? NOT_FOUND() : json(200, [...children.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([name, type]) => ({ name, path: `${prefix}${name}`, type, sha: gitSha(`entry ${prefix}${name}`) })));
     }
@@ -261,7 +274,7 @@ export class GitHubFixtureApi {
       if (method === "GET" && rest === "/files") {
         const page = Number(url.searchParams.get("page") ?? "1");
         const all = this.model.changedFiles(cr.id);
-        const files = all.slice((page - 1) * 100, page * 100).map((file) => ({ filename: file.path, status: file.status, additions: file.additions, deletions: file.deletions }));
+        const files = all.slice((page - 1) * 100, page * 100).map((file) => ({ filename: file.path, status: file.status, additions: file.additions, deletions: file.deletions, ...(file.previousPath === undefined ? {} : { previous_filename: file.previousPath }) }));
         return json(200, files, all.length > page * 100 ? { link: `<${API}${ROOT}/pulls/${cr.id}/files?per_page=100&page=${page + 1}>; rel="next"` } : {});
       }
       if (method === "GET" && rest === "/reviews") return json(200, cr.reviews.map((review, index) => this.reviewJson(cr, index, review)));
