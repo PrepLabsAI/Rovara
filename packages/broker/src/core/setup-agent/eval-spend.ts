@@ -1,40 +1,75 @@
+import { randomInt } from "node:crypto";
 // Independent setup approval. The setup-command candidate/check/owner gate is never reused for spend.
 import {
-  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendApprovalRecordSchema, EvalSpendPlanSchema, EvalSpendRoleSchema,
+  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendApprovalRecordSchema, EvalSpendPlanSchema,
   agentXError, canonicalJson, change, evalSpendDigest, evalSpendInputsDigest, when,
-  type DocumentStore, type EvalSpendApprovalRecord, type EvalSpendPlan, type EvalSpendGrant, type EvalSpendApproval, type MonthlyMeter, type EvalReservationAdapter, type OrgId,
+  type DocumentStore, type EvalSpendApprovalRecord, type EvalSpendPlan, type EvalSpendGrant, type EvalSpendApproval, type MonthlyMeter, type EvalReservationAdapter, type OrgId, type Principal, type StoredDocument,
 } from "@agentx/contracts";
 import { SubjectRefusal, type DecisionSubject } from "../decisions/approval-gate.js";
+import { localOwnerMembers, type SessionMembers, type SessionPerson } from "../sessions/access.js";
+import { developerIdOf } from "../sessions/create.js";
 import { setupPartition } from "./keys.js";
 
 export const EVAL_SPEND_KIND = "setup-eval-spend";
-type Table = { store: DocumentStore; companyId: OrgId };
+/** Cap and membership come from the trusted host, never the proposal or a stored approver role. */
+type Table = { store: DocumentStore; companyId: OrgId; members?: SessionMembers; monthlyCapMicros?: number; log?: (event: "eval_spend_approval_invalid") => void };
+
+async function roleFor(deps: Table, project: string, person: SessionPerson): Promise<"owner" | "admin" | "maintainer" | undefined> {
+  try {
+    const members = deps.members ?? localOwnerMembers();
+    const companyRole = await members.companyRole(person);
+    if (companyRole === "owner" || companyRole === "admin") return companyRole;
+    if (companyRole !== "member") return undefined;
+    return await members.projectGrant(person, project) === "maintainer" ? "maintainer" : undefined;
+  } catch { return undefined; }
+}
+const sessionPerson = (principal: Principal): SessionPerson => ({ companyId: principal.companyId, developerId: developerIdOf(principal), principal });
 export const evalSpendKey = (company: string, project: string) => ({ pk: setupPartition(company, project), sk: "EVAL_SPEND" });
 
-async function readRecord(deps: Table, project: string): Promise<EvalSpendApprovalRecord | undefined> {
-  const raw = await deps.store.get(evalSpendKey(deps.companyId, project));
+function parseRecord(deps: Table, project: string, raw: StoredDocument | undefined): EvalSpendApprovalRecord | undefined {
   if (raw === undefined) return undefined;
   const { pk, sk, ...value } = raw;
   void pk; void sk;
   const parsed = EvalSpendApprovalRecordSchema.safeParse(value);
-  if (!parsed.success) return undefined;
-  const row = parsed.data;
-  if (row.company !== deps.companyId || row.project !== project || row.digest !== evalSpendDigest(row.company, row.project, row.plan) || row.inputsDigest !== evalSpendInputsDigest(row.plan.inputs)) return undefined;
-  return row;
+  if (parsed.success) {
+    const row = parsed.data;
+    if (row.company === deps.companyId && row.project === project && row.digest === evalSpendDigest(row.company, row.project, row.plan) && row.inputsDigest === evalSpendInputsDigest(row.plan.inputs)) return row;
+  }
+  (deps.log ?? console.warn)("eval_spend_approval_invalid");
+  return undefined;
+}
+async function readRecord(deps: Table, project: string): Promise<EvalSpendApprovalRecord | undefined> {
+  return parseRecord(deps, project, await deps.store.get(evalSpendKey(deps.companyId, project)));
+}
+
+const fitsMonthlyCap = (deps: Table, plan: EvalSpendPlan): boolean =>
+  Number.isSafeInteger(deps.monthlyCapMicros) && deps.monthlyCapMicros! >= plan.budget.maximum.costMicros;
+
+async function approvedRole(deps: Table, row: EvalSpendApprovalRecord) {
+  if (row.approvedBy === undefined) return undefined;
+  return roleFor(deps, row.project, { companyId: row.company, developerId: developerIdOf(row.approvedBy) });
 }
 
 /** Called only with the trusted discovery/estimate, never request JSON or a model's approval claim.
  * A refresh may reuse approval through the producers; proposing a changed item always asks again. */
 export async function proposeEvalSpendApproval(deps: Table, project: string, input: Omit<EvalSpendPlan, "budget"> & { budget?: EvalSpendPlan["budget"] }): Promise<EvalSpendApprovalRecord> {
   const plan = EvalSpendPlanSchema.parse({ ...input, budget: input.budget ?? { usual: input.estimate, maximum: { calls: EVAL_DEFAULT_CALL_BUDGET, costMicros: EVAL_DEFAULT_COST_BUDGET_MICROS } } });
+  if (!fitsMonthlyCap(deps, plan)) throw agentXError("CONFIG_INVALID", "The eval budget does not fit the monthly cap.");
   const key = evalSpendKey(deps.companyId, project);
-  const before = await readRecord(deps, project);
+  const raw = await deps.store.get(key);
+  const before = parseRecord(deps, project, raw);
   const digest = evalSpendDigest(deps.companyId, project, plan);
-  if (before?.digest === digest && before.state !== "rejected") return before;
-  const row = EvalSpendApprovalRecordSchema.parse({ entityType: "EVAL_SPEND_APPROVAL", schemaVersion: 1, company: deps.companyId, project, revision: (before?.revision ?? 0) + 1, digest, inputsDigest: evalSpendInputsDigest(plan.inputs), plan, state: "waiting" });
+  if (before?.digest === digest && (before.state === "waiting" || (before.state === "approved" && await approvedRole(deps, before) !== undefined))) return before;
+  // Corrupt records need a new revision even when their previous revision is unreadable,
+  // so an old DecisionGate replay cannot masquerade as the new decision.
+  const previousRevision = before?.revision ?? (raw === undefined ? 0 : randomInt(1, 2 ** 48));
+  const row = EvalSpendApprovalRecordSchema.parse({ entityType: "EVAL_SPEND_APPROVAL", schemaVersion: 1, company: deps.companyId, project, revision: previousRevision + 1, digest, inputsDigest: evalSpendInputsDigest(plan.inputs), plan, state: "waiting" });
   const { approvedBy, ...waiting } = row;
   void approvedBy;
-  const result = await deps.store.put({ item: { ...key, ...waiting }, condition: before === undefined ? when.absent() : when.and(when.eq("revision", before.revision), when.eq("digest", before.digest), when.eq("state", before.state)) });
+  const result = await deps.store.put({ item: { ...key, ...waiting }, condition: raw === undefined ? when.absent() : when.and(
+    ...Object.entries(raw).map(([name, value]) => when.eq([name], value)),
+    ...["revision", "digest", "state", "approvedBy"].filter(name => !Object.hasOwn(raw, name)).map(name => when.notExists([name])),
+  ) });
   if (!result.applied) throw agentXError("CHANGE_STALE", "The eval approval changed. Read it again.");
   return row;
 }
@@ -43,10 +78,11 @@ export async function readEvalSpendItem(deps: Table, project: string) {
   try {
     const row = await readRecord(deps, project);
     if (row === undefined) return undefined;
-    const money = (n: number): string => `$${(n / 1_000_000).toFixed(6)}`;
+    const money = (n: number): string => `$${(n / 1_000_000).toFixed(2)}`;
     const { estimate, budget } = row.plan;
-    return { state: row.state, label: `Run the eval health check: about ${estimate.calls} calls, about ${money(estimate.costMicros)}`,
-      budget: `Usually about ${budget.usual.calls} calls (about ${money(budget.usual.costMicros)}), at most ${budget.maximum.calls} calls (about ${money(budget.maximum.costMicros)}), within the monthly cap.`,
+    const state = row.state === "approved" && await approvedRole(deps, row) === undefined ? "approval needs renewing" as const : row.state;
+    return { state, label: `Run the eval health check: about ${estimate.calls} calls, about ${money(estimate.costMicros)}`,
+      budget: `Usually about ${budget.usual.calls} calls (about ${money(budget.usual.costMicros)}), at most ${budget.maximum.calls} calls (about ${money(budget.maximum.costMicros)})${fitsMonthlyCap(deps, row.plan) ? ", within the monthly cap" : ""}.`,
       ...(row.state === "waiting" ? { approval: { requestId: `eval-${row.digest.slice(0, 40)}-${row.revision}`, revision: row.revision, artifactDigest: row.digest, kind: EVAL_SPEND_KIND as typeof EVAL_SPEND_KIND, risk: "high" as const } } : {}),
     };
   } catch { return undefined; }
@@ -62,10 +98,10 @@ export function createEvalSpendSubject(deps: Table): DecisionSubject {
       return { key: evalSpendKey(company, project), guard: when.and(when.eq("revision", row.revision), when.eq("digest", row.digest), when.eq("state", "waiting")), waiting: row.state === "waiting",
         request: { kind: EVAL_SPEND_KIND, subject: { type: "eval_spend", id: project }, projectName: project, revision: row.revision, artifactDigest: row.digest, risk: "high" }, state: row };
     },
-    apply(loaded, attempt, approvers, at) {
+    async apply(loaded, attempt, approvers, at) {
       const row = EvalSpendApprovalRecordSchema.parse(loaded.state);
-      // The Approvers adapter verifies membership for request.projectName. The subject narrows its result.
-      const roles = approvers.map(p => EvalSpendRoleSchema.options.find(role => p.roles.includes(role)));
+      // Company owners/admins are global; a maintainer must hold this project's own grant.
+      const roles = await Promise.all(approvers.map(p => roleFor(deps, row.project, sessionPerson(p))));
       if (approvers.length === 0 || approvers.some(p => p.companyId !== row.company) || roles.some(role => role === undefined)) throw new SubjectRefusal("not_the_approver", "Only a company owner, admin or project maintainer approves eval spend.");
       if (attempt.outcome === "reject") return { ops: [change.set("state", "rejected")] };
       if (attempt.outcome !== "approve") throw new SubjectRefusal("invalid_outcome", "Eval spend is approved or rejected.");
@@ -89,7 +125,7 @@ export function createEvalSpendCapabilities(options: Table & { project: string; 
     if (current.selection !== row.plan.selection || evalSpendInputsDigest(current.inputs) !== row.inputsDigest || canonicalJson(current.budget) !== canonicalJson(row.plan.budget) || current.estimate.calls > row.plan.estimate.calls || current.estimate.costMicros > row.plan.estimate.costMicros) return undefined;
     const authority = await options.adapter.authority({ company: row.company, project: row.project, approver: row.approvedBy });
     if (authority === undefined || authority.company !== row.company || authority.project !== row.project || authority.principal.companyId !== row.company || authority.principal.personId !== row.approvedBy.personId || authority.principal.provider !== row.approvedBy.provider || authority.provider !== "customer" || authority.connected !== true) return undefined;
-    const role = EvalSpendRoleSchema.options.find(r => authority.principal.roles.includes(r));
+    const role = await roleFor(options, row.project, sessionPerson(authority.principal));
     if (role === undefined) return undefined;
     return { row, role };
   };

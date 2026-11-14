@@ -73,7 +73,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     if (item === undefined) return "";
     const offer = item.approval;
     const form = (decision: "approve" | "reject"): string => offer === undefined ? "" : `<form method="post" action="${action("eval")}" class="row">${hidden("decision", decision)}${hidden("requestId", offer.requestId)}${hidden("revision", offer.revision)}${hidden("digest", offer.artifactDigest)}${token("eval", { requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })}${button(decision === "approve" ? "Approve eval spend" : "Not now", decision === "approve" ? "primary" : "")}</form>`;
-    return `<div class="panel"><h2>Eval health check</h2><p>${esc(item.label)}</p><p>${esc(item.budget)}</p><p>One approval covers later refreshes within this estimate and the monthly cap. A higher estimate or changed eval inputs needs another approval.</p><p>Spend approval: ${esc(item.state)}. Approving spend does not start a health check.</p><div class="row">${form("approve")}${form("reject")}</div></div>`;
+    return `<div class="panel"><h2>Eval health check</h2><p>${esc(item.label)}</p><p>${esc(item.budget)}</p><p>Later refreshes require current approval and a reservation against the monthly cap. A higher estimate or changed eval inputs needs another approval.</p><p>Spend approval: ${esc(item.state)}. Approving spend does not start a health check.</p><div class="row">${form("approve")}${form("reject")}</div></div>`;
   };
 
   const hosts = (): string => {

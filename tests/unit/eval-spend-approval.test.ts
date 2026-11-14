@@ -9,6 +9,9 @@ import { createSetupProposalSubject, setupApplyDigest } from "../../packages/bro
 import { createEvalSpendSubject, proposeEvalSpendApproval, readEvalSpendItem, evalSpendKey, createEvalSpendCapabilities, EVAL_SPEND_KIND } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { runEvalHealth, type EvalHealthInput } from "../../packages/worker/src/verification/eval-health.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
+import { renderSetupPage } from "../../packages/broker/src/core/local-pages/setup-page.js";
+import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
+import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import type { ModelEgressFrame } from "../../packages/contracts/src/model-egress/frame.js";
 
 const company = "org_aaaaaaaaaaaaaaaaaaaa";
@@ -18,12 +21,17 @@ const now = "2026-11-14T05:00:00.000Z";
 const settings = { imageDigest: "image", route: "customer" };
 const inputs = { evalSetHash: "a".repeat(64), judgePin: "b".repeat(64), modelVersion: "version-1", model: "model", catalogRowId: "model", commandFingerprint: evalCommandFingerprint("eval"), settingsFingerprint: evalSettingsFingerprint(settings, "b".repeat(64)) };
 const plan = (): EvalSpendPlan => ({ selection: "evals/demo", inputs: { ...inputs }, estimate: { calls: 6, costMicros: 60 }, budget: { usual: { calls: 6, costMicros: 60 }, maximum: { calls: 400, costMicros: 4_000_000 } } });
-const person = (role = "maintainer", companyId = company): Principal => ({ companyId, personId: "person", roles: [role], provider: "test-identity", displayName: "Test" });
+const person = (role = "maintainer", companyId = company): Principal => ({ companyId, personId: "person", roles: [role === "maintainer" ? "member" : role], provider: "test-identity", displayName: "Test" });
 
 function world(role = "maintainer") {
   const store = new MemoryDocumentStore();
-  const deps = { store, companyId: company };
-  const state = { principal: person(role), current: plan(), connected: true, provider: "customer", authorityCompany: company, authorityProject: project, remainingCalls: 100, remainingCost: 1000, denied: false };
+  const state = { principal: person(role), current: plan(), connected: true, provider: "customer", authorityCompany: company, authorityProject: project, remainingCalls: 100, remainingCost: 1000, denied: false, grants: new Set(role === "maintainer" ? [project] : []) };
+  const logs: string[] = [];
+  const members: SessionMembers = {
+    companyRole: p => p.companyId === state.principal.companyId && p.developerId === developerIdOf(state.principal) ? state.principal.roles[0] as "owner" | "admin" | "member" | "auditor" : undefined,
+    projectGrant: (p, name) => p.companyId === state.principal.companyId && p.developerId === developerIdOf(state.principal) && state.grants.has(name) ? "maintainer" : undefined,
+  };
+  const deps = { store, companyId: company, members, monthlyCapMicros: 50_000_000, log: (event: string) => { logs.push(event); } };
   const ledger: Array<{ company: string; project: string; provider: string }> = [];
   const holds: Array<{ calls: number; costMicros: number; approval: EvalSpendApprovalRecord }> = [];
   const approvers: Approvers = { requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_request, proof) => ({ approved: true, approver: state.principal, method: proof.method, proofId: proof.proofId }) };
@@ -31,7 +39,7 @@ function world(role = "maintainer") {
   const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [subject], now: () => new Date(now) });
   // The fake adapter owns the payer and atomic monthly hold. No product meter or provider is used.
   const adapter: EvalReservationAdapter = {
-    async authority() { return { company: state.authorityCompany, project: state.authorityProject, principal: state.principal, provider: state.provider, connected: state.connected }; },
+    async authority(request) { if (request.company !== company || request.project !== project) return undefined; return { company: state.authorityCompany, project: state.authorityProject, principal: state.principal, provider: state.provider, connected: state.connected }; },
     async reserve(request) {
       if (!await request.revalidate() || state.denied || request.calls > state.remainingCalls || request.costMicros > state.remainingCost) return undefined;
       state.remainingCalls -= request.calls; state.remainingCost -= request.costMicros;
@@ -51,7 +59,7 @@ function world(role = "maintainer") {
   const propose = () => proposeEvalSpendApproval(deps, project, state.current);
   const attempt = (row: EvalSpendApprovalRecord): DecisionAttempt => ({ companyId: company, kind: EVAL_SPEND_KIND, subjectId: project, requestId: `eval-decision-${row.revision}`, outcome: "approve", seen: { revision: row.revision, artifactDigest: row.digest }, credentials: [{ method: "local-session", token: ["fake", "session"].join("-") }] });
   const approve = async () => { const row = await propose(); expect((await gate.decide(attempt(row))).status).toBe("decided"); return row; };
-  return { store, deps, state, ledger, holds, subject, gate, adapter, capabilities, input, propose, attempt, approve };
+  return { store, deps, state, logs, members, ledger, holds, subject, gate, adapter, capabilities, input, propose, attempt, approve };
 }
 
 async function refused(w: ReturnType<typeof world>, input = w.input()) {
@@ -64,7 +72,7 @@ async function refused(w: ReturnType<typeof world>, input = w.input()) {
 describe("persisted eval spend approval", () => {
   it("shows a separate estimate and usual/maximum budget before approval; refreshes use one approval", async () => {
     const w = world(); const row = await w.propose();
-    expect(await readEvalSpendItem(w.deps, project)).toMatchObject({ label: "Run the eval health check: about 6 calls, about $0.000060", budget: "Usually about 6 calls (about $0.000060), at most 400 calls (about $4.000000), within the monthly cap.", approval: { artifactDigest: row.digest } });
+    expect(await readEvalSpendItem(w.deps, project)).toMatchObject({ label: "Run the eval health check: about 6 calls, about $0.00", budget: "Usually about 6 calls (about $0.00), at most 400 calls (about $4.00), within the monthly cap.", approval: { artifactDigest: row.digest } });
     await refused(w);
     expect((await w.gate.decide(w.attempt(row))).status).toBe("decided");
     expect(await w.store.get(evalSpendKey(company, project))).toMatchObject({ state: "approved", inputsDigest: evalSpendInputsDigest(inputs), plan: plan(), approvedBy: { personId: "person", provider: "test-identity", role: "maintainer", at: now } });
@@ -131,7 +139,7 @@ describe("persisted eval spend approval", () => {
   });
   it.each(["role", "company", "project", "person", "provider", "disconnected", "authority failure", "reservation failure", "cap calls", "cap cost", "reservation denied"])("refuses current %s before spend", async mode => {
     const w = world(); await w.approve();
-    if (mode === "role") w.state.principal = person("member");
+    if (mode === "role") { w.state.principal = person("member"); w.state.grants.clear(); }
     if (mode === "company") w.state.authorityCompany = other;
     if (mode === "project") w.state.authorityProject = "other";
     if (mode === "person") w.state.principal = { ...person(), personId: "other" };
@@ -211,15 +219,20 @@ it.each(["authority absent", "wrong identity company", "wrong identity provider"
 });
 it("the subject refuses empty and mixed approvers even with a valid loaded item", async () => {
   const w = world(); const row = await w.propose(); const loaded = (await w.subject.load(company, project))!;
-  for (const approvers of [[], [person(), person("auditor")], [person("owner", other)]]) {
-    expect(() => w.subject.apply(loaded, w.attempt(row), approvers, now)).toThrow("Only a company owner");
+  for (const approvers of [[], [person(), { ...person("auditor"), personId: "auditor" }], [person("owner", other)]]) {
+    await expect(Promise.resolve().then(() => w.subject.apply(loaded, w.attempt(row), approvers, now))).rejects.toThrow("Only a company owner");
   }
 });
-it("does not display unknown stored fields or nonfinite numbers and leaves corrupt rows untouched", async () => {
-  const w = world(); await w.propose(); const key = evalSpendKey(company, project); const row = (await w.store.get(key))!;
-  await w.store.put({ item: { ...row, extra: "untrusted" } });
-  expect(await readEvalSpendItem(w.deps, project)).toBeUndefined(); await expect(w.propose()).rejects.toThrow("changed");
-  expect((await w.store.get(key))?.["extra"]).toBe("untrusted");
+it("corrupt rows fail closed, log fixed words, and permit a fresh proposal", async () => {
+  const w = world(); await w.approve(); const key = evalSpendKey(company, project); const row = (await w.store.get(key))!;
+  await w.store.put({ item: { ...row, extra: "private-corrupt-detail" } });
+  expect(await readEvalSpendItem(w.deps, project)).toBeUndefined(); await refused(w);
+  expect(w.logs.length).toBeGreaterThan(0);
+  expect(new Set(w.logs)).toEqual(new Set(["eval_spend_approval_invalid"]));
+  const next = await w.propose(); expect(next.state).toBe("waiting");
+  expect((await w.store.get(key))?.["extra"]).toBeUndefined(); await refused(w);
+  expect((await w.gate.decide(w.attempt(next))).status).toBe("decided");
+  expect((await runEvalHealth(w.input())).status).toBe("measured");
 });
 it("missing or malformed subjects cannot be offered for approval", async () => {
   const w = world(); expect(await w.subject.load(company, project)).toBeUndefined();
@@ -257,4 +270,81 @@ it("shows only fixed words and finite amounts, never the stored selection's text
   expect(JSON.stringify(item)).not.toMatch(/evil|nested|@owner|#123|<img>|```|~~~/u);
   w.state.current.selection = "x".repeat(1_048_576); await expect(w.propose()).rejects.toThrow();
   w.state.current.selection = "eval\u200b\ufe0f"; await expect(w.propose()).rejects.toThrow();
+});
+
+it("refuses project B maintainers on project A at approval and read time", async () => {
+  const w = world(); const row = await w.propose();
+  w.state.grants = new Set(["other-project"]);
+  // An adapter returning a union of roles must not turn this into project A access.
+  w.state.principal = { ...w.state.principal, roles: [...w.state.principal.roles, "maintainer"] };
+  expect((await w.gate.decide(w.attempt(row))).status).toBe("refused"); await refused(w);
+  w.state.grants.add(project); await w.approve();
+  expect(await w.capabilities().approval.read()).toBeDefined();
+  w.state.grants.delete(project);
+  expect(await w.capabilities().approval.read()).toBeUndefined(); await refused(w);
+});
+it.each(["owner", "admin"])("keeps %s company-wide without project grants", async role => {
+  const w = world(role); expect(w.state.grants.size).toBe(0); await w.approve();
+  expect((await runEvalHealth(w.input())).status).toBe("measured");
+});
+it.each(["owner", "admin", "maintainer"])("renews a lapsed %s approval with a new decision", async role => {
+  const w = world(role); const first = await w.approve();
+  w.state.principal = person("member"); w.state.grants.clear();
+  const item = (await readEvalSpendItem(w.deps, project))!;
+  expect(item.state).toBe("approval needs renewing");
+  const html = renderSetupPage({ base: "/local", nonce: "nonce", sessionId: "session", formToken: () => "unused" }, {
+    project, revision: 1, status: "none", limits: { commands: 40, sameStepTries: 3, wallClockMin: 45, budgetCents: 400, hostAsks: 5 }, items: [], verified: false, journal: [], hostAsks: [], approvedHosts: [], check: { status: "unchecked" }, evalSpend: item,
+  });
+  expect(html).toContain("Spend approval: approval needs renewing"); expect(html).not.toContain("Spend approval: approved");
+  await refused(w);
+  const next = await w.propose(); expect(next).toMatchObject({ state: "waiting", revision: first.revision + 1 });
+  expect(next.approvedBy).toBeUndefined();
+  expect((await readEvalSpendItem(w.deps, project))?.approval).toBeDefined();
+  w.state.grants.add(project);
+  expect((await w.gate.decide(w.attempt(next))).status).toBe("decided");
+  expect((await runEvalHealth(w.input())).status).toBe("measured");
+});
+it("refuses a suggested budget above the monthly cap and labels only checked caps", async () => {
+  const w = world(); w.deps.monthlyCapMicros = 4_000_000;
+  const row = await w.propose(); expect(row.plan.budget.maximum.costMicros).toBe(4_000_000);
+  expect((await readEvalSpendItem(w.deps, project))?.budget).toContain("within the monthly cap");
+  w.state.current.budget.maximum.costMicros++;
+  await expect(w.propose()).rejects.toThrow("The eval budget does not fit the monthly cap.");
+  w.deps.monthlyCapMicros--;
+  expect((await readEvalSpendItem(w.deps, project))?.budget).not.toContain("within the monthly cap");
+  expect((await readEvalSpendItem({ store: w.store, companyId: company }, project))?.budget).not.toContain("within the monthly cap");
+  await refused(w);
+});
+it.each([undefined, NaN, Infinity, -1, "50000000", "private-cap-detail"])("refuses an unreadable monthly cap: %s", async cap => {
+  const w = world(); Object.assign(w.deps, { monthlyCapMicros: cap });
+  await expect(w.propose()).rejects.toThrow("The eval budget does not fit the monthly cap.");
+  expect(await w.store.get(evalSpendKey(company, project))).toBeUndefined(); await refused(w);
+});
+it.each(["extra", "missing state"])("corrupt-row recovery cannot overwrite an intervening approval: %s", async mode => {
+  const w = world(); await w.approve(); const key = evalSpendKey(company, project); const approved = (await w.store.get(key))!;
+  const corrupt = { ...approved }; if (mode === "extra") corrupt["extra"] = "private"; else delete corrupt["state"];
+  await w.store.put({ item: corrupt }); const put = w.store.put.bind(w.store);
+  w.store.put = async request => { await put({ item: approved }); return put(request); };
+  await expect(w.propose()).rejects.toThrow("changed");
+  expect(await w.store.get(key)).toEqual(approved);
+});
+it("recovery without a readable revision cannot replay the old approval", async () => {
+  const w = world(); const first = await w.approve(); const key = evalSpendKey(company, project);
+  const { revision, ...corrupt } = (await w.store.get(key))!; void revision;
+  await w.store.put({ item: corrupt }); await refused(w);
+  const next = await w.propose(); expect(next.revision).not.toBe(first.revision);
+  expect((await w.gate.decide(w.attempt(next))).status).toBe("decided");
+  expect((await runEvalHealth(w.input())).status).toBe("measured");
+});
+it.each(["company lookup", "grant lookup"])("unreadable %s refuses with fixed words and renews approval", async mode => {
+  const w = world(); const row = await w.approve();
+  const fail = () => { throw new Error("private-membership-detail"); };
+  if (mode === "company lookup") w.members.companyRole = fail; else w.members.projectGrant = fail;
+  expect(await readEvalSpendItem(w.deps, project)).toMatchObject({ state: "approval needs renewing" });
+  await refused(w); const next = await w.propose(); expect(next.revision).toBe(row.revision + 1);
+  expect(await w.gate.decide(w.attempt(next))).toMatchObject({ status: "refused", detail: "Only a company owner, admin or project maintainer approves eval spend." });
+});
+it.each([undefined, "unknown", "auditor"])("refuses an invalid company role even with a maintainer grant: %s", async role => {
+  const w = world(); const row = await w.propose(); w.members.companyRole = () => role as "auditor" | undefined;
+  expect((await w.gate.decide(w.attempt(row))).status).toBe("refused"); await refused(w);
 });

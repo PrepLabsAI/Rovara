@@ -311,7 +311,7 @@ export interface SetupPageView {
   /** A proposal waiting: the commands, and where the check on them stands. */
   apply?: { candidateRevision: number; setup: string[]; readiness: string[]; check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string }; approval?: ApprovalOffer };
   /** The independent eval-spend item. No repository text reaches its labels. */
-  evalSpend?: { state: "waiting" | "approved" | "rejected"; label: string; budget: string; approval?: ApprovalOffer };
+  evalSpend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; label: string; budget: string; approval?: ApprovalOffer };
   /** The websites the owner approved for this project, with when, each to be taken back on the page. */
   approvedHosts: Array<{ host: string; at: string | undefined }>;
 }

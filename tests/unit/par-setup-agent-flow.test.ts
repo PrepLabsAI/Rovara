@@ -560,13 +560,13 @@ it("shows and approves eval spend on its own form before any health run, without
   const h = await launch();
   expect(setupDecisionSubjects(h.runtime.app.flow.deps).map(subject => subject.kind)).toEqual(["setup-host", "setup-proposal", "setup-eval-spend"]);
   expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
-  await proposeEvalSpendApproval({ store: h.store, companyId: IMPLICIT_COMPANY_ID }, "payments", {
+  await proposeEvalSpendApproval({ store: h.store, companyId: IMPLICIT_COMPANY_ID, monthlyCapMicros: 50_000_000 }, "payments", {
     selection: "evals/refunds", inputs: { evalSetHash: "a".repeat(64), judgePin: "b".repeat(64), modelVersion: "version-1", model: "model", catalogRowId: "model", commandFingerprint: "c".repeat(64), settingsFingerprint: "d".repeat(64) }, estimate: { calls: 300, costMicros: 3_000_000 },
   });
   const link = await h.browse("/setup/payments");
   const page = await h.page(link, "/setup/payments");
-  expect(page.body).toContain("Run the eval health check: about 300 calls, about $3.000000");
-  expect(page.body).toContain("at most 400 calls (about $4.000000), within the monthly cap");
+  expect(page.body).toContain("Run the eval health check: about 300 calls, about $3.00");
+  expect(page.body).toContain("at most 400 calls (about $4.00)");
   expect(page.body).not.toContain("Approve these commands");
   const form = formOf(page.body, "/setup/payments/eval");
   expect(form).toBeDefined();
@@ -585,5 +585,10 @@ it("shows and approves eval spend on its own form before any health run, without
   const approvedPage = await h.page(link, "/setup/payments");
   expect(approvedPage.body).toContain("Spend approval: approved");
   expect(approvedPage.body).not.toContain("Approve eval spend");
+  const approved = (await h.store.get(evalSpendKey(IMPLICIT_COMPANY_ID, "payments")))!;
+  await h.store.put({ item: { ...approved, approvedBy: { ...(approved["approvedBy"] as Record<string, string>), personId: "former-owner" } } });
+  const stalePage = await h.page(link, "/setup/payments");
+  expect(stalePage.body).toContain("Spend approval: approval needs renewing");
+  expect(stalePage.body).not.toContain("Spend approval: approved");
   expect((await h.store.get(orgProjectCatalogKey(IMPLICIT_COMPANY_ID, "payments")))?.["latestRevision"]).toBe(1);
 });
