@@ -24,7 +24,7 @@ import type { SetupAgentCallbackDeps } from "../../core/setup-agent/callback.js"
 import { readSetupJournal } from "../../core/setup-agent/journal.js";
 import type { DecisionSubject } from "../../core/decisions/approval-gate.js";
 
-/** The subjects the approval gate must know for the setup agent: a website, waiting setup commands, and independent eval spend. */
+/** The subjects the approval gate must know for the setup agent: a website a run asked for, a project's waiting setup, then independent eval spend. */
 export function setupDecisionSubjects(flow: TaskFlowDeps, sandboxDenied?: (project: string) => readonly string[]): DecisionSubject[] {
   return [createSetupHostSubject({ store: flow.store, ...(sandboxDenied === undefined ? {} : { sandboxDenied }) }), createSetupProposalSubject({ flow }), createEvalSpendSubject({ store: flow.store, companyId: flow.companyId })];
 }

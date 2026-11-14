@@ -16,7 +16,8 @@ import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { planAnswer, testedPlanDocument } from "../support/plan-documents.js";
 import { TIER_QUESTIONS, escapedForPrompt } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
-import { readReviewInput } from "../../packages/broker/src/core/merge/change-tier-read.js";
+import { UNSEEN_WALK_MAX, baseCommitsOf, commitFlagsOf, readReviewInput, seenHeadsOf, unseenCommits } from "../../packages/broker/src/core/merge/change-tier-read.js";
+import type { CodeHost } from "@agentx/contracts";
 import { tierGate } from "../../packages/broker/src/core/merge/merge.js";
 import { workflowUpdateItem } from "../../packages/broker/src/core/merge/store.js";
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
@@ -24,13 +25,13 @@ import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { createTaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
 import { TASK_ID, mergeWorld } from "../support/merge-world.js";
-import { scopeOf } from "../../packages/broker/src/core/build-step/scope-question.js";
+import { scopeBanner, scopeOf } from "../../packages/broker/src/core/build-step/scope-question.js";
 import { vi } from "vitest";
 import { ESTIMATE_MIN_SAMPLES, ROVARA_CODE_AGENT_ID, runCostKey } from "@agentx/contracts";
 import { runTierChecks, testOfPlannedFile } from "../../packages/broker/src/core/build-step/tier-checks.js";
 import { checkingModelOf, runGrownReviews, tierReviewerOf } from "../../packages/broker/src/core/build-step/tier-review-calls.js";
 import { applyReviewerFloor, REVIEW_TIMEOUT_MS } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
-import { recordQuestionsAnswered, recordTierReview, tierReviewRecorded, reviewerFloorRecorded } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { recordQuestionsAnswered, recordTierReview, tierGrowthSentence, tierReviewRecorded, reviewerFloorRecorded } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { quickCheckEntry, withQuickChecks } from "../../packages/broker/src/core/task-flow/stage-selection.js";
 import { answerScopeQuestion, changeDigestOf, readScopeQuestion, retryScopeChecks, scopeHoldOf, scopeHolds, scopeQuestionKey, scopeQuestionOf } from "../../packages/broker/src/core/build-step/scope-question.js";
 import { createReadBudget } from "../../packages/broker/src/services/merge-tracking.js";
@@ -80,7 +81,7 @@ const reviewCalls = (reviewer: FakeReviewer): ReviewerCall[] => reviewer.calls.f
 
 // ---- one `rovara up` with the lighter flow switched as asked
 
-interface LaunchOptions { lighter?: boolean; reviewer?: FakeReviewer | "none"; planFormat?: "markdown" | "structured" }
+interface LaunchOptions { lighter?: boolean; reviewer?: FakeReviewer | "none"; planFormat?: "markdown" | "structured"; /** False: the host does not report each file's type (DEC 182), as before the port read. */ entries?: boolean }
 async function launch(options: LaunchOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), "rovara-stage-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -92,6 +93,17 @@ async function launch(options: LaunchOptions = {}) {
   const host = Object.defineProperties(new FakeCodeHost(model), { kind: { value: "github" } });
   const issue = host.issueGitCredential.bind(host);
   host.issueGitCredential = async (repository, access, scope) => ({ ...(await issue(repository, access, scope)), expiresAt: new Date(Date.now() + 50 * 60_000).toISOString() });
+  // The host reports each changed file's type at the head and the base (DEC 182), as an adapter that has the port read does: a symbolic link or an ordinary file (the fake keeps no mode bits).
+  const listed = host.changedFiles.bind(host);
+  host.changedFiles = async (ref, page, scope) => {
+    const read = await listed(ref, page, scope);
+    const cr = model.changeRequests.find((entry) => entry.id === ref.id);
+    if (options.entries === false || cr === undefined) return read;
+    const head = model.revision(model.headRevisionOf(cr));
+    const base = model.revision(model.headOf(cr.targetBranch));
+    const kindAt = (revision: typeof head, path: string) => (revision.symlinks.has(path) ? "symlink" : revision.files.has(path) ? "file" : "none");
+    return { ...read, files: read.files.map((file) => ({ ...file, entry: { head: kindAt(head, file.path), base: kindAt(base, file.previousPath ?? file.path) } })) };
+  };
   const reviewer = options.reviewer === "none" ? undefined : options.reviewer ?? fakeReviewer();
   const clock = { at: Date.now() };
   const runtime: LocalRuntime = await startLocalRuntime({
@@ -503,15 +515,25 @@ describe("T3: the reviewer sees exactly the gate's patch", () => {
     expect(await gate(h, t.taskId)).toBeUndefined();
   });
 
-  it("T3d-base-moves: the base branch moves and the diff changes; the floor runs again for the new patch", async () => {
+  it("T3d-base-moves: the base branch moves, then the task patch changes; the floor runs again for the new patch", async () => {
     const h = await launch();
     const t = await toAfterPlan(h);
-    await buildAndPublish(h, t, SMALL);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const originalFiles = h.model.changedFiles(cr.id);
     expect(questionCalls(h.reviewer)).toHaveLength(1);
+    expect(await gate(h, t.taskId)).toBeUndefined();
+    // GitHub compares the head with the merge base: advancing main alone leaves the PR's patch unchanged.
     h.model.commit("main", { "src/health.ts": "export const health = 201;\n" });
+    expect(h.model.changedFiles(cr.id)).toEqual(originalFiles);
+    expect(await gate(h, t.taskId)).toBeUndefined();
+    // A follow-up on the task branch really changes that patch, so the earlier floor cannot clear it.
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 202;\n" });
     expect(await gate(h, t.taskId)).toBeDefined();
+    expect(h.model.changedFiles(cr.id)).not.toEqual(originalFiles);
     await settle(h);
     expect(questionCalls(h.reviewer)).toHaveLength(2);
+    expect(questionCalls(h.reviewer)[0]!.prompt).not.toContain("health = 202");
+    expect(questionCalls(h.reviewer)[1]!.prompt).toContain("health = 202");
     expect(await gate(h, t.taskId)).toBeUndefined();
   });
 
@@ -2230,5 +2252,562 @@ describe("J: what the plan covers, unreadable files a person can keep, the diges
     h.model.setChecks(pushed, [PASSING]);
     await settle(h, 5);
     expect((await scopeQuestionOf(deps, t.taskId))!.question).toMatchObject({ state: "open", version: 2 });
+  });
+});
+
+// =====================================================================================================================
+// FLOW-P2-PROD-BLOCKER: a credential pushed in one version and taken out in the next, both between two passes, leaves a clean final diff. The versions no pass read count against the head (only up).
+describe("T10: versions pushed between checks", () => {
+  const fakeKey = () => ["AKIA", "Q".repeat(16)].join("");
+  const codesOf = (flow: FlowShape) => (flow.tier?.reasons ?? []).map((reason) => reason.code);
+
+  it("T10a-secret-in-and-out: a person pushes a credential and then a commit taking it out before the next pass; the head is risky (not small), the risky reviews run on it, and it is held for a person", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    expect((await flowOf(h, t.taskId)).tier?.level).toBe("small");
+    h.model.commit(cr.sourceBranch, { "src/health.ts": `export const health = 200;\nexport const key = "${fakeKey()}";\n` });
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 201;\n" });
+    // The final diff alone is a small, clean change.
+    expect((await readReviewInput([{ host: h.host, repositoryId: "demo", repositoryUrl: h.project.repositories[0]!.url, number: Number(cr.id), headSha: headOf(h, cr) }], { orgId: IMPLICIT_COMPANY_ID })).patchText).not.toContain("AKIA");
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).toContain("unseen_commit_flagged"); // DEC 213: the commit that held the key is scanned and named, not escalated as unscanned
+    expect(flow.tier?.headSha).toBe(headOf(h, cr));
+    expect(reviewCalls(h.reviewer).map((call) => call.purpose).sort()).toEqual(["code_review", "security_review"]);
+    expect(flow.quickChecks?.some((check) => check.detail === `tier_review level=risky head=${headOf(h, cr)}`)).toBe(true);
+    // Grown to risky: held until a person keeps it.
+    const question = await readScopeQuestion(h.runtime.app.flow.deps, t.taskId);
+    expect(question?.state).toBe("open");
+    expect(scopeHolds(flow, question)).toBe(true);
+  });
+
+  it("T10b-docs-in-and-out: the same for a docs change: never the docs route's light checks on a clean final diff", async () => {
+    const h = await launch({ planFormat: "markdown" });
+    const t = await toAfterPlan(h, { instructions: "Fix the typo in README.md", restatement: "Fix a typo in README.md.", markdown: "# Plan\n\nFix it.\n" });
+    const { cr } = await buildAndPublish(h, t, { "README.md": "Fix the typo here.\n" });
+    expect((await flowOf(h, t.taskId)).tier).toMatchObject({ level: "small", kinds: ["docs"] });
+    h.model.commit(cr.sourceBranch, { "README.md": `Set the key ${fakeKey()} before you start.\n` });
+    h.model.commit(cr.sourceBranch, { "README.md": "Fix the typo here, again.\n" });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).toContain("unseen_commit_flagged"); // DEC 213: the commit that held the key is scanned and named, not escalated as unscanned
+  });
+
+  it("T10c-each-push-seen: a credential pushed and seen by a pass, then taken out: the tier stays risky and the risky reviews are owed on the clean head", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    h.model.commit(cr.sourceBranch, { "src/health.ts": `export const health = 200;\nexport const key = "${fakeKey()}";\n` });
+    await settle(h);
+    expect(codesOf(await flowOf(h, t.taskId))).toContain("secret_like_text");
+    h.reviewer.reviews = { security_review: "throw" };
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 201;\n" });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+    expect(await gate(h, t.taskId)).toBeDefined();
+  });
+
+  it("T10d-one-commit-per-pass: a person's single-commit push between passes adds no unscanned versions", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 201;\n" });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("small");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+  });
+
+  it("T10e-host-cannot-say: a host that cannot list a commit's parents leaves the record as it was (the gate keeps refusing the new head)", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const before = await flowOf(h, t.taskId);
+    h.host.commitParents = async () => { throw new Error("the host is down"); };
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 201;\n" });
+    await settle(h);
+    expect((await flowOf(h, t.taskId)).tier).toEqual(before.tier);
+    expect(await gate(h, t.taskId)).toBeDefined();
+  });
+
+  it("T10g-seen: every version the task recorded counts as seen: pull request heads (and synced-from), base and candidate commits, tier heads, and heads named by its checks; a digest or a short id does not", () => {
+    const sha = (c: string) => c.repeat(40);
+    const workflow = {
+      pullRequests: [{ headSha: sha("1"), syncedFrom: sha("2") }], reviewBase: [{ repositoryId: "demo", baseCommitSha: sha("3") }], candidate: { repositories: [{ commitSha: sha("4"), baseCommitSha: sha("5") }] },
+      flow: { rulesVersion: 1, tier: { headSha: sha("6"), mergeBase: sha("7") }, tierHistory: [{ headSha: sha("8") }], quickChecks: [{ kind: "code_config", outcome: "passed", detail: `review level=small head=${sha("9")}`, at: "2026-11-14T00:00:00.000Z" }, { kind: "docs", outcome: "passed", detail: "head=abc1234", at: "2026-11-14T00:00:00.000Z" }] },
+    } as unknown as WorkflowSnapshot;
+    expect([...seenHeadsOf(workflow)].sort()).toEqual(["1", "2", "3", "4", "5", "6", "7", "8", "9"].map(sha));
+  });
+
+  /** A merge commit on the pull request's branch, with the head's files (what a merge that changes nothing about the final diff looks like). */
+  const mergeOnto = (h: Harness, cr: { sourceBranch: string }, parents: string[]): string => {
+    const files = h.model.revision(h.model.headOf(cr.sourceBranch)).files;
+    const made = h.model.makeRevision(parents, files);
+    h.model.branches.set(cr.sourceBranch, made.sha);
+    return made.sha;
+  };
+
+  it("T10h-own-base-merge: Rovara's own merge of the base branch (the recorded head first, the recorded base commit second) adds no unseen commit and stays small", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, SMALL);
+    expect((await flowOf(h, t.taskId)).tier?.level).toBe("small");
+    const merge = mergeOnto(h, cr, [commit, h.base]);
+    expect(h.model.revision(merge).parents).toEqual([commit, h.base]);
+    const workflow = await workflowOf(h, t.taskId);
+    expect(await unseenCommits([{ host: h.host, repositoryId: "demo", repositoryUrl: h.project.repositories[0]!.url, number: Number(cr.id), headSha: merge }], seenHeadsOf(workflow), { orgId: IMPLICIT_COMPANY_ID }, undefined, baseCommitsOf(workflow))).toMatchObject({ count: 0, capped: false });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.headSha).toBe(merge);
+    expect(flow.tier?.level).toBe("small");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+  });
+
+  it("T10i-person-merge-side: a person's `merge --no-ff side` where side holds a commit no check read is risky (the second parent's commits are walked)", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, SMALL);
+    const side = h.model.commit("side", { "src/health.ts": `export const health = 200;\nexport const key = "${fakeKey()}";\n` });
+    expect(h.model.revision(side).parents).toEqual([h.base]);
+    const merge = mergeOnto(h, cr, [commit, side]);
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.headSha).toBe(merge);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).toContain("unseen_commit_flagged"); // DEC 213: the commit that held the key is scanned and named, not escalated as unscanned
+  });
+
+  it("T10j-merge-first-parent-unseen: a commit pushed on the branch and then the base branch merged over it (the unseen commit is on the FIRST parent, the base commit second) is risky", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const pushed = h.model.commit(cr.sourceBranch, { "src/health.ts": `export const health = 200;\nexport const key = "${fakeKey()}";\n` });
+    mergeOnto(h, cr, [pushed, h.base]);
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).toContain("unseen_commit_flagged"); // DEC 213: the commit that held the key is scanned and named, not escalated as unscanned
+  });
+
+  it("T10k-all-parents-walk: every parent is walked within one total limit; the base branch's own history is not the task's, and a path past the limit is unknown", async () => {
+    const parents = new Map<string, string[]>([
+      ["merge", ["mine", "side"]], ["mine", ["seen"]], ["side", ["s1"]], ["s1", ["base"]],
+      ["baseSync", ["seen", "b1"]], ["base", ["b1"]], ["b1", ["b2"]], ["b2", []],
+      ["wide", ["w1", "w2"]], ["w1", ["w3", "w4"]], ["w2", ["w5", "w6"]],
+    ]);
+    const reads: string[] = [];
+    const host = { commitParents: async (_repository: unknown, revision: string) => { reads.push(revision); return parents.get(revision) ?? [`${revision}x`]; } } as unknown as CodeHost;
+    const target = (headSha: string) => [{ host, repositoryId: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 1, headSha }];
+    const scope = { orgId: IMPLICIT_COMPANY_ID };
+    const seen = new Set(["seen", "base"]);
+    // The second parent's commits (side, s1) and the first parent's (mine) are unseen; each path stops at a seen commit.
+    expect(await unseenCommits(target("merge"), seen, scope)).toMatchObject({ count: 3, capped: false });
+    // A merge of a base-branch commit below the recorded base (b1): the base branch's history is not the task's.
+    expect(await unseenCommits(target("baseSync"), new Set(["seen"]), scope, undefined, new Map([["demo", ["base"]]]))).toMatchObject({ count: 0, capped: false });
+    // Without the recorded base they would be counted.
+    expect((await unseenCommits(target("baseSync"), new Set(["seen"]), scope)).count).toBeGreaterThan(0);
+    // One total limit over all paths: a branching walk that never meets a seen commit stops at the limit.
+    reads.length = 0;
+    expect((await unseenCommits(target("wide"), seen, scope)).capped).toBe(true);
+    expect(reads.length).toBeLessThanOrEqual(UNSEEN_WALK_MAX);
+  });
+
+  it("T10l-own-head-forms: a head is read only from the forms Rovara writes, anchored at the start; a sha inside patch or free text copied into a detail does not mark that commit seen", () => {
+    const sha = (c: string) => c.repeat(40);
+    const at = "2026-11-14T00:00:00.000Z";
+    const check = (kind: string, detail: string) => ({ kind, outcome: "passed", detail, at });
+    const seenOf = (...details: Array<[string, string]>) => [...seenHeadsOf({ flow: { rulesVersion: 1, quickChecks: details.map(([kind, detail]) => check(kind, detail)) } } as unknown as WorkflowSnapshot)].sort();
+    // Every form Rovara writes counts (first head only).
+    expect(seenOf(
+      ["code_config", `review level=risky head=${sha("1")} 0 findings`], ["code_config", `tier_review level=small head=${sha("2")}`], ["ci_file", `tier_questions head=${sha("3")} patch=${sha("f")}`],
+      ["docs", `docs secret scan head=${sha("4")} found nothing`], ["code_config", `code_config tests passed head=${sha("5")}; reviewer x`], ["dependency", `dependency source head=${sha("6")} changed`],
+      ["dependency", `dependency install in the test run failed head=${sha("7")}`], ["install_link", `install_link head=${sha("8")} no command or link was found in the patch`],
+      ["ci_file", `ci_file reviewer questions (secrets and data sent out) not answered head=${sha("9")}`],
+    )).toEqual(["1", "2", "3", "4", "5", "6", "7", "8", "9"].map(sha));
+    // A sha written inside a patch line the detail quotes is not a head Rovara recorded.
+    expect(seenOf(["install_link", `install_link head=${sha("a")} README.md: old echo head=${sha("b")} | new curl x head=${sha("c")}`])).toEqual([sha("a")]);
+    expect(seenOf(["docs", `docs secret scan head=${sha("a")} found text that looks like a credential in docs/head=${sha("b")}.md`])).toEqual([sha("a")]);
+    expect(seenOf(["install_link", `install_link no command; old head=${sha("b")}`])).toEqual([]);
+    expect(seenOf(["code_config", `a note copied from a patch: head=${sha("b")}`])).toEqual([]);
+    expect(seenOf(["docs", `x review level=small head=${sha("b")}`])).toEqual([]);
+  });
+
+  it("T10f-walk: the walk stops at the first version the task saw, and counts as unknown a line that reaches none within the limit", async () => {
+    const parents = new Map<string, string[]>([["h3", ["h2"]], ["h2", ["h1"]], ["h1", ["seen"]], ["far", []]]);
+    const host = { commitParents: async (_repository: unknown, revision: string) => parents.get(revision) ?? [`${revision}x`] } as unknown as CodeHost;
+    const target = (headSha: string) => [{ host, repositoryId: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 1, headSha }];
+    expect(await unseenCommits(target("h3"), new Set(["seen"]), { orgId: IMPLICIT_COMPANY_ID })).toMatchObject({ count: 2, capped: false });
+    expect(await unseenCommits(target("h1"), new Set(["seen"]), { orgId: IMPLICIT_COMPANY_ID })).toMatchObject({ count: 0, capped: false });
+    expect(await unseenCommits(target("far"), new Set(["seen"]), { orgId: IMPLICIT_COMPANY_ID })).toMatchObject({ count: 0, capped: true });
+    expect((await unseenCommits(target("loop"), new Set(["seen"]), { orgId: IMPLICIT_COMPANY_ID })).capped).toBe(true);
+  });
+});
+
+// =====================================================================================================================
+// DEC 213: each version pushed between checks is scanned on its OWN diff (the host's "one commit's changes" read). Only a commit that is flagged raises the head; the head is escalated as not scanned only when the
+// walk hits its limit, the host cannot give a commit's changes (no read, a failure, a cut list) or a commit has more parents than the limit.
+describe("T11: each unseen commit scanned on its own", () => {
+  const fakeKey = () => ["AKIA", "Q".repeat(16)].join("");
+  const codesOf = (flow: FlowShape) => (flow.tier?.reasons ?? []).map((reason) => reason.code);
+  const flaggedOf = (flow: FlowShape) => (flow.tier?.reasons ?? []).filter((reason) => reason.code === "unseen_commit_flagged").map((reason) => reason.path ?? "");
+  const pushThree = (h: Harness, branch: string, middle: string): string[] => [
+    h.model.commit(branch, { "src/health.ts": "export const health = 201;\n" }),
+    h.model.commit(branch, { "src/health.ts": middle }),
+    h.model.commit(branch, { "src/health.ts": "export const health = 203;\n" }),
+  ];
+
+  it("T11a-three-clean: a person pushes three clean commits between passes: the change stays small, nothing is escalated", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    pushThree(h, cr.sourceBranch, "export const health = 202;\n");
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.headSha).toBe(headOf(h, cr));
+    expect(flow.tier?.level).toBe("small");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+    expect(codesOf(flow)).not.toContain("unseen_commit_flagged");
+  });
+
+  it("T11b-secret-in-middle: the middle commit adds a key and the last takes it out: risky, that commit is named with what was found and the advice to rotate it, never the key itself", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const [, middle] = pushThree(h, cr.sourceBranch, `export const health = 202;\nexport const key = "${fakeKey()}";\n`);
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+    const flagged = flaggedOf(flow);
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0]).toContain(`commit ${middle!.slice(0, 7)}`);
+    expect(flagged[0]).toContain("text that looks like a credential");
+    expect(flagged[0]).toContain("src/health.ts");
+    expect(JSON.stringify(flow)).not.toContain("AKIA");
+    // The person is asked once (DEC 202), and the question names the commit and what to do about the key.
+    const question = await readScopeQuestion(h.runtime.app.flow.deps, t.taskId);
+    expect(question?.state).toBe("open");
+    expect(question?.kind).toBe("scope");
+    expect(question?.area).toContain(`commit ${middle!.slice(0, 7)}`);
+    expect(question?.area).toMatch(/rotate/u);
+    expect(JSON.stringify(question)).not.toContain("AKIA");
+    expect(scopeHolds(flow, question)).toBe(true);
+    // The refusal sentence names it too.
+    expect(tierGrowthSentence(flow.tier!, (path) => path)).toContain(`commit ${middle!.slice(0, 7)}`);
+  });
+
+  it("T11c-truncated: a commit whose file list the host cut short is escalated as not scanned", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const [first] = pushThree(h, cr.sourceBranch, "export const health = 202;\n");
+    const read = h.host.commitChanges.bind(h.host);
+    h.host.commitChanges = async (repository, revision, scope) => ({ ...(await read(repository, revision, scope)), ...(revision === first ? { complete: false } : {}) });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).toContain("unscanned_commits");
+  });
+
+  it("T11d-no-read: a host without the read, or one that cannot answer it, escalates as before", async () => {
+    for (const mode of ["absent", "throws"] as const) {
+      const h = await launch();
+      const t = await toAfterPlan(h, {}, mode === "absent" ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222");
+      const { cr } = await buildAndPublish(h, t, SMALL);
+      if (mode === "absent") Object.defineProperty(h.host, "commitChanges", { value: undefined, configurable: true, writable: true });
+      else h.host.commitChanges = async () => { throw new Error("the host is down"); };
+      pushThree(h, cr.sourceBranch, "export const health = 202;\n");
+      await settle(h);
+      const flow = await flowOf(h, t.taskId);
+      expect(flow.tier?.level, mode).toBe("risky");
+      expect(codesOf(flow), mode).toContain("unscanned_commits");
+    }
+  });
+
+  /** GitHub's "Update branch": main moved on (a commit that touches a sensitive auth file, which would be risky in the task's own diff), and a merge of it lands on the pull request's branch with main as the second parent. */
+  const updateBranch = (h: Harness, cr: { sourceBranch: string }): { main: string; merge: string } => {
+    const main = h.model.commit("main", { "src/auth/session.ts": `export const ttl = ${String(h.model.revisions.size)};\n` });
+    const files = new Map(h.model.revision(h.model.headOf(cr.sourceBranch)).files);
+    files.set("src/auth/session.ts", h.model.revision(main).files.get("src/auth/session.ts")!);
+    const made = h.model.makeRevision([h.model.headOf(cr.sourceBranch), main], files);
+    h.model.branches.set(cr.sourceBranch, made.sha);
+    return { main, merge: made.sha };
+  };
+
+  it("T11e-update-branch: GitHub's \"Update branch\" with a newer main commit as second parent stays small, and so does a clean commit pushed on top of it", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const { merge } = updateBranch(h, cr);
+    await settle(h);
+    let flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.headSha).toBe(merge);
+    expect(flow.tier?.level).toBe("small");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+    // A fix pushed after the merge: the merge is now a version between checks; main's own changes in it are not the task's.
+    updateBranch(h, cr);
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 204;\n" });
+    await settle(h);
+    flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.headSha).toBe(headOf(h, cr));
+    expect(flow.tier?.level).toBe("small");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+    expect(codesOf(flow)).not.toContain("unseen_commit_flagged");
+  });
+
+  it("T11e2-merge-own-key: a merge commit that itself adds a key (taken out in the next push) is flagged, whatever main brought", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const main = h.model.commit("main", { "docs/notes.md": "Notes.\n" });
+    const files = new Map(h.model.revision(h.model.headOf(cr.sourceBranch)).files);
+    files.set("docs/notes.md", "Notes.\n");
+    files.set("src/health.ts", `export const health = 200;\nexport const key = "${fakeKey()}";\n`);
+    const merge = h.model.makeRevision([h.model.headOf(cr.sourceBranch), main], files);
+    h.model.branches.set(cr.sourceBranch, merge.sha);
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 205;\n" });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(flaggedOf(flow).join(" ")).toContain(`commit ${merge.sha.slice(0, 7)}`);
+  });
+
+  it("T11i-retargeted: a pull request retargeted at another branch does not make that branch's commits seen: they are scanned as the task's", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const other = h.model.commit("other", { "src/auth/session.ts": "export const ttl = 0;\n" });
+    const files = new Map(h.model.revision(h.model.headOf(cr.sourceBranch)).files);
+    files.set("src/auth/session.ts", "export const ttl = 0;\n");
+    const merge = h.model.makeRevision([h.model.headOf(cr.sourceBranch), other], files);
+    h.model.branches.set(cr.sourceBranch, merge.sha);
+    h.model.changeRequests.find((entry) => entry.id === cr.id)!.targetBranch = "other";
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(flaggedOf(flow).join(" ")).toContain(`commit ${other.slice(0, 7)}`);
+  });
+
+  it("T11f-cap: more commits than the walk's limit between passes is escalated as not scanned", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    for (let index = 0; index < UNSEEN_WALK_MAX + 2; index += 1) h.model.commit(cr.sourceBranch, { "src/health.ts": `export const health = ${String(300 + index)};\n` });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(codesOf(flow)).toContain("unscanned_commits");
+  });
+
+  // The walk itself, over a host stub: what each guard does.
+  const scope = { orgId: IMPLICIT_COMPANY_ID };
+  const clean = (path = "src/a.ts") => ({ path, status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;" });
+  const keyed = () => ({ path: "src/a.ts", status: "modified", additions: 1, deletions: 0, patch: `@@ -1 +1,2 @@\n export const a = 1;\n+export const k = "${fakeKey()}";` });
+  const sensitive = () => ({ path: "src/auth/session.ts", status: "added", additions: 1, deletions: 0, patch: "@@ -0,0 +1 @@\n+export const ttl = 0;" });
+  const sha = (seed: string) => Buffer.from(seed).toString("hex").padEnd(40, "0");
+  type StubFile = { path: string; status: string; additions: number; deletions: number; patch?: string; entry?: { head: string; base: string } };
+  /** A commit of the stub: its parents, its files against its first parent, and (a merge) its files against its second parent (`second`; absent: the compare read is refused). */
+  type StubNode = { parents: string[]; files?: StubFile[]; complete?: boolean; second?: StubFile[]; secondComplete?: boolean };
+  const stub = (graph: Record<string, StubNode>, extra: Record<string, unknown> = {}) => {
+    const reads: string[] = [];
+    const host = {
+      commitParents: async (_repository: unknown, revision: string) => { reads.push(`p:${revision}`); return graph[revision]?.parents ?? [`${revision.slice(0, 39)}x`]; },
+      commitChanges: async (_repository: unknown, revision: string) => {
+        reads.push(`c:${revision}`);
+        const node = graph[revision];
+        if (node === undefined) throw new Error("no such commit");
+        return { files: node.files ?? [clean()], complete: node.complete ?? true, parents: node.parents };
+      },
+      compareChanges: async (_repository: unknown, base: string, head: string) => {
+        reads.push(`m:${base}...${head}`);
+        const node = graph[head];
+        if (node?.second === undefined || node.parents[1] !== base) throw new Error("no such comparison");
+        return { files: node.second, complete: node.secondComplete ?? true };
+      },
+      baseBranchHead: async () => { reads.push("b"); throw new Error("no base branch in this stub"); },
+      ...extra,
+    } as unknown as CodeHost;
+    return { host, reads, target: (headSha: string, baseBranch?: string) => [{ host, repositoryId: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 1, headSha, ...(baseBranch === undefined ? {} : { baseBranch }) }] };
+  };
+
+  it("T11g-walk-guards: flagged commit named; cut list, octopus merge and missing read escalate; main's history counts as seen", async () => {
+    const [h, c1, c2, c3, seen, m1, m2, base] = ["h", "c1", "c2", "c3", "s", "m1", "m2", "b"].map(sha) as [string, string, string, string, string, string, string, string];
+    // A clean line: nothing flagged, nothing escalated.
+    let s = stub({ [h]: { parents: [c2] }, [c2]: { parents: [c1] }, [c1]: { parents: [seen] } });
+    expect(await unseenCommits(s.target(h), new Set([seen]), scope)).toMatchObject({ count: 2, capped: false, unscanned: 0, flagged: [] });
+    // A key in c1: flagged, with that commit.
+    s = stub({ [h]: { parents: [c2] }, [c2]: { parents: [c1] }, [c1]: { parents: [seen], files: [keyed()] } });
+    const keyedRead = await unseenCommits(s.target(h), new Set([seen]), scope);
+    expect(keyedRead).toMatchObject({ unscanned: 0, capped: false });
+    expect(keyedRead.flagged.map((entry) => entry.commit)).toEqual([c1]);
+    expect(keyedRead.flagged[0]!.reasons.map((reason) => reason.code)).toContain("secret_like_text");
+    // A cut list: not scanned.
+    s = stub({ [h]: { parents: [c1] }, [c1]: { parents: [seen], complete: false } });
+    expect((await unseenCommits(s.target(h), new Set([seen]), scope)).unscanned).toBe(1);
+    // An octopus merge (more parents than the limit) in between: not scanned, and its parents are not walked as if it were known.
+    s = stub({ [h]: { parents: [c3] }, [c3]: { parents: [seen, c1, c2] }, [c1]: { parents: [seen] }, [c2]: { parents: [seen] } });
+    expect((await unseenCommits(s.target(h), new Set([seen]), scope)).unscanned).toBeGreaterThan(0);
+    // A host without the read.
+    s = stub({ [h]: { parents: [c1] }, [c1]: { parents: [seen] } }, { commitChanges: undefined });
+    expect((await unseenCommits(s.target(h), new Set([seen]), scope)).unscanned).toBe(1);
+    // A host that cannot answer it.
+    s = stub({ [h]: { parents: [c1] }, [c1]: { parents: [seen] } }, { commitChanges: async () => { throw new Error("down"); } });
+    expect((await unseenCommits(s.target(h), new Set([seen]), scope)).unscanned).toBe(1);
+    // "Update branch": the merge's second parent is main's newer head; main's commits (m2, m1, down to the recorded base) are seen, not scanned, even when they touch a sensitive file.
+    const graph = { [h]: { parents: [seen, m2] }, [m2]: { parents: [m1], files: [sensitive()] }, [m1]: { parents: [base], files: [keyed()] }, [base]: { parents: [] } };
+    s = stub(graph, { baseBranchHead: async () => m2 });
+    const updated = await unseenCommits(s.target(h, "main"), new Set([seen, base]), scope);
+    expect(updated).toMatchObject({ count: 0, capped: false, unscanned: 0, flagged: [] });
+    expect(s.reads.filter((read) => read.startsWith("c:"))).toEqual([]);
+    // Without the base branch named, main's commits are the task's unseen ones and are scanned.
+    s = stub(graph, { baseBranchHead: async () => m2 });
+    expect((await unseenCommits(s.target(h), new Set([seen, base]), scope)).flagged.map((entry) => entry.commit)).toEqual([m2, m1]);
+  });
+
+  it("T11h-merge-own-changes: an unseen merge is judged by what it adds over BOTH parents: main's paths and lines are not its own, a key it adds is", async () => {
+    const [h, merge, mine, main, seen] = ["h", "mg", "mi", "ma", "s"].map(sha) as [string, string, string, string, string];
+    // Against its first parent the merge lists main's sensitive file and a clean edit; against main (its second parent) only the task's own clean edit: nothing is its own.
+    let s = stub({ [h]: { parents: [merge] }, [merge]: { parents: [mine, main], files: [sensitive(), clean()], second: [clean("src/b.ts")] }, [mine]: { parents: [seen] }, [main]: { parents: [seen] } });
+    expect(await unseenCommits(s.target(h), new Set([seen, main]), scope)).toMatchObject({ flagged: [], unscanned: 0 });
+    // A key line the merge adds against both parents (written while resolving a conflict): flagged.
+    s = stub({ [h]: { parents: [merge] }, [merge]: { parents: [mine, main], files: [sensitive(), keyed()], second: [keyed()] }, [mine]: { parents: [seen] }, [main]: { parents: [seen] } });
+    expect((await unseenCommits(s.target(h), new Set([seen, main]), scope)).flagged.map((entry) => entry.commit)).toEqual([merge]);
+    // The same key, but present against the first parent only (main brought it, and main's side is reviewed where it landed): not the merge's own.
+    s = stub({ [h]: { parents: [merge] }, [merge]: { parents: [mine, main], files: [sensitive(), keyed()], second: [clean()] }, [mine]: { parents: [seen] }, [main]: { parents: [seen] } });
+    expect(await unseenCommits(s.target(h), new Set([seen, main]), scope)).toMatchObject({ flagged: [], unscanned: 0 });
+  });
+
+
+  // ---- review of PR #608: a merge is judged by its own changes (git show --cc), the walk's cost, the public banner.
+
+  const pemFixture = () => [["-----BEGIN RSA", "PRIVATE KEY-----"].join(" "), "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu", ["-----END RSA", "PRIVATE KEY-----"].join(" "), ""].join("\n");
+  /** GitHub's "Update branch" with main's own new files (a test key fixture, a Windows line ending, an emoji joined with a zero-width joiner): those are main's, reviewed where they landed. */
+  const updateBranchWith = (h: Harness, cr: { sourceBranch: string }, mainFiles: Record<string, string>): { main: string; merge: string } => {
+    const main = h.model.commit("main", mainFiles);
+    const files = new Map(h.model.revision(h.model.headOf(cr.sourceBranch)).files);
+    for (const [path, content] of Object.entries(mainFiles)) files.set(path, content);
+    const made = h.model.makeRevision([h.model.headOf(cr.sourceBranch), main], files);
+    h.model.branches.set(cr.sourceBranch, made.sha);
+    return { main, merge: made.sha };
+  };
+  const mainNoise = (): Record<string, string> => ({ "tests/fixtures/key.pem": pemFixture(), "docs/windows.md": "Hello world\r\nSecond line\r\n", "docs/team.md": "Team \u{1F469}‍\u{1F4BB} rocks.\n" });
+
+  it("T12a-update-branch-noise: \"Update branch\" whose main side adds a key fixture, a CRLF line and a ZWJ emoji, then a fix on top: the merge (scanned between checks) stays light", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const { main, merge } = updateBranchWith(h, cr, mainNoise());
+    // Main's own commit WOULD be flagged on its own diff: the merge is light only because those lines are main's, not the merge's.
+    const mainRead = await h.host.commitChanges({ url: h.project.repositories[0]!.url }, main, { orgId: IMPLICIT_COMPANY_ID });
+    expect(commitFlagsOf("demo", mainRead)?.map((reason) => reason.code)).toEqual(expect.arrayContaining(["secret_like_text", "line_break_character"]));
+    h.model.commit(cr.sourceBranch, { "src/health.ts": "export const health = 206;\n" });
+    const workflow = await workflowOf(h, t.taskId);
+    const read = await unseenCommits([{ host: h.host, repositoryId: "demo", repositoryUrl: h.project.repositories[0]!.url, number: Number(cr.id), headSha: headOf(h, cr), baseBranch: "main" }], seenHeadsOf(workflow), { orgId: IMPLICIT_COMPANY_ID }, undefined, baseCommitsOf(workflow));
+    expect(read).toMatchObject({ count: 1, capped: false, unscanned: 0, flagged: [] });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.headSha).toBe(headOf(h, cr));
+    expect(flow.tier?.level).toBe("small");
+    expect(codesOf(flow)).not.toContain("unscanned_commits");
+    expect(codesOf(flow)).not.toContain("unseen_commit_flagged");
+    expect(merge).not.toBe(headOf(h, cr));
+  });
+
+  it("T12b-evil-merge: a merge that itself adds a .env file and a binary keystore, taken out by the next push, is flagged (named, never the text), whatever main brought", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const main = h.model.commit("main", { "docs/notes.md": "Notes.\n" });
+    const files = new Map(h.model.revision(h.model.headOf(cr.sourceBranch)).files);
+    files.set("docs/notes.md", "Notes.\n");
+    files.set(".env", `${["DB", "PASSWORD"].join("_")}=${["hunter2", "prod", "xyz"].join("-")}\n`); // built at runtime: no key-shaped text in source
+    files.set("certs/prod.p12", "\u0000\u0001binary\u0000");
+    const merge = h.model.makeRevision([h.model.headOf(cr.sourceBranch), main], files);
+    h.model.branches.set(cr.sourceBranch, merge.sha);
+    h.model.commit(cr.sourceBranch, { ".env": null, "certs/prod.p12": null });
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    const named = flaggedOf(flow).join(" ");
+    expect(named).toContain(`commit ${merge.sha.slice(0, 7)}`);
+    expect(named).toContain(".env");
+    expect(named).toContain("certs/prod.p12");
+    expect(JSON.stringify(flow)).not.toContain("hunter2");
+  });
+
+  it("T12c-banner: the public pull request banner says only that an earlier version was flagged; the commit, the file and the advice stay on the task page", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    const [, middle] = pushThree(h, cr.sourceBranch, `export const health = 202;\nexport const key = "${fakeKey()}";\n`);
+    await settle(h);
+    const question = await readScopeQuestion(h.runtime.app.flow.deps, t.taskId);
+    expect(question?.area).toContain(`commit ${middle!.slice(0, 7)}`);
+    expect(question?.earlierVersionFlagged).toBe(true);
+    const whole = crOf2(h, cr).body;
+    const body = whole.slice(whole.indexOf("<!-- rovara-scope:start -->"), whole.indexOf("<!-- rovara-scope:end -->"));
+    expect(body).toContain("This grew from small to risky.");
+    expect(body).toContain("An earlier version of this change, pushed between checks, was flagged. Open the task page in Rovara to see what was found.");
+    expect(body).not.toContain(middle!.slice(0, 7));
+    // The request names the file (the person's own words); the flagged file is never named as changed or flagged.
+    expect(body).not.toContain("`src/health.ts`");
+    expect(body).not.toContain("It also changed");
+    expect(body.toLowerCase()).not.toContain("credential");
+    expect(body.toLowerCase()).not.toContain("rotate");
+    expect(body).not.toContain("AKIA");
+    // With the head's own reasons as well, those stay (as before), and the earlier version is still only said to be flagged.
+    const banner = scopeBanner({ ...question!, area: "x; commit abc1234: text that looks like a credential in src/k.ts", publicArea: "a sensitive file", files: [{ path: "src/auth/session.ts", additions: 1, deletions: 0, area: "a sensitive file" }] }, true);
+    expect(banner).toContain("It also changed a sensitive file: `src/auth/session.ts` (+1 -0).");
+    expect(banner).toContain("An earlier version of this change");
+    expect(banner).not.toContain("src/k.ts");
+    expect(banner).not.toContain("abc1234");
+  });
+
+  it("T12d-no-rescan: a later pass on the same head does not walk or scan again, and the scope question still names the flagged commit", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    let changes = 0;
+    let parents = 0;
+    const readChanges = h.host.commitChanges.bind(h.host);
+    const readParents = h.host.commitParents.bind(h.host);
+    h.host.commitChanges = async (...args) => { changes += 1; return readChanges(...args); };
+    h.host.commitParents = async (...args) => { parents += 1; return readParents(...args); };
+    const [, middle] = pushThree(h, cr.sourceBranch, `export const health = 202;\nexport const key = "${fakeKey()}";\n`);
+    await settle(h);
+    const flow = await flowOf(h, t.taskId);
+    expect(flow.tier?.level).toBe("risky");
+    expect(changes).toBe(2); // the two commits between the seen head and the new head, once each
+    const before = { changes, parents };
+    // More passes on the same head: nothing is read again for the walk.
+    const task = await readTask(h.runtime.app.flow.deps, t.taskId);
+    await runTierChecks(h.runtime.app.flow.deps, task!);
+    await settle(h);
+    expect({ changes, parents }).toEqual(before);
+    const question = await readScopeQuestion(h.runtime.app.flow.deps, t.taskId);
+    expect(question?.area).toContain(`commit ${middle!.slice(0, 7)}`);
+  });
+
+  it("T12e-no-rewalk-unscanned: a commit that could not be scanned (a cut list) escalates the head once; later passes on that head do not ask again", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, SMALL);
+    let changes = 0;
+    const readChanges = h.host.commitChanges.bind(h.host);
+    h.host.commitChanges = async (...args) => { changes += 1; return { ...(await readChanges(...args)), complete: false }; };
+    pushThree(h, cr.sourceBranch, "export const health = 202;\n");
+    await settle(h);
+    expect(codesOf(await flowOf(h, t.taskId))).toContain("unscanned_commits");
+    const before = changes;
+    expect(before).toBe(2);
+    const task = await readTask(h.runtime.app.flow.deps, t.taskId);
+    await runTierChecks(h.runtime.app.flow.deps, task!);
+    await settle(h);
+    expect(changes).toBe(before);
   });
 });

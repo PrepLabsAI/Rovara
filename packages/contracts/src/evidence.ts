@@ -353,10 +353,14 @@ const testsShape = {
 /** What the WRITER builds and the worker's raw file holds: strict. */
 export const EvidenceChecksTestsSchema = z.object(testsShape).strict();
 /**
- * What a v1 pack's READERS parse: the same fields, but a key a newer writer added is dropped instead of refusing the whole pack. A part added to `tests` (TE-B3's `absentOnNew`) is then safe to write once every reader
- * has this schema; ship this reader a release before any writer sets a new part.
+ * What a v1 pack's READERS parse: the same fields, plus two optional ones a later writer sets (TE-B3: `absentOnNew`, the test ids that ran on the original code and are not in this code's report, at most `ABSENT_ON_NEW_MAX`,
+ * and `absentOnNewCount`, how many there are in all), and a key it does not know is dropped instead of refusing the whole pack. Readers ship before writers: a writer may add a part to `tests` once every reader has this schema.
  */
-export const EvidenceChecksTestsReadSchema = z.object(testsShape);
+export const EvidenceChecksTestsReadSchema = z.object({
+  ...testsShape,
+  absentOnNew: z.array(line(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX).optional(),
+  absentOnNewCount: CountSchema.optional(),
+});
 export const EvidenceCoverageSchema = z
   .object({
     linesChanged: CountSchema,
@@ -394,8 +398,9 @@ function checkPartsProblems(entry: { tests?: z.infer<typeof EvidenceChecksTestsS
   if (tests !== undefined && tests.total !== tests.passed + tests.failed + tests.skipped + tests.errored) issue(["tests", "total"], "total is passed, failed, skipped and errored together");
   if (tests !== undefined && (tests.skippedBefore === undefined) !== (tests.skippedAfter === undefined)) issue(["tests", "skippedAfter"], "skippedBefore and skippedAfter come together");
   if (tests?.skippedAfter !== undefined && tests.skippedAfter > tests.skipped) issue(["tests", "skippedAfter"], "skips among untouched tests are some of the skips");
-  if (tests !== undefined && (tests.absentOnNew === undefined) !== (tests.absentOnNewCount === undefined)) issue(["tests", "absentOnNewCount"], "absentOnNew and absentOnNewCount come together");
-  if (tests?.absentOnNew !== undefined && tests.absentOnNewCount !== undefined && tests.absentOnNewCount < tests.absentOnNew.length) issue(["tests", "absentOnNewCount"], "the count is at least the names listed");
+  const absent = (tests as { absentOnNew?: unknown[]; absentOnNewCount?: number } | undefined);
+  if (absent !== undefined && (absent.absentOnNew === undefined) !== (absent.absentOnNewCount === undefined)) issue(["tests", "absentOnNewCount"], "absentOnNew and absentOnNewCount come together");
+  if (absent?.absentOnNew !== undefined && absent.absentOnNewCount !== undefined && absent.absentOnNewCount < absent.absentOnNew.length) issue(["tests", "absentOnNewCount"], "the count is at least the names listed");
   if (entry.coverage !== undefined && entry.coverage.linesCovered > entry.coverage.linesChanged) issue(["coverage", "linesCovered"], "covered lines are some of the changed lines");
   if (entry.findings !== undefined && entry.findings.newCount !== Object.values(entry.findings.bySeverity).reduce((sum, count) => sum + count, 0)) issue(["findings", "newCount"], "newCount is the severities together");
 }
