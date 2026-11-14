@@ -24,6 +24,7 @@ import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { createTaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
 import { TASK_ID, mergeWorld } from "../support/merge-world.js";
+import { scopeOf } from "../../packages/broker/src/core/build-step/scope-question.js";
 import { vi } from "vitest";
 import { ESTIMATE_MIN_SAMPLES, ROVARA_CODE_AGENT_ID, runCostKey } from "@agentx/contracts";
 import { runTierChecks } from "../../packages/broker/src/core/build-step/tier-checks.js";
@@ -739,12 +740,18 @@ describe("T6: the grow-after-build stop", () => {
       const flow = await flowOf(h, t.taskId);
       expect(flow.quickChecks?.some((check) => check.detail?.startsWith("tier_review ") === true && check.detail.endsWith(headOf(h, cr)))).toBe(false);
       expect(await gate(h, t.taskId)).toBeDefined();
-      // Asked again on the same head, it is not: no shopping for a clean review.
       const before = reviewCalls(h.reviewer).length;
       h.reviewer.reviews = {};
       await settle(h, 4);
-      expect(reviewCalls(h.reviewer).length).toBe(before);
-      expect(await gate(h, t.taskId)).toBeDefined();
+      if (failure === "findings") {
+        // A review that found something is not asked again on the same head: no shopping for a clean one.
+        expect(reviewCalls(h.reviewer).length).toBe(before);
+        expect(await gate(h, t.taskId)).toBeDefined();
+      } else {
+        // One that could not run gave no answer: it runs again once the reviewer is back, and only then is it recorded.
+        expect(reviewCalls(h.reviewer).length).toBeGreaterThan(before);
+        expect((await flowOf(h, t.taskId)).quickChecks?.some((check) => check.detail === `tier_review level=risky head=${headOf(h, cr)}`)).toBe(true);
+      }
     });
   }
 
@@ -1121,9 +1128,10 @@ describe("R: reviewer's adversarial cases", () => {
     h.reviewer.questions = [];
     h.reviewer.reviews = {};
     await settle(h, 4);
-    // The model is back, but nothing is asked again for this head (T4b allows one retry for an outage when a yes cannot be lost).
-    expect(h.reviewer.calls.length).toBe(calls);
-    expect(await gate(h, t.taskId)).toBeDefined();
+    // The model is back: the floor's questions are not asked again for this head without Retry (an outage holds its head), the grown reviews that could not run run again, and the change stays held (the person sees "could not check" with Retry).
+    expect(questionCalls(h.reviewer).length).toBe(h.reviewer.calls.slice(0, calls).filter((call) => call.purpose === "questions").length);
+    const deps = h.runtime.app.flow.deps;
+    expect(await scopeHoldOf(deps, (await readTask(deps, t.taskId))!)).toBe(true);
   });
 
   it("R14-outage-per-head: after one outage, a clean new push is asked again (the outage holds its own head, not the next ones)", async () => {
@@ -1711,5 +1719,392 @@ describe("H: the tier pass is due from the store, and an unknown cost keeps the 
     const record = (await h.store().get({ pk: `DEVTASK#${t.taskId}`, sk: "META" }))!;
     if (record["runEstimate"] !== undefined) return; // the estimate did not read those rows here: nothing to prove
     expect(t.next.payload).not.toMatchObject({ workflowMode: "IMPLEMENT" });
+  });
+});
+
+// ======================= RVW579C probes (verify-the-fixes review) =======================
+const plog = (...trace: unknown[]): void => { void trace; }; // the review's trace, kept as calls; the assertions below are the cases
+describe("RVW579C", () => {
+  const PASS = { name: "unit-tests", state: "completed" as const, conclusion: "success" as const, required: false, url: "", runId: "run-1" };
+  const cr3 = (h: Harness, cr: { id: string }) => h.model.changeRequests.find((entry) => entry.id === cr.id)!;
+  const owner3 = async (h: Harness, taskId: string): Promise<string> => (await h.store().get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["developerId"] as string;
+  const appr = (allowed: readonly string[], strong: string[] = ["local-session"], methodOverride?: string) => ({
+    requirement: async () => ({ methods: ["local-session", "api-token", "mcp", "chat-slack", "code-host-comment"], minApprovers: 1, selfApprovalAllowed: true, strongMethods: strong }),
+    verify: async (request: { requestId: string; artifactDigest: string; revision: number }, proof: { token: string; method: string; proofId: string; requestId: string; artifactDigest: string; revision: number }) => {
+      const person = proof.token.replace(/^ok:/u, "");
+      return proof.requestId === request.requestId && proof.revision === request.revision && proof.artifactDigest === request.artifactDigest && allowed.includes(person)
+        ? { approved: true as const, approver: { companyId: IMPLICIT_COMPANY_ID, personId: person, displayName: "D", roles: ["owner"], provider: "test" }, method: methodOverride ?? proof.method, proofId: proof.proofId }
+        : { approved: false as const, reason: proof.artifactDigest !== request.artifactDigest ? "other_content" : "not_allowed" };
+    },
+  });
+  let n = 0;
+  const keepWith = async (h: Harness, taskId: string, opts: { method?: string; strong?: string[]; methodOverride?: string; request?: { requestId: string; revision: number; artifactDigest: string }; token?: string } = {}) => {
+    const deps = h.runtime.app.flow.deps;
+    const view = (await scopeQuestionOf(deps, taskId))!;
+    const request = opts.request ?? view.requests.keep!;
+    n += 1;
+    const proof = { proofId: `pp-${String(n)}`, method: opts.method ?? "local-session", requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token: opts.token ?? `ok:${await owner3(h, taskId)}` };
+    const result = await answerScopeQuestion({ ...deps, approvers: appr([await owner3(h, taskId)], opts.strong, opts.methodOverride) }, { taskId, choice: "keep", proof });
+    return { result, proof, request };
+  };
+  const grownTask = async (files: Record<string, string | null>, options: StartOptions = {}) => {
+    const h = await launch(options.markdown === undefined ? {} : { planFormat: "markdown" });
+    const t = await toAfterPlan(h, options);
+    const published = await buildAndPublish(h, t, files, false);
+    h.model.setChecks(published.commit, [PASS]);
+    await settle(h, 4);
+    return { h, t, ...published };
+  };
+
+  it("C1-push-after-keep-before-tierpass: new content in the kept file, merge press path before any tier pass", async () => {
+    const { h, t, cr } = await grownTask({ "src/auth/session.ts": "export const ttl = 0;\n" });
+    expect((await keepWith(h, t.taskId)).result.status).toBe("recorded");
+    const pushed = h.model.commit(cr3(h, cr).sourceBranch, { "src/auth/session.ts": "export const ttl = 0;\nexport const bypass = true;\n" });
+    h.model.setChecks(pushed, [PASS]);
+    const deps = h.runtime.app.flow.deps;
+    const task = (await readTask(deps, t.taskId))!;
+    const pressHold = await scopeHoldOf(deps, task);
+    const trackHold = await scopeHoldOf(deps, task, { repositoryId: "demo", headSha: pushed });
+    const g = await gate(h, t.taskId);
+    plog("C1", JSON.stringify({ pressHold, trackHold, gate: g }));
+    expect(trackHold).toBe(true);
+    expect(pressHold || g !== undefined).toBe(true);
+    // gate wrote the merge tier for the new head; press hold re-read
+    const pressHold2 = await scopeHoldOf(deps, (await readTask(deps, t.taskId))!);
+    plog("C1b pressHold after gate", pressHold2);
+    expect(pressHold2).toBe(true);
+  });
+
+  it("C2-push-after-keep-big-unrelated: after Keep, push 450 lines into a non-sensitive file (risky by size): asked again?", async () => {
+    const { h, t, cr } = await grownTask({ "src/auth/session.ts": "export const ttl = 0;\n" });
+    expect((await keepWith(h, t.taskId)).result.status).toBe("recorded");
+    const big = `${Array.from({ length: 450 }, (_, i) => `export const v${String(i)} = ${String(i)};`).join("\n")}\n`;
+    const pushed = h.model.commit(cr3(h, cr).sourceBranch, { "src/health.ts": big });
+    h.model.setChecks(pushed, [PASS]);
+    await settle(h, 5);
+    const view = (await scopeQuestionOf(h.runtime.app.flow.deps, t.taskId))!;
+    const flow = await flowOf(h, t.taskId);
+    plog("C2", JSON.stringify({ state: view.question.state, version: view.question.version, files: view.question.files.map((f) => f.path), reasons: flow.tier?.reasons.map((r) => `${r.code}:${r.path ?? ""}`), held: view.held, draft: cr3(h, cr).draft }));
+    // The kept content is not what will land any more: asked again, and held.
+    expect(view.question).toMatchObject({ state: "open", version: 2 });
+    expect(view.held).toBe(true);
+    expect(cr3(h, cr).draft).toBe(true);
+  });
+
+  it("C3-proof-replay-other-version: a v1 Keep proof replayed on v2; a v2 request id with v1 digest; same proof twice", async () => {
+    const { h, t, cr } = await grownTask({ "src/auth/session.ts": "export const ttl = 0;\n" });
+    const deps = h.runtime.app.flow.deps;
+    const v1 = (await scopeQuestionOf(deps, t.taskId))!.requests.keep!;
+    const first = await keepWith(h, t.taskId);
+    expect(first.result.status).toBe("recorded");
+    const pushed = h.model.commit(cr3(h, cr).sourceBranch, { "src/auth/session.ts": "export const ttl = 1;\n" });
+    h.model.setChecks(pushed, [PASS]);
+    await settle(h, 4);
+    const v2view = (await scopeQuestionOf(deps, t.taskId))!;
+    expect(v2view.question.version).toBe(2);
+    const owner = await owner3(h, t.taskId);
+    const replay = await answerScopeQuestion({ ...deps, approvers: appr([owner]) }, { taskId: t.taskId, choice: "keep", proof: first.proof });
+    const mixed = await keepWith(h, t.taskId, { request: { requestId: v2view.requests.keep!.requestId, revision: 2, artifactDigest: v1.artifactDigest } });
+    const revOnly = await keepWith(h, t.taskId, { request: { requestId: v2view.requests.keep!.requestId, revision: 1, artifactDigest: v2view.requests.keep!.artifactDigest } });
+    plog("C3", JSON.stringify({ replay: replay.status, mixed: mixed.result.status, revOnly: revOnly.result.status }));
+    expect(replay.status).toBe("refused");
+    expect(mixed.result.status).toBe("refused");
+    // single use: same token, same request, fresh proofId -> second Keep after a Stop-less reopen is impossible; check Stop proof reuse instead
+    const good = await keepWith(h, t.taskId, { token: `ok:${owner}` });
+    expect(good.result.status).toBe("recorded");
+  });
+
+  it("C4-keep-from-chat-or-tool: chat named as strong by the plug-in; adapter returns a weaker method than the proof claims", async () => {
+    const { h, t, cr } = await grownTask({ "src/auth/session.ts": "export const ttl = 0;\n" });
+    const chat = await keepWith(h, t.taskId, { method: "chat-slack", strong: ["chat-slack", "local-session"] });
+    const comment = await keepWith(h, t.taskId, { method: "code-host-comment", strong: ["code-host-comment"] });
+    const mcp = await keepWith(h, t.taskId, { method: "mcp" });
+    const lied = await keepWith(h, t.taskId, { method: "local-session", methodOverride: "mcp" });
+    const noStrongList = await keepWith(h, t.taskId, { method: "mcp", strong: undefined as never });
+    plog("C4", JSON.stringify({ chat: chat.result.status, comment: comment.result.status, mcp: mcp.result.status, lied: lied.result.status, noStrongList: noStrongList.result.status }));
+    expect([chat, comment, mcp, lied, noStrongList].every((r) => r.result.status === "refused")).toBe(true);
+    await settle(h, 3);
+    expect(cr3(h, cr).draft).toBe(true);
+  });
+
+  it("C5-due-row-deleted-early: the due row is deleted before the tier pass: never ready on the untiered head; the next sweep adds it back", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, { "src/auth/session.ts": "export const ttl = 0;\n" }, false);
+    h.model.setChecks(commit, [PASS]);
+    const tracking = h.runtime.app.tracking;
+    h.clock.at += 5 * 60_000;
+    await tracking.sweep();
+    await h.store().delete({ key: { pk: "TIER_CHECKS_DUE", sk: `TASK#${t.taskId}` } });
+    await tracking.tierChecks();
+    h.clock.at += 5 * 60_000;
+    await tracking.sweep();
+    const draftAfter = cr3(h, cr).draft;
+    const due = await h.store().get({ pk: "TIER_CHECKS_DUE", sk: `TASK#${t.taskId}` });
+    plog("C5", JSON.stringify({ draftAfter, dueBack: due !== undefined, tier: (await flowOf(h, t.taskId)).tier?.headSha === commit }));
+    expect(draftAfter).toBe(true);
+  });
+
+  it("C6-scope-read-fails: the store fails reading the scope record: held", async () => {
+    const { h, t, cr } = await grownTask({ "src/auth/session.ts": "export const ttl = 0;\n" });
+    expect((await keepWith(h, t.taskId)).result.status).toBe("recorded");
+    const deps = h.runtime.app.flow.deps;
+    const task = (await readTask(deps, t.taskId))!;
+    const broken = { store: { ...deps.store, get: async () => { throw new Error("down"); } } } as never;
+    expect(await scopeHoldOf(broken, task)).toBe(true);
+    expect(await scopeHoldOf(broken, task, { repositoryId: "demo", headSha: headOf(h, cr) })).toBe(true);
+  });
+
+  it("C7-multi-repo-same-path-digest: two repositories each change src/auth/session.ts; new content in the SECOND one keeps the digest", () => {
+    const at = new Date().toISOString();
+    const head = "c".repeat(64);
+    const flow = { rulesVersion: 1, skippedSteps: ["plan_check", "plan_approval"], tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at }],
+      tier: { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/auth/session.ts" }], headSha: head, at } } as never;
+    const headTier = { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/auth/session.ts" }], headSha: head, at } as never;
+    const files = (b: string) => [
+      { repository: "a", path: "src/auth/session.ts", status: "modified", additions: 1, deletions: 0, patch: "@@ -0,0 +1 @@\n+export const ttl = 0;" },
+      { repository: "b", path: "src/auth/session.ts", status: "modified", additions: 1, deletions: 0, patch: b },
+    ];
+    const d1 = scopeOf(flow, headTier, files("@@ -0,0 +1 @@\n+export const ok = 1;"))!.contentDigest;
+    const d2 = scopeOf(flow, headTier, files("@@ -0,0 +1 @@\n+export const bypass = true;"))!.contentDigest;
+    plog("C7", JSON.stringify({ same: d1 === d2 }));
+    expect(d1).not.toBe(d2);
+  });
+
+  it("C7b-repository-in-digest: the same two patches swapped between two repositories are a different change", () => {
+    const at = new Date().toISOString();
+    const head = "c".repeat(64);
+    const flow = { rulesVersion: 1, skippedSteps: ["plan_check", "plan_approval"], tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at }],
+      tier: { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/auth/session.ts" }], headSha: head, at } } as never;
+    const headTier = { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/auth/session.ts" }], headSha: head, at } as never;
+    const [one, two] = ["@@ -0,0 +1 @@\n+export const ok = 1;", "@@ -0,0 +1 @@\n+export const bypass = true;"];
+    const files = (first: string, second: string) => [
+      { repository: "a", path: "src/auth/session.ts", status: "modified", additions: 1, deletions: 0, patch: first },
+      { repository: "b", path: "src/auth/session.ts", status: "modified", additions: 1, deletions: 0, patch: second },
+    ];
+    expect(scopeOf(flow, headTier, files(one, two))!.contentDigest).not.toBe(scopeOf(flow, headTier, files(two, one))!.contentDigest);
+  });
+
+  it("C8-multi-repo-bound-head: two open PRs; the other PR's stored head is stale (pushed since): is THIS PR held?", async () => {
+    const at = new Date().toISOString();
+    const [a1, b1, b2] = ["a".repeat(40), "b".repeat(40), "e".repeat(40)];
+    const { boundCommits } = await import("../../packages/broker/src/core/merge/change-tier-read.js");
+    const bound = boundCommits([{ repositoryId: "a", headSha: a1 }, { repositoryId: "b", headSha: b1 }]).headSha!;
+    const flow = { rulesVersion: 1, skippedSteps: ["plan_check", "plan_approval"], tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at }],
+      tier: { level: "small", kinds: ["code_config"], source: "diff", reasons: [], headSha: bound, at },
+      quickChecks: [{ kind: "code_config", outcome: "passed", detail: `tier_questions head=${bound} patch=${"d".repeat(64)}`, at }] };
+    const workflow = { flow, pullRequests: [{ repositoryId: "a", number: 1, state: "OPEN", headSha: a1 }, { repositoryId: "b", number: 2, state: "OPEN", headSha: b1 }] } as never;
+    const store = { get: async () => undefined } as never;
+    const heldA = await scopeHoldOf({ store }, { taskId: "t", workflow }, { repositoryId: "a", headSha: a1 });
+    const heldB = await scopeHoldOf({ store }, { taskId: "t", workflow }, { repositoryId: "b", headSha: b2 });
+    const noRecordStore = await scopeHoldOf({ store }, { taskId: "t", workflow: { ...(workflow as object), pullRequests: [{ repositoryId: "a", number: 1, state: "OPEN" }, { repositoryId: "b", number: 2, state: "OPEN", headSha: b1 }] } as never }, { repositoryId: "a", headSha: a1 });
+    plog("C8", JSON.stringify({ heldA_withStaleB: heldA, heldB_newHead: heldB, missingStoredHead: noRecordStore }));
+    expect(heldB).toBe(true);
+    expect(noRecordStore).toBe(true);
+  });
+
+  it("C9-stall-standard-review-outage: small grew to standard; the standard reviews could not run; the reviewer comes back: still held? any question/Retry?", async () => {
+    const h = await launch();
+    h.reviewer.reviews = { code_review: "throw", security_review: "throw" };
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, { "src/health.ts": "export const health = 200;\n", "lib/a.ts": "export const a = 1;\n", "web/b.ts": "export const b = 1;\n", "api/c.ts": "export const c = 1;\n" }, false);
+    h.model.setChecks(commit, [PASS]);
+    await settle(h, 4);
+    h.reviewer.reviews = {};
+    await settle(h, 6);
+    const flow = await flowOf(h, t.taskId);
+    const deps = h.runtime.app.flow.deps;
+    const view = await scopeQuestionOf(deps, t.taskId);
+    plog("C9", JSON.stringify({ level: flow.tier?.level, draft: cr3(h, cr).draft, question: view?.question.state ?? "none", failed: p2Checks(flow).filter((c) => c.outcome === "failed").map((c) => c.detail), reviewCalls: reviewCalls(h.reviewer).length, gate: await gate(h, t.taskId) }));
+    // While the reviews could not run, the person sees it (a could-not-check record with Retry); once the reviewer is back they run again by themselves and the hold lifts.
+    expect(view?.question.kind).toBe("couldnt_check");
+    const retried = await retryScopeChecks(deps, t.taskId);
+    await settle(h, 4);
+    plog("C9b", JSON.stringify({ retried, draft: cr3(h, cr).draft }));
+    expect(tierReviewRecorded(await flowOf(h, t.taskId), "standard", headOf(h, cr))).toBe(true);
+    expect(await scopeHoldOf(deps, (await readTask(deps, t.taskId))!, { repositoryId: "demo", headSha: headOf(h, cr) })).toBe(false);
+  });
+
+  it("C10-stall-sticky-risky-no-record: risky file published, then removed BEFORE the first tier pass: is there a question, or a silent hold forever?", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, { "src/health.ts": "export const health = 200;\n", "src/auth/session.ts": "export const ttl = 0;\n" }, false);
+    // the merge gate tiers the first head (as a press attempt would), before any tier pass
+    await gate(h, t.taskId);
+    const removed = h.model.commit(cr3(h, cr).sourceBranch, { "src/auth/session.ts": null });
+    h.model.setChecks(removed, [PASS]);
+    void commit;
+    await settle(h, 8);
+    const flow = await flowOf(h, t.taskId);
+    const q = await readScopeQuestion(h.runtime.app.flow.deps, t.taskId);
+    plog("C10", JSON.stringify({ level: flow.tier?.level, head: flow.tier?.headSha === removed, reviewed: tierReviewRecorded(flow, "risky", removed), question: q?.state ?? "none", held: scopeHolds(flow, q), draft: cr3(h, cr).draft }));
+    // Never "waits for a person" with nothing to answer: a record names the changed files.
+    expect(q).toBeDefined();
+    expect(q?.files.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("C11-outside-plan-test-file: plan names src/health.ts; build adds src/health.test.ts beside it: raised?", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, { "src/health.ts": "export const health = 200;\n", "src/health.test.ts": "import { health } from './health';\nexpect(health).toBe(200);\n" }, false);
+    h.model.setChecks(commit, [PASS]);
+    await settle(h, 5);
+    const flow = await flowOf(h, t.taskId);
+    plog("C11", JSON.stringify({ level: flow.tier?.level, reasons: flow.tier?.reasons.map((r) => `${r.code}:${r.path ?? ""}`), grew: flow.grewAfterBuild, draft: cr3(h, cr).draft, reviews: reviewCalls(h.reviewer).length }));
+    // A test beside the planned file is covered by the plan.
+    expect(flow.tier?.reasons.map((r) => r.code)).not.toContain("outside_plan_code");
+    expect(flow.tier?.level).toBe("small");
+  });
+
+  it("C12-outside-plan-tests-dir-and-lock: plan names src/health.ts; build touches tests/unit/health.test.ts and package.json", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, { "src/health.ts": "export const health = 200;\n", "tests/unit/health.test.ts": "it('x', () => {});\n" }, false);
+    h.model.setChecks(commit, [PASS]);
+    await settle(h, 5);
+    const flow = await flowOf(h, t.taskId);
+    const q = await readScopeQuestion(h.runtime.app.flow.deps, t.taskId);
+    plog("C12", JSON.stringify({ level: flow.tier?.level, reasons: flow.tier?.reasons.map((r) => `${r.code}:${r.path ?? ""}`), question: q?.state ?? "none", draft: cr3(h, cr).draft }));
+    // A test in the tests/ mirror of the planned file is covered by the plan.
+    expect(flow.tier?.reasons.map((r) => r.code)).not.toContain("outside_plan_code");
+  });
+
+  it("C13-docs-plan-code-example: a docs plan for README.md; the agent also fixes a typo in examples/hello.py: risky + question?", async () => {
+    const h = await launch({ planFormat: "markdown" });
+    const t = await toAfterPlan(h, { instructions: "Fix the typo in README.md", restatement: "Fix a typo in README.md.", markdown: "# Plan\n\nFix the typo in README.md.\n" });
+    if ((t.next.payload as { workflowMode?: string }).workflowMode !== "IMPLEMENT") { plog("C13 not skipped", (t.next.payload as { workflowMode?: string }).workflowMode); return; }
+    const { cr, commit } = await buildAndPublish(h, t, { "README.md": "Hello world.\n", "examples/hello.py": "print('hello')\n" }, false);
+    h.model.setChecks(commit, [PASS]);
+    await settle(h, 5);
+    const flow = await flowOf(h, t.taskId);
+    const q = await readScopeQuestion(h.runtime.app.flow.deps, t.taskId);
+    plog("C13", JSON.stringify({ level: flow.tier?.level, reasons: flow.tier?.reasons.map((r) => `${r.code}:${r.path ?? ""}`), question: q?.state ?? "none", area: q?.area, draft: cr3(h, cr).draft }));
+    expect(flow.tier?.level).toBe("risky");
+    expect(q?.files.map((file) => file.path)).toContain("examples/hello.py");
+  });
+
+  it("C14-small-happy-path-ready: a plain small change still becomes ready (no stall)", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, SMALL, false);
+    h.model.setChecks(commit, [PASS]);
+    await settle(h, 5);
+    plog("C14", JSON.stringify({ draft: cr3(h, cr).draft, level: (await flowOf(h, t.taskId)).tier?.level }));
+    expect(cr3(h, cr).draft).toBe(false);
+  });
+
+  it("C15-no-tierchecks-host: a host that sweeps but never runs tierChecks: small change ready?", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr, commit } = await buildAndPublish(h, t, SMALL, false);
+    h.model.setChecks(commit, [PASS]);
+    (h.runtime.app.tracking as { tierChecks: () => Promise<number> }).tierChecks = async () => 0;
+    await settle(h, 6);
+    plog("C15", JSON.stringify({ draft: cr3(h, cr).draft, tierHead: (await flowOf(h, t.taskId)).tier?.source }));
+    // Never ready without its checks: the hold stands (and the install says loudly that no tier pass runs).
+    expect(cr3(h, cr).draft).toBe(true);
+  });
+  it("C2b-big-unrelated-then-merge: after Keep, risky-by-size push in another file: does it become ready and pass the gate without a new Keep?", async () => {
+    const { h, t, cr } = await grownTask({ "src/auth/session.ts": "export const ttl = 0;\n" });
+    expect((await keepWith(h, t.taskId)).result.status).toBe("recorded");
+    const big = `${Array.from({ length: 450 }, (_, i) => `export const v${String(i)} = ${String(i)};`).join("\n")}\n`;
+    const pushed = h.model.commit(cr3(h, cr).sourceBranch, { "src/health.ts": big });
+    h.model.setChecks(pushed, [PASS]);
+    await settle(h, 10);
+    const flow = await flowOf(h, t.taskId);
+    const deps = h.runtime.app.flow.deps;
+    plog("C2b", JSON.stringify({ q: (await readScopeQuestion(deps, t.taskId))?.state, reviewed: tierReviewRecorded(flow, "risky", pushed), trackHold: await scopeHoldOf(deps, (await readTask(deps, t.taskId))!, { repositoryId: "demo", headSha: pushed }), draft: cr3(h, cr).draft, gate: await gate(h, t.taskId) ?? "passes" }));
+    expect((await readScopeQuestion(deps, t.taskId))?.state).toBe("open");
+    expect(await scopeHoldOf(deps, (await readTask(deps, t.taskId))!)).toBe(true);
+    expect(cr3(h, cr).draft).toBe(true);
+  });
+
+  it("C10b-sticky-risky-no-record (no press): risky file published, removed before the first tier pass", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    const { cr } = await buildAndPublish(h, t, { "src/health.ts": "export const health = 200;\n", "src/auth/session.ts": "export const ttl = 0;\n" }, false);
+    const tier0 = (await flowOf(h, t.taskId)).tier;
+    const removed = h.model.commit(cr3(h, cr).sourceBranch, { "src/auth/session.ts": null });
+    h.model.setChecks(removed, [PASS]);
+    await settle(h, 8);
+    const flow = await flowOf(h, t.taskId);
+    const deps = h.runtime.app.flow.deps;
+    const q = await readScopeQuestion(deps, t.taskId);
+    const press = "n/a";
+    plog("C10b", JSON.stringify({ tierAtPublish: tier0 === undefined ? "none" : `${tier0.level}/${tier0.source}`, level: flow.tier?.level, reviewed: tierReviewRecorded(flow, "risky", removed), question: q?.state ?? "none", view: (await scopeQuestionOf(deps, t.taskId)) === undefined ? "none" : "some", held: scopeHolds(flow, q), draft: cr3(h, cr).draft, press }));
+    // A hold always has something to answer, or lifts once the risky reviews ran: never a silent hold.
+    expect(!scopeHolds(flow, q) || (q !== undefined && q.state === "open" && q.files.length > 0)).toBe(true);
+  });
+
+  it("C16-prepare-refuses-alone: the merge request itself refuses while the question is open (not only the press)", async () => {
+    const world = await mergeWorld({ withoutTier: true });
+    await world.seedTracking();
+    const head = world.prs[0]!.head;
+    const at = new Date(world.now.value).toISOString();
+    await world.setWorkflow({ flow: {
+      rulesVersion: 1, skippedSteps: ["plan_check", "plan_approval"], tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at }],
+      tier: { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/a.ts" }], headSha: head, at }, grewAfterBuild: { from: "small", to: "risky", at },
+      quickChecks: [{ kind: "code_config", outcome: "passed", detail: `tier_review level=risky head=${head}`, at }],
+    } });
+    await world.store.put({ item: { ...scopeQuestionKey(TASK_ID), entityType: "SCOPE_QUESTION", version: 1, question: { taskId: TASK_ID, kind: "scope", state: "open", version: 1, headSha: head, request: "x", area: "a sensitive path", files: [{ path: "src/a.ts", additions: 1, deletions: 0, area: "a sensitive path" }], contentDigest: "0", askedAt: at } } });
+    await expect(prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() })).rejects.toThrow(/grew from small to risky/u);
+  });
+
+  it("C17-press-rechecks: the question opens between the request and the press: the press refuses", async () => {
+    const world = await mergeWorld({ withoutTier: true });
+    await world.seedTracking();
+    const head = world.prs[0]!.head;
+    const at = new Date(world.now.value).toISOString();
+    const flow = {
+      rulesVersion: 1, skippedSteps: ["plan_check", "plan_approval"], tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at }],
+      tier: { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/a.ts" }], headSha: head, at }, grewAfterBuild: { from: "small", to: "risky", at },
+      quickChecks: [{ kind: "code_config", outcome: "passed", detail: `tier_review level=risky head=${head}`, at }],
+    };
+    await world.setWorkflow({ flow });
+    const kept = { taskId: TASK_ID, kind: "scope", state: "kept", version: 1, headSha: head, request: "x", area: "a sensitive path", files: [{ path: "src/a.ts", additions: 1, deletions: 0, area: "a sensitive path" }], contentDigest: "0", askedAt: at };
+    await world.store.put({ item: { ...scopeQuestionKey(TASK_ID), entityType: "SCOPE_QUESTION", version: 1, question: kept } });
+    const prepared = await prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() });
+    // Asked again (new content) while the press checks the person's proof: after the press's own request was made, before the merge.
+    const verify = world.deps.approvers.verify.bind(world.deps.approvers);
+    const deps = { ...world.deps, approvers: { ...world.deps.approvers, verify: async (...args: Parameters<typeof verify>) => {
+      await world.store.put({ item: { ...scopeQuestionKey(TASK_ID), entityType: "SCOPE_QUESTION", version: 2, question: { ...kept, state: "open", version: 2 } } });
+      return verify(...args);
+    } } };
+    const result = await pressMerge(deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }).then(() => "merged", (error: unknown) => String(error));
+    expect(result).toMatch(/grew from small to risky/u);
+  });
+
+  it("C18-keep-proof-method-checked: the adapter says a strong method but the proof is an AI tool's: refused (the proof's own method is checked)", async () => {
+    const { h, t } = await grownTask({ "src/auth/session.ts": "export const ttl = 0;\n" });
+    const claimed = await keepWith(h, t.taskId, { method: "mcp", methodOverride: "local-session" });
+    expect(claimed.result.status).toBe("refused");
+  });
+});
+
+describe("I: the whole change is what a Keep is for, and a stalled tier pass is loud", () => {
+  it("I1-unreadable-file: a changed file the host gives no patch for makes the question 'could not check', never a named area", () => {
+    const at = new Date().toISOString();
+    const head = "a".repeat(40);
+    const flow = { rulesVersion: 1, skippedSteps: ["plan_check", "plan_approval"], tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at }],
+      tier: { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/auth/session.ts" }], headSha: head, at } } as never;
+    const headTier = { level: "risky", kinds: ["code_config"], source: "diff", reasons: [{ code: "sensitive_path", path: "src/auth/session.ts" }], headSha: head, at } as never;
+    const scope = scopeOf(flow, headTier, [
+      { path: "src/auth/session.ts", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+x" },
+      { path: "assets/logo.png", status: "modified", additions: 0, deletions: 0 },
+    ]);
+    expect(scope?.kind).toBe("couldnt_check");
+    expect(scope?.files).toEqual([]);
+  });
+
+  it("I2-stall-loud: a host that sweeps but never runs the tier pass is told loudly once a task waited past the limit", async () => {
+    const h = await launch();
+    const t = await toAfterPlan(h);
+    await buildAndPublish(h, t, SMALL, false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const tracking = h.runtime.app.tracking;
+      for (let round = 0; round < 3; round += 1) { h.clock.at += 20 * 60_000; await tracking.sweep(); }
+      expect(errors.mock.calls.some((call) => String(call[0]).includes("tier_checks.not_running"))).toBe(true);
+    } finally { errors.mockRestore(); }
   });
 });
