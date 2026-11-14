@@ -30,7 +30,7 @@ function codeHostWorld(): CodeHostWorld & { api: GitHubFixtureApi } {
   const api = new GitHubFixtureApi(model);
   const host = githubCodeHost(providerOver(api), { credentialRef: "github", now: () => GITHUB_NOW, webhookSecret: webhookSecretReader() });
   return {
-    host, model, api, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, now: () => GITHUB_NOW, branch: WORKING_BRANCH,
+    fileEntries: true, host, model, api, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, now: () => GITHUB_NOW, branch: WORKING_BRANCH,
     signedDelivery: (event) => event.kind === "change_request.opened"
       ? githubDelivery("pull_request", githubPayloads.pullRequest("opened", Number(event.id)))
       : githubDelivery("push", githubPayloads.push(`refs/heads/${event.branch}`, event.revision)),
