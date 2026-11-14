@@ -51,8 +51,10 @@ export interface ScopeQuestionRecord {
   area: string;
   /** The files shown (at most 20). */
   files: ScopeFile[];
-  /** A digest of EVERY named file and its patch text: a Keep is for exactly this content. */
+  /** A digest of every changed file of every pull request: a Keep is for exactly this change. */
   contentDigest: string;
+  /** Some files could not be read (binary, renamed or mode-only): their content is not in the digest, so a Keep is for this head only (a new head asks again). */
+  headBound?: true;
   /** What the agent said about the change: shown only as "written by the agent, not checked". */
   agentReason?: string;
   askedAt: string;
@@ -78,7 +80,9 @@ const digestOf = (parts: readonly string[]): string => createHash("sha256").upda
 
 /** A digest of the whole change: every file of every pull request, by repository, path, earlier path, status and patch (a removed file by its status). The same path in two repositories counts twice. */
 export function changeDigestOf(files: readonly TierFile[]): string {
-  return digestOf(files.map((file) => [file.repository ?? "", file.path, file.previousPath ?? "", file.status, file.patch ?? (file.status === "removed" ? "(removed)" : "(unreadable)")].join("\u0001")).sort());
+  // Each entry as JSON (no delimiter inside a path can forge another entry), the entries sorted, the list as JSON.
+  const entries = files.map((file) => JSON.stringify([file.repository ?? "", file.path, file.previousPath ?? "", file.status, file.additions, file.deletions, file.patch ?? (file.status === "removed" ? "(removed)" : "(unreadable)")])).sort();
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 }
 
 /**
@@ -89,7 +93,7 @@ export function changeDigestOf(files: readonly TierFile[]): string {
  *   - risky with no file named (by size, or by the reviewer's own text in its answer): the changed files, under the reason's plain words.
  * Undefined: nothing to ask on this head (the extra files were removed again).
  */
-export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly TierFile[]): { kind: ScopeQuestionRecord["kind"]; area: string; files: ScopeFile[]; contentDigest: string } | undefined {
+export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly TierFile[]): { kind: ScopeQuestionRecord["kind"]; area: string; files: ScopeFile[]; contentDigest: string; headBound?: true } | undefined {
   const fileOf = (path: string) => files.find((file) => file.path === path);
   const asFiles = (entries: ReadonlyArray<{ path: string; area: string }>) => entries.map((entry) => ({ path: inertLine(entry.path, 200), additions: fileOf(entry.path)?.additions ?? 0, deletions: fileOf(entry.path)?.deletions ?? 0, area: entry.area }));
   // A Keep is for what will land: the digest covers EVERY changed file of every pull request (repository, path, status and patch), whatever is named.
@@ -99,7 +103,14 @@ export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly 
   const ownTier = flow.tier?.headSha === headTier.headSha ? flow.tier : undefined;
   const reasonsHere = [...headTier.reasons, ...(ownTier?.reasons ?? [])];
   const named = reasonsHere.filter((reason) => NAMING_CODES.has(reason.code) && !COULDNT_CHECK.has(reason.code) && reason.path !== undefined && fileOf(reason.path) !== undefined);
-  if (unreadable) return { kind: "couldnt_check", area: "Rovara could not check this change", files: [], contentDigest: whole };
+  if (unreadable) {
+    // Files with no patch and no lines (a binary, a pure rename, a mode change) can be named, and a person may keep them explicitly; a file with lines the host did not show (too large) cannot be judged.
+    const unreadableFiles = files.filter((file) => file.patch === undefined && file.status !== "removed");
+    if (!unreadableFiles.every((file) => file.additions + file.deletions === 0)) return { kind: "couldnt_check", area: "Rovara could not check this change", files: [], contentDigest: whole };
+    const namedHere = named.filter((reason) => !unreadableFiles.some((file) => file.path === reason.path)).map((reason) => ({ path: reason.path!, area: tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path) }));
+    const listed = [...unreadableFiles.map((file) => ({ path: file.path, area: "a file Rovara could not read (binary, renamed or mode-only)" })), ...namedHere];
+    return { kind: "scope", area: [...new Set(listed.map((file) => file.area))].join(", "), files: asFiles(listed).slice(0, 20), contentDigest: whole, headBound: true };
+  }
   if (named.length > 0) {
     const seen = new Map<string, string>();
     for (const reason of named) if (!seen.has(reason.path!)) seen.set(reason.path!, reason.code === "outside_plan_code" ? "code the plan did not name" : tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path));
@@ -153,12 +164,12 @@ export function planScopeQuestion(
   if (scope === undefined) {
     if (earlier === undefined || earlier.state !== "open") return { ...(earlier === undefined ? {} : { question: earlier }), asked: false };
     next = { ...earlier, state: "superseded", headSha: input.head };
-  } else if (earlier !== undefined && earlier.kind === scope.kind && earlier.contentDigest === scope.contentDigest && earlier.state !== "superseded") {
+  } else if (earlier !== undefined && earlier.kind === scope.kind && earlier.contentDigest === scope.contentDigest && earlier.state !== "superseded" && !(earlier.headBound === true && earlier.headSha !== input.head)) {
     // The same files with the same content: the answer stands, bound now to the current head.
     if (earlier.headSha === input.head) return { question: earlier, asked: false };
     next = { ...earlier, headSha: input.head };
   } else {
-    next = { taskId: task.taskId, kind: scope.kind, state: "open", version: (earlier?.version ?? 0) + 1, headSha: input.head, request: plainRequest(task.requestText), area: scope.area, files: scope.files, contentDigest: scope.contentDigest, askedAt: input.at };
+    next = { taskId: task.taskId, kind: scope.kind, state: "open", version: (earlier?.version ?? 0) + 1, headSha: input.head, request: plainRequest(task.requestText), area: scope.area, files: scope.files, contentDigest: scope.contentDigest, ...(scope.headBound === true ? { headBound: true as const } : {}), askedAt: input.at };
   }
   return {
     item: { kind: "put", item: { ...scopeQuestionKey(task.taskId), entityType: "SCOPE_QUESTION", question: JSON.parse(JSON.stringify(next)) as never, version: next.version }, condition: earlier === undefined ? when.absent() : when.eq("version", earlier.version) },
@@ -214,10 +225,11 @@ export const SCOPE_BANNER_END = "<!-- rovara-scope:end -->";
 export function scopeBanner(question: ScopeQuestionRecord | undefined, held: boolean): string {
   if (question === undefined || question.state === "superseded") return "";
   const lines = question.kind === "couldnt_check"
-    ? ["> **Rovara could not check this change** (its reviewer did not answer, or the change could not be read in full). It stays a draft until it is checked. Retry from the task page."]
+    ? ["> **Rovara could not check this change** (its reviewer did not answer, or a file was too large to read). It stays a draft until it is checked: retry the check from the task page, or remove or replace the file Rovara could not read."]
     : [
       `> **This grew from small to risky.** You asked for: "${question.request}".`,
       `> It also changed ${question.area}: ${question.files.map((file) => `\`${file.path}\` (+${String(file.additions)} -${String(file.deletions)})`).join(", ")}.`,
+      question.headBound === true && question.state !== "kept" ? "> Rovara could not read some of these files (binary, renamed or mode-only): remove or replace the unreadable file, or keep it explicitly on the task page." : "",
       question.state === "kept" ? "> A person chose to keep these files." : held ? "> It stays a draft until a person answers on the task page (keep, remove or stop) and the code and security reviews pass." : "",
     ].filter((line) => line !== "");
   return [SCOPE_BANNER_START, ...lines, SCOPE_BANNER_END, ""].join("\n");
