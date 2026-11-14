@@ -102,7 +102,7 @@ describe("the adapter registry", () => {
     const heard: string[] = [];
     const sink: ChannelInboundSink = { message: async (message) => void heard.push(message.text), decision: async () => {} };
     const listener = await adapter.start(sink);
-    await sink.message({ version: 2, channel: "whatsapp", eventId: "e1", conversation: event.conversation, actor: { channel: "whatsapp", tenant: "t", userId: "u" }, text: "hello", receivedAt: event.createdAt });
+    await sink.message({ version: 2, channel: "whatsapp", eventId: "e1", conversation: { channel: "whatsapp", tenant: "t", space: "s", thread: "main" }, actor: { channel: "whatsapp", tenant: "t", userId: "u" }, text: "hello", receivedAt: event.createdAt });
     expect(heard).toEqual(["hello"]);
     await listener.stop();
     expect(adapter.stopped).toBe(true);
