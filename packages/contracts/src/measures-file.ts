@@ -9,12 +9,20 @@ export const MeasuresFileEntrySchema = EvidenceMeasureSchema.pick({ name: true, 
   spread: EvidenceMeasureSchema.shape.spread.refine(notNegativeZero, "not negative zero"),
   count: z.number().int().min(0).max(100_000_000).refine(notNegativeZero, "not negative zero").optional(),
 }).strict();
+export const EvalQuestionSamplesSchema = z.object({
+  id: z.string().min(1).max(160),
+  samples: z.array(z.object({ pass: z.boolean(), answer: z.string().max(1_048_576) }).strict()).min(1).max(3),
+}).strict();
+export const EvalQuestionRowsSchema = z.array(EvalQuestionSamplesSchema).min(1).max(1_000)
+  .refine(rows => new Set(rows.map(row => row.id)).size === rows.length, "duplicate question ids");
+export type EvalQuestionSamples = z.infer<typeof EvalQuestionSamplesSchema>;
 export const MeasuresFileSchema = z.object({
   schemaVersion: z.literal(1),
   /** A runner reports these values; Rovara does not independently measure them. */
   source: z.literal("project_runner").default("project_runner"),
   /** SHA-256 of the eval set, when this file describes an eval. No baseline is implied. */
   eval_set_hash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  questions: EvalQuestionRowsSchema.optional(),
   measures: z.array(MeasuresFileEntrySchema).min(1).max(EVIDENCE_MEASURES_MAX),
 }).strict().refine((file) => new Set(file.measures.map((measure) => measure.name)).size === file.measures.length, "duplicate measure names");
 export type MeasuresFile = z.infer<typeof MeasuresFileSchema>;

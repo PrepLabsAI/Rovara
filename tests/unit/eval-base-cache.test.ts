@@ -1,7 +1,7 @@
 // TE-F3 part A: the base score cache. The key is content-addressed, so a change to any part is a miss and a fresh base run, never a stale score; the store is company-scoped; only Rovara's own base round writes it.
 import { describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DOCUMENT_STORE_LIMITS } from "../../packages/contracts/src/ports/document-store.js";
+import { DOCUMENT_STORE_LIMITS, type StoredDocument } from "../../packages/contracts/src/ports/document-store.js";
 import { COMPANY_KEY_PREFIX, companyOfKey } from "../../packages/contracts/src/ports/company-scope.js";
 import {
   EVAL_BASE_CACHE_TTL_DAYS, EvalBaseRecordSchema, createDocumentBaseScoreCache, evalBaseCacheKey, evalCommandFingerprint, evalSettingsFingerprint, type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalSettings,
@@ -144,7 +144,9 @@ describe("the cache service over the document store", () => {
     const key = { pk: `${COMPANY_KEY_PREFIX}org_aaaaaaaaaaaaaaaaaaaa#EVALBASE`, sk: `K#${evalBaseCacheKey(parts())}` };
     const good = (await store.get(key))!;
     for (const broken of [{ record: "not json" }, { record: { schemaVersion: 1 } }, { record: { ...record(), measures: [{ name: "a", unit: "u", value: "NaN", direction: "up_good" }] } }, { record: null }, { company: "org_other" }]) {
-      await store.put({ item: { ...good, ...broken } });
+      // Match the JSON boundary of the real document store (optional fields are absent).
+      const item = JSON.parse(JSON.stringify({ ...good, ...broken })) as StoredDocument;
+      await store.put({ item });
       expect(await mine.read(parts()), JSON.stringify(broken)).toBeUndefined();
     }
     await store.put({ item: good });

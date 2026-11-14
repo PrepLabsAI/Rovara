@@ -6,12 +6,12 @@
 //   - Every key part is immutable or content-addressed (a commit id, an eval-set hash, a hidden-set hash, a command fingerprint, a catalog row, a model), and the company and project are in it. Change any one and the key
 //     changes: a miss and a fresh base run, never a stale score.
 //   - Only Rovara's own base round of that very commit writes it (`EvalBaseWriteProvenance`). A value read from a file the coding agent could write is never cached.
-//   - It holds scores and counts only (no case id, input, output or path), so it cannot leak a hidden case.
+//   - Legacy records hold aggregate scores. New records can also hold three question samples; these stay in the company-scoped store and are never returned as private-set agent feedback.
 //   - A record that is corrupt, tampered with, filed under the wrong key, another company's, or expired is a miss. A store that is down is a miss (the cache is only an optimisation).
 // The store is the existing `DocumentStore` port with company-scoped partitions (no new port, so no DECISIONS 42/63 item): partition `ORG#<company>#EVALBASE`, sort key `K#<key>`, a 30-day expiry.
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
-import { MeasuresFileEntrySchema } from "./measures-file.js";
+import { EvalQuestionRowsSchema, MeasuresFileEntrySchema } from "./measures-file.js";
 import { EVIDENCE_MEASURES_MAX } from "./evidence.js";
 import { companyScoped } from "./ports/company-scope.js";
 import { DOCUMENT_STORE_LIMITS, type DocumentStore, type StoredDocument } from "./ports/document-store.js";
@@ -31,6 +31,7 @@ export const EvalBaseRecordSchema = z.object({
   schemaVersion: z.literal(1),
   /** Per-measure base scores and their spread, as the runner reported them in Rovara's own base round. */
   measures: z.array(MeasuresFileEntrySchema).min(1).max(EVIDENCE_MEASURES_MAX),
+  questions: EvalQuestionRowsSchema.refine(rows => rows.every(row => row.samples.length === 3), "three saved runs required").optional(),
   caseCount: z.number().int().min(0).max(100_000_000),
   /** The day the base round ran. */
   recordedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
