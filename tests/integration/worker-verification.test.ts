@@ -14,6 +14,8 @@ import {
   agentxPreambleSha256,
   AGENTX_PREAMBLE_VERSION,
   CheckReportSchema,
+  EvalRoundArtifactSchema,
+  TestProofSchema,
   createCandidateManifest,
   lastAssistantResponse,
   type CheckReport,
@@ -1908,6 +1910,32 @@ describe("a stop that could not be confirmed ends the run and touches nothing (F
 const evalWireRequest = { aiChange: true as const, reason: "eval_hint" as const, evalPass: 1 as const, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 };
 const evalWireStopped = { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) };
 describe("CHECKS eval hook", () => {
+  it("writes checks_failed with zero holds when the CHECKS round fails", async () => {
+    const w = await createEvalFinalCheckWorld();
+    try {
+      const fake = fakeRunners({ project: [{ exitCode: 1, timedOut: false, stdout: "failed", stderr: "" }] });
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+      expect(run.failure).toBeUndefined(); expect(run.result?.checks?.status).toBe("regression");
+      expect(JSON.parse(run.artifacts.find(a => a.name === "eval-round.json")!.content)).toMatchObject({ outcome: "not_run", notRunReason: "checks_failed", usage: { calls: 0, costMicros: 0 } });
+      expect(w.holds).toEqual([]); expect(w.calls).toEqual([]); expect(w.stages).toEqual([]);
+    } finally { await w.cleanup(); }
+  });
+  it("binds the written eval to the test proof candidate even when checks change files", async () => {
+    const w = await createEvalFinalCheckWorld(); const rootPath = await gitWorkspaceRoot([lint]);
+    const fake = fakeRunners(); const runProjectCommand = fake.runners.runProjectCommand.bind(fake.runners);
+    fake.runners.runProjectCommand = async (...args) => { await writeFile(join(rootPath, "app", "checks-left.txt"), "changed by checks"); return runProjectCommand(...args); };
+    try {
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath });
+      expect(run.failure).toBeUndefined(); expect(w.holds.length).toBeGreaterThan(0); expect(w.calls.length).toBeGreaterThan(0);
+      const before = createCandidateManifest(run.result!.workflowCandidateRepositories!).digest;
+      const after = createCandidateManifest(run.result!.workflowCheckCandidateRepositories!).digest;
+      expect(before).not.toBe(after);
+      const saved = EvalRoundArtifactSchema.parse(JSON.parse(run.artifacts.find(a => a.name === "eval-round.json")!.content));
+      expect(saved).toMatchObject({ outcome: "done", candidateDigest: before });
+      const proof = TestProofSchema.parse(JSON.parse(run.artifacts.find(a => a.name === "test-proof.json")!.content));
+      expect(saved.candidateDigest).toBe(proof.candidateDigest);
+    } finally { await w.cleanup(); }
+  });
   it("does not reread or report success after an unconfirmed eval stop", async () => {
     const w = await createEvalFinalCheckWorld(); w.ports.runner = async () => { throw new RunnerKillUnconfirmedError({ kind: "devcontainer" }); };
     try {

@@ -875,6 +875,8 @@
                 "key_refused",
                 "provider_error",
                 "refused",
+                "baseline_measuring",
+                "baseline_not_confirmed",
                 "too_many_not_run",
                 "too_few_questions",
                 "hidden_set_needs_sealed_round",

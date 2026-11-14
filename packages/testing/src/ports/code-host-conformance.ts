@@ -14,6 +14,8 @@ import { rejection, SHA40, type ContractCheck } from "./plugin-contract-kit.js";
 export interface CodeHostWorld {
   /** Two companies that share raw ids on this adapter, for the isolation kit. Absent: the adapter serves one company, and the isolation checks show as skipped. */
   readonly isolation?: TwoCompanyIsolation;
+  /** The fixture explicitly opts into optional changed-file type checks. */
+  readonly fileEntries?: boolean;
   readonly host: CodeHost;
   /** The state of the host. The fake reads it directly; a real adapter's fixtures are served from it. The suite only sets state up through it. */
   readonly model: FakeHostModel;
@@ -51,6 +53,86 @@ async function openChangeRequest(world: CodeHostWorld, options: { draft?: boolea
 }
 
 const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
+  {
+    name: "never reports a wrong entry when optional metadata is present",
+    async run({ host, model, repository, scope, branch }) {
+      model.commit("main", { "mode.txt": "same", "link.txt": "old", "gone.txt": "gone" });
+      model.commit(branch(1), { "ordinary.txt": "new", "gone.txt": null });
+      model.commitExecutable(branch(1), "mode.txt", "same");
+      model.commitSymlink(branch(1), "link.txt");
+      model.commitSubmodule(branch(1), "module", "a".repeat(40));
+      const { ref } = await host.reconcileChangeRequest({ repository, sourceBranch: branch(1), targetBranch: "main", title: "file" }, scope);
+      const expected = new Map([
+        ["ordinary.txt", { head: "file", base: "none" }], ["mode.txt", { head: "executable", base: "file" }],
+        ["link.txt", { head: "symlink", base: "file" }], ["module", { head: "submodule", base: "none" }], ["gone.txt", { head: "none", base: "file" }],
+      ]);
+      const files = (await host.changedFiles(ref, 1, scope)).files;
+      expect(files.some(file => file.path === "ordinary.txt")).toBe(true);
+      for (const file of files) if (file.entry !== undefined) expect(file.entry).toEqual(expected.get(file.path));
+    },
+  },
+  {
+    name: "reports types, mode-only changes, mode with edits, type changes, deletions and renames from the merge base",
+    needs: world => world.fileEntries === true,
+    async run({ host, model, repository, scope, branch }) {
+      model.commit("main", { mode: "old", edit: "old", link: "old", gone: "removed", rename: "unique" });
+      model.commit(branch(1), { gone: null, added: "new" });
+      model.commitExecutable(branch(1), "mode", "old");
+      model.commitExecutable(branch(1), "edit", "new");
+      model.commitSymlink(branch(1), "link");
+      model.commitSubmodule(branch(1), "module", "a".repeat(40));
+      model.commitRename(branch(1), "rename", "renamed");
+      model.commit("main", { unrelated: "tip only", mode: "tip edit" });
+      const { ref } = await host.reconcileChangeRequest({ repository, sourceBranch: branch(1), targetBranch: "main", title: "types" }, scope);
+      const files = (await host.changedFiles(ref, 1, scope)).files;
+      for (const [path, head, base] of [["added", "file", "none"], ["gone", "none", "file"], ["mode", "executable", "file"], ["edit", "executable", "file"], ["link", "symlink", "file"], ["module", "submodule", "none"], ["renamed", "file", "file"]]) {
+        expect(files.find(file => file.path === path)?.entry).toEqual({ head, base });
+      }
+      expect(files.find(file => file.path === "renamed")?.previousPath).toBe("rename");
+      expect(files.some(file => file.path === "unrelated")).toBe(false);
+      const revision = model.headOf(branch(1));
+      expect(await host.fileAtRevision(repository, "module", revision, scope)).toBeUndefined();
+      if (host.pathKind !== undefined) {
+        expect(await host.pathKind(repository, "module", revision, scope)).toBe("dir");
+        await expect(host.pathKind(repository, "module/child", revision, scope)).rejects.toBeDefined();
+      }
+      const pinned = await host.changedFiles(ref, 1, scope, { expectedHead: revision });
+      expect(pinned.files.find(file => file.path === "module")?.entry?.head).toBe("submodule");
+      model.commit(branch(1), { added: "later" });
+      const moved = await host.changedFiles(ref, 1, scope, { expectedHead: revision });
+      expect(moved.files.length).toBeGreaterThan(0);
+      expect(moved.files.every(file => file.entry === undefined)).toBe(true);
+    },
+  },
+  {
+    name: "omits entry when either tree cannot be completely read",
+    needs: world => world.fileEntries === true,
+    async run({ host, model, repository, scope, branch }) {
+      const head = model.commit(branch(1), { "a.txt": "new" });
+      model.incompleteTrees.add(head);
+      const { ref } = await host.reconcileChangeRequest({ repository, sourceBranch: branch(1), targetBranch: "main", title: "unknown" }, scope);
+      expect((await host.changedFiles(ref, 1, scope)).files[0]?.entry).toBeUndefined();
+    },
+  },
+  {
+    name: "lists nested instruction paths and entry types, excludes decoys and reports incomplete or failed reads",
+    needs: ({ host }) => host.instructionFiles !== undefined,
+    async run({ host, model, repository, scope }) {
+      model.commit("main", { "packages/api/AGENTS.md": "a", "apps/web/.cursor/rules/x.mdc": "b", ".github/instructions/a.md": "c", "Claude.md": "d", "AGENTS.md.bak": "e", "docs/agents.md.txt": "f", "my.cursor/rule": "g", "cursor/rules.md": "h" });
+      model.commitSymlink("main", ".agents/link");
+      const head = model.commitSubmodule("main", ".cursor/module", "a".repeat(40));
+      const read = await host.instructionFiles!(repository, head, scope);
+      expect(read.complete).toBe(true);
+      expect(read.files.map(file => file.path).sort()).toEqual(["packages/api/AGENTS.md", "apps/web/.cursor/rules/x.mdc", ".github/instructions/a.md", "Claude.md", ".agents/link", ".cursor/module"].sort());
+      expect(read.files.find(file => file.path === ".agents/link")?.type).toBe("symlink");
+      expect(read.files.find(file => file.path === ".cursor/module")?.type).toBe("submodule");
+      expect((await host.instructionFiles!(repository, head, scope, { max: 5 })).complete).toBe(false);
+      const next = model.commit("main", {});
+      model.incompleteTrees.add(next);
+      expect((await host.instructionFiles!(repository, next, scope)).complete).toBe(false);
+      expect(await rejection(() => host.instructionFiles!(repository, "f".repeat(40), scope))).toBeDefined();
+    },
+  },
   {
     name: "advertises capabilities that fit the schema and a kind",
     async run({ host }) {
@@ -194,6 +276,53 @@ const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
       expect(await host.pathKind!(repository, "real.md", head, scope)).toBe("file");
       expect(await host.pathKind!(repository, "nothing.md", head, scope)).toBe("none");
       expect(await rejection(() => host.pathKind!(repository, "AGENTS.md/inner.md", head, scope))).toBeDefined();
+    },
+  },
+  {
+    name: "gives one commit's own changes: its files against its first parent (with patches), whether the list is whole, and its parents",
+    needs: ({ host }) => host.commitChanges !== undefined,
+    async run({ host, model, repository, unregistered, scope }) {
+      const branch = "feature/one-commit";
+      const first = model.commit(branch, { "src/a.ts": "export const a = 1;\n", "README.md": "Hello.\n" });
+      const second = model.commit(branch, { "src/a.ts": "export const a = 2;\n", "README.md": null, "src/b.ts": "export const b = 1;\n" });
+      const read = await host.commitChanges!(repository, second, scope);
+      expect(read.complete).toBe(true);
+      expect(read.parents).toEqual([first]);
+      const byPath = new Map(read.files.map((file) => [file.path, file]));
+      expect([...byPath.keys()].sort()).toEqual(["README.md", "src/a.ts", "src/b.ts"]);
+      expect(byPath.get("src/a.ts")).toMatchObject({ status: "modified" });
+      expect(byPath.get("src/a.ts")!.additions).toBeGreaterThan(0);
+      expect(byPath.get("src/a.ts")!.deletions).toBeGreaterThan(0);
+      expect(byPath.get("src/a.ts")!.patch).toContain("+export const a = 2;");
+      expect(byPath.get("src/b.ts")).toMatchObject({ status: "added", deletions: 0 });
+      expect(byPath.get("README.md")).toMatchObject({ status: "removed" });
+      // Only that commit's own diff: the first commit's README is not in the second's list as added.
+      expect((await host.commitChanges!(repository, first, scope)).files.map((file) => file.path).sort()).toEqual(["README.md", "src/a.ts"]);
+      expect(await rejection(() => host.commitChanges!(repository, "f".repeat(40), scope))).toBeDefined();
+      expect(await rejection(() => host.commitChanges!(unregistered, second, scope))).toBeDefined();
+    },
+  },
+  {
+    name: "gives a merge's changes against its second parent (what the merge holds that the second parent does not), and refuses a base the head does not build on",
+    needs: ({ host }) => host.compareChanges !== undefined && host.commitChanges !== undefined,
+    async run({ host, model, repository, unregistered, scope }) {
+      const mine = model.commit("feature/compare-mine", { "src/mine.ts": "export const mine = 1;\n" });
+      const side = model.commit("feature/compare-side", { "docs/side.md": "Side.\n" });
+      const files = new Map(model.revision(mine).files);
+      files.set("docs/side.md", "Side.\n");
+      files.set("src/merge.ts", "export const merged = 1;\n");
+      const merge = model.makeRevision([mine, side], files).sha;
+      const read = await host.compareChanges!(repository, side, merge, scope);
+      expect(read.complete).toBe(true);
+      const byPath = new Map(read.files.map((file) => [file.path, file]));
+      expect([...byPath.keys()].sort()).toEqual(["src/merge.ts", "src/mine.ts"]);
+      expect(byPath.get("src/merge.ts")).toMatchObject({ status: "added", deletions: 0 });
+      expect(byPath.get("src/merge.ts")!.patch).toContain("+export const merged = 1;");
+      // Against the first parent the side's document is listed instead of the task's file.
+      expect((await host.commitChanges!(repository, merge, scope)).files.map((file) => file.path).sort()).toEqual(["docs/side.md", "src/merge.ts"]);
+      const other = model.commit("feature/compare-other", { "src/other.ts": "export const other = 1;\n" });
+      expect(await rejection(() => host.compareChanges!(repository, other, merge, scope))).toBeDefined();
+      expect(await rejection(() => host.compareChanges!(unregistered, side, merge, scope))).toBeDefined();
     },
   },
   {

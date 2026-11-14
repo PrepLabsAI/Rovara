@@ -405,6 +405,65 @@ it.each(["calls", "cost"] as const)("accepts the eval default %s boundary and re
   expect(requests).toEqual([]);
 });
 
+it.each([
+  ["measuring", "baseline_measuring"], ["awaiting_confirmation", "baseline_not_confirmed"],
+] as const)("returns %s before any task calls", async (state, reason) => {
+  const { input, requests } = await setup();
+  const result = await runEvalRound({ ...input, cache: { ...input.cache, read: async () => undefined }, prepareBaseline: async () => state });
+  expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason }, disposition: { draft: false, check: "neutral", retry: true }, questions: [] } });
+  expect(requests).toEqual([]); expect(JSON.stringify(result)).not.toMatch(/No drop found|Improved on eval|Worse on eval|Proven/u);
+});
+
+import { evalNotTestedEntry, renderEvidence } from "@agentx/contracts";
+import { v2Pack } from "../support/evidence-v2-fixtures.js";
+it("keeps the first round's evidence byte-identical after setup saves; only a new round compares", async () => {
+  const { input, record, requests } = await setup(3, true); const plan = input.questionPlan!;
+  const key = { ...input.key, codeHash: "e".repeat(64), judgePin: plan.judgePin, evalSetHash: hash, hiddenSetHash: "none", settingsFingerprint: "f".repeat(64) };
+  const store = new MemoryDocumentStore(); const cache = createDocumentBaseScoreCache(store, { companyId: key.company });
+  let release!: () => void; let started!: () => void; let reservations = 0; let calls = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; }); const entered = new Promise<void>(resolve => { started = resolve; });
+  const health: EvalHealthInput = { key, settings: input.settings, selection: "eval", cache, questionIds: plan.questions.map(q => q.id), maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
+    approval: { read: async () => ({ company: key.company, project: key.project, selection: "eval", role: "admin", inputsDigest: evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: evalSettingsFingerprint(input.settings, key.judgePin) }), provider: "customer", connected: true, maxCalls: 200, maxCostMicros: 2_000_000 }) },
+    meter: { reserve: async () => { reservations++; return { call: async () => { calls++; return { class: "ok", calls: 1, costMicros: 10 }; }, close: async () => {} }; } },
+    run: async ({ call }) => {
+      started(); await gate;
+      const egress = fakeModelEgressWorld();
+      for (let i = 0; i < plan.questions.length; i++) await call(ModelEgressFrameSchema.parse(validFrame(egress.rows.gemini!, egress.connection)));
+      return { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: key.baseCommit }), seconds: 1,
+        measures: { schemaVersion: 1, source: "project_runner", eval_set_hash: hash, measures: record.measures, questions: record.questions!.map(q => ({ id: q.id, samples: [q.samples[0]!] })) } };
+    },
+  };
+  const measuring = createEvalBaselines().afterMerge(health); await entered;
+  const taskHost = createEvalBaselines(); const taskCache = createDocumentBaseScoreCache(store, { companyId: key.company });
+  const task = { ...input, key, cache: taskCache, prepareBaseline: () => taskHost.forTask({ ...health, cache: taskCache }) };
+  try {
+    const first = await runEvalRound(task);
+    expect(first).toMatchObject({ result: { notRun: { reason: "baseline_measuring" } } });
+    expect(reservations).toBe(1); expect(calls).toBe(0); expect(requests).toEqual([]);
+    if (first.status !== "done") throw new Error("missing result");
+    const stored = JSON.stringify(first); const pack = v2Pack({ notTested: [evalNotTestedEntry(first.result)!] }); const before = renderEvidence(pack).text;
+    release(); expect((await measuring).status).toBe("measured");
+    expect(renderEvidence(pack).text).toBe(before); expect(JSON.stringify(first)).toBe(stored);
+    expect(await runEvalRound(task)).toMatchObject({ result: { label: "No drop found" } });
+    expect(reservations).toBe(1); expect(calls).toBe(9); expect(requests.length).toBeGreaterThan(0);
+  } finally { release(); await measuring; }
+});
+it.each(["measuring", "awaiting_confirmation"] as const)("keeps private %s feedback fixed without details or calls", async state => {
+  const { input, root, requests } = await setup();
+  const output = await runEvalRound({ ...input, roundKind: "check_sealed", cache: { ...input.cache, read: async () => undefined }, prepareBaseline: async () => state,
+    hiddenSet: { exists: async () => true, open: async () => ({ hostPath: root, hash }) }, hashHiddenSet: async () => hash });
+  expect(output).toMatchObject({ result: { label: "Not run", usedHiddenSet: true, notices: [], questions: [], excluded: [], casesRun: 0, casesTotal: 0, disposition: { check: "neutral", retry: true } } });
+  expect(requests).toEqual([]);
+  if (output.status !== "done") throw new Error("missing result");
+  expect(JSON.stringify(output.result)).not.toContain(root); expect(output).not.toHaveProperty("usage");
+  expect(output.result.summary).toBe(state === "measuring" ? "Eval: Not run — baseline still being measured. Not a pass or a fail." : "Eval: Not run — the eval health check is waiting for a maintainer or admin to confirm it.");
+});
+it.each([undefined, null, 9, "@private-canary"])("refuses unknown preparation state %s with existing fixed missing-baseline words", async state => {
+  const { input, requests } = await setup();
+  const output = await runEvalRound({ ...input, cache: { ...input.cache, read: async () => undefined }, prepareBaseline: async () => state as never });
+  expect(output).toMatchObject({ result: { summary: "Eval: Not run — no saved three-run question result is available. Retry." } });
+  expect(JSON.stringify(output)).not.toContain("@private-canary"); expect(requests).toEqual([]);
+});
 it("carries bounded comparison evidence without changing the in-memory eval result", async () => {
   const { input } = await setup();
   const output = await runEvalRound(input);

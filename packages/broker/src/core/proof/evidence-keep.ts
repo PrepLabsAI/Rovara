@@ -49,10 +49,10 @@ export interface KeepEvidenceInput {
   environmentNote?: EvidenceNotTested | undefined;
   /** Test services: the dependencies the broker pinned for the run (see `PinnedDependency`). */
   dependencies?: readonly PinnedDependency[] | undefined;
-  /** FIX-0518: fixed items the broker adds to the pack's "not tested" list as they are (the laptop's "model hosts allowed in the test sandbox by project setting"). Words from code, never from a repository. */
-  extraNotTested?: readonly EvidenceNotTested[] | undefined;
   /** TE-A2b: which version of the pack to write. Absent: version 1, which is what every strict reader of today reads. Version 2 is chosen by the caller (in Cloud, by the TE-A1 company gate; never here). */
   writer?: EvidenceWriter | undefined;
+  /** FIX-0518: fixed items the broker adds to the pack's "not tested" list as they are (the laptop's "model hosts allowed in the test sandbox by project setting"). Words from code, never from a repository. */
+  extraNotTested?: readonly EvidenceNotTested[] | undefined;
 }
 
 export interface KeepEvidenceDeps {

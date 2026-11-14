@@ -7,6 +7,7 @@
 //     that only trips a new detector still gets today's detection. If that one is stopped too, the detection is empty. Either way it says "Some checks took too long and were stopped.";
 //   - if a thread cannot be started because its entry file is missing (`ERR_MODULE_NOT_FOUND`, `ERR_WORKER_PATH`), the pass runs in this thread exactly as before, and ONE log line says so (the worker log), so a
 //     packaging fault does not go unseen. Any other failure before the first message (a crash, running out of memory) counts as "stopped": the caller gets today's detection plus the note, never an unguarded rerun.
+import type { WorkspaceDetection } from "./packages.js";
 import { existsSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
@@ -44,14 +45,14 @@ export function defaultThreadEntry(): ThreadEntry {
   return { url: new URL("./detect-thread.ts", import.meta.url), execArgv: ["--import", "tsx"] };
 }
 
-type Attempt = { kind: "done"; detection: Detection } | { kind: "stopped" } | { kind: "unavailable"; code: string };
+type Attempt<T> = { kind: "done"; detection: T } | { kind: "stopped" } | { kind: "unavailable"; code: string };
 
-function attempt(reader: RepositoryReader, cwd: string, legacyOnly: boolean, timeoutMs: number, entry: ThreadEntry, only?: readonly string[], detectorModules?: readonly string[]): Promise<Attempt> {
+function attempt<T = Detection>(reader: RepositoryReader, cwd: string, legacyOnly: boolean, timeoutMs: number, entry: ThreadEntry, only?: readonly string[], detectorModules?: readonly string[], workspace = false): Promise<Attempt<T>> {
   return new Promise((resolve) => {
     let worker: Worker;
     try {
       worker = new Worker(entry.url, {
-        workerData: { paths: [...reader.paths], truncated: reader.truncated === true, cwd, legacyOnly, ...(only === undefined ? {} : { only: [...only] }), ...(detectorModules === undefined || detectorModules.length === 0 ? {} : { detectorModules: [...detectorModules] }) },
+        workerData: { workspace, paths: [...reader.paths], truncated: reader.truncated === true, cwd, legacyOnly, ...(only === undefined ? {} : { only: [...only] }), ...(detectorModules === undefined || detectorModules.length === 0 ? {} : { detectorModules: [...detectorModules] }) },
         execArgv: entry.execArgv,
         env: {},
         resourceLimits: { maxOldGenerationSizeMb: THREAD_MEMORY_MB, maxYoungGenerationSizeMb: 64 },
@@ -63,15 +64,14 @@ function attempt(reader: RepositoryReader, cwd: string, legacyOnly: boolean, tim
     }
     let settled = false;
     let started = false;
-    const finish = (value: Attempt): void => {
+    const finish = (value: Attempt<T>): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      void worker.terminate();
-      resolve(value);
+      void worker.terminate().then(() => resolve(value), () => resolve(value));
     };
     const timer = setTimeout(() => finish({ kind: "stopped" }), timeoutMs);
-    worker.on("message", (message: { type: string; id?: number; path?: string; detection?: Detection }) => {
+    worker.on("message", (message: { type: string; id?: number; path?: string; detection?: T }) => {
       started = true;
       if (message.type === "read" && typeof message.path === "string") {
         const { id, path } = message;
@@ -108,4 +108,11 @@ export async function runDetectorsGuarded(reader: RepositoryReader, cwd: string,
   const legacy = await attempt(reader, cwd, true, Math.min(ENV_DETECT_FALLBACK_TIMEOUT_MS, timeoutMs), entry, options.only, vetted.modules);
   const base = legacy.kind === "done" ? legacy.detection : emptyDetection();
   return { ...base, notes: [...new Set([...vetted.notes, ...base.notes, ENV_DETECT_TIMEOUT_NOTE])] };
+}
+
+/** Package discovery and all unit passes share one attempt; a stopped workspace is never partial success. */
+export async function runWorkspacePackagesGuarded(reader: RepositoryReader, cwd: string, options: Pick<GuardOptions, "timeoutMs" | "entry" | "only"> = {}): Promise<WorkspaceDetection> {
+  const result = await attempt<WorkspaceDetection>(reader, cwd, false, options.timeoutMs ?? ENV_DETECT_TIMEOUT_MS, options.entry ?? defaultThreadEntry(), options.only, [], true);
+  if (result.kind === "done") return result.detection;
+  return { kind: "unavailable", units: [], reason: result.kind === "unavailable" ? "Workspace detection guard could not start." : "Workspace detection did not finish within its limit." };
 }

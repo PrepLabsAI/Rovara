@@ -131,7 +131,42 @@ export interface ApprovalRequest {
    * Which answer the proof is for, when the caller is a decision gate (lane L12, owner decision 66): a comment that says "approve" is not a proof for "request changes", and the other way round. Absent: an approval
    * (a merge press, the older callers).
    */
-  outcome?: "approve" | "reject" | "request_changes";
+  outcome?: ApprovalAnswer;
+  /**
+   * The decision card the person answered on, and the version of it they were shown (owner decision 211, gap G4), when the caller knows it. An adapter that binds a proof to a card (a step-up issued for one card)
+   * checks it; one that does not ignores it. Absent: the caller names no card, and an adapter that needs one refuses. Check it with `isValidApprovalCardRef` before use.
+   * The card is the caller's word, never proof: an adapter that binds to it must also check that the card belongs to `subject` (the same task) and cross-check `contentVersion` against `artifactDigest`
+   * (for a plan card the version IS the digest), and refuse when either does not hold.
+   */
+  card?: ApprovalCardRef;
+  /**
+   * Set by a caller that will settle every claim a verdict hands back (decision 211, gap G3): `commitClaim` once its own commit has applied, `releaseClaim` when it did not. Only then may an adapter CLAIM a one-time
+   * part of the proof inside `verify` and answer a `claimId`. A method with a one-time part REFUSES a request without it (reason `needs_settling_caller`, `NEEDS_SETTLING_CALLER`): a read-only check of a one-time
+   * secret would leave it replayable. Methods without one-time parts are unaffected (`verify` stays single-shot and read-only).
+   */
+  settlesClaims?: true;
+}
+
+/** An answer to an approval request. */
+export type ApprovalAnswer = "approve" | "reject" | "request_changes";
+/** The risk a request is graded at. */
+export type ApprovalRisk = "low" | "medium" | "high";
+
+/** A decision card and the version of it the person was shown (decision 211, gap G4). Opaque to Code; both are short text with no control or format characters. */
+export interface ApprovalCardRef {
+  cardId: string;
+  contentVersion: string;
+}
+
+const CARD_TEXT = (max: number): RegExp => new RegExp(`^[^\\p{Cc}\\p{Cf}]{1,${String(max)}}$`, "u");
+const CARD_ID = CARD_TEXT(200);
+const CARD_VERSION = CARD_TEXT(100);
+
+/** Whether a value is a readable `ApprovalCardRef`. An adapter that binds proofs to cards treats anything else as no card named. */
+export function isValidApprovalCardRef(card: unknown): card is ApprovalCardRef {
+  if (typeof card !== "object" || card === null) return false;
+  const { cardId, contentVersion } = card as Record<string, unknown>;
+  return typeof cardId === "string" && typeof contentVersion === "string" && CARD_ID.test(cardId) && CARD_VERSION.test(contentVersion);
 }
 
 /**
@@ -139,6 +174,17 @@ export interface ApprovalRequest {
  * `any-active`: any active company sign-in counts (the person is signed in now; for a company on its own single sign-on, so a high-risk approval needs no extra step). Only an approver adapter sets it; Code's local owner does not.
  */
 export type ApprovalSignInRule = { mode: "window"; seconds: number } | { mode: "any-active" };
+
+/**
+ * A sign-in rule for some answers only (decision 211, gap G1): the answers it covers, and optionally only some risks and only some methods (the places a person answers from, in the plug-in's words). It ADDS to
+ * `ApprovalRequirement.signIn`, never removes it. `risks` or `methods` absent: every risk or every method. An empty list is not allowed (`ApprovalSignInScopeSchema`): a rule set that cannot be read is refused whole.
+ */
+export interface ApprovalSignInScope {
+  outcomes: readonly ApprovalAnswer[];
+  risks?: readonly ApprovalRisk[];
+  methods?: readonly string[];
+  rule: ApprovalSignInRule;
+}
 
 /** What the approver adapter says is needed, so a surface can offer the right way to answer. */
 export interface ApprovalRequirement {
@@ -163,6 +209,20 @@ export interface ApprovalRequirement {
   changesMethods?: readonly string[];
   /** How recent the approver's sign-in must be for a high-risk approval or a rejection (decision 62). Absent: no rule (Code). */
   signIn?: ApprovalSignInRule;
+  /**
+   * More sign-in rules, each for some answers, risks and methods (decision 211, gap G1: a company window for a MEDIUM approval, a rejection or a request for changes from an outside place, and none from a browser).
+   * Every rule that applies must hold, together with `signIn` (`signInRulesFor`, `checkApprovalSignInFor`). Absent: only `signIn`. The rules read `Principal.authTime`, so an identity adapter that states them
+   * must set it from the person's last INTERACTIVE sign-in (never a refresh, a chat sign-in or a token's issue time).
+   * Not yet read by the decision gate or the merge press: until a later lane switches them in, an adapter that names rules here still enforces them in its own `verify`.
+   */
+  signInRules?: readonly ApprovalSignInScope[];
+  /**
+   * The adapter may mark a verdict `soleApprover` (decision 211, gap G2): the person may decide alone, as the company's only eligible approver under the adapter's own rule (a cool-off, say), even where
+   * `minApprovers` is above 1 and `selfApprovalAllowed` is false. The mark is honoured only for the person who asked (`ApprovalRequest.requestedBy`), and only an explicit `true` is believed, here and on the
+   * verdict; a mark without it is ignored (`checkApproverCount`). Absent: no exception. The adapter must put a `fence` on every sole-approver verdict and every verdict its second-person rule counts.
+   * Not yet read by the decision gate or the merge press: until a later lane switches them in, a sole approver is refused there as before.
+   */
+  soleApproverAllowed?: boolean;
 }
 
 /**
@@ -182,17 +242,77 @@ export interface ApprovalProof {
   token: string;
   /** The account the surface says answered. Checked against the token's issuer, never taken as given. */
   claimedAccount?: ExternalAccountRef;
+  /**
+   * More secrets for a method that needs more than one (decision 211, gap G3: a browser step-up carries the review session in `token` and the one-time sign-in in a named part), by the method's own names.
+   * Checked by the method's issuer like `token`, never logged. An adapter that does not use a part ignores it: a part never stands in for `token`. Not part of `approvalProofKey`: a one-time part is spent
+   * through the adapter's claim (`ApprovalRequest.settlesClaims`), not through the caller's marker.
+   */
+  parts?: Readonly<Record<string, string>>;
 }
 
 /**
  * The key a proof is used up under: the same session or comment token cannot be used again for the same request under a fresh
- * `proofId`. The caller stores this key (not `proofId`) with `when.absent()` in the decision transaction.
+ * `proofId`. The caller stores this key (not `proofId`) with `when.absent()` in the decision transaction. `parts` are deliberately left out, so every stored marker keeps its key.
  */
 export function approvalProofKey(proof: Pick<ApprovalProof, "method" | "token" | "requestId">): string {
   return createHash("sha256").update(JSON.stringify([proof.method, proof.token, proof.requestId])).digest("hex");
 }
 
-export type ApprovalVerdict = { approved: true; approver: Principal; method: string; proofId: string } | { approved: false; reason: string };
+/** The marker a method with a one-time part answers to a request without `settlesClaims`. */
+export const NEEDS_SETTLING_CALLER = "needs_settling_caller";
+
+/**
+ * What a verdict rested on that may change before the caller commits (decision 211, gap G2): the version of the company's membership the adapter read (who is an eligible approver, who owns what). The switch-in
+ * lane carries it into the decision's transaction as a condition, so a membership change between `verify` and the commit makes the commit fail instead of applying a sole or second-person approval that no longer
+ * holds. Opaque to Code beyond being a whole number the adapter compares.
+ */
+export interface ApprovalFence {
+  membershipVersion: number;
+}
+
+export type ApprovalVerdict =
+  | {
+      approved: true;
+      approver: Principal;
+      method: string;
+      proofId: string;
+      /** The approver may decide alone under the adapter's sole-approver rule (gap G2). Believed only when the requirement says `soleApproverAllowed: true` and the approver is the person who asked. */
+      soleApprover?: true;
+      /** What the verdict rested on (gap G2). Required from the adapter on a sole-approver verdict and on every verdict its second-person rule counts; the caller conditions its commit on it. */
+      fence?: ApprovalFence;
+      /**
+       * The adapter claimed a one-time part of the proof for this verdict (gap G3). Only for a request with `settlesClaims`. The caller passes it to `commitClaim` after its commit applied, or to `releaseClaim`
+       * when it did not (a later refusal, a lost race, a fault). A claim the caller does not settle in time LAPSES TO SPENT: the part stays used until the one-time secret itself expires, and is never given back
+       * by the clock, so a slow commit can never share the part with a second decision.
+       */
+      claimId?: string;
+    }
+  | { approved: false; reason: string };
+
+export type ApproverCountCheck = { ok: true } | { ok: false; reason: "needs_more_approvers" | "self_approval_not_allowed" | "invalid_requirement" };
+
+/**
+ * Whether verified approvals are enough (gap G2), by the rule the decision gate applies today plus the sole-approver exception: `minApprovers` distinct people (by provider and person id, at least one), and none of
+ * them the person who asked unless `selfApprovalAllowed`. A verdict marked `soleApprover` counts only when the requirement says `soleApproverAllowed: true` (an explicit `true` both times) and its approver is the
+ * person who asked (`requestedBy`); then that one approval is enough. An unmarked verdict never benefits. `minApprovers` must be a whole number of at least 1 (else `invalid_requirement`), so no verdict is never enough.
+ */
+export function checkApproverCount(
+  requirement: Pick<ApprovalRequirement, "minApprovers" | "selfApprovalAllowed" | "soleApproverAllowed">,
+  requestedBy: Pick<Principal, "provider" | "personId"> | undefined,
+  verdicts: ReadonlyArray<Extract<ApprovalVerdict, { approved: true }>>,
+): ApproverCountCheck {
+  if (!Number.isSafeInteger(requirement.minApprovers) || requirement.minApprovers < 1) return { ok: false, reason: "invalid_requirement" };
+  const exception = requirement.soleApproverAllowed === true;
+  const isRequester = (approver: Principal): boolean => requestedBy !== undefined && approver.provider === requestedBy.provider && approver.personId === requestedBy.personId;
+  const sole = (verdict: Extract<ApprovalVerdict, { approved: true }>): boolean => exception && verdict.soleApprover === true && isRequester(verdict.approver);
+  // The gate's order: the count first, then the person who asked.
+  if (!verdicts.some(sole)) {
+    const distinct = new Set(verdicts.map((verdict) => `${verdict.approver.provider}\u0000${verdict.approver.personId}`));
+    if (distinct.size < requirement.minApprovers) return { ok: false, reason: "needs_more_approvers" };
+  }
+  if (!requirement.selfApprovalAllowed && verdicts.some((verdict) => isRequester(verdict.approver) && !sole(verdict))) return { ok: false, reason: "self_approval_not_allowed" };
+  return { ok: true };
+}
 
 export interface Approvers {
   requirement(request: ApprovalRequest): Promise<ApprovalRequirement>;
@@ -203,6 +323,13 @@ export interface Approvers {
    * accepted and refuse a repeat; the caller's transaction is the guarantee.
    */
   verify(request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict>;
+  /**
+   * Spends a claim a verdict handed back (gap G3), once the caller's commit applied. Offered together with `releaseClaim` by an adapter that claims; an adapter that never claims offers neither. `applied` is
+   * true only when this call spent a live claim; an unknown, lapsed or already settled claim answers false and changes nothing (a lapsed part is already spent, never free).
+   */
+  commitClaim?(claimId: string): Promise<{ applied: boolean }>;
+  /** Gives a LIVE claim back unspent, when the caller's commit did not apply. An unknown, lapsed (still spent) or already settled claim is a no-op. */
+  releaseClaim?(claimId: string): Promise<void>;
 }
 
 // ---- Identity ----

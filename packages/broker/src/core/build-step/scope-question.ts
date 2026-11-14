@@ -55,6 +55,12 @@ export interface ScopeQuestionRecord {
   contentDigest: string;
   /** Some files could not be read (binary, renamed or mode-only): their content is not in the digest, so a Keep is for this head only (a new head asks again). */
   headBound?: true;
+  /**
+   * DEC 213: an earlier version, pushed between checks, was flagged. `area` names the commits, what was found, where, and what to do (shown in Rovara only); the public pull request banner says only that an earlier
+   * version was flagged, with `publicArea` (the area of the head's own files, without the commits; empty when only an earlier version was flagged).
+   */
+  earlierVersionFlagged?: true;
+  publicArea?: string;
   /** What the agent said about the change: shown only as "written by the agent, not checked". */
   agentReason?: string;
   askedAt: string;
@@ -93,7 +99,8 @@ export function changeDigestOf(files: readonly TierFile[]): string {
  *   - risky with no file named (by size, or by the reviewer's own text in its answer): the changed files, under the reason's plain words.
  * Undefined: nothing to ask on this head (the extra files were removed again).
  */
-export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly TierFile[]): { kind: ScopeQuestionRecord["kind"]; area: string; files: ScopeFile[]; contentDigest: string; headBound?: true } | undefined {
+type ScopeFound = { kind: ScopeQuestionRecord["kind"]; area: string; files: ScopeFile[]; contentDigest: string; headBound?: true; earlierVersionFlagged?: true; publicArea?: string };
+export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly TierFile[]): ScopeFound | undefined {
   const fileOf = (path: string) => files.find((file) => file.path === path);
   const asFiles = (entries: ReadonlyArray<{ path: string; area: string }>) => entries.map((entry) => ({ path: inertLine(entry.path, 200), additions: fileOf(entry.path)?.additions ?? 0, deletions: fileOf(entry.path)?.deletions ?? 0, area: entry.area }));
   // A Keep is for what will land: the digest covers EVERY changed file of every pull request (repository, path, status and patch), whatever is named.
@@ -103,21 +110,30 @@ export function scopeOf(flow: WorkflowFlow, headTier: FlowTier, files: readonly 
   const ownTier = flow.tier?.headSha === headTier.headSha ? flow.tier : undefined;
   const reasonsHere = [...headTier.reasons, ...(ownTier?.reasons ?? [])];
   const named = reasonsHere.filter((reason) => NAMING_CODES.has(reason.code) && !COULDNT_CHECK.has(reason.code) && reason.path !== undefined && fileOf(reason.path) !== undefined);
+  // DEC 213: the commits pushed between checks that the rules flagged, each named with what was found (the reason's own words, written by Rovara from the rules), on the head's own tier only.
+  const commitLines = [...new Set(headTier.reasons.filter((reason) => reason.code === "unseen_commit_flagged" && reason.path !== undefined).map((reason) => reason.path!))].slice(0, 5);
+  const withCommits = (area: string): string => (commitLines.length === 0 ? area : [area, ...commitLines].filter((part) => part !== "").join("; "));
+  // The commits are named in Rovara only: the public banner is given the head's own area, and says only that an earlier version was flagged.
+  const earlier = (area: string): { earlierVersionFlagged?: true; publicArea?: string } => (commitLines.length === 0 ? {} : { earlierVersionFlagged: true, publicArea: area });
   if (unreadable) {
     // Files with no patch and no lines (a binary, a pure rename, a mode change) can be named, and a person may keep them explicitly; a file with lines the host did not show (too large) cannot be judged.
     const unreadableFiles = files.filter((file) => file.patch === undefined && file.status !== "removed");
     if (!unreadableFiles.every((file) => file.additions + file.deletions === 0)) return { kind: "couldnt_check", area: "Rovara could not check this change", files: [], contentDigest: whole };
     const namedHere = named.filter((reason) => !unreadableFiles.some((file) => file.path === reason.path)).map((reason) => ({ path: reason.path!, area: tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path) }));
     const listed = [...unreadableFiles.map((file) => ({ path: file.path, area: "a file Rovara could not read (binary, renamed or mode-only)" })), ...namedHere];
-    return { kind: "scope", area: [...new Set(listed.map((file) => file.area))].join(", "), files: asFiles(listed).slice(0, 20), contentDigest: whole, headBound: true };
+    const area = [...new Set(listed.map((file) => file.area))].join(", ");
+    return { kind: "scope", area: withCommits(area), files: asFiles(listed).slice(0, 20), contentDigest: whole, headBound: true, ...earlier(area) };
   }
   if (named.length > 0) {
     const seen = new Map<string, string>();
     for (const reason of named) if (!seen.has(reason.path!)) seen.set(reason.path!, reason.code === "outside_plan_code" ? "code the plan did not name" : tierGrowthPhrase({ level: "risky", reasons: [{ code: reason.code }] }, (path) => path));
     const all = [...seen.entries()].map(([path, area]) => ({ path, area }));
-    return { kind: "scope", area: [...new Set(all.map((file) => file.area))].join(", "), files: asFiles(all).slice(0, 20), contentDigest: whole };
+    const area = [...new Set(all.map((file) => file.area))].join(", ");
+    return { kind: "scope", area: withCommits(area), files: asFiles(all).slice(0, 20), contentDigest: whole, ...earlier(area) };
   }
   const changed = files.map((file) => ({ path: file.path, area: "changed file" }));
+  // Flagged only in a commit pushed between checks: those commits, by name, with what will land (the changed files).
+  if (commitLines.length > 0) return { kind: "scope", area: withCommits(""), files: asFiles(changed).slice(0, 20), contentDigest: whole, ...earlier("") };
   const flagged = (ownTier?.reasons ?? []).filter((reason) => reason.code.startsWith("reviewer_") && !COULDNT_CHECK.has(reason.code) && reason.code !== "reviewer_text_instructions");
   if (flagged.length > 0) {
     const questions = flagged.map((reason) => TIER_QUESTIONS.find((question) => `reviewer_${question.id}` === reason.code)?.text).filter((text): text is string => text !== undefined);
@@ -169,7 +185,8 @@ export function planScopeQuestion(
     if (earlier.headSha === input.head) return { question: earlier, asked: false };
     next = { ...earlier, headSha: input.head };
   } else {
-    next = { taskId: task.taskId, kind: scope.kind, state: "open", version: (earlier?.version ?? 0) + 1, headSha: input.head, request: plainRequest(task.requestText), area: scope.area, files: scope.files, contentDigest: scope.contentDigest, ...(scope.headBound === true ? { headBound: true as const } : {}), askedAt: input.at };
+    next = { taskId: task.taskId, kind: scope.kind, state: "open", version: (earlier?.version ?? 0) + 1, headSha: input.head, request: plainRequest(task.requestText), area: scope.area, files: scope.files, contentDigest: scope.contentDigest, ...(scope.headBound === true ? { headBound: true as const } : {}),
+      ...(scope.earlierVersionFlagged === true ? { earlierVersionFlagged: true as const, publicArea: scope.publicArea ?? "" } : {}), askedAt: input.at };
   }
   return {
     item: { kind: "put", item: { ...scopeQuestionKey(task.taskId), entityType: "SCOPE_QUESTION", question: JSON.parse(JSON.stringify(next)) as never, version: next.version }, condition: earlier === undefined ? when.absent() : when.eq("version", earlier.version) },
@@ -228,7 +245,13 @@ export function scopeBanner(question: ScopeQuestionRecord | undefined, held: boo
     ? ["> **Rovara could not check this change** (its reviewer did not answer, or a file was too large to read). It stays a draft until it is checked: retry the check from the task page, or remove or replace the file Rovara could not read."]
     : [
       `> **This grew from small to risky.** You asked for: "${question.request}".`,
-      `> It also changed ${question.area}: ${question.files.map((file) => `\`${file.path}\` (+${String(file.additions)} -${String(file.deletions)})`).join(", ")}.`,
+      // DEC 213: a flagged earlier version is never named here (its commit, file and what was found stay in Rovara): the head's own area only, when there is one.
+      ...(question.earlierVersionFlagged === true
+        ? [
+          (question.publicArea ?? "") === "" ? "" : `> It also changed ${question.publicArea ?? ""}: ${question.files.map((file) => `\`${file.path}\` (+${String(file.additions)} -${String(file.deletions)})`).join(", ")}.`,
+          "> An earlier version of this change, pushed between checks, was flagged. Open the task page in Rovara to see what was found.",
+        ]
+        : [`> It also changed ${question.area}: ${question.files.map((file) => `\`${file.path}\` (+${String(file.additions)} -${String(file.deletions)})`).join(", ")}.`]),
       question.headBound === true && question.state !== "kept" ? "> Rovara could not read some of these files (binary, renamed or mode-only): remove or replace the unreadable file, or keep it explicitly on the task page." : "",
       question.state === "kept" ? "> A person chose to keep these files." : held ? "> It stays a draft until a person answers on the task page (keep, remove or stop) and the code and security reviews pass." : "",
     ].filter((line) => line !== "");

@@ -11,8 +11,8 @@ import { evidencePublicAiLines, evidenceV2Lines } from "./evidence-v2-lines.js";
 import { reviewModelLines } from "./review-model-lines.js";
 import { testingSectionLines } from "./testing-section.js";
 import { linearCloseLine, neutralizeLinearWords, normalizeIssueKey, sealLinearText } from "./linear-close.js";
-import { PROOF_LEVEL_LAST, proofSection, type ProofContext } from "./proof-section.js";
-import { testProofLinesOf } from "./proof-table.js";
+import { PROOF_LEVEL_LAST, proofSection, recordedCheckIdsOf, type ProofContext } from "./proof-section.js";
+import { testProofLinesOf, testProofQualifier } from "./proof-table.js";
 import type { EvidenceRiskSignal } from "./evidence-risk.js";
 import { assessRisk, riskHeading } from "./risk.js";
 import { verificationReport, type ChangedFileEntry, type VerificationProject } from "./verification-report.js";
@@ -208,6 +208,15 @@ function testedCommitLine(workflow: WorkflowSnapshot, report: VerificationReport
 /** A test-proof line: its quoted names are cut already, so this only bounds the whole line. */
 const PROOF_LINE_MAX = 600;
 
+/** Supplied publication lines and derived rewrite lines carry the same mock qualifier. */
+function testProofBodyLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext): string[] {
+  const provenance = { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: context.proof?.checkDependencies, realModelRun: context.proof?.realModelRun };
+  const qualifier = testProofQualifier(context.proof?.testProof, workflow.candidate?.digest, provenance);
+  return context.proofLines === undefined
+    ? testProofLinesOf(context.proof?.testProof, workflow.candidate?.digest, provenance)
+    : context.proofLines.map((line) => `${qualifier}${line}`);
+}
+
 /** The lines of the old Tests section that the Testing section keeps: the tested commit, the tests added and the test proof. */
 function testingExtraLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, limit: number): string[] {
   const report: VerificationReport = verificationReport(workflow, context.changedFiles?.files ?? [], { ...(context.ciBasis === undefined ? {} : { ciBasis: context.ciBasis }) });
@@ -218,7 +227,7 @@ function testingExtraLines(workflow: WorkflowSnapshot, context: PullRequestBodyC
   if (context.changedFiles === undefined) lines.push("- Tests added: Rovara couldn't list the changed files, so it can't say.");
   else if (added.length === 0) lines.push(`- Tests added: none${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
   else lines.push(`- Tests added: ${joined(added, limit)}${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
-  for (const line of context.proofLines ?? testProofLinesOf(context.proof?.testProof, workflow.candidate?.digest)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
+  for (const line of testProofBodyLines(workflow, context)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
   return lines;
 }
 
@@ -238,7 +247,7 @@ function testLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, 
   else if (added.length === 0) lines.push(`- Tests added: none${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
   else lines.push(`- Tests added: ${joined(added, limit)}${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
   // The test-proof lines have one home, this section. The publication passes the lines it read; the rewrite after a pushed fix has the proof the Proof section's reads gave it and derives the same lines from it.
-  for (const line of context.proofLines ?? testProofLinesOf(context.proof?.testProof, workflow.candidate?.digest)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
+  for (const line of testProofBodyLines(workflow, context)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
   return lines;
 }
 

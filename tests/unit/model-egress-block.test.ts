@@ -230,10 +230,20 @@ describe("the fixed sentences", () => {
     expect(redirectEscapeSentence("api.openai.com")).toBe("not run: client ignored the redirect (called api.openai.com)");
     expect(unlistedModelHostSentence("x.googleapis.com")).toBe("not run: unlisted model host (called x.googleapis.com)");
     expect(MODEL_HOSTS_NOT_BLOCKED_SENTENCE).toBe("model hosts not blocked on this machine");
-    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only");
+    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked");
     expect(NOT_SEALED_SENTENCE).toBe("not sealed");
   });
 });
+
+// TE-F4 (prompt change detection, stacked on this lane): the four pure contract files and the one test that use these modules. Exact file names only.
+const F4_FILES: ReadonlySet<string> = new Set(["prompt-change", "prompt-change-detect", "prompt-change-rules", "prompt-change-scan"].map((name) => `packages/contracts/src/${name}.ts`).concat("tests/unit/prompt-change-detect.test.ts"));
+// TE-F2 part A's exact files (the brief's stacked lane): 14 pure contract files and 10 test files.
+const F2A_SOURCES = ["model-failure-pack", "model-families", "model-family-anthropic", "model-family-cohere", "model-family-gemini-extra", "model-family-openai-ops", "model-family-vectors", "model-render", "model-reply-provenance", "model-reply-set", "model-request-facts", "model-serve-replies", "model-served-family", "model-sse-named"];
+const F2A_TESTS = ["model-failure-pack", "model-family-anthropic", "model-family-cohere", "model-family-openai-ops", "model-replies-contracts-guard", "model-reply-provenance", "model-reply-provenance-base", "model-reply-set", "model-request-facts", "model-serve-replies"].map((name) => `tests/unit/${name}.test.ts`);
+const F2A_FILES: ReadonlySet<string> = new Set([...F2A_SOURCES.map((name) => `packages/contracts/src/${name}.ts`), ...F2A_TESTS]);
+
+// TE-F2 part B (the helper program, stacked on part A): its worker files, its narrow contracts entry and its tests and support are the callers; its own guards (tests/unit/model-replies-contracts-guard.test.ts and worker-model-helper-import-graph.test.ts) pin what they may reach.
+const F2B_FILE = /^(?:packages\/worker\/src\/model-(?:helper|reply|failure)|packages\/contracts\/src\/model-helper-entry\.ts$|tests\/unit\/worker-model-|tests\/support\/model-)/u;
 
 describe("no callers yet", () => {
   const NEW_MODULES = ["model-catalog", "model-catalog-rows", "model-catalog-digest", "model-family-common", "model-family-gemini", "model-family-openai", "model-egress-block", "model-serve"];
@@ -249,7 +259,10 @@ describe("no callers yet", () => {
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
-        if (file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || own.has(file) || file === "packages/contracts/src/index.ts" || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        // TE-F1b (the helper network and the by-name block, packages/worker/src/model-helper-*.ts and model-sandbox-env.ts) is the second caller, by design, and the guard below excludes its files and tests.
+        // TE-F1a (the first caller, by design: it is built on F0a) lives in `packages/contracts/src/model-egress/`, `packages/testing/` and its own tests.
+        // TE-F2 part A stacks on F0a too: exactly its F2A_FILES may import F0a's modules (its guard model-replies-contracts-guard.test.ts proves nothing else calls them).
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || F4_FILES.has(file) || F2A_FILES.has(file) || F2B_FILE.test(file) || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
@@ -261,7 +274,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!packages/worker/src/model-helper*", ":!packages/worker/src/model-reply*", ":!packages/worker/src/model-failure*", ":!tests/unit/worker-model-*", ":!tests/support/model-*", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!tests/unit/prompt-change-detect.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts", ":!tests/contract/test-account-model-hosts.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

@@ -23,6 +23,7 @@ export default tseslint.config(
       "tests/fixtures/e2e-midstep-carriers/**",
       "tests/fixtures/e2e-inferred-web-app/**",
       "tests/fixtures/orders-web-m13/**",
+      "tests/fixtures/model-helper/scripted-run/**",
       "eslint.config.js",
     ],
   },

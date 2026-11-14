@@ -28,13 +28,13 @@ import {
   type CatalogEntry,
 } from "@agentx/contracts";
 import { DOCKER_CALL_TIMEOUT_MS } from "./setup-network.js";
-import { sweepServicesNetworks, type ServicesNetwork } from "./run-network.js";
+import { MODEL_HELPER_ALIAS, sweepServicesNetworks, type ServicesNetwork } from "./run-network.js";
 import type { DockerCli } from "./swebench/containers.js";
 
 /** The alias rule of TS-RN-3: 2 to 32 characters, lower-case letters, digits and hyphens, a letter first, not a hyphen last. */
 export const HELPER_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u;
 /** Names an alias may not take: the ones Rovara's helpers have, and the app's own name in the end-to-end checker's hosts files. */
-export const HELPER_RESERVED_ALIASES: readonly string[] = [...TEST_ENV_RESERVED_ALIASES, "app"];
+export const HELPER_RESERVED_ALIASES: readonly string[] = [...TEST_ENV_RESERVED_ALIASES, "app", MODEL_HELPER_ALIAS];
 export const MAX_HELPERS_PER_RUN = 12;
 /** The most a whole start may wait for health, over all helpers (4.0.6). */
 export const RUN_HEALTH_LIMIT_S = 120;

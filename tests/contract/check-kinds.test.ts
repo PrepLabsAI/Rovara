@@ -61,3 +61,9 @@ describe("trust classes", () => {
     expect(trustLabelWords(undefined)).toBeUndefined();
   });
 });
+
+it("keeps the owner-approved agent reply words exact", async () => {
+  const words = await import("../../packages/contracts/src/check-kinds.js");
+  expect(words.AGENT_REPLIES_UNCONFIRMED_WORDS).toBe("proven with scripted replies written in this task: check them");
+  expect(words.AGENT_REPLIES_DISAGREED_WORDS).toBe("scripted replies written in this task: the real model did not agree");
+});

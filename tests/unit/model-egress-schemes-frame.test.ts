@@ -101,10 +101,10 @@ describe("F0a's built-in catalog rows as egress rows", () => {
     }
     expect(gaps).toEqual(["portkey"]);
   });
-  it("the Azure row names a host suffix and no host: the host comes from the connection", () => {
+  it("the Azure row names its three host suffixes and no host: the host comes from the connection", () => {
     const azure = builtinModelCatalog().rows.find((row) => row.id === "azure-openai");
     expect(azure?.hosts).toEqual([]);
-    expect(azure?.hostSuffixes).toEqual(["openai.azure.com"]);
+    expect(azure?.hostSuffixes).toEqual(["openai.azure.com", "cognitiveservices.azure.com", "services.ai.azure.com"]);
   });
 });
 
