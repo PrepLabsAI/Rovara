@@ -67,18 +67,16 @@ import { checkKindInfo, type ProofBasis } from "./check-kinds.js";
 import type { EvidencePackV2 } from "./evidence.js";
 
 /** Why a draft is held. Fixed codes: nothing a test, a repository or a model wrote is ever stored as a reason. */
-export const PROOF_HOLD_REASONS = ["proof_failed", "changed_code_not_run", "test_absent_on_new", "flaky_on_change", "replies_not_counted"] as const;
+export const PROOF_HOLD_REASONS = ["proof_failed", "changed_code_not_run", "test_absent_on_new", "flaky_on_change"] as const;
 export type ProofHoldReason = (typeof PROOF_HOLD_REASONS)[number];
 export const ProofHoldReasonSchema = z.enum(PROOF_HOLD_REASONS);
 
 /** The words for each reason, in the order a person reads them on the task page and the pull request. Never a test's own name. */
-export const SCRIPTED_REPLIES_NOT_COUNTED_WORDS = "the proof rests on scripted replies added in this task (not counted)";
 export const PROOF_HOLD_WORDS: Readonly<Record<ProofHoldReason, string>> = Object.freeze({
   proof_failed: "the new tests pass on the old code too",
   changed_code_not_run: "no test ran the changed code",
   test_absent_on_new: "a test that ran on the old code is missing from the new code",
   flaky_on_change: "a test is flaky on this change but passed on the base",
-  replies_not_counted: SCRIPTED_REPLIES_NOT_COUNTED_WORDS,
 });
 /** "Held as a draft: the new tests pass on the old code too; no test ran the changed code." Empty for no reasons. */
 export function proofHoldLine(reasons: readonly ProofHoldReason[]): string {
@@ -87,18 +85,16 @@ export function proofHoldLine(reasons: readonly ProofHoldReason[]): string {
 }
 
 /**
- * Where the scripted replies a proving test ran against came from (DECISIONS 161). Only `before_task` (in the project's reply set before the task started) and `independent_agent` (written during the task by a reply
- * agent that never saw the code change or the tests) count toward the proof. `coding_agent` (written or edited by the agent that wrote the change) is allowed and never counts; `failure_pack` never proves anything;
- * `unknown` and anything else is read as not counting (fail closed).
+ * Where the scripted replies a proving test ran against came from. DEC 192a removes the draft hold for every origin;
+ * origins still qualify the proof as scripted. Whether the real model confirms a proof is a separate rule.
  */
 export const REPLY_ORIGINS = ["before_task", "independent_agent", "coding_agent", "failure_pack", "unknown"] as const;
 export type ReplyOrigin = (typeof REPLY_ORIGINS)[number];
-const COUNTING_REPLY_ORIGINS: ReadonlySet<string> = new Set(["before_task", "independent_agent"]);
 /** The labels the pull request shows for each origin. Scripted replies are never "Real". */
 export const REPLY_ORIGIN_WORDS: Readonly<Record<ReplyOrigin, string>> = Object.freeze({
   before_task: "scripted replies from before the task",
   independent_agent: "scripted replies written independently in this task",
-  coding_agent: "scripted replies added in this task (not counted)",
+  coding_agent: "scripted replies written in this task",
   failure_pack: "failure-pack replies (never proof)",
   unknown: "scripted replies of unknown origin (not counted)",
 });
@@ -147,7 +143,7 @@ export interface ProofHoldDecision {
   /** The hold turned into a warning because more than 10% of the project's recent pull requests were held. */
   relaxed: boolean;
   reasons: ProofHoldReason[];
-  /** Counted proving tests: an assertion failure on the old code, from a check that counts, resting on replies that count. */
+  /** Proving tests for the hold rule: an assertion failure on the old code, from a check that counts, regardless of reply origin. */
   provenCount: number;
   /** Tests that could not load on the old code (for the pack's proof section). */
   loadFailureOnOld: number;
@@ -162,16 +158,15 @@ const finiteCount = (value: unknown): number => (typeof value === "number" && Nu
 
 /**
  * The ready rule: whether the draft is held. Pure. `mode` is the preset's (`off` when the gate is off); `recent` is the project's hold history, which relaxes `hold` to a warning above 10% (O43).
- * Hold reasons are `proof_failed` (every counted test also passes on the old code), `changed_code_not_run` (coverage says no test ran any changed line), `test_absent_on_new`, `flaky_on_change` and
- * `replies_not_counted` (the only proof rests on scripted replies that do not count, DECISIONS 161). Replaces: the proof being informational only (the file header's old words).
+ * Hold reasons are `proof_failed` (every counted test also passes on the old code), `changed_code_not_run` (coverage says no test ran any changed line), `test_absent_on_new` and `flaky_on_change`.
+ * Scripted reply origins never hold a draft (DEC 192a). Replaces: the proof being informational only (the file header's old words).
  */
 export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; recent?: ProofHoldHistory | undefined }): ProofHoldDecision {
   const { facts } = input;
   let provenCount = 0;
-  let provenUncounted = 0;
   let vacuous = 0;
   let loadFailureOnOld = 0;
-  let counted = false;
+  let scriptedProof = false;
   const proof = facts.proof;
   if (proof !== undefined && proof.status === "checked") {
     for (const entry of proof.items) {
@@ -183,26 +178,20 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
       else if (entry.verdict === "does_not_prove") vacuous += 1;
       else {
         const origin = OWN(facts.scriptedReplies, entry.checkId);
-        if (origin !== undefined && !COUNTING_REPLY_ORIGINS.has(origin)) provenUncounted += 1;
-        else {
-          provenCount += 1;
-          if (origin !== undefined) counted = true;
-        }
+        provenCount += 1;
+        if (origin !== undefined) scriptedProof = true;
       }
     }
   }
   const reasons: ProofHoldReason[] = [];
-  if (proof?.status === "checked" && provenCount === 0) {
-    if (vacuous > 0) reasons.push("proof_failed");
-    else if (provenUncounted > 0) reasons.push("replies_not_counted");
-  }
+  if (proof?.status === "checked" && provenCount === 0 && vacuous > 0) reasons.push("proof_failed");
   const changed = finiteCount(facts.changedLines?.changed);
   if (changed > 0 && finiteCount(facts.changedLines?.covered) === 0) reasons.push("changed_code_not_run");
   if ((facts.absentOnNew?.length ?? 0) > 0) reasons.push("test_absent_on_new");
   if ((facts.flakyOnChange?.length ?? 0) > 0) reasons.push("flaky_on_change");
 
   const verdicts = (proof?.items ?? []).map((entry) => ({ checkId: entry.checkId, ...(entry.test === undefined ? {} : { testId: entry.test }), verdict: entry.verdict, reason: entry.reason }));
-  const base = { reasons, provenCount, loadFailureOnOld, verdicts, ...(counted ? { proofBasis: "scripted_ai_replies" as const } : {}) };
+  const base = { reasons, provenCount, loadFailureOnOld, verdicts, ...(scriptedProof ? { proofBasis: "scripted_ai_replies" as const } : {}) };
   const wouldHold = input.mode !== "off" && reasons.length > 0;
   if (!wouldHold) return { holds: false, warns: false, wouldHold: false, relaxed: false, ...base, reasons: input.mode === "off" ? [] : reasons };
   if (input.mode === "warn") return { holds: false, warns: true, wouldHold: true, relaxed: false, ...base };
@@ -222,7 +211,7 @@ export interface ProofHoldCheck {
 /**
  * The hold rule's facts from what the broker already has: the same-task before-run, the pack's checks (v1 or v2) and the v2 weakening list. Changed lines are summed over the checks that carry a coverage report; with none
  * the answer is "unknown" and never holds. A check whose proof rests on scripted AI replies gets the origin `replyOrigins` names for it, and `unknown` when nothing names one: the reply set that records where replies
- * came from (TE-F2) is not built yet, so today a scripted proof is never counted, which fails closed (DECISIONS 161).
+ * came from is optional. Every origin counts for the hold rule, while the scripted basis remains visible (DEC 192a).
  */
 export function proofHoldFactsOf(input: {
   proof?: TestProof | undefined;

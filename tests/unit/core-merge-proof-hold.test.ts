@@ -91,7 +91,7 @@ describe("the ready rule: a draft is held for its change proof", () => {
   it("each reason holds the draft", async () => {
     const cases: ProofHoldFacts[] = [
       { ...PROVEN, absentOnNew: ["a > b"] }, { ...PROVEN, changedLines: { changed: 5, covered: 0 } }, { ...PROVEN, flakyOnChange: ["a > b"] },
-      { ...PROVEN, scriptedReplies: { unit: "coding_agent" } },
+      VACUOUS,
     ];
     for (const facts of cases) {
       const { tracking, draft } = await heldWorld(facts);
@@ -99,12 +99,21 @@ describe("the ready rule: a draft is held for its change proof", () => {
       expect(draft(), JSON.stringify(facts)).toBe(true);
     }
   });
-  it("scripted replies from before the task or an independent agent prove the change", async () => {
-    for (const origin of ["before_task", "independent_agent"]) {
-      const { tracking, draft } = await heldWorld({ ...PROVEN, scriptedReplies: { unit: origin } });
+  it("scripted replies of every origin release the draft without a hold or warning", async () => {
+    for (const origin of ["before_task", "independent_agent", "coding_agent", "failure_pack", "unknown", "made_up"]) {
+      const { tracking, draft, world, pr } = await heldWorld({ ...PROVEN, scriptedReplies: { unit: origin } });
       await trackPullRequest(tracking, TASK_ID);
       expect(draft(), origin).toBe(false);
+      expect(world.timeline.lines.filter((line) => line.startsWith("Held") || line.startsWith("Not proven:"))).toEqual([]);
+      const stored = await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head });
+      expect(stored?.record).toMatchObject({ holds: false, warns: false, reasons: [], provenCount: 1 });
     }
+  });
+  it("a vacuous sibling does not hold an agent-reply proving test through tracking", async () => {
+    const mixed = proof([item("proves_change", "assertion_failed_on_old"), { ...item("does_not_prove", "passed_on_old"), checkId: "other" }]);
+    const { tracking, draft } = await heldWorld({ proof: mixed, scriptedReplies: { unit: "coding_agent" } });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(draft()).toBe(false);
   });
   it("the Lightweight preset warns and takes the draft out of draft; off ignores the proof", async () => {
     const warned = await heldWorld(VACUOUS, "warn");

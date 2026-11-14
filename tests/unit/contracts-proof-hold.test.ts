@@ -1,11 +1,10 @@
 // TE-B5: the pure change-proof hold rule (`proofHolds`). A draft stays a draft, with the reason, when the proof failed (the new tests pass on the old code too), changed code was not run, a test that ran on the old
-// code is absent on the new, or a test is flaky on the change; only an assertion failure on the old code counts as proven; scripted AI replies count only when they came from before the task or an independent
-// reply agent (DECISIONS 161); and above 10% held the hold becomes a warning by itself (O43).
+// code is absent on the new, or a test is flaky on the change; only an assertion failure on the old code counts as proven; scripted AI reply origins never hold a draft (DEC 192a); and above 10% held the hold becomes a warning by itself (O43).
 import { describe, expect, it } from "vitest";
 import { EvidencePackV2Schema, renderEvidence } from "../../packages/contracts/src/index.js";
 import { v2Pack } from "../support/evidence-v2-fixtures.js";
 import {
-  PROOF_HOLD_WINDOW, PROOF_HOLD_WORDS, proofHoldFactsOf, SCRIPTED_REPLIES_NOT_COUNTED_WORDS, proofHoldLine, proofHoldRelaxes, proofHolds, proofSectionOf,
+  PROOF_HOLD_WINDOW, PROOF_HOLD_WORDS, proofHoldFactsOf, ProofHoldReasonSchema, REPLY_ORIGIN_WORDS, proofHoldLine, proofHoldRelaxes, proofHolds, proofSectionOf,
   type ProofHoldFacts, type TestProof, type TestProofItem,
 } from "../../packages/contracts/src/index.js";
 
@@ -65,29 +64,73 @@ describe("proofHolds: the ready rule's truth table", () => {
   });
 });
 
-describe("proofHolds: scripted AI replies (DECISIONS 161)", () => {
-  const scripted = (origin: NonNullable<ProofHoldFacts["scriptedReplies"]>[string]): Partial<ProofHoldFacts> => ({ scriptedReplies: { unit: origin } });
-  it("replies from before the task, or an independent reply agent, count, and the proof is labelled", () => {
-    for (const origin of ["before_task", "independent_agent"] as const) {
-      expect(hold(scripted(origin))).toMatchObject({ holds: false, provenCount: 1, proofBasis: "scripted_ai_replies" });
+describe("proofHolds: scripted AI replies (DEC 192a)", () => {
+  it.each(["before_task", "independent_agent", "coding_agent", "failure_pack", "unknown", "made_up", "constructor", ""])("%s never holds, counts for the hold rule, and retains the scripted basis", (origin) => {
+    const result = hold({ scriptedReplies: { unit: origin } });
+    expect(result).toMatchObject({ holds: false, warns: false, wouldHold: false, relaxed: false, reasons: [], provenCount: 1, proofBasis: "scripted_ai_replies" });
+    expect(proofHoldLine(result.reasons)).toBe("");
+  });
+  it("one agent-reply proving test and one vacuous test do not trigger proof_failed", () => {
+    const mixed = proof([PROVES, item("other", "does_not_prove", "passed_on_old")]);
+    expect(hold({ proof: mixed, scriptedReplies: { unit: "coding_agent" } })).toMatchObject({ holds: false, reasons: [], provenCount: 1, proofBasis: "scripted_ai_replies" });
+  });
+  it("counts both a plain proving test and a scripted proving test, retaining the scripted basis", () => {
+    const both = proof([PROVES, item("evals", "proves_change", "assertion_failed_on_old")]);
+    expect(hold({ proof: both, scriptedReplies: { evals: "coding_agent" } })).toMatchObject({ holds: false, provenCount: 2, proofBasis: "scripted_ai_replies" });
+  });
+  it("scripted replies on a vacuous or excluded check never supply a proving count or basis", () => {
+    expect(hold({ proof: proof([VACUOUS]), scriptedReplies: { unit: "coding_agent" } })).toMatchObject({ holds: true, reasons: ["proof_failed"], provenCount: 0 });
+    for (const input of [
+      { proof: proof([VACUOUS]), scriptedReplies: { unit: "coding_agent" } },
+      { checkKinds: { unit: "lint" }, scriptedReplies: { unit: "coding_agent" } },
+      { proof: proof([PROVES], "not_checked"), scriptedReplies: { unit: "coding_agent" } },
+    ]) expect(hold(input)).not.toHaveProperty("proofBasis");
+  });
+  it.each([
+    [{ proof: proof([VACUOUS]) }, "proof_failed"],
+    [{ changedLines: { changed: 2, covered: 0 } }, "changed_code_not_run"],
+    [{ absentOnNew: ["missing"] }, "test_absent_on_new"],
+    [{ flakyOnChange: ["flaky"] }, "flaky_on_change"],
+  ] as const)("preserves the other hold for %j", (input, reason) => {
+    expect(hold({ ...input, scriptedReplies: { unit: "coding_agent" } })).toMatchObject({ holds: true, reasons: [reason] });
+  });
+  it("uses the approved coding-agent words and rejects the removed reason on the unshipped B5 contract", () => {
+    expect(REPLY_ORIGIN_WORDS.coding_agent).toBe("scripted replies written in this task");
+    expect(ProofHoldReasonSchema.safeParse("replies_not_counted").success).toBe(false);
+    for (const reason of ["proof_failed", "changed_code_not_run", "test_absent_on_new", "flaky_on_change"]) {
+      expect(ProofHoldReasonSchema.safeParse(reason).success).toBe(true);
     }
   });
-  it("replies the coding agent wrote or edited never count: the draft is held and says so", () => {
-    const result = hold(scripted("coding_agent"));
-    expect(result).toMatchObject({ holds: true, reasons: ["replies_not_counted"], provenCount: 0 });
-    expect(proofHoldLine(result.reasons)).toContain(SCRIPTED_REPLIES_NOT_COUNTED_WORDS);
+  it("keeps hostile origin text out of the decision and every remaining hold line at the proof item limit", () => {
+    const hostile = "[click](https://example.invalid) ![image][ref] @person #123 <b>secret</b>\n# > --- ``` ~~~\u200b\ufe0f" + "x".repeat(1_000_000);
+    const items = Array.from({ length: 200 }, (_, i) => item(`test:${String(i)}`, "proves_change", "assertion_failed_on_old"));
+    const scriptedReplies = Object.fromEntries(items.map((entry) => [entry.checkId, hostile]));
+    const start = performance.now();
+    const result = hold({ proof: proof(items), scriptedReplies });
+    expect(result).toMatchObject({ holds: false, provenCount: 200, proofBasis: "scripted_ai_replies" });
+    expect(JSON.stringify(result)).not.toContain("example.invalid");
+    for (const [input, expected] of [
+      [{ proof: proof([VACUOUS]) }, "Held as a draft: the new tests pass on the old code too."],
+      [{ changedLines: { changed: 1, covered: 0 } }, "Held as a draft: no test ran the changed code."],
+      [{ absentOnNew: [hostile] }, "Held as a draft: a test that ran on the old code is missing from the new code."],
+      [{ flakyOnChange: [hostile] }, "Held as a draft: a test is flaky on this change but passed on the base."],
+    ] as const) {
+      expect(proofHoldLine(hold({ ...input, scriptedReplies: { unit: hostile } }).reasons)).toBe(expected);
+    }
+    expect(performance.now() - start).toBeLessThan(1_000);
   });
-  it("the failure pack never proves anything", () => {
-    expect(hold(scripted("failure_pack"))).toMatchObject({ holds: true, reasons: ["replies_not_counted"], provenCount: 0 });
-  });
-  it("replies of an origin nobody can tell are not counted (fail closed)", () => {
-    expect(hold(scripted("unknown")).holds).toBe(true);
-    expect(hold(scripted("made_up")).holds).toBe(true);
-    expect(hold(scripted("constructor")).holds).toBe(true);
-  });
-  it("a plain assertion proof next to an uncounted scripted one still proves the change", () => {
-    const both = proof([PROVES, item("evals", "proves_change", "assertion_failed_on_old")]);
-    expect(hold({ proof: both, scriptedReplies: { evals: "coding_agent" } })).toMatchObject({ holds: false, provenCount: 1 });
+});
+
+describe("no scripted replies: byte-identical decision goldens", () => {
+  it.each([
+    [{}, [], 1, [{ checkId: "unit", verdict: "proves_change", reason: "assertion_failed_on_old" }]],
+    [{ proof: undefined }, [], 0, []],
+    [{ proof: proof([VACUOUS]) }, ["proof_failed"], 0, [{ checkId: "unit", verdict: "does_not_prove", reason: "passed_on_old" }]],
+    [{ changedLines: { changed: 1, covered: 0 } }, ["changed_code_not_run"], 1, [{ checkId: "unit", verdict: "proves_change", reason: "assertion_failed_on_old" }]],
+    [{ absentOnNew: ["missing"] }, ["test_absent_on_new"], 1, [{ checkId: "unit", verdict: "proves_change", reason: "assertion_failed_on_old" }]],
+    [{ flakyOnChange: ["flaky"] }, ["flaky_on_change"], 1, [{ checkId: "unit", verdict: "proves_change", reason: "assertion_failed_on_old" }]],
+  ] as const)("preserves the full decision bytes for %j", (input, reasons, provenCount, verdicts) => {
+    expect(JSON.stringify(hold(input))).toBe(JSON.stringify({ holds: reasons.length > 0, warns: false, wouldHold: reasons.length > 0, relaxed: false, reasons, provenCount, loadFailureOnOld: 0, verdicts }));
   });
 });
 
@@ -167,9 +210,9 @@ describe("proofHoldFactsOf: the facts from the checks a pack already has", () =>
     const lint = proofHoldFactsOf({ proof: proof([item("lint", "proves_change", "assertion_failed_on_old")]), checks: [{ id: "lint", kind: "lint" }] });
     expect(proofHolds({ facts: lint, mode: "hold" }).provenCount).toBe(0);
   });
-  it("a check proven with scripted replies counts only with a named independent origin; with none named it is not counted", () => {
+  it("a scripted check retains its basis with a named origin or the unknown fallback", () => {
     const checks = [{ id: "unit", kind: "test", proofBasis: "scripted_ai_replies" }];
-    expect(proofHolds({ facts: proofHoldFactsOf({ proof: proof([PROVES]), checks }), mode: "hold" })).toMatchObject({ holds: true, reasons: ["replies_not_counted"] });
+    expect(proofHolds({ facts: proofHoldFactsOf({ proof: proof([PROVES]), checks }), mode: "hold" })).toMatchObject({ holds: false, provenCount: 1, proofBasis: "scripted_ai_replies" });
     expect(proofHolds({ facts: proofHoldFactsOf({ proof: proof([PROVES]), checks, replyOrigins: { unit: "independent_agent" } }), mode: "hold" })).toMatchObject({ holds: false, proofBasis: "scripted_ai_replies" });
   });
   it("never assigns a hostile id onto a plain object", () => {
