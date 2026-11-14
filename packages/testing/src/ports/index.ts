@@ -15,6 +15,7 @@ export * from "./plugin-fake-worlds.js";
 export * from "./policy-conformance.js";
 export * from "./queue-conformance.js";
 export * from "./realtime-conformance.js";
+export * from "./reply-set-store-conformance.js";
 export * from "./record-source-conformance.js";
 export * from "./scheduler-conformance.js";
 export * from "./secret-store-conformance.js";
