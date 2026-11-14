@@ -19,6 +19,7 @@ export * from "./developer-tasks-node.js";
 export * from "./task-workflow-node.js";
 export * from "./task-workflow-revise.js";
 export * from "./task-workflow-design-review.js";
+export * from "./task-flow-tier.js";
 export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
@@ -227,6 +228,8 @@ export * from "./evidence.js";
 export * from "./evidence-inert.js";
 export * from "./evidence-render.js";
 export * from "./evidence-weakening.js";
+// TE-B9: the list of Rovara working files that are never committed.
+export * from "./never-commit.js";
 export * from "./api-samples.js";
 export * from "./media-gate.js";
 
@@ -293,6 +296,7 @@ export * from "./model-egress-block.js";
 export * from "./model-egress/index.js";
 export * from "./model-serve.js";
 export * from "./test-account.js";
+export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
 export * from "./mcp-servers.js";
 
@@ -351,3 +355,7 @@ export * from "./eval-check.js";
 export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter, EvalReservationAdapter } from "./ports/eval-health.js";
 
 export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
+export * from "./policy.js";
+export * from "./presets.js";
+
+export * from "./eval-round-artifact.js";

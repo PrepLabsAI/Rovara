@@ -471,12 +471,14 @@ export function evidencePackShape<A extends z.ZodType>(artifact: A, reader = fal
 
 /** What the broker builds from the worker's raw parts and keeps in the artifact store, next to the task's evidence (tagged evidence-std; see rovara-code/evidence-keep.ts). */
 export const EvidencePackSchema = evidencePackShape(ArtifactRefSchema);
-export type EvidencePack = z.infer<typeof EvidencePackSchema>;
-/** The same pack as a READER parses it: the `tests` part of a check ignores a key it does not know. The writer keeps `EvidencePackSchema`. */
+/** The same pack as a READER parses it: the `tests` part of a check ignores a key it does not know and accepts TE-B3's two optional ones. The writer keeps `EvidencePackSchema`. */
 export const EvidencePackReadSchema = evidencePackShape(ArtifactRefSchema, true);
+export type EvidencePack = z.infer<typeof EvidencePackSchema>;
 
 /** What the task page reads (version 2 views, full reads only): the pack with each artifact as a link, or as expired or withheld. */
 export const EvidenceViewSchema = evidencePackShape(ArtifactLinkSchema);
+/** The view as a READER parses it (the task view that the page and the CLI read): the `tests` part of a check ignores a key it does not know and accepts TE-B3's two optional parts. The broker keeps `EvidenceViewSchema` to build it. */
+export const EvidenceViewReadSchema = evidencePackShape(ArtifactLinkSchema, true);
 export type EvidenceView = z.infer<typeof EvidenceViewSchema>;
 export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
 
@@ -487,6 +489,7 @@ export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
  */
 export const EVIDENCE_RAW_ARTIFACT = "evidence-raw.json";
 /** The worker feature that reads `evidenceCapture` (a CHECKS run writes `evidence-raw.json`). The broker sends the field only when the proof switch is on, and never to a worker that does not list this. */
+export const EVAL_ROUND_FEATURE = "task.evalRound.v1" as const;
 export const EVIDENCE_CAPTURE_FEATURE = "task.evidenceCapture.v1" as const;
 export const EVIDENCE_RAW_MAX_BYTES = 2 * 1_048_576;
 export const EvidenceRawCheckSchema = z
