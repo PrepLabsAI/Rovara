@@ -78,6 +78,7 @@ import { registerDoctorCommand } from "./doctor/cli.js";
 import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { registerDestroyCommand } from "./destroy/cli.js";
+import { registerUpCommand, type UpCommandContext } from "./up/cli.js";
 import type { DestroyDependencies } from "./destroy/run.js";
 import { registerUpgradeCommand } from "./upgrade/cli.js";
 import type { UpgradeDependencies } from "./upgrade/run.js";
@@ -148,6 +149,8 @@ export interface CliDependencies {
   doctor?: { store?: ParameterStore; services?: (settings: EnvironmentSettings) => DoctorServices };
   /** `agentx upgrade` overrides, for tests: never touch AWS or GitHub. */
   upgrade?: Partial<UpgradeDependencies>;
+  /** `rovara up` overrides, for tests: never start a server, touch Docker or reach GitHub. */
+  up?: Partial<UpCommandContext>;
   /** `agentx destroy` overrides, for tests: never touch AWS. */
   destroy?: Partial<DestroyDependencies>;
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
@@ -476,6 +479,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const session = await adminSessionFor(env);
       return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
     },
+  });
+  registerUpCommand(program, {
+    home, version: CLI_VERSION, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr, ...dependencies.up,
   });
   registerUpgradeCommand(program, {
     ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),

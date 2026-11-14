@@ -6,7 +6,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./e2e/discovery": "./dist/e2e/discovery.js",
-    "./e2e/execution-plan": "./dist/e2e/execution-plan.js"
+    "./e2e/execution-plan": "./dist/e2e/execution-plan.js",
+    "./local": "./dist/local/index.js"
   },
   "types": "./dist/index.d.ts",
   "dependencies": {

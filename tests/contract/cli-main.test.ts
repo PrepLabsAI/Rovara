@@ -5,7 +5,7 @@ describe("AgentX executable command surface", () => {
   it("exposes administration and developer sign-in; developer tasks come from AI tools", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "loop", "doctor", "upgrade", "destroy", "admin", "project", "channel", "adapter", "connector", "alerts", "env", "deploy", "init", "mcp"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "loop", "doctor", "up", "upgrade", "destroy", "admin", "project", "channel", "adapter", "connector", "alerts", "env", "deploy", "init", "mcp"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "runtime-installation", "sign-in-client", "workspace", "slack", "eval", "credential", "turns", "task", "changes"]);

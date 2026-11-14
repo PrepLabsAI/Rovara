@@ -23,6 +23,9 @@ import {
   type RegistryView,
 } from "@agentx/contracts";
 
+/** The points whose adapters carry a `kind` that is also their registry name (a code host called `github` has kind `github`). */
+const KIND_NAMED_POINTS: ReadonlySet<PluginPoint> = new Set<PluginPoint>(["code-host", "tracker", "check-runner"]);
+
 interface Entry {
   adapter: unknown;
   isDefault: boolean;
@@ -46,6 +49,8 @@ export function createAdapterRegistry(): AdapterRegistry {
   return {
     register(point, name, adapter, registration: AdapterRegistration = {}) {
       mayChange(point);
+      // A caller never branches on an adapter's name, and a lookup by name must find the adapter that calls itself that.
+      if (KIND_NAMED_POINTS.has(point) && (adapter as { kind?: unknown } | null)?.kind !== name) throw new PluginRegistryError("bad_module", `a ${point} adapter's kind must be the name it is registered under (${name})`);
       const entries = entriesOf(point);
       const isDefault = registration.isDefault === true;
       const existing = entries.get(name);

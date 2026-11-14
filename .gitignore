@@ -10,6 +10,7 @@ docs/*
 !docs/ordered-work.md
 !docs/porting.md
 !docs/ports.md
+!docs/local.md
 !docs/specs/
 !docs/decisions/
 !docs/learnings/
