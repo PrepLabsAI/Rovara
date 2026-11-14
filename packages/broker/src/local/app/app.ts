@@ -613,7 +613,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, modelSelection, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,
-        setupCheck: setupAgent.page.check, setupDecideHost: setupAgent.page.decideHost, setupDecideProposal: setupAgent.page.decideProposal,
+        setupCheck: setupAgent.page.check, setupDecideHost: setupAgent.page.decideHost, setupDecideProposal: setupAgent.page.decideProposal, setupDecideEval: setupAgent.page.decideEval,
       } : {}),
       async createScriptToken(input) {
         try {

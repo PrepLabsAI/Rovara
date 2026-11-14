@@ -378,6 +378,8 @@ export * from "./eval-hidden-set.js";
 export * from "./eval-pacing.js";
 export * from "./eval-base-cache.js";
 export * from "./eval-check.js";
-export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter } from "./ports/eval-health.js";
+export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter, EvalReservationAdapter } from "./ports/eval-health.js";
+
+export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
 export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";

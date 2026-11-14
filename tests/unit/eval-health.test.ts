@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attestRovaraOnlyBaseCheckout, ModelEgressFrameSchema, type ModelEgressClass } from "@agentx/contracts";
+import { evalSpendInputsDigest, attestRovaraOnlyBaseCheckout, ModelEgressFrameSchema, type ModelEgressClass } from "@agentx/contracts";
 import { createDocumentBaseScoreCache, evalCommandFingerprint, type EvalBaseCacheKeyParts } from "../../packages/contracts/src/eval-base-cache.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
@@ -16,7 +16,7 @@ const key: EvalBaseCacheKeyParts = { company, project: "p", baseCommit: "a".repe
 function world() {
   const ledger: Array<{ company: string; provider: string }> = [];
   const cache = createDocumentBaseScoreCache(new MemoryDocumentStore(), { companyId: company });
-  const grant = { company, project: "p", selection: "evals/refund", role: "maintainer" as const, provider: "customer" as const, connected: true, maxCalls: 200, maxCostMicros: 2_000_000 };
+  const grant = { company, project: "p", selection: "evals/refund", role: "maintainer" as const, inputsDigest: evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: key.judgePin!, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: key.settingsFingerprint }), provider: "customer" as const, connected: true, maxCalls: 200, maxCostMicros: 2_000_000 };
   const approval: EvalSpendApproval = { read: async () => grant };
   const meter: MonthlyMeter = { reserve: async (request) => ({
     // The fake is an adapter: the capability's payer comes from the trusted grant, never the repository.

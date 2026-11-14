@@ -8,8 +8,8 @@ import {
 import { readReportPartsFile } from "./report-file.js";
 
 // DEC 203: eval-only defaults; general task pacing remains 200 calls / $2.
-export const EVAL_DEFAULT_CALL_BUDGET = 400;
-export const EVAL_DEFAULT_COST_BUDGET_MICROS = 4_000_000;
+import { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS } from "@agentx/contracts";
+export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS } from "@agentx/contracts";
 
 /** Shared by setup measurement, refresh and task comparison; preserve the existing key encoding. */
 export function evalSettingsFingerprint(settings: EvalRoundInput["settings"], judgePin: string): string {

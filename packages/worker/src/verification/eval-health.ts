@@ -1,4 +1,4 @@
-import { EVAL_QUESTION_LIMIT, MeasuresFileSchema, evalBaseCacheKey, inertEvidenceText, isEvalBaseAttestation, type EvalQuestionSamples, type BaseScoreCache, type EvalBaseAttestation, type EvalBaseCacheKeyParts, type MeasuresFile } from "@agentx/contracts";
+import { evalSpendInputsDigest, EVAL_QUESTION_LIMIT, MeasuresFileSchema, evalBaseCacheKey, inertEvidenceText, isEvalBaseAttestation, type EvalQuestionSamples, type BaseScoreCache, type EvalBaseAttestation, type EvalBaseCacheKeyParts, type MeasuresFile } from "@agentx/contracts";
 import type { EvalSpendApproval, MonthlyMeter, EvalMeterReservation } from "@agentx/contracts";
 import { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, evalSettingsFingerprint, type EvalRoundInput } from "./eval-round.js";
 import { evalHealthSensitivity, type EvalHealthSensitivity } from "./eval-health-power.js";
@@ -41,7 +41,7 @@ export async function runEvalHealth(input: EvalHealthInput): Promise<EvalHealthR
     evalBaseCacheKey(key);
     if (input.key.codeHash === undefined || input.key.judgePin === undefined || input.key.hiddenSetHash !== "none") return refused("a public eval needs its code hash and judge pin");
     const grant = await input.approval.read();
-    if (grant === undefined || !["maintainer", "admin"].includes(grant.role) || grant.company !== input.key.company || grant.project !== input.key.project || grant.selection !== input.selection || grant.provider !== "customer" || grant.connected !== true || !whole(grant.maxCalls) || !whole(grant.maxCostMicros) || grant.maxCalls < calls || grant.maxCostMicros < costMicros) return refused("a maintainer or admin must confirm the connected customer's call estimate");
+    if (grant === undefined || !["owner", "maintainer", "admin"].includes(grant.role) || grant.company !== input.key.company || grant.project !== input.key.project || grant.selection !== input.selection || grant.inputsDigest !== evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: input.key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: key.settingsFingerprint }) || grant.provider !== "customer" || grant.connected !== true || !whole(grant.maxCalls) || !whole(grant.maxCostMicros) || grant.maxCalls < calls || grant.maxCostMicros < costMicros) return refused("an owner, maintainer or admin must confirm the connected customer's call estimate");
     const reservation = await input.meter.reserve({ approval: grant, calls, costMicros });
     if (reservation === undefined) return refused("the monthly cap cannot fit these runs");
     let usedCalls = 0; let usedCost = 0; let dispatched = 0; let closed = false; let failed = false;
