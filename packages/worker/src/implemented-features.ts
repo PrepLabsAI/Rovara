@@ -7,6 +7,7 @@ import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, 
  * contracts adds it here when the worker implements it ("task.agentRun" was added by Task 23).
  */
 export const WORKER_IMPLEMENTED_FEATURES = [
+  "task.evalRound.v1",
   "task.modelPolicy",
   "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview",
   "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode",

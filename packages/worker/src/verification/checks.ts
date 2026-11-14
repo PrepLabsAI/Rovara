@@ -358,7 +358,7 @@ function unlessUnconfirmed(error: unknown): false {
  * runner that has not reported within `joinMs`, or that reports a stop it could not confirm, rejects with RunnerKillUnconfirmedError.
  * A runner that finishes, or fails, after the abort counts as stopped; the check is still `not_run`.
  */
-function untilAborted<T>(running: Promise<T>, signal: AbortSignal, joinMs: number, kind: UnconfirmedKind): Promise<T> {
+export function untilAborted<T>(running: Promise<T>, signal: AbortSignal, joinMs: number, kind: UnconfirmedKind): Promise<T> {
   // The task that asked for this work: the join timer fires in whatever context aborted the signal (a cancel from another invocation, another task's), and the unconfirmed stop
   // belongs to THIS task's latch, never to the canceller's or to nobody's.
   const task = currentWorkspaceSafety();

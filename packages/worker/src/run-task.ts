@@ -1,3 +1,5 @@
+import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
+import { EVAL_ROUND_ARTIFACT, evalResultFromArtifact } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -66,7 +68,7 @@ import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } 
 import { exportBaselineSource, type BaselineSourceExport } from "./baseline-source-export.js";
 import { proposedChecksOfPlan, runPlanDryRun } from "./plan-dry-run.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
-import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
+import { ABORT_JOIN_MS, untilAborted, CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { RunFindings, type FindingsRecorder } from "./no-change-findings.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
 import { currentWorkspaceSafety } from "./workspace-safety.js";
@@ -145,6 +147,8 @@ export interface TaskInvocationDependencies {
   model: WorkspaceModelConfiguration;
   eventSink: EventBatchSink;
   artifactSink: ArtifactSink;
+  /** Trusted eval capabilities; only the worker's own wiring sets it. */
+  evalFinalCheck?: EvalFinalCheckPorts;
   feedbackBundleReader?: FeedbackBundleReader;
   workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
@@ -627,6 +631,30 @@ async function runTask(
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
         if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, withScriptedReplyFacts(testProof, plan.source, candidateReplyFacts), events);
+      }
+      // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
+      if (invocation.payload.evalRequest !== undefined) {
+        const remaining = roundBudgetMs - (Date.now() - roundStarted);
+        if (remaining <= 0) stop.abort();
+        const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
+        let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
+        try {
+          const running = runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
+            status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
+          }).then(value => { evalArtifact = value; return value; });
+          await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
+        } catch (error) {
+          if (isWorkspaceUnsafe(error) || !stop.signal.aborted) throw error;
+        } finally { clearTimeout(deadline); }
+        assertWorkspaceSafe();
+        const afterEval = await readCandidateRepositories(repositories);
+        if (createCandidateManifest(afterEval).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterEval;
+        if (evalArtifact !== undefined) {
+          const result = evalResultFromArtifact(evalArtifact);
+          await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No drop found." });
+          try { await dependencies.artifactSink({ name: EVAL_ROUND_ARTIFACT, mediaType: "application/json", content: JSON.stringify(evalArtifact) }); }
+          catch { await events.append("progress", { message: "Eval result could not be saved." }); }
+        }
       }
       await events.append("result", {
         status: "SUCCEEDED", conversationId: invocation.payload.conversationId, workflowMode: "CHECKS", checks: compact,
