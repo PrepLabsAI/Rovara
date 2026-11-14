@@ -193,6 +193,7 @@ it("reports actual calls and cost for public questions and no numeric usage for 
   const result = await runEvalRound({ ...input, roundKind: "check_sealed", hiddenSet: { exists: async () => true, open: async () => ({ hostPath: root, hash }) }, hashHiddenSet: async () => hash });
   expect(result).toMatchObject({ status: "done", feedback: { pass: false }, result: { questions: [], casesRun: 0, casesTotal: 0, excluded: [], notices: [] } });
   expect(result).not.toHaveProperty("usage");
+  expect(result).toHaveProperty("evidence", { privatePass: false });
 });
 
 it("reads the original-set baseline when questions were edited, comparing only untouched questions", async () => {
@@ -402,4 +403,32 @@ it.each(["calls", "cost"] as const)("accepts the eval default %s boundary and re
   const result = await runEvalRound({ ...input, questionPlan: { ...budgetPlan, ...(dimension === "calls" ? { callsAlreadyUsed: 1 } : { costAlreadyUsedMicros: 1 }) } });
   expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap", sentence: "Not run: over the eval budget" }, summary: "Eval: Not run — over the eval budget. Retry." } });
   expect(requests).toEqual([]);
+});
+
+it("carries bounded comparison evidence without changing the in-memory eval result", async () => {
+  const { input } = await setup();
+  const output = await runEvalRound(input);
+  expect(output).toMatchObject({ status: "done", evidence: {
+    context: { aiChange: true, discovery: "unknown", previousPasses: 0 },
+    options: { changedPromptCalls: 3, hiddenSetUsed: false, subsetSupported: true, sameJudgeFamily: false },
+    questions: [{ id: "q0", category: "ordinary", old: [true, true, true], first: false, freshOld: [true, true, true], freshNew: [false, false, false] }, {}, {}],
+  } });
+});
+it("early refusals carry context and no invented comparison evidence", async () => {
+  const { input, requests } = await setup();
+  const output = await runEvalRound({ ...input, questionPlan: { ...input.questionPlan!, connected: false } });
+  expect(output).toMatchObject({ status: "done", result: { notRun: { reason: "no_product_key" } }, evidence: { context: { aiChange: true, discovery: "unknown", previousPasses: 0 } } });
+  expect(output).not.toHaveProperty("evidence.questions"); expect(requests).toEqual([]);
+});
+it("evidence records the measured-baseline notice without fabricating pass bits", async () => {
+  const { input, requests } = await setup();
+  const output = await runEvalRound({ ...input, cache: { read: async () => undefined, write: async () => "refused" }, prepareBaseline: async () => "measuring" });
+  expect(output).toMatchObject({ evidence: { notices: [{ code: "baseline_measuring" }] } });
+  expect(output).not.toHaveProperty("evidence.questions"); expect(requests).toEqual([]);
+});
+it("refuses unsupported fix-round context without inventing a first pass", async () => {
+  const { input } = await setup();
+  const output = await runEvalRound({ ...input, questionPlan: { ...input.questionPlan!, previousPasses: 2 } });
+  expect(output).toMatchObject({ status: "done", result: { notRun: { reason: "round_limit" } } });
+  if (output.status === "done") expect(output.evidence?.context).toBeUndefined();
 });

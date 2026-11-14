@@ -2,7 +2,7 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
+  captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, evalCommandFingerprint, hiddenEvalSetFor, isEvalBaseAttestation,
   type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
@@ -92,6 +92,8 @@ export type EvalRoundOutput =
     readonly status: "done";
     /** The eval check for the evidence writer. */
     readonly result: EvalCheckResult;
+    /** Bounded producer facts for the bound artifact; private rounds contain only pass/fail. */
+    readonly evidence?: EvalRoundEvidence;
     /** Actual spend for this eval; omitted for private sets. Missing cost means it could not be read. */
     readonly usage?: { readonly calls: number; readonly costMicros?: number };
     /** Public question details, or one fixed pass/fail for a private set. */
@@ -168,7 +170,17 @@ export async function hashEvalDirectory(directory: string): Promise<string> {
 /** Plans, then completes: for callers (and tests) that have no step between the two. The sealed round's caller uses `planEvalRound`, then the sandbox, then `completeEvalRound`. */
 export async function runEvalRound(input: EvalRoundInput): Promise<EvalRoundOutput> {
   const plan = await planEvalRound(input);
-  return plan.status === "stopped" ? plan.output : completeEvalRound(input, plan);
+  if (plan.status !== "stopped") return completeEvalRound(input, plan);
+  if (plan.output.status !== "done") return plan.output;
+  const context = evidenceContext(input);
+  return { ...plan.output, evidence: context === undefined ? {} : captureEvalRoundEvidence({ context, ...(input.hiddenSet === undefined ? {} : { privateSet: true }) }) };
+
+}
+
+function evidenceContext(input: EvalRoundInput): EvalRoundEvidence["context"] {
+  const previousPasses = input.questionPlan?.previousPasses ?? 0;
+  if (previousPasses !== 0 && previousPasses !== 1) return undefined;
+  return { aiChange: input.trigger.needed || tierRequestsEval(input.tier), discovery: input.evalConfigured === undefined ? "unknown" : input.evalConfigured ? "configured" : "not_configured", previousPasses };
 }
 
 /** Adapter for PR #570: eval_hint is a REASON, never a new tier kind. */
@@ -178,8 +190,12 @@ export function tierRequestsEval(tier: EvalRoundInput["tier"]): boolean { return
  * It is never manufactured from an aggregate score or a task's new-code answers. */
 export async function completeEvalRound(input: EvalRoundInput, plan: Extract<EvalRoundPlan, { status: "ready" }>): Promise<EvalRoundOutput> {
   const hidden = plan.hiddenMount !== undefined;
+  const context = evidenceContext(input);
   let usage: { calls: number; costMicros?: number } | undefined;
   const estimates: string[] = [];
+  const evidenceNotices: EvalEvidenceNotice[] = [];
+  let comparisonQuestions: EvalQuestionComparison[] | undefined;
+  let changedPromptCalls = 0;
   let excluded: EvalCheckResult["excluded"] = [];
   let cacheState: "hit" | "not_used" = "not_used";
   const finish = (result: EvalCheckResult): EvalRoundOutput => {
@@ -187,11 +203,18 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
     const exclusionSummary = count === 0 ? "" : ` ${count} question${count === 1 ? "" : "s"} added, removed or edited: not compared.`;
     const evidence = hidden ? result : { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...estimates], summary: result.summary + exclusionSummary };
     const output = done(evidence, cacheState, plan.hiddenMount === undefined ? {} : { hiddenMount: plan.hiddenMount });
-    return output.status === "done" && !hidden && usage !== undefined ? { ...output, usage } : output;
+    if (output.status !== "done") return output;
+    return { ...output, ...(!hidden && usage !== undefined ? { usage } : {}), evidence: context === undefined ? {} : captureEvalRoundEvidence({ context,
+      ...(hidden ? result.outcome === "ran" ? { privatePass: result.label !== "Worse on eval" } : { privateSet: true } : {
+        excluded, notices: evidenceNotices, ...(comparisonQuestions === undefined ? {} : { comparison: { questions: comparisonQuestions, changedPromptCalls, hiddenSetUsed: false, subsetSupported: input.questionPlan!.subsetSupported, sameJudgeFamily: input.questionPlan!.sameJudgeFamily === true } }),
+      }),
+    }) };
+
   };
   const refuse = (reason: EvalNotRunReason): EvalRoundOutput => finish(evalNotRunResult({ roundKind: input.roundKind, reason, hiddenSetUsed: hidden }));
   if (input.evalConfigured === false && tierRequestsEval(input.tier)) {
     const result = evalNotRunResult({ roundKind: input.roundKind, reason: "no_eval_configured", hiddenSetUsed: hidden });
+    evidenceNotices.push({ code: "no_eval_configured" });
     const notice = "Prompt changed. No eval found, so AI quality wasn't measured. Compare the old and new answers below.";
     return finish({ ...result, notices: [notice], summary: notice, disposition: { ...result.disposition, retry: false } });
   }
@@ -214,7 +237,7 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   if (base?.questions === undefined && input.prepareBaseline !== undefined) {
     try {
       const state = await input.prepareBaseline(parts);
-      if (state === "measuring") return finish({ ...evalNotRunResult({ roundKind: input.roundKind, reason: "no_base_score", hiddenSetUsed: hidden }), notices: hidden ? [] : ["baseline still being measured"] });
+      if (state === "measuring") { evidenceNotices.push({ code: "baseline_measuring" }); return finish({ ...evalNotRunResult({ roundKind: input.roundKind, reason: "no_base_score", hiddenSetUsed: hidden }), notices: hidden ? [] : ["baseline still being measured"] }); }
       if (state === "ready") base = await input.cache.read(parts);
     } catch { return refuse("no_base_score"); }
   }
@@ -237,13 +260,13 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   if (![maxCalls, maxCost, calls, cost, config.maxCallsPerQuestion, config.maxCostMicrosPerQuestion].every(whole) || config.maxCallsPerQuestion < 1 || config.maxCostMicrosPerQuestion < 1) return refuse("cap");
   const initialCalls = calls; const initialCost = cost;
   let costKnown = true;
-  let changedPromptCalls = 0;
   let stop: EvalNotRunReason | undefined;
   const fits = (questionRuns: number): boolean => calls + questionRuns * config.maxCallsPerQuestion <= maxCalls && cost + questionRuns * config.maxCostMicrosPerQuestion <= maxCost;
   const reserve = (stage: "first run" | "re-asks" | "second look", questionRuns: number): boolean => {
     const estimatedCalls = questionRuns * config.maxCallsPerQuestion;
     const estimatedCost = questionRuns * config.maxCostMicrosPerQuestion;
     if (!Number.isSafeInteger(estimatedCalls) || !Number.isSafeInteger(estimatedCost)) { stop = "cap"; return false; }
+    evidenceNotices.push({ code: "stage_estimate", stage, calls: estimatedCalls, costMicros: estimatedCost });
     estimates.push(`Eval ${stage} estimate: ${estimatedCalls} calls, ${estimatedCost} microdollars.`);
     if (!fits(questionRuns)) { stop = "cap"; return false; }
     return true;
@@ -252,6 +275,8 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
     if (stop !== undefined) return undefined;
     try {
       const output = await config.run({ side, ids, runs });
+      // A refused hold has no old-side result to attest. Preserve the budget refusal before examining evidence.
+      if (output.calls === 0 && output.facts.notRun > 0 && (output.facts.byClass.cap ?? 0) > 0) { stop = "cap"; return undefined; }
       if (side === "old" && (!isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit)) { stop = "base_round_unattested"; return undefined; }
       if (!whole(output.calls) || !whole(output.changedPromptCalls) || output.changedPromptCalls > output.calls) { stop = "invalid_question_data"; return undefined; }
       calls += output.calls;
@@ -278,7 +303,7 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   const first = await run("new", ids, 1);
   if (first === undefined) return refuse(stop ?? "provider_error");
   let questions: EvalQuestionComparison[] = untouched.map(q => ({ id: q.id, category: q.category, old: byId.get(q.id)!.samples, first: first.get(q.id)!.samples[0]!, edited: q.baseHash !== q.headHash }));
-  const judge = (): EvalCheckResult => evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true });
+  const judge = (): EvalCheckResult => { comparisonQuestions = questions; return evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true }); };
   if (config.subsetSupported) {
     const suspects = evalSuspects(questions); const selected = [...suspects.down, ...suspects.up];
     if (selected.length > 0 && reserve("re-asks", 6 * selected.length)) {
