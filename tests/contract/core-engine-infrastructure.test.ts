@@ -181,6 +181,7 @@ describe("the core job schedules", () => {
   const role = resources(named, "AWS::IAM::Role").find(([id]) => id.includes("CoreEngine") && id.includes("InvokeRole"))!;
 
   it("are one per scheduled row of the core's job table, with its rate, and the stream row has none", () => {
+    expect(CORE_JOB_SCHEDULES).toContainEqual({ job: "person-erase-resume", rate: "rate(15 minutes)" });
     expect(CORE_JOB_SCHEDULES.length).toBe(CORE_JOBS.filter((job) => job.trigger.kind === "schedule").length);
     for (const job of CORE_JOBS) {
       const scheduled = CORE_JOB_SCHEDULES.find((entry) => entry.job === job.name);

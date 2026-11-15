@@ -278,7 +278,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
           }
         }
-        return { ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }) };
+        return {
+          ...(inputs.services?.(companyId, flow, registry) ?? {}),
+          "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
+          ...(lessons === undefined ? {} : { lessons: lessons.service }),
+        };
       },
     }),
   });
@@ -365,6 +369,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     void companyId;
     return { store, audit, objects: objects as PersonEraseObjects, eraseLearning: hostedEraseLearning({ store, audit, now: () => now().getTime(), log }), now: () => now().getTime(), log };
   };
+  const resumeErases = async (companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }> => {
+    const registry = await app.registry();
+    return await resumePersonErases(eraseDepsOver(registry, companyId), companyId, budgetMs);
+  };
   const standingOf = async (companyId: string, personId: string): Promise<"member" | "former" | "unknown"> => {
     if (inputs.signInTableName === undefined || inputs.signInTableName === "") throw new Error("no sign-in table");
     const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
@@ -386,10 +394,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         eraseDeps: (companyId) => eraseDepsOver(registry, companyId),
       }).route(request, caller);
     },
-    async resumePersonErases(companyId, budgetMs) {
-      const registry = await app.registry();
-      return await resumePersonErases(eraseDepsOver(registry, companyId), companyId, budgetMs);
-    },
+    resumePersonErases: resumeErases,
     async callback(request) {
       if (coreTasks === undefined) return undefined;
       const match = CORE_CALLBACK.exec(request.path.split("?")[0] ?? "");
