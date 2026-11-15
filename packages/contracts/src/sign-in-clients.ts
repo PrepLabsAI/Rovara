@@ -21,8 +21,13 @@ export const SignInRedirectUriSchema = z.string().max(2_048).superRefine((value,
 /**
  * Spec 065: what a sign-in client may do on Rovara as the signed-in person, beyond the access check. An administrator
  * names them when registering the client; the client asks for them at sign-in and its tokens carry the allowed ones.
+ * Plan v3.2 lane ID: each /v1/dev/* route needs one of them (the broker's route table, dev-route-scopes.ts), or full
+ * access. A scope only narrows what the person may do; it never adds a right.
  */
-export const CLIENT_SCOPES = ["projects:members", "projects:create"] as const;
+export const CLIENT_SCOPES = [
+  "projects:members", "projects:create",
+  "profile:name", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide",
+] as const;
 export const ClientScopeSchema = z.enum(CLIENT_SCOPES);
 export type ClientScope = z.infer<typeof ClientScopeSchema>;
 const ClientScopesSchema = z.array(ClientScopeSchema).max(CLIENT_SCOPES.length).refine((scopes) => new Set(scopes).size === scopes.length, "scopes must be unique");
