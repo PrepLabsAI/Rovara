@@ -39,6 +39,32 @@ describe("one metered eval stage", () => {
     expect(stage!.usage()).toEqual({ calls: 2, costMicros: 20 });
     await stage!.close(); expect(closed).toEqual(["x"]);
   });
+  it("a call that throws after dispatch is an unknown cost even when another call already set the failure", async () => {
+    let open!: () => void; const gate = new Promise<void>(resolve => { open = resolve; });
+    const meter: MonthlyMeter = { reserve: async () => ({ call: async () => { await gate; throw new Error("boom"); }, close: async () => undefined }) };
+    const stage = await openMeteredStage({ grant, meter, calls: 1, costMicros: 20 });
+    const first = stage!.call(frame).then(() => "ran", () => "stopped");
+    await expect(stage!.call(frame)).rejects.toThrow("eval stage stopped");
+    expect(stage!.failure()).toBe("cap");
+    open(); expect(await first).toBe("stopped");
+    expect(stage!.failure()).toBe("cap"); expect(stage!.usage()).toEqual({ calls: 1 });
+  });
+  it("an unreadable result is an unknown cost even when another call already set the failure", async () => {
+    let n = 0; let open!: () => void; const gate = new Promise<void>(resolve => { open = resolve; });
+    const meter: MonthlyMeter = { reserve: async () => ({ call: async () => { if (n++ === 0) { await gate; return undefined as never; } return { calls: 1, costMicros: 3, class: "rate_limit" }; }, close: async () => undefined }) };
+    const stage = await openMeteredStage({ grant, meter, calls: 3, costMicros: 20 });
+    const garbage = stage!.call(frame).then(() => "ran", () => "stopped");
+    await expect(stage!.call(frame)).rejects.toThrow("eval stage stopped");
+    expect(stage!.failure()).toBe("rate_limit"); expect(stage!.usage()).toEqual({ calls: 2, costMicros: 3 });
+    open(); expect(await garbage).toBe("stopped");
+    expect(stage!.usage()).toEqual({ calls: 2 });
+  });
+  it("a settled provider refusal keeps its cost known (only a call that threw is unknown)", async () => {
+    const w = world({ calls: 1, costMicros: 3, class: "rate_limit" });
+    const stage = await openMeteredStage({ grant, meter: w.meter, calls: 2, costMicros: 20 });
+    await expect(stage!.call(frame)).rejects.toThrow("eval stage stopped");
+    expect(stage!.failure()).toBe("rate_limit"); expect(stage!.usage()).toEqual({ calls: 1, costMicros: 3 });
+  });
   it("any other reservation fault is still an unknown cost", async () => {
     const meter: MonthlyMeter = { reserve: async () => ({ call: async () => { throw new Error("boom"); }, close: async () => undefined }) };
     const stage = await openMeteredStage({ grant, meter, calls: 2, costMicros: 20 });

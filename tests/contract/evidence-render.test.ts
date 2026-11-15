@@ -359,7 +359,11 @@ describe("callers", () => {
       "packages/broker/src/core/proof/evidence-pack.ts",
       "packages/broker/src/core/proof/evidence-v2-lines.ts",
     ];
-    expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText"))).toEqual(writerFiles);
+    // The generic contract finder's mock config (TE-G6; SageMaker is its first adapter) reuses only the trust words, for its "Made by Rovara" label.
+    const mockConfig = "packages/broker/src/core/test-env/service-contract-mock.ts";
+    expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText" && name !== "EVIDENCE_TRUST_CLASS_WORDS"))).toEqual(writerFiles);
+    expect(callers(["EVIDENCE_TRUST_CLASS_WORDS"])).toEqual([mockConfig]);
+    expect(names.filter((name) => new RegExp(`\\b${name}\\b`, "u").test(readFileSync(`${root}/${mockConfig}`, "utf8")))).toEqual(["EVIDENCE_TRUST_CLASS_WORDS"]);
     // The v1 loader (test-proof-lines.ts) also uses the unconfirmed words.
     for (const name of proofOnly) expect(callers([name])).toEqual([
       "packages/broker/src/core/proof/proof-table.ts",
@@ -431,7 +435,14 @@ describe("no callers", () => {
       "packages/worker/src/setup-prove.ts",
       // The v1 test-proof description loader uses the unconfirmed-replies words (TE-192a B-0).
       "packages/broker/src/developer/test-proof-lines.ts",
+      // The generic contract finder's labelled mock config (TE-G6) reuses the trust words for its label; nothing calls it in production (pinned below).
+      "packages/broker/src/core/test-env/service-contract-mock.ts",
     ]);
     expect(hits.filter((file) => !file.startsWith("packages/contracts/") && !approved.has(file))).toEqual([]);
+    // Nothing calls the contract finder or its SageMaker adapter: only its own files name them.
+    const wired = spawnSync("git", ["grep", "--untracked", "-l", "-e", "service-contract", "-e", "sagemaker-contract", "-e", "sagemaker-mock", "-e", "generateSageMakerMock", "-e", "findSageMakerContract", "-e", "findServiceContract", "-e", "generateServiceMock", "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect(wired.status).toBe(0);
+    const dir = "packages/broker/src/core/test-env";
+    expect(wired.stdout.trim().split("\n").sort()).toEqual([`${dir}/sagemaker-contract.ts`, `${dir}/sagemaker-mock.ts`, `${dir}/service-contract-mock.ts`, `${dir}/service-contract.md`, `${dir}/service-contract.ts`]);
   });
 });
