@@ -4,7 +4,7 @@
 // round that failed or was stopped: `runChecks` always calls `endRound`). F1-c later extends this same hook with the bridge.
 //
 // The evidence says what is true: "not sealed; model hosts blocked by name only" (hosted) or exactly "model hosts not blocked on this machine" (the laptop); a client that ignored its redirect makes the round "not run: client
-// ignored the redirect (called <host>)", never a pass; a ledger that cannot be read is "not run". A scripted reply that is not `before_task` or `independent`, and the whole failure pack, never count.
+// ignored the redirect (called <host>)", never a pass; a ledger that cannot be read is "not run". Only a `before_task` scripted reply counts here; `task_made` needs the real model (the Proof table) and `independent` is parked (DEC 192a), and the whole failure pack never counts.
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -94,7 +94,8 @@ export interface StartedModelHelper {
   /** Stops the helper and removes its files (idempotent, never throws). */
   stop(): Promise<void>;
 }
-export type ScriptedReplyFacts = readonly { readonly checkId: string; readonly taskMade: number; readonly counted: number }[] | "unknown";
+/** Per check: replies written in this task, replies that count by themselves (`counted`: before_task), and, only when there were any, independent replies (parked by DEC 192a: they never count). */
+export type ScriptedReplyFacts = readonly { readonly checkId: string; readonly taskMade: number; readonly counted: number; readonly independent?: number }[] | "unknown";
 export interface ModelHelperRoundResult {
   /** Unknown means every check in this round may have used task-made replies. No helper: no result. */
   readonly scriptedReplies?: ScriptedReplyFacts;
@@ -155,8 +156,8 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
   let currentId: string | undefined;
   let inSetup = false;
   let unknown = false;
-  let previous = { taskMade: 0, counted: 0 };
-  let facts = new Map<string, { checkId: string; taskMade: number; counted: number }>();
+  let previous = { taskMade: 0, counted: 0, independent: 0 };
+  let facts = new Map<string, { checkId: string; taskMade: number; counted: number; independent: number }>();
   let readBudget = { ms: 0, bytes: 0, reads: 0 };
   const ensure = (signal: AbortSignal): Promise<StartedModelHelper | undefined> => {
     helper ??= plan.start(signal).catch((): never => {
@@ -187,7 +188,7 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       budget.bytes += Buffer.byteLength(JSON.stringify(parsed.data));
       if (budget.bytes > SUMMARY_READ_MAX_BYTES) { unknown = true; return undefined; }
       if (!parsed.data.trusted || parsed.data.replySetDigest !== started.pinnedDigest) { unknown = true; return UNTRUSTED_MODEL_SUMMARY; }
-      if (parsed.data.scripted.task_made < previous.taskMade || parsed.data.countsTowardProof < previous.counted) unknown = true;
+      if (parsed.data.scripted.task_made < previous.taskMade || parsed.data.countsTowardProof < previous.counted || parsed.data.scripted.independent < previous.independent) unknown = true;
       return parsed.data;
     } catch {
       unknown = true;
@@ -205,7 +206,7 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
     if (id === undefined) { unknown = true; return; }
     const summary = await read(started, signal);
     if (summary === undefined || !summary.trusted || unknown) return;
-    const next = { taskMade: summary.scripted.task_made, counted: summary.countsTowardProof };
+    const next = { taskMade: summary.scripted.task_made, counted: summary.countsTowardProof, independent: summary.scripted.independent };
     if (id === "setup") {
       // Setup can seed later checks. Any served reply here has no single proving check,
       // so mark the round; a healthy zero-reply setup must not manufacture uncertainty.
@@ -213,9 +214,9 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       previous = next;
       return;
     }
-    const old = facts.get(id) ?? { checkId: id, taskMade: 0, counted: 0 };
+    const old = facts.get(id) ?? { checkId: id, taskMade: 0, counted: 0, independent: 0 };
     if (!facts.has(id) && facts.size >= REPLY_FACTS_MAX) { unknown = true; return; }
-    facts.set(id, { checkId: id, taskMade: old.taskMade + next.taskMade - previous.taskMade, counted: old.counted + next.counted - previous.counted });
+    facts.set(id, { checkId: id, taskMade: old.taskMade + next.taskMade - previous.taskMade, counted: old.counted + next.counted - previous.counted, independent: old.independent + next.independent - previous.independent });
     previous = next;
   };
   const wrapped: CheckRunners = {
@@ -260,9 +261,9 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
           const summary = await read(started, undefined, { ms: 0, bytes: 0, reads: 0 });
           const evidence = modelHelperEvidence(summary, plan.blockList, plan.hostSuffixes === undefined ? {} : { hostSuffixes: plan.hostSuffixes });
           // Any calls after the last command settled have no reliable check attribution.
-          if (summary?.scripted.task_made !== previous.taskMade || summary?.countsTowardProof !== previous.counted || evidence.result === "not_run") unknown = true;
+          if (summary?.scripted.task_made !== previous.taskMade || summary?.countsTowardProof !== previous.counted || summary?.scripted.independent !== previous.independent || evidence.result === "not_run") unknown = true;
           try {
-            plan.onResult({ summary, evidence, scriptedReplies: unknown ? "unknown" : [...facts.values()] });
+            plan.onResult({ summary, evidence, scriptedReplies: unknown ? "unknown" : [...facts.values()].map(({ independent, ...rest }) => (independent > 0 ? { ...rest, independent } : rest)) });
           } catch {
             // A sink that throws must not keep the helper up or the round open.
           }
@@ -270,7 +271,7 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
         }
       } finally {
         helper = undefined; currentId = undefined; inSetup = false; unknown = false;
-        previous = { taskMade: 0, counted: 0 }; facts = new Map(); readBudget = { ms: 0, bytes: 0, reads: 0 };
+        previous = { taskMade: 0, counted: 0, independent: 0 }; facts = new Map(); readBudget = { ms: 0, bytes: 0, reads: 0 };
         await runners.endRound?.();
       }
     },

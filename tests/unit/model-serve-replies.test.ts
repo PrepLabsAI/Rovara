@@ -177,7 +177,7 @@ describe("unmatched fails closed", () => {
 });
 
 describe("provenance decides what counts", () => {
-  it("before_task and independent count; task_made does not", () => {
+  it("only before_task counts at serve time: independent is parked (DEC 192a) and task_made needs the real model, which the helper never has", () => {
     const set = stamp("openai_compatible", [
       { id: "b", match: { promptContains: "one" } },
       { id: "i", match: { promptContains: "two" }, provenance: "independent", origin: undefined },
@@ -185,7 +185,7 @@ describe("provenance decides what counts", () => {
     ]);
     const call = (word: string) => serve(post("/p/openai/v1/chat/completions", { model: "m", messages: [{ role: "user", content: word }] }), set);
     expect(call("one")).toMatchObject({ kind: "scripted", resultClass: "before_task", countsTowardProof: true });
-    expect(call("two")).toMatchObject({ kind: "scripted", resultClass: "independent", countsTowardProof: true });
+    expect(call("two")).toMatchObject({ kind: "scripted", resultClass: "independent", countsTowardProof: false });
     expect(call("three")).toMatchObject({ kind: "scripted", resultClass: "task_made", countsTowardProof: false, provenance: "task_made" });
   });
   it("records a content hash, never the reply", () => {

@@ -860,7 +860,7 @@
               "type": "string",
               "enum": [
                 "Worse on eval",
-                "No drop found",
+                "No regression measured (eval)",
                 "Improved on eval",
                 "Not run"
               ]

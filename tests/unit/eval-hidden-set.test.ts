@@ -102,7 +102,9 @@ it("a private single-question break leaks no fix-request bit beyond the pass/fai
   const yes = { pass: true, answer: "private old" }; const no = { pass: false, answer: "private new" };
   const result = evalCheckResult({ roundKind: "check_sealed", hiddenSetUsed: true, changedPromptCalls: 1,
     questions: [{ id: "private", category: "ordinary", old: [yes, yes, yes], first: no, freshOld: [yes, yes, yes], freshNew: [no, no, no] }] });
-  expect(result.label).toBe("No drop found");
+  expect(result.label).toBe("No regression measured (eval)");
+  // one word for one outcome (DEC 194): the summary says it too
+  expect(result.summary).toBe("Eval: No regression measured (eval) on private questions.");
   expect(result.fixRequested).toBe(false);
   expect(agentFeedbackFor(result)).toEqual({ pass: true });
 });

@@ -91,7 +91,7 @@ it("runs fake customer ModelEgress with pacing and charges only that company; ou
     return { ...report, facts: pacing.facts, calls: pacing.started, costMicros: pacing.spentMicros };
   };
   const result = await runEvalRound({ ...input, questionPlan: { ...config, maxCostMicrosPerQuestion: 100_000, run } });
-  expect(result).toMatchObject({ result: { label: "No drop found", questions: [{ change: "broke" }] } });
+  expect(result).toMatchObject({ result: { label: "No regression measured (eval)", questions: [{ change: "broke" }] } });
   expect(world.provider.calls).toHaveLength(7);
   expect(await world.meterOf(COMPANY_A)).not.toEqual(await world.meterOf(COMPANY_B));
   world.provider.script({ status: 500, body: "{}" });
@@ -136,14 +136,14 @@ it("pacing caps include earlier task spend and both permitted passes", async () 
   expect(await runEvalRound({ ...input, questionPlan: { ...plan, previousPasses: 1, callsAlreadyUsed: 395 } })).toMatchObject({ result: { notRun: { reason: "cap" } } });
   expect(requests).toEqual([{ side: "new", ids: ["q0"], runs: 1 }]);
   const second = await setup(1);
-  expect(await runEvalRound({ ...second.input, questionPlan: { ...second.input.questionPlan!, previousPasses: 1 } })).toMatchObject({ result: { label: "No drop found" } });
+  expect(await runEvalRound({ ...second.input, questionPlan: { ...second.input.questionPlan!, previousPasses: 1 } })).toMatchObject({ result: { label: "No regression measured (eval)" } });
 });
 
 it("requests just one fix round, then reports the remaining break without another fix request", async () => {
   const { input } = await setup(1);
   expect(await runEvalRound(input)).toMatchObject({ result: { fixRequested: true } });
   const second = await setup(1);
-  expect(await runEvalRound({ ...second.input, questionPlan: { ...second.input.questionPlan!, previousPasses: 1 } })).toMatchObject({ result: { label: "No drop found", fixRequested: false } });
+  expect(await runEvalRound({ ...second.input, questionPlan: { ...second.input.questionPlan!, previousPasses: 1 } })).toMatchObject({ result: { label: "No regression measured (eval)", fixRequested: false } });
 });
 it.each(["rate_limit", "quota", "overloaded", "key_refused"] as const)("keeps the provider's %s not-run class", async reason => {
   const { input } = await setup(1); const plan = input.questionPlan!;
@@ -348,12 +348,12 @@ it("rechecks the budget after old re-asks before new re-asks", async () => {
 
 it("runs an unchanged 50-question control and respects an explicit project call budget above the fallback", async () => {
   const control = await setup(50, true);
-  expect(await runEvalRound(control.input)).toMatchObject({ result: { label: "No drop found", questions: [] }, feedback: { questions: [] }, usage: { calls: 50 } });
+  expect(await runEvalRound(control.input)).toMatchObject({ result: { label: "No regression measured (eval)", questions: [] }, feedback: { questions: [] }, usage: { calls: 50 } });
   expect(control.requests).toHaveLength(1);
   const large = await setup(401, true);
   expect(await runEvalRound(large.input)).toMatchObject({ result: { notRun: { reason: "cap" } } });
   expect(large.requests).toEqual([]);
-  expect(await runEvalRound({ ...large.input, questionPlan: { ...large.input.questionPlan!, limits: { maxCalls: 401 } } })).toMatchObject({ result: { label: "No drop found" }, usage: { calls: 401 } });
+  expect(await runEvalRound({ ...large.input, questionPlan: { ...large.input.questionPlan!, limits: { maxCalls: 401 } } })).toMatchObject({ result: { label: "No regression measured (eval)" }, usage: { calls: 401 } });
 });
 
 it.each(["maxCallsPerQuestion", "maxCostMicrosPerQuestion"] as const)("refuses unsafe %s stage estimates without printing rounded numbers", async dimension => {
@@ -366,7 +366,7 @@ it("inerts excluded identities before they enter the result and bounds megabyte 
   const { input } = await setup(1); const plan = input.questionPlan!;
   const hostile = "[a[b]](https://evil.test) ![image][r]\n[r]: https://evil.test\n@team #123 <img>\n# title\n> quote\n---\n```js\n~~~\u200b\ufe0f" + "x".repeat(1_048_576);
   const result = await runEvalRound({ ...input, questionPlan: { ...plan, questions: [...plan.questions, { ...plan.questions[0]!, id: hostile }] } });
-  expect(result).toMatchObject({ result: { label: "No drop found", excluded: [{ reason: "edited" }] } });
+  expect(result).toMatchObject({ result: { label: "No regression measured (eval)", excluded: [{ reason: "edited" }] } });
   if (result.status === "done") {
     const text = JSON.stringify(result.result.excluded);
     expect(text.length).toBeLessThan(400);
@@ -398,7 +398,7 @@ it.each(["calls", "cost"] as const)("accepts the eval default %s boundary and re
   const budgetPlan = { ...plan, maxCostMicrosPerQuestion: 10_000,
     run: async (request: Parameters<typeof plan.run>[0]) => { const output = await plan.run(request); return { ...output, costMicros: output.calls * 10_000 }; },
   };
-  expect(await runEvalRound({ ...input, questionPlan: budgetPlan })).toMatchObject({ result: { label: "No drop found" }, usage: { calls: 400, costMicros: 4_000_000 } });
+  expect(await runEvalRound({ ...input, questionPlan: budgetPlan })).toMatchObject({ result: { label: "No regression measured (eval)" }, usage: { calls: 400, costMicros: 4_000_000 } });
   requests.length = 0;
   const result = await runEvalRound({ ...input, questionPlan: { ...budgetPlan, ...(dimension === "calls" ? { callsAlreadyUsed: 1 } : { costAlreadyUsedMicros: 1 }) } });
   expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason: "cap", sentence: "Not run: over the eval budget" }, summary: "Eval: Not run — over the eval budget. Retry." } });
@@ -411,7 +411,7 @@ it.each([
   const { input, requests } = await setup();
   const result = await runEvalRound({ ...input, cache: { ...input.cache, read: async () => undefined }, prepareBaseline: async () => state });
   expect(result).toMatchObject({ result: { label: "Not run", notRun: { reason }, disposition: { draft: false, check: "neutral", retry: true }, questions: [] } });
-  expect(requests).toEqual([]); expect(JSON.stringify(result)).not.toMatch(/No drop found|Improved on eval|Worse on eval|Proven/u);
+  expect(requests).toEqual([]); expect(JSON.stringify(result)).not.toMatch(/No regression measured (eval)|Improved on eval|Worse on eval|Proven/u);
 });
 
 import { evalNotTestedEntry, renderEvidence } from "@agentx/contracts";
@@ -444,7 +444,7 @@ it("keeps the first round's evidence byte-identical after setup saves; only a ne
     const stored = JSON.stringify(first); const pack = v2Pack({ notTested: [evalNotTestedEntry(first.result)!] }); const before = renderEvidence(pack).text;
     release(); expect((await measuring).status).toBe("measured");
     expect(renderEvidence(pack).text).toBe(before); expect(JSON.stringify(first)).toBe(stored);
-    expect(await runEvalRound(task)).toMatchObject({ result: { label: "No drop found" } });
+    expect(await runEvalRound(task)).toMatchObject({ result: { label: "No regression measured (eval)" } });
     expect(reservations).toBe(1); expect(calls).toBe(9); expect(requests.length).toBeGreaterThan(0);
   } finally { release(); await measuring; }
 });
