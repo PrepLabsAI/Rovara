@@ -6,13 +6,13 @@
 // The other core services (merge tracking, the session sweep, notices) are joined on a laptop by the local root (`local/app/app.ts`), which carries laptop rules (fixed code settings, a sole
 // owner). A deployed install needs the same joins with its own settings and people; each is a `CoreService` the deployment supplies, and `serviceGaps` names the ones missing so the switch cannot
 // be turned on for an area whose service is not wired (an area that is off is not asked: its missing service costs only its own jobs).
-import { AsyncLocalStorage } from "node:async_hooks";
-import { agentXError, type AdapterRegistry, type OrgId, type TransactItem } from "@agentx/contracts";
+import { agentXError, type AdapterRegistry, type OrgId } from "@agentx/contracts";
 import { RepositoryGrantService } from "../repository-access.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { createTaskFlowFromRegistry, type RegistryTaskFlowOptions, type TaskFlow } from "../core/task-flow/flow.js";
 import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flow/deps.js";
 import { withStepFenceRetry } from "./step-fence.js";
+import { startFenceItems } from "../core/task-flow/start-fence.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
 
@@ -56,15 +56,11 @@ export interface CoreRuntimeOptions {
   services?: (flow: TaskFlow) => Partial<Record<CoreServiceName, CoreService>>;
 }
 
-const startFences = new AsyncLocalStorage<readonly TransactItem[]>();
-
 /**
  * Runs a core start (and anything it awaits) with these checks added to the start's own transaction (`startExtras`): what the host read about the company before it started the task. A start
- * that finds one changed commits nothing. The context belongs to this call and its awaits, so concurrent starts never see each other's.
+ * that finds one changed commits nothing. The context belongs to this call and its awaits, so concurrent starts never see each other's. (The shared fence of core/task-flow/start-fence.ts.)
  */
-export function withStartFence<T>(items: readonly TransactItem[], run: () => Promise<T>): Promise<T> {
-  return startFences.run(items, run);
-}
+export { withStartFence } from "../core/task-flow/start-fence.js";
 
 /** What a start on a runtime that serves a company only for the tasks it already holds (drain, or a narrowed switch) answers. Fixed words. */
 export const CORE_START_REFUSED_WORDS = "the core engine starts no new task for this company";
@@ -81,7 +77,7 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     const stamped = stampForNewTask(options.flags, companyId, options.now());
     if (stamped.engine !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
     const own = given?.(input);
-    return { ...(own ?? {}), items: [...(own?.items ?? []), ...(startFences.getStore() ?? []), stampItem(companyId, input.taskId, stamped)] };
+    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped)] };
   };
   const base = createTaskFlowFromRegistry(withStepFenceRetry(registry), {
     ...options.flowOptions,

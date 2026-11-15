@@ -38,9 +38,9 @@ const message = { version: 2 as const, channel: "examplechat", eventId: "m1", co
 describe("what rovara up does with what a chat adapter hands it", () => {
   it("starts work only for the owner: a link to anyone else starts nothing", async () => {
     const { chat, started } = make();
-    await chat.work("examplechat").message({ orgId: ORG, message, projectName: "web", personId: STRANGER });
+    await chat.work("examplechat").message({ orgId: ORG, message, projectName: "web", personId: STRANGER, fence: [] });
     expect(started).toEqual([]);
-    await chat.work("examplechat").message({ orgId: ORG, message, projectName: "web", personId: OWNER_ID });
+    await chat.work("examplechat").message({ orgId: ORG, message, projectName: "web", personId: OWNER_ID, fence: [] });
     expect(started).toHaveLength(1);
     expect(started[0]).toMatchObject({ project: "web", instructions: "add a retry", workflow: true });
   });
@@ -48,11 +48,11 @@ describe("what rovara up does with what a chat adapter hands it", () => {
   it("decides only for the owner, and only as the chat's own method, naming the account that pressed", async () => {
     const { chat, attempts } = make();
     const work = chat.work("examplechat");
-    expect(await work.decide({ orgId: ORG, card, decision, personId: STRANGER, projectName: "web" })).toEqual({ status: "refused", reason: "invalid" });
+    expect(await work.decide({ orgId: ORG, card, decision, personId: STRANGER, projectName: "web", fence: [] })).toEqual({ status: "refused", reason: "invalid" });
     expect(attempts).toEqual([]);
-    expect(await work.decide({ orgId: ORG, card, decision: { ...decision, decision: "SKIP" }, personId: OWNER_ID, projectName: "web" })).toEqual({ status: "refused", reason: "invalid" });
+    expect(await work.decide({ orgId: ORG, card, decision: { ...decision, decision: "SKIP" }, personId: OWNER_ID, projectName: "web", fence: [] })).toEqual({ status: "refused", reason: "invalid" });
     expect(attempts).toEqual([]);
-    expect(await work.decide({ orgId: ORG, card, decision, personId: OWNER_ID, projectName: "web" })).toEqual({ status: "refused", reason: "method_not_allowed" });
+    expect(await work.decide({ orgId: ORG, card, decision, personId: OWNER_ID, projectName: "web", fence: [] })).toEqual({ status: "refused", reason: "method_not_allowed" });
     expect(attempts).toHaveLength(1);
     expect(attempts[0]).toMatchObject({
       kind: "workflow-document", subjectId: "task-1", outcome: "approve", seen: { revision: 3, artifactDigest: card.artifactDigest },
@@ -65,10 +65,10 @@ describe("what rovara up does with what a chat adapter hands it", () => {
   it("presents the same proof when the same account presses the same card again (so the gate answers the repeat), and another proof for another account or card", async () => {
     const { chat, attempts } = make();
     const work = chat.work("examplechat");
-    await work.decide({ orgId: ORG, card, decision, personId: OWNER_ID, projectName: "web" });
-    await work.decide({ orgId: ORG, card, decision: { ...decision, eventId: "d2" }, personId: OWNER_ID, projectName: "web" });
-    await work.decide({ orgId: ORG, card, decision: { ...decision, eventId: "d3", actor: { ...decision.actor, userId: "user2" } }, personId: OWNER_ID, projectName: "web" });
-    await work.decide({ orgId: ORG, card: { ...card, requestId: "4f2504e0-4f89-41d3-9a0c-0305e82c3301" }, decision, personId: OWNER_ID, projectName: "web" });
+    await work.decide({ orgId: ORG, card, decision, personId: OWNER_ID, projectName: "web", fence: [] });
+    await work.decide({ orgId: ORG, card, decision: { ...decision, eventId: "d2" }, personId: OWNER_ID, projectName: "web", fence: [] });
+    await work.decide({ orgId: ORG, card, decision: { ...decision, eventId: "d3", actor: { ...decision.actor, userId: "user2" } }, personId: OWNER_ID, projectName: "web", fence: [] });
+    await work.decide({ orgId: ORG, card: { ...card, requestId: "4f2504e0-4f89-41d3-9a0c-0305e82c3301" }, decision, personId: OWNER_ID, projectName: "web", fence: [] });
     const tokens = attempts.map((attempt) => attempt.credentials[0]!.token);
     expect(tokens[0]).toBe(tokens[1]);
     expect(new Set(tokens).size).toBe(3);
