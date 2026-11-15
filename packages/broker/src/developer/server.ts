@@ -15,6 +15,9 @@ import {
   TaskPeopleDisplayReadRequestSchema,
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
+  DEVELOPER_AUTH_REQUEST_SECONDS,
+  DEVELOPER_STEP_UP_ACR,
+  DEVELOPER_STEP_UP_WINDOW_SECONDS,
   EndDeveloperSessionsRequestSchema,
   SetDisplayNameRequestSchema,
   SetMyNameBodySchema,
@@ -54,12 +57,22 @@ import {
   type SlackAuthCheckResponse,
   type SlackUserByEmailRequest,
   type SlackUserByEmailResponse,
+  type ListPasskeysRequest,
+  type ListPasskeysResponse,
+  type RemovePasskeyRequest,
+  type RemovePasskeyResponse,
+  type RemovePersonPasskeysRequest,
+  type RemovePersonPasskeysResponse,
+  type SetFactorEmailRequest,
+  type SetFactorEmailResponse,
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
-import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
+import { createFactorAdmin } from "./factor-admin.js";
+import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
+import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk } from "./tokens.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
@@ -74,12 +87,16 @@ export interface DeveloperIdentityDependencies {
   directory: SlackDirectory;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
+  /** Lane ID part 2: the factors Code owns for a step-up. Absent: a step-up is refused for everyone (no code is issued), and every other sign-in is as before. */
+  stepUp?: StepUpDependencies;
 }
 export interface HttpResult { statusCode: number; headers: Record<string, string>; body: string; cookies?: string[] }
 /** The invoke's answer: the broker's contract, plus a refusal for a request that is not one. */
 export type ChannelMembersResult = ChannelMembersResponse | { ok: false; error: "invalid_request" };
 
 const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
+/** A company sign-in's auth_time this far ahead of the clock is not believed. */
+const AUTH_TIME_SKEW_SECONDS = 120;
 // The PR-feedback review page, or the read-only task page, which may name one document and the earlier version it came from.
 // Spec 062 FR-031: also a channel link page, /review/link/<32-character code>.
 const REVIEW_RETURN_TO = /^\/review\/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task(?:\?doc=(?:requirements|design|coding-plan)(?:&from=[1-9][0-9]{0,2})?)?)?|link\/[A-Za-z0-9_-]{32})$/i;
@@ -193,7 +210,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     issueAccessToken(deps.signer, {
       issuer: config.issuer, subject: session.developerId, amr: session.amr, env: config.env, sessionId: session.sessionId, now: deps.now(),
       ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience, scopes: (session.scopes ?? []).filter((scope) => client.scopes?.includes(scope as ClientScope) === true) } }),
+      ...(session.stepUpAt === undefined || session.stepUpMethod === undefined ? {} : { stepUp: { at: session.stepUpAt, method: session.stepUpMethod } }),
     });
+  const factorAdmin = createFactorAdmin({
+    env: config.env, store, email: deps.stepUp?.email, companyAdmin: deps.stepUp?.companyAdmin, now: deps.now, log: deps.log,
+    // As a refresh checks: the session's method is still on, and was on when it started.
+    methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, session.amr === "slack" ? config.slack.since : config.oidc?.since),
+  });
+  const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
   const registeredClient = async (clientId: string): Promise<SignInClientRecord | undefined> =>
@@ -238,7 +262,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const request = await store.chooseMethod(requestId, method);
       if (request === undefined) return expired();
       try {
-        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState);
+        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState, request.stepUp === true);
       } catch (error) {
         return serverError(error, "/v1/auth/authorize", request.clientRedirectUri, request.clientState);
       }
@@ -268,9 +292,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (methods.length === 0) {
       return toClient(redirectUri, { error: "access_denied", state: clientState, error_description: "developer sign-in is not enabled in this AgentX environment; ask an admin to run agentx signin enable slack" });
     }
+    // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
+    const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
+    // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
+    if (stepUp && deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
     let request: AuthRequestRecord;
     try {
       request = await store.createAuthRequest({
+        ...(stepUp ? { stepUp: true as const } : {}),
         clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url"),
         ...(client === undefined ? {} : { clientId: client.clientId }),
         // Spec 065 FR-002: a scope the registration does not allow is dropped, not refused.
@@ -279,7 +308,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (methods.length === 1) {
         const method = methods[0]!;
         if (await store.chooseMethod(request.id, method) === undefined) return expired();
-        return await toProvider(request.id, request.nonce, method, redirectUri, clientState);
+        return await toProvider(request.id, request.nonce, method, redirectUri, clientState, stepUp);
       }
     } catch (error) {
       return serverError(error, "/v1/auth/authorize", redirectUri, clientState);
@@ -326,9 +355,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return toClient(clientRedirect, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: clientState });
   }
 
-  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string): Promise<HttpResult> {
+  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string, stepUp = false): Promise<HttpResult> {
     try {
-      return redirect(await provider(method).authorizeUrl({ state: requestId, nonce, redirectUri: endpoint(`/callback/${method}`) }));
+      return redirect(await provider(method).authorizeUrl({
+        state: requestId, nonce, redirectUri: endpoint(`/callback/${method}`), ...(stepUp ? { reauthenticate: { maxAgeSeconds: DEVELOPER_STEP_UP_WINDOW_SECONDS } } : {}),
+      }));
     } catch (error) {
       return providerFailure(error, method, clientRedirect, clientState);
     }
@@ -433,15 +464,39 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       deps.log({ event: "signin.browser_succeeded", method, developerId });
       return browserReturn(request.browserReturnTo, true, session.sessionId);
     }
-    const agentxCode = await store.issueCode({
+    const grant: CodeGrant & { codeChallenge: string; redirectUri: string } = {
       developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
       ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
       ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       // FR-005: only a company sign-in can make an administrator.
       ...(method === "oidc" && identity.administrator === true ? { administrator: true as const } : {}),
-    });
-    deps.log({ event: "signin.succeeded", method, developerId, linkedToSlack: slackUserId !== undefined, ...(request.clientId === undefined ? {} : { clientId: request.clientId }) });
-    return client({ code: agentxCode });
+    };
+    if (request.stepUp === true) {
+      // Lane ID part 2: a company sign-in's own re-authentication counts when it says when it happened (auth_time) and that is inside the window. A Slack round trip never counts.
+      const nowSeconds = Math.floor(deps.now() / 1000);
+      const authTime = method === "oidc" ? identity.authTime : undefined;
+      // It must also be no earlier than this sign-in request (less the skew): an older company session that the issuer simply reused is not a re-authentication.
+      const requestedAt = request.expiresAt - DEVELOPER_AUTH_REQUEST_SECONDS;
+      if (authTime !== undefined && nowSeconds - authTime <= DEVELOPER_STEP_UP_WINDOW_SECONDS && authTime - nowSeconds <= AUTH_TIME_SKEW_SECONDS && authTime >= requestedAt - AUTH_TIME_SKEW_SECONDS) {
+        deps.log({ event: "signin.step_up_succeeded", method, stepUpMethod: "company_reauth", developerId });
+        return issueCode({ ...grant, stepUpAt: Math.min(authTime, nowSeconds), stepUpMethod: "company_reauth" }, request.clientState);
+      }
+      // ID-STEPUP-FOLLOWUPS (a): the code goes only to the person's factor email as the record held it BEFORE this sign-in (captured at their first sign-in, or set by a company admin).
+      // The provider's email, now or ever since, never chooses or moves it.
+      const started = await stepUpPages.start(grant, request.clientState, existing?.factorEmail);
+      if (typeof started !== "string") return started;
+      deps.log({ event: "signin.step_up_refused", method, developerId, reason: started });
+      return client({ error: "access_denied", error_description: started === "limited" ? STEP_UP_TEXT.limited : STEP_UP_TEXT.noFactor });
+    }
+    return issueCode(grant, request.clientState);
+  }
+
+  /** Issues the code for the client and sends the browser back to it. A step-up's grant carries its time and method. */
+  async function issueCode(grant: CodeGrant & { codeChallenge: string; redirectUri: string }, clientState: string, status: 302 | 303 = 302): Promise<HttpResult> {
+    const agentxCode = await store.issueCode(grant);
+    deps.log({ event: "signin.succeeded", method: grant.amr, developerId: grant.developerId, linkedToSlack: grant.slackUserId !== undefined, ...(grant.clientId === undefined ? {} : { clientId: grant.clientId }), ...(grant.stepUpMethod === undefined ? {} : { stepUpMethod: grant.stepUpMethod }) });
+    const back = toClient(grant.redirectUri, { code: agentxCode, state: clientState });
+    return { ...back, statusCode: status };
   }
 
   async function authorizationCodeGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {
@@ -580,6 +635,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     jwks_uri: endpoint("/.well-known/jwks.json"), response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS, revocation_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS,
     subject_types_supported: ["public"], id_token_signing_alg_values_supported: ["RS256"], scopes_supported: ["openid"],
+    ...(deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined ? {} : { acr_values_supported: [DEVELOPER_STEP_UP_ACR] }),
   });
 
   async function route(method: string, pathname: string, url: URL, body: string | undefined, headers: Record<string, string | undefined>): Promise<HttpResult> {
@@ -613,20 +669,35 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           return callback("slack", url.searchParams, headers);
         case "/v1/auth/callback/oidc":
           return callback("oidc", url.searchParams, headers);
+        case "/v1/auth/step-up":
+          return stepUpPages.show(headers);
       }
     }
+    if (method === "POST" && pathname === "/v1/auth/step-up/email") return stepUpPages.sendEmail(headers);
+    if (method === "POST" && pathname === "/v1/auth/step-up/verify") return stepUpPages.verify(headers, new URLSearchParams(body ?? ""));
+    if (method === "POST" && pathname === "/v1/auth/step-up/continue") return stepUpPages.continueWithoutPasskey(headers);
+    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/options") return stepUpPages.passkeyOptions(headers);
+    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/verify") return stepUpPages.passkeyVerify(headers, body);
+    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/register") return stepUpPages.passkeyRegister(headers, body);
     if (method === "POST" && pathname === "/v1/auth/token") return token(new URLSearchParams(body ?? ""), headers.authorization);
     if (method === "POST" && pathname === "/v1/auth/revoke") return revokeToken(new URLSearchParams(body ?? ""), headers.authorization);
     return jsonResult(404, { error: "not_found" });
   }
 
-  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
+  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/") || pathname.startsWith("/v1/auth/step-up");
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse> => {
+      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
+      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
+    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse> => {
     if ("kind" in event) {
+      // ID-STEPUP-FOLLOWUPS: the factor email and passkeys. Each checks the caller's own live session (and, for a change, its fresh step-up) in this table.
+      if (event.kind === "list-passkeys") return factorAdmin.listPasskeys(event);
+      if (event.kind === "remove-passkey") return factorAdmin.removePasskey(event);
+      if (event.kind === "remove-person-passkeys") return factorAdmin.removePersonPasskeys(event);
+      if (event.kind === "set-factor-email") return factorAdmin.setFactorEmail(event);
       // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);
