@@ -71,7 +71,7 @@
     {
       "path": "tests/contract/sign-in-access-check.test.ts",
       "rule": "secret",
-      "blob": "5a251c69d8816506fe1ae3a1d71295a8cd71a791",
+      "blob": "2530860d0d828fd43418779257bfd2524f1130e9",
       "reason": "mainline commit fcc0206a, fake test value"
     },
     {
