@@ -13,7 +13,7 @@ import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
 import { withTestRule } from "../proof/verification-report.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
-import { readOwnerNote } from "../task-flow/owner-note.js";
+import { ownerRoundPlaceOf, readOwnerNote, readOwnerRoundPlace } from "../task-flow/owner-note.js";
 import { readTask } from "../task-flow/reads.js";
 import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
@@ -120,7 +120,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   const found2 = sendBackProblems(workflow);
   // A round the owner started (a send-back or findings decision just made) always carries the owner's words, even when no check or review problem was recorded (a change ready to
   // publish, coding that stopped): the coder is never handed only the plan or a CI/conflict fix prompt while the owner's instructions sit unread.
-  const ownerRound = ownerStartedRound(workflow);
+  const ownerRound = await ownerStartedRound(deps, task.taskId, workflow);
   let prompt: string;
   let approvedPlan: WorkflowApprovedPlan | undefined;
   if (workflow.fixSource === "ci" && found2.length === 0 && !ownerRound) {
@@ -192,13 +192,18 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
 }
 
 /**
- * Whether this coding round is the one an owner's send-back or findings decision just started: the newest decision is theirs (not Rovara's own autofix) AND it moved the workflow to this
- * very revision. A later round (a CI, conflict or feedback fix after the pull request was opened, which adds no decision) is not the owner's, so it keeps its own prompt and evidence.
+ * Whether this coding round is the one an owner's send-back or findings decision started (its first run, or a retry of it after its run failed or stopped): the newest decision is theirs (not Rovara's
+ * own autofix), no fix after the pull request opened is under way, no feedback was decided since, and the round is where the decision put it (the very next revision, or the code and program step its
+ * note kept: a finished round leaves new code, a program's next build is another step). A later round keeps its own prompt and evidence.
  */
-function ownerStartedRound(workflow: WorkflowSnapshot): boolean {
+async function ownerStartedRound(deps: TaskFlowDeps, taskId: string, workflow: WorkflowSnapshot): Promise<boolean> {
   const last = workflow.decisions.at(-1);
-  return last !== undefined && last.decision === "REQUEST_CHANGES" && last.actorRole !== "AGENTX" && (last.source === "SEND_BACK" || last.source === "FINDINGS")
-    && last.workflowRevision + 1 === workflow.revision;
+  if (last === undefined || last.decision !== "REQUEST_CHANGES" || last.actorRole === "AGENTX" || (last.source !== "SEND_BACK" && last.source !== "FINDINGS")) return false;
+  if (last.workflowRevision + 1 === workflow.revision) return true;
+  if (workflow.fixSource !== undefined || (workflow.feedbackDecisions ?? []).some((decision) => decision.workflowRevision > last.workflowRevision)) return false;
+  const place = await readOwnerRoundPlace(deps.store, taskId, last.requestId).catch(() => undefined);
+  const here = ownerRoundPlaceOf(workflow);
+  return place !== undefined && place.candidateDigest === here.candidateDigest && place.programStepId === here.programStepId;
 }
 
 /**

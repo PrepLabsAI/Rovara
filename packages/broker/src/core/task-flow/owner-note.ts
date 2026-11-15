@@ -8,13 +8,32 @@ const KEEP_SECONDS = 400 * 86_400;
 
 export const ownerNoteKey = (taskId: string, requestId: string): DocumentKey => ({ pk: `DEVTASK#${taskId}`, sk: `OWNER_NOTE#${requestId}` });
 
-/** The step that keeps the words. Written once with the decision, so a note exists if and only if its decision does. */
-export function ownerNoteItem(input: { taskId: string; requestId: string; text: string; now: Date }): TransactItem {
+/**
+ * Where the round the decision started stands: the code it starts from and the program step it codes. A retry of that round (after its run failed or stopped) is at the same place; any later round is not
+ * (a finished round leaves new code, a program's next build is another step, a fix after the pull request opened has its own source). Empty strings stand for none.
+ */
+export interface OwnerRoundPlace { candidateDigest: string; programStepId: string }
+
+export const ownerRoundPlaceOf = (workflow: { candidate?: { digest: string } | undefined; programStepId?: string | undefined }): OwnerRoundPlace =>
+  ({ candidateDigest: workflow.candidate?.digest ?? "", programStepId: workflow.programStepId ?? "" });
+
+/** The step that keeps the words. Written once with the decision, so a note exists if and only if its decision does. `place` is where the round the decision started stands. */
+export function ownerNoteItem(input: { taskId: string; requestId: string; text: string; now: Date; place?: OwnerRoundPlace }): TransactItem {
   return {
     kind: "put",
-    item: { ...ownerNoteKey(input.taskId, input.requestId), entityType: "OWNER_NOTE", taskId: input.taskId, requestId: input.requestId, text: input.text, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.now.getTime() / 1000) + KEEP_SECONDS },
+    item: {
+      ...ownerNoteKey(input.taskId, input.requestId), entityType: "OWNER_NOTE", taskId: input.taskId, requestId: input.requestId, text: input.text,
+      ...(input.place === undefined ? {} : { candidateDigest: input.place.candidateDigest, programStepId: input.place.programStepId }),
+      [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.now.getTime() / 1000) + KEEP_SECONDS,
+    },
     condition: when.absent(),
   };
+}
+
+/** Where the round a decision started stands, as its note kept it; undefined when no note or no place was kept. */
+export async function readOwnerRoundPlace(store: Pick<DocumentStore, "get">, taskId: string, requestId: string): Promise<OwnerRoundPlace | undefined> {
+  const found = await store.get(ownerNoteKey(taskId, requestId));
+  return typeof found?.["candidateDigest"] === "string" && typeof found["programStepId"] === "string" ? { candidateDigest: found["candidateDigest"], programStepId: found["programStepId"] } : undefined;
 }
 
 /** The words kept for a decision, or undefined (a decision made before notes were kept, or one with none). */
