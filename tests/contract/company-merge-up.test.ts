@@ -160,11 +160,11 @@ describe("named T-lane known gaps (not isolation claims)", () => {
     expect(response.statusCode).toBe(503);
     expect(response.body).not.toContain("foreign-canary");
   });
-  it("T3/T5 client repositories and project creation callbacks have no company argument", async () => {
+  it("T5 client callbacks receive the authenticated person for membership-bound AWS checks", async () => {
     const h = harness(COMPANY_B.orgId);
     h.deps.clientRepositories = vi.fn(async () => []);
     expect((await h.call("/v1/dev/client/repositories")).statusCode).toBe(200);
-    expect(h.deps.clientRepositories).toHaveBeenCalledExactlyOnceWith();
+    expect(h.deps.clientRepositories).toHaveBeenCalledExactlyOnceWith(PERSON);
     h.deps.createClientProject = vi.fn(async () => { h.project(); return { name: "shared-project", latestRevision: 1 }; });
     expect((await h.call("/v1/dev/client/projects", "POST", { repository: "example/api" })).statusCode).toBe(404);
     expect(h.deps.createClientProject).toHaveBeenCalledExactlyOnceWith(PERSON, { repository: "example/api" });
