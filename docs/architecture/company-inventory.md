@@ -1,4 +1,4 @@
-389 record kinds: 38 company-scoped, 10 install-wide, 341 needs-company. 174 routes: 11 company-scoped, 2 install-wide, 161 needs-company.
+390 record kinds: 38 company-scoped, 10 install-wide, 342 needs-company. 174 routes: 11 company-scoped, 2 install-wide, 161 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -61,6 +61,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:DEVELOPER | needs-company | other | no | - | T1/T2: reused family: sign-in identity is install-wide, State-table task indexes need a company check; mixed family is not marked safe. |
 | record | pk:DEVELOPER_LIMIT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:DEVTASK; entity:DEVELOPER_TASK | needs-company | State table | no | - | T1/T2/T3: includes spec 067 READER#person records (no entityType) on the task partition. Task/detail/events/reader-list reads check the task company, including viewer fallback; reader writes and project-member authority still need company fences (named known gaps). |
+| record | entity:OWNER_NOTE | needs-company | State table | no | - | DEC 198 task actions: the owner's full words for a send-back or a findings round, on the task partition (DEVTASK#<task>, OWNER_NOTE#<request>). Written and read only after the task's owned read checks its company; same class as pk:DEVTASK until T1 proves every task-partition read. |
 | record | pk:E2E_FEATURE_VERIFIER; entity:E2E_FEATURE_VERIFIER | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:E2E_MODEL_ROUTES | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:EMAIL; entity:DEVELOPER_EMAIL | company-scoped | sign-in table | no | - | Nonimplicit company sign-in writes ORG-scoped EMAIL keys; implicit keeps the original key. Company-aware resolution uses the caller company and validates target membership. |
