@@ -169,6 +169,12 @@ describe("the client's reads", () => {
     });
     expect((await client.getLatestCheckRun(REPO, { branch: "release/2026" }, { name: "e2e-real" }, ORG))?.headSha).toBe(SHA_B);
     expect(requests.map((request) => request.path)).toEqual(["/repos/acme/svc/branches/release/2026", `/repos/acme/svc/commits/${SHA_B}/check-runs`]);
+    const moved = fakeClient({
+      "/repos/acme/svc/branches/main": json({ commit: { sha: SHA_B } }),
+      [`/repos/acme/svc/commits/${SHA_B}/check-runs`]: json({ check_runs: [run({ head_sha: SHA_A })] }),
+      [`/repos/acme/svc/commits/${SHA_B}/status`]: json({ sha: SHA_B, statuses: [] }),
+    });
+    expect(await moved.client.getLatestCheckRun(REPO, { branch: "main" }, { name: "e2e-real" }, ORG)).toBeUndefined();
     const gone = fakeClient({});
     expect(await gone.client.getLatestCheckRun(REPO, { branch: "main" }, { name: "e2e-real" }, ORG)).toBeUndefined();
     const odd = fakeClient({ "/repos/acme/svc/branches/main": json({ commit: { sha: "nope" } }) });
