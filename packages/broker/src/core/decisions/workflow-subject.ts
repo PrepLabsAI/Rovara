@@ -15,6 +15,7 @@ import {
 } from "@agentx/contracts";
 import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
+import { workflowWriteOps } from "../task-flow/flow-guard.js";
 
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
 /** What a refused decision says when the structured plan it names cannot be read back. */
@@ -85,8 +86,6 @@ export function waitingDocumentDigest(workflow: WorkflowSnapshot): string | unde
   const type = currentDocumentType(workflow);
   return workflow.artifacts.filter((artifact) => artifact.type === type).at(-1)?.sha256;
 }
-
-const jsonOf = <T>(value: T): never => JSON.parse(JSON.stringify(value)) as never;
 
 /**
  * The default mapping (decision 45.3): the local owner is the owner of every task on this install and decides as the task's owner. A repository collaborator whom the Approvers seam verified (a comment from someone
@@ -206,7 +205,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const taskId = loaded.request.subject.id;
       const extra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
       return {
-        ops: [change.set("workflow", jsonOf(after)), change.set("updatedAt", at)],
+        ops: [...workflowWriteOps(workflow, after).ops, change.set("updatedAt", at)],
         extra,
         result: { workflow: after },
       };

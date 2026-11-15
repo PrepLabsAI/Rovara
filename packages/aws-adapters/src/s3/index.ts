@@ -14,7 +14,7 @@
 // `overwrite: true` is a plain PUT (S3 keeps the last whole object; a reader never sees half of one).
 //
 // Errors never carry S3's own words (they can name the bucket or the key): a refusal is one of the port's errors, and anything else is `S3ObjectStorageError` with a fixed sentence.
-import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, type PutObjectCommandInput } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectVersionsCommand, ListObjectsV2Command, PutObjectCommand, type PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { ObjectConflictError, ObjectMetaError, ObjectTooBigError, assertObjectKey, assertObjectMeta, assertObjectPrefix, type ObjectMeta, type ObjectPutOptions, type ObjectStat, type ObjectStorage } from "@agentx/contracts";
 
 /** The largest object one PUT may carry (S3's own limit). */
@@ -40,7 +40,7 @@ const DELETE_ROUNDS = 100;
 const PUT_ATTEMPTS = 3;
 
 /** The commands this adapter sends. A real `S3Client` is one; tests give a faithful fake. */
-export type S3ObjectCommand = PutObjectCommand | GetObjectCommand | HeadObjectCommand | DeleteObjectCommand | DeleteObjectsCommand | ListObjectsV2Command;
+export type S3ObjectCommand = PutObjectCommand | GetObjectCommand | HeadObjectCommand | DeleteObjectCommand | DeleteObjectsCommand | ListObjectsV2Command | ListObjectVersionsCommand;
 export interface S3ObjectClient {
   send(command: S3ObjectCommand): Promise<unknown>;
 }
@@ -93,6 +93,27 @@ const isMissing = (error: unknown): boolean => ["NoSuchKey", "NotFound"].include
 /** 412: the condition failed (the key is taken, or the ETag moved). 409: S3 refused one of two conditional writes that ran at once. Both mean another writer won. */
 const isConflict = (error: unknown): boolean => ["PreconditionFailed", "ConditionalRequestConflict"].includes(nameOf(error)) || statusOf(error) === 412 || statusOf(error) === 409;
 const unavailable = (what: string): S3ObjectStorageError => new S3ObjectStorageError(`the object store could not ${what} (S3 refused or did not answer)`);
+
+/** List calls one version delete makes at most when its caller sets no bound. */
+const VERSION_LISTS_MAX = 1_000;
+
+/** Reads one versioned listing: the versions AND the delete markers under `prefix`. Anything it cannot read (an entry with no version id, a truncated page with no markers) fails, never reads as empty. */
+function versionPageOf(answer: unknown, prefix: string): { entries: Array<{ Key: string; VersionId: string }>; next?: { key: string; versionId: string } } {
+  const page = (answer ?? {}) as { Versions?: unknown; DeleteMarkers?: unknown; IsTruncated?: unknown; NextKeyMarker?: unknown; NextVersionIdMarker?: unknown };
+  const listed = [page.Versions ?? [], page.DeleteMarkers ?? []];
+  if (!listed.every(Array.isArray)) throw unavailable("read the list of versions");
+  const entries: Array<{ Key: string; VersionId: string }> = [];
+  for (const entry of (listed as unknown[][]).flat() as Array<{ Key?: unknown; VersionId?: unknown } | null>) {
+    if (typeof entry?.Key !== "string") throw unavailable("read the list of versions");
+    // Only keys under the exact prefix are ever deleted, whatever the listing returns.
+    if (!entry.Key.startsWith(prefix)) continue;
+    if (typeof entry.VersionId !== "string" || entry.VersionId === "") throw unavailable("read the list of versions");
+    entries.push({ Key: entry.Key, VersionId: entry.VersionId });
+  }
+  if (page.IsTruncated !== true) return { entries };
+  if (typeof page.NextKeyMarker !== "string" || page.NextKeyMarker === "" || typeof page.NextVersionIdMarker !== "string" || page.NextVersionIdMarker === "") throw unavailable("page the list of versions");
+  return { entries, next: { key: page.NextKeyMarker, versionId: page.NextVersionIdMarker } };
+}
 
 /**
  * When the bucket's lifecycle rule ends this object, from S3's `x-amz-expiration` (`expiry-date="Fri, 21 Dec 2012 00:00:00 GMT", rule-id="..."`), or undefined when no rule applies.
@@ -254,6 +275,56 @@ export class S3ObjectStorage implements ObjectStorage {
       } catch { throw unavailable("delete the objects"); }
     }
     return false;
+  }
+
+  /**
+   * A person's erase (DEC 212): deletes EVERY stored version under `prefix`, the current objects, the non-current versions and the delete markers, by key and version id (`ListObjectVersions` paged with its
+   * markers, then `DeleteObjects` with `VersionId`, at most 1,000 at a time), so a versioned bucket keeps nothing until its old-version expiry. Not part of the port: only the erase walk asks for it.
+   * The next page is listed BEFORE the page it follows is deleted, so a marker always names a version that still exists; a pass that found anything is followed by another from the start (a version written
+   * meanwhile is not left). Fails closed: a listing that cannot be made or read throws; a batch delete that reports any per-key error answers false; `stopAt` (epoch ms) is checked before every list
+   * call but the first and answers `out_of_time`; at most `maxLists` list calls (false after). True only when a whole pass found nothing. A fault's text is never kept (it may carry a key).
+   */
+  async deleteEveryVersion(prefix: string, options: { stopAt?: number | undefined; maxLists?: number } = {}): Promise<boolean | "out_of_time"> {
+    assertObjectPrefix(prefix);
+    const maxLists = options.maxLists ?? VERSION_LISTS_MAX;
+    let lists = 0;
+    type Entry = { Key: string; VersionId: string };
+    type Page = { entries: Entry[]; next?: { key: string; versionId: string } };
+    const list = async (from?: Page["next"]): Promise<Page | "out_of_time" | "rounds"> => {
+      if (lists >= maxLists) return "rounds";
+      if (lists > 0 && options.stopAt !== undefined && this.#now() >= options.stopAt) return "out_of_time";
+      lists += 1;
+      let answer: unknown;
+      try {
+        answer = await this.#client.send(new ListObjectVersionsCommand({ Bucket: this.#bucket, Prefix: prefix, MaxKeys: 1_000, ...(from === undefined ? {} : { KeyMarker: from.key, VersionIdMarker: from.versionId }), ...this.#owner }));
+      } catch { throw unavailable("list the versions to delete"); }
+      return versionPageOf(answer, prefix);
+    };
+    const remove = async (entries: readonly Entry[]): Promise<boolean> => {
+      for (let at = 0; at < entries.length; at += 1_000) {
+        let answer: { Errors?: unknown[] } | undefined;
+        try {
+          answer = (await this.#client.send(new DeleteObjectsCommand({ Bucket: this.#bucket, Delete: { Objects: entries.slice(at, at + 1_000).map(({ Key, VersionId }) => ({ Key, VersionId })), Quiet: true }, ...this.#owner }))) as typeof answer;
+        } catch { throw unavailable("delete the versions"); }
+        if (!Array.isArray(answer?.Errors ?? []) || (answer?.Errors?.length ?? 0) > 0) return false;
+      }
+      return true;
+    };
+    for (;;) {
+      const first = await list();
+      if (typeof first === "string") return first === "out_of_time" ? "out_of_time" : false;
+      let page: Page = first;
+      let found = 0;
+      for (;;) {
+        const next = page.next === undefined ? undefined : await list(page.next);
+        found += page.entries.length;
+        if (page.entries.length > 0 && !(await remove(page.entries))) return false;
+        if (typeof next === "string") return next === "out_of_time" ? "out_of_time" : false;
+        if (next === undefined) break;
+        page = next;
+      }
+      if (found === 0) return true;
+    }
   }
 
   /**

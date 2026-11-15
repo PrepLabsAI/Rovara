@@ -133,3 +133,85 @@ describe("hadProofSection", () => {
     for (let level = 0; level <= 4; level += 1) expect(section(level)).toEqual(["### Proof", "", "Proof is being updated for the latest change."]);
   });
 });
+
+describe("192a injected real-model input", () => {
+  const run = { schemaVersion: 1 as const, candidateDigest: DIGEST, items: [{ checkId: "readiness:0", result: "passed" as const }] };
+  const scripted = { ...proof(), items: [{ ...proof().items[0]!, checkId: "readiness:0" }], scriptedReplies: [{ checkId: "readiness:0", taskMade: 1, counted: 0 }] };
+  const wf = () => ({ candidate: { digest: DIGEST }, verification: { candidateDigest: DIGEST, results: [{ checkId: "unit", status: "PASS" }] } }) as never;
+  it("reads once and maps worker readiness ids through recorded order", async () => {
+    const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(scripted) } });
+    const realModelRun = vi.fn(async () => run);
+    const context = await loadProofContext({ actions: t.actions, realModelRun }, task, wf(), approved, [operation(1)] as never);
+    expect(context?.checkDependencies?.get("unit")).toEqual([{ dependencyId: "scripted_replies", trust: "simulated", replies: "task_made" }]);
+    expect(context?.realModelRun).toEqual(run);
+    expect(realModelRun).toHaveBeenCalledExactlyOnceWith(DIGEST);
+    expect(t.counts.operations).toBe(0);
+    expect(t.counts.artifacts).toBe(1);
+  });
+  it("does not invoke the reader without current checks or a plan", async () => {
+    const t = actionsOf();
+    const realModelRun = vi.fn(async () => run);
+    await loadProofContext({ actions: t.actions, realModelRun }, task, workflow(false), approved);
+    await loadProofContext({ actions: t.actions, realModelRun }, task, wf(), undefined);
+    expect(realModelRun).not.toHaveBeenCalled();
+  });
+  it("reader faults, malformed and stale runs leave only unconfirmed facts with no leaked cause", async () => {
+    const secret = `gh${"p"}_${"x".repeat(36)}`;
+    for (const reader of [async () => { throw new Error(secret); }, async () => ({ ...run, candidateDigest: "2".repeat(64) }), async () => ({ ...run, items: secret }) as never]) {
+      const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(scripted) } });
+      const context = await loadProofContext({ actions: t.actions, realModelRun: reader }, task, wf(), approved, [operation(1)] as never);
+      expect(context?.realModelRun).toBeUndefined();
+      expect(context?.checkDependencies?.get("unit")?.[0]?.replies).toBe("task_made");
+      expect(JSON.stringify(context)).not.toContain(secret);
+    }
+  });
+  it("times out through the existing guard and ignores a late read result", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (value: typeof run) => void;
+      const pending = loadProofContext({ actions: actionsOf().actions, realModelRun: () => new Promise((resolve) => { finish = resolve; }) }, task, wf(), approved, []);
+      await vi.advanceTimersByTimeAsync(1_501);
+      const context = await pending;
+      expect(context?.realModelRun).toBeUndefined();
+      finish(run);
+      await Promise.resolve();
+      expect(context?.realModelRun).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+  it("a present unreadable or unmappable reply part invalidates the entire proof", async () => {
+    for (const scriptedReplies of ["broken", [{ checkId: "unknown", taskMade: 1, counted: 0 }], [{ checkId: "readiness:1", taskMade: 1, counted: 0 }]]) {
+      const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify({ ...scripted, scriptedReplies }) } });
+      const context = await loadProofContext({ actions: t.actions }, task, wf(), approved, [operation(1)] as never);
+      expect(context?.testProof).toBeUndefined();
+    }
+  });
+  it("zero task-made replies do not add provenance or change the legacy context", async () => {
+    const value = { ...scripted, scriptedReplies: [{ checkId: "readiness:0", taskMade: 0, counted: 2 }] };
+    const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(value) } });
+    expect(await loadProofContext({ actions: t.actions }, task, wf(), approved, [operation(1)] as never)).toEqual({ plan, testProof: value });
+  });
+});
+
+it("does not revive an older proof when the newest proof has unreadable reply provenance", async () => {
+  const old = proof();
+  const malformed = { ...old, scriptedReplies: [{ checkId: "unit", taskMade: "broken", counted: 0 }] };
+  const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(old), [key("op-2")]: JSON.stringify(malformed) } });
+  expect(await loadTestProof(t.actions, task, DIGEST, [operation(1), operation(2)] as never)).toBeUndefined();
+});
+
+it("keeps the legacy context byte-identical for missing and malformed root artifacts", async () => {
+  for (const stored of [{}, { [key("op-1")]: "{broken" }, { [key("op-1")]: JSON.stringify({ schemaVersion: 99 }) }]) {
+    const t = actionsOf({ stored });
+    expect(JSON.stringify(await loadProofContext({ actions: t.actions }, task, workflow(true), approved, [operation(1)] as never))).toBe(JSON.stringify({ plan }));
+  }
+});
+
+it("a synchronously throwing or non-function real-model reader is a fixed refusal", async () => {
+  const secret = `gh${"p"}_${"z".repeat(36)}`;
+  for (const realModelRun of [() => { throw new Error(secret); }, "unsupported" as never]) {
+    const context = await loadProofContext({ actions: actionsOf().actions, realModelRun }, task, workflow(true), approved, []);
+    expect(context?.realModelRun).toBeUndefined();
+    expect(JSON.stringify(context)).not.toContain(secret);
+  }
+});

@@ -2,6 +2,7 @@
 export * from "./adapter-registry.js";
 export * from "./build-systems.js";
 export * from "./email.js";
+export * from "./fake-approvers.js";
 export * from "./fake-channel-adapter.js";
 export * from "./fake-image-registry.js";
 export * from "./fake-scheduler.js";
@@ -18,3 +19,5 @@ export * from "./record-source.js";
 export * from "./secret-error.js";
 export * from "./secret-stores.js";
 export * from "./transactional-outbox.js";
+
+export * from "./company-change-feed.js";

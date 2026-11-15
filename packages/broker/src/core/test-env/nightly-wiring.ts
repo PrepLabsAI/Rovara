@@ -7,7 +7,7 @@
 //   - the coverage maps live in the `object-storage` port (`createObjectMapStore`), one object per digest under a prefix of the company and project, so a project's maps are one prefix.
 import { createHash } from "node:crypto";
 import {
-  CoverageMapSchema, ObjectConflictError, canonicalJson,
+  CoverageMapSchema, ObjectConflictError, canonicalJson, IMPLICIT_COMPANY_ID, OrgIdSchema,
   type DueSchedule, type ObjectStorage, type OrgId, type ScheduleSubscription, type Scheduler, type TestEnvironment,
 } from "@agentx/contracts";
 import type { TestEnvDeps } from "./deps.js";
@@ -100,4 +100,15 @@ export function subscribeNightly(input: { scheduler: Scheduler; deps: TestEnvDep
     const answer = await fireTestEnvNightly(input.deps, due, input.runs, input.env);
     log({ event: "test_env.nightly_fire", outcome: answer.outcome, ...("reason" in answer ? { reason: answer.reason } : {}), attempt: due.attempt });
   });
+}
+
+/** Bind to the host's trusted stored-project lookup, not to any company claimed by a fire. */
+export function createProjectCompanyResolver(readProject: (project: string) => Promise<Readonly<Record<string, unknown>> | undefined>): (project: string) => Promise<string | undefined> {
+  return async (project) => {
+    const record = await readProject(project);
+    if (record === undefined) return undefined;
+    if (!Object.hasOwn(record, "companyId")) return IMPLICIT_COMPANY_ID;
+    const company = OrgIdSchema.safeParse(record.companyId);
+    return company.success ? company.data : undefined;
+  };
 }

@@ -9,6 +9,7 @@ import {
   GuardError,
   addedFileRule,
   adaptersPackageRule,
+  cloudDeploymentPathRule,
   awsImportFindings,
   awsImportReason,
   boundary,
@@ -26,6 +27,7 @@ import {
   withBoundary,
   type BoundaryData,
   type Finding,
+  type NameSource,
 } from "../../scripts/port-guard.js";
 
 // Lane W0-4 (decision 71/72): Cloud starts consuming Code, so neither side may leak into the other. These tests cover the rules added for that:
@@ -75,7 +77,7 @@ class Lane {
     git(this.dir, "add", "-A");
     git(this.dir, "commit", "-q", "-m", message);
   }
-  guard(options: { allowGuardEdits?: boolean } = {}): Finding[] {
+  guard(options: { allowGuardEdits?: boolean; publicBase?: string; names?: NameSource } = {}): Finding[] {
     return runGuard({ cwd: this.dir, range: "base..lane", gitleaks: "off", names: DEFAULT_NAMES, ...options }).findings;
   }
 }
@@ -213,42 +215,42 @@ describe("private branch names and the private repository name", () => {
 });
 
 describe("the AWS line: four generic adapters are public, everything else AWS stays private", () => {
-  it("refuses a NEW file under an aws/ directory but lets Code's existing files there be edited", () => {
+  it("(plan v3.2) lets a NEW file under an aws/ directory through, as well as an edit to an existing one: Code owns its AWS deployment (DEC 214)", () => {
     const lane = new Lane({ [`packages/broker/src/${AWS}/existing.ts`]: "export const a = 1;\n" });
     lane.write(`packages/broker/src/${AWS}/existing.ts`, "export const a = 2;\n");
     lane.commit("edit");
     expect(lane.guard()).toEqual([]);
     lane.write(`packages/broker/src/${AWS}/handler.ts`, "export const h = 1;\n");
     lane.commit("add");
-    const findings = lane.guard();
-    expect(findings.map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-aws:packages/broker/src/${AWS}/handler.ts`]);
-    expect(findings[0]!.detail).toMatch(/Cloud AWS handler/);
+    expect(lane.guard()).toEqual([]);
   });
 
-  it("refuses a NEW file under infra/ (Cloud's CDK) but lets an existing one be edited", () => {
+  it("(plan v3.2) lets a NEW file under infra/ through, as well as an edit to an existing one", () => {
     const lane = new Lane({ [`${INFRA}/lib/app.ts`]: "export const app = 1;\n" });
     lane.write(`${INFRA}/lib/app.ts`, "export const app = 2;\n");
     lane.commit("edit");
     expect(lane.guard()).toEqual([]);
     lane.write(`${INFRA}/lib/queue-stack.ts`, "export const q = 1;\n");
     lane.commit("add");
-    expect(lane.guard().map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-aws:${INFRA}/lib/queue-stack.ts`]);
+    expect(lane.guard()).toEqual([]);
   });
 
-  it("still fails a new aws/ file that a later commit deletes, because the history is pushed too", () => {
+  it("still fails a new Cloud-only aws/ file that a later commit deletes, because the history is pushed too", () => {
     const lane = new Lane();
-    lane.write(`packages/broker/src/${AWS}/handler.ts`, "export {};\n");
+    lane.write(`packages/broker/src/${AWS}/billing-sync.ts`, "export {};\n");
     lane.commit("add");
-    git(lane.dir, "rm", "-q", `packages/broker/src/${AWS}/handler.ts`);
+    git(lane.dir, "rm", "-q", `packages/broker/src/${AWS}/billing-sync.ts`);
     git(lane.dir, "commit", "-q", "-m", "remove");
-    expect(rules(lane.guard())).toEqual(["cloud-aws"]);
+    expect(rules(lane.guard())).toEqual(["cloud-path"]);
   });
 
-  it("names the rule for a path on its own (the tree test uses this)", () => {
-    expect(addedFileRule(`a/${AWS}/b.ts`)?.rule).toBe("cloud-aws");
-    expect(addedFileRule(`${INFRA}/bin/x.ts`)?.rule).toBe("cloud-aws");
+  it("names the rule for a path on its own", () => {
+    expect(addedFileRule(`a/${AWS}/b.ts`)).toBeNull();
+    expect(addedFileRule(`${INFRA}/bin/x.ts`)).toBeNull();
+    expect(addedFileRule(`a/${AWS}/billing.ts`)?.rule).toBe("cloud-path");
+    expect(addedFileRule(`${INFRA}/lib/model-proxy.ts`)?.rule).toBe("cloud-path");
     expect(addedFileRule("packages/aws-adapters/src/s3/store.ts")).toBeNull();
-    expect(addedFileRule(`packages/${AWS}-notes/x.ts`)).toBeNull();
+    expect(addedFileRule(`packages/${AWS}-notes/billing.ts`)).toBeNull();
     expect(addedFileRule("docs/aws-setup.md")).toBeNull();
   });
 
@@ -362,27 +364,27 @@ describe("a sanctioned AWS adapter and text fixtures (A-H1)", () => {
     expect(boundary().awsSdkSanctioned.map((entry) => entry.id)).toEqual(["bedrock-model-provider"]);
   });
 
-  it("does not read an import that is text inside a string in a test file, but still reads a real one, and a string outside tests", () => {
+  it("(plan v3.2) lets a test import the CDK and any AWS client, as text or for real, and still reads a string outside tests and outside the deployment", () => {
     const asText = `const cdk = \`${imp("Queue", j(CDK, "/aws-sqs"))}new Queue();\`;\n`;
     expect(awsImportFindings("tests/unit/x.test.ts", asText, true)).toEqual([]);
-    expect(awsImportFindings("tests/unit/x.test.ts", `const t = 'x'; ${imp("Queue", j(CDK, "/aws-sqs"))}`, true)).toHaveLength(1);
-    expect(awsImportFindings("tests/unit/x.test.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toHaveLength(1);
+    expect(awsImportFindings("tests/unit/x.test.ts", `const t = 'x'; ${imp("Queue", j(CDK, "/aws-sqs"))}`, true)).toEqual([]);
+    expect(awsImportFindings("tests/contract/x.test.ts", imp("Template", j(CDK, "/assertions")) + imp("EC2Client", SDK("ec2")), true)).toEqual([]);
     expect(awsImportFindings("packages/worker/src/x.ts", asText, true)).toHaveLength(1);
   });
 
-  it("opens no path for a real AWS client: the shipped data has no fixture paths, so a real import under tests/fixtures or an env-detect test name is read", () => {
+  it("opens no path for a real AWS client outside Code's deployment and test files: the shipped data has no fixture paths, and a helper or fixture under tests/ is not a test file", () => {
     expect(boundary().awsImportFixturePaths).toEqual([]);
     const real = `export { EC2Client } from "${SDK("ec2")}";\n`;
-    for (const path of ["tests/fixtures/ec2.ts", "tests/unit/worker-env-detect-evil.ts", "tests/unit/worker-env-detect-x.test.ts"]) {
+    for (const path of ["tests/fixtures/ec2.ts", "tests/unit/worker-env-detect-evil.ts", "tests/support/gateway-handler.ts", "packages/worker/src/fixtures/ec2.ts", "packages/worker/src/env-detect/evil.ts", "scripts/x.ts"]) {
       expect(awsImportFindings(path, real, true), path).toHaveLength(1);
     }
-    expect(awsImportFindings("tests/fixtures/stack.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toHaveLength(1);
+    expect(awsImportFindings("packages/worker/src/fixtures/stack.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toHaveLength(1);
   });
 
   it("still lets data name fixture paths (the key stays), for one path only", () => {
-    withBoundary({ ...boundary(), awsImportFixturePaths: ["tests/fixtures/"] }, () => {
-      expect(awsImportFindings("tests/fixtures/stack.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toEqual([]);
-      expect(awsImportFindings("tests/other/stack.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toHaveLength(1);
+    withBoundary({ ...boundary(), awsImportFixturePaths: ["packages/worker/src/fixtures/"] }, () => {
+      expect(awsImportFindings("packages/worker/src/fixtures/stack.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toEqual([]);
+      expect(awsImportFindings("packages/worker/src/other/stack.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toHaveLength(1);
     });
   });
 
@@ -624,5 +626,260 @@ describe("the Cloud-only package list (A-M4) and the data that drives it (A13, A
     expect(importFindings("packages/a/src/x.ts", 'import x from "../../../b/x.js";\n')).toEqual([]);
     expect(importFindings("tests/unit/x.test.ts", "const t = 'import x from \"../../../x.js\"';\n")).toEqual([]);
     expect(importFindings("tests/unit/x.test.ts", 'import x from "../../../../x.js";\n')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Migration plan v3.2 (DEC 214-218): Code owns its AWS deployment, and commits already public on mainline are not judged again for private names.
+
+describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it is not (DEC 214)", () => {
+  const INVENTED = nameSourceFromWords("test-salt", { "the private repository name": ["zorblaxvault"] });
+
+  it("passes Code's own deployment files: a new infra/ stack and aws/ handler with CDK and AWS SDK imports, and their test", () => {
+    const lane = new Lane();
+    lane.write(`${INFRA}/lib/core-queue.ts`, imp("Stack", CDK) + imp("Construct", "constructs") + "export const s = [Stack, Construct];\n");
+    lane.write(`packages/broker/src/${AWS}/worker-machines/host.ts`, imp("EC2Client", SDK("ec2")) + imp("SchedulerClient", SDK("scheduler")) + "export const h = [EC2Client, SchedulerClient];\n");
+    lane.write("tests/contract/core-queue.test.ts", imp("Template", j(CDK, "/assertions")) + imp("LambdaClient", SDK("lambda")) + "export const t = [Template, LambdaClient];\n");
+    lane.commit("Code's deployment");
+    expect(lane.guard()).toEqual([]);
+  });
+
+  it("fails a deployment file that holds a private name: a private branch, or the private repository's name (invented here)", () => {
+    const lane = new Lane();
+    lane.write(`${INFRA}/lib/core-queue.ts`, `// ported from ${INTEG}/0519\nexport const q = 1;\n`);
+    lane.write(`packages/broker/src/${AWS}/host.ts`, "// see PrepLabs/Zorblax-Vault for the rest\nexport const h = 1;\n");
+    lane.commit("names");
+    expect(lane.guard().map((f) => `${f.rule}:${f.file}`)).toContain(`private-name:${INFRA}/lib/core-queue.ts`);
+    expect(lane.guard({ names: INVENTED }).map((f) => `${f.rule}:${f.file}:${f.detail}`)).toContain(`private-name:packages/broker/src/${AWS}/host.ts:the private repository name`);
+  });
+
+  it.each([
+    `${INFRA}/lib/model-gateway.ts`,
+    `${INFRA}/lib/modelProxy.ts`,
+    `${INFRA}/lib/${CLD}-identity.ts`,
+    `${INFRA}/lib/${CLD}Gateway/stack.ts`,
+    `packages/broker/src/${AWS}/billing/invoices.ts`,
+    `packages/broker/src/${AWS}/stripe-webhook.ts`,
+    `packages/broker/src/${AWS}/company-admin/routes.ts`,
+    `packages/broker/src/${AWS}/developer-routes/org-admin.ts`,
+    `packages/broker/src/${AWS}/team-record-wiring.ts`,
+    `${INFRA}/lib/audit-ledger-table.ts`,
+    `${INFRA}/lib/web-app.ts`,
+    `${INFRA}/lib/embedder-function.ts`,
+    `${INFRA.toUpperCase()}/LIB/BILLING.ts`,
+    `${INFRA}/lib/gateway.ts`,
+    `${INFRA}/lib/gateways-stack.ts`,
+    `packages/broker/src/${AWS}/invoicing.ts`,
+    `packages/broker/src/${AWS}/team-records.ts`,
+    `packages/broker/src/${AWS}/org-routes.ts`,
+    `packages/broker/src/${AWS}/orgs/list.ts`,
+    `packages/broker/src/${AWS}/organization-settings.ts`,
+    `${INFRA}/lib/devices-stack.ts`,
+    `${INFRA}/lib/audit-ledgers.ts`,
+    `${INFRA}/lib/web-apps.ts`,
+    `${INFRA}/lib/models-gateway.ts`,
+    `${INFRA}/lib/my${CLD}.ts`,
+    `${INFRA}/lib/b\u0456lling.ts`,
+    `packages/broker/src/${AWS}/tool-budget.ts`,
+    `${INFRA}/lib/llmgateway.ts`,
+    `${INFRA}/lib/aigateway.ts`,
+    `packages/broker/src/${AWS}/orgadmin/index.ts`,
+    `packages/broker/src/${AWS}/metering.ts`,
+    `packages/broker/src/${AWS}/tenantBilling.ts`,
+    `packages/broker/src/${AWS}/mybilling.ts`,
+    `packages/broker/src/${AWS}/2billing.ts`,
+    `${INFRA}/lib/LlmGateway.ts`,
+    `packages/broker/src/${AWS}/tenantBudgets.ts`,
+    `packages/broker/src/${AWS}/teamDevices.ts`,
+    `${INFRA}/lib/sharedGateway.ts`,
+    `packages/broker/src/${AWS}/${CLD}/map.ts`,
+    `${INFRA}/${CLD}/search/index.ts`,
+    `${INFRA}/lib/${CLD}-watch-x.ts`,
+    `${INFRA}/lib/${CLD}.watch.ts`,
+    `${INFRA}/lib/${CLD}-9.ts`,
+    `${INFRA}/lib/api/gateway.ts`,
+    `${INFRA}/lib/model-api-gateway.ts`,
+    `${INFRA}/lib/llm-proxy.ts`,
+    `${INFRA}/lib/ai-proxy.ts`,
+    `${INFRA}/lib/gate-way.ts`,
+    `${INFRA}/lib/GateWay.ts`,
+    `packages/broker/src/${AWS}/payments.ts`,
+    `packages/broker/src/${AWS}/usage-quota.ts`,
+    `packages/broker/src/${AWS}/quotas/check.ts`,
+    `packages/broker/src/${AWS}/subscriptions.ts`,
+    `packages/broker/src/${AWS}/entitlements.ts`,
+    `${INFRA}/lib/${CLD.toUpperCase()}Stack.ts`,
+  ])("refuses a NEW Cloud-only deployment path, as cloud-path: %s", (path) => {
+    expect(addedFileRule(path)?.rule).toBe("cloud-path");
+  });
+
+  it.each([
+    `${INFRA}/lib/core-engine.ts`,
+    `${INFRA}/lib/${CLD}watch-alarms.ts`,
+    `${INFRA}/lib/${CLD}formation-limits.ts`,
+    `packages/broker/src/${AWS}/admin-reads.ts`,
+    `packages/broker/src/${AWS}/worker-machines/core-dispatch-host.ts`,
+    `packages/broker/src/${AWS}/developer-routes.ts`,
+    `packages/broker/src/${AWS}/connector-ledger.ts`,
+    `packages/broker/src/${AWS}/storage-organic.ts`,
+    `${INFRA}/lib/${CLD}front-cache.ts`,
+    `${INFRA}/lib/${CLD[0]!.toUpperCase()}${CLD.slice(1)}WatchAlarms.ts`,
+    `${INFRA}/lib/nat-gateway.ts`,
+    `${INFRA}/lib/internet-gateway.ts`,
+    `${INFRA}/lib/api-gateway-stack.ts`,
+    `${INFRA}/lib/gateway-endpoints.ts`,
+    `${INFRA}/lib/vpc-gateway-endpoint.ts`,
+    `${INFRA}/lib/vpn-gateway.ts`,
+    `${INFRA}/lib/virtual-private-gateway.ts`,
+    `${INFRA}/lib/direct-connect-gateway.ts`,
+    `${INFRA}/lib/NatGateway.ts`,
+    `${INFRA}/lib/web-application-firewall.ts`,
+    `${INFRA}/lib/${CLD[0]!.toUpperCase()}${CLD.slice(1)}9Stack.ts`,
+    `docs/billing.md`,
+    `packages/broker/src/billing-notes.ts`,
+  ])("lets an ordinary Code path through: %s", (path) => {
+    expect(cloudDeploymentPathRule(path)).toBeNull();
+    expect(addedFileRule(path)).toBeNull();
+  });
+
+  it("fails a lane that adds a Cloud-only deployment file, and the accepted list cannot excuse it (cloud-path is not acceptable)", () => {
+    const lane = new Lane();
+    lane.write(`${INFRA}/lib/model-gateway.ts`, "export const g = 1;\n");
+    lane.commit("gateway");
+    const blob = git(lane.dir, "rev-parse", `lane:${INFRA}/lib/model-gateway.ts`).trim();
+    const accepted = [{ path: `${INFRA}/lib/model-gateway.ts`, rule: "cloud-aws" as const, blob, reason: "a test that tries to excuse it" }];
+    const findings = runGuard({ cwd: lane.dir, range: "base..lane", gitleaks: "off", names: DEFAULT_NAMES, accepted }).findings;
+    expect(findings.map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-path:${INFRA}/lib/model-gateway.ts`]);
+  });
+
+  it("still refuses an off-list AWS client or the CDK in a NEW file outside the deployment and tests", () => {
+    expect(awsImportReason("packages/worker/src/new.ts", SDK("ec2"), true)).not.toBeNull();
+    expect(awsImportReason("packages/worker/src/new.ts", CDK, true)).not.toBeNull();
+    expect(awsImportReason(`packages/broker/src/${AWS}/new.ts`, SDK("ec2"), true)).toBeNull();
+    expect(awsImportReason(`${INFRA}/lib/new.ts`, CDK, true)).toBeNull();
+    expect(awsImportReason("tests/unit/new.test.ts", SDK("ec2"), true)).toBeNull();
+    expect(awsImportReason("packages/worker/src/new.test.ts", SDK("ec2"), true)).not.toBeNull();
+    expect(awsImportReason(`packages/broker/src/${AWS}/new.test.ts`, SDK("ec2"), true)).toBeNull();
+    expect(awsImportReason(`${INFRA}/test/stack.test.ts`, CDK, true)).toBeNull();
+    expect(awsImportReason(`${ADAPTERS}/src/sqs/queue.ts`, SDK("ec2"), true)).not.toBeNull();
+  });
+});
+
+describe("plan v3.2: commits already public on mainline are not judged again for private names (--public-base)", () => {
+  /** code/next (base), a mainline that branched from it with its own commits, and a lane (the sync) that merges mainline. */
+  function sync(mainlineCommits: ReadonlyArray<Readonly<Record<string, string | null>>>): Lane {
+    const lane = new Lane();
+    git(lane.dir, "switch", "-q", "-c", "mainline", "base");
+    mainlineCommits.forEach((files, index) => {
+      for (const [path, text] of Object.entries(files)) {
+        if (text === null) git(lane.dir, "rm", "-q", path);
+        else lane.write(path, text);
+      }
+      lane.commit(`mainline ${index + 1}`);
+    });
+    git(lane.dir, "switch", "-q", "lane");
+    git(lane.dir, "merge", "-q", "--no-ff", "-m", "Merge mainline into code/next", "mainline");
+    // public mainline as CI sees it: fetched from origin
+    git(lane.dir, "update-ref", ORIGIN_MAINLINE, "refs/heads/mainline");
+    return lane;
+  }
+  const NAME_IN = `from ${INTEG}/0519\n`;
+  const ORIGIN_MAINLINE = "refs/remotes/origin/mainline";
+
+  it("skips a private name in a mainline commit (its patch and its message) that the tip no longer holds", () => {
+    const lane = sync([{ "docs/a.md": NAME_IN }, { "docs/a.md": "from a branch\n" }]);
+    git(lane.dir, "commit", "-q", "--allow-empty", "-m", "noop");
+    expect(rules(lane.guard())).toContain("private-name");
+    expect(lane.guard({ publicBase: ORIGIN_MAINLINE })).toEqual([]);
+  });
+
+  it("still fails a private name in a NEW commit (not on mainline), with the same text as a skipped one", () => {
+    const lane = sync([{ "docs/a.md": NAME_IN }, { "docs/a.md": "from a branch\n" }]);
+    lane.write("docs/b.md", NAME_IN);
+    lane.commit("new");
+    const sha = git(lane.dir, "rev-parse", "--short=8", "HEAD").trim();
+    lane.write("docs/b.md", "gone\n");
+    lane.commit(`again ${INTEG}/0519`);
+    const findings = lane.guard({ publicBase: ORIGIN_MAINLINE });
+    expect(findings.map((f) => `${f.rule}:${f.file}:${f.commit ?? ""}`)).toEqual([`private-name:docs/b.md:${sha}`, `private-name:(commit message or author):${git(lane.dir, "rev-parse", "--short=8", "HEAD").trim()}`]);
+  });
+
+  it("still fails a private name that a mainline commit brought and the tip still holds: the net diff is read in full", () => {
+    const lane = sync([{ "docs/a.md": NAME_IN }]);
+    const findings = lane.guard({ publicBase: ORIGIN_MAINLINE });
+    expect(findings.map((f) => `${f.rule}:${f.file}:${f.commit ?? "net"}`)).toEqual(["private-name:docs/a.md:net"]);
+  });
+
+  it("skips only private-name: every other rule still reads the mainline commits", () => {
+    const lane = sync([{ "docs/a.md.orig": "x\n", ".github/workflows/ci.yml": "on: push\n" }, { "docs/a.md.orig": null, ".github/workflows/ci.yml": null }]);
+    expect(lane.guard({ publicBase: ORIGIN_MAINLINE }).map((f) => `${f.rule}:${f.file}`).sort()).toEqual(["guard-files:.github/workflows/ci.yml", "stray-file:docs/a.md.orig"]);
+  });
+
+  it("refuses a public base that is not a commit, loudly", () => {
+    const lane = sync([{ "docs/a.md": "x\n" }]);
+    expect(() => lane.guard({ publicBase: "refs/heads/no-such-branch" })).toThrow(GuardError);
+    git(lane.dir, "update-ref", "-d", ORIGIN_MAINLINE);
+    expect(() => lane.guard({ publicBase: ORIGIN_MAINLINE })).toThrow(GuardError);
+    expect(() => lane.guard({ publicBase: "--all" })).toThrow(GuardError);
+  });
+
+  it("takes only a full branch name: a short name could resolve to a tag a lane pushed at its own tip", () => {
+    const lane = sync([{ "docs/a.md": "x\n" }]);
+    lane.write("docs/b.md", NAME_IN);
+    lane.commit("new");
+    // A tag that shadows the short name, planted at the lane's tip: as a short name it would pass every commit of the lane as public.
+    git(lane.dir, "tag", "mainline", "lane");
+    expect(() => lane.guard({ publicBase: "mainline" })).toThrow(GuardError);
+    expect(() => lane.guard({ publicBase: "refs/tags/mainline" })).toThrow(GuardError);
+    git(lane.dir, "rm", "-q", "docs/b.md");
+    lane.commit("gone");
+    expect(rules(lane.guard({ publicBase: ORIGIN_MAINLINE }))).toEqual(["private-name"]);
+    // only origin's mainline: not a local branch (it can hold unpushed commits), not another remote's or another branch
+    expect(() => lane.guard({ publicBase: "refs/heads/mainline" })).toThrow(GuardError);
+    git(lane.dir, "update-ref", "refs/remotes/private/mainline", "refs/heads/mainline");
+    expect(() => lane.guard({ publicBase: "refs/remotes/private/mainline" })).toThrow(GuardError);
+    expect(() => lane.guard({ publicBase: "refs/remotes/origin/missing" })).toThrow(GuardError);
+  });
+
+  it("judges a file that a merge commit itself adds (no parent had it) as an added file", () => {
+    const lane = sync([{ "docs/a.md": "x\n" }]);
+    git(lane.dir, "reset", "-q", "--hard", "HEAD~1");
+    git(lane.dir, "merge", "-q", "--no-ff", "--no-commit", "mainline");
+    lane.write(`${INFRA}/lib/billing.ts`, "export const b = 1;\n");
+    git(lane.dir, "add", "-A");
+    git(lane.dir, "commit", "-q", "-m", "Merge mainline with a file of its own");
+    git(lane.dir, "rm", "-q", `${INFRA}/lib/billing.ts`);
+    lane.commit("gone");
+    expect(lane.guard({ publicBase: ORIGIN_MAINLINE }).map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-path:${INFRA}/lib/billing.ts`]);
+  });
+});
+
+describe("plan v3.2: a test may import the AWS SDK and the CDK only as Code's deployment test (review of #650)", () => {
+  const BEDROCK_RUNTIME = SDK("bedrock-runtime");
+  const METERING = SDK("marketplace-metering");
+  const COGNITO = SDK("cognito-identity-provider");
+
+  it.each([
+    ["a test file outside tests/, aws/ and infra/", "packages/broker/src/model-gateway.test.ts", BEDROCK_RUNTIME],
+    ["a test under tests/ whose name is Cloud-only work", "tests/unit/billing-meter.test.ts", METERING],
+    ["a .mts test file in a package", "packages/x/src/h.test.mts", COGNITO],
+    ["a camel-cased Cloud-only test name under tests/", "tests/unit/tenantBudgets.test.ts", METERING],
+    ["a Cloud-only test name under aws/", `packages/broker/src/${AWS}/model-gateway.test.ts`, BEDROCK_RUNTIME],
+  ])("refuses %s (%s)", (_name, path, specifier) => {
+    expect(awsImportReason(path, specifier, true)).not.toBeNull();
+  });
+
+  it("fails a lane that parks gateway code in a test file, and passes Code's own deployment test", () => {
+    const lane = new Lane();
+    lane.write("packages/broker/src/model-gateway.test.ts", imp("BedrockRuntimeClient", BEDROCK_RUNTIME) + 'it("x", () => {});\nexport const g = BedrockRuntimeClient;\n');
+    lane.write("tests/unit/billing-meter.test.ts", imp("MarketplaceMeteringClient", METERING) + "export const m = MarketplaceMeteringClient;\n");
+    lane.write("packages/x/src/h.test.mts", imp("CognitoIdentityProviderClient", COGNITO) + "export const c = CognitoIdentityProviderClient;\n");
+    lane.write("tests/contract/core-queue.test.ts", imp("Template", j(CDK, "/assertions")) + imp("SQSClient", SDK("sqs")) + imp("EC2Client", SDK("ec2")) + "export const t = [Template, SQSClient, EC2Client];\n");
+    lane.commit("tests");
+    expect([...new Set(lane.guard().map((f) => `${f.rule}:${f.file}`))].sort()).toEqual([
+      "cloud-aws:packages/broker/src/model-gateway.test.ts",
+      "cloud-aws:packages/x/src/h.test.mts",
+      "cloud-aws:tests/unit/billing-meter.test.ts",
+    ]);
   });
 });

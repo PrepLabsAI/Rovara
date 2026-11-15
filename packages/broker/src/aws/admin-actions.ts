@@ -3,11 +3,14 @@
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
 import type { SignInClientRegistry } from "./developer-routes.js";
 import { randomUUID } from "node:crypto";
-import { DeleteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { z } from "zod";
 import { type DeveloperSignInMethod, SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
 import { emailIndexKey } from "../developer/store.js";
 import { ownerKeyForSubject } from "./lambda.js";
+import { resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { OrgIdSchema } from "@agentx/contracts";
 
 export interface AdminActionDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -19,6 +22,7 @@ export interface AdminActionDependencies {
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
   /** Spec 063: the sign-in clients' registry; absent where developer sign-in is not set up. */
   signInClients?: SignInClientRegistry;
+  companies?: CompanyMembershipReader;
   now(): number;
 }
 export interface ResolvedDeveloper {
@@ -57,7 +61,8 @@ function profileFrom(item: Record<string, unknown> | undefined): ResolvedDevelop
 
 const developerItem = (deps: AdminActionDependencies, developerId: string) => signInItem(deps, { pk: `DEVELOPER#${developerId}`, sk: "META" });
 
-export async function resolveDeveloper(deps: AdminActionDependencies, reference: string): Promise<ResolvedDeveloper> {
+export async function resolveDeveloper(deps: AdminActionDependencies, reference: string, companyId?: string): Promise<ResolvedDeveloper> {
+  const read = async (): Promise<ResolvedDeveloper> => {
   const value = reference.trim();
   if (HEX64.test(value)) {
     const profile = profileFrom(await developerItem(deps, value));
@@ -69,7 +74,8 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
     return { developerId, via: "slack", slackUserId: value, ...(profile === undefined ? {} : { profile }) };
   }
   if (EMAIL.test(value)) {
-    const indexed = await signInItem(deps, emailIndexKey(value));
+    const indexed = await signInItem(deps, emailIndexKey(value, companyId));
+    if (companyId !== undefined && !z.object({ entityType: z.literal("DEVELOPER_EMAIL"), developerId: z.string().regex(HEX64), updatedAt: z.iso.datetime() }).safeParse(indexed).success) throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN);
     // Q4: an email names only someone who signed in with it (from this release on).
     if (typeof indexed?.developerId !== "string" || !HEX64.test(indexed.developerId)) throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN);
     const item = await developerItem(deps, indexed.developerId);
@@ -80,6 +86,14 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
     return { developerId: indexed.developerId, via: "email", ...(profile === undefined ? {} : { profile }) };
   }
   throw agentXError("CONFIG_INVALID", "developer must be a developer ID, an email or a Slack user ID such as U0123456789");
+  };
+  if (companyId === undefined) return read();
+  try {
+    if (!OrgIdSchema.safeParse(companyId).success) throw new Error("unreadable company");
+    const person = await read();
+    if (await resolveCompany(deps.companies, person.developerId) !== companyId) throw new Error("no such person");
+    return person;
+  } catch { throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN); }
 }
 
 /** The membership row's role, and when it was granted (null for a row without that, such as an administrator's). */
@@ -90,20 +104,59 @@ export async function projectGrant(deps: AdminActionDependencies, project: strin
   return { role, grantedAt: typeof response.Item?.grantedAt === "string" ? response.Item.grantedAt : null };
 }
 
+/**
+ * Spec 065: the project's side of a grant, so a project's members can be listed (memberships are keyed by person). Written
+ * and removed in the same transaction as the membership row. Grants made before it are not listed until made again.
+ */
+export function projectMemberKey(project: string, developerId: string): { pk: string; sk: string } {
+  return { pk: `PROJECT_MEMBERS#${project}`, sk: `DEVELOPER#${developerId}` };
+}
+
+/** A transaction's condition failed (or a single write's): the row was not as the write needed it. */
+function conditionFailed(error: unknown): boolean {
+  if (conditional(error)) return true;
+  const reasons = (error as { name?: unknown; CancellationReasons?: Array<{ Code?: unknown } | undefined> }).CancellationReasons;
+  return (error as { name?: unknown }).name === "TransactionCanceledException" && (reasons ?? []).some((reason) => reason?.Code === "ConditionalCheckFailed");
+}
+
+/** Spec 065: a project's members as its side of each grant records them, oldest first. */
+export async function listProjectMembers(deps: AdminActionDependencies, project: string): Promise<Array<{ developerId: string; role: "administrator" | "developer"; grantedAt: string | null }>> {
+  const members: Array<{ developerId: string; role: "administrator" | "developer"; grantedAt: string | null }> = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :developer)",
+      ExpressionAttributeValues: { ":pk": `PROJECT_MEMBERS#${project}`, ":developer": "DEVELOPER#" }, ConsistentRead: true,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    for (const item of page.Items ?? []) {
+      const developerId = typeof item.sk === "string" ? item.sk.slice("DEVELOPER#".length) : "";
+      if (developerId === "" || (item.role !== "administrator" && item.role !== "developer")) continue;
+      members.push({ developerId, role: item.role, grantedAt: typeof item.grantedAt === "string" ? item.grantedAt : null });
+    }
+    start = page.LastEvaluatedKey;
+  } while (start !== undefined);
+  return members.sort((a, b) => (a.grantedAt ?? "").localeCompare(b.grantedAt ?? ""));
+}
+
 /** FR-013.1: a `developer` ProjectMembership row. An administrator row for the same key is kept as it is. */
 export async function grantProjectAccess(deps: AdminActionDependencies, admin: { issuer: string; subject: string }, project: string, developerId: string): Promise<{ granted: true; already: boolean }> {
   const current = await projectGrant(deps, project, developerId);
   if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `that developer already administers ${project}, so there is nothing to grant`);
   if (current?.role === "developer") return { granted: true, already: true };
+  const grantedAt = new Date(deps.now()).toISOString();
   try {
-    await deps.documentClient.send(new PutCommand({
-      TableName: deps.tableName,
-      Item: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}`, entityType: "MEMBERSHIP", ownerKey: developerId, projectName: project, role: "developer",
-        grantId: randomUUID(), grantedBy: admin, grantedAt: new Date(deps.now()).toISOString() },
-      ConditionExpression: "attribute_not_exists(pk)",
-    }));
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Put: {
+        TableName: deps.tableName,
+        Item: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}`, entityType: "MEMBERSHIP", ownerKey: developerId, projectName: project, role: "developer",
+          grantId: randomUUID(), grantedBy: admin, grantedAt },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+      { Put: { TableName: deps.tableName, Item: { ...projectMemberKey(project, developerId), entityType: "PROJECT_MEMBER", role: "developer", grantedAt } } },
+    ] }));
   } catch (error) {
-    if (!conditional(error)) throw error;
+    if (!conditionFailed(error)) throw error;
     // A row appeared between the read and the write: say what it is rather than assume.
     const raced = await projectGrant(deps, project, developerId);
     if (raced?.role === "administrator") throw agentXError("CONFIG_INVALID", `that developer already administers ${project}, so there is nothing to grant`);
@@ -114,17 +167,20 @@ export async function grantProjectAccess(deps: AdminActionDependencies, admin: {
 
 export async function revokeProjectAccess(deps: AdminActionDependencies, project: string, developerId: string): Promise<{ revoked: boolean }> {
   try {
-    await deps.documentClient.send(new DeleteCommand({
-      TableName: deps.tableName,
-      Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` },
-      // Only a grant: an administrator row is never removed by revoking a developer's access.
-      ConditionExpression: "#role = :developer",
-      ExpressionAttributeNames: { "#role": "role" },
-      ExpressionAttributeValues: { ":developer": "developer" },
-    }));
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Delete: {
+        TableName: deps.tableName,
+        Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` },
+        // Only a grant: an administrator row is never removed by revoking a developer's access.
+        ConditionExpression: "#role = :developer",
+        ExpressionAttributeNames: { "#role": "role" },
+        ExpressionAttributeValues: { ":developer": "developer" },
+      } },
+      { Delete: { TableName: deps.tableName, Key: projectMemberKey(project, developerId) } },
+    ] }));
     return { revoked: true };
   } catch (error) {
-    if (conditional(error)) return { revoked: false };
+    if (conditionFailed(error)) return { revoked: false };
     throw error;
   }
 }

@@ -1,3 +1,4 @@
+import { MAX_PEAK_MEMORY_MIB } from "./machine-size.js";
 // The test environment (design proof-test-env, section 4): how a project's code is built and tested, which services are mocked and which are real, which data and accounts a run uses, and
 // which tier it runs in. Rovara PROPOSES it from the repositories (detectors first, then a read-only model session), PROVES it by booting the app and running a smoke test, and a maintainer
 // approves it once. It is a project setting with its own revision. Browser-safe: nothing here imports a Node module.
@@ -425,7 +426,8 @@ export const TestEnvProveReportSchema = z
       )
       .max(TEST_ENV_PROVE_STEPS.length),
     /** The first full run, timed: how long the whole suite takes and how many tests it ran. */
-    fullSuite: z.object({ durationMs: z.number().int().min(0), tests: z.number().int().min(0).max(100_000_000) }).strict().optional(),
+    machineChip: z.enum(["arm64", "x86_64"]).optional(),
+    fullSuite: z.object({ peakMemoryMiB: z.number().min(0).max(MAX_PEAK_MEMORY_MIB).optional(), durationMs: z.number().int().min(0), tests: z.number().int().min(0).max(100_000_000) }).strict().optional(),
     /** The coverage map the full run recorded (a stored artifact's digest), when coverage contexts were on. */
     coverageMapRef: Sha256Schema.optional(),
     services: z.array(z.object({ name: line(80), modeUsed: z.enum(["preprod", "mocked"]) }).strict()).max(32),
