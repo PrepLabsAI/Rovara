@@ -224,17 +224,20 @@ function sendFixed(res: ServerResponse, status: number, body: string, extra: Rec
 }
 
 /** Sends an answer: a stream (`text/event-stream`) chunked, anything else with a length; every write is at most 1 MB. */
-function sendAnswer(res: ServerResponse, answer: { readonly status: number; readonly headers: Readonly<Record<string, string>>; readonly body: string | Uint8Array }, kind: string): void {
+function sendAnswer(res: ServerResponse, answer: { readonly status: number; readonly headers: Readonly<Record<string, string>>; readonly body: string | Uint8Array; readonly truncated?: true }, kind: string): void {
   if (res.headersSent || res.destroyed) return;
   const bytes = typeof answer.body === "string" ? Buffer.from(answer.body, "utf8") : Buffer.from(answer.body);
   const headers: Record<string, string> = { "cache-control": "no-store" };
   for (const [name, value] of Object.entries(answer.headers)) if (!/[\r\n]/u.test(name + value)) headers[name.toLowerCase()] = value;
   headers["x-rovara-model-helper"] = kind;
   const streamed = (headers["content-type"] ?? "").startsWith(SSE_CONTENT_TYPE);
-  if (!streamed) headers["content-length"] = String(bytes.length);
+  if (!streamed) headers["content-length"] = String(bytes.length + (answer.truncated === true ? 1 : 0));
   res.writeHead(answer.status, headers);
   for (let offset = 0; offset < bytes.length; offset += MODEL_HELPER_LIMITS.chunkBytes) res.write(bytes.subarray(offset, offset + MODEL_HELPER_LIMITS.chunkBytes));
-  res.end();
+  // A cut-off is a dropped HTTP response, not a successfully delivered malformed JSON body.
+  // Flush partial bytes first, then omit the final chunk/content byte and close the connection.
+  if (answer.truncated === true) res.write(Buffer.alloc(0), () => res.destroy());
+  else res.end();
 }
 
 /** Starts the helper's listeners. Rejects when a port cannot be bound. */
