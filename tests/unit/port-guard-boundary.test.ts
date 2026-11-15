@@ -698,6 +698,16 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/${CLD}.watch.ts`,
     `${INFRA}/lib/${CLD}-9.ts`,
     `${INFRA}/lib/api/gateway.ts`,
+    `${INFRA}/lib/model-api-gateway.ts`,
+    `${INFRA}/lib/llm-proxy.ts`,
+    `${INFRA}/lib/ai-proxy.ts`,
+    `${INFRA}/lib/gate-way.ts`,
+    `${INFRA}/lib/GateWay.ts`,
+    `packages/broker/src/${AWS}/payments.ts`,
+    `packages/broker/src/${AWS}/usage-quota.ts`,
+    `packages/broker/src/${AWS}/quotas/check.ts`,
+    `packages/broker/src/${AWS}/subscriptions.ts`,
+    `packages/broker/src/${AWS}/entitlements.ts`,
     `${INFRA}/lib/${CLD.toUpperCase()}Stack.ts`,
   ])("refuses a NEW Cloud-only deployment path, as cloud-path: %s", (path) => {
     expect(addedFileRule(path)?.rule).toBe("cloud-path");
@@ -748,7 +758,9 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     expect(awsImportReason(`packages/broker/src/${AWS}/new.ts`, SDK("ec2"), true)).toBeNull();
     expect(awsImportReason(`${INFRA}/lib/new.ts`, CDK, true)).toBeNull();
     expect(awsImportReason("tests/unit/new.test.ts", SDK("ec2"), true)).toBeNull();
-    expect(awsImportReason("packages/worker/src/new.test.ts", SDK("ec2"), true)).toBeNull();
+    expect(awsImportReason("packages/worker/src/new.test.ts", SDK("ec2"), true)).not.toBeNull();
+    expect(awsImportReason(`packages/broker/src/${AWS}/new.test.ts`, SDK("ec2"), true)).toBeNull();
+    expect(awsImportReason(`${INFRA}/test/stack.test.ts`, CDK, true)).toBeNull();
     expect(awsImportReason(`${ADAPTERS}/src/sqs/queue.ts`, SDK("ec2"), true)).not.toBeNull();
   });
 });
@@ -767,15 +779,18 @@ describe("plan v3.2: commits already public on mainline are not judged again for
     });
     git(lane.dir, "switch", "-q", "lane");
     git(lane.dir, "merge", "-q", "--no-ff", "-m", "Merge mainline into code/next", "mainline");
+    // public mainline as CI sees it: fetched from origin
+    git(lane.dir, "update-ref", ORIGIN_MAINLINE, "refs/heads/mainline");
     return lane;
   }
   const NAME_IN = `from ${INTEG}/0519\n`;
+  const ORIGIN_MAINLINE = "refs/remotes/origin/mainline";
 
   it("skips a private name in a mainline commit (its patch and its message) that the tip no longer holds", () => {
     const lane = sync([{ "docs/a.md": NAME_IN }, { "docs/a.md": "from a branch\n" }]);
     git(lane.dir, "commit", "-q", "--allow-empty", "-m", "noop");
     expect(rules(lane.guard())).toContain("private-name");
-    expect(lane.guard({ publicBase: "refs/heads/mainline" })).toEqual([]);
+    expect(lane.guard({ publicBase: ORIGIN_MAINLINE })).toEqual([]);
   });
 
   it("still fails a private name in a NEW commit (not on mainline), with the same text as a skipped one", () => {
@@ -785,24 +800,26 @@ describe("plan v3.2: commits already public on mainline are not judged again for
     const sha = git(lane.dir, "rev-parse", "--short=8", "HEAD").trim();
     lane.write("docs/b.md", "gone\n");
     lane.commit(`again ${INTEG}/0519`);
-    const findings = lane.guard({ publicBase: "refs/heads/mainline" });
+    const findings = lane.guard({ publicBase: ORIGIN_MAINLINE });
     expect(findings.map((f) => `${f.rule}:${f.file}:${f.commit ?? ""}`)).toEqual([`private-name:docs/b.md:${sha}`, `private-name:(commit message or author):${git(lane.dir, "rev-parse", "--short=8", "HEAD").trim()}`]);
   });
 
   it("still fails a private name that a mainline commit brought and the tip still holds: the net diff is read in full", () => {
     const lane = sync([{ "docs/a.md": NAME_IN }]);
-    const findings = lane.guard({ publicBase: "refs/heads/mainline" });
+    const findings = lane.guard({ publicBase: ORIGIN_MAINLINE });
     expect(findings.map((f) => `${f.rule}:${f.file}:${f.commit ?? "net"}`)).toEqual(["private-name:docs/a.md:net"]);
   });
 
   it("skips only private-name: every other rule still reads the mainline commits", () => {
     const lane = sync([{ "docs/a.md.orig": "x\n", ".github/workflows/ci.yml": "on: push\n" }, { "docs/a.md.orig": null, ".github/workflows/ci.yml": null }]);
-    expect(lane.guard({ publicBase: "refs/heads/mainline" }).map((f) => `${f.rule}:${f.file}`).sort()).toEqual(["guard-files:.github/workflows/ci.yml", "stray-file:docs/a.md.orig"]);
+    expect(lane.guard({ publicBase: ORIGIN_MAINLINE }).map((f) => `${f.rule}:${f.file}`).sort()).toEqual(["guard-files:.github/workflows/ci.yml", "stray-file:docs/a.md.orig"]);
   });
 
   it("refuses a public base that is not a commit, loudly", () => {
     const lane = sync([{ "docs/a.md": "x\n" }]);
     expect(() => lane.guard({ publicBase: "refs/heads/no-such-branch" })).toThrow(GuardError);
+    git(lane.dir, "update-ref", "-d", ORIGIN_MAINLINE);
+    expect(() => lane.guard({ publicBase: ORIGIN_MAINLINE })).toThrow(GuardError);
     expect(() => lane.guard({ publicBase: "--all" })).toThrow(GuardError);
   });
 
@@ -816,10 +833,11 @@ describe("plan v3.2: commits already public on mainline are not judged again for
     expect(() => lane.guard({ publicBase: "refs/tags/mainline" })).toThrow(GuardError);
     git(lane.dir, "rm", "-q", "docs/b.md");
     lane.commit("gone");
-    expect(rules(lane.guard({ publicBase: "refs/heads/mainline" }))).toEqual(["private-name"]);
-    // the remote-tracking form CI passes works the same way
-    git(lane.dir, "update-ref", "refs/remotes/origin/mainline", "refs/heads/mainline");
-    expect(rules(lane.guard({ publicBase: "refs/remotes/origin/mainline" }))).toEqual(["private-name"]);
+    expect(rules(lane.guard({ publicBase: ORIGIN_MAINLINE }))).toEqual(["private-name"]);
+    // only origin's mainline: not a local branch (it can hold unpushed commits), not another remote's or another branch
+    expect(() => lane.guard({ publicBase: "refs/heads/mainline" })).toThrow(GuardError);
+    git(lane.dir, "update-ref", "refs/remotes/private/mainline", "refs/heads/mainline");
+    expect(() => lane.guard({ publicBase: "refs/remotes/private/mainline" })).toThrow(GuardError);
     expect(() => lane.guard({ publicBase: "refs/remotes/origin/missing" })).toThrow(GuardError);
   });
 
@@ -832,6 +850,36 @@ describe("plan v3.2: commits already public on mainline are not judged again for
     git(lane.dir, "commit", "-q", "-m", "Merge mainline with a file of its own");
     git(lane.dir, "rm", "-q", `${INFRA}/lib/billing.ts`);
     lane.commit("gone");
-    expect(lane.guard({ publicBase: "refs/heads/mainline" }).map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-path:${INFRA}/lib/billing.ts`]);
+    expect(lane.guard({ publicBase: ORIGIN_MAINLINE }).map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-path:${INFRA}/lib/billing.ts`]);
+  });
+});
+
+describe("plan v3.2: a test may import the AWS SDK and the CDK only as Code's deployment test (review of #650)", () => {
+  const BEDROCK_RUNTIME = SDK("bedrock-runtime");
+  const METERING = SDK("marketplace-metering");
+  const COGNITO = SDK("cognito-identity-provider");
+
+  it.each([
+    ["a test file outside tests/, aws/ and infra/", "packages/broker/src/model-gateway.test.ts", BEDROCK_RUNTIME],
+    ["a test under tests/ whose name is Cloud-only work", "tests/unit/billing-meter.test.ts", METERING],
+    ["a .mts test file in a package", "packages/x/src/h.test.mts", COGNITO],
+    ["a camel-cased Cloud-only test name under tests/", "tests/unit/tenantBudgets.test.ts", METERING],
+    ["a Cloud-only test name under aws/", `packages/broker/src/${AWS}/model-gateway.test.ts`, BEDROCK_RUNTIME],
+  ])("refuses %s (%s)", (_name, path, specifier) => {
+    expect(awsImportReason(path, specifier, true)).not.toBeNull();
+  });
+
+  it("fails a lane that parks gateway code in a test file, and passes Code's own deployment test", () => {
+    const lane = new Lane();
+    lane.write("packages/broker/src/model-gateway.test.ts", imp("BedrockRuntimeClient", BEDROCK_RUNTIME) + 'it("x", () => {});\nexport const g = BedrockRuntimeClient;\n');
+    lane.write("tests/unit/billing-meter.test.ts", imp("MarketplaceMeteringClient", METERING) + "export const m = MarketplaceMeteringClient;\n");
+    lane.write("packages/x/src/h.test.mts", imp("CognitoIdentityProviderClient", COGNITO) + "export const c = CognitoIdentityProviderClient;\n");
+    lane.write("tests/contract/core-queue.test.ts", imp("Template", j(CDK, "/assertions")) + imp("SQSClient", SDK("sqs")) + imp("EC2Client", SDK("ec2")) + "export const t = [Template, SQSClient, EC2Client];\n");
+    lane.commit("tests");
+    expect([...new Set(lane.guard().map((f) => `${f.rule}:${f.file}`))].sort()).toEqual([
+      "cloud-aws:packages/broker/src/model-gateway.test.ts",
+      "cloud-aws:packages/x/src/h.test.mts",
+      "cloud-aws:tests/unit/billing-meter.test.ts",
+    ]);
   });
 });

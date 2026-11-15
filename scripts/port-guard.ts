@@ -4,7 +4,8 @@
 //   cloud-path      a Cloud-only path (decision 41): org/, spend/, audit/, team-record/, devices/, the Cloud web app and audit verifier
 //                   packages, the Cloud upgrade command, the Cloud CDK stacks, the Cloud-only contracts files
 //   cloud-aws       the AWS line (decision 72, O2, as changed by migration plan v3.2, DEC 214): Code owns its own AWS deployment, so a new file under
-//                   an aws/ directory or under infra/ is Code's and is allowed, and Code's deployment code (aws/, infra/) and test files may import the AWS
+//                   an aws/ directory or under infra/ is Code's and is allowed, and Code's deployment code (aws/, infra/) and its tests (*.test.* under tests/,
+//                   aws/ or infra/, whose path names no Cloud-only work) may import the AWS
 //                   SDK and the CDK. Still refused: a private adapter inside the public adapters package (only four generic adapters, DynamoDB, SQS, S3
 //                   and Secrets Manager, live there), and an AWS SDK client or CDK import off that list in the adapters package or in a NEW file
 //                   anywhere else. The list is data (scripts/boundary-allowlist.json), read by this guard and by Cloud's boundary check
@@ -24,7 +25,7 @@
 //   secret          anything gitleaks finds in the range
 //   accepted-stale  an entry of the accepted-findings list whose file the range itself changes or removes (the list must not rot where the range works)
 //
-// Already-public history (--public-base <full branch ref>, CI passes refs/remotes/origin/mainline on the strict pull request run; a short name is refused, as it could resolve to a tag): a commit of the range that is reachable from
+// Already-public history (--public-base refs/remotes/origin/mainline, the only value it takes; CI passes it on the strict pull request run. A short name could resolve to a tag and a local branch could hold unpushed commits): a commit of the range that is reachable from
 // that revision is already public, so its own private-name findings (its patch and its message) are skipped. Only private-name, and only for those
 // commits: the net diff is still read in full, so a private name the range leaves at its tip fails whichever commit brought it, and every other rule
 // still reads every commit.
@@ -41,7 +42,7 @@
 // pattern, never the text it matched. Exit status: 0 clean, 1 findings, 2 the guard could not run (bad range, git or gitleaks missing).
 //
 // Node runs this file directly, so only erasable syntax and only Node's own modules. Usage, from inside the lane's worktree:
-//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <full branch ref>] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
+//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base refs/remotes/origin/mainline] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
 // The controller's extended name list (one regular expression per line) is read from the file named by PORT_GUARD_PRIVATE_NAMES, if set.
 //
 // No name is written in this file or in its tests: the protected words are salted hashes (see NameSource), and the tests use invented names.
@@ -262,8 +263,12 @@ export function adaptersPackageRule(path: string): string | null {
 /** A path in Code's own AWS deployment: under an aws/ directory or under infra/ (DEC 214: Code owns its AWS deployment). */
 const DEPLOYMENT_PATH = /(^|\/)aws\/|^infra\//i;
 
-/** True when a path is a test file (*.test.*): helpers and fixtures under tests/ are not, so they cannot park AWS code there. */
-const isTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/.test(lower);
+/**
+ * True when a test file may import the AWS SDK and the CDK (Code's deployment tests): a *.test.* file under tests/, or under an aws/ or infra/
+ * directory. Not a test file elsewhere (packages/x/src/h.test.ts), and not a helper or fixture under tests/. The caller also refuses a test whose
+ * path names Cloud-only work.
+ */
+const isDeploymentTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/.test(lower) && (/^tests\//.test(lower) || DEPLOYMENT_PATH.test(lower));
 
 /**
  * Words that name Cloud-only work in a deployment path (DEC 214: the model gateway, billing, the company admin backend and the other Cloud-only
@@ -279,9 +284,12 @@ const isTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/.test(lowe
  */
 const CLOUD_DEPLOYMENT_ANYWHERE = [
   "billing", "invoic", "stripe", "metering", "teamrecord", "auditledger", "modelproxy", "modelsproxy", "modelgateway", "modelsgateway",
-  "llmgateway", "aigateway", "companyadmin", "orgadmin", "admincons", "embedder", "webapp", "customdomain",
+  "llmgateway", "aigateway", "llmproxy", "aiproxy", "companyadmin", "orgadmin", "admincons", "embedder", "webapp", "customdomain",
+  "subscription", "entitlement",
 ];
-const CLOUD_DEPLOYMENT_PREFIX = ["pricing", "spend", "budget", "organization", "edition"];
+const CLOUD_DEPLOYMENT_PREFIX = ["pricing", "spend", "budget", "organization", "edition", "payment", "quota", "usagequota"];
+/** Words that make a gateway in the same name the model gateway, whatever AWS word sits between (model-api-gateway). */
+const MODEL_WORDS = new Set(["model", "models", "llm", "llms", "ai"]);
 const CLOUD_DEPLOYMENT_WHOLE = new Set(["org", "orgs", "price", "prices", "meter", "meters", "devices"]);
 const AWS_GATEWAY_BEFORE = new Set([
   "nat", "internet", "api", "apis", "vpc", "vpn", "transit", "egress", "virtual", "private", "customer", "storage", "http", "rest", "websocket", "lb",
@@ -294,9 +302,14 @@ const DEPLOYMENT_DETAIL =
 
 /** Why a deployment path names Cloud-only work, or null (also null for a path outside aws/ and infra/). */
 export function cloudDeploymentPathRule(path: string): string | null {
+  if (!DEPLOYMENT_PATH.test(posix.normalize(path.replaceAll("\\", "/").normalize("NFKC")).replace(/^\.\//, "").toLowerCase())) return null;
+  return cloudWordsReason(path);
+}
+
+/** Why a path's words name Cloud-only work (the word rule above, wherever the path is), or null. */
+export function cloudWordsReason(path: string): string | null {
   const unified = path.replaceAll("\\", "/");
-  if (!DEPLOYMENT_PATH.test(posix.normalize(unified.normalize("NFKC")).replace(/^\.\//, "").toLowerCase())) return null;
-  if (/[^\x20-\x7e]/.test(unified)) return "a letter outside ASCII in a path under aws/ or infra/ (a look-alike letter could hide a Cloud-only name)";
+  if (/[^\x20-\x7e]/.test(unified)) return "a letter outside ASCII in the path (a look-alike letter could hide a Cloud-only name)";
   // Words with where they came from: the path segment (between slashes) and the run of letters and digits (between separators) each sits in.
   const words: Array<{ word: string; segment: number; run: number }> = [];
   let run = 0;
@@ -324,7 +337,11 @@ export function cloudDeploymentPathRule(path: string): string | null {
     // An AWS gateway (nat-gateway, NatGateway, gateway-endpoints) names its kind in the same file or folder name, never across a slash.
     const awsGateway = (before !== undefined && before.segment === segment && AWS_GATEWAY_BEFORE.has(before.word)) ||
       word.slice(7).startsWith("endpoint") || (next !== undefined && next.segment === segment && next.word.startsWith("endpoint"));
-    if (word.startsWith("gateway") && !awsGateway) return DEPLOYMENT_DETAIL;
+    // "gateway" also when written in two words (gate-way), and always when a model, llm or ai word comes earlier in the same name.
+    const sameName = next !== undefined && next.segment === segment ? next.word : "";
+    const isGateway = word.startsWith("gateway") || (word === "gate" && sameName.startsWith("way"));
+    const modelBefore = words.slice(0, i).some((entry) => entry.segment === segment && MODEL_WORDS.has(entry.word));
+    if (isGateway && (modelBefore || !awsGateway)) return DEPLOYMENT_DETAIL;
     for (let n = 1; n <= 3 && i + n <= words.length; n += 1) {
       // "web application" (as in a web application firewall) is an AWS name, not the Cloud web app.
       const candidate = words.slice(i, i + n).map((entry) => entry.word).join("").replaceAll("webapplication", "");
@@ -356,7 +373,8 @@ export function awsImportReason(file: string, specifier: string, isNewFile: bool
   const lower = file.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
   const inAdapters = lower.startsWith(adaptersDir(data));
   if (!inAdapters && !isNewFile) return null;
-  if (!inAdapters && (DEPLOYMENT_PATH.test(lower) || isTestPath(lower))) return null;
+  // Code's deployment code and its deployment tests may import any of them, unless the path names Cloud-only work (a "test" that is gateway code).
+  if (!inAdapters && (DEPLOYMENT_PATH.test(lower) || isDeploymentTestPath(lower)) && cloudWordsReason(file.replaceAll("\\", "/").replace(/^\.\//, "")) === null) return null;
   if (!inAdapters && data.awsSdkPublicPaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
   if (!inAdapters && data.awsImportFixturePaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
   const base = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : (specifier.split("/")[0] ?? "");
@@ -1446,8 +1464,8 @@ export function runGuard(options: GuardOptions): GuardResult {
     const publicTip = git(options.cwd, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${options.publicBase}^{commit}`], true).trim();
     if (options.publicBase.startsWith("-") || /\s/.test(options.publicBase) || publicTip === "") throw new GuardError(`"${options.publicBase}" (--public-base) is not a commit in this repository (did you fetch?)`);
     // A full branch name only: a short name such as origin/mainline is looked up among tags first, so a pushed tag of that name could pass a lane's own tip as public.
-    if (!/^refs\/(?:remotes|heads)\/\S+$/.test(options.publicBase) || git(options.cwd, ["show-ref", "--verify", options.publicBase], true).trim() === "") {
-      throw new GuardError(`"${options.publicBase}" (--public-base) must be a full branch name, such as refs/remotes/origin/mainline (a short name can resolve to a tag)`);
+    if (options.publicBase !== PUBLIC_BASE || git(options.cwd, ["show-ref", "--verify", options.publicBase], true).trim() === "") {
+      throw new GuardError(`"${options.publicBase}" (--public-base) must be ${PUBLIC_BASE}: only the public mainline as fetched from origin is already public (a short name can resolve to a tag, a local branch can hold unpushed commits)`);
     }
     notPublic = new Set(git(options.cwd, ["rev-list", `${range.base}..${range.tip}`, "--not", publicTip]).split("\n").filter((row) => row !== ""));
   }
@@ -1478,6 +1496,8 @@ export function formatFinding(finding: Finding): string {
 // Command line.
 
 export const DEFAULT_RANGE = "origin/code/next..HEAD";
+/** The one revision --public-base accepts: public mainline as fetched from origin. */
+export const PUBLIC_BASE = "refs/remotes/origin/mainline";
 
 export function main(argv: readonly string[]): number {
   let range = DEFAULT_RANGE;
@@ -1498,7 +1518,7 @@ export function main(argv: readonly string[]): number {
     else if (arg === "--public-base") {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("-")) {
-        console.error("port-guard: --public-base needs a full branch ref such as refs/remotes/origin/mainline");
+        console.error("port-guard: --public-base needs refs/remotes/origin/mainline");
         return 2;
       }
       publicBase = value;
@@ -1523,7 +1543,7 @@ export function main(argv: readonly string[]): number {
       i += 1;
     }
     else if (arg === "--help" || arg === "-h") {
-      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <full branch ref>] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
+      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base refs/remotes/origin/mainline] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
       return 0;
     } else {
       console.error(`port-guard: unknown argument ${arg}`);
