@@ -155,6 +155,7 @@ export * from "./record-trust.js";
 export * from "./open-ids.js";
 export * from "./standing-instructions.js";
 export * from "./signing-key.js";
+export * from "./policy-hook.js";
 export * from "./task-budget.js";
 export * from "./model-not-enabled.js";
 export * from "./org-scoped-keys.js";
@@ -386,4 +387,7 @@ export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInp
 export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";
 
+export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
+
+export * from "./ports/company-log.js";

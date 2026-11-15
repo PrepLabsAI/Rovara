@@ -20,6 +20,7 @@ export interface AgentXNaming {
   readonly workspaceKeyAlias: string;
   /** KMS alias of the key that signs developer access tokens (spec 025). */
   readonly developerTokenKeyAlias: string;
+  readonly taskTokenKeyAlias?: string;
   readonly alertsTopicName: string;
   alarmName(suffix: string): string;
   readonly connectorSecretPrefix: string;
@@ -114,6 +115,7 @@ export function environmentNaming(env: string): AgentXNaming {
     resourcePrefix: `agentx-${name}`,
     workspaceKeyAlias: `alias/agentx/${name}/workspaces`,
     developerTokenKeyAlias: `alias/agentx/${name}/developer-tokens`,
+    taskTokenKeyAlias: `alias/agentx/${name}/task-tokens`,
     alertsTopicName: `agentx-${name}-alerts`,
     alarmName: (suffix) => `agentx-${name}-${suffix}`,
     connectorSecretPrefix: environmentConnectorSecretPrefix(name),
