@@ -17,7 +17,7 @@ import { stageAudit } from "./admission.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem } from "./dispatch-rows.js";
 import { findingAcceptItem, type FindingAcceptMethod } from "./finding-accept.js";
-import { ownerNoteItem } from "./owner-note.js";
+import { ownerNoteItem, ownerRoundPlaceOf } from "./owner-note.js";
 import { CLOSED_TASK, NEVER_STARTED_TASK, WAITING_FOR_SPEND, admitRound, loadTaskAsOwner, ownerWords, parseBody, requireMayStartWork, waitingForSpend, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
 import { commitWorkflow, readWorkspace, runDispatchRow } from "./stage-machine.js";
@@ -72,7 +72,7 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     ...(due === undefined ? [] : [dispatchRowItem(deps, task.taskId, next.revision, due, now)]),
     ...(acting.items ?? []),
     ...(accepts === 0 ? [] : [findingAcceptItem({ taskId: task.taskId, requestId: request.requestId, candidateDigest: request.candidateDigest, person: caller.principal, method: via, fingerprints: request.resolutions.filter((resolution) => resolution.action === "ACCEPT").map((resolution) => resolution.findingId), at: now, now: deps.now?.() ?? new Date() })]),
-    ...(fixes === 0 ? [] : [ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, text: fixInstructions(workflow, next, request), now: deps.now?.() ?? new Date() })]),
+    ...(fixes === 0 ? [] : [ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, text: fixInstructions(workflow, next, request), now: deps.now?.() ?? new Date(), place: ownerRoundPlaceOf(next) })]),
     ...stageAudit(deps, {
       eventId: `task.findings_resolved:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.findings_resolved", subject: { type: "task", id: task.taskId },
       // Counts only: the findings' text is reviewer output and the reasons are the owner's words, kept on the workflow.
