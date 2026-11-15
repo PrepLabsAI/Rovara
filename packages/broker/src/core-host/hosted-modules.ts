@@ -299,17 +299,17 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
   return {
     ...timing,
     async keepWholeHold(reservationId, mark) {
+      // What the run's unreported spend is kept at: never less than the fixed estimate. The hold's room is kept first (the whole hold, as spent); what the room does not cover is booked
+      // as the estimate entry. A hold its checkpoints nearly used up thus never keeps only its last cents for a call that was still going.
       const ours = companyOfReservation(reservationId) === deps.companyId;
-      if (ours && await openHoldRoom(deps.store, reservationId) > 0) {
-        await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
-        return;
-      }
-      // An open hold with no room left is closed as estimated too (it keeps nothing more); then the estimate.
+      const room = ours ? await openHoldRoom(deps.store, reservationId) : 0;
       if (ours) await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
+      const rest = unflushedEstimateMicros(deps.settings) - room;
+      if (rest <= 0) return;
       await estimates.recordUsage({
         companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
         usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-        reportedCost: { micros: unflushedEstimateMicros(deps.settings), currency: "USD" },
+        reportedCost: { micros: rest, currency: "USD" },
       });
     },
   };

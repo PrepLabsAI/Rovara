@@ -144,7 +144,7 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
   let timer: ReturnType<typeof setTimeout> | undefined;
   const cancelled = (): boolean => input.cancellationController?.isCancelled(input.operationId) === true;
   try {
-    unregister = input.cancellationController?.register(input.operationId, { abort: async () => { stepEnds.abort(); await session?.abort(); } });
+    unregister = input.cancellationController?.register(input.operationId, { abort: async () => { stepEnds.abort(); await session?.abort(); checkpoints?.checkpointNow(); } });
     if (payload.timeoutMs !== undefined) {
       timer = setTimeout(() => { stepTimedOut = true; stepEnds.abort(); void Promise.resolve(session?.abort()).catch(() => undefined); }, payload.timeoutMs);
     }

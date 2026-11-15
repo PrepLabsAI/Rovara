@@ -32,6 +32,8 @@ export interface CoreDispatchMessage {
   companyId: OrgId;
   workspaceId: string;
   operationId: string;
+  /** A queued cancel of the operation (core/task-flow/money-stop.ts): the cancel's own id. Absent: an ordinary dispatch. */
+  cancel?: string;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -48,11 +50,14 @@ export function coreDispatchMessage(body: string): CoreDispatchMessage | undefin
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const fields = value as Record<string, unknown>;
-  if (Object.keys(fields).sort().join(",") !== "companyId,operationId,v,workspaceId") return undefined;
+  // The four fields of a dispatch, and a queued cancel's own id as a fifth (money-stop.ts); nothing else.
+  const keys = Object.keys(fields).sort().join(",");
+  if (keys !== "companyId,operationId,v,workspaceId" && keys !== "cancel,companyId,operationId,v,workspaceId") return undefined;
   if (fields.v !== 1 || typeof fields.workspaceId !== "string" || typeof fields.operationId !== "string") return undefined;
+  if (Object.hasOwn(fields, "cancel") && (typeof fields.cancel !== "string" || !UUID.test(fields.cancel))) return undefined;
   const company = OrgIdSchema.safeParse(fields.companyId);
   if (!company.success || !UUID.test(fields.workspaceId) || !UUID.test(fields.operationId)) return undefined;
-  return { v: 1, companyId: company.data, workspaceId: fields.workspaceId, operationId: fields.operationId };
+  return { v: 1, companyId: company.data, workspaceId: fields.workspaceId, operationId: fields.operationId, ...(typeof fields.cancel === "string" ? { cancel: fields.cancel } : {}) };
 }
 
 export interface CoreDispatchHostDependencies {

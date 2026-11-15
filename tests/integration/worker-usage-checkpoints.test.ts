@@ -142,7 +142,7 @@ describe("usage checkpoints", () => {
       payload: { kind: "agent", agentId: "agt_aaaaaaaaaaaaaaaaaaaa", version: 1, stepId: "triage", instructions: "Triage.", workspace: "none", inputs: "Request" },
       operationId, workspaceId: randomUUID(), conversationId: randomUUID(), capability: "c".repeat(64), brokerUrl: "http://broker.invalid",
       workspace: { rootPath, localFileTools: true }, modelAccess: { model: { provider: "fixture", modelId: "fixture-model" }, piAdapter: checkpointAdapter(rootPath, 2, { input: 40, output: 4, cost: 0.004 }) },
-      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined, catalogs: async () => [], call: async () => ({ status: "SUCCEEDED", text: "ok" }),
+      eventSink: async (batch: readonly WorkerEvent[]) => { events.push(...batch); }, artifactSink: async () => undefined, catalogs: async () => [], call: async () => ({ status: "SUCCEEDED", text: "ok" }),
       usageCheckpoints: { intervalMs: 0 },
     } as unknown as RunAgentStepInput).catch(() => undefined);
     const usage = usageEvents(events);
@@ -158,7 +158,7 @@ describe("usage checkpoints", () => {
       payload: { kind: "agent", agentId: "agt_aaaaaaaaaaaaaaaaaaaa", version: 1, stepId: "triage", instructions: "Triage.", workspace: "none", inputs: "Request" },
       operationId: randomUUID(), workspaceId: randomUUID(), conversationId: randomUUID(), capability: "c".repeat(64), brokerUrl: "http://broker.invalid",
       workspace: { rootPath, localFileTools: true }, modelAccess: { model: { provider: "fixture", modelId: "fixture-model" }, piAdapter: checkpointAdapter(rootPath, 2, { input: 40, output: 4, cost: 0.004 }) },
-      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined, catalogs: async () => [], call: async () => ({ status: "SUCCEEDED", text: "ok" }),
+      eventSink: async (batch: readonly WorkerEvent[]) => { events.push(...batch); }, artifactSink: async () => undefined, catalogs: async () => [], call: async () => ({ status: "SUCCEEDED", text: "ok" }),
     } as unknown as RunAgentStepInput).catch(() => undefined);
     const usage = usageEvents(events);
     expect(usage).toHaveLength(1);

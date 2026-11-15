@@ -164,16 +164,18 @@ describe("a stopped run's usage that never arrived: the whole hold is kept, mark
     const operationId = randomUUID();
     await stop.keepWholeHold(hold, { operationId, taskId: task });
     expect(await w.store.get(holdKey(A, hold))).toMatchObject({ state: "settled", keptMicros: 3_500_000, drawnMicros: 1_500_000, estimated: true, estimatedFor: operationId });
-    // The day counts the whole $5 hold: $1.50 booked plus $3.50 kept as an estimate.
-    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 1_500_000, settledMicros: 3_500_000, estimatedMicros: 3_500_000, reservedMicros: 0, loadMicros: 5_000_000 });
+    // The unreported spend is kept at no less than the fixed estimate ($5): the hold's $3.50 room, and $1.50 more as the estimate entry. The checkpoints' $1.50 stays booked.
+    expect(await w.store.get({ pk: costPartition(A, task), sk: `ENTRY#${unflushedEntryId(operationId)}` })).toBeDefined();
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(3_000_000);
+    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 3_000_000, settledMicros: 3_500_000, estimatedMicros: 3_500_000, reservedMicros: 0, loadMicros: 6_500_000 });
     // The next run of the task stopped without its usage (after a Retry): its hold is closed now, so a fixed estimate is booked on the task, never $0; once per run.
     const next = randomUUID();
     await stop.keepWholeHold(hold, { operationId: next, taskId: task });
     expect(await w.store.get({ pk: costPartition(A, task), sk: `ENTRY#${unflushedEntryId(next)}` })).toBeDefined();
-    expect((await w.ledger.taskCost(A, task)).micros).toBe(1_500_000 + unflushedEstimateMicros(SETTINGS));
-    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 1_500_000 + 5_000_000, loadMicros: 10_000_000 });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(3_000_000 + unflushedEstimateMicros(SETTINGS));
+    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 8_000_000, loadMicros: 11_500_000 });
     await stop.keepWholeHold(hold, { operationId: next, taskId: task });
-    expect((await w.ledger.taskCost(A, task)).micros).toBe(1_500_000 + unflushedEstimateMicros(SETTINGS));
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(3_000_000 + unflushedEstimateMicros(SETTINGS));
     expect(unflushedEstimateMicros(SETTINGS)).toBe(5_000_000);
     expect(unflushedEstimateMicros(undefined)).toBe(6_000_000);
   });
@@ -321,7 +323,10 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const answer = await handler({ method: "POST", path: `/v1/internal/workspaces/${a.workspaceId}/operations/${a.id}/events`, headers: { [CAPABILITY_HEADER]: capability }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) });
     expect(answer.statusCode).toBe(200);
     expect(await store.get(operationKey(a.workspaceId, a.id))).toMatchObject({ status: "CANCEL_REQUESTED", stopReason: "company_day_cap", stopRequestedAt: NOW.toISOString() });
-    expect(queued).toEqual([expect.objectContaining({ companyId: A, body: expect.objectContaining({ v: 1, companyId: A, workspaceId: a.workspaceId, operationId: a.id, cancel: expect.any(String) }) })]);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.companyId).toBe(A);
+    expect(queued[0]!.body).toMatchObject({ v: 1, companyId: A, workspaceId: a.workspaceId, operationId: a.id });
+    expect(typeof queued[0]!.body["cancel"]).toBe("string");
     expect(relayed).toEqual([{ companyId: A, ids: [queued[0]!.body["cancel"]] }]);
     expect(delivered).toEqual([]);
     expect(await store.get(operationKey(b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });

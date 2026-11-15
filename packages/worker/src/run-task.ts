@@ -985,7 +985,7 @@ async function runTask(
     baseline, stats: () => open.getSessionStats(), model: () => withRetention(open.getModel()), requested: dependencies.model, send: sendCheckpoint,
   });
   const checkpoints = checkpointsFor(session, usageBaseline, checkpointsAsked && usageBaselineKnown);
-  /** The checkpoints of the parallel parts running now (a stop sends what each spent before it ends). */
+  /** The checkpoints of the parallel parts and reviewers of this run (a stop sends what each spent before it ends). */
   const partCheckpoints = new Map<object, UsageCheckpointer>();
   // A planning run has one wall-clock deadline (the first prompt and the format retry share it) and a no-activity limit; the other modes only get the heartbeat-free attempt counter.
   const monitor = new ModelCallMonitor({
@@ -1761,7 +1761,8 @@ async function runTask(
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
           onLoadedKnowledge: (manifest) => { void emit("progress", loadedKnowledgePayload(manifest)); },
           // Per-run dollar stop: each reviewer reports its usage as it goes too (its session is made new, so it starts from nothing).
-          ...(checkpointsAsked ? { usageCheckpoints: (reviewer: PiSessionHandle) => checkpointsFor(reviewer, undefined) } : {}),
+          // Kept with the parts' so a stop sends what each reviewer spent at once too.
+          ...(checkpointsAsked ? { usageCheckpoints: (reviewer: PiSessionHandle) => { const made = checkpointsFor(reviewer, undefined); partCheckpoints.set(reviewer, made); return made; } } : {}),
           onUsage: async ({ role, stats, model, outcome, secondReviewTry, checkpoints: reviewerCheckpoints }) => {
             const reviewerModel = { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
             const usage = createTaskUsageTelemetry(stats, reviewerModel, outcome);
