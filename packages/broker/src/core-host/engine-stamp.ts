@@ -82,6 +82,20 @@ export function coreInUseItem(companyId: string): Extract<TransactItem, { kind: 
   return { kind: "put", item: { ...coreInUseKey(companyId), entityType: "CORE_ENGINE_IN_USE", orgId: companyId } };
 }
 
+/** Every company with an in-use mark, at most `limit` pages of the partition (the companies the root serves for the tasks the core holds). */
+export async function listCoreInUse(store: Pick<DocumentStore, "query">, pages = 20): Promise<string[]> {
+  const companies: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < pages; page += 1) {
+    const read = await store.query({ pk: CORE_IN_USE_PARTITION, ...(cursor === undefined ? {} : { cursor }) });
+    for (const item of read.items) if (typeof item.orgId === "string") companies.push(item.orgId);
+    if (read.cursor === undefined) return companies;
+    cursor = read.cursor;
+  }
+  // More marks than the pages read: refuse rather than serve a silent subset.
+  throw new Error("the core engine's in-use marks are more than one job can list");
+}
+
 const ensured = new WeakMap<object, Set<string>>();
 
 /**

@@ -1,7 +1,7 @@
 // Engine host (migration plan v3.2 lane E2): the composition root of the core on a deployed install (`core-host/`, the counterpart of the laptop's `local/app/`).
 //
 // One object per function container. It reads the switch once, and only when it serves does it build the registry (once) and a core runtime per company (once). With the switch off (the default)
-// it builds nothing, writes nothing, and every entry point answers "off" without touching the store: the install behaves exactly as before.
+// it builds nothing and writes nothing: every entry point answers "off" without touching the store, except `engineOfTask`, which reads only the task's stamp item. The install behaves exactly as before.
 //
 // Entry points:
 //   - `engineForNewTask(company)`: where a new task starts (the switch). The start route asks this; `core` sends the start to the company's runtime.
@@ -10,7 +10,7 @@
 //   - `relayOutbox(companies)`: the stream reader's hook on outbox inserts.
 import type { AdapterRegistry, DocumentStore, OrgId } from "@agentx/contracts";
 import { createCoreRuntime, serviceGaps, type CoreRuntime, type CoreRuntimeOptions } from "./core-runtime.js";
-import { engineForNewTask, engineOfStoredTask, type Engine } from "./engine-stamp.js";
+import { engineForNewTask, engineOfStoredTask, listCoreInUse, type Engine } from "./engine-stamp.js";
 import { CORE_AREAS, anyCoreAreaOn, coreAreaOn, coreCompanies, coreEngineServes, readCoreEngineFlags, type CoreArea, type CoreEngineFlags } from "./flags.js";
 import { CORE_JOBS, isCoreJobEvent, runPerCompany, type CompanyRunReport, type CoreJob } from "./jobs.js";
 import { buildCoreRegistry, type CoreAdapterContext, type CoreAdapterModule } from "./registry.js";
@@ -19,8 +19,10 @@ export interface CoreHostAppOptions {
   env?: NodeJS.ProcessEnv;
   /** The adapters (the deployment's modules in production; fakes in tests). A function is called when the registry is first built, so a deployment's inputs are asked for only then. */
   modules: readonly CoreAdapterModule[] | (() => readonly CoreAdapterModule[]);
-  /** The companies that hold core tasks (every company with an in-use mark). The jobs run for these as well as the switched companies, so a drained company's tasks are still served. */
+  /** The companies that hold core tasks. The jobs run for these as well as the switched companies, so a drained company's tasks are still served. Default: every company with an in-use mark in the registry's store. */
   servedCompanies?: () => Promise<readonly string[]>;
+  /** Where the root reports a switch value it could not read (the variable and a fixed problem, never the value). */
+  log?: (entry: Record<string, unknown>) => void;
   /** Builds the adapter context (clients) on first use. */
   context: () => CoreAdapterContext;
   /** The per-company runtime's own wiring (signing key, access, credentials, services). */
@@ -75,7 +77,8 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
 
   const contextOnce = (): CoreAdapterContext => (context ??= options.context());
   const modulesOf = (): readonly CoreAdapterModule[] => (typeof options.modules === "function" ? options.modules() : options.modules);
-  const servedCompanies = async (): Promise<readonly string[]> => await options.servedCompanies?.() ?? [];
+  const servedCompanies = async (): Promise<readonly string[]> => (options.servedCompanies === undefined ? await listCoreInUse((await registry()).require("storage")) : await options.servedCompanies());
+  for (const problem of flags.problems) options.log?.({ event: "core_engine.switch_unreadable", variable: problem.variable, problem: problem.problem });
 
   const registry = (): Promise<AdapterRegistry> => {
     if (!serving) return Promise.reject(new CoreEngineOffError("no registry is built"));

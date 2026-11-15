@@ -8,7 +8,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { createAllowAllAdmission, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import {
   CORE_ENGINE_OFF, CORE_JOBS, CoreRegistryError, coreAreaOn, coreEngineServes, coreInUseKey, createCoreHostApp, engineOfStoredTask, engineStampKey, ensureCoreInUse, parseCoreSwitch, readCoreEngineFlags,
-  runPerCompany, scheduleEventOf, stampForNewTask, stampItem, stampOf, type CoreHostApp, type CoreService, type CoreServiceName,
+  CORE_START_REFUSED_WORDS, runPerCompany, scheduleEventOf, stampForNewTask, stampItem, stampOf, type CoreHostApp, type CoreService, type CoreServiceName,
 } from "../../packages/broker/src/core-host/index.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -254,6 +254,62 @@ describe("drain: the core serves the tasks it holds, and starts none", () => {
 
   it("with the switch ON for that area the runtime is still refused (a switched area is never half-wired)", async () => {
     await expect(appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "on" }, { services: flowOnly }).runtimeFor(FAKE_COMPANY)).rejects.toThrow(/merge-tracking/);
+  });
+});
+
+describe("review fixes: a start the switch does not send to the core is refused, the in-use mark is kept, access is required", () => {
+  it("in drain, a held company's runtime refuses a new start and writes nothing (no task on the core with a workflow stamp)", async () => {
+    const world = createFakeWorld();
+    await registerProject(world, FAKE_COMPANY);
+    const app = appOver(world, { ROVARA_CORE_ENGINE: "drain" }, { servedCompanies: async () => [FAKE_COMPANY] });
+    const runtime = await app.runtimeFor(FAKE_COMPANY);
+    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test" };
+    const put = vi.spyOn(world.store, "put");
+    const transact = vi.spyOn(world.store, "transact");
+    await expect(runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining(CORE_START_REFUSED_WORDS) as string });
+    expect(put).not.toHaveBeenCalled();
+    expect(transact).not.toHaveBeenCalled();
+    expect((await runtime.flow.list(owner)).tasks).toEqual([]);
+  });
+
+  it("the stamp step refuses too, so a start that skips the wrapper still commits nothing", async () => {
+    const world = createFakeWorld();
+    await registerProject(world, FAKE_COMPANY);
+    const runtime = await appOver(world, { ROVARA_CORE_ENGINE: "drain" }, { servedCompanies: async () => [FAKE_COMPANY] }).runtimeFor(FAKE_COMPANY);
+    expect(() => runtime.flow.deps.startExtras!({ taskId: "t-1" } as never)).toThrow(CORE_START_REFUSED_WORDS);
+  });
+
+  it("a core start writes the company's in-use mark first, and by default the root's jobs serve every company that holds core tasks", async () => {
+    const world = createFakeWorld();
+    await registerProject(world, OTHER);
+    const app = createCoreHostApp({
+      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+    });
+    expect(await app.handleScheduledJob({ source: "agentx.core-job", job: "dispatch-sweep" })).toMatchObject({ companies: [{ companyId: FAKE_COMPANY }] });
+    const runtime = await app.runtimeFor(OTHER);
+    await runtime.flow.start({ principal: localOwnerPrincipal({ companyId: OTHER }), client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    expect(await world.store.get(coreInUseKey(OTHER))).toMatchObject({ orgId: OTHER });
+    const result = await app.handleScheduledJob({ source: "agentx.core-job", job: "dispatch-sweep" }) as { companies: { companyId: string; outcome: string }[] };
+    expect(result.companies.map((entry) => entry.companyId).sort()).toEqual([FAKE_COMPANY, OTHER].sort());
+    expect(result.companies.every((entry) => entry.outcome === "ran")).toBe(true);
+  });
+
+  it("refuses a runtime given no access rule at run time (never the laptop's sole-owner rule by omission)", async () => {
+    const world = createFakeWorld();
+    const app = createCoreHostApp({
+      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: undefined as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+    });
+    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
+  });
+
+  it("reports an unreadable switch once, by variable and fixed problem, never the value", () => {
+    const world = createFakeWorld();
+    const entries: Record<string, unknown>[] = [];
+    createCoreHostApp({ env: { ROVARA_CORE_ENGINE: "on:hunter2-value" }, modules: world.modules, context: () => world.context(), runtime: () => { throw new Error("unused"); }, log: (entry) => entries.push(entry) });
+    expect(entries).toEqual([{ event: "core_engine.switch_unreadable", variable: "ROVARA_CORE_ENGINE", problem: expect.any(String) as string }]);
+    expect(JSON.stringify(entries)).not.toContain("hunter2");
   });
 });
 

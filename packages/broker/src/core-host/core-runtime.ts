@@ -7,13 +7,13 @@
 // owner). A deployed install needs the same joins with its own settings and people; each is a `CoreService` the deployment supplies, and `serviceGaps` names the ones missing so the switch cannot
 // be turned on for an area whose service is not wired (an area that is off is not asked: its missing service costs only its own jobs).
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AdapterRegistry, OrgId, TransactItem } from "@agentx/contracts";
+import { agentXError, type AdapterRegistry, type OrgId, type TransactItem } from "@agentx/contracts";
 import { RepositoryGrantService } from "../repository-access.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { createTaskFlowFromRegistry, type RegistryTaskFlowOptions, type TaskFlow } from "../core/task-flow/flow.js";
 import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flow/deps.js";
 import { withStepFenceRetry } from "./step-fence.js";
-import { stampForNewTask, stampItem } from "./engine-stamp.js";
+import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
 
 /** A core service a scheduled job runs, per company. */
@@ -66,17 +66,24 @@ export function withStartFence<T>(items: readonly TransactItem[], run: () => Pro
   return startFences.run(items, run);
 }
 
+/** What a start on a runtime that serves a company only for the tasks it already holds (drain, or a narrowed switch) answers. Fixed words. */
+export const CORE_START_REFUSED_WORDS = "the core engine starts no new task for this company";
+
 export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
   const { registry, companyId } = options;
+  // Checked at run time, not only by the type: the core's own default is the laptop's sole-owner rule, which a deployed install must never get by omission.
+  if ((options as { access?: unknown }).access === undefined) throw new Error("the core runtime needs an access rule");
   const store = registry.require("storage");
   const given = options.flowOptions?.startExtras;
-  // Every core start writes the engine stamp with the task (a task keeps its engine). Joined with any start extras the deployment gives.
+  // Every core start writes the engine stamp with the task (a task keeps its engine). Joined with any start extras the deployment gives. A start the switch does not send to the core
+  // (drain, or a company served only for the tasks it holds) is refused here too, so its transaction never commits: no task can exist on the core with a workflow stamp.
   const startExtras = (input: StartExtrasInput): StartExtras => {
+    const stamped = stampForNewTask(options.flags, companyId, options.now());
+    if (stamped.engine !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
     const own = given?.(input);
-    const stamp = stampItem(companyId, input.taskId, stampForNewTask(options.flags, companyId, options.now()));
-    return { ...(own ?? {}), items: [...(own?.items ?? []), ...(startFences.getStore() ?? []), stamp] };
+    return { ...(own ?? {}), items: [...(own?.items ?? []), ...(startFences.getStore() ?? []), stampItem(companyId, input.taskId, stamped)] };
   };
-  const flow = createTaskFlowFromRegistry(withStepFenceRetry(registry), {
+  const base = createTaskFlowFromRegistry(withStepFenceRetry(registry), {
     ...options.flowOptions,
     companyId,
     projects: options.flowOptions?.projects ?? createStoreProjectSource(store, companyId),
@@ -87,6 +94,15 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     log: options.log,
     startExtras,
   });
+  // The company's in-use mark is written before its first core start (off the start's transaction), so the root's jobs always find every company that holds core tasks.
+  const flow: TaskFlow = {
+    ...base,
+    async start(caller, request) {
+      if (engineForNewTask(options.flags, companyId) !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
+      await ensureCoreInUse(store, companyId);
+      return await base.start(caller, request);
+    },
+  };
   return { companyId, flow, services: options.services?.(flow) ?? {} };
 }
 
