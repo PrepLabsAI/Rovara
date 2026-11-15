@@ -8,7 +8,7 @@
 //   - `keep`  : the deployed broker expires this kind too; the core's expiry stands.
 //   - `strip` : the deployed broker keeps this kind; the core's expiry is removed before the write reaches the table.
 // tests/unit/core-host-code-modules.test.ts recomputes the collisions from the sources and fails on one that is not reviewed here (and on a reviewed kind that no longer collides), so a
-// new collision is decided here, never silently. Changing a decision is a retention decision (owner).
+// new collision is decided here, never silently. Changing a decision is a retention decision (owner). Separately, the owner's DEC 222 keeps some kinds for good on AWS (`KEPT_FOR_GOOD_ON_AWS`).
 //
 // An update names its kind only through a `set` of `entityType` (a `setIfAbsent` does not change an existing item's kind). An update that writes the expiry without setting the kind
 // reads the item's current kind first (strongly consistent) and is judged by it. (A kind changing between that read and the write is not guarded: the stripped kinds are written once.)
@@ -28,13 +28,31 @@ export const CORE_EXPIRY_COLLISIONS: Readonly<Record<string, "keep" | "strip">> 
   TASK_RATE: "keep",
 });
 
+/**
+ * Owner decision DEC 222 (2026-11-15): on AWS the cost ledger, approvals and decisions are kept with NO expiry; session summaries and operation and activity events expire as on a laptop
+ * (their kinds keep the core's expiry, the default). These kinds lose the core's expiry before the write reaches the table, whatever the deployed broker writes. No core read depends on
+ * their expiry (checked 2026-11-15): the ledger and the decision record are read by key only; an approval's own validity is its request's `expiresAt`, read by time; a spent or used proof
+ * marker kept for good only keeps refusing a replay. `DECISION_EVIDENCE_OPENED` is not a decision (a short "the evidence was opened" mark, judged by its own `openedAt`): it keeps its expiry.
+ */
+export const KEPT_FOR_GOOD_ON_AWS: ReadonlySet<string> = new Set([
+  // The cost ledger (core/cost/ledger.ts): each entry and its once-marker. The running total (COST_TOTAL) is written with no expiry.
+  "COST_ENTRY", "COST_ENTRY_ONCE",
+  // Approvals (core/decisions/approval-gate.ts): the decision and the proof markers it spends.
+  "APPROVAL_DECISION", "APPROVAL_PROOF_USED", "APPROVAL_PROOF_SPENT",
+  // Decisions (core/decisions/store.ts).
+  "DECISION_RECORD",
+]);
+// Left out on purpose, pending the owner: RUN_COST (core/cost/estimate.ts), the per-run cost history the estimate reads its newest rows from, keeps its 365-day expiry. On AWS the
+// approval gate's `policy.proofKeepSeconds` (unset today) is overridden for the kinds above: they are kept for good.
+
 /** The `keep` collisions whose core items never share a key with the deployed broker's (checked by hand; the scan cannot see key families). */
 export const KEPT_ON_SEPARATE_KEYS: ReadonlySet<string> = new Set(["CHANNEL_THREAD", "TASK_RATE"]);
 
 export type RetentionAction = "keep" | "strip";
 
 export function retentionFor(entityType: unknown): RetentionAction {
-  return typeof entityType === "string" && CORE_EXPIRY_COLLISIONS[entityType] === "strip" ? "strip" : "keep";
+  if (typeof entityType !== "string") return "keep";
+  return CORE_EXPIRY_COLLISIONS[entityType] === "strip" || KEPT_FOR_GOOD_ON_AWS.has(entityType) ? "strip" : "keep";
 }
 
 /** The item as the deployed table keeps it: the expiry removed only for a kind the deployed broker keeps for good. */

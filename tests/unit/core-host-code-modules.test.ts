@@ -6,13 +6,13 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { CORE_ENGINE_VARIABLE, change, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { CORE_ENGINE_VARIABLE, change, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FakeHostModel } from "@agentx/broker/fakes";
 import { CoreRegistryError, buildCoreRegistry, createCoreHostApp, engineStampKey, stampOf, type CoreAdapterModule } from "../../packages/broker/src/core-host/index.js";
-import { CORE_EXPIRY_COLLISIONS, KEPT_ON_SEPARATE_KEYS, appliesCodeRetention, codeRetentionStore, retentionFor, withCodeRetention } from "../../packages/broker/src/core-host/retention.js";
+import { CORE_EXPIRY_COLLISIONS, KEPT_FOR_GOOD_ON_AWS, KEPT_ON_SEPARATE_KEYS, appliesCodeRetention, codeRetentionStore, retentionFor, withCodeRetention } from "../../packages/broker/src/core-host/retention.js";
 import { COMPANY_SECRET_PATHS, CORE_DISPATCH_QUEUE, OWED_POINTS, codeAdapterModules, owedPoints, stateTableIndexes, type CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
@@ -23,6 +23,7 @@ import { BINDING, COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../su
 import { SessionWorkerFleet, SessionWorkerMachines } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { createCoreRuntime, withCompanyMachines } from "../../packages/broker/src/core-host/core-runtime.js";
 import { readCoreEngineFlags } from "../../packages/broker/src/core-host/flags.js";
+import { costPartition as costPartitionFor, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
 
 const OTHER = "org_corehost00000000000b";
 const BASE = "https://sqs.us-west-2.amazonaws.com/000000000000";
@@ -228,6 +229,40 @@ describe("Code's retention for core writes", () => {
     }
     expect(retentionFor("WORKFLOW_THREAD_NOTE")).toBe("strip");
     expect(withCodeRetention({ pk: "p", sk: "s", entityType: "WORKFLOW_THREAD_NOTE", indexExpiresAt: 5, other: 1 })).toEqual({ pk: "p", sk: "s", entityType: "WORKFLOW_THREAD_NOTE", other: 1 });
+  });
+
+  it("keeps the cost ledger, approvals and decisions for good on AWS (owner decision DEC 222); session and activity records keep the core's expiry", async () => {
+    const root = join(import.meta.dirname, "../../packages/broker/src");
+    const core = await kindsIn(await sources(join(root, "core")));
+    // Every kind on the list is one the core really writes with an expiry (a stale entry fails here).
+    for (const kind of KEPT_FOR_GOOD_ON_AWS) {
+      expect(core.expiring.has(kind), kind).toBe(true);
+      expect(retentionFor(kind), kind).toBe("strip");
+      expect(withCodeRetention({ pk: "p", sk: "s", entityType: kind, indexExpiresAt: 5, other: 1 })).toEqual({ pk: "p", sk: "s", entityType: kind, other: 1 });
+    }
+    // Session summaries and operation and activity events expire as on a laptop.
+    for (const kind of ["LIVE_SESSION", "OPERATION_EVENT", "WORK_EVENT", "DECISION_EVIDENCE_OPENED"]) {
+      expect(core.expiring.has(kind), kind).toBe(true);
+      expect(retentionFor(kind), kind).toBe("keep");
+    }
+    // Through the core's own ledger on the deployed store: the entry and its once-marker reach the table with no expiry; the totals are kept.
+    const inner = new MemoryDocumentStore();
+    const stripped: string[] = [];
+    const ledger = createCostLedger({ store: codeRetentionStore(inner, { stripped: (kind) => stripped.push(kind) }), metering: createPriceTableMetering({ currency: "USD", models: {} }), now: () => new Date("2026-11-15T10:00:00.000Z") });
+    await ledger.recordUsage({ companyId: FAKE_COMPANY, entryId: "e-1", at: "2026-11-15T10:00:00.000Z", taskId: "t-1", usage: { provider: "anthropic", modelId: "m", tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } });
+    const written = (await inner.query({ pk: costPartitionFor(FAKE_COMPANY, "t-1") })).items;
+    const entry = written.find((item) => item.entityType === "COST_ENTRY")!;
+    expect(entry).toBeDefined();
+    expect(entry).not.toHaveProperty("indexExpiresAt");
+    const once = await inner.get({ pk: companyScoped(FAKE_COMPANY, "COST_ENTRY"), sk: "e-1" });
+    expect(once?.entityType).toBe("COST_ENTRY_ONCE");
+    expect(once).not.toHaveProperty("indexExpiresAt");
+    expect(stripped.sort()).toEqual(["COST_ENTRY", "COST_ENTRY_ONCE"]);
+    // Positive control: the same write on a store without Code's retention keeps the core's expiry.
+    const bare = new MemoryDocumentStore();
+    await createCostLedger({ store: bare, metering: createPriceTableMetering({ currency: "USD", models: {} }), now: () => new Date("2026-11-15T10:00:00.000Z") })
+      .recordUsage({ companyId: FAKE_COMPANY, entryId: "e-1", at: "2026-11-15T10:00:00.000Z", taskId: "t-1", usage: { provider: "anthropic", modelId: "m", tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } });
+    expect(await bare.get({ pk: companyScoped(FAKE_COMPANY, "COST_ENTRY"), sk: "e-1" })).toHaveProperty("indexExpiresAt");
   });
 
   it("judges an update by the kind it sets, else by the item's current kind; a setIfAbsent of the kind names nothing", async () => {
