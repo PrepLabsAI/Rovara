@@ -21,6 +21,14 @@ describe("one metered eval stage", () => {
     await expect(stage!.call(frame)).rejects.toThrow("eval stage stopped");
     expect(w.dispatched).toEqual(["company-a", "company-a"]);
   });
+  it("a call past the held count is a stage failure (over budget), not a quiet refusal", async () => {
+    const w = world(); const stage = await openMeteredStage({ grant, meter: w.meter, calls: 2, costMicros: 20 });
+    await stage!.call(frame); await stage!.call(frame);
+    expect(stage!.failure()).toBeUndefined();
+    await expect(stage!.call(frame)).rejects.toThrow("eval stage stopped");
+    expect(stage!.failure()).toBe("cap"); expect(stage!.callFailure()).toBe("cap");
+    expect(w.dispatched).toHaveLength(2); expect(stage!.usage()).toEqual({ calls: 2, costMicros: 20 });
+  });
   it("does not dispatch when the hold is refused", async () => {
     const stage = await openMeteredStage({ grant, meter: { reserve: async () => undefined }, calls: 1, costMicros: 10 });
     expect(stage).toBeUndefined();
