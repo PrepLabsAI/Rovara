@@ -57,11 +57,20 @@ import {
   type SlackAuthCheckResponse,
   type SlackUserByEmailRequest,
   type SlackUserByEmailResponse,
+  type ListPasskeysRequest,
+  type ListPasskeysResponse,
+  type RemovePasskeyRequest,
+  type RemovePasskeyResponse,
+  type RemovePersonPasskeysRequest,
+  type RemovePersonPasskeysResponse,
+  type SetFactorEmailRequest,
+  type SetFactorEmailResponse,
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
+import { createFactorAdmin } from "./factor-admin.js";
 import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner } from "./tokens.js";
@@ -202,6 +211,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience, scopes: (session.scopes ?? []).filter((scope) => client.scopes?.includes(scope as ClientScope) === true) } }),
       ...(session.stepUpAt === undefined || session.stepUpMethod === undefined ? {} : { stepUp: { at: session.stepUpAt, method: session.stepUpMethod } }),
     });
+  const factorAdmin = createFactorAdmin({ env: config.env, store, email: deps.stepUp?.email, companyAdmin: deps.stepUp?.companyAdmin, now: deps.now, log: deps.log });
   const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
@@ -466,10 +476,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         deps.log({ event: "signin.step_up_succeeded", method, stepUpMethod: "company_reauth", developerId });
         return issueCode({ ...grant, stepUpAt: Math.min(authTime, nowSeconds), stepUpMethod: "company_reauth" }, request.clientState);
       }
-      // The code goes to the email the record held BEFORE this sign-in, and only while this sign-in still asserts the same one: the round trip that does not count must not choose the inbox.
-      const same = (a: string | undefined, b: string | undefined) => a !== undefined && b !== undefined && a.trim().toLowerCase() === b.trim().toLowerCase();
-      const factorEmail = same(existing?.email, identity.email) ? existing?.email : undefined;
-      const started = await stepUpPages.start(grant, request.clientState, factorEmail);
+      // ID-STEPUP-FOLLOWUPS (a): the code goes only to the person's factor email as the record held it BEFORE this sign-in (captured at their first sign-in, or set by a company admin).
+      // The provider's email, now or ever since, never chooses or moves it.
+      const started = await stepUpPages.start(grant, request.clientState, existing?.factorEmail);
       if (typeof started !== "string") return started;
       deps.log({ event: "signin.step_up_refused", method, developerId, reason: started });
       return client({ error: "access_denied", error_description: started === "limited" ? STEP_UP_TEXT.limited : STEP_UP_TEXT.noFactor });
@@ -660,9 +669,16 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse> => {
+      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
+      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
+    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse> => {
     if ("kind" in event) {
+      // ID-STEPUP-FOLLOWUPS: the factor email and passkeys. Each checks the caller's own live session (and, for a change, its fresh step-up) in this table.
+      if (event.kind === "list-passkeys") return factorAdmin.listPasskeys(event);
+      if (event.kind === "remove-passkey") return factorAdmin.removePasskey(event);
+      if (event.kind === "remove-person-passkeys") return factorAdmin.removePersonPasskeys(event);
+      if (event.kind === "set-factor-email") return factorAdmin.setFactorEmail(event);
       // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);

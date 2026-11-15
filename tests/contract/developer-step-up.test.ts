@@ -180,7 +180,7 @@ describe("refusals on the step-up page", () => {
     }
   });
 
-  it("never lets the step-up's own sign-in choose the inbox: no factor on a first-ever sign-in, or when the provider now says another email", async () => {
+  it("never lets the step-up's own sign-in choose the inbox: no factor on a first-ever sign-in, and the factor email (not the provider's new one) when the provider now says another", async () => {
     const sender = fakeSender();
     const first = identityHarness({ slackUsers: [maya], stepUp: { email: sender } });
     expect(new URL((await throughSlack(first, "U0MAYA001", false, true)).headers.location!).searchParams.get("error_description")).toBe(STEP_UP_TEXT.noFactor);
@@ -188,9 +188,12 @@ describe("refusals on the step-up page", () => {
     const h = identityHarness({ slackUsers: [moved], stepUp: { email: sender } });
     await plainSignIn(h, "U0MAYA001");
     moved.email = "attacker@example.net";
+    // ID-STEPUP-FOLLOWUPS (a): the code goes to the factor email captured at the first sign-in, whatever the provider says now.
     const back = await throughSlack(h, "U0MAYA001", false, true);
-    expect(new URL(back.headers.location!).searchParams.get("error_description")).toBe(STEP_UP_TEXT.noFactor);
-    expect(sender.sent).toEqual([]);
+    expect(back.headers.location).toBe(`${ISSUER}/step-up`);
+    await h.http(browser("POST", "/v1/auth/step-up/email", cookieOf(back)));
+    expect(sender.sent.map((message) => message.to)).toEqual(["maya@example.com"]);
+    sender.sent.length = 0;
     // The same address in another case is the same inbox.
     moved.email = "Maya@Example.com";
     const h2 = identityHarness({ slackUsers: [moved], stepUp: { email: sender } });

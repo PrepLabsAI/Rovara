@@ -28,6 +28,11 @@ export interface StepUpDependencies {
    * Lane ID part 2b: passkeys owned by Code (WebAuthn). `rpId` is the API's host (or a registrable suffix of it); the expected origin is always the issuer's own. Absent: no passkeys.
    */
   passkeys?: { rpId: string; rpName: string };
+  /**
+   * ID-STEPUP-FOLLOWUPS: the install's rule for who is a company admin over a person (setting their factor email, removing their passkeys). True only for a yes now. Absent: those admin
+   * requests are refused.
+   */
+  companyAdmin?: (adminDeveloperId: string, personDeveloperId: string) => Promise<boolean>;
 }
 
 export interface StepUpHttpResult { statusCode: number; headers: Record<string, string>; body: string; cookies?: string[] }
@@ -52,7 +57,7 @@ export const STEP_UP_TEXT = {
   tooManyTries: "Too many wrong codes. Start again from where you were.",
   expired: "This confirmation has expired. Start again from where you were.",
   wrongPlace: "This confirmation did not come from this page. Start again from where you were.",
-  noFactor: "there is no way to confirm it's you set up for your account here (it needs an email on your sign-in record); ask an admin",
+  noFactor: "there is no way to confirm it's you set up for your account here: no confirmation email is set for you yet; ask a company admin to set one",
   limited: "too many confirmations were started for your account in the last hour; try again later",
   subject: "Your AgentX confirmation code",
 } as const;
@@ -203,6 +208,16 @@ export function createStepUpPages(options: StepUpPagesOptions) {
     return { secret, record };
   }
 
+  /**
+   * ID-STEPUP-FOLLOWUPS (a): the page's address is still the person's factor email. An admin who changed it (an old inbox may be someone else's now) ends every page that would still
+   * send a code there, or accept one sent there.
+   */
+  async function stillFactorEmail(record: StepUpRecord): Promise<boolean> {
+    if (record.email === undefined) return false;
+    const current = (await options.store.getDeveloper(record.grant.developerId))?.factorEmail;
+    return current !== undefined && current.trim().toLowerCase() === record.email.trim().toLowerCase();
+  }
+
   /** Uses the page up and issues the code with this step-up. Undefined: the page was already used. */
   async function finish(secret: string, at: number, method: "email_code" | "passkey"): Promise<StepUpHttpResult | undefined> {
     const used = await options.store.consumeStepUp(secret);
@@ -228,8 +243,8 @@ export function createStepUpPages(options: StepUpPagesOptions) {
 
   return {
     /**
-     * After the provider said who the person is, for a step-up: start Code's own page. `factorEmail` is the address the code goes to, chosen by the caller from the record as it stood
-     * BEFORE this sign-in (the round trip that does not count must not choose the inbox either). A passkey the person registered with Code is a factor too. "no_factor" when there is
+     * After the provider said who the person is, for a step-up: start Code's own page. `factorEmail` is the address the code goes to: the person's factor email as their record held it
+     * BEFORE this sign-in (captured at their first sign-in or set by a company admin; the round trip that does not count never chooses or moves it). A passkey the person registered with Code is a factor too. "no_factor" when there is
      * neither; "limited" when this person started too many pages in the last hour. Either way the caller tells the client so, and no code is issued.
      */
     async start(grant: StepUpRecord["grant"], clientState: string, factorEmail: string | undefined): Promise<StepUpHttpResult | "no_factor" | "limited"> {
@@ -251,7 +266,7 @@ export function createStepUpPages(options: StepUpPagesOptions) {
       if ("statusCode" in page) return page;
       const sender = options.deps?.email;
       const email = page.record.email;
-      if (sender === undefined || email === undefined || page.record.verifiedAt !== undefined) return ended(STEP_UP_TEXT.expired);
+      if (sender === undefined || email === undefined || page.record.verifiedAt !== undefined || !await stillFactorEmail(page.record)) return ended(STEP_UP_TEXT.expired);
       const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
       // Bound before it is sent: a code that reached the inbox always works on this page, and a page out of sends never sends.
       if (!await options.store.recordStepUpEmail(page.secret, codeHash(page.secret, code))) return view(page.record, [STEP_UP_TEXT.noMoreEmails], 429);
@@ -292,6 +307,8 @@ export function createStepUpPages(options: StepUpPagesOptions) {
         if (counted.attempts >= DEVELOPER_STEP_UP_ATTEMPTS_MAX) return ended(STEP_UP_TEXT.tooManyTries);
         return view(counted, [STEP_UP_TEXT.wrong], 400);
       }
+      // A code sent to an address that is no longer the factor email proves nothing now.
+      if (!await stillFactorEmail(counted)) return ended(STEP_UP_TEXT.expired);
       const at = Math.floor(options.now() / 1000);
       if (passkeys !== undefined && (await passkeysOf(counted.grant.developerId)).length < DEVELOPER_PASSKEYS_MAX) {
         if (!await options.store.markStepUpVerified(page.secret, at)) return ended(STEP_UP_TEXT.expired);

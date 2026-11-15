@@ -30,7 +30,14 @@ export interface AuthRequestRecord { id: string; clientRedirectUri: string; clie
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
-  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
+  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
+  /**
+   * ID-STEPUP-FOLLOWUPS (a): where step-up codes go. Captured once, from the verified email of the person's FIRST sign-in, or set by a company admin; a later sign-in never changes it,
+   * whatever the provider now says (`email` follows the provider; this does not). Absent: no email factor until an admin sets one.
+   */
+  factorEmail?: string; factorEmailSetAt?: string;
+  /** `first_sign_in`, or the developer id of the admin who set it. */
+  factorEmailSetBy?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
 export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod }
@@ -46,7 +53,10 @@ export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; sl
  * is the SHA-256 of the last emailed code bound to this record. `emailsSent` and `attempts` count up to their limits and never reset.
  */
 /** Lane ID part 2b: one passkey registered with Code. `publicKey` is the COSE public key, base64url. */
-export interface PasskeyRecord { credentialId: string; publicKey: string; counter: number; createdAt: string; transports?: string[] }
+export interface PasskeyRecord { credentialId: string; publicKey: string; counter: number; createdAt: string; transports?: string[]; lastUsedAt?: string }
+
+/** The most passkey rows one removal of all of a person's passkeys reads (registration keeps a person at DEVELOPER_PASSKEYS_MAX; more rows than this is an error, never a partial removal). */
+const PASSKEY_ROWS_REMOVE_MAX = 100;
 
 export interface StepUpRecord {
   grant: CodeGrant & { codeChallenge: string; redirectUri: string };
@@ -220,6 +230,7 @@ export class DeveloperSignInStore {
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
     const at = this.iso();
+    const mark = randomUUID();
     const setClauses = [
       "entityType = :entityType",
       "provider = :provider",
@@ -227,6 +238,8 @@ export class DeveloperSignInStore {
       "subject = :subject",
       "lastSignInAt = :at",
       "firstSignInAt = if_not_exists(firstSignInAt, :at)",
+      // ID-STEPUP-FOLLOWUPS (a): a mark only the write that first sets it holds (two sign-ins in one millisecond have different marks).
+      "firstSignInMark = if_not_exists(firstSignInMark, :mark)",
       "revoked = if_not_exists(revoked, :false)",
     ];
     const removeClauses: string[] = [];
@@ -237,6 +250,7 @@ export class DeveloperSignInStore {
       ":subject": profile.subject,
       ":at": at,
       ":false": false,
+      ":mark": mark,
     };
     if (profile.email === undefined) removeClauses.push("email");
     else { setClauses.push("email = :email"); values[":email"] = profile.email; }
@@ -261,6 +275,18 @@ export class DeveloperSignInStore {
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
       await this.put({ ...emailIndexKey(profile.email), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+      // ID-STEPUP-FOLLOWUPS (a): the factor email is captured on the FIRST sign-in only. Both conditions hold only for the write that created the record: if_not_exists keeps an earlier
+      // first sign-in's time and mark (a record from before the mark has an older time), so a later sign-in, with whatever email the provider now says, never sets or moves it.
+      try {
+        await this.input.documentClient.send(new UpdateCommand({
+          TableName: this.input.tableName, Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
+          UpdateExpression: "SET factorEmail = :email, factorEmailSetAt = :at, factorEmailSetBy = :by",
+          ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(factorEmail) AND firstSignInAt = :at AND firstSignInMark = :mark",
+          ExpressionAttributeValues: { ":email": profile.email, ":at": at, ":by": "first_sign_in", ":mark": mark },
+        }));
+      } catch (error) {
+        if (!conditionFailed(error)) throw error;
+      }
     }
     const stored = await this.getDeveloper(profile.developerId);
     if (stored === undefined) throw new Error("developer upsert did not persist");
@@ -287,6 +313,25 @@ export class DeveloperSignInStore {
     const stored = await this.getDeveloper(developerId);
     if (stored === undefined) throw agentXError("NOT_FOUND", "your sign-in record was not found; sign in again");
     return stored;
+  }
+
+  /**
+   * ID-STEPUP-FOLLOWUPS (a): a company admin sets a person's factor email. Only while it is still `expected` (undefined: none), so two changes cannot cross. False: the person's record is
+   * gone, or the factor email changed meanwhile.
+   */
+  async setFactorEmail(developerId: string, email: string, expected: string | undefined, by: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `DEVELOPER#${developerId}`, sk: META },
+        UpdateExpression: "SET factorEmail = :email, factorEmailSetAt = :at, factorEmailSetBy = :by",
+        ConditionExpression: `attribute_exists(pk) AND ${expected === undefined ? "attribute_not_exists(factorEmail)" : "factorEmail = :expected"}`,
+        ExpressionAttributeValues: { ":email": email, ":at": this.iso(), ":by": by, ...(expected === undefined ? {} : { ":expected": expected }) },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
   }
 
   async getDeveloper(developerId: string): Promise<DeveloperRecord | undefined> {
@@ -425,10 +470,10 @@ export class DeveloperSignInStore {
       TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: DEVELOPER_PASSKEYS_MAX,
     })) as { Items?: Array<Record<string, unknown>> };
     return (response.Items ?? []).flatMap((item) => {
-      const { credentialId, publicKey, counter, createdAt, transports } = item;
+      const { credentialId, publicKey, counter, createdAt, transports, lastUsedAt } = item;
       if (typeof credentialId !== "string" || typeof publicKey !== "string" || typeof counter !== "number" || !Number.isSafeInteger(counter) || counter < 0 || typeof createdAt !== "string") return [];
       const listed = Array.isArray(transports) ? transports.filter((entry): entry is string => typeof entry === "string").slice(0, 8) : undefined;
-      return [{ credentialId, publicKey, counter, createdAt, ...(listed === undefined ? {} : { transports: listed }) }];
+      return [{ credentialId, publicKey, counter, createdAt, ...(listed === undefined ? {} : { transports: listed }), ...(typeof lastUsedAt === "string" ? { lastUsedAt } : {}) }];
     });
   }
 
@@ -440,6 +485,37 @@ export class DeveloperSignInStore {
     } catch (error) {
       if (conditionFailed(error)) return false;
       throw error;
+    }
+  }
+
+  /** ID-STEPUP-FOLLOWUPS (b): removes one of a person's passkeys. False: they have no passkey with that id. */
+  async removePasskey(developerId: string, credentialId: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk: credentialId }, ConditionExpression: "attribute_exists(pk)" }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * ID-STEPUP-FOLLOWUPS (b): removes every passkey row of a person, readable or not, and answers how many. Reads at most PASSKEY_ROWS_REMOVE_MAX rows; a person with more throws after
+   * removing those (never a silent partial answer), and the caller says it could not finish.
+   */
+  async removeAllPasskeys(developerId: string): Promise<number> {
+    let removed = 0;
+    for (;;) {
+      const response = await this.input.documentClient.send(new QueryCommand({
+        TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: 25,
+      })) as { Items?: Array<Record<string, unknown>> };
+      const rows = (response.Items ?? []).flatMap((item) => (typeof item.sk === "string" ? [item.sk] : []));
+      if (rows.length === 0) return removed;
+      for (const sk of rows) {
+        if (removed >= PASSKEY_ROWS_REMOVE_MAX) throw new Error("more passkey rows than one removal reads");
+        await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk } }));
+        removed += 1;
+      }
     }
   }
 
