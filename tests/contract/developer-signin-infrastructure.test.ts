@@ -811,6 +811,8 @@ function accessTuples(template: TemplateJson): AccessTuple[] {
   return [...new Map(tuples.map((tuple) => [JSON.stringify(tuple), tuple])).values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
 
+// The broker's effective access before INFRA-IAM-HEADROOM moved grants into resource policies, plus #663's reviewed core-engine grants (the broker on its own
+// CoreEngineJobs queue and dead letters, the schedules' role invoking the broker), which landed beside it in the 2026-11-15 batch.
 const beforeTuples: AccessTuple[] = [
   ["*","Deny","kms:GetPublicKey","key:DeveloperSignInTaskTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\",\"role:DeveloperSignInFunctionServiceRole\"]}}"],
   ["*","Deny","kms:GetPublicKey","key:DeveloperSignInTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:DeveloperSignInFunctionServiceRole\"]}}"],
@@ -897,7 +899,13 @@ const beforeTuples: AccessTuple[] = [
   ["role:BrokerServiceRole","Allow","secretsmanager:GetSecretValue","parameter:GitHubAppPrivateKeySecretArn","{}"],
   ["role:BrokerServiceRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/channel-adapter/*","{}"],
   ["role:BrokerServiceRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/connectors/*","{\"StringEquals\":{\"secretsmanager:ResourceTag/agentx-writable\":[\"refresh-token\"]}}"],
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiEventDeadLetters","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierNoticeDeadLetterQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierStreamFailureQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DispatchDeadLetterQueue","{}"],
@@ -906,6 +914,10 @@ const beforeTuples: AccessTuple[] = [
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:SlackRequestQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueUrl","queue:SlackHandOffFailureQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueUrl","queue:SlackRequestQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackHandOffFailureQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackRequestQueue","{}"],
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-features","{}"],
@@ -970,6 +982,7 @@ const beforeTuples: AccessTuple[] = [
   ["role:ChannelApiIngressServiceRole","Allow","sqs:SendMessage","queue:ChannelApiRequests","{}"],
   ["role:ChannelApiIngressServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
   ["role:ChannelApiIngressServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:CoreEngineJobsInvokeRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:DeleteItem","table:DeveloperSignInTable","{\"ForAllValues:StringEquals\":{\"dynamodb:LeadingKeys\":[\"SIGNIN_CLIENTS\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:GetItem","table:DeveloperSignInTable","{}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:PutItem","table:DeveloperSignInTable","{}"],
