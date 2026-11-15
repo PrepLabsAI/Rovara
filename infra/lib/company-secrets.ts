@@ -8,7 +8,7 @@
 //     it calls STS. IAM fences a wrong session, not a compromised broker: membership in code is the authority on which company a person acts for.
 //     Same account, and the trust policy names the broker's role ARN: the broker's own inline policy needs no statement (it is at its size pin), but its permissions boundary must
 //     allow sts:AssumeRole and sts:TagSession (a deploy-time check, listed in the PR).
-//   - Reads and writes (GetSecretValue, DescribeSecret, PutSecretValue, DeleteSecret) are fenced by the secret's NAME only: `agentx/<env>/<family>/${aws:PrincipalTag/rovara:org}/*` for the
+//   - Reads and writes (GetSecretValue, DescribeSecret, PutSecretValue, and DeleteSecret, which must keep its recovery window) are fenced by the secret's NAME only: `agentx/<env>/<family>/${aws:PrincipalTag/rovara:org}/*` for the
 //     company families (org-connectors, org-hooks). No aws:ResourceTag condition on them, so the company's own missing secret is ResourceNotFoundException (not AccessDenied) and its
 //     untagged older secrets stay usable; another company's path, existing or not, is AccessDenied.
 //   - CreateSecret: the company's own path AND the request's `rovara:org` tag equal to the session's.
@@ -26,7 +26,7 @@ export const COMPANY_TAG_VALUE_GLOB = `org_${"?".repeat(20)}`;
 /** The secret-name families that belong to one company (packages/broker/src/core-host/code-modules.ts COMPANY_SECRET_PATHS). */
 export const COMPANY_SECRET_FAMILIES = ["org-connectors", "org-hooks"] as const;
 /** The read and write actions the name fence covers. */
-export const COMPANY_SECRET_USE_ACTIONS = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue", "secretsmanager:DeleteSecret"] as const;
+export const COMPANY_SECRET_USE_ACTIONS = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue"] as const;
 
 export interface CompanySecretsProps {
   /** The environment's name (a named environment only). */
@@ -58,6 +58,13 @@ export class CompanySecrets extends Construct {
     }));
     const sessionHasCompany = { Null: { [`aws:PrincipalTag/${COMPANY_TAG_KEY}`]: "false" } };
     this.role.addToPolicy(new iam.PolicyStatement({ sid: "UseOwnCompanySecrets", actions: [...COMPANY_SECRET_USE_ACTIONS], resources: companyArns, conditions: sessionHasCompany }));
+    // A delete always keeps the recovery window (never ForceDeleteWithoutRecovery), so a wrong delete can be undone.
+    this.role.addToPolicy(new iam.PolicyStatement({
+      sid: "DeleteOwnCompanySecretsRecoverably",
+      actions: ["secretsmanager:DeleteSecret"],
+      resources: companyArns,
+      conditions: { ...sessionHasCompany, Bool: { "secretsmanager:ForceDeleteWithoutRecovery": "false" } },
+    }));
     this.role.addToPolicy(new iam.PolicyStatement({
       sid: "CreateOwnCompanySecrets",
       actions: ["secretsmanager:CreateSecret"],
