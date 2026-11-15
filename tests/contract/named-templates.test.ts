@@ -1,6 +1,7 @@
 import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -229,7 +230,7 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template)))) : template).toMatchSnapshot();
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template))))) : template).toMatchSnapshot();
     }, 120_000);
   }
 });

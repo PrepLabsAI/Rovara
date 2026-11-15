@@ -2,7 +2,7 @@
 // stores do, and a memory document store with the task flow's indexes.
 import { INDEX_EXPIRY_ATTRIBUTE, type OrgId } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
-import { admitSecretName, type ConnectionSecrets } from "../../packages/broker/src/connections/org-secrets.js";
+import { secretNameBelongsTo, admitSecretName, type ConnectionSecrets } from "../../packages/broker/src/connections/org-secrets.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
 export const memoryStore = (): MemoryDocumentStore => new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: INDEX_EXPIRY_ATTRIBUTE });
@@ -18,7 +18,7 @@ export class InMemoryConnectionSecrets implements ConnectionSecrets {
   names(): string[] { return [...this.#versions.keys()].sort(); }
 
   async read(orgId: string, name: string, versionId?: string): Promise<string | undefined> {
-    admitSecretName(this.env, orgId, name);
+    if (!secretNameBelongsTo(this.env, orgId, name)) return undefined;
     this.calls.push(`read ${name}`);
     const versions = this.#versions.get(name);
     if (versions === undefined || versions.length === 0) return undefined;

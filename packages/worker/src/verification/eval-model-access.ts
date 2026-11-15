@@ -3,7 +3,8 @@
 // in tests it is a script. This file turns one hold plus an egress into the `MonthlyMeter` the final-check eval already consumes.
 //
 // Rules, each with a test: the WHOLE estimate is held before any call; a call beyond the held count, or once settled spend reached the
-// held cost, is refused before it reaches the egress, and at most four calls are open at once; every call is ONE attempt (no retry, a retry can double-spend); a fault, a malformed or over-long answer
+// held cost, is refused before it reaches the egress (a budget refusal: cap with the cost known, and the refused call is not counted), and at most
+// four calls are open at once; every call is ONE attempt (no retry, a retry can double-spend); a fault, a malformed or over-long answer
 // or a deadline is "provider_error" with an UNKNOWN cost (NaN), so the stage stops and the spend is retained, never a pass;
 // close joins every call and releases only what is known to be unspent; no provider words, header, key or error text leaves here.
 import {
