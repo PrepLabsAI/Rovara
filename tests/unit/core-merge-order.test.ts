@@ -169,6 +169,7 @@ describe("merge all in order", () => {
     expect(world.models.get("app")!.getChangeRequest("1").state).toBe("open");
     expect(world.milestones.written.map((m) => m.kind)).toEqual(["stuck"]);
     expect((world.milestones.written[0] as { text?: string }).text).toBe(refusal.message);
+    expect(((world.milestones.written[0] as { pullRequests?: Array<{ repository: string }> }).pullRequests ?? []).map((pr) => pr.repository)).toEqual(["docs", "payments-lib", "app"]);
   });
 
   it("refuses a cycle or unreadable facts until a person confirms the override, which is bound into the proof", async () => {
@@ -177,6 +178,7 @@ describe("merge all in order", () => {
       expect(await rejects(() => world.prepare())).toEqual({ code: "MERGE_NOT_READY", message: words });
       const overridden = await prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId(), orderOverride: true });
       expect(overridden.orderOverride).toBe(true);
+      expect(overridden.changes).toEqual(["Merge app pull request 1 (squash) (in the order listed, which you confirmed)", "Merge payments-lib pull request 1 (squash) (in the order listed, which you confirmed)"]);
       // A proof made for the override does not press without it: the digest differs.
       const plain = await world2(undefined, { seam: false });
       expect(overridden.request.artifactDigest).not.toBe((await plain.prepare()).request.artifactDigest);
@@ -186,10 +188,29 @@ describe("merge all in order", () => {
     }
   });
 
-  it("fails closed when the dependency facts cannot be read at all", async () => {
-    const world = await world2(undefined);
-    world.deps.repositoryEdges = async () => { throw new Error("store down: secret-ish detail"); };
-    expect(await rejects(() => world.prepare())).toEqual({ code: "MERGE_NOT_READY", message: MERGE_ORDER_WORDS.noSafeOrder.unreadable });
+  it("fails closed when the dependency facts cannot be read at all, whatever way the read throws, and never echoes the cause", async () => {
+    const throwing = { get consumer(): string { throw new Error("getter secret-ish detail"); }, provider: "payments-lib" };
+    for (const seam of [
+      async () => { throw new Error("store down: secret-ish detail"); },
+      () => { throw new Error("sync secret-ish detail"); },
+      async () => [throwing],
+    ]) {
+      const world = await world2(undefined);
+      world.deps.repositoryEdges = seam;
+      expect(await rejects(() => world.prepare())).toEqual({ code: "MERGE_NOT_READY", message: MERGE_ORDER_WORDS.noSafeOrder.unreadable });
+    }
+  });
+
+  it("does not refuse the last pull request of a half merge over a cycle: there is no order left to get wrong", async () => {
+    const world = await world2([edge("app", "payments-lib"), edge("payments-lib", "app")]);
+    const app = world.prs.find((pr) => pr.repositoryId === "app")!;
+    expect(app.model.merge("1", { revision: app.head, method: "squash" }).outcome).toBe("merged");
+    await world.setWorkflow({ pullRequests: ((await world.task()).workflow.pullRequests ?? []).map((pr) => (pr.repositoryId === "app" ? { ...pr, state: "MERGED" } : pr)) });
+    const prepared = await world.prepare();
+    expect(prepared.changes).toEqual(["Merge payments-lib pull request 1 (squash)"]);
+    expect("orderOverride" in prepared).toBe(false);
+    await pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) });
+    expect(mergedOrder(world)).toEqual(["acme/payments-lib"]);
   });
 
   it("treats facts that changed after the person confirmed as a new question", async () => {

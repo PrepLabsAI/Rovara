@@ -410,15 +410,17 @@ export function mergeArtifactDigest(subject: MergeSubject, method: CodeSettings[
 async function mergeOrderOfTask(deps: MergeDependencies, task: MergeTask & { workflow: WorkflowSnapshot }): Promise<MergeOrder> {
   const repositories = requiredPullRequests(task.workflow).map((entry) => entry.repositoryId);
   if (deps.repositoryEdges === undefined) return mergeOrderOf(repositories, undefined);
-  let facts: unknown;
+  // The read and the reading of the facts are both inside the try: a seam that throws (at once or later) or facts that throw when read are "unreadable", never a raw error.
   try {
-    facts = await deps.repositoryEdges(task);
+    return mergeOrderOf(repositories, await deps.repositoryEdges(task));
   } catch (error) {
     deps.host.log?.("merge.order_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     return { kind: "no_safe_order", reason: "unreadable", repositories: mergeOrderOf(repositories, undefined).repositories };
   }
-  return mergeOrderOf(repositories, facts);
 }
+
+/** What each change line says when a person confirmed merging although no safe order could be found. */
+const ORDER_OVERRIDE_SUFFIX = " (in the order listed, which you confirmed)";
 
 /** The pull requests in the order they merge: the order's when it came from dependencies, repository order otherwise (today's, and a person's override). */
 function inMergeOrder<T extends { repositoryId: string; number: number }>(list: readonly T[], order: MergeOrder): T[] {
@@ -483,7 +485,9 @@ export async function prepareMerge(
     pullRequests: byRepository(open.map((entry) => ({ repositoryId: entry.repositoryId, number: entry.number, headSha: heads.get(pullRequestKey(entry))! }))),
   };
   // MR3: the order the pull requests merge in. No safe order is refused until a person confirms the override; only a person can (DEC 209).
-  const order = await mergeOrderOfTask(deps, tracked);
+  // With one pull request left to merge (a half merge being finished) there is no order to get wrong: nothing to refuse or override.
+  const found = await mergeOrderOfTask(deps, tracked);
+  const order: MergeOrder = found.kind === "no_safe_order" && subject.pullRequests.length < 2 ? { kind: "repository", repositories: found.repositories } : found;
   if (order.kind === "no_safe_order" && input.orderOverride !== true) throw agentXError("MERGE_NOT_READY", MERGE_ORDER_WORDS.noSafeOrder[order.reason]);
   const ordered = inMergeOrder(subject.pullRequests, order);
   const orderShown = order.kind === "dependencies" ? ordered.map((pr) => pr.repositoryId) : order.kind === "no_safe_order" ? "override" as const : undefined;
@@ -496,7 +500,7 @@ export async function prepareMerge(
   const steps = order.kind === "dependencies" && ordered.length > 1;
   return {
     request, requirement: await deps.approvers.requirement(request), subject, risk, mergeMethod: checked.settings.mergeMethod, ...(tier === undefined ? {} : { tier }),
-    changes: ordered.map((pr, index) => `${changeText(pr.repositoryId, pr.number, checked.settings.mergeMethod)}${steps ? (index === 0 ? " first" : " then") : ""}`),
+    changes: ordered.map((pr, index) => `${changeText(pr.repositoryId, pr.number, checked.settings.mergeMethod)}${steps ? (index === 0 ? " first" : " then") : orderShown === "override" ? ORDER_OVERRIDE_SUFFIX : ""}`),
     ...(orderShown === undefined ? {} : orderShown === "override" ? { orderOverride: true as const } : { mergeOrder: orderShown }),
   };
 }
