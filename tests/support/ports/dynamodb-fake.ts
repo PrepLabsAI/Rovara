@@ -25,6 +25,7 @@ import {
   GetItemCommand,
   PutItemCommand,
   QueryCommand,
+  ScanCommand,
   TransactionCanceledException,
   TransactWriteItemsCommand,
   UpdateItemCommand,
@@ -535,7 +536,7 @@ export class FakeDynamoDb implements DynamoDbSender {
   async send(command: DynamoDbCommand): Promise<unknown> {
     await Promise.resolve();
     const operation = command instanceof GetItemCommand ? "GetItem" : command instanceof BatchGetItemCommand ? "BatchGetItem" : command instanceof PutItemCommand ? "PutItem"
-      : command instanceof UpdateItemCommand ? "UpdateItem" : command instanceof DeleteItemCommand ? "DeleteItem" : command instanceof QueryCommand ? "Query" : command instanceof TransactWriteItemsCommand ? "TransactWriteItems" : "Unknown";
+      : command instanceof UpdateItemCommand ? "UpdateItem" : command instanceof DeleteItemCommand ? "DeleteItem" : command instanceof QueryCommand ? "Query" : command instanceof ScanCommand ? "Scan" : command instanceof TransactWriteItemsCommand ? "TransactWriteItems" : "Unknown";
     this.requests.push({ operation, input: structuredClone(command.input) });
     const fault = this.#faults.findIndex((entry) => entry.operation === operation);
     if (fault >= 0) throw this.#faults.splice(fault, 1)[0]!.make();
@@ -545,6 +546,7 @@ export class FakeDynamoDb implements DynamoDbSender {
     if (command instanceof UpdateItemCommand) return this.#update(command.input);
     if (command instanceof DeleteItemCommand) return this.#delete(command.input);
     if (command instanceof QueryCommand) return this.#query(command.input);
+    if (command instanceof ScanCommand) return this.#scan(command.input);
     if (command instanceof TransactWriteItemsCommand) return this.#transact(command.input);
     throw validation("unsupported operation");
   }
@@ -675,6 +677,29 @@ export class FakeDynamoDb implements DynamoDbSender {
     }
     const lastKey = cut && last !== undefined ? this.#positionOf(last, index) : undefined;
     return { Items: items, Count: items.length, ScannedCount: evaluated, ...(lastKey === undefined ? {} : { LastEvaluatedKey: lastKey }), $metadata: {} };
+  }
+
+  /** A table scan (no index, no filter in this double): every item in table-key order, paged by `Limit` and the size cap like a query. */
+  #scan(input: ScanCommand["input"]): unknown {
+    this.#table(input.TableName);
+    if (input.IndexName !== undefined || input.FilterExpression !== undefined || input.Segment !== undefined) throw validation("this double scans the table only, unfiltered");
+    const limit = input.Limit;
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw validation("Limit must be at least 1");
+    const order = (a: Item, b: Item): number => Math.sign(Buffer.compare(utf8(a.pk!.S!), utf8(b.pk!.S!))) || Math.sign(Buffer.compare(utf8(a.sk!.S!), utf8(b.sk!.S!)));
+    let candidates = [...this.#items.values()].sort(order);
+    if (input.ExclusiveStartKey !== undefined) { const position = input.ExclusiveStartKey as Item; candidates = candidates.filter((item) => order(item, position) > 0); }
+    const items: Item[] = [];
+    let bytes = 0;
+    let last: Item | undefined;
+    let cut = false;
+    for (const item of candidates) {
+      bytes += itemSize(item);
+      last = item;
+      items.push(structuredClone(item));
+      if ((limit !== undefined && items.length >= limit) || bytes >= this.#pageBytes) { cut = true; break; }
+    }
+    const lastKey = cut && last !== undefined ? { pk: last.pk!, sk: last.sk! } : undefined;
+    return { Items: items, Count: items.length, ScannedCount: items.length, ...(lastKey === undefined ? {} : { LastEvaluatedKey: lastKey }), $metadata: {} };
   }
 
   #transact(input: TransactWriteItemsCommand["input"]): unknown {
