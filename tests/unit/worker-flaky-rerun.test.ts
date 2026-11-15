@@ -9,6 +9,8 @@ import { runChecks, type CheckPlan, type CheckRunners } from "../../packages/wor
 import { CHECKS_MESSAGE_TYPE, checksFeedback, verificationExtension, type VerificationOptions } from "../../packages/worker/src/verification/extension.js";
 import { FLAKY_RERUN_IDS_MAX, flakyRerunFileFor, flakyRerunFileOf, isFullyFlaky, rerunFlaky, type FlakyRerunResult } from "../../packages/worker/src/verification/flaky-rerun.js";
 import { splitFailures } from "../../packages/worker/src/nightly-run.js";
+import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
+import { WorkspaceSafety, markWorkspaceUnsafe, withWorkspaceSafety } from "../../packages/worker/src/workspace-safety.js";
 
 type State = "passed" | "failed" | "skipped";
 const PYTEST_ARGS = ["--junitxml=report.xml"];
@@ -208,6 +210,75 @@ describe("a rerun that did not run leaves the failure a failure", () => {
     const aborted = await rerunFlaky({ rootPath: root, commands: [pytest()], checks: [TESTS], entries: round.entries, runners, roundStartedAtMs: 0, budgetMs: MINUTE, signal: controller.signal });
     expect(aborted.size).toBe(0);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("an unsafe workspace is not written again, and a multi-repo round is not rerun", () => {
+  /** Three pytest checks, each failing one test next to a passing one, each with its own report file. A rerun of check `unsafeOn` (0-based) writes its narrower report and then cannot confirm its stop. */
+  async function threeChecks(unsafeOn: number | undefined, extra: Partial<CheckRunners> = {}) {
+    const commands = [0, 1, 2].map((n) => pytest([`--junitxml=report${n}.xml`, `check${n}`]));
+    const calls: ProjectCommand[] = [];
+    const runners: CheckRunners = {
+      async runProjectCommand(command) {
+        calls.push(command);
+        const n = Number(/report(\d)\.xml/u.exec(command.args.join(" "))![1]);
+        const rerun = command.args.some((arg) => arg.includes("::"));
+        const id = `tests/test_${n}.py::test_x`;
+        const states: Record<string, State> = rerun ? { [id]: "passed" } : { [id]: "failed", [`tests/test_${n}.py::test_other`]: "passed" };
+        await writeFile(join(root, `report${n}.xml`), junit(states));
+        if (rerun && n === unsafeOn) throw new RunnerKillUnconfirmedError({ kind: "local" });
+        return { exitCode: rerun ? 0 : 1, timedOut: false, stdout: "", stderr: "" };
+      },
+      async runAgentCommand() { throw new Error("no agent commands here"); },
+      ...extra,
+    };
+    const started = Date.now() - 50;
+    const signal = new AbortController().signal;
+    const round = await runChecks({ source: "project", readiness: commands, projectBefore: ["passed", "passed", "passed"] }, runners, { budgetMs: 30 * MINUTE, signal });
+    const rerun = () => rerunFlaky({ rootPath: root, commands, checks: [TESTS, TESTS, TESTS], entries: round.entries, runners, roundStartedAtMs: started, budgetMs: 30 * MINUTE, signal });
+    const report = (n: number) => readFile(join(root, `report${n}.xml`), "utf8");
+    return { rerun, calls, report };
+  }
+
+  it("control: without an unsafe stop each of the three failing checks is rerun once and is fully flaky", async () => {
+    await withWorkspaceSafety(new WorkspaceSafety(), async () => {
+      const { rerun, calls, report } = await threeChecks(undefined);
+      const result = await rerun();
+      expect(calls).toHaveLength(6);
+      expect([...result.keys()]).toEqual(["readiness:0", "readiness:1", "readiness:2"]);
+      expect(await report(1)).toContain("test_other");
+    });
+  });
+
+  it("a rerun stopped without confirmation ends the whole rerun: no result at all, no later check is rerun, and no report is written back", async () => {
+    await withWorkspaceSafety(new WorkspaceSafety(), async () => {
+      const { rerun, calls, report } = await threeChecks(1);
+      const result = await rerun();
+      // The three round runs, the first check's rerun, the second check's rerun (which could not be confirmed stopped): the third is never rerun.
+      expect(calls).toHaveLength(5);
+      expect(result.size).toBe(0);
+      // The second check's report stays as the stopped rerun left it: an unsafe workspace is not written again (the first check's was put back before anything was unsafe).
+      expect(await report(1)).not.toContain("test_other");
+      expect(await report(0)).toContain("test_other");
+    });
+  });
+
+  it("a workspace that was already unsafe when the rerun starts: no command starts and nothing is written", async () => {
+    const safety = new WorkspaceSafety();
+    await withWorkspaceSafety(safety, async () => {
+      const { rerun, calls, report } = await threeChecks(undefined);
+      const before = await report(0);
+      markWorkspaceUnsafe({ kind: "local" });
+      expect((await rerun()).size).toBe(0);
+      expect(calls).toHaveLength(3);
+      expect(await report(0)).toBe(before);
+    });
+  });
+
+  it("a multi-repo round (runners with a report root of their own) is not rerun: no command starts", async () => {
+    const { rerun, calls } = await threeChecks(undefined, { reportRoot: () => root });
+    expect((await rerun()).size).toBe(0);
+    expect(calls).toHaveLength(3);
   });
 });
 

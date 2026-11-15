@@ -43,6 +43,13 @@ describe("GET /v1/dev/tasks/{taskId} (FR-016, FR-025)", () => {
     expect(task).not.toHaveProperty("failure");
   });
 
+  it("says what the task has cost from its counted usage, and nothing before the first (#651)", async () => {
+    const { read, db, taskId } = await running();
+    expect(((await read()) as { task: Record<string, unknown> }).task.spent).toBeUndefined();
+    db.set({ ...(db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown>), spentUsd: 28.4812, spentInputTokens: 26_257_037, spentOutputTokens: 257_592, spentRuns: 17, spentUnpricedRuns: 0, spentUpdatedAt: "2026-11-15T01:43:15.327Z" });
+    expect(((await read()) as { task: Record<string, unknown> }).task.spent).toEqual({ usd: 28.4812, inputTokens: 26_257_037, outputTokens: 257_592, runs: 17, unpricedRuns: 0, updatedAt: "2026-11-15T01:43:15.327Z" });
+  });
+
   it("returns only as many events as asked, and none for events=0", async () => {
     const { read, events, workspaceId, operationId } = await running();
     await events(workspaceId, operationId, Array.from({ length: 5 }, (_, index) => ({ type: "progress", payload: { message: `step ${index}` } })));

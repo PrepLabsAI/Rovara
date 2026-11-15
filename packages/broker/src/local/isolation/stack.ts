@@ -111,6 +111,8 @@ export interface GatewayInput extends HelperCommon {
   names: IsolationNames;
   nets: { worker: NetworkInfo; sandbox: NetworkInfo; external: NetworkInfo };
   allowed: readonly string[];
+  /** Names the SANDBOX network may not reach although they are on `allowed` (the model hosts; TE-F1c). Absent or empty: no such rule. The worker's network ignores it. */
+  sandboxDenied?: readonly string[] | undefined;
   workspaceId: string;
   callback: { tcpPort: number; socketDirectory?: string | undefined };
   /** The user the gateway runs as: 1000, or the owner's own on Linux when the callback socket is mounted. */
@@ -125,6 +127,7 @@ export function gatewayConfig(input: GatewayInput): Record<string, unknown> {
   targets.push({ host: "host.docker.internal", port: input.callback.tcpPort });
   return {
     allowed: input.allowed,
+    ...(input.sandboxDenied === undefined || input.sandboxDenied.length === 0 ? {} : { sandboxDenied: input.sandboxDenied }),
     nets: { worker: input.nets.worker.subnet, sandbox: input.nets.sandbox.subnet, external: input.nets.external.subnet },
     callback: { port: CALLBACK_RELAY_PORT, workspaceId: input.workspaceId, targets, hostHeader: `host.docker.internal:${input.callback.tcpPort}` },
     ingress: { port: GATEWAY_INGRESS_PORT, target: WORKER_ALIAS, targetPort: GATEWAY_INGRESS_PORT },

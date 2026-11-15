@@ -13,20 +13,20 @@ export interface CheckTests {
   file?: { path: string; bytes: Buffer };
 }
 
-/** The check's report in id form, or undefined when the command names none, it is missing, unsafe, too large, stale (with `notBeforeMs`) or not a report. Never throws. */
-export async function readCheckTests(rootPath: string, command: ProjectCommand, options: { notBeforeMs?: number } = {}): Promise<CheckTests | undefined> {
+/** The check's report in id form (`idRootPath`: where the test ids resolve against, when the report was written elsewhere, as for a multi-repo round), or undefined when the command names none, it is missing, unsafe, too large, stale (with `notBeforeMs`) or not a report. Never throws. */
+export async function readCheckTests(rootPath: string, command: ProjectCommand, options: { notBeforeMs?: number; idRootPath?: string } = {}): Promise<CheckTests | undefined> {
   try {
     if (options.notBeforeMs === undefined) {
       const read = await readCheckReport(rootPath, command);
       const parsed = read === undefined ? undefined : parseTestReport(read.text, read.kind);
-      return parsed === undefined ? undefined : { report: await withTestIds(parsed, { root: rootPath, cwd: command.cwd }) };
+      return parsed === undefined ? undefined : { report: await withTestIds(parsed, { root: options.idRootPath ?? rootPath, cwd: command.cwd }) };
     }
     const spec = reportSpecOf(command);
     if (spec === undefined) return undefined;
     const read = await readContainedReport({ root: rootPath, cwd: command.cwd, argument: spec.argument, maxBytes: TEST_REPORT_MAX_BYTES, notBeforeMs: options.notBeforeMs });
     if (!read.ok) return undefined;
     const parsed = parseTestReport(read.bytes.toString("utf8"), spec.kind);
-    return parsed === undefined ? undefined : { report: await withTestIds(parsed, { root: rootPath, cwd: command.cwd }), file: { path: read.path, bytes: read.bytes } };
+    return parsed === undefined ? undefined : { report: await withTestIds(parsed, { root: options.idRootPath ?? rootPath, cwd: command.cwd }), file: { path: read.path, bytes: read.bytes } };
   } catch {
     return undefined;
   }

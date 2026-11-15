@@ -33,6 +33,9 @@ import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { sessionEventItem } from "../core/sessions/store.js";
 import { verifyPublishedChanges } from "../core/build-step/changed-files.js";
+import { runTierChecks } from "../core/build-step/tier-checks.js";
+import { scopeHoldOf } from "../core/build-step/scope-question.js";
+import { skippedPlanning } from "../core/decisions/change-tier.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { announceTaskEnd, completedByMerge } from "../core/task-flow/task-end.js";
@@ -48,6 +51,13 @@ export const TRACKING_FAILURE_MAX_MS = TRACKING_HEARTBEAT_MINUTES * 60_000;
 export const SWEEP_MAX_ROWS = 10;
 export const SWEEP_MAX_REQUESTS = 256;
 export const SWEEP_MAX_MS = 20_000;
+/** One task's lighter-flow checks: their own allowance of requests, and at most this much of a pass's time (the reviewer calls are bounded on their own). */
+export const TIER_CHECKS_MAX_REQUESTS = 256;
+export const TIER_CHECKS_MAX_MS = 4 * 60_000;
+/** One tier pass, all tasks together: the rest wait for the next pass (they are taken oldest run first). */
+export const TIER_PASS_MAX_MS = 10 * 60_000;
+/** How long a task may wait for a tier pass before the install says loudly that none runs. */
+export const TIER_STALL_MS = 30 * 60_000;
 /** What the task says when its pull request ended at a head Rovara did not check. */
 export const MERGED_OUTSIDE = "The pull request was merged with commits Rovara did not check, so this is not a merge of the code Rovara checked. Look at what was merged, then close this task.";
 export const CLOSED_OUTSIDE = "The pull request was closed on the code host with commits Rovara did not check. Look at it there, then close this task.";
@@ -152,6 +162,8 @@ export interface MergeTrackingService {
   pauseUntil(retryAt: number): void;
   /** Waits for a sweep that is running. */
   idle(): Promise<void>;
+  /** The lighter flow's checks for the tasks the sweeps found owing them, each in its own allowance (model calls take long; the sweep never waits for them). Answers how many ran. */
+  tierChecks(): Promise<number>;
 }
 
 export function createMergeTrackingService(options: MergeTrackingServiceOptions): MergeTrackingService {
@@ -178,6 +190,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     repository: resolver,
     // A pull request seen "changed outside Rovara" has no recorded head, so its head reads as someone else's and it is never called ready.
     recordedHead: recordedHeadOf(flow),
+    // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
+    readyHold: (task, current) => scopeHoldOf(flow, task, current),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 
@@ -207,13 +221,13 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
           kind: "stuck", orgId: companyId, taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at, text: state === "MERGED" ? MERGED_OUTSIDE : CLOSED_OUTSIDE,
           pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
         }, outside.revision, { definitionVersion: workflow.definitionVersion });
-        const recorded = await store.transact([workflowUpdateItem(taskId, outside, workflow.revision), ...stuck]);
+        const recorded = await store.transact([workflowUpdateItem(taskId, outside, workflow.revision, workflow), ...stuck]);
         if (recorded.applied) await milestones.deliver(taskId).catch(() => undefined);
         return recorded.applied ? { kind: "TERMINAL", release: "confirmed" } : { kind: "OBSERVED" };
       }
       const next = observeWorkflowPullRequest(workflow, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, candidateDigest: pullRequest.candidateDigest, state, source: "CODE_HOST", observedAt: at }, at);
       const items: TransactItem[] = [
-        workflowUpdateItem(taskId, next, workflow.revision),
+        workflowUpdateItem(taskId, next, workflow.revision, workflow),
         ...await mergedMilestoneItems({ milestones, bindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) } }, task, workflow, next, at),
         ...await mergedStateItems({ store, timeline, audit: flow.audit, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
@@ -279,6 +293,56 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     }
   };
 
+  /**
+   * The tasks the sweep found owing the lighter flow's checks are kept as rows (`TIER_CHECKS_DUE`), so a host that only sweeps (or a short-lived one) still runs the tier pass later. The pass takes them oldest
+   * run first (round robin), each with its own allowance and a share of the pass's time; a row goes only once its task was checked (or owes nothing), never before a code host's pause is honoured.
+   */
+  const tierDueKey = (taskId: string) => ({ pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` });
+  const markTierDue = async (taskId: string): Promise<void> => {
+    await store.put({ item: { ...tierDueKey(taskId), entityType: "TIER_CHECKS_DUE", taskId, lastRunAt: 0, dueAt: now() }, condition: when.absent() }).catch(() => undefined);
+    // A host that sweeps but never runs the tier pass (`tierChecks`) leaves every lighter-flow task held: say so loudly, once per task and hour.
+    const row = await store.get(tierDueKey(taskId)).catch(() => undefined);
+    const dueAt = typeof row?.["dueAt"] === "number" ? row["dueAt"] : now();
+    const lastRunAt = typeof row?.["lastRunAt"] === "number" ? row["lastRunAt"] : 0;
+    if (now() - Math.max(dueAt, lastRunAt) > TIER_STALL_MS && (stallLogged.get(taskId) ?? 0) + 3_600_000 < now()) {
+      stallLogged.set(taskId, now());
+      console.error(JSON.stringify({ component: "merge_tracking", event: "tier_checks.not_running", level: "error", taskId, waitingMs: now() - Math.max(dueAt, lastRunAt), words: "No tier pass has run for this task: its pull request stays held. Call MergeTrackingService.tierChecks() on a schedule." }));
+    }
+  };
+  const stallLogged = new Map<string, number>();
+  let tierRunning: Promise<number> | undefined;
+  const runTierPass = async (): Promise<number> => {
+    const rows = (await queryAll(store, { pk: "TIER_CHECKS_DUE", sk: { op: "beginsWith", prefix: "TASK#" } }).catch(() => []))
+      .sort((left, right) => Number(left["lastRunAt"] ?? 0) - Number(right["lastRunAt"] ?? 0));
+    const passEnds = now() + TIER_PASS_MAX_MS;
+    let ran = 0;
+    for (const row of rows) {
+      if (cooldownUntil !== undefined && now() < cooldownUntil) break;
+      const left = passEnds - now();
+      if (left <= 0) break;
+      const taskId = typeof row["taskId"] === "string" ? row["taskId"] : "";
+      if (taskId === "") continue;
+      const task = await readTask(flow, taskId).catch(() => undefined);
+      if (task === undefined || task.closedAt !== undefined) { await store.delete({ key: tierDueKey(taskId) }).catch(() => undefined); continue; }
+      // Each task's share: its own requests, and at most a fixed part of the pass's time, so one slow task cannot hold the others back.
+      const { budget, stop } = createReadBudget(now, { requests: TIER_CHECKS_MAX_REQUESTS, ms: Math.min(TIER_CHECKS_MAX_MS, left) });
+      let outcome: Awaited<ReturnType<typeof runTierChecks>> | undefined;
+      try {
+        outcome = await runTierChecks(flow, task, budget.beforeRequest);
+        ran += 1;
+      } catch (error) {
+        const limitedUntil = hostRateLimitRetryAt(error);
+        if (limitedUntil !== undefined) { cooldownUntil = Math.max(cooldownUntil ?? 0, limitedUntil); remember(cooldownUntil); break; }
+        log({ component: "merge_tracking", event: "tier_checks.failed", taskId, error: error instanceof Error ? error.name : "unknown" });
+      } finally {
+        stop();
+      }
+      if (outcome === "checked" || outcome === "not_owed") await store.delete({ key: tierDueKey(taskId) }).catch(() => undefined);
+      else await store.update({ key: tierDueKey(taskId), ops: [change.set("lastRunAt", now())], condition: when.present() }).catch(() => undefined);
+    }
+    return ran;
+  };
+
   const runSweep = async (): Promise<{ attempted: number }> => {
     if (!cooldownRead) {
       cooldownRead = true;
@@ -310,6 +374,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
           // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
           const task = await readTask(flow, row.taskId);
           if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
+          // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
+          if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(row.taskId);
           result = await reconcileTrackingTask(deps, row.taskId, budget);
         } catch (error) {
           const limitedUntil = hostRateLimitRetryAt(error);
@@ -346,7 +412,12 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     },
     pauseUntil(retryAt) { cooldownUntil = Math.max(cooldownUntil ?? 0, retryAt); remember(cooldownUntil); },
     pausedUntil: () => (cooldownUntil !== undefined && now() < cooldownUntil ? cooldownUntil : undefined),
-    async idle() { await sweeping?.catch(() => undefined); },
+    async idle() { await sweeping?.catch(() => undefined); await tierRunning?.catch(() => undefined); },
+    tierChecks() {
+      // One pass at a time; a task's checks never run twice at once in this process.
+      tierRunning ??= runTierPass().finally(() => { tierRunning = undefined; });
+      return tierRunning;
+    },
   };
 }
 

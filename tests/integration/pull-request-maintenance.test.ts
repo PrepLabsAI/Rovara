@@ -5,10 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { WorkerInvocation } from "@agentx/contracts";
+import { neverCommitRefusal, type WorkerInvocation } from "@agentx/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { maintainPullRequest } from "../../packages/worker/src/maintain-pull-request.js";
+import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker/src/devcontainer.js";
 
 const execFileAsync = promisify(execFile);
@@ -94,6 +95,25 @@ describe("pull request maintenance", () => {
       previousCommit: fixture.pullRequestHead,
       commit: result.commit,
     }));
+  });
+
+  it("appends the customer's change without Rovara's own working files, even when they were force-added (TE-B9)", async () => {
+    const fixture = await createFixture("append");
+    await mkdir(join(fixture.checkout, ".agentx"), { recursive: true });
+    await writeFile(join(fixture.checkout, ".agentx", "x"), "state\n", "utf8");
+    await writeFile(join(fixture.checkout, ".agentx-tmp"), "scratch\n", "utf8");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    await git(fixture.checkout, ["add", "-f", ".agentx", ".agentx-tmp"]);
+    const result = await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestUpdateSink: vi.fn(async () => ({ url: "https://github.com/example/demo/pull/7", state: "open" as const, reconciled: false })),
+    });
+    const before = (await git(fixture.bare, ["ls-tree", "-r", "--name-only", fixture.pullRequestHead])).split("\n").filter((line) => line !== "");
+    const after = (await git(fixture.bare, ["ls-tree", "-r", "--name-only", result.commit])).split("\n").filter((line) => line !== "");
+    expect(after).toEqual([...before, "APPEND.md"].sort());
+    expect(after.some((path) => path.startsWith(".agentx"))).toBe(false);
   });
 
   it("rejects a stale recorded head before changing a remote branch", async () => {
@@ -267,6 +287,27 @@ describe("pull request maintenance", () => {
         otherOperationWait: { timeoutMs: 60, pollMs: 5 },
       })).rejects.toThrow(/another operation still running.*did not push/);
       expect(credential).not.toHaveBeenCalled();
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+    });
+
+    it("refuses, in the one guarded push, a reviewed fix that holds Rovara's working files (a tree captured before the rule); the branch and the pull request are untouched (TE-B9 M4)", async () => {
+      const fixture = await createFixture("append");
+      // The task committed a working file and its fix; the tree was captured with no base named (before the rule, or by a caller that has none), so nothing takes the file out of it.
+      await mkdir(join(fixture.checkout, ".agentx"), { recursive: true });
+      await writeFile(join(fixture.checkout, ".agentx", "x"), "state\n", "utf8");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      await git(fixture.checkout, ["add", "-f", ".agentx", "FIX.md"]);
+      await commit(fixture.checkout, "task: fix and state");
+      const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout }]);
+      const reviewedTree = candidate!.treeSha;
+      const update = sink();
+      await expect(pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree),
+        credentialProvider: async () => ({}),
+        pullRequestUpdateSink: update,
+      })).rejects.toThrow(neverCommitRefusal(".agentx/x"));
+      expect(update).not.toHaveBeenCalled();
       expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
     });
 

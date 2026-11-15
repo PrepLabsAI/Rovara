@@ -9,7 +9,7 @@ import { DEFAULT_AGENT_ALLOW_DOMAINS, SetupHostSchema, prodDenyMatchesHost, type
 /** A host longer than this is refused: the card shows the whole name, and a long name can hide its end. */
 export const SETUP_HOST_CARD_MAX = 70;
 
-export const SETUP_HOST_REFUSALS = ["not_a_host", "address_literal", "ip_in_name", "private_name", "too_long", "paste_site", "link_shortener", "tunnel", "webhook_sink", "raw_storage", "production"] as const;
+export const SETUP_HOST_REFUSALS = ["not_a_host", "address_literal", "ip_in_name", "private_name", "too_long", "paste_site", "link_shortener", "tunnel", "webhook_sink", "raw_storage", "production", "model_host"] as const;
 export type SetupHostRefusal = (typeof SETUP_HOST_REFUSALS)[number];
 
 /** The fixed words a refusal is shown with (never a repository's or a model's words). */
@@ -25,6 +25,7 @@ export const SETUP_HOST_REFUSAL_WORDS: Record<SetupHostRefusal, string> = {
   webhook_sink: "A website that collects whatever is sent to it.",
   raw_storage: "Storage or hosting that anyone can upload to.",
   production: "On the company's production deny list.",
+  model_host: "A model host: the test sandbox is not allowed to reach it.",
 };
 
 type SuffixKind = "paste_site" | "link_shortener" | "tunnel" | "webhook_sink" | "raw_storage" | "ip_in_name";
@@ -63,7 +64,7 @@ const coveredBySuffix = (host: string, suffix: string): boolean => host === suff
  * `host:port` or a URL is `not_a_host`), anything but ASCII letters, digits, dots and hyphens in the text as given, an address in digits, a private last label, the contract's host shape, the length,
  * an address in the name, the fixed suffix lists, then the company's production deny list. A name that is not understood is refused, never passed on.
  */
-export function refuseSetupHost(host: string, prodDeny?: TestEnvProdDeny): SetupHostRefusal | undefined {
+export function refuseSetupHost(host: string, prodDeny?: TestEnvProdDeny, sandboxDenied?: readonly string[]): SetupHostRefusal | undefined {
   if (typeof host !== "string") return "not_a_host";
   const raw = host.endsWith(".") ? host.slice(0, -1) : host;
   if (raw === "") return "not_a_host";
@@ -82,6 +83,8 @@ export function refuseSetupHost(host: string, prodDeny?: TestEnvProdDeny): Setup
   if (LAMBDA_URL.test(lower) || GITHUB_USER_FILES.test(lower)) return "raw_storage";
   for (const [kind, suffixes] of SUFFIXES) if (suffixes.some((suffix) => coveredBySuffix(lower, suffix))) return kind;
   if (prodDeny !== undefined && prodDenyMatchesHost(prodDeny, lower)) return "production";
+  // FIX-0518: a model host the test sandbox is denied (the laptop's deny list) is not one a setup run can ask back in, and is never "already allowed".
+  if (sandboxDenied !== undefined && sandboxDenied.length > 0 && listCovers(sandboxDenied, lower)) return "model_host";
   return undefined;
 }
 

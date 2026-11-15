@@ -1,5 +1,7 @@
+import type { WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
+import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
 import type { TaskTestEnvironment } from "../test-env/seam.js";
 import type {
   Admission,
@@ -42,6 +44,8 @@ import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
+  /** Server start surface. Set by the route/adapter, never copied from request data. */
+  origin?: WorkOrigin;
   principal: Principal;
   client?: string | undefined;
   /**
@@ -54,6 +58,9 @@ export interface TaskCaller {
    */
   scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
 }
+
+/** Starting work always names the trusted server surface; other task actions need no origin. */
+export interface TaskStartCaller extends TaskCaller { origin: WorkOrigin }
 
 /** A registered project revision, as the flow needs it. */
 export interface ProjectRevision {
@@ -325,6 +332,19 @@ export interface TaskFlowDeps {
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
    */
   learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
+  /**
+   * The lighter flow, install-wide: a change whose plan is estimated exactly small skips its planning steps (plan check, design review, the requirements, design and plan approvals) and gets, after each push, the
+   * reviewer's fixed questions and the quick checks of what it touched; one that grows after the build stops and gets the grown tier's reviews on its current head before it can merge. Off or absent: today's flow.
+   * Switching it on needs `tierReviewCall` (construction refuses it without one), and there is no way to switch the reviewer's questions off.
+   */
+  lighterFlow?: boolean;
+  /**
+   * The install's model call for the lighter flow's reviewers (the floor's questions, and the reviews of a tier a change grew to), on the model the checking stage's rule picks. Kept whether or not the switch is on:
+   * a task that skipped steps owes the questions after the switch went off. Absent: nothing can be asked, so such a task cannot merge.
+   */
+  tierReviewCall?: TierReviewCall;
+  /** Counts each lighter-flow reviewer call against the task's spend (Cloud's S3 wiring). A refusal makes the reviewer unavailable (the change fails closed). Absent: not metered. */
+  tierReviewMeter?: TierReviewMeter;
 }
 
 export const DEFAULT_DISPATCH_QUEUE = "task-dispatch";

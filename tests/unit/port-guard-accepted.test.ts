@@ -52,14 +52,18 @@ class Lane {
   }
 }
 
-const HANDLER = "packages/broker/src/aws/handler.ts";
+// A cloud-aws finding that plan v3.2 still makes: a NEW file outside Code's deployment (aws/, infra/) and tests that imports an AWS client off the
+// four adapters' list. The module name is assembled, so no import of it sits in this file.
+const HANDLER = "packages/worker/src/placement.ts";
+const OTHER = "packages/worker/src/other.ts";
+const IMPORT = `import { EC2Client } from "${["@aws-sdk/", "client-", "ec2"].join("")}";\n`;
 const entry = (lane: Lane, path = HANDLER, rule: AcceptedFinding["rule"] = "cloud-aws"): AcceptedFinding => ({ path, rule, blob: lane.blob(path), reason: "owner decision 2026-11-12: already public" });
 const rules = (findings: Finding[]) => findings.map((finding) => `${finding.rule} ${finding.file}`);
 
 describe("accepted findings", () => {
   it("skip a finding whose path, rule and exact content match an entry", () => {
     const lane = new Lane();
-    lane.write(HANDLER, "export const handler = 1;\n");
+    lane.write(HANDLER, `${IMPORT}export const handler = 1;\n`);
     lane.commit();
     expect(rules(lane.guard([]))).toEqual([`cloud-aws ${HANDLER}`]);
     expect(lane.guard([entry(lane)])).toEqual([]);
@@ -67,37 +71,37 @@ describe("accepted findings", () => {
 
   it("flag an accepted file again once it is edited, and report the entry as stale", () => {
     const lane = new Lane();
-    lane.write(HANDLER, "export const handler = 1;\n");
+    lane.write(HANDLER, `${IMPORT}export const handler = 1;\n`);
     lane.commit();
     const accepted = entry(lane);
-    lane.write(HANDLER, "export const handler = 2;\n");
+    lane.write(HANDLER, `${IMPORT}export const handler = 2;\n`);
     lane.commit();
     // Changed inside the range: an error, and the file is still flagged on its own merits.
     expect(rules(lane.guard([accepted]))).toEqual([`cloud-aws ${HANDLER}`, `accepted-stale ${HANDLER}`]);
   });
 
-  it("flag a new file under aws/ that no entry names, while the accepted one stays skipped", () => {
+  it("flag a new file that no entry names, while the accepted one stays skipped", () => {
     const lane = new Lane();
-    lane.write(HANDLER, "export const handler = 1;\n");
-    lane.write("packages/broker/src/aws/other.ts", "export const other = 1;\n");
+    lane.write(HANDLER, `${IMPORT}export const handler = 1;\n`);
+    lane.write(OTHER, `${IMPORT}export const other = 1;\n`);
     lane.commit();
-    expect(rules(lane.guard([entry(lane)]))).toEqual(["cloud-aws packages/broker/src/aws/other.ts"]);
+    expect(rules(lane.guard([entry(lane)]))).toEqual([`cloud-aws ${OTHER}`]);
   });
 
   it("do not cover another rule on the same file", () => {
     const lane = new Lane();
-    lane.write(HANDLER, "export const handler = 1;\n");
+    lane.write(HANDLER, `${IMPORT}export const handler = 1;\n`);
     lane.commit();
     expect(rules(lane.guard([{ ...entry(lane), rule: "secret" }]))).toEqual([`cloud-aws ${HANDLER}`]);
   });
 
   it("treat an entry whose file is not at the tip and not touched by the range as inactive: it skips nothing and fails nothing, with a note", () => {
     const lane = new Lane();
-    lane.write("packages/broker/src/aws/other.ts", "export const other = 1;\n");
+    lane.write(OTHER, `${IMPORT}export const other = 1;\n`);
     lane.commit();
     const absent: AcceptedFinding = { path: HANDLER, rule: "cloud-aws", blob: "a".repeat(40), reason: "owner decision 2026-11-12: already public" };
     const result = lane.run([absent]);
-    expect(rules(result.findings)).toEqual(["cloud-aws packages/broker/src/aws/other.ts"]);
+    expect(rules(result.findings)).toEqual([`cloud-aws ${OTHER}`]);
     expect(result.notes).toEqual([expect.stringContaining(`${HANDLER}: accepted cloud-aws entry inactive`)]);
     expect(result.warnings).toEqual([]);
   });
@@ -120,7 +124,7 @@ describe("accepted findings", () => {
 
   it("report an entry for a file the range removes as stale", () => {
     const lane = new Lane();
-    lane.write(HANDLER, "export const handler = 1;\n");
+    lane.write(HANDLER, `${IMPORT}export const handler = 1;\n`);
     lane.commit();
     const accepted = entry(lane);
     git(lane.dir, "rm", "-q", HANDLER);
@@ -130,7 +134,7 @@ describe("accepted findings", () => {
 
   it("never accept a private name, even in a file whose cloud-aws finding is accepted", () => {
     const lane = new Lane();
-    lane.write(HANDLER, "// built for zorblaxcorp\nexport const handler = 1;\n");
+    lane.write(HANDLER, `${IMPORT}// built for zorblaxcorp\nexport const handler = 1;\n`);
     lane.commit();
     expect(rules(lane.guard([entry(lane)]))).toEqual([`private-name ${HANDLER}`]);
     expect(ACCEPTABLE_RULES).not.toContain("private-name");

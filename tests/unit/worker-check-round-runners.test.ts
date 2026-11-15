@@ -186,7 +186,7 @@ describe("withSealedCheckRound: the order is the seal (TS-SEAL-3)", () => {
   it("the working sandbox stays off the round network when the round is cancelled mid-check, and nothing runs after", async () => {
     const p = plan();
     const controller = new AbortController();
-    const { docker, calls, state } = fakeDocker(p.sandboxName, { answer: () => { controller.abort(); return new Promise(() => undefined); } });
+    const { docker, calls, state } = fakeDocker(p.sandboxName, { answer: () => { controller.abort(); return { exitCode: 143 }; } });
     const round = await runSealedCheckRound(roundInput(docker, p), planChecks([command("sleep", ["30"]), command("true")], { firstRuns: () => [] }), { budgetMs: 30 * MINUTE, signal: controller.signal });
     expect(round.stopped).toBe(true);
     expect(round.entries.map((entry) => entry.after)).toEqual(["not_run", "not_run"]);
@@ -338,7 +338,7 @@ describe("withSealedCheckRound: the order is the seal (TS-SEAL-3)", () => {
     const failed = fakeDocker(p.sandboxName);
     scenarios.push(["failure", () => withSealedCheckRound(roundInput(failed.docker, p), () => Promise.reject(new Error("x"))).catch(() => undefined), failed]);
     const controller = new AbortController();
-    const cancelled = fakeDocker(p.sandboxName, { answer: () => { controller.abort(); return new Promise(() => undefined); } });
+    const cancelled = fakeDocker(p.sandboxName, { answer: () => { controller.abort(); return { exitCode: 143 }; } });
     scenarios.push(["cancel", () => runSealedCheckRound(roundInput(cancelled.docker, p), planChecks([command("sleep", ["9"])], { firstRuns: () => [] }), { budgetMs: 30 * MINUTE, signal: controller.signal }), cancelled]);
     const noStart = fakeDocker(p.sandboxName, { startExit: 125 });
     scenarios.push(["start failure", () => withSealedCheckRound(roundInput(noStart.docker, p), () => Promise.resolve()).catch(() => undefined), noStart]);
@@ -389,7 +389,7 @@ describe("withSealedCheckRound: the order is the seal (TS-SEAL-3)", () => {
     await withSealedCheckRound(roundInput(failed.docker, p), () => Promise.reject(new Error("x"))).catch(() => undefined);
     check("failure", failed.calls, failed.state, { unpaused: true });
     const controller = new AbortController();
-    const cancelled = fakeDocker(p.sandboxName, { answer: () => { controller.abort(); return new Promise(() => undefined); } });
+    const cancelled = fakeDocker(p.sandboxName, { answer: () => { controller.abort(); return { exitCode: 143 }; } });
     await runSealedCheckRound(roundInput(cancelled.docker, p), planChecks([command("sleep", ["9"])], { firstRuns: () => [] }), { budgetMs: 30 * MINUTE, signal: controller.signal });
     check("cancel", cancelled.calls, cancelled.state, { unpaused: true });
     const noStart = fakeDocker(p.sandboxName, { startExit: 125 });

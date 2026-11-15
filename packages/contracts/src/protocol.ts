@@ -1,3 +1,6 @@
+import { PrepareSetupProveSchema } from "./setup-prove.js";
+import { TEST_ENV_PROVE_MEASURE_FEATURE } from "./machine-size.js";
+export { TEST_ENV_PROVE_MEASURE_FEATURE } from "./machine-size.js";
 import {StageIdSchema} from "./stage-model-shared.js";
 import { ActingAttributionSchema } from "./attribution.js";
 import { createHash } from "node:crypto";
@@ -32,7 +35,7 @@ import { LearnedContextSchema, LearnedRefsSchema } from "./learned-context.js";
 import { SpecReviewInputSchema, SpecWriteBindingSchema } from "./spec-target.js";
 import { OWNER_REDIRECT_FEATURE, OwnerRedirectInvocationSchema, PEEK_FEATURE } from "./live-interaction.js";
 import { DIAGNOSIS_WORKER_FEATURE, DiagnosisInvocationSchema } from "./live-diagnosis.js";
-import { EVIDENCE_CAPTURE_FEATURE } from "./evidence.js";
+import { EVIDENCE_CAPTURE_FEATURE, EVAL_ROUND_FEATURE } from "./evidence.js";
 import { TASK_DEPENDENCY_PLAN_MAX, TASK_FLAKY_RERUN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TaskDependencyPlanSchema, TestEnvTaskPlanSchema } from "./test-environment-wire.js";
 import { PeekPayloadSchema } from "./live-peek.js";
 import { DESIGN_REVIEW_REVIEWERS_MAX, ReviewerRoleSchema } from "./design-review.js";
@@ -50,7 +53,15 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
 export const SECOND_REVIEWER_FEATURE = "task.workflowSecondReviewer.v1" as const;
 /** DR5: the design-review form of the PLAN_CRITIQUE operation (`designReview` binding). A worker without it is never sent the binding; the broker refuses delivery instead (ec2-delivery.ts). */
 export const DESIGN_REVIEW_WORKER_FEATURE = "task.designReview.v1" as const;
-export const WORKER_INVOCATION_FEATURES = ["task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.workflowApprovedPlan.v1", SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TASK_FLAKY_RERUN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
+/** Broker-owned eval trigger and prior usage; repository data cannot request spend. */
+export const EvalRequestSchema = z.object({
+  aiChange: z.literal(true), reason: z.literal("eval_hint"), evalPass: z.union([z.literal(1), z.literal(2)]),
+  callsAlreadyUsed: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  costAlreadyUsedMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export type EvalRequest = z.infer<typeof EvalRequestSchema>;
+
+export const WORKER_INVOCATION_FEATURES = [TEST_ENV_PROVE_MEASURE_FEATURE, "task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.workflowApprovedPlan.v1", SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, EVAL_ROUND_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TASK_FLAKY_RERUN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
   NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** An agent step's payload (`agentStep`) goes only to a worker that lists this; the agent kind also needs AGENT_RUN_FEATURE. */
@@ -349,12 +360,23 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
       pins: PreparePinsSchema.optional(),
       /** Saved project images (switch `sv`): a rebuild of the project's image. The preparation is read only and pinned (`pins` are the job's commits); after it the worker proves the approved environment in a fresh sandbox and builds and pushes the image (saved-env/rebuild.ts). The lease token is added by the dispatcher at delivery. Sent only to a worker that lists `prepare.savedEnvBuild.v1`; never dropped. */
       savedEnvBuild: PrepareSavedEnvBuildSchema.optional(),
+      /** A proposal Prove on its own read-only, pinned preparation. Unadvertised until the broker result route lands. */
+      setupProve: PrepareSetupProveSchema.optional(),
       /**
        * Test services (slice 1, Prove): a test environment's CANDIDATE check starts these dependencies (pinned by digest; no secret), runs the proposal's readiness commands against them with the sealed check runners and
        * reports a usage record under `testServicesUsage` in its result. Sent only with the switch `tx` on and only to a worker whose /ping lists `task.testServices.v1`; never dropped (delivery refuses an older worker).
        */
       testServices: z.object({ dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX) }).strict().optional(),
-    }).strict(),
+    }).strict().superRefine((payload, context) => {
+      if (payload.setupProve === undefined) return;
+      const commits = new Map(Object.entries(payload.setupProve.commits));
+      if (payload.readOnly !== true || payload.pins === undefined || payload.pins.length !== commits.size
+        || payload.pins.some(pin => commits.get(pin.repository) !== pin.commit)
+        || payload.meta !== undefined || payload.registries !== undefined
+        || payload.checkout !== undefined || payload.savedEnvBuild !== undefined || payload.savedEnv !== undefined || payload.testServices !== undefined) {
+        context.addIssue({ code: "custom", path: ["setupProve"], message: "setup prove requires its own read-only pinned preparation" });
+      }
+    }),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("task"),
@@ -531,6 +553,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * only. Sent only while the proof switch is on, and only to a worker whose /ping lists "task.evidenceCapture.v1"; the dispatcher drops the field for an older worker (no evidence is captured and the omission is logged), because its strict parse would refuse it.
          */
         evidenceCapture: z.literal(true).optional(),
+        evalRequest: EvalRequestSchema.optional(),
         /**
          * Test environment (wire-testenv): this setup draft also runs the environment detectors over the default branch's files and reports the environment it would propose (a draft, never approved or run). Setup-draft
          * mode only. Sent only while the test environment switch is on, and only to a worker whose /ping lists "task.testEnvDetect.v1"; the dispatcher drops the field for an older worker (the setup draft then has no environment draft and the omission is logged), because its strict parse would refuse it.
@@ -559,6 +582,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.diagnosis !== undefined && (payload.agentStep !== undefined || payload.ownerRedirect !== undefined || payload.specWrite !== undefined || payload.contextSources !== undefined)) {
           context.addIssue({ code: "custom", path: ["diagnosis"], message: "a diagnosis carries no agent step, redirect, spec write or context sources" });
+        }
+        if (payload.evalRequest !== undefined && payload.workflowMode !== "CHECKS") {
+          context.addIssue({ code: "custom", path: ["evalRequest"], message: "eval requires the verification (checks) mode" });
         }
         if (payload.evidenceCapture !== undefined && payload.workflowMode !== "CHECKS") {
           context.addIssue({ code: "custom", path: ["evidenceCapture"], message: "evidence capture requires the verification (checks) mode" });

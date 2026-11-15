@@ -24,7 +24,7 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
   it("splits the tests across shards that each run on their own machine, and a failing shard does not hide the others", async () => {
     const test = (await workflow()).jobs.test!;
     expect(test.strategy?.["fail-fast"]).toBe(false);
-    expect(test.strategy?.matrix?.shard).toEqual([1, 2, 3, 4]);
+    expect(test.strategy?.matrix?.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(test.steps.some((step) => step.run === "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}")).toBe(true);
   });
 
@@ -113,6 +113,8 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     const body = release.slice(release.indexOf("export async function smokeTestExecutor"), release.indexOf("export async function smokeTestWorker"));
     expect(body).toContain("executorSmokeDockerArgs(image)");
     expect(body).not.toMatch(/--network|--cap-drop|seccomp|smoke\.js/);
+    // The production release loads release-common.ts before it builds, and the smoke module reads the built contracts.
+    expect(release).not.toMatch(/^import .*executor-smoke/m);
     expect(readFileSync("scripts/test-deploy.ts", "utf8")).toContain("smokeTest: smokeTestExecutor");
   });
 

@@ -18,6 +18,7 @@ import { commandWithSelection } from "./selection.js";
 import { RERUN_COMMANDS_MAX, rerunCommandsOf } from "./test-ids.js";
 import { reportSpecOf } from "./test-proof.js";
 import { isFailingState, splitFailures, testStatesOf, type TestState } from "./test-states.js";
+import { currentWorkspaceSafety } from "../workspace-safety.js";
 
 /** The most failing tests of one check that are rerun; more than this is a regression, not flakiness. */
 export const FLAKY_RERUN_IDS_MAX = RERUN_COMMANDS_MAX;
@@ -77,12 +78,17 @@ export function flakyRerunFileFor(reported: object | undefined, held: ReportedFl
 
 const READINESS_ID = /^readiness:(\d{1,3})$/u;
 
+/** FIX-RUNNER-ABORT-JOIN: a command of this task was stopped without the stop being confirmed, so the workspace may still be written: nothing more is started in it and nothing is written to it. */
+const workspaceUnsafe = (): boolean => currentWorkspaceSafety()?.unsafe === true;
+
 export async function rerunFlaky(input: FlakyRerunInput): Promise<FlakyRerunResult> {
+  // A multi-repo round writes its reports under a root of its own (`reportRoot`) and a rerun round would replace them with the narrower rerun's: no rerun there, every failure stands.
+  if (input.runners.reportRoot !== undefined) return new Map();
   const now = input.now ?? Date.now;
   const startedAt = now();
   const out = new Map<string, FlakyCheckResult>();
   for (const entry of input.entries) {
-    if (input.signal.aborted) return new Map();
+    if (input.signal.aborted || workspaceUnsafe()) return new Map();
     if (entry.class !== "regression" || entry.after !== "failed" || entry.source !== "project") continue;
     const matched = READINESS_ID.exec(entry.id);
     if (matched === null) continue;
@@ -96,10 +102,11 @@ export async function rerunFlaky(input: FlakyRerunInput): Promise<FlakyRerunResu
       const result = await rerunCheck(input, entry.id, command, check.selectArgs, left, now);
       if (result !== undefined) out.set(entry.id, result);
     } catch {
-      // A fault in the rerun leaves the check failing: no entry.
+      // A fault in the rerun leaves the check failing: no entry. A stop that could not be confirmed ends the whole rerun: no result at all, and no further command.
+      if (workspaceUnsafe()) return new Map();
     }
   }
-  return input.signal.aborted ? new Map() : out;
+  return input.signal.aborted || workspaceUnsafe() ? new Map() : out;
 }
 
 async function rerunCheck(input: FlakyRerunInput, checkId: string, command: ProjectCommand, selectArgs: readonly string[], budgetMs: number, now: () => number): Promise<FlakyCheckResult | undefined> {
@@ -133,10 +140,10 @@ async function rerunCheck(input: FlakyRerunInput, checkId: string, command: Proj
     const split = splitFailures(failingIds, stillFailing);
     result = { checkId, flaky: split.flaky, failing: split.failed };
   } finally {
-    // The rerun overwrote the check's report with a narrower one: put the first report back, or trust nothing.
-    if (!(await restoreReport(input.rootPath, command, first.file))) result = undefined;
+    // The rerun overwrote the check's report with a narrower one: put the first report back, or trust nothing. An unsafe workspace is not written again (the result is dropped instead).
+    if (workspaceUnsafe() || !(await restoreReport(input.rootPath, command, first.file))) result = undefined;
   }
-  return input.signal.aborted ? undefined : result;
+  return input.signal.aborted || workspaceUnsafe() ? undefined : result;
 }
 
 /** Writes the first report's bytes back to the same contained path (never through a link). False when it cannot be done. */

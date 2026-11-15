@@ -16,7 +16,7 @@ import { candidateChanges } from "./diff.js";
 import { changedMigrationFiles, migrationDirectionOf, migrationEvidence } from "./migration-check.js";
 import { readContainedReport } from "./report-file.js";
 import { SARIF_REPORT_MAX_BYTES, findingsPart, newFindings, parseSarif, readsPrebuiltState, sameFindings, sarifPathOf, unverifiedPart, type ParsedSarif } from "./sarif.js";
-import { AgentFilesRestoreError } from "./original-code.js";
+import { isWorkspaceUnsafe } from "./original-code.js";
 import { runBaselineScans, type BaselineRun, type BaselineScan } from "./sarif-baseline.js";
 import { changedTestFiles, type TestProofRepository } from "./test-proof.js";
 import { withIsolatedGit } from "../isolated-git.js";
@@ -29,6 +29,8 @@ import type { FlakyRerunResult } from "./flaky-rerun.js";
 export interface CollectEvidenceInput {
   /** The workspace root, where a check's report path is resolved from its cwd. */
   rootPath: string;
+  /** Worker report storage, separate from source paths used to place test IDs and coverage. */
+  reportRootPath?: string | undefined;
   /** The project checks that were run, in order: check `readiness:<index>` is `commands[index]`. */
   commands: readonly ProjectCommand[];
   /** The round's entries on the candidate. */
@@ -120,8 +122,8 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     for (const [index, command] of input.commands.entries()) {
       const entry = entryOf(index);
       if (entry === undefined) continue;
-      // The tests in ID form (contracts `test-id.ts`), the same strings the nightly run and the known-failing marks use (one reader, shared with the flaky rerun).
-      const parsed = (await readCheckTests(input.rootPath, command))?.report;
+      // The tests in ID form (contracts `test-id.ts`), the same strings the nightly run and the known-failing marks use (one reader, shared with the flaky rerun). The report is read where the round wrote it (`reportRootPath`); the ids resolve against the workspace.
+      const parsed = (await readCheckTests(input.reportRootPath ?? input.rootPath, command, { idRootPath: input.rootPath }))?.report;
       const partial: CheckParts = { index, entry };
       // The skips among untouched tests before and now, and the tests that ran before and are gone (TE-B3), need the run on the ORIGINAL code, which comes after this file is written: they come from test-proof.json
       // (`weakening`, test-proof.ts) and the broker joins them to this part when it keeps the pack (evidence-keep.ts), so `skippedOutside` is not given here.
@@ -135,11 +137,11 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
       if (entry.after === "failed") { const tail = outputTailOf(entry.output); if (tail !== undefined) partial.outputTail = tail; }
       // A timed-out, stopped or never-run check may have left an older report on disk: only a check that ended is read.
       if (ended(entry)) {
-        const covered = await readChangedCoverage({ rootPath: input.rootPath, command, repositories: diffs, notBeforeMs: input.roundStartedAtMs, used: usedReports, approvedPath: input.coveragePaths?.[index], lineCoverage: (text, repositories) => placeLineCoverage(text, input.rootPath, command.cwd, repositories) });
+        const covered = await readChangedCoverage({ rootPath: input.rootPath, reportRootPath: input.reportRootPath, command, repositories: diffs, notBeforeMs: input.roundStartedAtMs, used: usedReports, approvedPath: input.coveragePaths?.[index], lineCoverage: (text, repositories) => placeLineCoverage(text, input.rootPath, command.cwd, repositories) });
         if ("coverage" in covered) partial.coverage = coveragePart(covered.coverage, input.repositories.length);
         const argument = sarifPathOf(command);
         if (argument !== undefined) {
-          const sarif = await readContainedReport({ root: input.rootPath, cwd: command.cwd, argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: input.roundStartedAtMs });
+          const sarif = await readContainedReport({ root: input.reportRootPath ?? input.rootPath, cwd: command.cwd, argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: input.roundStartedAtMs });
           const candidate = sarif.ok ? parseSarif(sarif.bytes.toString("utf8"), roots) : undefined;
           if (sarif.ok && candidate !== undefined) scans.push({ index, command, argument, path: sarif.path, candidateBytes: Buffer.from(sarif.bytes), candidate });
         }
@@ -158,7 +160,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     if (asking.length > 0 && input.baselineScans !== undefined) {
       baselines = await input.baselineScans(asking.map((scan): BaselineScan => ({ index: scan.index, command: scan.command, argument: scan.argument, path: scan.path, candidateBytes: scan.candidateBytes }))).catch((error: unknown) => {
         // The one fault that must stop the task is not swallowed: the agent's files are not back.
-        if (error instanceof AgentFilesRestoreError) throw error;
+        if (isWorkspaceUnsafe(error)) throw error;
         return new Map<number, string>();
       });
     }
@@ -225,7 +227,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     if (!parsed.success) return undefined;
     return Buffer.byteLength(JSON.stringify(parsed.data), "utf8") > EVIDENCE_RAW_MAX_BYTES ? undefined : parsed.data;
   } catch (error) {
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     return undefined;
   }
 }
@@ -267,7 +269,7 @@ export async function saveEvidenceRaw(input: {
     const complete = placed.length === input.repositories.length;
     const baseline = input.baseline;
     const raw = await collectEvidenceRaw({
-      rootPath: input.rootPath, commands: input.plan.readiness, entries: input.entries, candidateDigest: createCandidateManifest(input.candidateBefore).digest, roundStartedAtMs: input.roundStartedAtMs,
+      rootPath: input.rootPath, reportRootPath: input.baseline?.runners.reportRoot?.(), commands: input.plan.readiness, entries: input.entries, candidateDigest: createCandidateManifest(input.candidateBefore).digest, roundStartedAtMs: input.roundStartedAtMs,
       repositories: placed, repositoriesComplete: complete,
       selection: input.selection, coveragePaths: input.coveragePaths,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
@@ -281,7 +283,7 @@ export async function saveEvidenceRaw(input: {
     return true;
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     return false;
   }
 }

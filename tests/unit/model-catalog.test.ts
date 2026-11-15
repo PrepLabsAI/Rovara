@@ -56,7 +56,7 @@ describe("the built-in rows", () => {
   });
   it("takes the Gemini facts from the redirect check", () => {
     const gemini = rowById("gemini");
-    expect(gemini.hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"]);
+    expect(gemini.hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com", "firebasevertexai.googleapis.com"]);
     expect(gemini.family).toBe("gemini");
     expect(gemini.auth).toEqual([{ scheme: "header", name: "x-goog-api-key" }]);
     expect(gemini.streaming).toEqual(["sse", "json_array"]);
@@ -68,11 +68,13 @@ describe("the built-in rows", () => {
     expect(sdk).toContain("@langchain/google-genai");
     expect(gemini.redirect.some((method) => method.kind === "none" && method.client.includes("gRPC"))).toBe(true);
   });
-  it("lists Vertex by exact names, the metadata variables, and the token hosts it blocks", () => {
+  it("lists Vertex by exact names, the metadata variables, and the token hosts it reserves for authentication", () => {
     const vertex = rowById("vertex");
     expect(vertex.family).toBe("vertex");
     expect(vertex.hosts).toContain("aiplatform.googleapis.com");
     expect(vertex.hosts).toContain("us-central1-aiplatform.googleapis.com");
+    for (const host of ["aiplatform.us-central1.rep.googleapis.com", "aiplatform.us-central1.rep.mtls.googleapis.com", "aiplatform.us-west8.rep.googleapis.com"]) expect(vertex.hosts).toContain(host);
+    for (const host of vertex.authHosts) expect(vertex.hosts).not.toContain(host);
     expect(vertex.hosts.every((host) => !host.includes("*"))).toBe(true);
     expect(vertex.authHosts).toEqual(["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"]);
     expect(vertex.auth.map((auth) => auth.scheme).sort()).toEqual(["gcp_oauth", "header"]);
@@ -102,14 +104,14 @@ describe("the built-in rows", () => {
     for (const row of builtin()) expect(Object.keys(row.errors).sort()).toEqual(["badToolJson", "cutOffStream", "rateLimit", "refusal", "tokenLimit"]);
   });
   it("covers the direct providers: OpenAI, Anthropic, Cohere, Mistral, Groq, Together and Azure OpenAI (a suffix row)", () => {
-    expect(rowById("openai")).toMatchObject({ family: "openai_compatible", hosts: ["api.openai.com"] });
+    expect(rowById("openai")).toMatchObject({ family: "openai_compatible", hosts: ["api.openai.com", "eu.api.openai.com", "us.api.openai.com"] });
     expect(rowById("anthropic")).toMatchObject({ family: "anthropic_messages", hosts: ["api.anthropic.com"], auth: [{ scheme: "header", name: "x-api-key" }] });
     expect(rowById("cohere")).toMatchObject({ family: "cohere", hosts: ["api.cohere.ai", "api.cohere.com"] });
-    expect(rowById("mistral")).toMatchObject({ family: "openai_compatible", hosts: ["api.mistral.ai"] });
+    expect(rowById("mistral")).toMatchObject({ family: "openai_compatible", hosts: ["api.mistral.ai", "codestral.mistral.ai"] });
     expect(rowById("groq")).toMatchObject({ family: "openai_compatible", hosts: ["api.groq.com"] });
     expect(rowById("together")).toMatchObject({ family: "openai_compatible" });
     expect(rowById("together").hosts).toEqual(expect.arrayContaining(["api.together.xyz"]) as unknown);
-    expect(rowById("azure-openai")).toMatchObject({ family: "openai_compatible", hosts: [], hostSuffixes: ["openai.azure.com"], auth: [{ scheme: "header", name: "api-key" }] });
+    expect(rowById("azure-openai")).toMatchObject({ family: "openai_compatible", hosts: [], hostSuffixes: ["openai.azure.com", "cognitiveservices.azure.com", "services.ai.azure.com"], auth: [{ scheme: "header", name: "api-key" }] });
     // Shapes the redirect check did not cover are unverified, in the data and the notes.
     for (const id of ["openai", "anthropic", "cohere", "mistral", "groq", "together", "azure-openai"]) {
       expect(rowById(id).redirect.every((method) => !method.verified), id).toBe(true);
@@ -121,7 +123,7 @@ describe("the built-in rows", () => {
     for (const host of ["europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "europe-west10-aiplatform.mtls.googleapis.com"]) {
       expect(vertex, host).toContain(host);
     }
-    expect(rowById("gemini").hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"]);
+    expect(rowById("gemini").hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com", "firebasevertexai.googleapis.com"]);
     expect(rowById("gemini-openai").hosts).toEqual(["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"]);
   });
   it("keeps one row per (host, family) so routing is never ambiguous", () => {
@@ -131,6 +133,17 @@ describe("the built-in rows", () => {
 });
 
 describe("row schema", () => {
+  it("accepts only the three DEC 174 token hosts as authHosts", () => {
+    const authHosts = ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts: [] })).success).toBe(true);
+    for (const host of authHosts) expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts: [host] })).success, host).toBe(true);
+    for (const host of ["eu.api.openai.com", "models.inference.ai.azure.com", "storage.googleapis.com", "auth.example.com", "x.oauth2.googleapis.com", "oauth2.googleapis.com.evil.example.com", "OAUTH2.googleapis.com", "oauth2.googleapis.com."]) {
+      const row = sampleRow({ authHosts: [host] });
+      expect(ModelCatalogRowSchema.safeParse(row).success, host).toBe(false);
+      expect(parseModelCatalogBytes(new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, revision: 1, rows: [row] }))).ok, host).toBe(false);
+    }
+  });
   it("accepts a built-in row round-tripped through JSON", () => {
     expect(ModelCatalogRowSchema.safeParse(sampleRow()).success).toBe(true);
   });
@@ -183,11 +196,11 @@ describe("row schema", () => {
   });
   it("bounds the lists", () => {
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [] })).success).toBe(false);
-    const many = Array.from({ length: 129 }, (_, index) => `h${String(index)}.example.com`);
+    const many = Array.from({ length: 257 }, (_, index) => `h${String(index)}.example.com`);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many })).success).toBe(false);
-    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many.slice(0, 128) })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: many.slice(0, 256) })).success).toBe(true);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: [] })).success).toBe(false);
-    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: ["openai.azure.com"] })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: [], hostSuffixes: ["openai.azure.com", "cognitiveservices.azure.com", "services.ai.azure.com"] })).success).toBe(true);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hostSuffixes: ["com"] })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hostSuffixes: ["*.azure.com"] })).success).toBe(false);
     expect(ModelCatalogRowSchema.safeParse(sampleRow({ hosts: ["a.example.com", "a.example.com"] })).success).toBe(false);
@@ -352,7 +365,7 @@ describe("the stable digest and the unsigned parse", () => {
     expect(modelCatalogDigest({ ...base, revision: base.revision + 1 })).not.toBe(modelCatalogDigest(base));
   });
   it("pins the digest of the built-in rows: any change to a row is a conscious change here", () => {
-    expect(modelCatalogDigest(builtinModelCatalog())).toBe("77cf5f6756a7d86c0e34851a25302385d9078c2f497ab66a9da424e06fccb012");
+    expect(modelCatalogDigest(builtinModelCatalog())).toBe("c8327551ff3ec7156387c3c2b7d594f678bcd223b7fc9caea69dd2ffaae01d69");
   });
   it("keeps the unsigned parse out of the barrel: only builtinModelCatalog() may feed F1 and F2", async () => {
     const barrel = (await import("../../packages/contracts/src/index.js")) as Record<string, unknown>;
