@@ -4,8 +4,9 @@
 import { describe, expect, it } from "vitest";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import {
-  CORE_SWITCH_BLOCKERS, CoreSwitchBlockedError, CI_MODE_UNREADABLE_WORDS, SWITCH_BLOCKED_WORDS, checkedCiReporting, createCoreHostApp, switchBlockers, type CoreHostApp, type CoreService, type CoreServiceName,
+  CORE_SWITCH_BLOCKERS, CoreSwitchBlockedError, CI_MODE_UNREADABLE_WORDS, SWITCH_BLOCKED_WORDS, checkedCiReporting, createCoreHostApp, switchBlockers, type CoreHostApp, type CoreService, type CoreServiceName, type CoreServiceWiring,
 } from "../../packages/broker/src/core-host/index.js";
+import type { TaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 import type { ProjectCiMode, TrackedTask } from "../../packages/broker/src/core/merge/index.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -17,19 +18,24 @@ const flowOnly = () => ({ "session-sweep": { pass: async () => ({ swept: 0 }) },
 const TASK = { taskId: "t-1", companyId: FAKE_COMPANY } as unknown as TrackedTask;
 const SECRET = "SECRET-sk-live-zzz org_leak000000000000000";
 
-function appOver(world: FakeWorld, env: NodeJS.ProcessEnv, ciReporting: unknown, extra: { services?: (flow: unknown, wiring: { ciMode?: unknown }) => Partial<Record<CoreServiceName, CoreService>>; servedCompanies?: () => Promise<readonly string[]> } = {}): CoreHostApp {
+function appOver(world: FakeWorld, env: NodeJS.ProcessEnv, ciReporting: unknown, extra: { services?: (flow: TaskFlow, wiring: CoreServiceWiring) => Partial<Record<CoreServiceName, CoreService>>; servedCompanies?: () => Promise<readonly string[]> } = {}): CoreHostApp {
   return createCoreHostApp({
     env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     ...(extra.servedCompanies === undefined ? {} : { servedCompanies: extra.servedCompanies }),
     runtime: () => ({
       callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
-      services: (extra.services ?? ALL_SERVICES) as never,
+      services: extra.services ?? ALL_SERVICES,
       ...(ciReporting === undefined ? {} : { ciReporting: ciReporting as never }),
     }),
   });
 }
 
+/** The error a promise rejects with; a resolved promise fails the test. */
+async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+  try { await promise; } catch (caught) { return caught as Error; }
+  throw new Error("expected a rejection");
+}
 const honest = (...given: unknown[]) => { const mode = given.length === 0 ? "their_ci_fix" : given[0]; return { honest: true, ciMode: () => mode }; };
 
 describe("the switch blockers list", () => {
@@ -50,7 +56,7 @@ describe("the switch blockers list", () => {
 });
 
 describe("checkedCiReporting: validated at run time, not only by the type", () => {
-  it.each([
+  it.each<[string, unknown]>([
     ["absent", undefined],
     ["null", null],
     ["honest false", { honest: false, ciMode: () => "sandbox_only" }],
@@ -78,14 +84,14 @@ describe("checkedCiReporting: validated at run time, not only by the type", () =
 
   it("a reader that throws is the same fixed refusal and never echoes its text", async () => {
     const reporting = checkedCiReporting({ honest: true, ciMode: () => { throw new Error(SECRET); } })!;
-    const error = await reporting.ciMode(TASK).catch((caught: unknown) => caught as Error);
+    const error = await rejectionOf(reporting.ciMode(TASK));
     expect(error.message).toContain(CI_MODE_UNREADABLE_WORDS);
     expect(error.message).not.toContain("SECRET");
     expect(JSON.stringify(error)).not.toContain("SECRET");
   });
 
   it("an unknown answer never echoes what the reader said", async () => {
-    const error = await checkedCiReporting(honest(SECRET))!.ciMode(TASK).catch((caught: unknown) => caught as Error);
+    const error = await rejectionOf(checkedCiReporting(honest(SECRET))!.ciMode(TASK));
     expect(error.message).not.toContain("SECRET");
   });
 });
@@ -93,7 +99,7 @@ describe("checkedCiReporting: validated at run time, not only by the type", () =
 describe("the root refuses a company's runtime while a blocker stands", () => {
   it("merge on and no CI reporting wired: refused with the blocker's id and fixed words", async () => {
     const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "on" }, undefined);
-    const error = await app.runtimeFor(FAKE_COMPANY).catch((caught: unknown) => caught as CoreSwitchBlockedError);
+    const error = await rejectionOf(app.runtimeFor(FAKE_COMPANY)) as CoreSwitchBlockedError;
     expect(error).toBeInstanceOf(CoreSwitchBlockedError);
     expect(error.name).toBe("CoreSwitchBlockedError");
     expect(error.blockers).toEqual(["honest-ci"]);
@@ -102,7 +108,7 @@ describe("the root refuses a company's runtime while a blocker stands", () => {
   });
 
   it.each([["honest false", { honest: false, ciMode: () => "sandbox_only" }], ["honest as text", { honest: "true", ciMode: () => "sandbox_only" }], ["ciMode not a function", { honest: true, ciMode: SECRET }]])("refused when the wiring is %s, and the error names nothing it was given", async (_name, given) => {
-    const error = await appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: `on:${FAKE_COMPANY}` }, given).runtimeFor(FAKE_COMPANY).catch((caught: unknown) => caught as Error);
+    const error = await rejectionOf(appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: `on:${FAKE_COMPANY}` }, given).runtimeFor(FAKE_COMPANY));
     expect(error).toBeInstanceOf(CoreSwitchBlockedError);
     expect(error.message).not.toContain("SECRET");
   });
@@ -138,11 +144,9 @@ describe("the root refuses a company's runtime while a blocker stands", () => {
 
   it("a blocked runtime is not cached: wiring the reader later (a new container) serves", async () => {
     const world = createFakeWorld();
-    let wired: unknown;
     const app = appOver(world, { ROVARA_CORE_ENGINE: "on" }, undefined);
     await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreSwitchBlockedError);
-    wired = honest();
-    const again = appOver(world, { ROVARA_CORE_ENGINE: "on" }, wired);
+    const again = appOver(world, { ROVARA_CORE_ENGINE: "on" }, honest());
     await expect(again.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
   });
 

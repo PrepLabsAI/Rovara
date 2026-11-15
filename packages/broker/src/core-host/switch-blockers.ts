@@ -21,7 +21,7 @@ export interface CiReporting {
 /** The validated wrapper the runtime holds: `ciMode` always answers one of the four modes, or rejects with fixed words. */
 export interface CheckedCiReporting {
   readonly honest: true;
-  ciMode(task: TrackedTask): Promise<ProjectCiMode>;
+  readonly ciMode: (task: TrackedTask) => Promise<ProjectCiMode>;
 }
 
 export interface CoreSwitchBlocker {
@@ -55,7 +55,7 @@ export function checkedCiReporting(given: unknown): CheckedCiReporting | undefin
   const reader = candidate.ciMode as (task: TrackedTask) => unknown;
   return Object.freeze({
     honest: true as const,
-    async ciMode(task: TrackedTask): Promise<ProjectCiMode> {
+    ciMode: async (task: TrackedTask): Promise<ProjectCiMode> => {
       let answer: unknown;
       try { answer = await reader.call(given, task); } catch { throw new Error(CI_MODE_UNREADABLE_WORDS); }
       if (!CI_MODES.has(answer)) throw new Error(CI_MODE_UNREADABLE_WORDS);
