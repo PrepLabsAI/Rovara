@@ -8,6 +8,7 @@ import {
   DEVELOPER_CODE_SECONDS,
   DEVELOPER_SESSION_SECONDS,
   SIGN_IN_CLIENTS_PK,
+  agentXError,
   SignInClientRecordSchema,
   signInClientKey,
   type DeveloperSignInMethod,
@@ -18,7 +19,10 @@ import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 /** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
 /** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
 export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[] }
-export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
+export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
+  /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
+  displayNameChosen?: boolean;
+  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
 export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[] }
@@ -176,7 +180,7 @@ export class DeveloperSignInStore {
     return item === undefined ? undefined : strip(item);
   }
 
-  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked">): Promise<DeveloperRecord> {
+  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">): Promise<DeveloperRecord> {
     // One atomic update, not a read-then-overwrite: a concurrent revocation (or another sign-in)
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
@@ -186,7 +190,6 @@ export class DeveloperSignInStore {
       "provider = :provider",
       "issuer = :issuer",
       "subject = :subject",
-      "displayName = :displayName",
       "lastSignInAt = :at",
       "firstSignInAt = if_not_exists(firstSignInAt, :at)",
       "revoked = if_not_exists(revoked, :false)",
@@ -197,7 +200,6 @@ export class DeveloperSignInStore {
       ":provider": profile.provider,
       ":issuer": profile.issuer,
       ":subject": profile.subject,
-      ":displayName": profile.displayName,
       ":at": at,
       ":false": false,
     };
@@ -206,18 +208,49 @@ export class DeveloperSignInStore {
     if (profile.slackUserId === undefined) removeClauses.push("slackUserId");
     else { setClauses.push("slackUserId = :slackUserId"); values[":slackUserId"] = profile.slackUserId; }
 
-    await this.input.documentClient.send(new UpdateCommand({
+    const update = (withName: boolean) => this.input.documentClient.send(new UpdateCommand({
       TableName: this.input.tableName,
       Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
-      UpdateExpression: `SET ${setClauses.join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
-      ExpressionAttributeValues: values,
+      UpdateExpression: `SET ${[...setClauses, ...(withName ? ["displayName = :displayName"] : [])].join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
+      // A name the person chose is theirs: the sign-in writes the provider's name only while they have not chosen one. The check is part of
+      // the write, so a name chosen while this sign-in is in flight is not overwritten either (ported from Rovara Cloud abd4a061d).
+      ...(withName ? { ConditionExpression: "attribute_not_exists(displayNameChosen) OR displayNameChosen = :false" } : {}),
+      ExpressionAttributeValues: { ...values, ...(withName ? { ":displayName": profile.displayName } : {}) },
     }));
+    try {
+      await update(true);
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+      await update(false);
+    }
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
       await this.put({ ...emailIndexKey(profile.email), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
     }
     const stored = await this.getDeveloper(profile.developerId);
     if (stored === undefined) throw new Error("developer upsert did not persist");
+    return stored;
+  }
+
+  /**
+   * The person chooses their own name. `developerId` is the verified caller's, never anything a request carries; `name` was checked with
+   * `SetMyNameBodySchema` at the route. Marks it chosen, so a sign-in leaves it alone. A revoked or unknown person is NOT_FOUND.
+   */
+  async setChosenDisplayName(developerId: string, name: string): Promise<DeveloperRecord> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `DEVELOPER#${developerId}`, sk: META },
+        UpdateExpression: "SET displayName = :name, displayNameChosen = :chosen",
+        ConditionExpression: "attribute_exists(pk) AND revoked = :false",
+        ExpressionAttributeValues: { ":name": name, ":chosen": true, ":false": false },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) throw agentXError("NOT_FOUND", "your sign-in record was not found; sign in again");
+      throw error;
+    }
+    const stored = await this.getDeveloper(developerId);
+    if (stored === undefined) throw agentXError("NOT_FOUND", "your sign-in record was not found; sign in again");
     return stored;
   }
 

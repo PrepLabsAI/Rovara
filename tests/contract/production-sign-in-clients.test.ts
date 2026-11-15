@@ -40,6 +40,14 @@ describe("admin changes in the legacy deployment (spec 064)", () => {
     expect(rows()).toEqual([]);
   });
 
+  it("says what full access means before it applies (spec 066)", async () => {
+    const { harness, rows } = await production();
+    const planned = await harness.propose({ kind: "register_sign_in_client", clientId: "rovara-cloud", registration: { ...registration, secretHash: "f".repeat(64), fullAccess: true } }, ["cli"]);
+    expect((planned.body.change as { effect: string }).effect).toContain("which AgentX's developer API accepts as the signed-in person, with all their rights, as it does the AgentX CLI's (full access)");
+    await harness.apply((planned.body.change as { changeId: string }).changeId, "cli");
+    expect(rows()).toEqual([expect.objectContaining({ sk: "CLIENT#rovara-cloud", fullAccess: true })]);
+  });
+
   it("grants and revokes a signed-in person's access to a project, so the access check lists it", async () => {
     const { harness } = await production();
     const grant = await harness.propose({ kind: "grant_project_access", project: "payments", developer: OMAR.developerId }, ["cli"]);

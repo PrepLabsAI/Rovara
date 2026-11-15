@@ -285,12 +285,12 @@ describe("developer sign-in infrastructure (named environments)", () => {
   });
 });
 
-describe("the legacy deployment (R3, spec 064)", () => {
-  it("has sign-in for account linking only: no developer task settings, grants or JWT authorizer", () => {
+describe("the legacy deployment (production)", () => {
+  it("has the full developer sign-in and tasks, as named environments do, under its legacy names", () => {
     const text = JSON.stringify(legacy);
-    for (const absent of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
-      "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "MCP_CONFIRM_ELICITATION", "agentx-developer-jwt", "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
-      expect(text, absent).not.toContain(absent);
+    for (const present of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
+      "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "MCP_CONFIRM_ELICITATION", "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
+      expect(text, present).toContain(present);
     }
     for (const present of ["SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId", "DeveloperOidcSince"]) expect(legacy.Parameters[present], present).toBeDefined();
     expect(legacy.Parameters.DeveloperSignInSlack).toMatchObject({ Default: "disabled" });
@@ -301,13 +301,13 @@ describe("the legacy deployment (R3, spec 064)", () => {
     expect((signIn.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ AGENTX_ENV: "production", DEVELOPER_OIDC_SECRET_ID: "agentx/production/developer-oidc" });
     const broker = legacy.Resources[functionId(legacy, "Broker")]!;
     const brokerEnvironment = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(brokerEnvironment).toMatchObject({ AGENTX_ENV: "production", DEVELOPER_API_SCOPE: "linking" });
-    // No developer-task grants: no TASK# turn records and no cross-table condition check. Spec 064: the sign-in client
-    // admin changes are audited under CHANGE#.
+    expect(brokerEnvironment).toMatchObject({ AGENTX_ENV: "production" });
+    expect(brokerEnvironment).not.toHaveProperty("DEVELOPER_API_SCOPE");
+    // The developer-task grants: TASK# turn records and the cross-table condition check; admin changes audited under CHANGE#.
     const brokerRole = ((broker.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
     const brokerStatements = grants(legacy).filter(({ role }) => role === brokerRole).map(({ statement }) => statement);
-    expect(brokerStatements.some((statement) => allows(statement, "dynamodb:ConditionCheckItem") && JSON.stringify(statement.Resource).includes("DeveloperSignInTable"))).toBe(false);
-    expect(JSON.stringify(brokerStatements)).not.toMatch(/TASK#\*/);
+    expect(brokerStatements.some((statement) => allows(statement, "dynamodb:ConditionCheckItem") && JSON.stringify(statement.Resource).includes("DeveloperSignInTable"))).toBe(true);
+    expect(JSON.stringify(brokerStatements)).toMatch(/TASK#\*/);
     expect(JSON.stringify(brokerStatements)).toContain("CHANGE#*");
     // The routes and their throttle, as in named environments; still only the one admin JWT authorizer.
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toEqual(expect.arrayContaining(["ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", "ANY /review/{proxy+}"]));
@@ -348,9 +348,9 @@ describe("AI-tool turn records (spec 025 FR-037, R27)", () => {
     expect(updates.map(({ statement }) => statement.Condition)).toEqual([{ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } }]);
   });
 
-  it("adds nothing to the legacy templates", () => {
+  it("gives the legacy template (production) the same TASK# grants", () => {
     expect(grants(legacy).some(({ statement }) => (statement.Condition as Record<string, Record<string, unknown>> | undefined)?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"] !== undefined
-      && JSON.stringify(statement.Condition).includes("TASK#"))).toBe(false);
+      && JSON.stringify(statement.Condition).includes("TASK#"))).toBe(true);
   });
 });
 
@@ -469,11 +469,11 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     }
   });
 
-  it("adds none of it to the legacy template", () => {
-    expect(ofType(legacy, "AWS::Lambda::Function").map(([id]) => withoutHash(id))).not.toContain("DeveloperTaskNotifierFunction");
-    expect(ofType(legacy, "AWS::CloudWatch::Alarm").map(([, resource]) => JSON.stringify(resource.Properties.AlarmName))).not.toContainEqual(expect.stringContaining("DeveloperNotice"));
-    expect(streamMappings(legacy)).toHaveLength(1);
+  it("runs in the legacy template (production) too, with Slack task threads on", () => {
+    expect(ofType(legacy, "AWS::Lambda::Function").map(([id]) => withoutHash(id))).toContain("DeveloperTaskNotifierFunction");
+    expect(ofType(legacy, "AWS::CloudWatch::Alarm").map(([, resource]) => JSON.stringify(resource.Properties.AlarmName))).toContainEqual(expect.stringContaining("DeveloperNotice"));
+    expect(streamMappings(legacy)).toHaveLength(streamMappings(named).length);
     const [, ingress] = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "SlackIngress")!;
-    expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("SHARED_TASKS");
+    expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ SHARED_TASKS: "enabled" });
   });
 });

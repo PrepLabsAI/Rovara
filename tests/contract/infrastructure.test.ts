@@ -194,12 +194,13 @@ describe("hosted Slack control-plane infrastructure", () => {
     expect(statements.flatMap(actionsOf)).not.toContain("dynamodb:*");
   });
 
-  it("limits the ingress Lambda to reading channel bindings from the state table", () => {
+  it("limits the ingress Lambda to reading items by key from the state table: channel bindings, shared threads and task buttons", () => {
     const statements = statementsForRole(template, "SlackIngress");
     const stateAccess = statements.filter((statement) => JSON.stringify(statement.Resource).match(/"State[0-9A-F]{8}"/));
-    expect(stateAccess).toHaveLength(1);
-    expect(actionsOf(stateAccess[0]!)).toEqual(["dynamodb:GetItem"]);
-    expect(stateAccess[0]?.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SLACK_BINDING#*"] } });
+    for (const statement of stateAccess) expect(actionsOf(statement)).toEqual(["dynamodb:GetItem"]);
+    const keys = stateAccess.map((statement) => (statement.Condition as Record<string, Record<string, unknown>>)["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]);
+    expect(keys).toEqual(expect.arrayContaining([["SLACK_BINDING#*"], ["SHARED_TASK#*"], ["DEVTASK#*"]]));
+    expect(keys.every((entry) => Array.isArray(entry))).toBe(true);
   });
 });
 
@@ -272,7 +273,7 @@ describe("control-plane infrastructure", () => {
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
     // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
-    template.resourceCountIs("AWS::Lambda::Function", 11);
+    template.resourceCountIs("AWS::Lambda::Function", 12);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -316,7 +317,7 @@ describe("control-plane infrastructure", () => {
     const template = Template.fromStack(stack);
 
     // One per Lambda, plus the EC2 session provisioner's and deleter's (#83).
-    template.resourceCountIs("AWS::Logs::LogGroup", 13);
+    template.resourceCountIs("AWS::Logs::LogGroup", 14);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -482,6 +483,10 @@ describe("production release pipeline", () => {
     expect(buildSpec).not.toMatch(/--skip-checks|--allow-dirty/);
     expect(buildSpec).toContain("sha256sum -c");
     expect(buildSpec).toContain("awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip");
+    // The port guard's tests run the real secret scan: the release machine has the same pinned gitleaks as CI, checked before use.
+    expect(buildSpec).toContain("gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz");
+    expect(buildSpec).toContain('echo \\"${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -');
+    expect(buildSpec).toContain("/opt/gitleaks:$PATH");
   });
 
   it("keeps the release project outside the broker's CodeBuild gate allow-list", () => {
@@ -543,7 +548,7 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
     // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
-    template.resourceCountIs("AWS::Lambda::Function", 11);
+    template.resourceCountIs("AWS::Lambda::Function", 12);
   });
 });
 
