@@ -261,6 +261,13 @@ describe("MR2 deadline and syntax guards", () => {
     expect(result).toEqual(wired ? { edges: [edge("both", "python")], notes: [] } : { edges: [], notes: ["dependency manifest unreadable"] });
     expect(elapsed).toBeLessThan(3_000);
   });
+  it.each(["\r", "\u2028"])("adversarial go.mod comment run before %j parses in linear time", async terminator => {
+    const size = Number(process.env.MR2_ADVERSARIAL_SIZE ?? 300_000);
+    const f = await fixture([{ "go.mod": "module example.com/app\nrequire example.com/lib v1.0.0\n" + "/".repeat(size) + terminator + "x\n" }, { "go.mod": "module example.com/lib\n" }]);
+    const started = performance.now(); const result = await f.derive(); const elapsed = performance.now() - started;
+    expect(result).toEqual({ edges: [edge("both", "go")], notes: [] });
+    expect(elapsed).toBeLessThan(3_000);
+  });
   it("a CRLF go.mod with comments is read like an LF one", async () => {
     const f = await fixture([{ "go.mod": "module example.com/app\r\n// app\r\nrequire example.com/lib v1.0.0 // pinned\r\n" }, { "go.mod": "module example.com/lib\r\n" }]);
     expect(await f.derive()).toEqual({ edges: [edge("both", "go")], notes: [] });

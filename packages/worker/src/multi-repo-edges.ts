@@ -41,7 +41,8 @@ function node(text: string): Declaration {
 function go(text: string): Declaration {
   const result = empty(); let block = "";
   for (const raw of text.split(/\r?\n/u)) {
-    const line = raw.replace(/\/\/.*$/u, "").trim(); if (!line) continue;
+    // Linear: cut at the first "//" (a regex here backtracks quadratically on a run of "/" before a lone \r or U+2028).
+    const comment = raw.indexOf("//"); const line = (comment < 0 ? raw : raw.slice(0, comment)).trim(); if (!line) continue;
     if (line === ")") { if (!block) return invalid(); block = ""; continue; }
     const start = /^(require|replace|exclude|retract)\s*\($/u.exec(line);
     if (start) { if (block) return invalid(); block = start[1]!; continue; }
