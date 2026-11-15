@@ -3,6 +3,7 @@
 // text and checks every count against the files, so a worker's own summary is never taken as truth. Every list and string is bounded, every text is one plain line
 // (no control or format characters) that readers escape for their own markup, and a pack for any other candidate digest is ignored by the broker.
 import { z } from "zod";
+import { EvidenceAiSchema, readEvidenceAi } from "./evidence-ai.js";
 import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES, isRegisteredCheckKind, partsOutsideKind } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
@@ -344,6 +345,9 @@ const testsShape = {
     /** Skips among tests the change did not touch, on the run before (the original code or the baseline) and on this run: a rise is shown as a not-tested reason. Both or neither. */
     skippedBefore: CountSchema.optional(),
     skippedAfter: CountSchema.optional(),
+    /** TE-B3: tests that ran on the original code and are not in this code's report (test ids, at most `ABSENT_ON_NEW_MAX`), and how many there are in all. Both or neither; absent on every pack built before TE-B3. A reader built before this field refuses a pack that has it: upgrade readers first. */
+    absentOnNew: z.array(line(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX).optional(),
+    absentOnNewCount: CountSchema.optional(),
     names: z.array(EvidenceTestSchema).max(EVIDENCE_TEST_NAMES_MAX),
     newTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_NEW_TESTS_MAX),
 };
@@ -491,6 +495,7 @@ export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
  */
 export const EVIDENCE_RAW_ARTIFACT = "evidence-raw.json";
 /** The worker feature that reads `evidenceCapture` (a CHECKS run writes `evidence-raw.json`). The broker sends the field only when the proof switch is on, and never to a worker that does not list this. */
+export const EVAL_ROUND_FEATURE = "task.evalRound.v1" as const;
 export const EVIDENCE_CAPTURE_FEATURE = "task.evidenceCapture.v1" as const;
 export const EVIDENCE_RAW_MAX_BYTES = 2 * 1_048_576;
 export const EvidenceRawCheckSchema = z
@@ -618,16 +623,19 @@ const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "a date");
 const MeasureNumberSchema = z.number().min(-1e12).max(1e12);
 const MoneySchema = z.number().min(0).max(1e9);
 
+/** Shared evidence measure: file adapters reuse these fields instead of defining another numeric or label shape. */
+export const EvidenceMeasureSchema = z.object({
+  name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
+  direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: z.object({ low: MeasureNumberSchema, high: MeasureNumberSchema }).strict().optional(),
+}).strict();
+
 /** The schemas of a v2 pack. The writer's (`strict`) refuses an unregistered kind and runs every cross-check; the reader's (`reader`, walked by `tolerantRead`) takes any kind id and runs none (the caller makes the few it needs). */
 function evidencePackV2Schemas(mode: Mode) {
   const obj = <S extends z.ZodRawShape>(shape: S) => z.object(shape).strict();
   const artifact = ArtifactRefSchema;
   const kind = mode === "strict" ? z.string().regex(CHECK_KIND_ID_PATTERN).refine(isRegisteredCheckKind, "a registered check kind") : line(64);
 
-  const measure = obj({
-    name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
-    direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: obj({ low: MeasureNumberSchema, high: MeasureNumberSchema }).optional(),
-  });
+  const measure = EvidenceMeasureSchema;
   const pair = obj({ id: line(80), before: artifact.optional(), after: artifact.optional(), diff: artifact.optional() });
 
   const checkObject = obj({
@@ -682,6 +690,7 @@ function evidencePackV2Schemas(mode: Mode) {
     : dependency;
 
   const sections = {
+    ai: EvidenceAiSchema.optional(),
     proof: obj({
       verdicts: z.array(obj({ checkId: line(64).optional(), testId: line(TEST_ID_MAX).optional(), verdict: TestProofVerdictSchema, reason: TestProofReasonSchema.optional() })).max(EVIDENCE_PROOF_VERDICTS_MAX),
       provenCount: CountSchema,
@@ -694,10 +703,14 @@ function evidencePackV2Schemas(mode: Mode) {
       skipRise: obj({ before: CountSchema, after: CountSchema }).optional(),
       removedTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
       absentOnNew: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
+      /** TE-B3: how many tests ran before and are not in the new report, in all (`absentOnNew` lists at most 200). Absent: the list is the whole count. */
+      absentOnNewCount: CountSchema.optional(),
       changedTestConfig: z.array(line(500)).max(100),
       changedSnapshots: z.array(line(500)).max(100),
       changedFixtures: z.array(line(500)).max(100),
     }).optional(),
+    /** TE-B3 (O39): files whose change a reviewer should look at first. Flags, never approvals. `instructionFiles`: Rovara instruction files (AGENTS.md, CLAUDE.md, .rovara rules, project and playbook files). `ciExecutedFiles`: files CI runs (test commands, test configuration, Makefile, conftest.py, package scripts). */
+    flags: obj({ instructionFiles: z.array(line(500)).max(100), ciExecutedFiles: z.array(line(500)).max(100) }).optional(),
     dependencies: z.array(dependencyChecked).max(EVIDENCE_DEPENDENCIES_MAX).optional(),
     tests: TestAnswerRecordsSchema.optional(),
     meters: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9), machineUsd: MoneySchema, caps: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9) }) }).optional(),
@@ -817,7 +830,7 @@ export function readEvidencePack(input: unknown): EvidencePackRead {
   if (!isRecord(input) || typeof input.schemaVersion !== "number" || !Number.isInteger(input.schemaVersion)) return { status: "unreadable", reason: "not_a_pack" };
   if (exceedsReadLimit(input, EVIDENCE_V2_MAX_BYTES)) return { status: "unreadable", reason: "too_large" };
   if (input.schemaVersion === 1) {
-    const parsed = EvidencePackSchema.safeParse(input);
+    const parsed = EvidencePackReadSchema.safeParse(input);
     return parsed.success ? { status: "v1", pack: parsed.data } : { status: "unreadable", reason: "not_a_pack" };
   }
   if (input.schemaVersion > EVIDENCE_V2_SCHEMA_VERSION) {
@@ -846,6 +859,12 @@ export function readEvidencePack(input: unknown): EvidencePackRead {
     const raw = own(key);
     if (raw === undefined) {
       if (key === "notTested") setOwnProperty(out, key, []);
+      continue;
+    }
+    if (key === "ai") {
+      const ai = readEvidenceAi(raw);
+      setOwnProperty(out, key, ai ?? {});
+      if (ai === undefined) notePath(key);
       continue;
     }
     const read = tolerantRead((V2_READER.sections as Record<string, z.ZodType>)[key]!, raw, key, report);

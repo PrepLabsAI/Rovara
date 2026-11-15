@@ -88,13 +88,15 @@ export function createSlackChannelForwarder(deps: SlackChannelForwarderDependenc
     // A new ID for each attempt: the channel API drops a repeat by the Slack event ID, for a day.
     const headers = { "content-type": "application/json", ...webhookHeaders({ secret, id: `msg_${randomUUID()}`, timestamp: Math.floor(now() / 1_000), body }) };
     const response = await fetchFn(url, { method: "POST", headers, body, redirect: "error", signal: AbortSignal.timeout(FORWARD_TIMEOUT_MILLISECONDS) });
-    let status: unknown;
+    let answer: { status?: unknown; ok?: unknown };
     try {
-      status = ((await response.json()) as { status?: unknown }).status;
+      answer = (await response.json()) as { status?: unknown; ok?: unknown };
     } catch {
-      status = undefined;
+      answer = {};
     }
-    const taken = (response.status === 202 && status === "accepted") || (response.status === 200 && status === "duplicate");
+    // Queued, a repeat, or (Phase 7c2) handled by the channel API's Slack router, which answers as Slack's ingress does.
+    const taken = (response.status === 202 && answer.status === "accepted") || (response.status === 200 && answer.status === "duplicate")
+      || (response.status === 200 && answer.ok === true);
     if (!taken) throw new Error(`the channel API did not take the request: HTTP ${response.status}`);
   };
 }

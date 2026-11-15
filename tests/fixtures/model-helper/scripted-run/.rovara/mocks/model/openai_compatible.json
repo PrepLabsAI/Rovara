@@ -1,0 +1,1 @@
+{"version":1,"family":"openai_compatible","replies":[{"id":"greeting","match":{"promptContains":"hello"},"response":{"text":"Hello from the scripted reply.","finish":"stop","usage":{"inputTokens":3,"outputTokens":5}}}]}

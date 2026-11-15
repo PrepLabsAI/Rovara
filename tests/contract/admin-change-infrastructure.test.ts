@@ -52,10 +52,10 @@ describe("admin change infrastructure", () => {
     expect(JSON.stringify(named.toJSON())).toContain("MCP_CONFIRM_ELICITATION");
   });
 
-  it("changes nothing in the legacy template", () => {
-    expect(legacy.toJSON().Parameters).not.toHaveProperty("McpConfirmElicitation");
-    expect(JSON.stringify(legacy.toJSON())).not.toContain("ADMIN_CHANGE");
-    for (const absent of ["MCP_CONFIRM_ELICITATION", "CHANGE#*", "EMAIL#*"]) expect(JSON.stringify(legacy.toJSON())).not.toContain(absent);
+  it("gives the legacy template (production) the full admin changes, as named environments have", () => {
+    expect(legacy.toJSON().Parameters).toHaveProperty("McpConfirmElicitation");
+    expect(JSON.stringify(legacy.toJSON())).toContain("MCP_CONFIRM_ELICITATION");
+    expect(JSON.stringify(legacy.toJSON())).toContain("CHANGE#*");
   });
 
   // Task 10 additions: the exact shape of each new statement, and where each variable goes.
@@ -80,7 +80,7 @@ describe("admin change infrastructure", () => {
     const changes = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("CHANGE#"));
     expect(changes).toEqual([{ Effect: "Allow", Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"], Resource: tableRef(named, "TurnRecords"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } } }]);
     const emails = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("EMAIL#"));
-    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } } }]);
+    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", "COMPANY_MEMBER#*"] } } }]);
   });
 
   it("gives the ingress's ADMIN_CHANGE statement the State table only, with the projection pinned", () => {
@@ -97,14 +97,12 @@ describe("admin change infrastructure", () => {
     }]);
   });
 
-  it("turns the ingress press path on in the named template only", () => {
-    expect(variablesOf(named, "SlackIngress")).toMatchObject({ ADMIN_CHANGES: "enabled" });
-    expect(variablesOf(legacy, "SlackIngress")).not.toHaveProperty("ADMIN_CHANGES");
+  it("turns the ingress press path on in every template", () => {
+    for (const template of [named, legacy]) expect(variablesOf(template, "SlackIngress")).toMatchObject({ ADMIN_CHANGES: "enabled" });
   });
 
   it("passes McpConfirmElicitation to DeveloperIdentity and the broker straight from the parameter", () => {
-    for (const prefix of ["Broker", "DeveloperSignInFunction"]) expect(variablesOf(named, prefix).MCP_CONFIRM_ELICITATION).toEqual({ Ref: "McpConfirmElicitation" });
-    expect(variablesOf(legacy, "Broker")).not.toHaveProperty("MCP_CONFIRM_ELICITATION");
+    for (const template of [named, legacy]) for (const prefix of ["Broker", "DeveloperSignInFunction"]) expect(variablesOf(template, prefix).MCP_CONFIRM_ELICITATION).toEqual({ Ref: "McpConfirmElicitation" });
   });
 
   it("expires admin change items by the State table's TTL in named environments", () => {

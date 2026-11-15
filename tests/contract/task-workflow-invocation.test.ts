@@ -213,3 +213,19 @@ describe("workflow-mode worker invocation", () => {
     expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowPullRequestUpdate");
   });
 });
+
+const evalRequest = { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 };
+describe("final-check eval request", () => {
+  const parse = (request: unknown, workflowMode = "CHECKS") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, evalRequest: request } });
+  it("accepts the broker request only on CHECKS and preserves old payload bytes", () => {
+    expect(parse(evalRequest).success).toBe(true);
+    expect(parse({ ...evalRequest, evalPass: 2 }).success).toBe(true);
+    expect(parse(evalRequest, "IMPLEMENT").success).toBe(false);
+    expect(parse(evalRequest, "REVIEW").success).toBe(false);
+    expect(JSON.stringify(WorkerInvocationSchema.parse(base))).toBe(JSON.stringify({ protocolVersion: 1, operationId: base.operationId, workspaceId: base.workspaceId, fence: 1, projectRevision: 1, callbackCapability: base.callbackCapability, kind: "task", payload: base.payload }));
+    expect(WORKER_INVOCATION_FEATURES).toContain("task.evalRound.v1");
+  });
+  it.each([null, {}, { ...evalRequest, aiChange: false }, { ...evalRequest, reason: "other" }, { ...evalRequest, evalPass: 3 }, { ...evalRequest, evalPass: "1" }, { ...evalRequest, callsAlreadyUsed: -1 }, { ...evalRequest, callsAlreadyUsed: 0.5 }, { ...evalRequest, callsAlreadyUsed: Infinity }, { ...evalRequest, costAlreadyUsedMicros: Number.MAX_SAFE_INTEGER + 1 }, { ...evalRequest, extra: true }])("refuses malformed request %j", request => {
+    expect(parse(request).success).toBe(false);
+  });
+});
