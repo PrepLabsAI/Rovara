@@ -8,6 +8,7 @@
 // contracts call `PluginKind`.
 import { isBuiltin } from "node:module";
 import { z } from "zod";
+import { AGENTX_NAME_PATTERN } from "../names.js";
 import { PluginKindSchema } from "../plugins/common.js";
 import { ExternalAccountRefSchema } from "../outside-account.js";
 import type { ChannelCapabilities, ChannelCommand, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
@@ -288,6 +289,14 @@ export const PluginModuleSpecifierSchema = z.string().min(1).max(256).refine(
 
 const JsonSettingSchema: z.ZodType<JsonObject> = z.record(z.string(), z.json());
 
+/**
+ * FIX-0518 (laptop only, owner-set): what one project's task sandbox may do beyond the install-wide rules. `sandboxModelHosts: "allow"` lets that project's sandboxes reach the model hosts (api.openai.com, api.anthropic.com, ...); absent or "deny" blocks
+ * them, which is the default. Read only from the owner's own config file: a project, a repository or an agent cannot set it.
+ */
+export const LocalProjectSettingsSchema = z.object({ sandboxModelHosts: z.enum(["allow", "deny"]).optional() }).strict();
+export type LocalProjectSettings = z.infer<typeof LocalProjectSettingsSchema>;
+export const LOCAL_PROJECT_SETTINGS_MAX = 200;
+
 export const PluginConfigEntrySchema = z.object({
   point: PluginPointSchema,
   name: PluginNameSchema,
@@ -323,8 +332,14 @@ export const PluginConfigSchema = z.object({
     api: z.enum(MODEL_REQUEST_FORMATS).optional(),
     id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@~-]{0,199}$/u, "a model id is plain characters, as the provider lists it (for OpenRouter, vendor/model)"),
   }).strict().optional(),
+  /**
+   * FIX-0518 (laptop only, owner-set): per-project settings, by project name, for example `{ "my-app": { "sandboxModelHosts": "allow" } }` for a project whose tests really call a model with the repository's own key. Absent: every project's sandbox is denied the model hosts.
+   * A cloud install ignores it.
+   */
+  projectSettings: z.record(z.string().regex(AGENTX_NAME_PATTERN, "a project name is lower-case letters, digits and hyphens"), LocalProjectSettingsSchema).optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {
+  if (config.projectSettings !== undefined && Object.keys(config.projectSettings).length > LOCAL_PROJECT_SETTINGS_MAX) context.addIssue({ code: "custom", path: ["projectSettings"], message: `at most ${String(LOCAL_PROJECT_SETTINGS_MAX)} projects` });
   const seen = new Set<string>();
   const one = new Set<string>();
   config.plugins.forEach((entry, index) => {

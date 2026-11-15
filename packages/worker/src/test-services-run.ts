@@ -60,6 +60,7 @@ import { EmulatorControlError, type EmulatorControlTarget } from "./emulator-con
 import { emulatorLedgerPort, type EmulatorLedgerPort } from "./emulator-ledger.js";
 import { EmulatorSeedError, readAwsResourcesFromIac, seedEmulator } from "./service-seed-aws.js";
 import { repoAwsEndpointNames } from "./repo-aws-endpoints.js";
+import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { SeedError, createResetHooks, resetForNextCheck, seedRun, type ResetDependency, type SeedPorts } from "./service-reset.js";
 import { SeedFileError, loadSeedFile, readSeedFile, seedFileDigest } from "./service-seed-file.js";
 import { seedLockHoldsInCheckout } from "./service-seed-lock.js";
@@ -616,6 +617,11 @@ function workingSandboxAttachment(docker: DockerCli, sandboxName: string): Sandb
   };
 }
 
+/** The `--env K=V` arguments of a working-sandbox exec: the command's own variables, without a name the run owns (the env file sets it) and without a value that is `undefined` (a variable to remove, never the text "undefined"). */
+export function execEnvArgs(env: Readonly<Record<string, string>> | undefined, owned: ReadonlySet<string>): string[] {
+  return Object.entries(env ?? {}).filter(([name, value]) => !owned.has(name) && value !== undefined).flatMap(([name, value]) => ["--env", `${name}=${value}`]);
+}
+
 /** `docker exec [--env-file F] [--env K=V ...] <sandbox> <command>`: the run's variables come from the env file, and a name the run sets is taken out of the command's own `env` (Docker lets `--env` win over `--env-file`). */
 function workingExec(docker: DockerCli, files: HelperFiles, sandboxName: string, environment: ServiceEnvironment, active: () => boolean): (inner: ContainerExec) => ContainerExec {
   const owned = new Set(environment.entries.map(([name]) => name));
@@ -624,9 +630,9 @@ function workingExec(docker: DockerCli, files: HelperFiles, sandboxName: string,
   return (inner) => async (command, options) => {
     if (!active()) return inner(command, options);
     counter += 1;
-    const own = Object.entries(options.env ?? {}).filter(([name]) => !owned.has(name));
+    const own = execEnvArgs(options.env, owned);
     return withServiceEnvFile(files, `wrk-${prefix}-${String(counter)}`, environment, (envFileArgs) => docker.run([
-      "exec", ...envFileArgs, ...own.flatMap(([name, value]) => ["--env", `${name}=${value}`]), sandboxName, ...command,
+      "exec", ...envFileArgs, ...own, sandboxName, ...command,
     ], {
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -961,6 +967,8 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
         try {
           await seedRun(countResets(workSession).session, [dependencyOf(item, workSession, files, runId)], workingSeeds, seedSignal);
         } catch (error) {
+          // A seed command whose stop could not be confirmed may still be running: it is not "seed failed", and nothing must touch the workspace after it.
+          if (error instanceof RunnerKillUnconfirmedError) throw error;
           for (const id of item.emulator?.ids ?? [item.plan.id]) failures.set(id, "seed_failed");
           throw new TestServicesError(seedStartFailureOf(error), failures);
         }
@@ -1069,6 +1077,8 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
         try {
           await seedRun(state.counted, state.resetDeps.filter((dependency) => dependency.id === item.plan.id), roundSeeds, seedSignal);
         } catch (error) {
+          // A seed command whose stop could not be confirmed may still be running: it is not "seed failed", and nothing must touch the workspace after it.
+          if (error instanceof RunnerKillUnconfirmedError) throw error;
           for (const id of item.emulator?.ids ?? [item.plan.id]) failures.set(id, "seed_failed");
           throw new TestServicesError(seedStartFailureOf(error), failures);
         }
@@ -1087,7 +1097,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
           await step("round-directory", () => removeRunDirectory(roundFiles.directory));
         }
       }
-      throw failure;
+      throw error instanceof RunnerKillUnconfirmedError ? error : failure;
     }
   };
   const currentRound = (): CheckRunners => {
@@ -1128,6 +1138,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
     ids,
     checkRunners() {
       return {
+        kind: "sealed",
         runProjectCommand: async (command, signal) => {
           const result = await currentRound().runProjectCommand(command, signal);
           if (result.exitCode !== 0 || result.timedOut) checkFailed = true;

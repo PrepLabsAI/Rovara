@@ -8,7 +8,7 @@ import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
 import { TEST_ID_MAX } from "./test-id.js";
 import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
-import { TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
+import { ABSENT_ON_NEW_MAX, TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
 import { TestServicesUsageRecordSchema } from "./test-services-usage.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -335,8 +335,7 @@ export type EvidenceNotTested = z.infer<typeof EvidenceNotTestedSchema>;
 const SeverityCountsSchema = z.object({ critical: CountSchema, high: CountSchema, medium: CountSchema, low: CountSchema, info: CountSchema }).strict();
 
 /** The parts of a check's evidence that do not hold an artifact: the worker reports them and the broker verifies them. */
-export const EvidenceChecksTestsSchema = z
-  .object({
+const testsShape = {
     total: CountSchema,
     passed: CountSchema,
     failed: CountSchema,
@@ -345,10 +344,23 @@ export const EvidenceChecksTestsSchema = z
     /** Skips among tests the change did not touch, on the run before (the original code or the baseline) and on this run: a rise is shown as a not-tested reason. Both or neither. */
     skippedBefore: CountSchema.optional(),
     skippedAfter: CountSchema.optional(),
+    /** TE-B3: tests that ran on the original code and are not in this code's report (test ids, at most `ABSENT_ON_NEW_MAX`), and how many there are in all. Both or neither; absent on every pack built before TE-B3. A reader built before this field refuses a pack that has it: upgrade readers first. */
+    absentOnNew: z.array(line(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX).optional(),
+    absentOnNewCount: CountSchema.optional(),
     names: z.array(EvidenceTestSchema).max(EVIDENCE_TEST_NAMES_MAX),
     newTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_NEW_TESTS_MAX),
-  })
-  .strict();
+};
+/** What the WRITER builds and the worker's raw file holds: strict. */
+export const EvidenceChecksTestsSchema = z.object(testsShape).strict();
+/**
+ * What a v1 pack's READERS parse: the same fields, plus two optional ones a later writer sets (TE-B3: `absentOnNew`, the test ids that ran on the original code and are not in this code's report, at most `ABSENT_ON_NEW_MAX`,
+ * and `absentOnNewCount`, how many there are in all), and a key it does not know is dropped instead of refusing the whole pack. Readers ship before writers: a writer may add a part to `tests` once every reader has this schema.
+ */
+export const EvidenceChecksTestsReadSchema = z.object({
+  ...testsShape,
+  absentOnNew: z.array(line(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX).optional(),
+  absentOnNewCount: CountSchema.optional(),
+});
 export const EvidenceCoverageSchema = z
   .object({
     linesChanged: CountSchema,
@@ -386,11 +398,14 @@ function checkPartsProblems(entry: { tests?: z.infer<typeof EvidenceChecksTestsS
   if (tests !== undefined && tests.total !== tests.passed + tests.failed + tests.skipped + tests.errored) issue(["tests", "total"], "total is passed, failed, skipped and errored together");
   if (tests !== undefined && (tests.skippedBefore === undefined) !== (tests.skippedAfter === undefined)) issue(["tests", "skippedAfter"], "skippedBefore and skippedAfter come together");
   if (tests?.skippedAfter !== undefined && tests.skippedAfter > tests.skipped) issue(["tests", "skippedAfter"], "skips among untouched tests are some of the skips");
+  const absent = (tests as { absentOnNew?: unknown[]; absentOnNewCount?: number } | undefined);
+  if (absent !== undefined && (absent.absentOnNew === undefined) !== (absent.absentOnNewCount === undefined)) issue(["tests", "absentOnNewCount"], "absentOnNew and absentOnNewCount come together");
+  if (absent?.absentOnNew !== undefined && absent.absentOnNewCount !== undefined && absent.absentOnNewCount < absent.absentOnNew.length) issue(["tests", "absentOnNewCount"], "the count is at least the names listed");
   if (entry.coverage !== undefined && entry.coverage.linesCovered > entry.coverage.linesChanged) issue(["coverage", "linesCovered"], "covered lines are some of the changed lines");
   if (entry.findings !== undefined && entry.findings.newCount !== Object.values(entry.findings.bySeverity).reduce((sum, count) => sum + count, 0)) issue(["findings", "newCount"], "newCount is the severities together");
 }
 
-export function evidencePackShape<A extends z.ZodType>(artifact: A) {
+export function evidencePackShape<A extends z.ZodType>(artifact: A, reader = false) {
   const check = z
     .object({
       checkId: line(64),
@@ -401,7 +416,7 @@ export function evidencePackShape<A extends z.ZodType>(artifact: A) {
       class: z.enum(EVIDENCE_CHECK_CLASSES),
       durationMs: z.number().int().min(0),
       exitCode: z.number().int().nullable().optional(),
-      tests: EvidenceChecksTestsSchema.optional(),
+      tests: (reader ? EvidenceChecksTestsReadSchema : EvidenceChecksTestsSchema).optional(),
       coverage: EvidenceCoverageSchema.optional(),
       findings: EvidenceFindingsSchema.optional(),
       migrations: EvidenceMigrationsSchema.optional(),
@@ -461,10 +476,14 @@ export function evidencePackShape<A extends z.ZodType>(artifact: A) {
 
 /** What the broker builds from the worker's raw parts and keeps in the artifact store, next to the task's evidence (tagged evidence-std; see rovara-code/evidence-keep.ts). */
 export const EvidencePackSchema = evidencePackShape(ArtifactRefSchema);
+/** The same pack as a READER parses it: the `tests` part of a check ignores a key it does not know and accepts TE-B3's two optional ones. The writer keeps `EvidencePackSchema`. */
+export const EvidencePackReadSchema = evidencePackShape(ArtifactRefSchema, true);
 export type EvidencePack = z.infer<typeof EvidencePackSchema>;
 
 /** What the task page reads (version 2 views, full reads only): the pack with each artifact as a link, or as expired or withheld. */
 export const EvidenceViewSchema = evidencePackShape(ArtifactLinkSchema);
+/** The view as a READER parses it (the task view that the page and the CLI read): the `tests` part of a check ignores a key it does not know and accepts TE-B3's two optional parts. The broker keeps `EvidenceViewSchema` to build it. */
+export const EvidenceViewReadSchema = evidencePackShape(ArtifactLinkSchema, true);
 export type EvidenceView = z.infer<typeof EvidenceViewSchema>;
 export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
 
@@ -475,6 +494,7 @@ export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
  */
 export const EVIDENCE_RAW_ARTIFACT = "evidence-raw.json";
 /** The worker feature that reads `evidenceCapture` (a CHECKS run writes `evidence-raw.json`). The broker sends the field only when the proof switch is on, and never to a worker that does not list this. */
+export const EVAL_ROUND_FEATURE = "task.evalRound.v1" as const;
 export const EVIDENCE_CAPTURE_FEATURE = "task.evidenceCapture.v1" as const;
 export const EVIDENCE_RAW_MAX_BYTES = 2 * 1_048_576;
 export const EvidenceRawCheckSchema = z
@@ -602,16 +622,19 @@ const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "a date");
 const MeasureNumberSchema = z.number().min(-1e12).max(1e12);
 const MoneySchema = z.number().min(0).max(1e9);
 
+/** Shared evidence measure: file adapters reuse these fields instead of defining another numeric or label shape. */
+export const EvidenceMeasureSchema = z.object({
+  name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
+  direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: z.object({ low: MeasureNumberSchema, high: MeasureNumberSchema }).strict().optional(),
+}).strict();
+
 /** The schemas of a v2 pack. The writer's (`strict`) refuses an unregistered kind and runs every cross-check; the reader's (`reader`, walked by `tolerantRead`) takes any kind id and runs none (the caller makes the few it needs). */
 function evidencePackV2Schemas(mode: Mode) {
   const obj = <S extends z.ZodRawShape>(shape: S) => z.object(shape).strict();
   const artifact = ArtifactRefSchema;
   const kind = mode === "strict" ? z.string().regex(CHECK_KIND_ID_PATTERN).refine(isRegisteredCheckKind, "a registered check kind") : line(64);
 
-  const measure = obj({
-    name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
-    direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: obj({ low: MeasureNumberSchema, high: MeasureNumberSchema }).optional(),
-  });
+  const measure = EvidenceMeasureSchema;
   const pair = obj({ id: line(80), before: artifact.optional(), after: artifact.optional(), diff: artifact.optional() });
 
   const checkObject = obj({
@@ -678,10 +701,14 @@ function evidencePackV2Schemas(mode: Mode) {
       skipRise: obj({ before: CountSchema, after: CountSchema }).optional(),
       removedTests: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
       absentOnNew: z.array(line(TEST_ID_MAX)).max(EVIDENCE_WEAKENING_LIST_MAX),
+      /** TE-B3: how many tests ran before and are not in the new report, in all (`absentOnNew` lists at most 200). Absent: the list is the whole count. */
+      absentOnNewCount: CountSchema.optional(),
       changedTestConfig: z.array(line(500)).max(100),
       changedSnapshots: z.array(line(500)).max(100),
       changedFixtures: z.array(line(500)).max(100),
     }).optional(),
+    /** TE-B3 (O39): files whose change a reviewer should look at first. Flags, never approvals. `instructionFiles`: Rovara instruction files (AGENTS.md, CLAUDE.md, .rovara rules, project and playbook files). `ciExecutedFiles`: files CI runs (test commands, test configuration, Makefile, conftest.py, package scripts). */
+    flags: obj({ instructionFiles: z.array(line(500)).max(100), ciExecutedFiles: z.array(line(500)).max(100) }).optional(),
     dependencies: z.array(dependencyChecked).max(EVIDENCE_DEPENDENCIES_MAX).optional(),
     tests: TestAnswerRecordsSchema.optional(),
     meters: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9), machineUsd: MoneySchema, caps: obj({ modelUsd: MoneySchema, machineMinutes: z.number().min(0).max(1e9) }) }).optional(),
@@ -801,7 +828,7 @@ export function readEvidencePack(input: unknown): EvidencePackRead {
   if (!isRecord(input) || typeof input.schemaVersion !== "number" || !Number.isInteger(input.schemaVersion)) return { status: "unreadable", reason: "not_a_pack" };
   if (exceedsReadLimit(input, EVIDENCE_V2_MAX_BYTES)) return { status: "unreadable", reason: "too_large" };
   if (input.schemaVersion === 1) {
-    const parsed = EvidencePackSchema.safeParse(input);
+    const parsed = EvidencePackReadSchema.safeParse(input);
     return parsed.success ? { status: "v1", pack: parsed.data } : { status: "unreadable", reason: "not_a_pack" };
   }
   if (input.schemaVersion > EVIDENCE_V2_SCHEMA_VERSION) {

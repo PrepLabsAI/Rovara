@@ -3,6 +3,7 @@
 // digest) lives in `rovara-code-node.ts`.
 import { z } from "zod";
 import { IntentDesignSchema } from "./design-review.js";
+import { FindingScaleSchema } from "./task-flow-tier.js";
 import { OrgIdSchema, SessionBindingSchema, SessionIdSchema } from "./browser-ids.js";
 import { forwardReader } from "./forward-reader.js";
 import { CommitIdSchema } from "./plugins/common.js";
@@ -252,7 +253,7 @@ export const PlanCritiqueSchema = z
   .object({
     verdict: z.enum(["ok", "revise"]),
     points: z
-      .array(z.object({ id: z.string().min(1).max(32), severity: z.enum(["blocking", "note"]), text: z.string().min(1).max(500), claimId: z.string().min(1).max(64).optional() }).strict())
+      .array(z.object({ id: z.string().min(1).max(32), severity: z.enum(["blocking", "note"]), text: z.string().min(1).max(500), claimId: z.string().min(1).max(64).optional(), scale: FindingScaleSchema.optional() }).strict())
       .max(PLAN_CRITIC_POINTS_MAX),
     // A stored critique is read leniently: a company name this build does not know reads as "other" rather than failing the whole workflow snapshot (a rollback must never strand a task).
     model: ModelIdentifierSchema.extend({ company: z.preprocess((value) => (typeof value === "string" && !(MODEL_COMPANIES as readonly string[]).includes(value) ? "other" : value), ModelCompanySchema) }).strict(),

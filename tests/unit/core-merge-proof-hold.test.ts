@@ -56,6 +56,30 @@ describe("the ready rule: a draft is held for its change proof", () => {
     expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
     expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
   });
+  it.each([true, false])("a proof override cannot bypass the tier hold (%s)", async (tierHeld) => {
+    const { tracking, draft, world, pr } = await heldWorld(VACUOUS);
+    await trackPullRequest(tracking, TASK_ID);
+    expect((await press(world, { actorId: "owner-1" })).overridden).toBe(true);
+    const tierHeads: string[] = [];
+    await trackPullRequest({ ...tracking, readyHold: async (_task, current) => { tierHeads.push(current.headSha); return tierHeld; } }, TASK_ID);
+    expect(tierHeads).toEqual([pr.head]);
+    expect(draft()).toBe(tierHeld);
+    expect(world.milestones.written.filter((entry) => entry.kind === "pr_ready")).toHaveLength(tierHeld ? 0 : 1);
+  });
+  it("does not judge the proof until the tier hold lets the draft become ready", async () => {
+    const { tracking, calls, draft, world, pr } = await heldWorld(VACUOUS);
+    let held = true;
+    const combined = { ...tracking, readyHold: async () => held };
+    await trackPullRequest(combined, TASK_ID);
+    expect(calls.facts).toBe(0);
+    expect(draft()).toBe(true);
+    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+    held = false;
+    await trackPullRequest(combined, TASK_ID);
+    expect(calls.facts).toBe(1);
+    expect(draft()).toBe(true);
+    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeDefined();
+  });
   it("a proven change is taken out of draft", async () => {
     const { tracking, draft, pr, world } = await heldWorld(PROVEN);
     await trackPullRequest(tracking, TASK_ID);

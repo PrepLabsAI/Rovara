@@ -1,7 +1,19 @@
 import { createHash, createSign } from "node:crypto";
-import { PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, isSafeE2ESourcePath, type AgentXError, type E2ESourceSnapshot } from "@agentx/contracts";
+import { z } from "zod";
+import { PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, isSafeE2ESourcePath, type AgentXError, type ClientRepositoriesResponse, type E2ESourceSnapshot } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
 import type { GithubMergeReadBudget } from "./aws/workflow-merge-recovery.js";
+
+// Spec 065b: what installedRepositories reads of GitHub's answers.
+const InstallationsSchema = z.array(z.object({
+  id: z.number().int().positive(),
+  account: z.object({ login: z.string(), type: z.enum(["User", "Organization"]) }),
+  repository_selection: z.enum(["all", "selected"]),
+  suspended_at: z.string().nullable().optional(),
+}));
+const InstallationRepositoriesSchema = z.object({
+  repositories: z.array(z.object({ id: z.number().int().positive(), full_name: z.string(), private: z.boolean(), default_branch: z.string() })),
+});
 
 const GITHUB_APP_ID = /^[1-9][0-9]*$/;
 const FILE_AT_COMMIT_MAX_BYTES = 20_971_520;
@@ -193,6 +205,29 @@ export class GitHubAppCredentialProvider {
   async checkRepository(repository: { credentialRef: string; url: string }): Promise<void> {
     if (repository.credentialRef !== this.options.credentialRef) return;
     await this.installed(parseGitHubRepository(repository.url));
+  }
+
+  /** The credential reference projects name to use this App. */
+  get credentialRef(): string {
+    return this.options.credentialRef;
+  }
+
+  /**
+   * Spec 065b: a repository the App is installed on, and its default branch, as GitHub says. Refuses a repository the App
+   * cannot reach, so a project is never created on one it could not work on.
+   */
+  async repositoryDefaults(repositoryUrl: string): Promise<{ owner: string; name: string; defaultBranch: string }> {
+    const installed = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.createInstallationToken(installed, { contents: "read" });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(installed.owner)}/${encodeURIComponent(installed.name)}`,
+      { headers: githubHeaders(token), signal: AbortSignal.timeout(5_000), redirect: "error" },
+    );
+    if (response.status === 404) throw agentXError("NOT_FOUND", `the AgentX GitHub App cannot see ${installed.owner}/${installed.name}; install it on that repository`);
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository lookup failed with HTTP ${response.status}`);
+    const body = await response.json() as { default_branch?: unknown };
+    if (typeof body.default_branch !== "string" || body.default_branch === "") throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned no default branch");
+    return { owner: installed.owner, name: installed.name, defaultBranch: body.default_branch };
   }
 
   /** Confirms a signed webhook's repository identity against the App's current installation and GitHub API. */
@@ -845,6 +880,35 @@ export class GitHubAppCredentialProvider {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid installation response");
     }
     return { id: id as number, login };
+  }
+
+  /**
+   * Spec 065b: the accounts the App is installed on and the repositories each lets it reach (the first 100 of each), read
+   * with a metadata-only token per installation. A suspended installation is listed with no repositories.
+   */
+  async installedRepositories(): Promise<ClientRepositoriesResponse["installations"]> {
+    const response = await this.fetchImplementation("https://api.github.com/app/installations?per_page=100", {
+      headers: await this.appHeaders(), signal: AbortSignal.timeout(5_000), redirect: "error",
+    });
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installations lookup failed with HTTP ${response.status}`);
+    const installations = InstallationsSchema.safeParse(await response.json());
+    if (!installations.success) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid installations response");
+    return Promise.all(installations.data.map(async (installation) => {
+      const status = installation.suspended_at ? "suspended" as const : "active" as const;
+      const listed = { installationId: installation.id, accountLogin: installation.account.login, accountType: installation.account.type, repositorySelection: installation.repository_selection, status };
+      if (status === "suspended") return { ...listed, repositories: [] };
+      const tokenResponse = await this.fetchImplementation(`https://api.github.com/app/installations/${installation.id}/access_tokens`, {
+        method: "POST", headers: await this.appHeaders(), body: JSON.stringify({ permissions: { metadata: "read" } }), signal: AbortSignal.timeout(5_000), redirect: "error",
+      });
+      const token = tokenResponse.ok ? (await tokenResponse.json() as { token?: unknown }).token : undefined;
+      if (typeof token !== "string") throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installation token request failed with HTTP ${tokenResponse.status}`);
+      const reposResponse = await this.fetchImplementation("https://api.github.com/installation/repositories?per_page=100", {
+        headers: githubHeaders(token), signal: AbortSignal.timeout(5_000), redirect: "error",
+      });
+      const repositories = reposResponse.ok ? InstallationRepositoriesSchema.safeParse(await reposResponse.json()) : undefined;
+      if (repositories?.success !== true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository list failed with HTTP ${reposResponse.status}`);
+      return { ...listed, repositories: repositories.data.repositories.map((repository) => ({ fullName: repository.full_name, githubRepositoryId: repository.id, private: repository.private, defaultBranch: repository.default_branch })) };
+    }));
   }
 
   /** Spec 025 A13: how many accounts the App is installed on (the first 100), for the health route. */

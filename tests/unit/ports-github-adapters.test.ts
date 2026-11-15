@@ -27,7 +27,7 @@ function githubCodeHostWorld(): CodeHostWorld & { api: GitHubFixtureProvider } {
   const api = new GitHubFixtureProvider(model);
   const host = githubCodeHost(api, { credentialRef: "github", now: () => GITHUB_NOW, webhookSecret: webhookSecretReader() });
   return {
-    host, model, api, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, now: () => GITHUB_NOW, branch: WORKING_BRANCH,
+    fileEntries: true, host, model, api, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, now: () => GITHUB_NOW, branch: WORKING_BRANCH,
     // P6: the GitHub normaliser. A pull request opened, and a push to a branch, signed as GitHub signs them; and one whose signature is wrong.
     signedDelivery: (event) => event.kind === "change_request.opened"
       ? githubDelivery("pull_request", githubPayloads.pullRequest("opened", Number(event.id)))

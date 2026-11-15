@@ -146,6 +146,7 @@ describe("words and the pack's proof section", () => {
     const pack = EvidencePackV2Schema.parse({ ...v2Pack(), proof: section });
     const rendered = renderEvidence(pack);
     expect(rendered.firstLine).toContain("marked ready anyway");
+    expect(renderEvidence(pack, { compact: true }).firstLine).toBe(rendered.firstLine);
     expect(rendered.text).toContain("Held as a draft until the change is proven");
     expect(rendered.text).toContain("Marked ready anyway by person-");
     expect(rendered.text).toContain("reviewed by hand");

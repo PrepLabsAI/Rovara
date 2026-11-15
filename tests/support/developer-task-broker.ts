@@ -95,6 +95,8 @@ export async function createDeveloperTaskBroker(options: {
   register?: boolean;
   /** Spread into the DeveloperApiConfiguration last. */
   developerExtra?: Partial<DeveloperApiConfiguration>;
+  /** Spec 064: the legacy deployment, whose sign-in is for account linking only (set as `linking`, not `developer`). */
+  linkingOnly?: boolean;
   /** Passed to createBroker as its `extra` broker input. */
   brokerExtra?: Record<string, unknown>;
   /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
@@ -117,10 +119,10 @@ export async function createDeveloperTaskBroker(options: {
     s3,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.organizationLimit === undefined ? {} : { organizationLimit: options.organizationLimit }),
-    developer, turnRecordsTableName: "turns", slackThreadsTableName: "threads",
+    ...(options.linkingOnly === true ? {} : { developer }), turnRecordsTableName: "turns", slackThreadsTableName: "threads",
     ...(options.realism === undefined ? {} : { realism: options.realism }),
     ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
-    ...(options.brokerExtra === undefined ? {} : { extra: options.brokerExtra }),
+    ...(options.brokerExtra === undefined && options.linkingOnly !== true ? {} : { extra: { ...options.brokerExtra, ...(options.linkingOnly === true ? { linking: developer } : {}) } }),
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);
   for (const who of [MAYA, OMAR]) {

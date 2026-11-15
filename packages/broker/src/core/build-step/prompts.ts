@@ -46,12 +46,18 @@ export function ownerConstraintsSection(workflow: WorkflowSnapshot, plan: { notC
 }
 
 /** The first coding run: the approved plan, to be built. */
-export function implementPrompt(plan: { text: string; sha256: string }): string {
+export function implementPrompt(plan: { text: string; sha256: string }, approved = true): string {
+  // A small change's plan went to coding with no approval (the lighter flow): it is never called approved.
+  if (!approved) return `Implement the plan below (no approval needed: small change). Follow its ordered steps, run the listed checks, and report results and limitations. ${NO_PUBLISH_NOTE}\n\nPlan (no approval needed: small change; sha256 ${plan.sha256}):\n${plan.text}`;
   return `Implement the human-approved plan below. Follow its ordered steps, run the listed checks, and report results and limitations. ${NO_PUBLISH_NOTE}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}`;
 }
 
 /** A coding run after a send-back (the owner's, or Rovara's own for a block): the problems the checks and reviews found, the plan it keeps to, and the owner's standing words. */
-export function sendBackPrompt(input: { problems: string; plan: { text: string; sha256: string }; constraints: string; ownerNote?: string | undefined }): string {
+export function sendBackPrompt(input: { problems: string; plan: { text: string; sha256: string }; constraints: string; ownerNote?: string | undefined; approved?: boolean | undefined }): string {
+  if (input.approved === false) {
+    const plain = sendBackPrompt({ ...input, approved: true });
+    return plain.replace("keeping to the approved plan.", "keeping to the plan (no approval needed: small change).").replace(`Approved plan (sha256 ${input.plan.sha256}):`, `Plan (no approval needed: small change; sha256 ${input.plan.sha256}):`).replace("The approved plan says these stay", "The plan says these stay");
+  }
   const note = input.ownerNote === undefined || input.ownerNote.trim() === "" ? "" : `\n\nOwner note (the owner's own instructions for this step): ${input.ownerNote.trim()}`;
   return `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${input.problems}${note}${input.constraints}\n\nApproved plan (sha256 ${input.plan.sha256}):\n${input.plan.text}`;
 }

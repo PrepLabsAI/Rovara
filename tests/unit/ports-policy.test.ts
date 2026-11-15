@@ -15,6 +15,7 @@ import {
   createPriceTableMetering,
   localOwnerPrincipal,
 } from "../../packages/broker/src/ports/policy-defaults.js";
+import { FAKE_ONE_TIME_PART, FAKE_SESSION_METHOD, createFakeApprovers } from "../../packages/broker/src/ports/fake-approvers.js";
 import { createEnvironmentModelKeyStore, createFileModelKeyStore, createLayeredModelKeyStore, createMemoryModelKeyStore, environmentVariableFor } from "../../packages/broker/src/ports/model-key-stores.js";
 import { runAdmissionConformance, runApproversConformance, runAuditSinkConformance, runIdentityConformance, runMeteringConformance, runModelKeyStoreConformance } from "../support/ports/policy-conformance.js";
 import { commentReads, freshComment } from "../support/comment-fakes.js";
@@ -47,6 +48,41 @@ runApproversConformance("Code default (repository collaborator by comment)", {
   request: REQUEST,
   acceptable: { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: COMMENT_ID, claimedAccount: COLLABORATOR },
   forgedToken: "comment-that-does-not-exist",
+});
+
+// Owner decision 211 (gaps G1-G4): the fake approvers speak every optional part of the port, so the suite's claim and card cases run on something.
+const FAKE_SESSION = ["fake", "session", "for", "tests"].join("-");
+const FAKE_ONCE = ["fake", "once", "for", "tests"].join("-");
+const FAKE_CARD = { cardId: "approve_plan:t1", contentVersion: "a".repeat(64) };
+const fakeProof = (method: string, parts?: Record<string, string>) => ({ proofId: "p", method, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: FAKE_SESSION, ...(parts === undefined ? {} : { parts }) });
+const MAYA = { ...owner, personId: "maya", provider: "example-idp" };
+const fakeApprovers = (card?: typeof FAKE_CARD, now?: () => number) => createFakeApprovers({
+  people: [{ token: FAKE_SESSION, principal: MAYA, soleApprover: true }],
+  soleApproverAllowed: true, minApprovers: 2, selfApprovalAllowed: false,
+  signInRules: [{ outcomes: ["approve"], risks: ["medium"], methods: ["fake-step-up"], rule: { mode: "window", seconds: 600 } }],
+  oneTime: [{ method: "fake-step-up", token: FAKE_SESSION, secret: FAKE_ONCE, ...(card === undefined ? {} : { card }) }],
+  claimSeconds: 60, ...(now === undefined ? {} : { now }),
+});
+runApproversConformance("fake approvers (session, asked by the sole approver)", {
+  create: async () => fakeApprovers(),
+  request: { ...REQUEST, requestedBy: MAYA },
+  acceptable: fakeProof(FAKE_SESSION_METHOD),
+  forgedToken: "guessed-session",
+});
+const STEP_UP_REQUEST = { ...REQUEST, card: FAKE_CARD, settlesClaims: true as const };
+runApproversConformance("fake approvers (step-up with a one-time part, bound to a card)", {
+  create: async () => fakeApprovers(FAKE_CARD),
+  request: STEP_UP_REQUEST,
+  acceptable: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }),
+  forgedToken: "guessed-session",
+  claims: {
+    proof: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }),
+    withClock: async () => {
+      let now = Date.now();
+      return { approvers: fakeApprovers(FAKE_CARD, () => now), lapse: () => { now += 61_000; } };
+    },
+  },
+  cardBound: { request: STEP_UP_REQUEST, proof: fakeProof("fake-step-up", { [FAKE_ONE_TIME_PART]: FAKE_ONCE }) },
 });
 
 runIdentityConformance("Code default (local owner)", {
