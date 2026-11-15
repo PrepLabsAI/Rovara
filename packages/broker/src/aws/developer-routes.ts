@@ -53,7 +53,7 @@ import {
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
   SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
-  ActorRefSchema,
+  ActorRefSchema, COMPANY_AUDIT_RECORDS_PATH, COMPANY_EVENTS_PATH,
   SignInClientViewSchema,
   AccessCheckRequestSchema,
   AccessCheckResponseSchema,
@@ -70,6 +70,7 @@ import {
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority } from "../developer/task-project-access.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
@@ -163,6 +164,8 @@ export interface DeveloperRouteDependencies {
   chatgpt?: ChatGptConnections;
   /** Spec 062: channel account links; without them /review/link/* and /v1/dev/channel-links answer NOT_FOUND. */
   channelLinks?: ChannelLinkDependencies;
+  /** Lanes AU and EV: the company audit and event reads for a company administrator; without them those two routes answer NOT_FOUND. */
+  companyReads?: CompanyReadsConfiguration;
 }
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
 
@@ -791,6 +794,16 @@ const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]
  */
 export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (deps.developer.clientRoutes !== true) throw agentXError("NOT_FOUND", "route not found");
+  // Lanes AU and EV: the company's audit records and events, read as the company administrator of the caller's own company.
+  if (url.pathname === COMPANY_AUDIT_RECORDS_PATH || url.pathname === COMPANY_EVENTS_PATH) {
+    if (deps.companyReads === undefined || request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+    const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${reader.developerId}`);
+    if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+    // A person's name: the host's lookup, else the sign-in table's display name.
+    const personName = deps.companyReads.personName ?? (async (developerId: string) => (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName);
+    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator }, url, deps.now());
+  }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
   if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {

@@ -365,6 +365,7 @@ export * from "./task-status.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
+export * from "./company-reads.js";
 // TE-F8 (M2, 0.5.19): record-then-replay for changed prompts. Additive, no callers; depends on TE-F1a (model-egress) and TE-F4 (prompt-change).
 export * from "./model-record-key.js";
 export * from "./model-record-policy.js";
