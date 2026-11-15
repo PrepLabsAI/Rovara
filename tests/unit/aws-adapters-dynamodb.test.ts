@@ -175,6 +175,33 @@ describe("the DynamoDB store's requests", () => {
     expect(world.fake.requests.filter((entry) => entry.operation === "Query").length).toBeGreaterThan(3);
   });
 
+  it("walks every item of the table with a strongly consistent scan, page by page, for the company purge", async () => {
+    const world = dynamoWorld({ pageBytes: 2_000 });
+    const keys: string[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      const pk = companyScoped(index % 2 === 0 ? "org_aaaaaaaaaaaaaaaaaaaa" : "org_bbbbbbbbbbbbbbbbbbbb", `P${String(index % 3)}`);
+      await world.store.put({ item: { pk, sk: `R${String(index).padStart(2, "0")}`, body: "x".repeat(300) } });
+      keys.push(`${pk}|R${String(index).padStart(2, "0")}`);
+    }
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = await world.store.scanPage({ limit: 5, ...(cursor === undefined ? {} : { cursor }) });
+      seen.push(...page.items.map((item) => `${item.pk}|${item.sk}`));
+      cursor = page.cursor;
+      pages += 1;
+      // An item deleted between pages does not break the walk.
+      if (pages === 1) await world.store.delete({ key: { pk: page.items[0]!.pk, sk: page.items[0]!.sk } });
+    } while (cursor !== undefined);
+    expect([...seen].sort()).toEqual([...keys].sort());
+    expect(pages).toBeGreaterThan(2);
+    const scans = world.fake.requests.filter((entry) => entry.operation === "Scan").map((entry) => entry.input as { ConsistentRead?: boolean; Limit?: number; FilterExpression?: string });
+    expect(scans.every((input) => input.ConsistentRead === true && input.Limit === 5 && input.FilterExpression === undefined)).toBe(true);
+    await expect(world.store.scanPage({ cursor: (await world.store.query({ pk: keys[0]!.split("|")[0]!, limit: 1 })).cursor ?? "not-a-cursor" })).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(world.store.scanPage({ limit: 0 })).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
   it("refuses a cursor of another partition, and one it did not give out", async () => {
     const world = dynamoWorld();
     for (const sk of ["a", "b", "c"]) await world.store.put({ item: { pk: PK, sk } });
