@@ -19,7 +19,7 @@ import { readContainedReport } from "./verification/report-file.js";
 import { reportSpecOf } from "./verification/test-proof.js";
 import { sarifPathOf } from "./verification/sarif.js";
 
-/** Worker-only input: the task coordinator supplies selection; the worker does not read broker/core state. */
+/** Worker-only input: explicit injection or manifest derivation; never broker/core state. */
 export interface MultiRepoChecks {
   rootPath: string;
   repositories: readonly { repositoryId: string; path: string; baseCommit: string; taskBranch?: string }[];
@@ -66,6 +66,7 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
           // eslint-disable-next-line preserve-caught-error -- Neither the refusal nor its cause may disclose customer paths.
           throw new Error("multi-repository leftover sweep is unavailable");
         }
+        await pruneReports(workspace, checkTime);
         root = await mkdtemp(join(workspace.path, ".agentx-check-"));
         activeRoots.add(root);
         const copies = new Map<string, string>();
@@ -75,14 +76,18 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
           checkTime();
           const source = inside(workspace.path, repository.path);
           const destination = inside(root, repository.path);
-          // Matching task branch for affected repositories, pinned base for the others. Dirty candidate files are retained in both cases.
+          // Detached preparation has no task ref. A changed candidate selects its own HEAD;
+          // an unchanged tree must still be pinned to its base (including empty commits).
           if (repository.taskBranch !== undefined && !isSafeRefName(repository.taskBranch)) throw new Error("multi-repository task branch is invalid");
-          const selected = (await runIsolatedGit(source, ["rev-parse", "--verify", `${repository.taskBranch ?? repository.baseCommit}^{commit}`])).trim();
           const tree = await withIsolatedGit(source, "write", async (git) => {
             const head = await git.headCommit();
-            if (head !== selected) throw new Error("multi-repository checkout does not match the selected branch or base");
             const tree = await snapshotTree(git, head, repository.baseCommit);
-            if (repository.taskBranch === undefined && tree !== (await git.text(["rev-parse", `${repository.baseCommit}^{tree}`])).trim()) throw new Error("multi-repository unaffected repository differs from its base");
+            const baseTree = (await git.text(["rev-parse", `${repository.baseCommit}^{tree}`])).trim();
+            const affected = tree !== baseTree;
+            const selected = repository.taskBranch !== undefined
+              ? (await runIsolatedGit(source, ["rev-parse", "--verify", `${repository.taskBranch}^{commit}`])).trim()
+              : affected ? head : repository.baseCommit;
+            if (head !== selected) throw new Error("multi-repository checkout does not match the selected branch or base");
             // Measure the candidate tree once, with one shared limit across all repositories.
             const listing = await git.text(["ls-tree", "-r", "-l", "-z", tree], { signal, timeout: Math.max(1, remainingMs()), maxBuffer: 8 * 1024 * 1024 });
             for (const entry of listing.split("\0").filter(Boolean)) {
@@ -164,6 +169,8 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
             await reportDirectory!.close(); reportDirectory = parent;
             const round = (await reportDirectory.subdirectory(randomUUID(), true))!;
             reports = round.path;
+            activeReports.add(reports);
+            reportLifetime.getStore()?.add(reports);
             await round.close();
           } catch { throw new Error("multi-repository report location is unavailable"); } finally { await reportDirectory?.close(); }
           await preserveReports(plan, root!, reports, started, result.entries.some((entry) => entry.after === "passed" || entry.after === "failed"), coveragePaths);
@@ -283,6 +290,52 @@ async function preserveReports(plan: CheckPlan, root: string, destination: strin
 
 // Active and unconfirmed roots are left to their owning round/quarantine, including concurrent rounds in this worker.
 const activeRoots = new Set<string>();
+
+const activeReports = new Set<string>();
+const reportLifetime = new AsyncLocalStorage<Set<string>>();
+/** Release only this invocation's report ownership after all its readers and rounds finish. */
+export async function withMultiRepoReportLifetime<T>(work: () => Promise<T>): Promise<T> {
+  const reports = new Set<string>();
+  try { return await reportLifetime.run(reports, work); }
+  finally { if (currentWorkspaceSafety()?.unsafe !== true) for (const report of reports) activeReports.delete(report); }
+}
+
+/** Best-effort housekeeping. Every traversal and deletion shares the round clock and total limits. */
+async function pruneReports(workspace: HeldDirectory, checkTime: () => void): Promise<void> {
+  let state: HeldDirectory | undefined; let parent: HeldDirectory | undefined;
+  let visited = 0; let removed = 0;
+  const count = () => { checkTime(); if (++visited > 256) throw new Error("prune limit"); };
+  const empty = async (directory: HeldDirectory, depth: number): Promise<void> => {
+    if (depth > 64) throw new Error("prune limit");
+    const stream = await opendir(directory.descriptorPath ?? directory.path);
+    for await (const entry of stream) {
+      count();
+      if (entry.isDirectory()) {
+        const child = await directory.subdirectory(entry.name, false); if (!child) continue;
+        try { await empty(child, depth + 1); } finally { await child.close(); }
+        await rmdir(directory.entry(entry.name));
+      } else await unlink(directory.entry(entry.name));
+    }
+  };
+  try {
+    state = await workspace.subdirectory(".agentx", false); parent = await state?.subdirectory("multi-repo-reports", false);
+    if (!parent) return;
+    const stream = await opendir(parent.descriptorPath ?? parent.path);
+    for await (const entry of stream) {
+      count(); if (removed >= 64) break;
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(entry.name) || !entry.isDirectory() || activeReports.has(join(parent.path, entry.name))) continue;
+      try {
+        const child = await parent.subdirectory(entry.name, false); if (!child) continue;
+        try {
+          const stat = await lstat(child.descriptorPath === undefined ? child.path : `${child.descriptorPath}/.`);
+          if (Date.now() - stat.mtimeMs <= 24 * 60 * 60 * 1000) continue;
+          await empty(child, 0); checkTime(); await rmdir(parent.entry(entry.name)); removed++;
+        } finally { await child.close(); }
+      } catch { /* Leave unavailable folders for a later round. */ }
+    }
+  } catch { /* Pruning never fails a check round, including at its deadline. */ }
+  finally { await parent?.close().catch(() => undefined); await state?.close().catch(() => undefined); }
+}
 
 /** Bounded recovery of crash leftovers; held directories prevent a link swap from redirecting deletion. */
 async function sweepRoots(workspace: HeldDirectory, checkTime: () => void): Promise<void> {
