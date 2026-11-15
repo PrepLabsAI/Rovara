@@ -157,7 +157,7 @@ export function pickChangedRoutes(input: { changedFiles: unknown; recipe: unknow
   for (const route of recipe.data.routes) {
     if (seen.has(route.path)) continue;
     let hit = false;
-    for (const file of files as string[]) {
+    for (const file of files) {
       for (const glob of route.files) {
         const result = matchPolicyGlob(glob, file);
         steps += result.steps;
@@ -169,7 +169,7 @@ export function pickChangedRoutes(input: { changedFiles: unknown; recipe: unknow
     if (hit) { seen.add(route.path); candidates.push(route.path); }
   }
   if (recipe.data.framework === "nextjs") {
-    for (const file of files as string[]) {
+    for (const file of files) {
       const page = nextjsRouteOf(file);
       if (page === undefined || seen.has(page.route)) continue;
       seen.add(page.route);
@@ -194,6 +194,9 @@ export function pickChangedRoutes(input: { changedFiles: unknown; recipe: unknow
 /** Painted over before every screenshot (Playwright's `mask`): secrets and personal data in form fields, and anything the app marks private. */
 export const BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS: readonly string[] = Object.freeze([
   'input[type="password"]',
+  // A "show password" toggle turns the field into type=text: these still find it.
+  'input[name*="password" i]',
+  'input[autocomplete$="password"]',
   'input[type="email"]',
   'input[type="tel"]',
   'input[autocomplete^="cc-"]',
@@ -228,6 +231,13 @@ export const BROWSER_EVIDENCE_TEXT_MASKS: ReadonlyArray<Readonly<{ source: strin
   { source: "\\b\\d(?:[ -]?\\d){12,18}\\b", flags: "gu" },
   { source: "\\+\\d{1,3}(?:[ .-]?\\d{2,4}){2,5}\\b", flags: "gu" },
   { source: "\\(?\\b\\d{3}\\)?[ .-]\\d{3}[ .-]\\d{4}\\b", flags: "gu" },
+  // A US social security number, an IBAN (all its groups), GitLab and Twilio keys, a bearer token, and a labelled secret (`password: ...`, `api_key=...`).
+  { source: "\\b\\d{3}-\\d{2}-\\d{4}\\b", flags: "gu" },
+  { source: "\\b[A-Z]{2}\\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?\\b", flags: "gu" },
+  { source: "glpat-[A-Za-z0-9_-]{20,}", flags: "gu" },
+  { source: "\\bSK[a-f0-9]{32}\\b", flags: "gu" },
+  { source: "\\bbearer\\s+[A-Za-z0-9._~+/-]{8,}=*", flags: "giu" },
+  { source: "\\b(?:password|passwd|secret|token|api[_-]?key)\\s*[:=]\\s*\\S{4,}", flags: "giu" },
 ].map((mask) => Object.freeze(mask)));
 export const BROWSER_EVIDENCE_TEXT_MASK = "•••";
 const TEXT_MASKS = BROWSER_EVIDENCE_TEXT_MASKS.map((mask) => new RegExp(mask.source, mask.flags));
@@ -263,7 +273,7 @@ export type BrowserEvidenceOutcome = RunResult<ArtifactRef>;
 
 const CountSchema = z.number().int().min(0).max(1_000_000);
 const JpegRefSchema = ArtifactRefSchema.refine((ref) => ref.kind === "jpeg", "a screenshot is a JPEG");
-const OutcomeSchema = z.object({
+const OutcomeBaseSchema = z.object({
   isolation: z.enum(BROWSER_EVIDENCE_ISOLATIONS),
   durationMs: z.number().int().min(0).max(86_400_000),
   routes: z.array(z.discriminatedUnion("status", [
@@ -273,12 +283,32 @@ const OutcomeSchema = z.object({
   notShown: z.array(z.object({ route: RouteSchema, reason: z.enum(BROWSER_EVIDENCE_NOT_SHOWN_REASONS) }).strict()).max(BROWSER_EVIDENCE_NOT_SHOWN_MAX),
   moreNotShown: CountSchema,
   notRun: z.enum(BROWSER_EVIDENCE_NOT_RUN_REASONS).optional(),
-}).strict().superRefine((outcome, context) => {
+}).strict();
+const OutcomeSchema = OutcomeBaseSchema.superRefine((outcome, context) => {
   if (new Set(outcome.routes.map((row) => row.route)).size !== outcome.routes.length) context.addIssue({ code: "custom", message: "routes are unique" });
   if (outcome.notRun !== undefined && outcome.routes.length > 0) context.addIssue({ code: "custom", message: "a run that did not happen has no routes" });
 });
 
 const INVALID = "browser evidence outcome is not valid";
+
+const ShotSchema = z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/u), bytes: z.instanceof(Uint8Array).refine((bytes) => bytes.byteLength > 0 && bytes.byteLength <= BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES) }).strict();
+const CapturedSchema = OutcomeBaseSchema.extend({
+  routes: z.array(z.discriminatedUnion("status", [
+    z.object({ route: RouteSchema, status: z.literal("shown"), before: ShotSchema, after: ShotSchema, consoleErrors: z.object({ before: CountSchema, after: CountSchema }).strict() }).strict(),
+    z.object({ route: RouteSchema, status: z.literal("not_run"), reason: z.enum(BROWSER_EVIDENCE_NOT_RUN_REASONS) }).strict(),
+  ])).max(BROWSER_EVIDENCE_ROUTES_MAX),
+}).superRefine((captured, context) => {
+  if (new Set(captured.routes.map((row) => row.route)).size !== captured.routes.length) context.addIssue({ code: "custom", message: "routes are unique" });
+  if (captured.notRun !== undefined && captured.routes.length > 0) context.addIssue({ code: "custom", message: "a run that did not happen has no routes" });
+  const total = captured.routes.reduce((sum, row) => sum + (row.status === "shown" ? row.before.bytes.byteLength + row.after.bytes.byteLength : 0), 0);
+  if (total > BROWSER_EVIDENCE_TOTAL_MAX_BYTES) context.addIssue({ code: "custom", message: "a run keeps at most the run's byte budget" });
+});
+/** The runner's result checked whole before anything of it is stored: the shape, every shot within the screenshot cap, and all of them within the run's budget. Throws otherwise. */
+export function checkedBrowserEvidenceCaptured(captured: unknown): BrowserEvidenceCaptured {
+  const parsed = CapturedSchema.safeParse(captured);
+  if (!parsed.success) throw new Error(INVALID);
+  return parsed.data as BrowserEvidenceCaptured;
+}
 function checkedOutcome(outcome: unknown): BrowserEvidenceOutcome {
   const parsed = OutcomeSchema.safeParse(outcome);
   if (!parsed.success) throw new Error(INVALID);
@@ -294,8 +324,9 @@ export function browserEvidenceCheck(outcome: BrowserEvidenceOutcome): { check: 
   const shown = checked.routes.filter((row): row is Extract<BrowserEvidenceRouteResult<ArtifactRef>, { status: "shown" }> => row.status === "shown");
   const any = shown.length > 0;
   const check: EvidenceCheckV2 = {
-    id: BROWSER_EVIDENCE_CHECK_ID, kind: "visual", label: CHECK_LABEL, stage: "sandbox", runBy: "rovara",
-    before: any ? "passed" : "not_run", after: any ? "passed" : "not_run", class: any ? "passing" : "not_rerun", durationMs: checked.durationMs,
+    // `class` is neutral (a picture is not a pass); the stage is the sandbox only when it ran there (a laptop has no stage of its own: the producer says where).
+    id: BROWSER_EVIDENCE_CHECK_ID, kind: "visual", label: CHECK_LABEL, ...(checked.isolation === "sandbox" ? { stage: "sandbox" as const } : {}), runBy: "rovara",
+    before: any ? "passed" : "not_run", after: any ? "passed" : "not_run", class: "not_rerun", durationMs: checked.durationMs,
     ...(any ? { pairs: shown.map((row) => ({ id: row.route, before: row.before, after: row.after })) } : {}),
   };
   const notTested: EvidencePackV2["notTested"] = [

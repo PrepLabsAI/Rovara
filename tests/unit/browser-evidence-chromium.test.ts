@@ -74,6 +74,28 @@ describe.skipIf(!haveChromium)("browser evidence in a real Chromium", () => {
     } finally { await driver.stopApp("after"); }
   }, 120_000);
 
+  it("masks text the page re-renders after load, text in an open shadow root and text in a same-origin frame", async () => {
+    const port = await freePort();
+    const got = await runBrowserEvidence({ isolation: "sandbox", routes: ["/late-a", "/late-b", "/shadow-a", "/shadow-b"], notShown: [], moreNotShown: 0, maskSelectors: [], driver: driverFor(port) });
+    const frames = await runBrowserEvidence({ isolation: "sandbox", routes: ["/frame-a", "/frame-b"], notShown: [], moreNotShown: 0, maskSelectors: [], driver: driverFor(port) });
+    const shaOf = (run: typeof got, route: string) => { const row = run.routes.find((r) => r.route === route); if (row?.status !== "shown") throw new Error(`${route} was not shown: ${JSON.stringify(row)}`); return row.after.sha256; };
+    expect(shaOf(got, "/late-a")).toBe(shaOf(got, "/late-b"));
+    expect(shaOf(got, "/shadow-a")).toBe(shaOf(got, "/shadow-b"));
+    expect(shaOf(frames, "/frame-a")).toBe(shaOf(frames, "/frame-b"));
+  }, 120_000);
+
+  it("keeps no picture of a secret split over several elements, and a page whose script never yields ends at its time and the app is stopped", async () => {
+    const port = await freePort();
+    const started = Date.now();
+    const got = await runBrowserEvidence({ isolation: "sandbox", routes: ["/split", "/busy"], notShown: [], moreNotShown: 0, maskSelectors: [], driver: driverFor(port), limits: { pageMs: 4_000 } });
+    expect(got.routes).toEqual([{ route: "/split", status: "not_run", reason: "masked_content" }, { route: "/busy", status: "not_run", reason: "time_limit" }]);
+    expect(Date.now() - started).toBeLessThan(60_000);
+    // Both sides' apps were stopped: nothing listens on the port any more.
+    const again = driverFor(port);
+    expect(await again.startApp("before", { timeoutMs: 20_000 })).toBe("ready");
+    await again.stopApp("before");
+  }, 120_000);
+
   it("an app whose start command fails or never answers is Not run, and its process is gone", async () => {
     const port = await freePort();
     const failed = await runBrowserEvidence({ isolation: "sandbox", routes: ["/checkout"], notShown: [], moreNotShown: 0, maskSelectors: [], driver: driverFor(port, `"${process.execPath}" -e "process.exit(3)"`) });

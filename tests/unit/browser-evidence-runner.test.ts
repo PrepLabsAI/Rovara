@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, BROWSER_EVIDENCE_TOTAL_MAX_BYTES } from "../../packages/contracts/src/browser-evidence.js";
-import { runBrowserEvidence, type BrowserEvidenceDriver, type BrowserEvidenceSide } from "../../packages/verifier/src/executor/browser-evidence.js";
+import { BROWSER_EVIDENCE_STOP_MS, runBrowserEvidence, type BrowserEvidenceDriver, type BrowserEvidenceSide } from "../../packages/verifier/src/executor/browser-evidence.js";
 
 const jpegOf = (seed: string, size = 2_000) => {
   const bytes = new Uint8Array(size);
@@ -112,10 +112,31 @@ describe("runBrowserEvidence", () => {
     }
   });
 
+  it("a driver that never answers cannot hold the run: the page is Not run (time limit) at the page's time, and the app is still stopped, within a bound", async () => {
+    const calls: string[] = [];
+    const never = <T>() => new Promise<T>(() => undefined);
+    const driver: BrowserEvidenceDriver = {
+      async startApp(side) { calls.push(`start:${side}`); return "ready"; },
+      capture() { calls.push("capture"); return never(); },
+      stopApp(side) { calls.push(`stop:${side}`); return never(); },
+    };
+    const started = Date.now();
+    const got = await runBrowserEvidence({ ...base, routes: ["/a"], driver, limits: { pageMs: 50 } });
+    expect(got.routes).toEqual([{ route: "/a", status: "not_run", reason: "time_limit" }]);
+    expect(calls).toEqual(["start:before", "capture", "stop:before"]);
+    expect(Date.now() - started).toBeLessThan(BROWSER_EVIDENCE_STOP_MS + 5_000);
+    const hungStart: BrowserEvidenceDriver = { startApp: () => never(), capture: () => never(), async stopApp() { calls.push("stopped"); } };
+    expect((await runBrowserEvidence({ ...base, routes: ["/a"], driver: hungStart, limits: { runMs: 50 } })).notRun).toBe("app_did_not_start");
+    expect(calls.at(-1)).toBe("stopped");
+  }, 30_000);
+
   it("refuses input it was not built for instead of trimming it", async () => {
     const { driver } = fakeDriver();
     await expect(runBrowserEvidence({ ...base, routes: ["/1", "/2", "/3", "/4", "/5", "/6"], driver })).rejects.toThrow("browser evidence input is not valid");
     await expect(runBrowserEvidence({ ...base, routes: ["checkout"], driver })).rejects.toThrow("browser evidence input is not valid");
     await expect(runBrowserEvidence({ ...base, isolation: "imported" as never, routes: ["/a"], driver })).rejects.toThrow("browser evidence input is not valid");
+    await expect(runBrowserEvidence({ ...base, moreNotShown: 1_000_001, routes: ["/a"], driver })).rejects.toThrow("browser evidence input is not valid");
+    await expect(runBrowserEvidence({ ...base, notShown: [{ route: "/x", reason: "because" as never }], routes: ["/a"], driver })).rejects.toThrow("browser evidence input is not valid");
+    await expect(runBrowserEvidence({ ...base, maskSelectors: Array.from({ length: 21 }, (_, i) => `.m${i}`), routes: ["/a"], driver })).rejects.toThrow("browser evidence input is not valid");
   });
 });

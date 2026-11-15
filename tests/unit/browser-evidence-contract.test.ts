@@ -11,7 +11,7 @@ import { checkKindInfo } from "../../packages/contracts/src/check-kinds.js";
 import { EVIDENCE_ARTIFACT_MAX_BYTES, EvidencePackV2Schema, type ArtifactRef, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
 import { POLICY_FIELDS, resolvePolicy } from "../../packages/contracts/src/policy.js";
 import { POLICY_PRESETS } from "../../packages/contracts/src/presets.js";
-import { proofHolds } from "../../packages/contracts/src/test-proof.js";
+import { proofHolds, type TestProof } from "../../packages/contracts/src/test-proof.js";
 import { CAPTURE_SCREENSHOT_MAX_BYTES } from "../../packages/verifier/src/executor/capture.js";
 
 const sha = (c: string) => c.repeat(64);
@@ -31,7 +31,7 @@ describe("the setting", () => {
   it("fails closed on anything but a resolved policy whose value is exactly `on`", () => {
     for (const input of [undefined, null, {}, "on", { status: "refused", values: {} }, { status: "disabled", values: { browser_evidence: { value: "on", origin: "install_off" } } },
       { status: "resolved", values: { browser_evidence: { value: "ON", origin: "changed_here" } } }, { status: "resolved", values: { browser_evidence: { value: true, origin: "changed_here" } } },
-      { status: "resolved", values: { browser_evidence: "on" } }, { status: "resolved", values: Object.create({ browser_evidence: { value: "on" } }) }]) {
+      { status: "resolved", values: { browser_evidence: "on" } }, { status: "resolved", values: Object.create({ browser_evidence: { value: "on" } }) as unknown }]) {
       expect(browserEvidenceOn(input), JSON.stringify(input)).toBe(false);
     }
     expect(browserEvidenceOn(resolvePolicy({ project: { [BROWSER_EVIDENCE_SETTING]: "on" } }, { installOff: true }))).toBe(false);
@@ -95,7 +95,7 @@ describe("which changed pages are picked", () => {
 
 describe("masking", () => {
   it("paints over passwords, card and code fields, email and phone inputs and marked elements by default, plus the recipe's own selectors", () => {
-    for (const selector of ['input[type="password"]', 'input[autocomplete^="cc-"]', 'input[autocomplete="one-time-code"]', 'input[type="email"]', 'input[type="tel"]', "[data-rovara-mask]", "[data-private]"]) {
+    for (const selector of ['input[type="password"]', 'input[name*="password" i]', 'input[autocomplete$="password"]', 'input[autocomplete^="cc-"]', 'input[autocomplete="one-time-code"]', 'input[type="email"]', 'input[type="tel"]', "[data-rovara-mask]", "[data-private]"]) {
       expect(BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, selector).toContain(selector);
     }
     expect(browserEvidenceMaskSelectors(undefined)).toEqual([...BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS]);
@@ -110,6 +110,11 @@ describe("masking", () => {
     const text = `Signed in as ada.lovelace+test@example.co.uk. Key ${token}. Session ${jwt}. Id ${hex}. Card 4111 1111 1111 1111. Call +44 20 7946 0958 or (415) 555-0123.`;
     const out = scrubVisibleText(text);
     for (const secret of ["ada.lovelace+test@example.co.uk", token, jwt, hex, "4111 1111 1111 1111", "+44 20 7946 0958", "(415) 555-0123", "555-0123"]) expect(out, secret).not.toContain(secret);
+    const gitlab = ["glp", "at-"].join("") + "x".repeat(10) + "Y1z2".repeat(4);
+    const twilio = ["S", "K"].join("") + "0123456789abcdef".repeat(2);
+    const bearer = `${["Bear", "er"].join("")} abc.DEF-123_xyz~987`;
+    const more = scrubVisibleText(`SSN 123-45-6789. IBAN GB82 WEST 1234 5698 7654 32. ${gitlab} ${twilio}. Authorization: ${bearer}. password: Hunter2! api_key=abc123.`);
+    for (const secret of ["123-45-6789", "WEST 1234 5698 7654 32", gitlab, twilio, "abc.DEF-123_xyz~987", "Hunter2!", "abc123"]) expect(more, secret).not.toContain(secret);
     expect(out).toContain("Signed in as");
     expect(scrubVisibleText("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.")).toBe("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.");
   });
@@ -150,13 +155,15 @@ const basePack = (): EvidencePackV2 => ({
 describe("the evidence-pack check", () => {
   it("is a `visual` check run by Rovara in the sandbox, with one before/after pair per shown route, and a not-tested row for every route not shown", () => {
     const { check, notTested } = browserEvidenceCheck(shown);
-    expect(check).toEqual({ id: BROWSER_EVIDENCE_CHECK_ID, kind: "visual", label: "Browser evidence", stage: "sandbox", runBy: "rovara", before: "passed", after: "passed", class: "passing", durationMs: 4_200,
+    expect(check).toEqual({ id: BROWSER_EVIDENCE_CHECK_ID, kind: "visual", label: "Browser evidence", stage: "sandbox", runBy: "rovara", before: "passed", after: "passed", class: "not_rerun", durationMs: 4_200,
       pairs: [{ id: "/checkout", before: jpeg("a"), after: jpeg("b") }] });
     expect(notTested).toEqual([
       { what: "Browser evidence: /settings", reason: "Not run: the page did not load" },
       { what: "Browser evidence: /orders/[id]", reason: "Not shown: needs a route in the recipe" },
     ]);
     expect(EvidencePackV2Schema.safeParse(addBrowserEvidenceToPack(basePack(), shown)).success).toBe(true);
+    // A laptop run has no sandbox stage: the producer says where it ran.
+    expect(browserEvidenceCheck({ ...shown, isolation: "developer_machine" }).check.stage).toBeUndefined();
   });
   it("a run that showed nothing is `not_run` with no pairs, and a whole-run reason becomes one not-tested row", () => {
     const { check, notTested } = browserEvidenceCheck({ isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "app_did_not_start" });
@@ -167,8 +174,8 @@ describe("the evidence-pack check", () => {
   it("NEVER counts toward the proof: the kind is visual, the registry says so, and the hold rule ignores a passing visual check", () => {
     expect(browserEvidenceCheck(shown).check.kind).toBe("visual");
     expect(checkKindInfo("visual")?.countsTowardProof).toBe(false);
-    const proof = { schemaVersion: 1, candidateDigest: sha("d"), status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 10,
-      items: [{ checkId: BROWSER_EVIDENCE_CHECK_ID, label: "Browser evidence", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" }] } as const;
+    const proof: TestProof = { schemaVersion: 1, candidateDigest: sha("d"), status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 10,
+      items: [{ checkId: BROWSER_EVIDENCE_CHECK_ID, label: "Browser evidence", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" }] };
     // Positive control: the same entry under a kind that counts is a proven change.
     expect(proofHolds({ facts: { proof, checkKinds: { [BROWSER_EVIDENCE_CHECK_ID]: "e2e" } }, mode: "hold" }).provenCount).toBe(1);
     expect(proofHolds({ facts: { proof, checkKinds: { [BROWSER_EVIDENCE_CHECK_ID]: browserEvidenceCheck(shown).check.kind } }, mode: "hold" }).provenCount).toBe(0);

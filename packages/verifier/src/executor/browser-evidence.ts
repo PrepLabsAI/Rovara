@@ -1,10 +1,12 @@
 // TE-H1 browser evidence: the runner. For each picked route it takes one screenshot on the base code ("before") and one on the candidate ("after"), through a driver that starts the
-// project's app in the sandbox and drives a headless Chromium (browser-evidence-chromium.ts; tests use a fake). It holds the run to one time limit and one byte budget, keeps each
-// screenshot within the e2e capture cap, drops one that carries a known credential, and always stops the app it started. A page that cannot be shown is "Not run" with a fixed reason.
+// project's app in the sandbox and drives a headless Chromium (browser-evidence-chromium.ts; tests use a fake). It holds the run to one time limit (every driver call is raced against
+// the time left, so a page that never answers cannot hold the run) and one byte budget, keeps each screenshot within the e2e capture cap, and always stops the app it started (that wait
+// is bounded too). A page that cannot be shown is "Not run" with a fixed reason. The masking itself is the driver's (scrub, freeze, scrub again, verify, then the picture); the
+// credential scan of the JPEG bytes here is defence in depth only: rendered text becomes compressed pixels, so it rarely sees one.
 // Nothing here decides whether a change is proven: the result is visual evidence only (contracts/browser-evidence.ts).
 import { createHash } from "node:crypto";
 import {
-  BROWSER_EVIDENCE_ISOLATIONS, BROWSER_EVIDENCE_NOT_SHOWN_MAX, BROWSER_EVIDENCE_PAGE_MS, BROWSER_EVIDENCE_ROUTES_MAX, BROWSER_EVIDENCE_RUN_MS, BROWSER_EVIDENCE_TOTAL_MAX_BYTES,
+  BROWSER_EVIDENCE_ISOLATIONS, BROWSER_EVIDENCE_MASK_SELECTORS_MAX, BROWSER_EVIDENCE_NOT_SHOWN_MAX, BROWSER_EVIDENCE_NOT_SHOWN_REASONS, BROWSER_EVIDENCE_PAGE_MS, BROWSER_EVIDENCE_ROUTES_MAX, BROWSER_EVIDENCE_RUN_MS, BROWSER_EVIDENCE_TOTAL_MAX_BYTES,
   isBrowserEvidenceRoute, withDefaultMasks,
   type BrowserEvidenceCaptured, type BrowserEvidenceIsolation, type BrowserEvidenceNotRunReason, type BrowserEvidenceNotShown, type BrowserEvidenceRouteResult, type BrowserEvidenceShot,
 } from "@agentx/contracts";
@@ -13,7 +15,7 @@ import { CAPTURE_SCREENSHOT_MAX_BYTES } from "./capture.js";
 export type BrowserEvidenceSide = "before" | "after";
 export type { BrowserEvidenceCaptured };
 /** What the driver may answer for one page: the JPEG and its console error count, or one of these fixed reasons. Anything else is read as `capture_failed`. */
-export type BrowserEvidenceCaptureAnswer = { ok: true; bytes: Uint8Array; consoleErrors: number } | { ok: false; reason: "page_did_not_load" | "time_limit" | "capture_failed" };
+export type BrowserEvidenceCaptureAnswer = { ok: true; bytes: Uint8Array; consoleErrors: number } | { ok: false; reason: "page_did_not_load" | "time_limit" | "capture_failed" | "masked_content" };
 export type BrowserEvidenceDriver = Readonly<{
   /** Starts the project's app for this side (the base checkout or the candidate) and waits until it answers. Anything but "ready" means it did not start. */
   startApp(side: BrowserEvidenceSide, options: { timeoutMs: number }): Promise<"ready" | "app_did_not_start" | "time_limit">;
@@ -32,7 +34,7 @@ export type BrowserEvidenceRunInput = Readonly<{
   /** Extra selectors to paint over; the defaults are always added. */
   maskSelectors: readonly string[];
   driver: BrowserEvidenceDriver;
-  /** The run's credential scan (the executor's `CredentialRedactor`): a screenshot it finds a credential in is not kept. */
+  /** The run's credential scan (the executor's `CredentialRedactor`) over the JPEG bytes: defence in depth only (see the file header). */
   redactor?: Readonly<{ contains(bytes: Uint8Array): boolean }>;
   now?: () => number;
   /** Lower limits for this run; the built-in limits are the most a caller can get. */
@@ -41,9 +43,22 @@ export type BrowserEvidenceRunInput = Readonly<{
 
 const INVALID = "browser evidence input is not valid";
 const SIDES: readonly BrowserEvidenceSide[] = ["before", "after"];
-const DRIVER_REASONS = new Set(["page_did_not_load", "time_limit", "capture_failed"]);
+const DRIVER_REASONS = new Set(["page_did_not_load", "time_limit", "capture_failed", "masked_content"]);
 const isJpeg = (bytes: Uint8Array) => bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
 const sha256Of = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+/** How long `stopApp` may take, whatever is left of the run: the app is always asked to stop, and the run never waits on it for longer. */
+export const BROWSER_EVIDENCE_STOP_MS = 10_000;
+const TIMED_OUT = Symbol("timed out");
+const FAILED = Symbol("failed");
+/** The work's answer, `FAILED` when it throws or rejects, or `TIMED_OUT` once `ms` have passed. */
+async function within<T>(work: () => Promise<T>, ms: number): Promise<T | typeof TIMED_OUT | typeof FAILED> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    let started: Promise<T | typeof FAILED>;
+    try { started = work().catch((): typeof FAILED => FAILED); } catch { started = Promise.resolve(FAILED); }
+    return await Promise.race<T | typeof TIMED_OUT | typeof FAILED>([started, new Promise<typeof TIMED_OUT>((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), Math.max(1, ms)); })]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
 const lower = (given: number | undefined, most: number) => (typeof given === "number" && Number.isFinite(given) && given > 0 ? Math.min(given, most) : most);
 
 type Kept = BrowserEvidenceShot & { consoleErrors: number };
@@ -70,9 +85,15 @@ function keepShot(answer: unknown, redactor: BrowserEvidenceRunInput["redactor"]
  */
 export async function runBrowserEvidence(input: BrowserEvidenceRunInput): Promise<BrowserEvidenceCaptured> {
   const { routes, driver } = input;
+  // Runtime checks of what TypeScript promises: `Array.isArray` on a typed list would widen it to any[], so the list is read as unknown first.
+  const notShownInput: unknown = input.notShown;
+  const notShownOk = Array.isArray(notShownInput) && notShownInput.length <= BROWSER_EVIDENCE_NOT_SHOWN_MAX && notShownInput.every((row: unknown) => typeof row === "object" && row !== null
+    && isBrowserEvidenceRoute((row as { route?: unknown }).route) && (BROWSER_EVIDENCE_NOT_SHOWN_REASONS as readonly unknown[]).includes((row as { reason?: unknown }).reason));
+  const notShown: readonly BrowserEvidenceNotShown[] = input.notShown;
   if (!(BROWSER_EVIDENCE_ISOLATIONS as readonly string[]).includes(input.isolation) || !Array.isArray(routes) || routes.length === 0 || routes.length > BROWSER_EVIDENCE_ROUTES_MAX
-    || !routes.every(isBrowserEvidenceRoute) || new Set(routes).size !== routes.length || !Array.isArray(input.notShown) || input.notShown.length > BROWSER_EVIDENCE_NOT_SHOWN_MAX
-    || !Number.isInteger(input.moreNotShown) || input.moreNotShown < 0) throw new Error(INVALID);
+    || !routes.every(isBrowserEvidenceRoute) || new Set(routes).size !== routes.length || !notShownOk
+    || !Number.isInteger(input.moreNotShown) || input.moreNotShown < 0 || input.moreNotShown > 1_000_000
+    || !Array.isArray(input.maskSelectors) || input.maskSelectors.length > BROWSER_EVIDENCE_MASK_SELECTORS_MAX) throw new Error(INVALID);
   const now = input.now ?? Date.now;
   const started = now();
   const deadline = started + lower(input.limits?.runMs, BROWSER_EVIDENCE_RUN_MS);
@@ -81,28 +102,28 @@ export async function runBrowserEvidence(input: BrowserEvidenceRunInput): Promis
   const maskSelectors = withDefaultMasks(input.maskSelectors);
   const failed = new Map<string, BrowserEvidenceNotRunReason>();
   const kept: Record<BrowserEvidenceSide, Map<string, Kept>> = { before: new Map(), after: new Map() };
-  const base = { isolation: input.isolation, notShown: input.notShown.map((row) => ({ ...row })), moreNotShown: input.moreNotShown };
+  const base = { isolation: input.isolation, notShown: notShown.map((row) => ({ route: row.route, reason: row.reason })), moreNotShown: input.moreNotShown };
   const fail = (route: string, reason: BrowserEvidenceNotRunReason) => { if (!failed.has(route)) failed.set(route, reason); };
 
   for (const side of SIDES) {
     const pending = routes.filter((route) => !failed.has(route));
     if (pending.length === 0) break;
     if (deadline - now() <= 0) { for (const route of pending) fail(route, "time_limit"); break; }
-    let ready = false;
     try {
-      try { ready = (await driver.startApp(side, { timeoutMs: deadline - now() })) === "ready"; } catch { ready = false; }
+      const left = deadline - now();
+      const ready = (await within(() => driver.startApp(side, { timeoutMs: left }), left)) === "ready";
       if (!ready) return { ...base, durationMs: Math.max(0, now() - started), routes: [], notRun: "app_did_not_start" };
       for (const route of pending) {
         const left = deadline - now();
         if (left <= 0) { fail(route, "time_limit"); continue; }
-        let answer: unknown;
-        try { answer = await driver.capture(side, route, { maskSelectors, timeoutMs: Math.min(pageMs, left) }); } catch { answer = undefined; }
-        const shot = keepShot(answer, input.redactor);
+        const answer = await within(() => driver.capture(side, route, { maskSelectors, timeoutMs: Math.min(pageMs, left) }), Math.min(pageMs, left));
+        const shot = answer === TIMED_OUT ? "time_limit" : keepShot(answer, input.redactor);
         if (typeof shot === "string") fail(route, shot);
         else kept[side].set(route, shot);
       }
     } finally {
-      try { await driver.stopApp(side); } catch { /* the driver's stop is its own; a failure there changes no result */ }
+      // Always asked, never waited on past its bound: a stop that fails or hangs changes no result.
+      await within(() => driver.stopApp(side), BROWSER_EVIDENCE_STOP_MS);
     }
   }
 

@@ -1,12 +1,19 @@
-// TE-H1 browser evidence: the real driver. The project's own start command starts the app (in its own process group, so stopping it stops only what it started), and a headless
-// Chromium (the executor's `launchLocalChromium`, its own sandbox on) opens each route on the app's origin only, scrubs secrets and personal data from the page's text and form values,
-// paints over the masked elements and takes one JPEG at the quality the e2e capture uses. Any other origin is refused before and during the load.
+// TE-H1 browser evidence: the real driver. The project's own start command starts the app (in its own process group, so stopping it stops only what it started; a start command that
+// daemonizes out of the group is left to the sandbox's own teardown), and a headless Chromium (the executor's `launchLocalChromium`, its own sandbox on) opens each route on the app's
+// origin only (`http://127.0.0.1:<port>`; any other origin is aborted before and during the load; WebSockets are not routed, which the sandbox's network walls cover).
+//
+// Masking, in this order, before the one JPEG is taken: every frame's text, open shadow roots, form values, placeholders and title are scrubbed (contracts' text masks); the page's own
+// scripts are then stopped (CDP `Emulation.setScriptExecutionDisabled`), so nothing can re-render the raw text; everything is scrubbed again; a verify pass re-reads it all (each text node,
+// each field, and the joined visible text of the page and of each shadow root, which catches a secret split over several nodes) and any match left means no picture
+// ("withheld"); finally the masked elements are painted over by Playwright. Not reachable by any text scrub, and so left to the recipe's mask selectors: canvas, images, CSS generated
+// content and closed shadow roots. Every step is bounded by the page's time; the context is closed after each page, which also ends a renderer that is still busy.
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { BROWSER_EVIDENCE_TEXT_MASK, BROWSER_EVIDENCE_TEXT_MASKS, BROWSER_EVIDENCE_TEXT_SCAN_MAX, isBrowserEvidenceRoute } from "@agentx/contracts";
 import type { BrowserEvidenceCaptureAnswer, BrowserEvidenceDriver, BrowserEvidenceSide } from "./browser-evidence.js";
 import { launchLocalChromium } from "./local-browser.js";
@@ -19,8 +26,10 @@ const READY_POLL_MS = 200;
 const PROBE_TIMEOUT_MS = 1_000;
 const STOP_GRACE_MS = 3_000;
 const STOP_KILLED_MS = 2_000;
-/** The page's text nodes and form fields scrubbed at most; a page with more is not photographed. */
-const SCRUB_NODES_MAX = 50_000;
+const CLOSE_MS = 5_000;
+/** The page's nodes and form fields read at most, and its characters in all; a page with more is not photographed. */
+const PAGE_NODES_MAX = 50_000;
+const PAGE_CHARS_MAX = 2_000_000;
 
 const pause = (milliseconds: number) => new Promise<void>((resolve) => { setTimeout(resolve, milliseconds); });
 
@@ -29,7 +38,18 @@ const pause = (milliseconds: number) => new Promise<void>((resolve) => { setTime
 export type ProjectApp = Readonly<{ stop(): Promise<void> }>;
 export type ProjectAppStart = { status: "ready"; app: ProjectApp } | { status: "app_did_not_start" | "time_limit" };
 
-/** Whether anything answers HTTP on the loopback port at this path (any status below 500). */
+/** Whether anything accepts a TCP connection on the loopback port (any listener, whatever it answers). */
+function listening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    const done = (value: boolean) => { socket.destroy(); resolve(value); };
+    socket.setTimeout(PROBE_TIMEOUT_MS, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** Whether the app answers HTTP on the loopback port at this path (any status below 500). */
 function answers(port: number, path: string): Promise<boolean> {
   return new Promise((resolve) => {
     const probe = request({ host: "127.0.0.1", port, path, method: "GET", timeout: PROBE_TIMEOUT_MS }, (response) => { response.resume(); resolve((response.statusCode ?? 500) < 500); });
@@ -41,25 +61,27 @@ function answers(port: number, path: string): Promise<boolean> {
 
 /**
  * Starts the project's app with its own start command (`/bin/sh -c`, inside the sandbox, in `cwd`, with only `env` and `PORT`), in a new process group, and waits until
- * `http://127.0.0.1:<port><readyPath>` answers. Refuses a port something else already answers on (it would photograph another program). An app that exits, or does not answer within
+ * `http://127.0.0.1:<port><readyPath>` answers. Refuses a port anything already listens on (it would photograph another program). An app that exits, or does not answer within
  * `timeoutMs`, is stopped and reported; `stop` ends the whole group and waits for it.
  */
 export async function startProjectApp(input: { command: string; cwd: string; port: number; readyPath?: string | undefined; timeoutMs: number; env: Readonly<Record<string, string>> }): Promise<ProjectAppStart> {
   const readyPath = input.readyPath ?? "/";
   if (typeof input.command !== "string" || input.command.length === 0 || !Number.isInteger(input.port) || input.port < 1_024 || input.port > 65_535 || !isBrowserEvidenceRoute(readyPath)) return { status: "app_did_not_start" };
-  if (await answers(input.port, readyPath)) return { status: "app_did_not_start" };
+  if (await listening(input.port)) return { status: "app_did_not_start" };
   let child: ChildProcess;
   try {
     child = spawn("/bin/sh", ["-c", input.command], { cwd: input.cwd, env: { ...input.env, PORT: String(input.port) }, detached: true, stdio: "ignore" });
   } catch { return { status: "app_did_not_start" }; }
   let exited = false;
   const exit = new Promise<void>((resolve) => { child.once("exit", () => { exited = true; resolve(); }); child.once("error", () => { exited = true; resolve(); }); });
+  const groupAlive = () => { if (child.pid === undefined) return false; try { process.kill(-child.pid, 0); return true; } catch { return false; } };
   const signalGroup = (signal: NodeJS.Signals) => { if (child.pid !== undefined) { try { process.kill(-child.pid, signal); } catch { /* the group is already gone */ } } };
   const stop = async (): Promise<void> => {
-    // The group, not only the shell: the app the shell started is in it. Only this group, never by name.
+    // The group, not only the shell: the app the shell started is in it. Only this group, never by name; never signalled again once it is gone (its id could be reused).
+    if (!groupAlive()) return;
     signalGroup("SIGTERM");
     if (!exited) await Promise.race([exit, pause(STOP_GRACE_MS)]);
-    signalGroup("SIGKILL");
+    if (groupAlive()) signalGroup("SIGKILL");
     if (!exited) await Promise.race([exit, pause(STOP_KILLED_MS)]);
   };
   const deadline = Date.now() + Math.max(0, input.timeoutMs);
@@ -77,39 +99,78 @@ export async function startProjectApp(input: { command: string; cwd: string; por
 
 // ---- the page
 
+type PageArg = { masks: ReadonlyArray<{ source: string; flags: string }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
+type PageVerdict = "clean" | "dirty" | "too_large";
+
 /**
- * Runs IN THE PAGE: replaces every text mask in the page's text nodes, form values and placeholders, and in the document title. False when the page has more nodes than it scrubs (it is then
- * not photographed). Self-contained: it gets the mask sources as its argument.
+ * Runs IN THE PAGE (each frame). `verify: false` replaces every text mask in the text nodes (light DOM and open shadow roots), form values, placeholders and the title. `verify: true`
+ * changes nothing and says "dirty" when any of them, or the joined visible text of the page or of a shadow root, still matches a mask (fields inside a masked element and hidden fields
+ * are not read: they are painted over, or never shown). "too_large" past the node or character budget. Self-contained: everything it uses is in its argument. This package has no DOM
+ * types, so the document is described by the little this function touches (1 and 4 are ELEMENT_NODE and SHOW_ELEMENT|SHOW_TEXT's text bit).
  */
-function scrubInPage(arg: { masks: ReadonlyArray<{ source: string; flags: string }>; mask: string; maxText: number; maxNodes: number }): boolean {
+function maskPage(arg: PageArg): PageVerdict {
+  type Field = { value?: unknown; placeholder?: unknown; type?: unknown; closest?(selector: string): unknown };
+  type Root = { querySelectorAll(selector: string): ArrayLike<Field> };
+  type Node = { nodeType: number; nodeValue: string | null; shadowRoot?: Root | null; parentNode?: { nodeName?: string } | null };
+  type Doc = Root & { documentElement: unknown; title: string; body: { innerText?: unknown } | null; createTreeWalker(root: unknown, show: number): { nextNode(): Node | null } };
+  const doc = (globalThis as unknown as { document: Doc }).document;
   const patterns = arg.masks.map((item) => new RegExp(item.source, item.flags));
+  const hits = (text: string): boolean => text.length > arg.maxText || patterns.some((pattern) => text.search(pattern) !== -1);
   const scrub = (text: string): string => {
     if (text.length > arg.maxText) return arg.mask;
     let out = text;
     for (const pattern of patterns) out = out.replace(pattern, arg.mask);
     return out;
   };
-  // This package has no DOM types: the page's document is described by the little this function touches. 4 is NodeFilter.SHOW_TEXT.
-  type Field = { value?: unknown; placeholder?: unknown };
-  const doc = (globalThis as unknown as { document: { documentElement: unknown; title: string; createTreeWalker(root: unknown, show: number): { nextNode(): { nodeValue: string | null } | null };
-    querySelectorAll(selector: string): ArrayLike<Field> } }).document;
+  const masked = (field: Field): boolean => { try { return arg.maskedSelector !== "" && typeof field.closest === "function" && field.closest(arg.maskedSelector) !== null; } catch { return false; } };
+  const unseen = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
   let nodes = 0;
-  const walker = doc.createTreeWalker(doc.documentElement, 4);
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-    nodes += 1;
-    if (nodes > arg.maxNodes) return false;
-    const before = node.nodeValue ?? "";
-    const after = scrub(before);
-    if (after !== before) node.nodeValue = after;
+  let chars = 0;
+  const pending: unknown[] = [doc.documentElement];
+  const roots: Array<{ root: Root; joined: string[] }> = [{ root: doc, joined: [] }];
+  const shadows: string[][] = [];
+  while (pending.length > 0) {
+    const top = pending.pop();
+    const joined: string[] = [];
+    if (top !== doc.documentElement) shadows.push(joined);
+    const walker = doc.createTreeWalker(top, 5);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      nodes += 1;
+      if (nodes > arg.maxNodes) return "too_large";
+      if (node.nodeType === 1) {
+        const shadow = node.shadowRoot;
+        if (shadow !== null && shadow !== undefined) { pending.push(shadow); roots.push({ root: shadow, joined: [] }); }
+        continue;
+      }
+      if (unseen.has(node.parentNode?.nodeName ?? "")) continue;
+      const text = node.nodeValue ?? "";
+      chars += text.length;
+      if (chars > arg.maxChars) return "too_large";
+      if (arg.verify) { if (hits(text)) return "dirty"; joined.push(text); continue; }
+      const out = scrub(text);
+      if (out !== text) node.nodeValue = out;
+    }
   }
-  for (const field of Array.from(doc.querySelectorAll("input, textarea"))) {
-    nodes += 1;
-    if (nodes > arg.maxNodes) return false;
-    if (typeof field.value === "string" && field.value !== "") field.value = scrub(field.value);
-    if (typeof field.placeholder === "string" && field.placeholder !== "") field.placeholder = scrub(field.placeholder);
+  for (const { root } of roots) {
+    for (const field of Array.from(root.querySelectorAll("input, textarea"))) {
+      nodes += 1;
+      if (nodes > arg.maxNodes) return "too_large";
+      if (field.type === "hidden") continue;
+      for (const key of ["value", "placeholder"] as const) {
+        const text = field[key];
+        if (typeof text !== "string" || text === "") continue;
+        chars += text.length;
+        if (chars > arg.maxChars) return "too_large";
+        if (arg.verify) { if (!masked(field) && hits(text)) return "dirty"; } else field[key] = scrub(text);
+      }
+    }
   }
-  doc.title = scrub(doc.title);
-  return true;
+  if (!arg.verify) { doc.title = scrub(doc.title); return "clean"; }
+  if (hits(doc.title)) return "dirty";
+  const visible = doc.body?.innerText;
+  if (typeof visible === "string" && hits(visible)) return "dirty";
+  for (const joined of shadows) if (hits(joined.join(""))) return "dirty";
+  return "clean";
 }
 
 export type ChromiumEvidenceDriverInput = Readonly<{
@@ -120,10 +181,21 @@ export type ChromiumEvidenceDriverInput = Readonly<{
   app: Readonly<{ start(side: BrowserEvidenceSide, timeoutMs: number): Promise<"ready" | "app_did_not_start" | "time_limit">; stop(side: BrowserEvidenceSide): Promise<void> }>;
 }>;
 
+class StepTimeout extends Error { override name = "TimeoutError"; }
+/** The work, or a `StepTimeout` once `ms` have passed. */
+async function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new StepTimeout()), Math.max(1, ms)); })]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+const timedOut = (error: unknown) => error instanceof Error && error.name === "TimeoutError";
+const originOf = (url: string): string | undefined => { try { return new URL(url).origin; } catch { return undefined; } };
+
 /** The driver `runBrowserEvidence` uses in the sandbox and on a laptop. */
 export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput): BrowserEvidenceDriver {
   const origin = new URL(input.origin).origin;
-  if (!/^http:\/\/(?:127\.0\.0\.1|localhost):\d{4,5}$/u.test(origin)) throw new Error("browser evidence opens only the app on the loopback address");
+  if (!/^http:\/\/127\.0\.0\.1:\d{4,5}$/u.test(origin)) throw new Error("browser evidence opens only the app on the loopback address");
   return Object.freeze({
     startApp: (side: BrowserEvidenceSide, options: { timeoutMs: number }) => input.app.start(side, options.timeoutMs),
     stopApp: (side: BrowserEvidenceSide) => input.app.stop(side),
@@ -133,40 +205,66 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
       if (url.origin !== origin) return { ok: false, reason: "page_did_not_load" };
       const deadline = Date.now() + Math.max(1, options.timeoutMs);
       const left = () => Math.max(1, deadline - Date.now());
-      let context: Awaited<ReturnType<Browser["newContext"]>>;
+      let context: BrowserContext | undefined;
       try {
-        context = await input.browser.newContext({ viewport: VIEWPORT, serviceWorkers: "block", acceptDownloads: false });
-      } catch { return { ok: false, reason: "capture_failed" }; }
-      try {
-        // Only the app's own origin is loaded: anything else (a font, an analytics call, a redirect away) is aborted.
-        await context.route("**/*", (routed) => (new URL(routed.request().url()).origin === origin ? routed.continue() : routed.abort("blockedbyclient")));
-        const page: Page = await context.newPage();
+        context = await bounded(input.browser.newContext({ viewport: VIEWPORT, serviceWorkers: "block", acceptDownloads: false }), left());
+        // Only the app's own origin is loaded: anything else (a font, an analytics call, a redirect away, a third-party frame) is aborted.
+        await bounded(context.route("**/*", (routed) => (originOf(routed.request().url()) === origin ? routed.continue() : routed.abort("blockedbyclient"))), left());
+        const page: Page = await bounded(context.newPage(), left());
+        // The page's own errors only: a console error about a request Rovara blocked (another origin) is not the change's.
         let consoleErrors = 0;
-        page.on("console", (message) => { if (message.type() === "error") consoleErrors += 1; });
+        page.on("console", (message) => { if (message.type() === "error" && originOf(message.location().url) === origin) consoleErrors += 1; });
         page.on("pageerror", () => { consoleErrors += 1; });
         try {
-          const response = await page.goto(url.href, { waitUntil: "load", timeout: left() });
-          if (response === null || response.status() >= 400 || new URL(page.url()).origin !== origin) return { ok: false, reason: "page_did_not_load" };
+          const response = await bounded(page.goto(url.href, { waitUntil: "load", timeout: left() }), left());
+          if (response === null || response.status() >= 400 || originOf(page.url()) !== origin) return { ok: false, reason: "page_did_not_load" };
         } catch (error) {
-          return { ok: false, reason: error instanceof Error && error.name === "TimeoutError" ? "time_limit" : "page_did_not_load" };
+          return { ok: false, reason: timedOut(error) ? "time_limit" : "page_did_not_load" };
         }
+        const arg = (verify: boolean): PageArg => ({ masks: BROWSER_EVIDENCE_TEXT_MASKS.map((item) => ({ ...item })), mask: BROWSER_EVIDENCE_TEXT_MASK, maxText: BROWSER_EVIDENCE_TEXT_SCAN_MAX,
+          maxNodes: PAGE_NODES_MAX, maxChars: PAGE_CHARS_MAX, verify, maskedSelector: options.maskSelectors.join(", ") });
+        // Every frame the page has: the app's own (and about:/srcdoc ones) are read; a frame of another origin was aborted, so it shows only the browser's error page.
+        const everyFrame = async (verify: boolean): Promise<PageVerdict> => {
+          for (const frame of page.frames()) {
+            const frameOrigin = originOf(frame.url());
+            const ours = frame === page.mainFrame() || frameOrigin === origin || frame.url().startsWith("about:");
+            let verdict: PageVerdict;
+            try { verdict = await bounded(frame.evaluate(maskPage, arg(verify)), left()); } catch (error) {
+              if (timedOut(error)) throw error;
+              if (!ours) continue;
+              return "too_large";
+            }
+            if (verdict !== "clean") return verdict;
+          }
+          return "clean";
+        };
         try {
-          const scrubbed = await page.evaluate(scrubInPage, { masks: BROWSER_EVIDENCE_TEXT_MASKS.map((item) => ({ ...item })), mask: BROWSER_EVIDENCE_TEXT_MASK, maxText: BROWSER_EVIDENCE_TEXT_SCAN_MAX, maxNodes: SCRUB_NODES_MAX });
-          if (scrubbed !== true) return { ok: false, reason: "capture_failed" };
-          const bytes = await page.screenshot({
+          if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
+          // Freeze: the page's own scripts stop, so no re-render can bring the raw text back; then scrub what changed since, and verify.
+          const session = await bounded(context.newCDPSession(page), left());
+          await bounded(session.send("Emulation.setScriptExecutionDisabled", { value: true }), left());
+          if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
+          const verdict = await everyFrame(true);
+          if (verdict === "dirty") return { ok: false, reason: "masked_content" };
+          if (verdict !== "clean") return { ok: false, reason: "capture_failed" };
+          const bytes = await bounded(page.screenshot({
             type: "jpeg", quality: SCREENSHOT_QUALITY, timeout: Math.min(SCREENSHOT_TIMEOUT_MS, left()), animations: "disabled", caret: "hide",
             mask: options.maskSelectors.map((selector) => page.locator(selector)), maskColor: "#5c5c5c",
-          });
+          }), left());
           return { ok: true, bytes: Uint8Array.from(bytes), consoleErrors };
         } catch (error) {
-          return { ok: false, reason: error instanceof Error && error.name === "TimeoutError" ? "time_limit" : "capture_failed" };
+          return { ok: false, reason: timedOut(error) ? "time_limit" : "capture_failed" };
         }
+      } catch (error) {
+        return { ok: false, reason: timedOut(error) ? "time_limit" : "capture_failed" };
       } finally {
-        await context.close().catch(() => undefined);
+        // Closing the context also ends a renderer that is still busy (a page whose script never yields).
+        if (context !== undefined) await bounded(context.close(), CLOSE_MS).catch(() => undefined);
       }
     },
   });
 }
+
 
 /** The executor's Chromium (its own sandbox on, DevTools on loopback), connected for the driver. `close` ends the browser and removes its scratch. */
 export async function openEvidenceChromium(input: { signal: AbortSignal }): Promise<{ browser: Browser; close(): Promise<void> }> {

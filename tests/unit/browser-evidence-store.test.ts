@@ -43,11 +43,40 @@ describe("storeBrowserEvidence", () => {
     const outcome = await storeBrowserEvidence({ blobs: failing }, OWNER, captured());
     expect(outcome.routes[0]).toEqual({ route: "/checkout", status: "not_run", reason: "not_stored" });
     expect(JSON.stringify(outcome)).not.toContain("secret");
+    // The side that was stored is deleted again: no object is left that no pack names.
+    expect(await blobs.get(evidenceArtifactKey(OWNER.ownerKey, OWNER.workspaceId, OWNER.taskId, shot("a").sha256), 1_000)).toBeUndefined();
     // A digest that does not match its bytes is not stored either.
     const lying = captured();
     const first = lying.routes[0]!;
     if (first.status === "shown") first.after = { ...first.after, sha256: "f".repeat(64) };
     expect((await storeBrowserEvidence({ blobs }, OWNER, lying)).routes[0]).toEqual({ route: "/checkout", status: "not_run", reason: "not_stored" });
+  });
+
+  it("keeps a half-stored picture another kept route still names", async () => {
+    const blobs = createDocumentEvidenceBlobStore(new MemoryDocumentStore(), { companyId: COMPANY_A });
+    const failing: EvidenceBlobStore = { ...blobs, async put(key, bytes, meta, options) { if (meta.metadata["sha256"] === shot("c").sha256) throw new Error("no"); return blobs.put(key, bytes, meta, options); } };
+    const run = captured();
+    run.routes = [{ route: "/a", status: "shown", before: shot("a"), after: shot("b"), consoleErrors: { before: 0, after: 0 } }, { route: "/b", status: "shown", before: shot("a"), after: shot("c"), consoleErrors: { before: 0, after: 0 } }];
+    const outcome = await storeBrowserEvidence({ blobs: failing }, OWNER, run);
+    expect(outcome.routes.map((row) => row.status)).toEqual(["shown", "not_run"]);
+    expect(await blobs.get(evidenceArtifactKey(OWNER.ownerKey, OWNER.workspaceId, OWNER.taskId, shot("a").sha256), 1_000)).toBeDefined();
+  });
+
+  it("checks the run whole before the first write: a run it refuses stores nothing", async () => {
+    const documents = new MemoryDocumentStore();
+    const blobs = createDocumentEvidenceBlobStore(documents, { companyId: COMPANY_A });
+    const big = (seed: string) => { const bytes = new Uint8Array(500_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") }; };
+    const bad: unknown[] = [
+      { ...captured(), routes: Array.from({ length: 6 }, (_, i) => ({ route: `/r${i}`, status: "shown", before: shot("a"), after: shot("b"), consoleErrors: { before: 0, after: 0 } })) },
+      { ...captured(), isolation: "imported" },
+      { ...captured(), routes: ["a", "b", "c", "d", "e"].map((c, i) => ({ route: `/r${i}`, status: "shown", before: big(c), after: big(c.toUpperCase()), consoleErrors: { before: 0, after: 0 } })) },
+      { ...captured(), routes: [{ route: "/a", status: "shown", before: { sha256: "x", bytes: jpegOf("a") }, after: shot("b"), consoleErrors: { before: 0, after: 0 } }] },
+    ];
+    for (const run of bad) {
+      await expect(storeBrowserEvidence({ blobs }, OWNER, run as BrowserEvidenceCaptured)).rejects.toThrow("browser evidence outcome is not valid");
+    }
+    expect(await blobs.get(evidenceArtifactKey(OWNER.ownerKey, OWNER.workspaceId, OWNER.taskId, shot("a").sha256), 1_000)).toBeUndefined();
+    expect(await blobs.get(evidenceArtifactKey(OWNER.ownerKey, OWNER.workspaceId, OWNER.taskId, big("a").sha256), 600_000)).toBeUndefined();
   });
 
   it("a run that did not happen stores nothing and keeps its reason", async () => {
