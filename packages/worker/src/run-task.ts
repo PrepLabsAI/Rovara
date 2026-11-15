@@ -1764,6 +1764,8 @@ async function runTask(
           // Kept with the parts' so a stop sends what each reviewer spent at once too.
           ...(checkpointsAsked ? { usageCheckpoints: (reviewer: PiSessionHandle) => { const made = checkpointsFor(reviewer, undefined); partCheckpoints.set(reviewer, made); return made; } } : {}),
           onUsage: async ({ role, stats, model, outcome, secondReviewTry, checkpoints: reviewerCheckpoints }) => {
+            // The reviewer has ended: a later stop has nothing more of it to send.
+            for (const [session, made] of partCheckpoints) if (made === reviewerCheckpoints) partCheckpoints.delete(session);
             const reviewerModel = { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
             const usage = createTaskUsageTelemetry(stats, reviewerModel, outcome);
             const redactedUsage = redactCredentials(usage);
