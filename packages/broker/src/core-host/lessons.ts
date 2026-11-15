@@ -207,12 +207,12 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
       const digests = await sendLessonDigests({
         companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry, companyOf: options.channelCompanyOf, now,
         log: (event, fields) => log(event, fields),
-      }, await projectNames().catch(() => []), { deadlineAt: Date.now() + Math.floor(budgetMs / 4) }).catch(() => ({ projects: 0, sent: 0, held: 0, failed: 0 }));
+      }, await projectNames().catch(() => []), { deadlineAt: Date.now() + Math.max(0, Math.min(Math.floor(budgetMs / 4), deadlineAt - now())) }).catch(() => ({ projects: 0, sent: 0, held: 0, failed: 0 }));
       const reflected = await pumpReflectQueue({ queues: registry.require("queue"), hostFor, perPass: REFLECT_PER_PASS, now, log, deadlineAt }).catch((error: unknown) => {
         log("reflect_pass_failed", { error: error instanceof Error ? error.name : "unknown" });
         return { received: 0, reflected: 0, dropped: 0, retried: 0 };
       });
-      return { milestones: delivered.attempted, ...reflected, nightly, digests: digests.sent };
+      return { milestones: delivered.attempted, ...reflected, nightly, digests: digests.sent, digestsHeld: digests.held, digestsFailed: digests.failed };
     },
   };
 

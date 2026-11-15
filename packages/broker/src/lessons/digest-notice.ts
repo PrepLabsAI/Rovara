@@ -15,7 +15,7 @@
 //   - Bounded: `DIGEST_PROJECTS_PER_PASS` projects, `DIGEST_PEOPLE_MAX` people per project, `DIGEST_TITLES_MAX` titles per list, one deadline for the pass; whatever is not reached waits for the next pass.
 //   - The rows are company-scoped (`LESSON_DIGEST#<project>`): the setting, the week a project was finished, and one `SENT#<person>` row per person (removed by the person erase), each kept a few weeks.
 import { createHash } from "node:crypto";
-import { companyScoped, type ChannelAdapter, type ChannelEvent, type DocumentStore, type OrgId, type RegistryView } from "@agentx/contracts";
+import { companyScoped, defaultNotifyChannel, effectiveNotify, type ChannelAdapter, type ChannelEvent, type DocumentStore, type OrgId, type RegistryView } from "@agentx/contracts";
 import { tenantIsCompanys, type ChannelCompanyOf } from "../core/channel/company.js";
 import { notifyTargetKey, readNotifyPrefs, type NotifyTarget } from "../core/notify/prefs.js";
 import { holdOf } from "../core/notify/schedule.js";
@@ -31,23 +31,30 @@ const DAY = 86_400_000;
 const WEEK = 7 * DAY;
 export const EXPIRY_WARN_DAYS = 2;
 export const FADE_WARN_DAYS = 14;
+/** Projects one pass works on (sends for), and the most it looks at to find them (a project that is off or done for the week costs one or two reads). */
 export const DIGEST_PROJECTS_PER_PASS = 50;
+export const DIGEST_PROJECTS_SCAN_MAX = 1_000;
+/** People one project's pass builds a summary for, and the most deciders it looks at (one already told this week costs one read). */
 export const DIGEST_PEOPLE_MAX = 50;
+export const DIGEST_PEOPLE_SCAN_MAX = 500;
 export const DIGEST_TITLES_MAX = 5;
 export const DIGEST_SEND_TIMEOUT_MS = 2_500;
 /** How long the week rows are kept (the setting has no expiry). */
 const ROW_KEEP_SECONDS = 5 * 7 * 86_400;
 const TITLE_CHARS = 80;
 
-/** The week a time falls in (whole weeks since the epoch). */
-export const digestWeekOf = (now: number): number => Math.floor(now / WEEK);
+/** The week a time falls in: whole weeks since the first Monday after the epoch (weeks start on Monday 00:00 UTC; 1970-01-05 was a Monday). */
+export const digestWeekOf = (now: number): number => Math.floor((now - 4 * DAY) / WEEK);
+
+/** Whether the project's weekly summary is on. Absent or malformed: off. Throws when it cannot be read (`readDigestSetting` reads that as off; the API says it cannot read it). */
+export async function readDigestSettingStrict(documents: Pick<DocumentStore, "get">, companyId: OrgId, project: string): Promise<boolean> {
+  const row = await documents.get({ pk: companyScoped(companyId, `LESSON_DIGEST#${project}`), sk: "SETTING" });
+  return row?.["entityType"] === "LESSON_DIGEST" && row["on"] === true;
+}
 
 /** Whether the project's weekly summary is on. Absent, malformed or unreadable: off. */
 export async function readDigestSetting(documents: Pick<DocumentStore, "get">, companyId: OrgId, project: string): Promise<boolean> {
-  try {
-    const row = await documents.get({ pk: companyScoped(companyId, `LESSON_DIGEST#${project}`), sk: "SETTING" });
-    return row?.["entityType"] === "LESSON_DIGEST" && row["on"] === true;
-  } catch { return false; }
+  try { return await readDigestSettingStrict(documents, companyId, project); } catch { return false; }
 }
 
 /** Sets the project's weekly summary on or off (the caller audits first). Throws when it could not be saved. */
@@ -87,14 +94,18 @@ export function digestNoticeText(project: string, input: { waiting: number; went
   if (input.waiting + input.wentLive + input.retired + input.expiring.length + input.fading.length === 0) return undefined;
   const lines = [`Lessons this week in ${oneLine(project)}:`];
   if (input.waiting > 0) lines.push(`- ${String(input.waiting)} waiting for a decision`);
-  if (input.wentLive > 0) lines.push(`- ${String(input.wentLive)} went live on trial`);
+  if (input.wentLive > 0) lines.push(`- ${String(input.wentLive)} went live without a person's approval`);
   if (input.retired > 0) lines.push(`- ${String(input.retired)} retired or expired`);
   if (input.expiring.length > 0) lines.push(`Expiring in the next ${String(EXPIRY_WARN_DAYS)} days unless someone decides: ${titles(input.expiring)}`);
   if (input.fading.length > 0) lines.push(`Fading in the next ${String(FADE_WARN_DAYS)} days because they have not helped lately: ${titles(input.fading)}`);
   const footer = "Open the project's lessons in Rovara to keep, edit or drop them.";
   const body = lines.join("\n");
-  const room = maxLength - footer.length - 1;
-  return `${[...body].length <= room ? body : `${[...body].slice(0, Math.max(0, room - 1)).join("")}…`}\n${footer}`;
+  // Counted in characters (code points) throughout; the footer goes only when it fits, and the whole message never passes `maxLength`.
+  const footerChars = [...footer].length;
+  const withFooter = maxLength - footerChars - 1 >= 40;
+  const room = withFooter ? maxLength - footerChars - 1 : maxLength;
+  const cut = [...body].length <= room ? body : `${[...body].slice(0, Math.max(0, room - 1)).join("")}…`;
+  return withFooter ? `${cut}\n${footer}` : cut;
 }
 
 const eventId = (companyId: string, project: string, week: number, personId: string, target: string): string =>
@@ -108,8 +119,10 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
   const ttl = (now: number): Record<string, number> => (documents.ttlAttribute === undefined ? {} : { [documents.ttlAttribute]: Math.floor(now / 1000) + ROW_KEEP_SECONDS });
   const timeLeft = (): boolean => Date.now() < options.deadlineAt;
 
-  for (const project of projects.slice(0, DIGEST_PROJECTS_PER_PASS)) {
-    if (!timeLeft()) break;
+  // Only projects that have work count toward the cap: one that is off, or done for the week, is passed over, so a company with many projects still reaches every one that is on.
+  let worked = 0;
+  for (const project of projects.slice(0, DIGEST_PROJECTS_SCAN_MAX)) {
+    if (!timeLeft() || worked >= DIGEST_PROJECTS_PER_PASS) break;
     try {
       if (!(await readDigestSetting(documents, companyId, project))) continue;
       const resolved = await resolveLearning(deps.settings, companyId, project);
@@ -120,6 +133,7 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
       if (typeof done?.["week"] === "number" && done["week"] >= week) continue;
       const group = await deps.directory.eligibility(companyId, project).catch(() => undefined);
       if (group === undefined || !group.complete) { log("eligibility_unavailable"); continue; }
+      worked += 1;
       outcome.projects += 1;
       const key = { workspaceId: companyId, project };
       // The warnings' lessons, read once for the project; each person sees only those they may read.
@@ -127,17 +141,25 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
         && (lesson.status === "pending" ? lesson.pendingExpiresAt !== undefined && lesson.pendingExpiresAt > now && lesson.pendingExpiresAt <= now + EXPIRY_WARN_DAYS * DAY
           : lesson.expiresAt > now && lesson.expiresAt <= now + FADE_WARN_DAYS * DAY));
       let pending = false;
-      for (const personId of [...new Set(group.eligibleIds)].slice(0, DIGEST_PEOPLE_MAX)) {
+      const deciders = [...new Set(group.eligibleIds)];
+      if (deciders.length > DIGEST_PEOPLE_SCAN_MAX) pending = true;
+      let built = 0;
+      for (const personId of deciders.slice(0, DIGEST_PEOPLE_SCAN_MAX)) {
         if (!timeLeft()) { pending = true; break; }
         // One person's fault (a record that cannot be read) holds only that person, for a later pass.
         try {
         const sentKey = { pk: companyScoped(companyId, `LESSON_DIGEST#${project}`), sk: `SENT#${personId}` };
         const sent = await documents.get(sentKey);
         if (typeof sent?.["week"] === "number" && sent["week"] >= week) continue;
+        // Only people still to be told count toward the cap: the next pass goes on from where this one stopped.
+        if (built >= DIGEST_PEOPLE_MAX) { pending = true; break; }
+        built += 1;
         const prefs = await readNotifyPrefs(documents, companyId, personId);
         if (!prefs.muted && holdOf(prefs, now, undefined) === "quiet") { pending = true; outcome.held += 1; continue; }
+        // The chats only when the person's own choice sends them there (as the attention notices: "email" alone means no chat; an email choice they unsubscribed from falls back to the chats).
+        const goes = effectiveNotify({ channel: prefs.channel ?? defaultNotifyChannel(prefs.targets.length > 0), slackLinked: prefs.targets.length > 0, emailAvailable: true, emailUnsubscribed: prefs.emailUnsubscribed });
         const places: Array<{ target: NotifyTarget; adapter: ChannelAdapter }> = [];
-        for (const target of prefs.muted ? [] : prefs.targets) {
+        for (const target of prefs.muted || !goes.slack ? [] : prefs.targets) {
           const adapter = deps.registry.get("channel", target.channel);
           if (adapter === undefined || !adapter.capabilities.proactive) continue;
           if (!(await tenantIsCompanys(deps.companyOf, companyId, target.channel, target.conversation.tenant))) { log("other_company"); continue; }
@@ -161,6 +183,7 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
         });
         if (!claimed.applied || text === undefined) continue;
         for (const { target, adapter } of places) {
+          if (!timeLeft()) { outcome.failed += 1; log("send_late"); continue; }
           const event = { version: 1, id: eventId(companyId, project, week, personId, notifyTargetKey(target)), type: "progress", channel: target.channel, conversation: target.conversation, createdAt: new Date(now).toISOString(), data: { text } } as ChannelEvent;
           let timer: ReturnType<typeof setTimeout> | undefined;
           try {
@@ -179,7 +202,7 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
           log("person_failed", { error: error instanceof Error ? error.name : "unknown" });
         }
       }
-      if (!pending && group.eligibleIds.length <= DIGEST_PEOPLE_MAX) {
+      if (!pending) {
         await documents.put({ item: { pk: companyScoped(companyId, `LESSON_DIGEST#${project}`), sk: "WEEK", entityType: "LESSON_DIGEST", week, ...ttl(now) } });
       }
     } catch (error) {

@@ -502,6 +502,17 @@ describe("the weekly summary setting", () => {
     expect(await call(target, "a-admin", "PUT", PATH, { on: false })).toMatchObject({ ok: true, body: { on: false } });
   });
 
+  it("a setting that cannot be read is answered as unavailable, not as off", async () => {
+    const w = await setUp();
+    const real = w.lessons.get(A)!;
+    const documents = real.runtime.documents;
+    const get = documents.get.bind(documents);
+    const spy = vi.spyOn(documents, "get").mockImplementation(async (key) => { if (key.sk === "SETTING" && key.pk.includes("LESSON_DIGEST#")) throw new Error("down"); return await get(key); });
+    const answer = await call(api(w).api, "a-admin", "GET", PATH);
+    spy.mockRestore();
+    expect(answer).toMatchObject({ ok: false, code: "RUNTIME_UNAVAILABLE" });
+  });
+
   it("a change that cannot be audited is not saved", async () => {
     const w = await setUp();
     const real = w.lessons.get(A)!;

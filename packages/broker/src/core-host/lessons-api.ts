@@ -37,7 +37,7 @@ import { attributionNameOf } from "../lessons/people.js";
 import { DEFAULT_LEARNING_MODE, requireAudit, resolveLearning, type LearningMode } from "../lessons/policy.js";
 import { readVisible } from "../lessons/read-visible.js";
 import { idIn } from "../lessons/types.js";
-import { readDigestSetting, writeDigestSetting } from "../lessons/digest-notice.js";
+import { readDigestSettingStrict, writeDigestSetting } from "../lessons/digest-notice.js";
 import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
@@ -273,7 +273,11 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     };
 
     if (route === "weekly-summary") {
-      if (method === "GET") return { project, on: await readDigestSetting(runtime.documents, companyId, project), canChange: await mayChange() };
+      if (method === "GET") {
+        let on: boolean;
+        try { on = await readDigestSettingStrict(runtime.documents, companyId, project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+        return { project, on, canChange: await mayChange() };
+      }
       const body = bodyOf(WeeklySummaryBody, request.body, "the weekly summary takes on: true or false");
       if (!(await mayChange())) throw agentXError("FORBIDDEN", SUMMARY_NEEDS_ADMIN);
       // The record first: no record, no change.

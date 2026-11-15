@@ -8,7 +8,7 @@ import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-d
 import { prefsKey } from "../../../packages/broker/src/core/notify/prefs.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, erasePersonLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
-import { DIGEST_PEOPLE_MAX, digestNoticeText, readDigestSetting, sendLessonDigests, writeDigestSetting, type DigestNoticeDeps } from "../../../packages/broker/src/lessons/digest-notice.js";
+import { DIGEST_PEOPLE_MAX, DIGEST_PROJECTS_PER_PASS, digestNoticeText, digestWeekOf, readDigestSetting, sendLessonDigests, writeDigestSetting, type DigestNoticeDeps } from "../../../packages/broker/src/lessons/digest-notice.js";
 import { writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
@@ -278,5 +278,47 @@ describe("the weekly lessons summary", () => {
     const [one, two] = await Promise.all([run(deps(w, A, slack)), run(deps(w, A, slack))]);
     expect(one.sent + two.sent).toBe(2);
     expect(slack.events).toHaveLength(2);
+  });
+  it("the person's own channel choice holds: email alone means no chat; both, or chat, sends it", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin", "TA", { channel: "email" });
+    await chooseSlack(w, A, "a-maint", "TA", { channel: "both" });
+    const slack = adapter();
+    expect(await run(deps(w, A, slack))).toMatchObject({ sent: 1 });
+    expect(slack.events.map((e) => (e as { conversation: { space: string } }).conversation.space)).toEqual(["D-a-maint"]);
+  });
+
+  it("more deciders than one pass builds for: the next pass goes on from where it stopped, and everyone is told once", async () => {
+    const w = await busyWorld();
+    const many = Array.from({ length: DIGEST_PEOPLE_MAX + 2 }, (_, i) => `a-p${String(i)}`);
+    const saved = DECIDERS[A]!;
+    DECIDERS[A] = many;
+    try {
+      for (const person of many) await chooseSlack(w, A, person);
+      const slack = adapter();
+      expect(await run(deps(w, A, slack))).toMatchObject({ sent: DIGEST_PEOPLE_MAX });
+      expect(await run(deps(w, A, slack))).toMatchObject({ sent: 2 });
+      expect(await run(deps(w, A, slack))).toMatchObject({ sent: 0 });
+      expect(new Set(slack.events.map((e) => (e as { conversation: { space: string } }).conversation.space)).size).toBe(many.length);
+    } finally { DECIDERS[A] = saved; }
+  });
+
+  it("projects that are off or done do not use up the pass: a project far down the list that is on is still reached", async () => {
+    const w = await setUp();
+    const names = Array.from({ length: DIGEST_PROJECTS_PER_PASS + 5 }, (_, i) => `proj${String(i)}`);
+    const last = names[names.length - 1]!;
+    await writeDigestSetting(w.world.store, A, last, true, w.world.clock.now);
+    const outcome = await sendLessonDigests(deps(w, A, adapter()), names, { deadlineAt: Date.now() + 10_000 });
+    expect(outcome.projects).toBe(1);
+    expect(await w.world.store.get({ pk: companyScoped(A, `LESSON_DIGEST#${last}`), sk: "WEEK" })).toMatchObject({ week: digestWeekOf(w.world.clock.now) });
+  });
+
+  it("weeks start on Monday 00:00 UTC; a message never passes the place's limit, and drops the footer when it does not fit", () => {
+    const monday = Date.parse("2026-11-16T00:00:00.000Z");
+    expect(digestWeekOf(monday)).toBe(digestWeekOf(monday - 1) + 1);
+    expect(digestWeekOf(monday + 7 * DAY - 1)).toBe(digestWeekOf(monday));
+    const small = digestNoticeText("payments", { waiting: 3, wentLive: 0, retired: 0, expiring: [{ title: "x".repeat(70) }], fading: [] }, 60)!;
+    expect([...small].length).toBeLessThanOrEqual(60);
+    expect(small).not.toContain("Open the project");
   });
 });
