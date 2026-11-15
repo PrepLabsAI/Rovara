@@ -137,7 +137,7 @@ async function discover(root: string, repositoryPaths: readonly string[]): Promi
         found.push(join(dir, entry.name));
       }
     }
-    } catch { /* a folder that cannot be read has no description */ } finally { await listing.close().catch(() => undefined); }
+    } catch { truncated = true; /* a folder that fails part way could hide a second description: never pick one then */ } finally { await listing.close().catch(() => undefined); }
   }
   if (truncated || found.length > GENERAL_FAKES_DISCOVERY_LIMITS.candidates) return notBuilt("spec_ambiguous");
   const fakes = await Promise.all(found.map((path) => fakeOfFile(root, path)));
