@@ -14,6 +14,7 @@ import { engineForNewTask, engineOfStoredTask, listCoreInUse, type Engine } from
 import { CORE_AREAS, anyCoreAreaOn, coreAreaOn, coreCompanies, coreEngineServes, readCoreEngineFlags, type CoreArea, type CoreEngineFlags } from "./flags.js";
 import { CORE_JOBS, isCoreJobEvent, runPerCompany, type CompanyRunReport, type CoreJob } from "./jobs.js";
 import { buildCoreRegistry, type CoreAdapterContext, type CoreAdapterModule } from "./registry.js";
+import { CoreSwitchBlockedError, switchBlockers } from "./switch-blockers.js";
 
 export interface CoreHostAppOptions {
   env?: NodeJS.ProcessEnv;
@@ -109,6 +110,9 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
         const areas = CORE_AREAS.filter((area) => coreAreaOn(flags, area, companyId));
         const gaps = options.dispatchOnly === true ? [] : serviceGaps(runtime.services, areas);
         if (gaps.length > 0) throw new Error(`the core runtime lacks services for the areas switched on: ${gaps.join(", ")}`);
+        // The switch blockers (switch-blockers.ts): required checks, by id. Honest CI is asked where the merge area is on or merge tracking runs at all.
+        const blockers = switchBlockers(runtime, areas);
+        if (blockers.length > 0) throw new CoreSwitchBlockedError(blockers);
         return runtime;
       })();
       found.catch(() => runtimes.delete(companyId));

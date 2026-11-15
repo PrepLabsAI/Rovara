@@ -59,7 +59,7 @@ describe("saving a connection", () => {
     const w = world();
     await w.store.put({ orgId: ORG, connection: linear(), secret: { apiKey: KEY }, by: OWNER });
     expect(await w.store.get(OTHER, LINEAR)).toBeUndefined();
-    await expect(w.secrets.read(OTHER, orgConnectorSecretName(ENV, ORG, LINEAR))).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(await w.secrets.read(OTHER, orgConnectorSecretName(ENV, ORG, LINEAR))).toBeUndefined();
     await expect(w.store.put({ orgId: "not-an-org", connection: linear(), by: OWNER })).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(await w.store.get(ORG, "../../etc")).toBeUndefined();
   });

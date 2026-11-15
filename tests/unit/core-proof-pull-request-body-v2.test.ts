@@ -245,3 +245,63 @@ describe("size", () => {
     expect(Buffer.byteLength(body(context({ evidenceWriter: 2 })), "utf8")).toBeLessThanOrEqual(PULL_REQUEST_BODY_MAX_BYTES);
   });
 });
+
+describe("AI evidence public and private descriptions", () => {
+  it("an ordinary task with no eval renders byte-identically, with no synthetic Not run", () => {
+    for (const repositoryKnownPrivate of [true, false, undefined]) {
+      const control = body(context({ evidenceWriter: 2, repositoryKnownPrivate }));
+      expect(control).not.toContain("AI checks");
+      expect(control).not.toContain("Eval: Not run");
+      for (const evalArtifact of [undefined, null, {}, "malformed root"]) {
+        const read = v2Read(v1Pack(), { ...writer, evalArtifact });
+        expect(body(context({ evidenceWriter: 2, repositoryKnownPrivate }, { read }))).toBe(control);
+      }
+    }
+  });
+  const aiArtifact = () => ({ schemaVersion: 1, candidateDigest: DIGEST, roundKind: "check_unsealed", evalPass: 1, outcome: "done", context: { aiChange: true, discovery: "configured", previousPasses: 0 }, questions: Array.from({ length: 1000 }, (_, i) => ({ id: i === 999 ? "CANARY-SAFETY" : `q${i}`, category: i === 999 ? "safety" : "ordinary", edited: false, old: [true, true, true], first: i !== 999, ...(i === 999 ? { freshOld: [true, true, true], freshNew: [false, false, false], answers: { old: ["CANARY-OLD", "CANARY-OLD", "CANARY-OLD"], first: "CANARY-NEW", freshOld: ["CANARY-OLD", "CANARY-OLD", "CANARY-OLD"], freshNew: ["CANARY-NEW", "CANARY-NEW", "CANARY-NEW"] } } : {}) })), options: { changedPromptCalls: 1, hiddenSetUsed: false, subsetSupported: true, sameJudgeFamily: false }, excluded: [], notices: [], usage: { calls: 1006 }, cache: "not_used" });
+  it("keeps the label and counts in public bodies, full answers only in private bodies", () => {
+    const read = v2Read(v1Pack(), { ...writer, evalArtifact: aiArtifact() });
+    for (const repositoryKnownPrivate of [false, undefined, true]) {
+      const ctx = context({ evidenceWriter: 2, repositoryKnownPrivate }, { read });
+      const text = body(ctx);
+      expect(text).toContain("Worse on eval: 1 question broke");
+      expect(text).toContain("Eval counts: 1000 questions");
+      expect(text.includes("CANARY")).toBe(repositoryKnownPrivate === true);
+      if (repositoryKnownPrivate !== true) {
+        const start = text.indexOf("## Evidence");
+        const block = text.slice(start, text.indexOf("\n## ", start + 3)).trimEnd();
+        expect(block).toBe("## Evidence\nWorse on eval: 1 question broke\n\nAI checks\n\nEval: Worse on eval\n\nEval counts: 1000 questions; 1 broke; 0 newly fail; 0 newly pass; 0 flaky; 999 unchanged; 0 excluded\n\nReal-model run: Not run (not available yet)");
+        const aiStart = text.indexOf("## Evidence");
+        expect(text.slice(aiStart)).not.toContain("Checks by trust:");
+        expect(text.slice(aiStart)).not.toContain("Checked in a sealed round");
+      }
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(PULL_REQUEST_BODY_MAX_BYTES);
+    }
+  });
+  it.each(["not_run", "done"] as const)("public non-Worse blocks contain only AI evidence (%s)", outcome => {
+    const base = aiArtifact();
+    const evalArtifact = outcome === "not_run"
+      ? { ...base, outcome, notRunReason: "no_eval_configured", questions: undefined, options: undefined, context: { aiChange: true, discovery: "not_configured", previousPasses: 0 }, evalConfigured: false }
+      : { ...base, questions: base.questions.map(q => ({ ...q, first: true, freshOld: undefined, freshNew: undefined, answers: undefined })) };
+    const read = v2Read(v1Pack(), { ...writer, evalArtifact });
+    for (const repositoryKnownPrivate of [false, undefined]) {
+      const text = body(context({ evidenceWriter: 2, repositoryKnownPrivate }, { read }));
+      const start = text.indexOf("## Evidence");
+      const block = text.slice(start, text.indexOf("\n## ", start + 3));
+      expect(block).toContain(outcome === "not_run" ? "Eval: Not run." : "Eval: No drop found");
+      expect(block.startsWith("## Evidence\nAI checks\n")).toBe(true);
+      expect(block).not.toMatch(/Verified|Checks:|Tests:|Change proof:|Dependencies:|below/u);
+    }
+  });
+  it("shrinking never sacrifices the label, counts or the broken safety question", () => {
+    const read = v2Read(v1Pack(), { ...writer, evalArtifact: aiArtifact() });
+    const ctx = context({ evidenceWriter: 2 }, { read });
+    for (const level of [0, 1, 2, 3, 4]) {
+      const text = evidenceV2Lines(ctx.proof?.evidence, DIGEST, [], level)!.join("\n");
+      expect(text).toContain("Worse on eval: 1 question broke"); expect(text).toContain("1000 questions"); expect(text).toContain("CANARY-SAFETY");
+    }
+    const text = rovaraPullRequestBody({ summary: ["s".repeat(30000)], fallbackTitle: "t", workflow: workflow(), context: ctx, reviewLines: listed => Array.from({ length: listed }, () => "r".repeat(1500)), pageUrl: undefined });
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(PULL_REQUEST_BODY_MAX_BYTES);
+    expect(text).toContain("Worse on eval"); expect(text).toContain("1000 questions"); expect(text).toContain("CANARY-SAFETY");
+  });
+});
