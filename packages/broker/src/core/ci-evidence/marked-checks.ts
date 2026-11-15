@@ -87,7 +87,7 @@ export function currentRun(marked: Pick<MarkedCheck, "name" | "source">, runs: r
  * The marked check's state: passed or failed on its run, "not run" when the pipeline said skipped or neutral (a skip is not a pass: a pipeline that skips drafts says skipped), waiting while it runs or
  * has not reported and the wait has not ended, and "not run" (timed out) once it has: the wait starts at `waitStart` (Rovara's push of this head, or the first time a person's head was seen).
  */
-export function markedCheckState(input: { run: MarkedRun | undefined; waitStart: number; expectedMs: number; now: number }): MarkedState {
+export function markedCheckState(input: { run: MarkedRun | undefined; waitStart: number; expectedMs: number; capMs?: number | undefined; now: number }): MarkedState {
   const { run } = input;
   if (run !== undefined && run.check.state === "completed" && run.check.conclusion !== "action_required") {
     const conclusion = run.check.conclusion ?? "";
@@ -95,7 +95,9 @@ export function markedCheckState(input: { run: MarkedRun | undefined; waitStart:
     if (FAILED.has(conclusion)) return { kind: "failed", ...(run.attempt === undefined ? {} : { attempt: run.attempt }), run };
     return { kind: "not_run", reason: conclusion === "skipped" ? "skipped" : "neutral" };
   }
-  const until = input.waitStart + input.expectedMs;
-  if (input.now >= until) return { kind: "not_run", reason: "timed_out", afterMs: input.expectedMs };
+  // A run GitHub shows as still running is given the whole cap, not the learned time: it has started, so it is slow, not missing.
+  const waitMs = run !== undefined && input.capMs !== undefined && input.capMs > input.expectedMs ? input.capMs : input.expectedMs;
+  const until = input.waitStart + waitMs;
+  if (input.now >= until) return { kind: "not_run", reason: "timed_out", afterMs: waitMs };
   return { kind: "waiting", until, expectedMs: input.expectedMs };
 }

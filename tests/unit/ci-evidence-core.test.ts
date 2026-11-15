@@ -135,6 +135,12 @@ describe("the marked check's clock", () => {
     expect(markedCheckState({ run: run({ state: "pending", conclusion: undefined }), waitStart: T0, expectedMs: 40 * MIN, now: T0 + 41 * MIN }).kind).toBe("not_run");
     expect(markedCheckState({ run: run({ conclusion: "action_required" }), waitStart: T0, expectedMs: 40 * MIN, now: T0 }).kind).toBe("waiting");
   });
+  it("gives a run that has started the whole cap, not the learned time", () => {
+    const running = run({ state: "pending", conclusion: undefined });
+    expect(markedCheckState({ run: running, waitStart: T0, expectedMs: 40 * MIN, capMs: 120 * MIN, now: T0 + 41 * MIN })).toEqual({ kind: "waiting", until: T0 + 120 * MIN, expectedMs: 40 * MIN });
+    expect(markedCheckState({ run: running, waitStart: T0, expectedMs: 40 * MIN, capMs: 120 * MIN, now: T0 + 120 * MIN })).toEqual({ kind: "not_run", reason: "timed_out", afterMs: 120 * MIN });
+    expect(markedCheckState({ run: undefined, waitStart: T0, expectedMs: 40 * MIN, capMs: 120 * MIN, now: T0 + 40 * MIN })).toEqual({ kind: "not_run", reason: "timed_out", afterMs: 40 * MIN });
+  });
   it("reads pass and failure with their run, and a skip as not run", () => {
     expect(markedCheckState({ run: run({}, { attempt: 2 }), waitStart: T0, expectedMs: MIN, now: T0 })).toMatchObject({ kind: "passed", attempt: 2 });
     expect(markedCheckState({ run: run({ conclusion: "failure" }, { attempt: 1 }), waitStart: T0, expectedMs: MIN, now: T0 })).toMatchObject({ kind: "failed", attempt: 1 });
@@ -168,7 +174,7 @@ describe("the honesty rule: a pipeline pass is not change proof", () => {
   const tests = (entries: Array<[string, PipelineTestOutcome]>) => new Map(entries);
   it("proves only a test that failed by the same name on the base commit's main run", () => {
     const proof = pipelineProof({
-      head: { commit: HEAD, tests: tests([["a", "passed"], ["b", "passed"], ["c", "passed"], ["d", "failed"], ["e", "skipped"], ["f", "passed"]]) },
+      headCommit: HEAD, head: { commit: HEAD, tests: tests([["a", "passed"], ["b", "passed"], ["c", "passed"], ["d", "failed"], ["e", "skipped"], ["f", "passed"]]) },
       base: { commit: BASE, tests: tests([["a", "failed"], ["b", "passed"], ["d", "failed"], ["f", "skipped"]]) },
       baseCommit: BASE, addedTests: new Set(["c"]),
     });
@@ -176,33 +182,37 @@ describe("the honesty rule: a pipeline pass is not change proof", () => {
   });
   it("proves nothing without the base run, or with a base run on another commit", () => {
     const head = { commit: HEAD, tests: tests([["a", "passed"]]) };
-    expect(pipelineProof({ head, base: undefined, baseCommit: BASE, addedTests: new Set() })).toEqual({ proven: [], addedByChange: [], passedNotProof: ["a"], failed: [], noBase: "no_base_run" });
-    expect(pipelineProof({ head, base: { commit: "c".repeat(40), tests: tests([["a", "failed"]]) }, baseCommit: BASE, addedTests: new Set() }))
+    expect(pipelineProof({ headCommit: HEAD, head, base: undefined, baseCommit: BASE, addedTests: new Set() })).toEqual({ proven: [], addedByChange: [], passedNotProof: ["a"], failed: [], noBase: "no_base_run" });
+    expect(pipelineProof({ headCommit: HEAD, head, base: { commit: "c".repeat(40), tests: tests([["a", "failed"]]) }, baseCommit: BASE, addedTests: new Set() }))
       .toEqual({ proven: [], addedByChange: [], passedNotProof: ["a"], failed: [], noBase: "base_commit_differs" });
   });
+  it("refuses a head report for another commit (an earlier push) whole", () => {
+    const proof = pipelineProof({ headCommit: HEAD, head: { commit: "c".repeat(40), tests: tests([["a", "passed"], ["b", "failed"]]) }, base: { commit: BASE, tests: tests([["a", "failed"]]) }, baseCommit: BASE, addedTests: new Set() });
+    expect(proof).toEqual({ proven: [], addedByChange: [], passedNotProof: [], failed: [], noBase: "head_commit_differs" });
+  });
   it("keeps an added test's sandbox label even when a test of that name failed on base", () => {
-    const proof = pipelineProof({ head: { commit: HEAD, tests: tests([["new", "passed"]]) }, base: { commit: BASE, tests: tests([["new", "failed"]]) }, baseCommit: BASE, addedTests: new Set(["new"]) });
+    const proof = pipelineProof({ headCommit: HEAD, head: { commit: HEAD, tests: tests([["new", "passed"]]) }, base: { commit: BASE, tests: tests([["new", "failed"]]) }, baseCommit: BASE, addedTests: new Set(["new"]) });
     expect(proof.proven).toEqual([]);
     expect(proof.addedByChange).toEqual(["new"]);
   });
   it("matches names exactly", () => {
-    const proof = pipelineProof({ head: { commit: HEAD, tests: tests([["Suite a", "passed"]]) }, base: { commit: BASE, tests: tests([["suite a", "failed"]]) }, baseCommit: BASE, addedTests: new Set() });
+    const proof = pipelineProof({ headCommit: HEAD, head: { commit: HEAD, tests: tests([["Suite a", "passed"]]) }, base: { commit: BASE, tests: tests([["suite a", "failed"]]) }, baseCommit: BASE, addedTests: new Set() });
     expect(proof.proven).toEqual([]);
   });
   it("refuses an oversized run whole instead of cutting it, in bounded time", () => {
     const big = new Map(Array.from({ length: PIPELINE_PROOF_TESTS_MAX + 1 }, (_, index) => [`t${String(index)}`, "passed" as const]));
     const started = performance.now();
-    const proof = pipelineProof({ head: { commit: HEAD, tests: big }, base: { commit: BASE, tests: new Map([["t1", "failed"]]) }, baseCommit: BASE, addedTests: new Set() });
-    expect(proof).toEqual({ proven: [], addedByChange: [], passedNotProof: [], failed: [], noBase: "no_base_run" });
+    const proof = pipelineProof({ headCommit: HEAD, head: { commit: HEAD, tests: big }, base: { commit: BASE, tests: new Map([["t1", "failed"]]) }, baseCommit: BASE, addedTests: new Set() });
+    expect(proof).toEqual({ proven: [], addedByChange: [], passedNotProof: [], failed: [], noBase: "report_too_large" });
     const baseBig = new Map(Array.from({ length: PIPELINE_PROOF_TESTS_MAX + 1 }, (_, index) => [`t${String(index)}`, "failed" as const]));
-    expect(pipelineProof({ head: { commit: HEAD, tests: new Map([["t1", "passed"]]) }, base: { commit: BASE, tests: baseBig }, baseCommit: BASE, addedTests: new Set() }).proven).toEqual([]);
+    expect(pipelineProof({ headCommit: HEAD, head: { commit: HEAD, tests: new Map([["t1", "passed"]]) }, base: { commit: BASE, tests: baseBig }, baseCommit: BASE, addedTests: new Set() })).toEqual({ proven: [], addedByChange: [], passedNotProof: ["t1"], failed: [], noBase: "report_too_large" });
     expect(performance.now() - started).toBeLessThan(2_000);
   });
 });
 
 describe("environment, ask or fix", () => {
   const failed = markedCheckState({ run: run({ conclusion: "failure" }, { attempt: 1 }), waitStart: T0, expectedMs: MIN, now: T0 });
-  const base = { state: failed, longOrPaid: true, testsRan: 12, logShared: false, mainRun: "passed" as const, roundsUsed: 0, roundsMax: 3 };
+  const base = { state: failed, longOrPaid: true, testsRan: 12, testsFailed: 1, logShared: false, mainRun: "passed" as const, roundsUsed: 0, roundsMax: 3 };
   it("does nothing on a pass, waits while waiting, and leaves a skip alone", () => {
     expect(decideMarkedCheck({ ...base, state: markedCheckState({ run: run(), waitStart: T0, expectedMs: MIN, now: T0 }) })).toEqual({ kind: "none" });
     expect(decideMarkedCheck({ ...base, state: { kind: "waiting", until: T0, expectedMs: MIN } })).toEqual({ kind: "wait" });
@@ -222,6 +232,13 @@ describe("environment, ask or fix", () => {
     expect(decideMarkedCheck({ ...base, testsRan: undefined, logShared: false })).toEqual({ kind: "ask", reason: "no_detail" });
     expect(decideMarkedCheck({ ...base, testsRan: undefined, logShared: true })).toEqual({ kind: "fix", roundsMax: LONG_CHECK_FIX_ROUNDS_MAX, fullSandboxPassFirst: true });
     expect(decideMarkedCheck({ ...base, testsRan: undefined, logShared: false, mainRun: "unknown" })).toEqual({ kind: "ask", reason: "no_detail" });
+  });
+  it("asks when the report has tests but none failed (a coverage gate, a step after the tests)", () => {
+    expect(decideMarkedCheck({ ...base, testsFailed: 0 })).toEqual({ kind: "ask", reason: "no_detail" });
+    expect(decideMarkedCheck({ ...base, testsFailed: 0, logShared: true })).toMatchObject({ kind: "fix" });
+  });
+  it.each([[Number.NaN, 3], [-1, 3], [1.5, 3], [0, Number.NaN], [0, 0], [0, Number.POSITIVE_INFINITY]])("never opens an uncapped round on counts that are not counts (%s used of %s)", (roundsUsed, roundsMax) => {
+    expect(decideMarkedCheck({ ...base, roundsUsed, roundsMax })).toEqual({ kind: "ask", reason: "cap_reached" });
   });
   it("fixes a long or paid check twice, after a full sandbox pass, then asks", () => {
     expect(decideMarkedCheck({ ...base, roundsUsed: 0 })).toEqual({ kind: "fix", roundsMax: 2, fullSandboxPassFirst: true });
@@ -256,9 +273,26 @@ describe("does the customer's CI skip drafts", () => {
   });
   const job = "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
   it("finds a job condition on the draft flag", async () => {
+    expect(DEFAULT_CI_EVIDENCE_SETTINGS.markedChecks).toEqual([]);
+    expect(() => (DEFAULT_CI_EVIDENCE_SETTINGS.markedChecks as unknown as unknown[]).push(1)).toThrow();
     const skips = `on: pull_request\njobs:\n  test:\n    if: github.event.pull_request.draft == false\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n`;
     expect(await detectDraftSkip(reader({ "ci.yml": skips, "lint.yml": `on: [push, pull_request]\n${job}` }))).toEqual({ verdict: "skips_drafts", workflows: [".github/workflows/ci.yml"] });
-    expect(draftVerdictOf(`on: pull_request\njobs:\n  t:\n    if: \${{ !github.event.pull_request['draft'] }}\n    steps: []\n`)).toBe("skips");
+    expect(draftVerdictOf(`on: pull_request\njobs:\n  t:\n    if: \${{ !github.event.pull_request['draft'] }}\n    steps: []\n`)).toBe("unknown");
+  });
+  it("reads each job's own condition, never a comment, and can't tell on a mix or an unknown spelling", () => {
+    const head = "on: pull_request\njobs:\n";
+    const jobWith = (name: string, condition?: string) => `  ${name}:\n${condition === undefined ? "" : `    if: ${condition}\n`}    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n`;
+    expect(draftVerdictOf(`# skip when github.event.pull_request.draft\n${head}${jobWith("t")}`)).toBe("runs");
+    expect(draftVerdictOf(`${head}${jobWith("lint", "github.event.pull_request.draft == false")}${jobWith("e2e")}`)).toBe("unknown");
+    expect(draftVerdictOf(`${head}${jobWith("t", "github.event.pull_request.draft == true")}`)).toBe("unknown");
+    expect(draftVerdictOf(`${head}${jobWith("t", "github.event['pull_request']['draft'] == false")}`)).toBe("unknown");
+    expect(draftVerdictOf(`${head}${jobWith("t", "\"github.event_name == 'push' || !github.event.pull_request.draft\"")}`)).toBe("unknown");
+    expect(draftVerdictOf(`${head}${jobWith("t", "github.repository == 'a/b' && !github.event.pull_request.draft")}`)).toBe("skips");
+    expect(draftVerdictOf(`${head}${jobWith("a", "${{ github.event.pull_request.draft != true }}")}${jobWith("b", "'!github.event.pull_request.draft'")}`)).toBe("skips");
+    expect(draftVerdictOf(`${head}${jobWith("t", "github.repository == 'a/b'")}`)).toBe("runs");
+    expect(draftVerdictOf(`${head}${jobWith("t", "\"!github.event.pull_request.draft && (github.actor == 'a' || github.actor == 'b')\"")}`)).toBe("skips");
+    expect(draftVerdictOf(`${head}${jobWith("t", "${{ github.event.pull_request.draft == false }} && ${{ true }}")}`)).toBe("unknown");
+    expect(draftVerdictOf(`on:\n  pull_request:\n    types: []\n${head.slice(17)}${jobWith("t")}`)).toBe("unknown");
   });
   it("finds a trigger that runs only when a draft is marked ready", async () => {
     expect(draftVerdictOf(`on:\n  pull_request:\n    types: [ready_for_review]\n${job}`)).toBe("skips");

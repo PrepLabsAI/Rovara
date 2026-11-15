@@ -9,6 +9,7 @@ export const CI_EVIDENCE_LIMITS = {
   markedChecksMax: 20,
   checkNameMax: 200,
   calledAsMax: 80,
+  sourceMax: 200,
   waitCapMinutesMin: 15,
   waitCapMinutesMax: 1_440,
   waitCapMinutesDefault: 120,
@@ -20,7 +21,7 @@ export const CI_EVIDENCE_LIMITS = {
 /** One check the customer marked at setup as running in their test environment. Matched by name (and by `source`, the reporting app, when given), never by position. */
 export const MarkedCheckSchema = z.object({
   name: z.string().min(1).max(CI_EVIDENCE_LIMITS.checkNameMax),
-  source: z.string().min(1).max(200).optional(),
+  source: z.string().min(1).max(CI_EVIDENCE_LIMITS.sourceMax).optional(),
   /** What the customer calls it, in their words: "real model in our account". Shown inert. */
   calledAs: z.string().min(1).max(CI_EVIDENCE_LIMITS.calledAsMax),
   /** A long or paid run (a deploy, a real model): fixes get two rounds, and only after a full sandbox pass. */
@@ -47,7 +48,7 @@ export type CiEvidenceSettings = z.infer<typeof CiEvidenceSettingsSchema>;
 
 /** A project with no settings: nothing marked, so every check is treated exactly as today. */
 export const DEFAULT_CI_EVIDENCE_SETTINGS: CiEvidenceSettings = Object.freeze({
-  version: 1, markedChecks: [], waitCapMinutes: CI_EVIDENCE_LIMITS.waitCapMinutesDefault, perTestReports: true, shareLogs: false,
+  version: 1, markedChecks: Object.freeze([]) as unknown as MarkedCheck[], waitCapMinutes: CI_EVIDENCE_LIMITS.waitCapMinutesDefault, perTestReports: true, shareLogs: false,
 });
 
 /** The one refusal a bad settings value gets. It never echoes the value. */

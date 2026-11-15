@@ -29,6 +29,8 @@ export function decideMarkedCheck(input: {
   state: MarkedState;
   longOrPaid: boolean;
   testsRan: number | undefined;
+  /** How many tests the report says failed (undefined: no report). A red check whose report has no failed test (a coverage gate, a step after the tests) gives nothing to fix from. */
+  testsFailed: number | undefined;
   logShared: boolean;
   mainRun: MainRun;
   roundsUsed: number;
@@ -42,6 +44,10 @@ export function decideMarkedCheck(input: {
   if (input.testsRan === 0) return { kind: "environment", reason: "failed_before_tests" };
   if (input.mainRun === "failed") return { kind: "environment", reason: "red_on_main" };
   if (input.testsRan === undefined && !input.logShared) return { kind: "ask", reason: "no_detail" };
+  if (input.testsRan !== undefined && input.testsFailed === 0 && !input.logShared) return { kind: "ask", reason: "no_detail" };
+  // Counts that are not counts never open an uncapped round.
+  const counted = (value: number, min: number): boolean => Number.isSafeInteger(value) && value >= min;
+  if (!counted(input.roundsUsed, 0) || !counted(input.roundsMax, 1)) return { kind: "ask", reason: "cap_reached" };
   const cap = input.longOrPaid ? Math.min(LONG_CHECK_FIX_ROUNDS_MAX, input.roundsMax) : input.roundsMax;
   if (input.roundsUsed >= cap) return { kind: "ask", reason: "cap_reached" };
   return { kind: "fix", roundsMax: cap, fullSandboxPassFirst: input.longOrPaid };
