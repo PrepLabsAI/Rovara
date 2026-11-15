@@ -1,7 +1,6 @@
 // TE-C5 part B (broker): the machine-size switch, the stored measurement (facts only, never the proof row), the person's stored choice and the card. Switch off: nothing is read or written.
 import { describe, expect, it } from "vitest";
 import { MACHINE_SIZE_ROWS, TestEnvironmentBodySchema, type TestEnvProveReport } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MACHINE_SIZE_VARIABLE, machineCard, machineSizeEnabled, readMachineChoice, readMachineFacts, recordMachineMeasurement, setMachineChoice, testEnvMachineChoiceKey, testEnvMachineKey } from "../../packages/broker/src/core/test-env/machine-size.js";
 import { readTestEnvProveReport } from "../../packages/broker/src/core/test-env/environment.js";
 import { bench, BENCH_ORG } from "../support/test-env-bench.js";
@@ -89,13 +88,13 @@ describe("recording a measurement", () => {
     await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest)) });
     expect(await readMachineFacts(w.deps, COMPANY_B_ID as never, w.project, w.digest)).toBeUndefined();
     expect(await readMachineFacts(w.deps, BENCH_ORG, "other", w.digest)).toBeUndefined();
-    await expect(recordMachineMeasurement(w.deps, { orgId: COMPANY_B_ID as never, project: w.project, body: body(reportFor(w.digest)) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    await expect(recordMachineMeasurement(w.deps, { orgId: COMPANY_B_ID, project: w.project, body: body(reportFor(w.digest)) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
   });
   it("a row copied under another company's or project's key is not read there (the row names its own company, project and digest)", async () => {
     const w = await world();
     await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest)) });
     const row = (await w.store.get(testEnvMachineKey(BENCH_ORG, w.project, w.digest)))!;
-    await w.store.put({ item: { ...row, ...testEnvMachineKey(COMPANY_B_ID as never, w.project, w.digest) } });
+    await w.store.put({ item: { ...row, ...testEnvMachineKey(COMPANY_B_ID, w.project, w.digest) } });
     expect(await readMachineFacts(w.deps, COMPANY_B_ID as never, w.project, w.digest)).toBeUndefined();
     await w.store.put({ item: { ...row, ...testEnvMachineKey(BENCH_ORG, "other", w.digest) } });
     expect(await readMachineFacts(w.deps, BENCH_ORG, "other", w.digest)).toBeUndefined();
@@ -150,7 +149,7 @@ describe("the person's choice", () => {
     const w = await world();
     await setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId: "arm64-2-8" });
     const row = (await w.store.get(testEnvMachineChoiceKey(BENCH_ORG, w.project)))!;
-    await w.store.put({ item: { ...row, ...testEnvMachineChoiceKey(COMPANY_B_ID as never, w.project) } });
+    await w.store.put({ item: { ...row, ...testEnvMachineChoiceKey(COMPANY_B_ID, w.project) } });
     expect(await readMachineChoice(w.deps, COMPANY_B_ID as never, w.project)).toBeUndefined();
   });
   it("a stored row that does not read back is none", async () => {
@@ -193,7 +192,7 @@ describe("the card", () => {
     for (let n = 0; n < 50; n++) await w.store.put({ item: { pk: `ORG#${String(BENCH_ORG)}#PROJECT#${w.project}`, sk: `TESTENV#MACHINE#${String(n).padStart(64, "0")}`, entityType: "TEST_ENV_MACHINE_MEASURE" } });
     let reads = 0;
     const counting = { ...w.deps, store: new Proxy(w.store, { get: (target, name, receiver) => { const value = Reflect.get(target, name, receiver) as unknown; if (name === "query" || name === "get" || name === "batchGet") return (...args: unknown[]) => { reads += 1; return (value as (...a: unknown[]) => unknown).apply(target, args); }; return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value; } }) };
-    await machineCard(counting as never, BENCH_ORG, w.project, w.digest);
+    await machineCard(counting, BENCH_ORG, w.project, w.digest);
     expect(reads).toBe(2);
   });
   it("a different company sees nothing of the project's facts", async () => {

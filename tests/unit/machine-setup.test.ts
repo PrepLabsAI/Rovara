@@ -61,7 +61,7 @@ describe("machine facts are derived, never copied", () => {
 describe("the card never guesses a size", () => {
   const advice = (facts: Parameters<typeof machineAdviceOf>[0], available: readonly string[] = ALL) => machineAdviceOf(facts, { available });
   it("suggests the row that fits with headroom, in fixed words", () => {
-    const a = advice(machineFactsOf(report())!);
+    const a = advice(machineFactsOf(report()));
     expect(a.status).toBe("suggested");
     expect(a.row?.id).toBe("arm64-4-16");
     expect(a.headline).toBe("Suggested machine: ARM, 4 vCPU, 16 GB");
@@ -76,7 +76,7 @@ describe("the card never guesses a size", () => {
     expect(a.reasons).toContain("ARM incompatible; x86 required");
   });
   it("an ARM incompatibility with no peak says x86 is needed and the size is not measured", () => {
-    const a = advice(machineFactsOf(report({ fullSuite: undefined }, failedWith("exec format error")))!);
+    const a = advice(machineFactsOf(report({ fullSuite: undefined }, failedWith("exec format error"))));
     expect(a.status).toBe("not_measured");
     expect(a.row).toBeUndefined();
     expect(a.headline).toBe("Machine size: not measured");
@@ -100,7 +100,7 @@ describe("the card never guesses a size", () => {
     expect(a).toMatchObject({ status: "not_measured", reasons: ["ARM incompatible; x86 required", "peak memory not measured"] });
   });
   it("no available size is not a suggestion", () => {
-    const a = advice(machineFactsOf(report())!, ["x86_64-8-32"]);
+    const a = advice(machineFactsOf(report()), ["x86_64-8-32"]);
     expect(a.status).toBe("not_measured");
     expect(a.reasons).toContain("no available size meets the measured memory requirement");
   });
@@ -110,7 +110,7 @@ describe("the card never guesses a size", () => {
     expect(MACHINE_STORED_ONLY_LINE).toBe("Stored only: Rovara does not launch this size yet.");
   });
   it("prints no output text", () => {
-    const a = advice(machineFactsOf(report({ fullSuite: undefined }, failedWith(`${CANARY} exec format error`)))!);
+    const a = advice(machineFactsOf(report({ fullSuite: undefined }, failedWith(`${CANARY} exec format error`))));
     expect(JSON.stringify(a)).not.toContain(CANARY);
   });
 });
