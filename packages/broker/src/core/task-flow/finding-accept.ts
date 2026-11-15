@@ -16,23 +16,26 @@ export const findingAcceptKey = (taskId: string, requestId: string): DocumentKey
 const shownName = (name: string): string => redactText(name).replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, NAME_MAX) || "the owner";
 
 /** The step that keeps who accepted which findings and how. Written once with the decision. */
-export function findingAcceptItem(input: { taskId: string; requestId: string; person: { personId: string; displayName: string }; method: FindingAcceptMethod; fingerprints: readonly string[]; at: string; now: Date }): TransactItem {
+export function findingAcceptItem(input: { taskId: string; requestId: string; candidateDigest: string; person: { personId: string; displayName: string }; method: FindingAcceptMethod; fingerprints: readonly string[]; at: string; now: Date }): TransactItem {
   return {
     kind: "put",
     item: {
-      ...findingAcceptKey(input.taskId, input.requestId), entityType: "FINDING_ACCEPT", taskId: input.taskId, requestId: input.requestId, personId: input.person.personId, name: shownName(input.person.displayName),
+      ...findingAcceptKey(input.taskId, input.requestId), entityType: "FINDING_ACCEPT", taskId: input.taskId, requestId: input.requestId, candidateDigest: input.candidateDigest, personId: input.person.personId, name: shownName(input.person.displayName),
       method: input.method, fingerprints: [...input.fingerprints], at: input.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.now.getTime() / 1000) + KEEP_SECONDS,
     },
     condition: when.absent(),
   };
 }
 
-/** For each accepted finding (by fingerprint), "<name> via <method>", for the pull request's description. Undefined when nothing was recorded (an accept from before this was kept). */
-export async function acceptedByOf(store: Pick<DocumentStore, "get" | "query">, taskId: string): Promise<Record<string, string> | undefined> {
+/**
+ * For each finding accepted for this code (by fingerprint), "<name> via <method>", for the pull request's description. Only the accepts made for `candidateDigest` count: a fingerprint
+ * does not name the code, so the same finding accepted in an earlier round (by someone else, or another way) is never shown as this code's accept. Undefined when nothing was recorded.
+ */
+export async function acceptedByOf(store: Pick<DocumentStore, "get" | "query">, taskId: string, candidateDigest: string): Promise<Record<string, string> | undefined> {
   const rows = await queryAll(store,{ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: PREFIX } });
   const by: Record<string, string> = {};
   for (const row of rows) {
-    if (typeof row["name"] !== "string" || (row["method"] !== "api-token" && row["method"] !== "page") || !Array.isArray(row["fingerprints"])) continue;
+    if (row["candidateDigest"] !== candidateDigest || typeof row["name"] !== "string" || (row["method"] !== "api-token" && row["method"] !== "page") || !Array.isArray(row["fingerprints"])) continue;
     for (const fingerprint of row["fingerprints"]) if (typeof fingerprint === "string") by[fingerprint] = `${row["name"]} via ${row["method"] === "page" ? "the task page" : "the API token (a tool)"}`;
   }
   return Object.keys(by).length === 0 ? undefined : by;

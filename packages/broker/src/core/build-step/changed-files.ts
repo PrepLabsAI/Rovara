@@ -157,7 +157,11 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
   const linearIssueKey = await ticketIssueKeyOf(deps, task);
-  const acceptedBy = await acceptedByOf(deps.store, task.taskId).catch(() => undefined);
+  // Who accepted which finding is shown when it can be read; a read that fails leaves it out of the description (logged by error name only).
+  const acceptedBy = await acceptedByOf(deps.store, task.taskId, candidate.digest).catch((error: unknown) => {
+    log(deps, { event: "build_step.accepted_by_unreadable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    return undefined;
+  });
   for (const entry of hosts) {
     try {
       // Each repository's description names the lessons that repository's readers may read.

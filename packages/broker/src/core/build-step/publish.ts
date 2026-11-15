@@ -77,7 +77,11 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
   const lessonsUsed = await lessonsUsedOf(deps, task, repository.repositoryId);
   const linearIssueKey = await ticketIssueKeyOf(deps, task);
-  const acceptedBy = await acceptedByOf(deps.store, task.taskId).catch(() => undefined);
+  // Who accepted which finding is shown when it can be read; a read that fails leaves it out of the description (logged by error name only).
+  const acceptedBy = await acceptedByOf(deps.store, task.taskId, candidate.digest).catch((error: unknown) => {
+    log(deps, { event: "build_step.accepted_by_unreadable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    return undefined;
+  });
   const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
   const operationId = newId(deps);
