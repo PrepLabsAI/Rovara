@@ -6,19 +6,24 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { change, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { CORE_ENGINE_VARIABLE, change, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
 import { CoreRegistryError, buildCoreRegistry, createCoreHostApp, engineStampKey, stampOf, type CoreAdapterModule } from "../../packages/broker/src/core-host/index.js";
-import { CORE_EXPIRY_COLLISIONS, KEPT_ON_SEPARATE_KEYS, appliesCodeRetention, codeRetentionStore, retentionFor, withCodeRetention } from "../../packages/broker/src/core-host/retention.js";
+import { CORE_EXPIRY_COLLISIONS, KEPT_FOR_GOOD_ON_AWS, KEPT_ON_SEPARATE_KEYS, appliesCodeRetention, codeRetentionStore, retentionFor, withCodeRetention } from "../../packages/broker/src/core-host/retention.js";
 import { COMPANY_SECRET_PATHS, CORE_DISPATCH_QUEUE, OWED_POINTS, codeAdapterModules, owedPoints, stateTableIndexes, type CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
 import { FakeS3, FakeSecretsManager } from "../support/ports/aws-fakes.js";
 import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
+import { BINDING, COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
+import { SessionWorkerFleet, SessionWorkerMachines } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
+import { createCoreRuntime, withCompanyMachines } from "../../packages/broker/src/core-host/core-runtime.js";
+import { readCoreEngineFlags } from "../../packages/broker/src/core-host/flags.js";
+import { costPartition as costPartitionFor, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
 
 const OTHER = "org_corehost00000000000b";
 const BASE = "https://sqs.us-west-2.amazonaws.com/000000000000";
@@ -52,6 +57,15 @@ function awsWorld(overrides: Partial<CodeModuleDeps> = {}): AwsWorld {
 function modulesWithOwed(aws: AwsWorld): CoreAdapterModule[] {
   const owed = new Set<string>(owedPoints(aws.deps).map((entry) => entry.point));
   return [...codeAdapterModules(aws.deps), ...createFakeWorld().modules.filter((module) => owed.has(module.point))];
+}
+
+/** The EC2 fleet's operations over the session world (no AWS). */
+function fleetDeps(): NonNullable<CodeModuleDeps["workerMachines"]> {
+  const world = createSessionMachinesWorld();
+  return {
+    sessions: world.sessions, companyOfWorkspace: async () => COMPANY_A, binding: async () => BINDING,
+    stopInstance: async () => ({ gone: true }), sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 200, body: "{}" }), ping: async () => undefined,
+  };
 }
 
 const context = () => ({ installCompanyId: FAKE_COMPANY, now: () => new Date("2026-11-15T10:00:00.000Z"), env: {}, clients: {}, log: () => undefined });
@@ -114,6 +128,8 @@ describe("Code's AWS adapter modules", () => {
       [{ secrets: { namePrefix: "agentx/staging/" } as never }, /secrets input is hollow: clientFor/],
       [{ codeHost: { provider: new GitHubFixtureProvider(new FakeHostModel({ url: "https://github.com/example/demo.git", id: "1", fullName: "example/demo" })), options: { credentialRef: "" } } }, /codeHost input is hollow/],
       [{ checkRunner: { githubActions: {} as never } }, /checkRunner\.githubActions input is hollow/],
+      [{ workerMachines: { ...fleetDeps(), sign: undefined as never } }, /workerMachines input is hollow: sign/],
+      [{ workerMachines: { ...fleetDeps(), sessions: { get: async () => undefined } as never } }, /workerMachines\.sessions input is hollow: ensureSession, deleteSession, claimStop, markStopped/],
     ];
     for (const [override, words] of cases) {
       await expect(buildCoreRegistry({ modules: modulesWithOwed(awsWorld(override)), context: context(), areas: ["flow", "build", "merge"] }), words.source).rejects.toThrow(words);
@@ -138,6 +154,8 @@ describe("Code's AWS adapter modules", () => {
     expect(refused).toBeInstanceOf(CoreRegistryError);
     expect((refused as CoreRegistryError).missing.map((entry) => entry.point).sort()).toEqual(Object.keys(OWED_POINTS).sort());
     expect(owedPoints({ checkRunner: { githubActions: {} as never } }).map((entry) => entry.point)).not.toContain("check-runner");
+    expect(owedPoints({ workerMachines: fleetDeps() }).map((entry) => entry.point)).not.toContain("worker-machines");
+    expect(owedPoints({}).map((entry) => entry.point)).toContain("worker-machines");
     // Building the list makes no client and calls nothing: the adapters are made only when the registry is built (with the switch serving).
     const quiet = awsWorld();
     codeAdapterModules(quiet.deps);
@@ -213,6 +231,42 @@ describe("Code's retention for core writes", () => {
     expect(withCodeRetention({ pk: "p", sk: "s", entityType: "WORKFLOW_THREAD_NOTE", indexExpiresAt: 5, other: 1 })).toEqual({ pk: "p", sk: "s", entityType: "WORKFLOW_THREAD_NOTE", other: 1 });
   });
 
+  it("keeps the cost ledger, approvals and decisions for good on AWS (owner decision DEC 222); session and activity records keep the core's expiry", async () => {
+    const root = join(import.meta.dirname, "../../packages/broker/src");
+    const core = await kindsIn(await sources(join(root, "core")));
+    // Every kind on the list is one the core really writes with an expiry (a stale entry fails here).
+    for (const kind of KEPT_FOR_GOOD_ON_AWS) {
+      expect(core.expiring.has(kind), kind).toBe(true);
+      expect(retentionFor(kind), kind).toBe("strip");
+      expect(withCodeRetention({ pk: "p", sk: "s", entityType: kind, indexExpiresAt: 5, other: 1 })).toEqual({ pk: "p", sk: "s", entityType: kind, other: 1 });
+    }
+    // DEC 222a: the per-run cost history is part of the cost ledger.
+    expect(KEPT_FOR_GOOD_ON_AWS.has("RUN_COST")).toBe(true);
+    // Session summaries and operation and activity events expire as on a laptop.
+    for (const kind of ["LIVE_SESSION", "OPERATION_EVENT", "WORK_EVENT", "DECISION_EVIDENCE_OPENED"]) {
+      expect(core.expiring.has(kind), kind).toBe(true);
+      expect(retentionFor(kind), kind).toBe("keep");
+    }
+    // Through the core's own ledger on the deployed store: the entry and its once-marker reach the table with no expiry; the totals are kept.
+    const inner = new MemoryDocumentStore();
+    const stripped: string[] = [];
+    const ledger = createCostLedger({ store: codeRetentionStore(inner, { stripped: (kind) => stripped.push(kind) }), metering: createPriceTableMetering({ currency: "USD", models: {} }), now: () => new Date("2026-11-15T10:00:00.000Z") });
+    await ledger.recordUsage({ companyId: FAKE_COMPANY, entryId: "e-1", at: "2026-11-15T10:00:00.000Z", taskId: "t-1", usage: { provider: "anthropic", modelId: "m", tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } });
+    const written = (await inner.query({ pk: costPartitionFor(FAKE_COMPANY, "t-1") })).items;
+    const entry = written.find((item) => item.entityType === "COST_ENTRY")!;
+    expect(entry).toBeDefined();
+    expect(entry).not.toHaveProperty("indexExpiresAt");
+    const once = await inner.get({ pk: companyScoped(FAKE_COMPANY, "COST_ENTRY"), sk: "e-1" });
+    expect(once?.entityType).toBe("COST_ENTRY_ONCE");
+    expect(once).not.toHaveProperty("indexExpiresAt");
+    expect(stripped.sort()).toEqual(["COST_ENTRY", "COST_ENTRY_ONCE"]);
+    // Positive control: the same write on a store without Code's retention keeps the core's expiry.
+    const bare = new MemoryDocumentStore();
+    await createCostLedger({ store: bare, metering: createPriceTableMetering({ currency: "USD", models: {} }), now: () => new Date("2026-11-15T10:00:00.000Z") })
+      .recordUsage({ companyId: FAKE_COMPANY, entryId: "e-1", at: "2026-11-15T10:00:00.000Z", taskId: "t-1", usage: { provider: "anthropic", modelId: "m", tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } });
+    expect(await bare.get({ pk: companyScoped(FAKE_COMPANY, "COST_ENTRY"), sk: "e-1" })).toHaveProperty("indexExpiresAt");
+  });
+
   it("judges an update by the kind it sets, else by the item's current kind; a setIfAbsent of the kind names nothing", async () => {
     const inner = new MemoryDocumentStore();
     const store = codeRetentionStore(inner);
@@ -238,5 +292,37 @@ describe("Code's retention for core writes", () => {
     await store.update({ key: { pk: "a", sk: "own" }, ops: [change.set("y", 1)] });
     expect(reads).not.toHaveBeenCalled();
     expect(appliesCodeRetention(inner)).toBe(false);
+  });
+});
+
+describe("the EC2 fleet in the registry", () => {
+  it("registers one fleet for every company, which each company's runtime sees bound to that company only", async () => {
+    const aws = awsWorld({ workerMachines: fleetDeps() });
+    const registry = await buildCoreRegistry({ modules: modulesWithOwed(aws), context: context(), areas: ["flow", "build", "merge"] });
+    const fleet = registry.require("worker-machines");
+    expect(fleet).toBeInstanceOf(SessionWorkerFleet);
+    // The registry as company A's runtime sees it: the fleet bound to A, by `require` and by `get`.
+    const seenByA = withCompanyMachines(registry, COMPANY_A);
+    const boundA = seenByA.require("worker-machines") as SessionWorkerMachines;
+    expect(boundA).toBeInstanceOf(SessionWorkerMachines);
+    expect(boundA.companyId).toBe(COMPANY_A);
+    expect((seenByA.get("worker-machines", "ec2-sessions") as SessionWorkerMachines).companyId).toBe(COMPANY_A);
+    expect((withCompanyMachines(registry, COMPANY_B).require("worker-machines") as SessionWorkerMachines).companyId).toBe(COMPANY_B);
+    // Every other point is the registry's own.
+    expect(seenByA.require("storage")).toBe(registry.require("storage"));
+    // An adapter without `forCompany` (the laptop's, which reads the company from each spec) is handed out as it is.
+    const plain = await buildCoreRegistry({ modules: createFakeWorld().modules, context: context(), areas: ["flow", "build", "merge"] });
+    expect(withCompanyMachines(plain, COMPANY_A).require("worker-machines")).toBe(plain.require("worker-machines"));
+  });
+
+  it("builds a company's core over the fleet bound to that company: the flow's machines are the company's adapter", async () => {
+    const aws = awsWorld({ workerMachines: fleetDeps() });
+    const registry = await buildCoreRegistry({ modules: modulesWithOwed(aws), context: context(), areas: ["flow", "build", "merge"] });
+    const runtime = createCoreRuntime({
+      registry, companyId: COMPANY_A, flags: readCoreEngineFlags({ [CORE_ENGINE_VARIABLE]: "on" }), callbackSigningKey: Buffer.alloc(32, 1),
+      access: createOwnerTaskAccess(), repositoryCredential: async () => { throw new Error("unused"); }, repositoryGrantKey: Buffer.alloc(32, 2), now: () => new Date(), log: () => undefined,
+    });
+    expect(runtime.flow.deps.machines).toBeInstanceOf(SessionWorkerMachines);
+    expect((runtime.flow.deps.machines as SessionWorkerMachines).companyId).toBe(COMPANY_A);
   });
 });

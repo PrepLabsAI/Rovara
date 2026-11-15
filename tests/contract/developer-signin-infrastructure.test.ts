@@ -586,7 +586,8 @@ describe("task-token key and membership IAM", () => {
     withoutCoreEngine(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
-    // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny); each is asserted in hosted-wiring-infrastructure.test.ts.
+    // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
+    // and R2 step 4 (the dispatcher's core queue mapping, its reads, the conditional deleter policy, its core variables, the outbox pending index).
     expect(createHash("sha256").update(text).digest("hex")).toBe("b8175bf72b4876d9d78575f6aafe78464c7da55471ed1b98c86bd6fefeca5f5e");
   });
 
@@ -737,7 +738,9 @@ describe("task key deployment boundary coverage", () => {
   });
 });
 
-// IAM headroom: frozen data captured from d605c7b24b0ac3ce4c2b015d8a70d1195593391a.
+// IAM headroom: frozen data captured from d605c7b24b0ac3ce4c2b015d8a70d1195593391a, plus the 16 additions of lane E2 (reviewed one by one): the broker's five queue actions on
+// each core dispatch queue (granted on the queues' own policies, #663), the core job schedules' role invoking the broker (#663), and the dispatcher's four reads of the core
+// dispatch queue and its deleter start under CoreEngineIsOn (R2 step 4). Nothing was removed.
 // Kept in this existing test because this lane cannot add files under the port guard.
 type AccessTuple = [principal: string, effect: string, action: string, resource: string, condition: string];
 const symbolicTypes: Record<string, string> = {
@@ -1061,11 +1064,16 @@ const beforeTuples: AccessTuple[] = [
   ["role:DispatcherServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
   ["role:DispatcherServiceRole","Allow","kms:Sign","key:InvokeSigningKey","{}"],
   ["role:DispatcherServiceRole","Allow","s3:GetObject","bucket:Artifacts/workflow-e2e-admissions/*","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsQueue","{}"],
   ["role:DispatcherServiceRole","Allow","sqs:ChangeMessageVisibility","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsQueue","{}"],
   ["role:DispatcherServiceRole","Allow","sqs:DeleteMessage","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsQueue","{}"],
   ["role:DispatcherServiceRole","Allow","sqs:GetQueueAttributes","queue:DispatchQueue","{}"],
   ["role:DispatcherServiceRole","Allow","sqs:GetQueueUrl","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsQueue","{}"],
   ["role:DispatcherServiceRole","Allow","sqs:ReceiveMessage","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","states:StartExecution","machine:SessionsDeleter","{}"],
   ["role:DispatcherServiceRole","Allow","states:StartExecution","machine:SessionsProvisioner","{}"],
   ["role:DispatcherServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
   ["role:DispatcherServiceRole","Allow","xray:PutTraceSegments","*","{}"],
