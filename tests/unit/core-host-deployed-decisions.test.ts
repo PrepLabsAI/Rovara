@@ -112,12 +112,12 @@ async function setup(options: { permissive?: boolean } = {}) {
   const otherDeps = deployedDecisionCards({ runtime: otherRuntime, registry, people, proofs: point.proofs, log });
 
   /** A task of this person, waiting on a coding plan (Markdown unless `structured`), as the flow stores it. */
-  const waitingTask = async (personId: string, companyId: OrgId = ORG, plan: { structured?: "bad"; closed?: boolean; notWaiting?: boolean } = {}) => {
+  const waitingTask = async (personId: string, companyId: OrgId = ORG, plan: { structured?: "bad"; closed?: boolean; notWaiting?: boolean; foreignKey?: boolean } = {}) => {
     const flow = companyId === ORG ? runtime.flow : otherRuntime.flow;
     const { task } = await flow.start({ principal: principalOf(personId, companyId), client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     const stored = (await world.store.get(taskKey(task.taskId)))!;
     const ownerKey = stored["ownerKey"] as string;
-    const objectKey = `private/${ownerKey}/${stored["workspaceId"] as string}/plan-v1.${plan.structured === undefined ? "md" : "json"}`;
+    const objectKey = plan.foreignKey === true ? `private/${"f".repeat(64)}/elsewhere/plan-v1.md` : `private/${ownerKey}/${stored["workspaceId"] as string}/plan-v1.${plan.structured === undefined ? "md" : "json"}`;
     const text = "# Plan\n\nChange src/health.ts to answer 200.\n";
     const bytes = new TextEncoder().encode(text);
     await registry.require("object-storage").put(objectKey, bytes, { contentType: "text/markdown", metadata: {}, retention: "evidence-std" });
@@ -178,6 +178,8 @@ describe("the deployed session levels (the company's own records)", () => {
       person("dev-x"), person("dev-x", OTHER), person("nobody"),
       // The session layer names one person, the principal another.
       { ...person("dev-o"), developerId: developerIdOf(principalOf("dev-m")) },
+      // This company's principal asked about a session the layer says is another company's.
+      { companyId: OTHER, developerId: developerIdOf(principalOf("dev-o")), principal: principalOf("dev-o") },
       // A principal of another company, under this company's session.
       { companyId: ORG, developerId: developerIdOf(principalOf("dev-o", OTHER)), principal: principalOf("dev-o", OTHER) },
       // A follower's re-check: the id only.
@@ -239,6 +241,22 @@ describe("the deployed decision cards: what is listed", () => {
     const row = (await t.world.store.query({ pk: taskIndexKey("dev-a", "", "").pk, sk: { op: "beginsWith", prefix: "TASK#" } })).items.find((item) => item["taskId"] === elsewhere)!;
     await t.world.store.put({ item: { ...row, orgId: ORG } });
     expect((await view(t.deps, "dev-a")).cards).toEqual([]);
+  });
+
+  it("leaves out another person's task even when a row in the caller's own index names it (the task record decides)", async () => {
+    const t = await setup();
+    const theirs = await t.waitingTask("dev-b");
+    const row = (await t.world.store.query({ pk: taskIndexKey("dev-b", "", "").pk, sk: { op: "beginsWith", prefix: "TASK#" } })).items.find((item) => item["taskId"] === theirs)!;
+    await t.world.store.put({ item: { ...row, pk: taskIndexKey("dev-a", "", "").pk } });
+    expect((await view(t.deps, "dev-a")).cards).toEqual([]);
+  });
+
+  it("reads a document's facts only from the task's own storage: a pointer elsewhere reads as unread", async () => {
+    const t = await setup();
+    await t.waitingTask("dev-a");
+    await t.waitingTask("dev-a", ORG, { foreignKey: true });
+    const items = await t.deps.sources.list(cardCaller("dev-a", ORG, { stepUp: false }));
+    expect(items.map((item) => (item as { files?: readonly string[] }).files).sort()).toEqual([[], ["src/health.ts"]]);
   });
 
   it("leaves out a closed task, a task that waits on nothing, and a structured document that does not read back", async () => {
@@ -328,11 +346,23 @@ describe("the deployed decision cards: acting", () => {
     const t = await setup();
     const taskId = await t.waitingTask("dev-a");
     const item = await itemFor(t, taskId);
-    for (const who of [cardCaller("dev-b"), cardCaller("dev-x", OTHER), { ...cardCaller("dev-a"), developerId: developerIdOf(principalOf("dev-b")) }]) {
+    // The last: this company's caller (orgId) carrying a principal that names another company.
+    for (const who of [cardCaller("dev-b"), cardCaller("dev-x", OTHER), { ...cardCaller("dev-a"), developerId: developerIdOf(principalOf("dev-b")) }, { ...cardCaller("dev-a"), principal: { ...principalOf("dev-a", OTHER), authTime: STEP_UP.at } }]) {
       expect(await t.deps.performer.approve(who, { card: item.card, item: item.item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
     }
     expect(t.point.proofs.issue).not.toHaveBeenCalled();
     expect((await t.stored(taskId)).stage).toBe("PLAN_REVIEW");
+  });
+
+  it("refuses, before any proof, a card of the person's task in another company acted on through this company", async () => {
+    const t = await setup();
+    t.memberships.set("dev-a", { companyId: OTHER, role: "member" });
+    const elsewhere = await t.waitingTask("dev-a", OTHER);
+    const items = await t.otherDeps.sources.list(cardCaller("dev-a", OTHER, { stepUp: false }));
+    const card = projectDecisionCards(items).cards.find((entry) => entry.id === cardOf(elsewhere))!;
+    t.memberships.set("dev-a", { companyId: ORG, role: "member" });
+    expect(await t.deps.performer.approve(cardCaller("dev-a"), { card, item: items[0]!, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
+    expect(t.point.proofs.issue).not.toHaveBeenCalled();
   });
 
   it("records nothing when the point vouches for someone other than the task's owner (the gate's subject accepts only the owner)", async () => {
