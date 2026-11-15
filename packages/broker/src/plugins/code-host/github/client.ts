@@ -1223,7 +1223,7 @@ export class GitHubAppCredentialProvider {
       runId = (statusRecord(listed.body).check_runs as unknown[]).map(ours).find((id) => id !== undefined);
     }
     if (runId !== undefined) {
-      const { head_sha: _head, ...update } = body;
+      const update = Object.fromEntries(Object.entries(body).filter(([name]) => name !== "head_sha"));
       const patched = await provider.trackingJson(`${root}/check-runs/${runId}`, token, { method: "PATCH", body: update });
       if (patched.status === 403) return "no_permission";
       if (patched.status === 200) {

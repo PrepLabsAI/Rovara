@@ -7,8 +7,9 @@ import {
 const T0 = Date.parse("2026-11-15T10:00:00.000Z");
 const base: RovaraCheckInput = { proof: { kind: "not_judged" }, ci: "passing", ciMode: "their_ci_fix", fullSuite: "not_needed", firstSeenAtMs: T0, nowMs: T0 + 60_000 };
 const of = (over: Partial<RovaraCheckInput>) => rovaraCheckOf({ ...base, ...over });
-const PROCEED = { kind: "proceed", warns: false, relaxed: false, provenCount: 2, reasons: [] } as const;
-const HELD = { kind: "held", reasons: ["proof_failed"], provenCount: 0 } as const;
+type Proof = RovaraCheckInput["proof"];
+const PROCEED = { kind: "proceed", warns: false, relaxed: false, provenCount: 2, reasons: [] } satisfies Proof;
+const HELD: Proof = { kind: "held", reasons: ["proof_failed"], provenCount: 0 };
 
 describe("the conclusion table (O48)", () => {
   it("not judged yet: in progress, no conclusion", () => {
@@ -48,7 +49,7 @@ describe("the conclusion table (O48)", () => {
     ["sandbox only by choice", { ciMode: "sandbox_only", ci: "none" }],
     ["sandbox only by choice, CI passing", { ciMode: "sandbox_only", ci: "passing" }],
   ] as const)("%s: neutral, whatever the proof says when it is not a hold", (_label, over) => {
-    for (const proof of [PROCEED, { kind: "not_judged" } as const]) {
+    for (const proof of [PROCEED, { kind: "not_judged" }] satisfies Proof[]) {
       expect(of({ ...over, proof })).toMatchObject({ status: "completed", conclusion: "neutral" });
     }
   });
@@ -118,7 +119,7 @@ describe("words and bounds", () => {
     ["negative proven count", { proof: { ...PROCEED, provenCount: -1 } }],
     ["override name not a string", { proof: HELD, override: { by: 42 } }],
   ])("bad input (%s) is a fixed neutral refusal, never a throw or a guess, and echoes nothing", (_label, over) => {
-    const refused = rovaraCheckOf({ ...base, ...(over as object) } as RovaraCheckInput);
+    const refused = rovaraCheckOf({ ...base, ...(over as object) });
     expect(refused).toMatchObject({ status: "completed", conclusion: "neutral" });
     expect(refused.title).toBe("Rovara could not finish");
     for (const word of ["maybe", "because", "green", "half", "oops", "soon"]) expect(JSON.stringify(refused)).not.toContain(word);

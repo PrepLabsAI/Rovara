@@ -276,7 +276,7 @@ describe("through the real GitHub client over the fake GitHub API", () => {
     await trackPullRequest(tracking(PROVEN), TASK_ID);
     expect(api().checkRuns).toEqual([]);
     expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
-    expect(await w.store.get(summaryCheckKey(ORG, TASK_ID, pr.repositoryId, pr.number))).toMatchObject({ noPermissionAtMs: expect.any(Number) });
+    expect(typeof (await w.store.get(summaryCheckKey(ORG, TASK_ID, pr.repositoryId, pr.number)))?.["noPermissionAtMs"]).toBe("number");
   });
   it("another app's 'Rovara' check is still the customer's CI", async () => {
     const { w, pr, tracking } = await githubWorld();

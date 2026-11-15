@@ -512,7 +512,7 @@ export async function trackTask(deps: MergeTrackingDependencies, taskId: string)
   if (first === undefined || first.closedAt !== undefined || first.releasedAt !== undefined || first.orgId === undefined || !tracksMerge(first.workflow)) {
     // TE-B4: Rovara stops following the task, so a Check of it still in progress is finished as neutral (a required Check must not hang).
     if (first?.orgId !== undefined && deps.summaryCheck !== undefined) {
-      await stopSummaryChecks({ store: deps.store, now: deps.now, source: deps.summaryCheck, repository: deps.repository, scope: deps.scope, ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }) }, { ...first, orgId: first.orgId });
+      await stopSummaryChecks({ store: deps.store, now: deps.now, source: deps.summaryCheck, repository: (project, revision, repositoryId, orgId) => deps.repository(project, revision, repositoryId, orgId), scope: (orgId) => deps.scope(orgId), ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }) }, { ...first, orgId: first.orgId });
     }
     return { result: "gone", anyNotOpen: false };
   }
