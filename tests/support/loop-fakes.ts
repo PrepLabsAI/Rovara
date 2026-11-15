@@ -198,7 +198,9 @@ export class LoopWorld {
     return fail(`unexpected ${method} ${path}`);
   }
 
-  private async git(args: string[]): Promise<ExecResult> {
+  private async git(allArgs: string[]): Promise<ExecResult> {
+    // TE-B9: the loop's own never-commit check puts a global option after `-C <dir>`; the fake reads the subcommand without it.
+    const args = allArgs.filter((arg) => arg !== "--no-literal-pathspecs");
     // #392: a Codex item's clone, with its git directory beside it.
     if (args[0] === "clone") { await mkdir(args[args.length - 1] ?? "", { recursive: true }); this.clones.push(args.slice(1)); return ok(); }
     const sub = args[2];
@@ -209,6 +211,8 @@ export class LoopWorld {
     // The loop's own evidence commit: something is always staged in this fake.
     if (sub === "add") return ok();
     // `diff --cached --quiet` after the evidence is added: something is staged. Otherwise the change under review.
+    // TE-B9: the check on the files the branch introduces (`diff --name-only -z ... origin/<base>...HEAD -- <list>`): the world's commits hold none of Rovara's working files.
+    if (sub === "diff" && args.includes("--name-only") && args.includes("-z")) return ok("");
     if (sub === "diff") return args.includes("--cached") ? fail("", 1) : ok(this.diff);
     if (sub === "commit") { this.loopCommits.push(`${args.slice(args.indexOf("--") + 1).join(", ")}: ${args[args.indexOf("-m") + 1] ?? ""}`); return ok(); }
     if (sub === "push") {

@@ -233,3 +233,20 @@ describe("reading events", () => {
     expect(await listWorkEvents(s, { orgId, from: at, to: at })).toEqual({ events: [], unreadable: 1 });
   });
 });
+
+describe("T8 company guards", () => {
+  it("refuses invalid query company in fixed words before any read", async () => {
+    let reads = 0;
+    for (const bad of ["bad-canary", "", undefined, null, 42]) await expect(listWorkEvents({ query: async () => { reads++; return { items: [] }; } }, { orgId: bad as string, from: at, to: at })).rejects.toThrow("invalid company");
+    expect(reads).toBe(0);
+  });
+  it("counts a foreign row orgId or partition as unreadable without returning it", async () => {
+    const foreign = `org_${"b".repeat(20)}`;
+    for (const wrong of [{ orgId: foreign }, { pk: `ORG#${foreign}#WORK_EVENTS#2026-11#0` }]) {
+      const row = { ...workEventRow(SAMPLES.task_started), ...wrong };
+      let first = true;
+      const result = await listWorkEvents({ query: async () => { const items = first ? [row] : []; first = false; return { items }; } }, { orgId, from: at, to: at, now: Date.parse(at) });
+      expect(result).toEqual({ events: [], unreadable: 1 });
+    }
+  });
+});

@@ -9,7 +9,7 @@ import { runContract } from "../support/ports/plugin-contract-kit.js";
 import { checkRunnerWorldFor, codeHostWorldFor, fakeCheckRunnerWorld, fakeCodeHostWorld, fakeTrackerWorld, newModel, trackerWorldFor } from "../support/ports/plugin-fake-worlds.js";
 import { trackerChecks } from "../support/ports/tracker-conformance.js";
 
-runContract("FakeCodeHost passes the CodeHost contract", codeHostChecks, fakeCodeHostWorld);
+runContract("FakeCodeHost passes the CodeHost contract", codeHostChecks, () => ({ ...fakeCodeHostWorld(), fileEntries: true }));
 runContract("FakeCheckRunner passes the CheckRunner contract", checkRunnerChecks, fakeCheckRunnerWorld);
 runContract("FakeTracker passes the Tracker contract", trackerChecks, fakeTrackerWorld);
 

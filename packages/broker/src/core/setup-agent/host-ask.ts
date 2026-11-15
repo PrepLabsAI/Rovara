@@ -49,6 +49,7 @@ export const SETUP_HOST_REFUSAL_WORDS: Record<SetupHostRefusal, string> = {
   webhook_sink: "A website that collects whatever is sent to it.",
   raw_storage: "Storage or hosting that anyone can upload to.",
   production: "On the production deny list.",
+  model_host: "A model host: the test sandbox is not allowed to reach it.",
 };
 
 export const SETUP_HOST_ASK_STATES = ["open", "approved", "refused"] as const;
@@ -142,6 +143,8 @@ export interface HostAskInput {
   /** The websites reachable by the project's own list now (to say "already allowed"): the hosts the owner approved before, and the install's own list. */
   projectDomains: readonly string[];
   prodDeny?: TestEnvProdDeny | undefined;
+  /** FIX-0518: the names the project's test sandbox is denied (the laptop's model hosts). A host it covers is refused as a model host, never "already allowed". Absent or empty: no such rule (the owner allowed model hosts for the project, or the install has none). */
+  sandboxDenied?: readonly string[] | undefined;
   /** The person who typed the command that hit the blocked website, when one did: filled in by the broker from its own stored command (the worker names only the command's place), never from a payload. */
   typedBy?: string | undefined;
 }
@@ -162,7 +165,7 @@ export async function requestHostAsk(table: Table, input: HostAskInput): Promise
   const requestedBy = await setupRunStarterOf(table, input.orgId, input.project, input.taskId, { requireRunning: true });
   if (requestedBy === undefined) return { outcome: "no_run" };
   const host = typeof input.host === "string" ? (input.host.endsWith(".") ? input.host.slice(0, -1) : input.host) : "";
-  const reason = refuseSetupHost(host, input.prodDeny);
+  const reason = refuseSetupHost(host, input.prodDeny, input.sandboxDenied);
   if (reason !== undefined) { await countRefusal(table, input, reason); return { outcome: "refused", reason, words: SETUP_HOST_REFUSAL_WORDS[reason] }; }
   const name = host.toLowerCase();
   if (hostAlreadyAllowed(name, input.projectDomains)) return { outcome: "already_allowed" };
@@ -249,7 +252,7 @@ async function openAskBySubject(store: Pick<DocumentStore, "query">, orgId: OrgI
  * The gate's subject for a host ask. Approving lets the install's machines reach the host when they next start; refusing keeps the host out for a week. It decides nothing about the project's code. The owner is the
  * approver (Code's one company has one owner); a repository collaborator's comment is never one (`SubjectRefusal`). Both outcomes settle the ask, its index row and the open counter in the decision's transaction.
  */
-export function createSetupHostSubject(options: { store: DocumentStore; prodDeny?: (project: string) => Promise<TestEnvProdDeny | undefined> }): DecisionSubject {
+export function createSetupHostSubject(options: { store: DocumentStore; prodDeny?: (project: string) => Promise<TestEnvProdDeny | undefined>; sandboxDenied?: ((project: string) => readonly string[]) | undefined }): DecisionSubject {
   return {
     kind: SETUP_HOST_KIND,
     async load(companyId, subjectId): Promise<LoadedSubject | undefined> {
@@ -275,7 +278,7 @@ export function createSetupHostSubject(options: { store: DocumentStore; prodDeny
       ];
       if (attempt.outcome === "approve") {
         // The host is checked against the refusal list AGAIN: the list or the deny list may have changed since the ask.
-        const refusal = refuseSetupHost(ask.host, options.prodDeny === undefined ? undefined : await options.prodDeny(ask.project));
+        const refusal = refuseSetupHost(ask.host, options.prodDeny === undefined ? undefined : await options.prodDeny(ask.project), options.sandboxDenied?.(ask.project));
         if (refusal !== undefined) throw new SubjectRefusal("invalid", SETUP_HOST_REFUSAL_WORDS[refusal]);
         return { ops: [change.set("state", "approved"), change.set("decidedAt", at), change.set("decidedBy", approver.personId)], extra: open, result: { host: ask.host, state: "approved" } };
       }

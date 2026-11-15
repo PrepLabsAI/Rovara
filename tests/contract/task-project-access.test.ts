@@ -13,12 +13,27 @@ const revision = (definition: { developerTasks?: unknown }) => ({
 const developerGrant = { pk: `MEMBER#${"a".repeat(64)}`, sk: "PROJECT#payments-api", projectName: "payments-api", role: "developer" };
 
 describe("task project authority core", () => {
-  it("counts only developer memberships as project grants", () => {
+  it("counts developer and administrator memberships as project grants, and witnesses the role it saw (#630)", () => {
     const result = evaluateProjectAuthority({
       project: "payments-api",
       developerId: "a".repeat(64), teamId: "T0BSHLLUGBD",
       revision: revision({ developerTasks: { enabled: true, channelMembersMayUse: false } }),
       memberships: [{ ...developerGrant, role: "administrator" }],
+      bindings: [],
+      freshMemberOf: [],
+      slackUserId: "U0123456789",
+    });
+
+    expect(result).toMatchObject({ kind: "allowed", access: "granted", witness: { membership: { ...developerGrant, role: "administrator" } } });
+  });
+
+  const roleless = { pk: developerGrant.pk, sk: developerGrant.sk, projectName: developerGrant.projectName };
+  it.each([["viewer", { ...developerGrant, role: "viewer" }], ["none", roleless]])("does not count a membership with role %s as a grant", (_name, membership) => {
+    const result = evaluateProjectAuthority({
+      project: "payments-api",
+      developerId: "a".repeat(64), teamId: "T0BSHLLUGBD",
+      revision: revision({ developerTasks: { enabled: true, channelMembersMayUse: false } }),
+      memberships: [membership],
       bindings: [],
       freshMemberOf: [],
       slackUserId: "U0123456789",

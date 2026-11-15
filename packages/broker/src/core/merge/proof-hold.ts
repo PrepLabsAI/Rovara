@@ -15,14 +15,16 @@ import {
   type AuditSink, type DocumentStore, type OrgId, type ProofHoldDecision, type ProofHoldFacts, type ProofHoldHistory, type ProofHoldMode, type ProofHoldReason, type ProofOverride, type TransactItem,
 } from "@agentx/contracts";
 import { plain } from "./store.js";
+import { PROOF_READ_MAX_MS, withinTime } from "../proof/proof-keep.js";
+import type { MergeReadBudget } from "./budget.js";
 import type { MergeTask, SessionTimeline } from "./seams.js";
 
 /** What the host supplies so a draft can be judged. Absent, the pass never holds. */
 export interface ProofHoldSource {
   /** The preset's rule for this task's project: `off` when the gate is off, `warn` (Lightweight), `hold` (Balanced, Careful). */
-  mode(task: MergeTask): Promise<ProofHoldMode> | ProofHoldMode;
+  mode(task: MergeTask, budget?: MergeReadBudget): Promise<ProofHoldMode> | ProofHoldMode;
   /** What is known about this change for the head: the same-task before-run, coverage, tests absent on the new code, scripted-reply origins. `undefined` when nothing could be read (never a hold). */
-  facts(input: { task: MergeTask; repositoryId: string; number: number; headSha: string }): Promise<ProofHoldFacts | undefined>;
+  facts(input: { task: MergeTask; repositoryId: string; number: number; headSha: string; signal: AbortSignal; budget: MergeReadBudget }): Promise<ProofHoldFacts | undefined>;
 }
 
 export const PROOF_HOLD_ENTITY = "PROOF_HOLD";
@@ -110,13 +112,15 @@ function entriesOf(stored: Record<string, unknown> | undefined): HistoryEntry[] 
 /** How many of the project's last 20 judged pull requests the rule would have held. */
 export async function readProofHoldHistory(store: Pick<DocumentStore, "get">, orgId: OrgId, project: string, exclude?: string): Promise<ProofHoldHistory> {
   // `exclude`: the pull request being judged. Its own earlier verdict is not evidence about the project's hold rate, or a held draft would count itself and relax on the next sweep.
-  const entries = entriesOf(await store.get(historyKey(orgId, project))).filter((entry) => entry.k !== exclude);
+  return historyOf(await store.get(historyKey(orgId, project)), exclude);
+}
+function historyOf(stored: Record<string, unknown> | undefined, exclude?: string): ProofHoldHistory {
+  const entries = entriesOf(stored).filter((entry) => entry.k !== exclude);
   return { held: entries.filter((entry) => entry.held).length, total: entries.length };
 }
 /** Records the rule's own verdict for one pull request (the latest verdict for a pull request replaces the one before it, so a pass that runs again does not count twice). Best effort: a lost race only delays it to the next pass. */
-async function noteProofHoldOutcome(store: DocumentStore, orgId: OrgId, project: string, key: string, held: boolean): Promise<void> {
+async function noteProofHoldOutcome(store: DocumentStore, orgId: OrgId, project: string, key: string, held: boolean, stored: Record<string, unknown> | undefined): Promise<void> {
   const at = historyKey(orgId, project);
-  const stored = await store.get(at);
   const before = entriesOf(stored);
   const next = [...before.filter((entry) => entry.k !== key), { k: key, held }].slice(-WINDOW);
   if (stored !== undefined && next.length === before.length && next.every((entry, index) => entry.k === before[index]?.k && entry.held === before[index]?.held)) return;
@@ -142,6 +146,7 @@ export interface JudgeDependencies {
   store: DocumentStore;
   timeline: SessionTimeline;
   proofHold: ProofHoldSource;
+  budget?: MergeReadBudget | undefined;
   log?(event: string, fields: Record<string, unknown>): void;
 }
 
@@ -160,27 +165,58 @@ export function proofWarningLine(decision: ProofHoldDecision): string {
 export async function judgeProofHold(
   deps: JudgeDependencies, task: MergeTask & { orgId: OrgId }, pullRequest: { repositoryId: string; number: number }, headSha: string, now: number,
 ): Promise<ProofHoldGate> {
-  let decision: ProofHoldDecision;
-  let mode: ProofHoldMode;
-  let override: ProofOverrideRecord | undefined;
-  try {
-    mode = await deps.proofHold.mode(task);
-    if (mode === "off") return { kind: "proceed" };
-    const facts = (await deps.proofHold.facts({ task, repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha })) ?? {};
-    const recent = await readProofHoldHistory(deps.store, task.orgId, task.project, `${pullRequest.repositoryId}#${String(pullRequest.number)}`);
-    decision = proofHolds({ facts, mode, recent });
-    // M2: unknown never releases. A draft that was held (on any head) and whose proof cannot be read now (no facts, no proof, or one that was not checked) stays held with the reasons it had.
-    const unknown = facts.proof === undefined || facts.proof.status !== "checked";
-    const before = holdRecordOf(await deps.store.get(proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number)), task.orgId, task.taskId);
-    if (mode === "hold" && unknown && !decision.holds && !decision.relaxed && before?.holds === true) {
-      decision = { ...decision, holds: true, warns: false, wouldHold: true, reasons: before.reasons.length > 0 ? before.reasons : ["proof_failed"] };
-    }
-    const stored = overrideRecordOf(await deps.store.get(proofOverrideKey(task.taskId, pullRequest.repositoryId, pullRequest.number)), task.orgId, task.taskId);
-    override = stored !== undefined && stored.headSha === headSha ? stored : undefined;
-  } catch (error) {
-    deps.log?.("proof_hold.unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+  // One deadline covers ALL judgment reads. The raced work is read-only, and every continuation
+  // checks cancellation before another read; a source ignoring abort can never write a late judgment.
+  const controller = new AbortController();
+  const abort = () => { controller.abort(); };
+  const parent = deps.budget?.signal;
+  parent?.addEventListener("abort", abort, { once: true });
+  if (parent?.aborted === true) abort();
+  const budget: MergeReadBudget = {
+    signal: controller.signal,
+    beforeRequest: () => { controller.signal.throwIfAborted(); deps.budget?.beforeRequest(); },
+  };
+  const read = async <T,>(operation: () => T | Promise<T>): Promise<T> => {
+    budget.beforeRequest();
+    const value = await operation();
+    controller.signal.throwIfAborted();
+    return value;
+  };
+  let cancel: (() => void) | undefined;
+  const result = await withinTime(PROOF_READ_MAX_MS, () => Promise.race([
+    Promise.resolve().then(async () => {
+      const mode = await read(() => deps.proofHold.mode(task, budget));
+      if (mode === "off") return { off: true as const };
+      if (mode !== "hold" && mode !== "warn") throw new Error("unreadable");
+      const facts = (await read(() => deps.proofHold.facts({ task, repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha, signal: budget.signal, budget }))) ?? {};
+      const historyStored = await read(() => deps.store.get(historyKey(task.orgId, task.project)));
+      const recent = historyOf(historyStored, `${pullRequest.repositoryId}#${String(pullRequest.number)}`);
+      let decision = proofHolds({ facts, mode, recent });
+      const unknown = facts.proof === undefined || facts.proof.status !== "checked";
+      const holdStored = await read(() => deps.store.get(proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number)));
+      const before = holdRecordOf(holdStored, task.orgId, task.taskId);
+      if (mode === "hold" && unknown && !decision.holds && !decision.relaxed && before?.holds === true) {
+        decision = { ...decision, holds: true, warns: false, wouldHold: true, reasons: before.reasons.length > 0 ? before.reasons : ["proof_failed"] };
+      }
+      const stored = overrideRecordOf(await read(() => deps.store.get(proofOverrideKey(task.taskId, pullRequest.repositoryId, pullRequest.number))), task.orgId, task.taskId);
+      const override = stored !== undefined && stored.headSha === headSha ? stored : undefined;
+      return { off: false as const, mode, decision, override, holdStored, historyStored };
+    }),
+    new Promise<never>((_resolve, reject) => {
+      cancel = () => { reject(new Error("unreadable")); };
+      controller.signal.addEventListener("abort", cancel, { once: true });
+      if (controller.signal.aborted) cancel();
+    }),
+  ]));
+  parent?.removeEventListener("abort", abort);
+  if (cancel !== undefined) controller.signal.removeEventListener("abort", cancel);
+  if (!result.done || controller.signal.aborted) {
+    abort();
+    deps.log?.("proof_hold.unreadable", { taskId: task.taskId, error: "unreadable" });
     return { kind: "unreadable" };
   }
+  if (result.value.off) return { kind: "proceed" };
+  const { mode, decision, override, holdStored, historyStored } = result.value;
 
   const at = new Date(now).toISOString();
   const record: ProofHoldRecord = {
@@ -190,8 +226,7 @@ export async function judgeProofHold(
   const spoken = decision.holds || decision.warns;
   const stateKey = createHash("sha256").update(JSON.stringify([headSha, decision.reasons, decision.holds, decision.warns, decision.relaxed, override?.at ?? null])).digest("hex").slice(0, 24);
   try {
-    const stored = await deps.store.get(proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number));
-    const changed = stored?.["stateKey"] !== stateKey;
+    const changed = holdStored?.["stateKey"] !== stateKey;
     if (changed) {
       const recordItem = plain({ ...proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number), entityType: PROOF_HOLD_ENTITY, stateKey, ...record });
       const items: TransactItem[] = [{ kind: "put", item: recordItem }];
@@ -205,7 +240,7 @@ export async function judgeProofHold(
       // The timeline line was said before (the judgement came back to an earlier state, so its line's id exists): the record is still written.
       if (!written.applied && items.length > 1) await deps.store.put({ item: recordItem });
     }
-    await noteProofHoldOutcome(deps.store, task.orgId, task.project, `${pullRequest.repositoryId}#${String(pullRequest.number)}`, decision.wouldHold);
+    await noteProofHoldOutcome(deps.store, task.orgId, task.project, `${pullRequest.repositoryId}#${String(pullRequest.number)}`, decision.wouldHold, historyStored);
   } catch (error) {
     // The record is for the person reading the page: a failure to write it is logged. What the pass decides below does not depend on it.
     deps.log?.("proof_hold.record_failed", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
@@ -248,8 +283,16 @@ export type MarkReadyResult = { overridden: true; already: boolean; override: Pr
 /** One plain line of a person's words: secrets redacted, control, format and invisible characters and line breaks gone, cut to the pack's bound. Rendering makes it inert again. */
 export function plainReason(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
-  const plainText = redactText(text.slice(0, OVERRIDE_REASON_MAX * 4)).replace(/[\p{Cc}\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\s]+/gu, " ").trim();
-  const points = Array.from(plainText).slice(0, OVERRIDE_REASON_MAX).join("").trim();
+  // Bound raw work, but discard the entire word crossing that boundary before redaction.
+  const rawLimit = 262_144;
+  let capped = text.slice(0, rawLimit);
+  if (text.length > rawLimit) {
+    let end = capped.length;
+    while (end > 0 && !/\s/u.test(capped[end - 1]!)) end -= 1;
+    capped = capped.slice(0, end);
+  }
+  const plainText = redactText(capped).replace(/[\p{Cc}\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\s]+/gu, " ").trim();
+  const points = redactText(Array.from(redactText(plainText)).slice(0, OVERRIDE_REASON_MAX).join("")).trim();
   return points === "" ? undefined : points;
 }
 

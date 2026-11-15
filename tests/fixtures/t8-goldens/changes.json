@@ -1,0 +1,34 @@
+[
+  [
+    {
+      "kind": "insert",
+      "cause": "write",
+      "key": {
+        "pk": "ORG#org_00000000000000000000#OLD",
+        "sk": "one"
+      },
+      "after": {
+        "pk": "ORG#org_00000000000000000000#OLD",
+        "sk": "one",
+        "value": "scoped"
+      },
+      "sequence": "00000000000000000001"
+    }
+  ],
+  [
+    {
+      "kind": "insert",
+      "cause": "write",
+      "key": {
+        "pk": "OLD",
+        "sk": "two"
+      },
+      "after": {
+        "pk": "OLD",
+        "sk": "two",
+        "value": "unscoped"
+      },
+      "sequence": "00000000000000000002"
+    }
+  ]
+]

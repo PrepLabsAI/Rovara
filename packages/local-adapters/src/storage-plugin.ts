@@ -1,6 +1,7 @@
 // Port lane L3: the `storage` plug-in "sqlite" for the W0 registry. Config entry:
 //   { "point": "storage", "name": "sqlite", "module": "@agentx/local-adapters/storage",
-//     "settings": { "path": ".rovara/state.db", "indexes": [ ... ], "ttlAttribute": "expiresAt" } }
+//     "settings": { "path": "state.db", "indexes": [ ... ], "ttlAttribute": "expiresAt" } }
+// A relative `path` is kept in the state folder (`~/.rovara`); a path inside a git repository is refused (settings.ts `databasePath`).
 // Not wired into the broker here: lane L4 loads it.
 import { OUTBOX_PENDING_INDEX, type IndexDefinition, type JsonValue, type PluginModule } from "@agentx/contracts";
 import { allowOnly, databasePath, optionalNumber, SettingsError, synchronousSetting } from "./settings.js";
@@ -63,7 +64,7 @@ export const plugin: PluginModule<"storage"> = {
       };
     }
     return SqliteDocumentStore.open({
-      path: databasePath(settings),
+      path: databasePath(settings, { ...(context.stateDirectory === undefined ? {} : { stateDirectory: context.stateDirectory }) }),
       indexes: indexesOf(settings.indexes),
       ...(ttl === null ? {} : { ttlAttribute: ttl }),
       // The plug-in's config owns the file's layout: a new index in the config is built at the next start.

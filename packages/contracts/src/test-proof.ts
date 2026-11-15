@@ -45,7 +45,43 @@ export const TestProofItemSchema = z.object({
 }).strict();
 export type TestProofItem = z.infer<typeof TestProofItemSchema>;
 
-export const TestProofSchema = z.object({
+/** The most test ids one check names as "ran before, not now" (the count says the rest). */
+export const ABSENT_ON_NEW_MAX = 100;
+
+/** Why a check's untouched tests could not be compared with the run on the original code. Fixed codes only. `no_report`: one of the two runs left no report of its own that can be read. `original_run_incomplete`: the run on the original code did not end (timed out, stopped). `original_run_truncated`: it looks cut short (collection errors, a stop-at-first-failure option, far fewer untouched tests than this code's run), so a missing test or a skip count would only be the cut. */
+export const TestProofNotComparedReasonSchema = z.enum(["no_report", "original_run_incomplete", "original_run_truncated"]);
+export type TestProofNotComparedReason = z.infer<typeof TestProofNotComparedReasonSchema>;
+
+/**
+ * TE-B3: what the run on the original code shows about a check's untouched tests, per COMPARED check (a check that was compared and shows nothing has zeros, so a reader can tell it from one that was not compared).
+ * `skippedBefore` and `skippedAfter` are the skips among tests the change did not touch (original code, this code); `absentOnNew` names tests that ran on the original code and are not in this code's report (at most
+ * `ABSENT_ON_NEW_MAX`, as test ids), and `absentOnNewCount` is how many there are in all. Facts only: the broker words them.
+ * The WRITER's schema is strict. The READER (`TestProofSchema`) strips what it does not know and drops a weakening part it cannot read, so a broker ships the reader before any worker writes the part.
+ */
+const weakeningShape = {
+  checkId: z.string().min(1).max(64),
+  skippedBefore: z.number().int().min(0).max(100_000_000),
+  skippedAfter: z.number().int().min(0).max(100_000_000),
+  absentOnNew: z.array(z.string().min(1).max(TEST_ID_MAX)).max(ABSENT_ON_NEW_MAX),
+  absentOnNewCount: z.number().int().min(0).max(100_000_000),
+};
+const countCheck = (item: { absentOnNew: unknown[]; absentOnNewCount: number }) => item.absentOnNewCount >= item.absentOnNew.length;
+export const TestProofWeakeningSchema = z.object(weakeningShape).strict().refine(countCheck, "the count is at least the names listed");
+const TestProofWeakeningReadSchema = z.object(weakeningShape).refine(countCheck, "the count is at least the names listed");
+export type TestProofWeakening = z.infer<typeof TestProofWeakeningSchema>;
+
+const notComparedShape = { checkId: z.string().min(1).max(64), reason: TestProofNotComparedReasonSchema };
+// Reply facts travel with the proof so provenance cannot go missing independently.
+const replyShape = {
+  checkId: z.string().min(1).max(64),
+  taskMade: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  counted: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+};
+const boundedReplies = z.unknown().refine((items) => Array.isArray(items) && items.length <= 200, "unsupported");
+const uniqueReplies = (items: { checkId: string }[]) => new Set(items.map((item) => item.checkId)).size === items.length;
+const repliesWrite = boundedReplies.pipe(z.array(z.object(replyShape).strict()).refine(uniqueReplies, "unsupported"));
+const repliesRead = boundedReplies.pipe(z.array(z.object(replyShape)).refine(uniqueReplies, "unsupported"));
+const proofShape = {
   schemaVersion: z.literal(1),
   /** The candidate digest of the code the checks passed on. A proof for any other digest is ignored. */
   candidateDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -55,7 +91,26 @@ export const TestProofSchema = z.object({
   changedTests: z.object({ added: z.number().int().nonnegative(), changed: z.number().int().nonnegative(), deleted: z.number().int().nonnegative() }).strict(),
   items: z.array(TestProofItemSchema).max(200),
   durationMs: z.number().int().nonnegative(),
+};
+
+/** What the WORKER writes (strict). */
+export const TestProofWriteSchema = z.object({
+  ...proofShape,
+  scriptedReplies: repliesWrite.optional(),
+  /** TE-B3: per compared check, what the original code's run shows about tests the change did not touch. */
+  weakening: z.array(TestProofWeakeningSchema).max(64).optional(),
+  /** TE-B3: the checks that were run on the original code and could not be compared, with the fixed reason. */
+  weakeningNotCompared: z.array(z.object(notComparedShape).strict()).max(64).optional(),
 }).strict();
+
+/** What READERS parse: the same, but a key a newer writer added is dropped, and a weakening part that does not read is dropped alone (the rest of the proof still reads). */
+export const TestProofSchema = z.object({
+  ...proofShape,
+  // A present unreadable provenance part invalidates the WHOLE proof. Never catch-and-drop it.
+  scriptedReplies: repliesRead.optional(),
+  weakening: z.array(TestProofWeakeningReadSchema).max(64).optional().catch(undefined),
+  weakeningNotCompared: z.array(z.object(notComparedShape)).max(64).optional().catch(undefined),
+});
 export type TestProof = z.infer<typeof TestProofSchema>;
 
 // ---- TE-B5: the change proof holds the draft (testing plan O2, O30, O43; DECISIONS 161)
@@ -156,6 +211,26 @@ export interface ProofHoldDecision {
 const OWN = (record: Readonly<Record<string, string>> | undefined, key: string): string | undefined => (record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined);
 const finiteCount = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0);
 
+/** Reject oversized collections before schema traversal; the whole proof must be understood before any row can prove the change. */
+function proofForHold(raw: TestProof | undefined): { proof?: TestProof; invalid: boolean } {
+  if (raw === undefined) return { invalid: false };
+  try {
+    if (!Array.isArray(raw.items) || raw.items.length > 200
+      || (raw.weakening !== undefined && (!Array.isArray(raw.weakening) || raw.weakening.length > 64
+        || raw.weakening.some((row) => !Array.isArray(row.absentOnNew) || row.absentOnNew.length > ABSENT_ON_NEW_MAX)))
+      || (raw.weakeningNotCompared !== undefined && (!Array.isArray(raw.weakeningNotCompared) || raw.weakeningNotCompared.length > 64))
+      || (raw.scriptedReplies !== undefined && (!Array.isArray(raw.scriptedReplies) || raw.scriptedReplies.length > 200))) return { invalid: true };
+    const parsed = TestProofSchema.safeParse(raw);
+    if (!parsed.success
+      || (raw.weakening !== undefined && parsed.data.weakening === undefined)
+      || (raw.weakeningNotCompared !== undefined && parsed.data.weakeningNotCompared === undefined)
+      || parsed.data.items.some((entry) => entry.verdict === "proves_change" && entry.reason !== "assertion_failed_on_old")) return { invalid: true };
+    return { proof: parsed.data, invalid: false };
+  } catch {
+    return { invalid: true };
+  }
+}
+
 /**
  * The ready rule: whether the draft is held. Pure. `mode` is the preset's (`off` when the gate is off); `recent` is the project's hold history, which relaxes `hold` to a warning above 10% (O43).
  * Hold reasons are `proof_failed` (every counted test also passes on the old code), `changed_code_not_run` (coverage says no test ran any changed line), `test_absent_on_new` and `flaky_on_change`.
@@ -167,7 +242,7 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
   let vacuous = 0;
   let loadFailureOnOld = 0;
   let scriptedProof = false;
-  const proof = facts.proof;
+  const { proof, invalid } = proofForHold(facts.proof);
   if (proof !== undefined && proof.status === "checked") {
     for (const entry of proof.items) {
       if (entry.verdict === "not_applicable" || entry.verdict === "not_checked") continue;
@@ -176,14 +251,14 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
       if (kind !== undefined && checkKindInfo(kind)?.countsTowardProof !== true) continue;
       if (entry.verdict === "could_not_run_on_old") loadFailureOnOld += 1;
       else if (entry.verdict === "does_not_prove") vacuous += 1;
-      else {
+      else if (entry.verdict === "proves_change" && entry.reason === "assertion_failed_on_old") {
         const origin = OWN(facts.scriptedReplies, entry.checkId);
         provenCount += 1;
         if (origin !== undefined) scriptedProof = true;
       }
     }
   }
-  const reasons: ProofHoldReason[] = [];
+  const reasons: ProofHoldReason[] = invalid ? ["proof_failed"] : [];
   if (proof?.status === "checked" && provenCount === 0 && vacuous > 0) reasons.push("proof_failed");
   const changed = finiteCount(facts.changedLines?.changed);
   if (changed > 0 && finiteCount(facts.changedLines?.covered) === 0) reasons.push("changed_code_not_run");
@@ -195,7 +270,7 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
   const wouldHold = input.mode !== "off" && reasons.length > 0;
   if (!wouldHold) return { holds: false, warns: false, wouldHold: false, relaxed: false, ...base, reasons: input.mode === "off" ? [] : reasons };
   if (input.mode === "warn") return { holds: false, warns: true, wouldHold: true, relaxed: false, ...base };
-  const relaxed = proofHoldRelaxes(input.recent);
+  const relaxed = !invalid && proofHoldRelaxes(input.recent);
   return { holds: !relaxed, warns: relaxed, wouldHold: true, relaxed, ...base };
 }
 
