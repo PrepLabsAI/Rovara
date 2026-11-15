@@ -11,7 +11,7 @@ import {
 } from "../../packages/broker/src/aws/company-member-routes.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
-import { MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP } from "../../packages/broker/src/developer/company-member-contract.js";
+import { MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP } from "../../packages/broker/src/developer/company-member-contract.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = Date.parse("2026-11-15T12:00:00.000Z");
@@ -209,10 +209,11 @@ describe("removal and role change", () => {
     expect(await h.call("POST", member(MEMBER, "removal"), {})).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
   });
 
-  it("an admin demotes another admin to member", async () => {
+  it("demoting an admin reaches T3b, whose step-up seam refuses it until #660 is wired (fail closed)", async () => {
     const h = world(); h.join(OWNER2, A, "admin"); h.stepUp();
-    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect(h.role(OWNER2)).toBe("member");
+    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual(refusal(403, "REAUTH_REQUIRED", MEMBER_STEP_UP));
+    expect(h.role(OWNER2)).toBe("admin");
+    expect(h.forwarded).toEqual([{ kind: "company-member-role-set", companyId: A, personId: OWNER2, role: "member", createdBy: ADMIN }]);
   });
 
   it("surfaces T3b's own refusals in its fixed words: the step-up seam for a promotion, and a removed member's role", async () => {
@@ -251,13 +252,22 @@ describe("only an owner changes or removes an owner (DEC 232e)", () => {
     expect(h.forwarded).toEqual([]);
   });
 
-  it("an owner demotes and removes another owner (one owner always stays)", async () => {
+  it("an owner's demotion or removal of another owner passes the route and reaches T3b (whose step-up seam still refuses it, fail closed)", async () => {
     const h = world(); h.join(OWNER2, A, "owner"); h.as(OWNER); h.stepUp();
-    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect(h.role(OWNER2)).toBe("member");
-    h.join(OWNER2, A, "owner");
-    expect(await h.call("POST", member(OWNER2, "removal"))).toEqual({ status: 200, body: { ok: true } });
-    expect(h.revoked(OWNER2)).toBe(true);
+    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual(refusal(403, "REAUTH_REQUIRED", MEMBER_STEP_UP));
+    expect(await h.call("POST", member(OWNER2, "removal"))).toEqual(refusal(403, "REAUTH_REQUIRED", MEMBER_STEP_UP));
+    expect(h.role(OWNER2)).toBe("owner"); expect(h.revoked(OWNER2)).toBe(false);
+    expect(h.forwarded.map((event) => [event["kind"], event["createdBy"]])).toEqual([["company-member-role-set", OWNER], ["company-member-revoke", OWNER]]);
+  });
+
+  it("T3b's own owner-only refusal reaches the caller as 403 in its words: the target became an owner after the route read it", async () => {
+    const h = world(); h.join(OWNER2, A, "member"); h.stepUp();
+    const helper = h.deps.developer.companyMembers!;
+    // An owner promotes the target between the route's read and the identity side's write; T3b's store refuses the admin inside its own check.
+    h.deps.developer.companyMembers = { ...helper, revoke: async (caller, request) => { h.join(OWNER2, A, "owner"); return helper.revoke(caller, request); } };
+    expect(await h.call("POST", member(OWNER2, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
+    expect(h.revoked(OWNER2)).toBe(false); expect(h.role(OWNER2)).toBe("owner");
+    expect(OWNER_ONLY).toBe(MEMBER_ONLY_OWNER);
   });
 
   it("the preview tells the caller whether they may remove the person", async () => {

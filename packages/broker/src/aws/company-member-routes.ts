@@ -23,11 +23,12 @@ import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
-import { CompanyMember, MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, memberCursorPerson, type CompanyMemberReply } from "../developer/company-member-contract.js";
+import { CompanyMember, MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, memberCursorPerson, type CompanyMemberReply } from "../developer/company-member-contract.js";
 
 export const MEMBER_NOT_FOUND = "member not found";
 export const NOT_FOUND = "not found";
-export const OWNER_ONLY = "only an owner can change or remove an owner";
+/** T3b's own words for DEC 232e; the route refuses first with the same sentence, and the store refuses again inside its transaction. */
+export const OWNER_ONLY = MEMBER_ONLY_OWNER;
 export const OWN_MEMBERSHIP = "you cannot change your own role or remove yourself here";
 export const REMOVAL_STEP_UP = "this removal needs a fresh sign-in check; sign in again and retry";
 export const ROLE_BODY = "send the new role: member, admin or owner";
@@ -90,7 +91,7 @@ function unwrap(reply: CompanyMemberReply): Extract<CompanyMemberReply, { ok: tr
   if (reply.error === "step_up_required") throw agentXError("REAUTH_REQUIRED", MEMBER_STEP_UP);
   if (message === MEMBER_LAST_OWNER) throw agentXError("LAST_OWNER", MEMBER_LAST_OWNER);
   if (message === MEMBER_REVOKED) throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
-  if ((message as string | undefined) === OWNER_ONLY) throw agentXError("FORBIDDEN", OWNER_ONLY);
+  if (message === MEMBER_ONLY_OWNER) throw agentXError("FORBIDDEN", MEMBER_ONLY_OWNER);
   if (reply.error === "not_found") throw agentXError("NOT_FOUND", MEMBER_NOT_FOUND);
   if (reply.error === "invalid_request") throw agentXError("CONFIG_INVALID", REQUEST_INVALID);
   throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE);
