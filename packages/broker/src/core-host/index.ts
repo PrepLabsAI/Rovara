@@ -7,3 +7,4 @@ export * from "./jobs.js";
 export * from "./registry.js";
 export * from "./retention.js";
 export * from "./step-fence.js";
+export * from "./lessons.js";
