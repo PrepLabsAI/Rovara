@@ -6,6 +6,7 @@
 import { ROVARA_CODE_PROGRAM } from "../plan/program.js";
 import {
   AgentXError,
+  WorkOriginSchema,
   UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
   unrunnableExternalCheck,
   ROVARA_CODE_V2_FOR_NEW_ORGS,
@@ -27,7 +28,7 @@ import { taskOwnerKey } from "../../developer/task-records.js";
 import { buildOperation } from "./accept.js";
 import { recordAudit, releaseAdmission, stageAdmission, stageAudit } from "./admission.js";
 import { taskWorkflowCheckPolicy } from "./check-policy.js";
-import type { TaskCaller, TaskFlowDeps } from "./deps.js";
+import type { TaskStartCaller, TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem } from "./dispatch-rows.js";
 import { chargeConflict, chargeItems, limitReached } from "./limits.js";
 import { developerCharge, startIdempotencyKey, taskIndexKey, taskKey, taskPointerKey, workspaceKey, conversationKey } from "./keys.js";
@@ -65,13 +66,17 @@ function parseRequest(value: unknown): StartDeveloperTaskRequest {
  */
 export interface SetupAgentStart { limits: SetupAgentLimits; seenTaskId: string | undefined }
 
-export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: unknown, run?: { setupAgent?: SetupAgentStart }): Promise<StartResult> {
+export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, value: unknown, run?: { setupAgent?: SetupAgentStart }): Promise<StartResult> {
   const parsedRequest = parseRequest(value);
   const { principal } = caller;
   if (principal.companyId !== deps.companyId) throw agentXError("FORBIDDEN", "this person belongs to another company");
   // `design first:` at the start of a request asks for the design to be reviewed before any code. Read only while the stage exists for the company (and after the company check, so another company's request is refused before anything is read); the instructions are then the request without the prefix.
   const designFirst = parsedRequest.workflow === true ? await deps.designReview?.designFirst(parsedRequest.instructions) : undefined;
   const request = designFirst?.designFirst === true ? { ...parsedRequest, instructions: designFirst.rest } : parsedRequest;
+  // Direct engine starts and the shared developer API are the app surface. CLI and MCP share
+  // a credential/route here, so their free-text client labels cannot distinguish trusted origins.
+  const origin = WorkOriginSchema.safeParse(caller.origin);
+  if (!origin.success) throw agentXError("CONFIG_INVALID", "invalid task origin");
   const developerId = principal.personId;
   // A script token's task always has the fixed client "Script token": the body cannot choose that text, and the token's own name never reaches a pull request footer or a turn record (the audit names the token).
   const client = caller.scriptToken !== undefined ? SCRIPT_TOKEN_CLIENT_NAME : cleanClientName(request.client ?? caller.client);
@@ -183,7 +188,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
   });
   const task: TaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", companyId: deps.companyId, taskId, developerId, provider: principal.provider, developerName: principal.displayName,
-    client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: false,
+    origin: origin.data, client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: false,
     // A workflow task quotes the request in each plan's "why".
     ...(asWorkflow ? { requestText } : {}),
     // A task intake started from a ticket says so, so its request is shown as the ticket's words and not as the owner's.
