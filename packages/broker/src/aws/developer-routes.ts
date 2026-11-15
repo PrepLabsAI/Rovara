@@ -76,6 +76,7 @@ import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
+import { renameTaskOwner } from "../developer/task-owner-name.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -364,6 +365,13 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
   const answer = await set({ kind: "set-display-name", developerId: caller.developerId, name: body.data.name });
   if (answer.ok) {
     console.log(JSON.stringify({ component: "broker", event: "developer.display_name_chosen", developerId: caller.developerId }));
+    // #661: the person's tasks take the new name. Best effort: the name is already theirs, so a failure here is logged, not answered.
+    try {
+      const renamed = await renameTaskOwner(deps.documentClient, deps.tableName, caller.developerId, answer.name);
+      console.log(JSON.stringify({ component: "broker", event: "developer.tasks_renamed", developerId: caller.developerId, ...renamed }));
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "developer.tasks_rename_failed", developerId: caller.developerId, error: error instanceof Error ? error.name : "unknown" }));
+    }
     return { name: answer.name, nameChosen: true };
   }
   if (answer.error === "not_found") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
