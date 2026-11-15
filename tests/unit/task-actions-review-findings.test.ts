@@ -29,7 +29,7 @@ const STEP_UP_NOW = "2026-11-09T10:00:00.000Z";
 const FRESH = { at: STEP_UP_NOW, method: "email_code" };
 const pageActions = (deps: TaskFlowDeps, options?: TaskActionsOptions) => {
   const actions = createTaskActions(deps, options);
-  return { resolveFindings: (caller: TaskCaller, taskId: string, body: unknown, via: "page" | "api-token" = "page") => actions.resolveFindings({ ...caller, stepUp: FRESH }, taskId, body, via) };
+  return { resolveFindings: (caller: TaskCaller, taskId: string, body: unknown, via: "page" | "api-token" = "page") => actions.resolveFindings({ ...caller, stepUp: FRESH, webApp: true }, taskId, body, via) };
 };
 const both = () => blockedReview({}, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]);
 const answer = (findingId: string, action: "ACCEPT" | "FIX", note = action === "ACCEPT" ? "A footer we drop on purpose." : "Keep the footer line.") => ({ findingId, action, note });

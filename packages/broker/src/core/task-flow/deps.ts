@@ -63,6 +63,11 @@ export interface TaskCaller {
    * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
    */
   stepUp?: { at: string; method: string } | undefined;
+  /**
+   * DEC 236h: set only by the host's sign-in, from the verified client's registration, when the request comes from the Rovara web app's own sign-in client (the one the operator marked; never an administrator's
+   * registration, and never another full-access client such as an AI tool's). Only the act that is the web page's alone (accepting a security finding, `security-accept.ts`) reads it.
+   */
+  webApp?: true | undefined;
 }
 
 /** Starting work always names the trusted server surface; other task actions need no origin. */

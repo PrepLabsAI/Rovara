@@ -21,7 +21,7 @@ const fixBoth = () => request([answer(parserId, "FIX", "Keep it."), answer(token
 /** The harness clock (2026-11-09T10:00:00Z) is the time of "now"; a step-up is this many seconds old. */
 const NOW_MS = Date.parse("2026-11-09T10:00:00.000Z");
 const stepUp = (ageSeconds: number, method = "email_code") => ({ at: new Date(NOW_MS - ageSeconds * 1_000).toISOString(), method });
-const withStepUp = (caller: TaskCaller, value: { at: string; method: string } | undefined): TaskCaller => (value === undefined ? caller : { ...caller, stepUp: value });
+const withStepUp = (caller: TaskCaller, value: { at: string; method: string } | undefined): TaskCaller => (value === undefined ? { ...caller, webApp: true } : { ...caller, stepUp: value, webApp: true });
 const refused = { message: expect.stringContaining(SECURITY_ACCEPT_ON_THE_PAGE) as string };
 
 describe("a security finding is accepted on the web page, with a fresh step-up", () => {
@@ -43,7 +43,7 @@ describe("a security finding is accepted on the web page, with a fresh step-up",
   it("is refused to a script token (the owner is not a script token), with nothing written", async () => {
     const { h, caller } = await seed({ workflow: both() });
     const before = await stateOf(h);
-    const script = { ...caller, stepUp: stepUp(5), scriptToken: { tokenId: "t", name: "CI", permissions: ["read", "start"] as const, projects: ["payments"] } };
+    const script = { ...caller, stepUp: stepUp(5), webApp: true as const, scriptToken: { tokenId: "t", name: "CI", permissions: ["read", "start"] as const, projects: ["payments"] } };
     await expect(createTaskActions(h.deps).resolveFindings(script, TASK_ID, acceptSecurity(), "page")).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     expect(await stateOf(h)).toEqual(before);
     // The guard on its own refuses a script token that reached it, whatever the way and the step-up say.
@@ -67,6 +67,17 @@ describe("a security finding is accepted on the web page, with a fresh step-up",
       await expect(createTaskActions(h.deps).resolveFindings(withStepUp(caller, held), TASK_ID, acceptSecurity(), "page"), name).rejects.toMatchObject({ code: "REAUTH_REQUIRED", ...refused });
       expect(await stateOf(h), name).toEqual(before);
     }
+  });
+
+  it("is refused to a page-way caller that is not the web app's own client (a full-access AI tool's, say), even with a fresh step-up", async () => {
+    const { h, caller } = await seed({ workflow: both() });
+    const before = await stateOf(h);
+    const tool = { ...caller, stepUp: stepUp(5) };
+    await expect(createTaskActions(h.deps).resolveFindings(tool, TASK_ID, acceptSecurity(), "page")).rejects.toMatchObject({ code: "FORBIDDEN", ...refused });
+    await expect(createTaskActions(h.deps).resolveFindings({ ...tool, webApp: undefined }, TASK_ID, acceptSecurity(), "page")).rejects.toMatchObject({ code: "FORBIDDEN", ...refused });
+    expect(await stateOf(h)).toEqual(before);
+    // The code review's findings stay open to it.
+    await createTaskActions(h.deps).resolveFindings(tool, TASK_ID, request([answer(parserId, "ACCEPT"), answer(tokenId, "FIX", "Remove it.")]), "page");
   });
 
   it("holds the company's window: it may only shorten the ten minutes, and a window that cannot be read refuses", async () => {
