@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { TASK_KEY_PURPOSE, type OrgId } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
 import { brokerCoreModuleDeps, createBrokerCoreRoot, taskTokensFromEnvironment, type BrokerCoreRootInputs } from "../../packages/broker/src/aws/core-engine-root.js";
 import { hostedDispatcherFlow } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { mintTaskToken } from "../../packages/broker/src/core/model-gateway/token.js";
@@ -133,10 +132,10 @@ describe("the broker's model gateway for core callbacks", () => {
     expect(claimsOf((await mintTaskToken({ ...gateway, now: () => 1_800_000_000_000 }, operation)).token)).toMatchObject({ cid: ORG_A, mdl: [MODEL], iss: "https://api.staging.example/v1/auth" });
   });
   it("the broker's task tokens from its environment: the KMS task key stamped with purpose `task`, or nothing without the key or the issuer", async () => {
+    // A fake KMS by the command's input shape (a Sign carries the message; GetPublicKey only the key id).
     const kms = { send: async (command: unknown) => {
-      if (command instanceof GetPublicKeyCommand) return { PublicKey: new Uint8Array(der), KeyUsage: "SIGN_VERIFY" };
-      if (command instanceof SignCommand) return { Signature: new Uint8Array(sign("sha256", Buffer.from(command.input.Message!), pair.privateKey)) };
-      throw new Error("unexpected");
+      const input = (command as { input: { Message?: Uint8Array } }).input;
+      return input.Message === undefined ? { PublicKey: new Uint8Array(der), KeyUsage: "SIGN_VERIFY" } : { Signature: new Uint8Array(sign("sha256", Buffer.from(input.Message), pair.privateKey)) };
     } };
     expect(taskTokensFromEnvironment({}, kms)).toBeUndefined();
     expect(taskTokensFromEnvironment({ TASK_TOKEN_KEY_ARN: "arn:aws:kms:us-west-2:111122223333:key/k" }, kms)).toBeUndefined();
