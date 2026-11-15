@@ -150,10 +150,8 @@ describe("POST /v1/dev/access by developer ID, for a confidential service (FR-00
 
 describe("a client's token on Rovara's own routes (FR-003)", () => {
   it("is refused, even naming a client session", async () => {
-    // Plan v3.2 lane ID: a client's own token is now checked against the route's named scope, and refused naming it.
     const response = await handler({ rawPath: "/v1/dev/projects", headers: { authorization: `Bearer ${await signed(clientClaims())}` }, requestContext: { requestId: "r", http: { method: "GET" } } });
-    expect(response.statusCode).toBe(403);
-    expect(response.body).toContain("needs the tasks:read scope for GET /v1/dev/projects");
+    expect(response.statusCode).toBe(401);
     // A CLI-shaped token that names a client's session is refused too.
     const forged = await handler({ rawPath: "/v1/dev/projects", headers: { authorization: `Bearer ${await signed(clientClaims({ aud: "agentx-developer", azp: undefined }))}` }, requestContext: { requestId: "r", http: { method: "GET" } } });
     expect(forged.statusCode).toBe(401);

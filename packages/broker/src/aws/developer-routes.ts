@@ -377,7 +377,8 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
   if (set === undefined) throw agentXError("NOT_FOUND", "choosing your own name is not set up in this deployment");
   const answer = await set({ kind: "set-display-name", developerId: caller.developerId, name: body.data.name });
   if (answer.ok) {
-    console.log(JSON.stringify({ component: "broker", event: "developer.display_name_chosen", developerId: caller.developerId }));
+    // This path has no company in scope (the caller is a person), so it uses the file's one company-less logger, already in the inventory, rather than a new console call.
+    logDeveloperEvent({ event: "developer.display_name_chosen", developerId: caller.developerId });
     return { name: answer.name, nameChosen: true };
   }
   if (answer.error === "not_found") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
@@ -834,7 +835,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
 function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord; scopes: readonly ClientScope[] }): void {
   if (route.requires === "none") return;
   if (route.requires === "full" ? caller.client.fullAccess === true : caller.scopes.includes(route.requires)) return;
-  console.log(JSON.stringify({ component: "broker", event: "client.scope_refused", clientId: caller.client.clientId, method: route.method, route: route.path, requires: route.requires }));
+  // No company in scope here (the caller is a sign-in client acting as a person), so this uses the file's one company-less logger, already in the log-site inventory, rather than a new console call.
+  logDeveloperEvent({ event: "client.scope_refused", clientId: caller.client.clientId, method: route.method, route: route.path, requires: route.requires });
   throw agentXError("FORBIDDEN", route.requires === "full"
     ? `${caller.client.name} needs full access for ${route.method} ${route.path}, which is off for it; an administrator can turn it on`
     : `${caller.client.name} needs the ${route.requires} scope for ${route.method} ${route.path}; an administrator can allow it with that scope`);
@@ -843,8 +845,9 @@ function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord
 /**
  * A developer API caller: the Rovara CLI's token, with all the person's rights; or a registered sign-in client's, as its
  * signed-in person, within the route's scope (plan v3.2 lane ID) or, for a `full` route, only with full access (spec
- * 066). The unverified azp only picks the path; each then verifies the token in full. The client's registration is
- * read at every request, so removing a scope or full access takes effect at once.
+ * 066). A client registered with no scope and no full access is refused with 401, as before. The unverified azp only
+ * picks the path; each then verifies the token in full. The client's registration is read at every request, so
+ * removing a scope or full access takes effect at once.
  */
 async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<DeveloperCaller> {
   let azp: unknown;
@@ -853,7 +856,9 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
   } catch {
     azp = undefined;
   }
-  if (typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID || (await signInClientOf(deps, azp)) === undefined) {
+  // A client with neither a scope nor full access is refused as before: its tokens are never Rovara's (401).
+  const client = typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID ? undefined : await signInClientOf(deps, azp);
+  if (client === undefined || (client.fullAccess !== true && (client.scopes ?? []).length === 0)) {
     return authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization));
   }
   const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));

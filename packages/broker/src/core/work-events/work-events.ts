@@ -6,7 +6,7 @@
 //
 // The reader (`listWorkEvents`) is for the rollups and flow reports that come later; nothing in Code reads events yet.
 import {
-  INDEX_EXPIRY_ATTRIBUTE, WorkEventInstantSchema, WorkEventSchema, queryAll, workEventExpiresAt, workEventKey, workEventMonths, workEventPartitions,
+  INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, companyOfKey, WorkEventInstantSchema, WorkEventSchema, queryAll, workEventExpiresAt, workEventKey, workEventMonths, workEventPartitions,
   type DocumentStore, type OrgId, type StoredDocument, type TransactItem, type WorkEvent, type WorkEventInput, type WorkEventKind, type WriteResult,
 } from "@agentx/contracts";
 
@@ -75,6 +75,7 @@ export interface WorkEventQuery {
  * returned, even if the store has not yet swept it.
  */
 export async function listWorkEvents(store: Pick<DocumentStore, "query">, query: WorkEventQuery): Promise<{ events: WorkEvent[]; unreadable: number }> {
+  if (!OrgIdSchema.safeParse(query?.orgId).success) throw new Error("invalid company");
   WorkEventInstantSchema.parse(query.from);
   WorkEventInstantSchema.parse(query.to);
   const nowSeconds = Math.floor((query.now ?? Date.now()) / 1000);
@@ -88,7 +89,7 @@ export async function listWorkEvents(store: Pick<DocumentStore, "query">, query:
         const expires = row[INDEX_EXPIRY_ATTRIBUTE];
         if (typeof expires === "number" && expires <= nowSeconds) continue;
         const parsed = WorkEventSchema.safeParse(Object.fromEntries(Object.entries(row).filter(([name]) => !["pk", "sk", "entityType", INDEX_EXPIRY_ATTRIBUTE].includes(name))));
-        if (!parsed.success) {
+        if (!parsed.success || parsed.data.orgId !== query.orgId || companyOfKey(row.pk) !== query.orgId) {
           unreadable += 1;
           continue;
         }

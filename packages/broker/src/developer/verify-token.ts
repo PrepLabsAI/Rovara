@@ -30,6 +30,9 @@ async function importKeys(jwks: unknown[]): Promise<Map<string, VerifyKey>> {
   const keys = new Map<string, VerifyKey>();
   for (const entry of jwks) {
     if (typeof entry !== "object" || entry === null) continue;
+    // Legacy JWKS have no purpose. Once both keys are published, only developer keys
+    // may authenticate sign-in; unknown or malformed purposes fail closed too.
+    if ("rovara_purpose" in entry && entry.rovara_purpose !== "developer") continue;
     const jwk = entry as { kty?: unknown; kid?: unknown; n?: unknown; e?: unknown; alg?: unknown; use?: unknown };
     if (jwk.kty !== "RSA" || typeof jwk.kid !== "string" || typeof jwk.n !== "string" || typeof jwk.e !== "string") continue;
     if ((jwk.alg !== undefined && jwk.alg !== "RS256") || (jwk.use !== undefined && jwk.use !== "sig")) continue;

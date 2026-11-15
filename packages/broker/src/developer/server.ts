@@ -73,7 +73,7 @@ import type { SlackDirectory } from "./slack-directory.js";
 import { createFactorAdmin } from "./factor-admin.js";
 import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
-import { issueAccessToken, pkceChallengeMatches, type TokenSigner } from "./tokens.js";
+import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk } from "./tokens.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
@@ -82,6 +82,7 @@ export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
   signer: TokenSigner;
+  extraPublicKeys?: ReadonlyArray<{ publicJwk(): Promise<PublicSigningJwk> }>;
   providers: Partial<Record<DeveloperSignInMethod, SignInProvider>>;
   directory: SlackDirectory;
   now: () => number;
@@ -642,8 +643,22 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       switch (pathname) {
         case "/v1/auth/.well-known/openid-configuration":
           return publicJson(discovery());
-        case "/v1/auth/.well-known/jwks.json":
-          return publicJson({ keys: [await deps.signer.publicJwk()] });
+        case "/v1/auth/.well-known/jwks.json": {
+          const developerKey = await deps.signer.publicJwk();
+          const extras = deps.extraPublicKeys ?? [];
+          // Preserve legacy bytes when no task key is configured. In a dual-key JWKS,
+          // purposes are symmetric and remain stable even if the task key read fails.
+          if (extras.length === 0) return publicJson({ keys: [developerKey] });
+          const keys = [{ ...developerKey, rovara_purpose: "developer" }];
+          for (const extra of extras) {
+            try {
+              keys.push({ ...await extra.publicJwk(), rovara_purpose: "task" });
+            } catch {
+              deps.log({ event: "developer.jwks_task_key_failed" });
+            }
+          }
+          return publicJson({ keys });
+        }
         case "/v1/auth/.well-known/agentx-configuration":
           return jsonResult(200, configuration());
         case "/v1/auth/authorize":

@@ -224,7 +224,11 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const isolation = pack.producer.isolation as string;
   const weakest = pack.level.weakest;
   const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
-  const firstLine = evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words });
+  // TE-B5 (O30): keep the override on the first line in both the full and compact forms.
+  const firstLine = line([
+    evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words }),
+    ...(pack.proof?.override === undefined ? [] : ["marked ready anyway"]),
+  ].join(" · "));
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
   const newer = options.newer ?? noNewerEvidence();

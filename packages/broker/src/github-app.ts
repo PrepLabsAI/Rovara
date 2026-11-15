@@ -413,6 +413,33 @@ export class GitHubAppCredentialProvider {
     });
   }
 
+  /**
+   * One page (`perPage` files, at most 100) of a pull request's changed files, for the task diff screen. `more` is whether GitHub
+   * says another page follows. A patch is kept whole here (the route decides what is too long to show); a file GitHub gave no
+   * patch for (binary, or too large for GitHub) has none.
+   */
+  async getPullRequestFilesPage(repositoryUrl: string, number: number, page: number, perPage = 30): Promise<{ files: GitHubPullRequestChangedFile[]; more: boolean }> {
+    if (!Number.isSafeInteger(number) || number < 1 || !Number.isSafeInteger(page) || page < 1 || page > 100 || !Number.isSafeInteger(perPage) || perPage < 1 || perPage > 100) {
+      throw agentXError("CONFIG_INVALID", "the pull request diff page is invalid");
+    }
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.createInstallationToken(repository, { contents: "read", pull_requests: "read" });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls/${number}/files?per_page=${perPage}&page=${page}`,
+      { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" },
+    );
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request diff lookup failed with HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    if (!Array.isArray(body) || body.length > perPage) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request diff");
+    const files = body.map((entry): GitHubPullRequestChangedFile => {
+      const file = entry !== null && typeof entry === "object" ? entry as Record<string, unknown> : {};
+      if (typeof file.filename !== "string" || file.filename.length === 0 || file.filename.length > 500 || typeof file.status !== "string"
+        || !Number.isSafeInteger(file.additions) || !Number.isSafeInteger(file.deletions)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request diff");
+      return { filename: file.filename, status: file.status, additions: file.additions as number, deletions: file.deletions as number, ...(typeof file.patch === "string" ? { patch: file.patch } : {}) };
+    });
+    return { files, more: /<[^>]*>;\s*rel="next"/u.test(response.headers.get("link") ?? "") };
+  }
+
   /** Current authoritative feedback, including thread resolution, read with a repository-scoped token. */
   async getPullRequestFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback> {
     const repository = await this.installed(parseGitHubRepository(repositoryUrl));
