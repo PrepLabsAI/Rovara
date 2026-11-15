@@ -555,6 +555,13 @@ describe("earned trust (DEC 231): the offer to let low-risk lessons go live on t
     await decide(locked, A, 10, 0);
     await locked.world.store.put({ item: { ...learningModeLockKey(A), entityType: "LESSON_MODE", mode: "collect", updatedAt: 1 } });
     expect(await offerOf(api(locked).api, "a-admin")).toBeUndefined();
+    // The project chose auto but a company lock holds it at Suggest: the project's own choice is not Suggest, so there is nothing to offer.
+    const heldBack = await setUp();
+    await decide(heldBack, A, 10, 0);
+    expect(await call(api(heldBack).api, "a-admin", "PUT", `${P}/lessons/mode`, { mode: "auto" })).toMatchObject({ ok: true });
+    await heldBack.world.store.put({ item: { ...learningModeLockKey(A), entityType: "LESSON_MODE", mode: "suggest", updatedAt: 1 } });
+    expect(await call(api(heldBack).api, "a-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "auto", effective: "suggest" } });
+    expect(await offerOf(api(heldBack).api, "a-admin")).toBeUndefined();
     const regulated = await setUp();
     await decide(regulated, A, 10, 0);
     await new DocumentPresetStore(regulated.world.store).write({ kind: "company", workspaceId: A }, "regulated", { by: "a-admin", at: 1 }, "standard");
