@@ -13,6 +13,7 @@
 //   POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful   {}                       a person on the project marks a lesson the task was given as not helpful (thumbs-down)
 //   GET  /v1/dev/projects/{project}/lessons/mode                                                             the project's learning mode
 //   PUT  /v1/dev/projects/{project}/lessons/mode                        { mode: off | suggest | auto }       a project admin (maintainer) or a company owner or admin only
+//   POST /v1/dev/projects/{project}/lessons/mode/trial-offer            { decision: accept | not_now }       the earned-trust offer (`lessons/earned-trust.ts`): who may change the mode answers it
 //
 // Rules:
 //   - The switch (`ROVARA_CORE_LESSONS`) is read first: a company it does not cover gets the fixed "Lessons are off." and nothing is read or written. With the switch `off` not even membership is read.
@@ -35,12 +36,13 @@ import { attributionNameOf } from "../lessons/people.js";
 import { DEFAULT_LEARNING_MODE, requireAudit, resolveLearning, type LearningMode } from "../lessons/policy.js";
 import { readVisible } from "../lessons/read-visible.js";
 import { idIn } from "../lessons/types.js";
+import { snoozeTrialOffer, tallyTrialOffer, trialOfferEarned, trialOfferSnoozed, type TrialOfferTally } from "../lessons/earned-trust.js";
 import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
@@ -85,6 +87,7 @@ const RejectBody = z.object({ version: z.number().int().min(1).max(1_000_000), r
 const RetireBody = z.object({ reason: z.enum(RETIRE_REASONS) }).strict();
 const EmptyBody = z.object({}).strict();
 const ModeBody = z.object({ mode: z.enum(LESSON_API_MODES) }).strict();
+const TrialOfferBody = z.object({ decision: z.enum(["accept", "not_now"]) }).strict();
 const PageQuery = z.object({
   list: z.enum(LESSON_PAGE_LISTS).default("approved"),
   limit: z.string().regex(/^[1-9][0-9]{0,2}$/u).transform(Number).refine((n) => n <= 100).optional(),
@@ -196,7 +199,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson] = match;
     const method = request.method;
     const route = rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", decisions: "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
+    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
     if (route === "mode" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
@@ -261,7 +264,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       return { ...page, ...(page.next === undefined ? {} : { next: encodeLessonCursor(page.next) }) };
     }
 
-    if (route === "mode") {
+    if (route === "mode" || route === "mode/trial-offer") {
       const settings = await runtime.settings.read(companyId, project).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
       const resolved = await resolveLearning(runtime.settings, companyId, project);
       // No settings, or no mode stored, is the default (Suggest, DEC 226).
@@ -271,9 +274,44 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
         if (role === "owner" || role === "admin") return true;
         try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
       };
+      /**
+       * The earned-trust offer (DEC 231): only while the project's own mode and the mode in force are both Suggest (no company lock), its preset is Standard (Regulated has no trial), the offer is earned
+       * and nobody said "not now" lately. Undefined: no offer. Who may not change the mode is never offered it.
+       */
+      const offerDue = async (): Promise<TrialOfferTally | undefined> => {
+        if (own !== "suggest" || FROM_STORED[resolved.chosenMode] !== "suggest" || resolved.preset !== "standard") return undefined;
+        if (await trialOfferSnoozed(runtime.documents, companyId, project, options.now())) return undefined;
+        const tally = await tallyTrialOffer(runtime.store, where, options.now());
+        return tally !== undefined && trialOfferEarned(tally) ? tally : undefined;
+      };
+      if (route === "mode/trial-offer") {
+        const body = bodyOf(TrialOfferBody, request.body, "the decision is accept or not_now");
+        if (!(await mayChange())) throw agentXError("FORBIDDEN", MODE_NEEDS_ADMIN);
+        // Answered against the offer as it stands now: one that is no longer due (the mode changed, a lock came, a drop, someone answered) is not answered under the person.
+        const tally = await offerDue();
+        if (tally === undefined) throw agentXError("IDEMPOTENCY_CONFLICT", "There is no offer to answer now.");
+        const facts = { answer: body.decision === "accept" ? "accepted" : "not_now", approvals: tally.approvals, drops: tally.drops };
+        // The records first: no record, no change.
+        if (!(await requireAudit(runtime.audit, { action: "lesson.trial_offer_answered", workspaceId: companyId, project, actor: personId, facts }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+        if (body.decision === "not_now") {
+          try { await snoozeTrialOffer(runtime.documents, companyId, project, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+          log("trial_offer_not_now", { companyId });
+          return { project, decision: "not_now", mode: own };
+        }
+        if (!(await requireAudit(runtime.audit, { action: "lesson.mode_changed", workspaceId: companyId, project, actor: personId, facts: { from: own, to: "auto" } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+        try { await writeLearningMode(runtime.documents, where, TO_STORED.auto, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "The mode could not be saved. Try again."); }
+        // Best effort: a project that goes back to Suggest later is not offered trial again at once.
+        await snoozeTrialOffer(runtime.documents, companyId, project, options.now()).catch(() => undefined);
+        log("trial_offer_accepted", { companyId });
+        const after = await resolveLearning(runtime.settings, companyId, project);
+        return { project, decision: "accept", mode: "auto", effective: FROM_STORED[after.chosenMode] };
+      }
       if (method === "GET") {
         const effective = FROM_STORED[resolved.chosenMode];
-        return { project, mode: own, effective, lockedByCompany: effective !== own, canChange: await mayChange() };
+        const canChange = await mayChange();
+        // The offer is extra: a tally that cannot be read is no offer, never a failed read of the mode.
+        const offer = canChange ? await offerDue().catch(() => undefined) : undefined;
+        return { project, mode: own, effective, lockedByCompany: effective !== own, canChange, ...(offer === undefined ? {} : { trialOffer: { approvals: offer.approvals, drops: offer.drops, since: offer.since } }) };
       }
       const body = bodyOf(ModeBody, request.body, "the mode is off, suggest or auto");
       if (!(await mayChange())) throw agentXError("FORBIDDEN", MODE_NEEDS_ADMIN);

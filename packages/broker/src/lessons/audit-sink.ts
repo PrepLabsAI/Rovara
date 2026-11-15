@@ -58,6 +58,8 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.preset_changed": { action: "lesson.preset_changed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown"), mode: word(e.facts["mode"], "direct") }) },
   // A project's learning mode set by a project or company admin through the developer API (off, suggest or auto; `collect` is the laptop's).
   "lesson.mode_changed": { action: "lesson.mode_changed", facts: (e) => ({ fromMode: word(e.facts["from"], "unknown"), toMode: word(e.facts["to"], "unknown") }) },
+  // A project or company admin answered the earned-trust offer ("let low-risk lessons go live on trial?"): accepted (the mode change is recorded too) or not now, with the tally that earned it.
+  "lesson.trial_offer_answered": { action: "lesson.trial_offer_answered", facts: (e) => ({ answer: word(e.facts["answer"], "unknown"), approvals: num(e.facts["approvals"]), drops: num(e.facts["drops"]) }) },
   "lesson.preset_proposed": { action: "lesson.preset_proposed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown") }) },
   // Erasing a commenter took back the harmful mark that retired a lesson, and the rest no longer justify it: the lesson goes back to a person as a pending card (never live by itself), recorded as a proposal.
   "lesson.harm_reversed": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]) }) },
