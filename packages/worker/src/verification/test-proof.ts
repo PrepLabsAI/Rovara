@@ -17,7 +17,8 @@
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
 import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofNotComparedReason, type TestProofWeakening } from "@agentx/contracts";
+import { TestProofWriteSchema, isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofNotComparedReason, type TestProofWeakening } from "@agentx/contracts";
+import type { ScriptedReplyFacts } from "../model-helper-round.js";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { testIdResolver, withTestIds, type TestIdContext } from "./test-ids.js";
@@ -242,6 +243,21 @@ async function weakeningOf(checkId: string, oldEntry: CheckEntry, report: Report
   return { checkId, skippedBefore: rise.before, skippedAfter: rise.after, absentOnNew: absent.ids, absentOnNewCount: absent.count };
 }
 
+/** Attach only the candidate's project-check facts; absent input preserves the legacy bytes exactly. */
+export function withScriptedReplyFacts(proof: TestProof, source: CheckPlan["source"], facts: ScriptedReplyFacts | undefined): TestProof {
+  if (source !== "project" || proof.status !== "checked" || facts === undefined) return proof;
+  const parsed = TestProofWriteSchema.shape.scriptedReplies.safeParse(facts);
+  const ids = new Set(proof.items.map((item) => item.checkId));
+  // 1 means "at least one, unknown", not a measured count. An unreadable part never becomes an absent marker.
+  const scriptedReplies = facts === "unknown" || !parsed.success
+    ? [...ids].map((checkId) => ({ checkId, taskMade: 1, counted: 0 }))
+    : (parsed.data ?? []).filter((entry) => ids.has(entry.checkId));
+  if (scriptedReplies.length === 0) return proof;
+  const written = { ...proof, scriptedReplies };
+  if (!TestProofWriteSchema.safeParse(written).success) throw new Error("unsupported scripted reply facts");
+  return written;
+}
+
 /**
  * test-proof.json as the worker saves it: always under PROOF_MAX_BYTES, so the broker's loader (256 KiB) reads all of it. Labels and test names are cut
  * (nothing else is lost) when the full text is too long, and items are dropped from the end only as a last resort.
@@ -254,7 +270,11 @@ export function serializeTestProof(proof: TestProof): string {
   if (proof.weakening !== undefined) current = { ...proof, weakening: proof.weakening.map((item) => ({ ...item, absentOnNew: item.absentOnNew.slice(0, 10).map((id) => id.slice(0, 120)) })) };
   if (fits()) return JSON.stringify(current);
   current = { ...current, items: proof.items.map((item) => ({ ...item, label: item.label.slice(0, 120) || "check", ...(item.test === undefined ? {} : { test: item.test.slice(0, 80) }) })) };
-  while (!fits() && current.items.length > 0) current = { ...current, items: current.items.slice(0, Math.floor(current.items.length / 2)) };
+  while (!fits() && current.items.length > 0) {
+    const items = current.items.slice(0, Math.floor(current.items.length / 2));
+    const ids = new Set(items.map((item) => item.checkId));
+    current = { ...current, items, ...(current.scriptedReplies === undefined ? {} : { scriptedReplies: current.scriptedReplies.filter((entry) => ids.has(entry.checkId)) }) };
+  }
   return JSON.stringify(current);
 }
 

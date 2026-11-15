@@ -2033,6 +2033,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Description": "The EC2 workers' launch template",
       "Type": "String",
     },
+    "Ec2WorkerSubnets": {
+      "Description": "The EC2 workers' availabilityZone=subnetId pairs",
+      "Type": "String",
+    },
     "GitHubAppCredentialRef": {
       "Default": "github-agentx-sdlc",
       "Type": "String",
@@ -2392,6 +2396,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "/v1/auth",
                 ],
               ],
+            },
+            "EC2_WORKER_LAUNCH_TEMPLATE_ID": {
+              "Ref": "Ec2WorkerLaunchTemplateId",
+            },
+            "EC2_WORKER_SUBNETS": {
+              "Ref": "Ec2WorkerSubnets",
             },
             "GITHUB_APP_CREDENTIAL_REF": {
               "Ref": "GitHubAppCredentialRef",
@@ -3479,6 +3489,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::ApiGatewayV2::Route",
     },
+    "ChannelApiConversationStateRoute5CAEAB4F": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/channels/{channel}/conversation-state",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "ChannelApiIntegration4BC4F1DE",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
     "ChannelApiDecisionsRoute248618C4": {
       "Properties": {
         "ApiId": {
@@ -3639,6 +3670,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "CHANNEL_EVENT_QUEUE_URL": {
               "Ref": "ChannelApiEvents5999C77C",
             },
+            "CHANNEL_STATE_TABLE_NAME": {
+              "Ref": "ChannelApiStateE5478A65",
+            },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
             },
@@ -3797,6 +3831,23 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     },
                     ":secret:agentx/staging/channel-adapter/*",
                   ],
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "LAST_EVENT#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiStateE5478A65",
+                  "Arn",
                 ],
               },
             },
@@ -4187,6 +4238,82 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "dynamodb:LeadingKeys": [
                     "CHANNEL_LINK_CODE#*",
                   ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "workspaceId",
+                    "closedAt",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SLACK_THREAD#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query",
+              ],
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "entityType",
+                    "status",
+                    "id",
+                    "kind",
+                    "createdAt",
+                    "updatedAt",
+                    "result",
+                    "url",
+                    "state",
+                    "expectedHeadCommit",
+                    "baseBranch",
+                    "number",
+                    "createdByOperationId",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "WORKSPACE#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
                 },
               },
               "Effect": "Allow",
