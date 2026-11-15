@@ -56,6 +56,7 @@ export * from "./plan-grounding.js";
 export * from "./workflow-dependencies-node.js";
 export * from "./display-name.js";
 export * from "./environments.js";
+export * from "./core-engine-infra.js";
 export * from "./github-mcp.js";
 export * from "./oauth-profiles.js";
 export * from "./operation.js";

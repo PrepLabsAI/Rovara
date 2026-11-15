@@ -1,5 +1,6 @@
 import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
+import { CORE_JOB_SCHEDULES } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -219,6 +220,32 @@ function withoutTaskPeopleControls(template: unknown): unknown {
   return template;
 }
 
+/**
+ * Migration plan v3.2 lane E2 adds the core engine's switch to a named control plane: the off-by-default CoreEngine parameter, its reference on the broker, and the CoreEngineJobs construct
+ * (queue, dead letters, their queue policies, an alarm, a schedule group, the scheduler's role and one schedule per job, behind the CoreEngineIsOn condition). tests/contract/core-engine-infrastructure.test.ts
+ * checks each in full; here their kinds and count are checked, then they are taken out, so the rest of the template must still match the snapshot (nothing else moved, the broker role included).
+ */
+function withoutCoreEngine(template: unknown): unknown {
+  const synthesized = template as { Parameters: Record<string, unknown>; Conditions: Record<string, unknown>; Resources: Record<string, Resource> };
+  expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
+  delete synthesized.Parameters.CoreEngine;
+  const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
+  expect(conditions).toHaveLength(1);
+  delete synthesized.Conditions[conditions[0]!];
+  const added = Object.entries(synthesized.Resources).filter(([id]) => id.startsWith("CoreEngineJobs"));
+  expect(added.map(([, resource]) => resource.Type).sort()).toEqual([
+    "AWS::CloudWatch::Alarm", "AWS::IAM::Policy", "AWS::IAM::Role", ...Array<string>(CORE_JOB_SCHEDULES.length).fill("AWS::Scheduler::Schedule"), "AWS::Scheduler::ScheduleGroup",
+    "AWS::SQS::Queue", "AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::SQS::QueuePolicy",
+  ].sort());
+  for (const [id] of added) delete synthesized.Resources[id];
+  const brokers = Object.entries(synthesized.Resources).filter(([id, resource]) => id.startsWith("Broker") && resource.Type === "AWS::Lambda::Function");
+  expect(brokers).toHaveLength(1);
+  const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  expect(variables.ROVARA_CORE_ENGINE).toStrictEqual({ Ref: "CoreEngine" });
+  delete variables.ROVARA_CORE_ENGINE;
+  return template;
+}
+
 // Issue 157 changes the Slack service's code only. These snapshots were recorded from mainline
 // 4a605fd (re-recorded there when mainline merged in), so a named environment's templates must stay
 // as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop,
@@ -229,7 +256,7 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template)))) : template).toMatchSnapshot();
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template))))) : template).toMatchSnapshot();
     }, 120_000);
   }
 });
