@@ -355,7 +355,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -710,7 +710,7 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     ...(developer === undefined ? {} : { channelMembers: (request: ChannelMembersRequest) => developer.channelMembers(request) }),
     limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
     now: Date.now,
-    log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+    log: brokerLogLine,
     ...dependencies.adminReads,
   };
 }
@@ -972,7 +972,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const installation = await dependencies.githubBindingInstallations.get(input.installationId);
         if (installation === undefined || installation.installationId !== input.installationId) throw githubBindingRefusal();
         await dependencies.githubBindings.claimOperator(input.companyId, installation);
-        console.log(JSON.stringify({ component: "broker", event: "github.binding_claimed", installationId: input.installationId, companyId: input.companyId }));
+        companyLog(input.companyId, brokerLogLine)({ event: "github.binding_claimed", installationId: input.installationId });
         return json({ claimed: true }, "github-binding-claim");
       } catch { return json({ error: { code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" } }, "github-binding-claim", 403); }
     }
@@ -6853,7 +6853,7 @@ async function handleCallback(
   }
   if (action === "e2e-model-budget") {
     return json(await handleE2EModelBudgetCallback({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, orgOf: async () => LEGACY_E2E_COMPANY,
-      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+      log: brokerLogLine,
       ...(dependencies.e2eAgentInstallation === undefined ? {} : { e2eAgentInstallation: dependencies.e2eAgentInstallation }) }, operation, body), request.requestId);
   }
   if (action === "feedback-bundles") {
@@ -11511,7 +11511,7 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
       readArtifactText: async (key) => { const bytes = await readStoredBytes(dependencies, key, 64 * 1024 + 1); return bytes?.toString("utf8"); },
       recycleWorker: (current) => recycleDriftedWorker(ec2Sessions, current.workspaceId),
       now: Date.now,
-      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+      log: brokerLogLine,
     };
     const outcome = await runWorkflowAutofix(deps, task, { expectedRevision: item.workflowRevision, startedAt: item.createdAt, cause: autofixBlockCauseOf(item.autofixCause) });
     if (outcome !== "WAITING") { await remove(); return outcome === "STALE" || outcome === "DISABLED" ? "STALE" : "DISPATCHED"; }
@@ -15233,7 +15233,7 @@ export const handler = createAwsBrokerHandler({
       deadLetterQueues: process.env.HEALTH_DEAD_LETTER_QUEUES,
       slackAuthCheck: developer?.slackAuthCheck,
       github: githubCredentials,
-      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+      log: brokerLogLine,
     }),
   },
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
@@ -15273,3 +15273,6 @@ export const handler = createAwsBrokerHandler({
       }
     : {}),
 });
+
+/** One broker log line writer; company-scoped events wrap it with companyLog so the helper owns companyId. */
+function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.stringify({ component: "broker", ...entry })); }

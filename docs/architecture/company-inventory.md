@@ -1,4 +1,4 @@
-375 record kinds: 25 company-scoped, 8 install-wide, 342 needs-company. 171 routes: 7 company-scoped, 2 install-wide, 162 needs-company.
+376 record kinds: 26 company-scoped, 8 install-wide, 342 needs-company. 171 routes: 7 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -568,6 +568,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | gateway | POST /v1/slack/channel-events | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
 | gateway | POST /v1/slack/events | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
 | gateway | POST /v1/slack/interactions | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
+| record | entity:LESSONS_NIGHTLY | company-scoped | State table | no | - | core-host/lessons.ts nightlyKey uses companyScoped(companyId, LESSONS_NIGHTLY) for both claimNightly and releaseNightly; core-host-lessons tests exercise two-company nightly isolation. |
 
 
 
@@ -578,6 +579,19 @@ Each row names its feeding constructor set. A generic DocumentStore/stream site 
 
 | kind | file:line:column:field | exact expression | why generic | feeding constructors |
 |---|---|---|---|---|
+| forwarding | packages/broker/src/aws/developer-routes.ts:486:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
+| forwarding | packages/broker/src/core-host/lessons.ts:222:41:pk | orgProjectCatalogKey(companyId, "x").pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
+| forwarding | packages/broker/src/core-host/lessons.ts:249:47:pk | pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
+| forwarding | packages/broker/src/core-host/lessons.ts:251:35:pk | row.pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
+| forwarding | packages/broker/src/core-host/lessons.ts:251:47:sk | row.sk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
+| forwarding | packages/broker/src/lessons/host-glue.ts:83:108:computed | [flow.store.ttlAttribute] | Moved from local/app/lessons.ts: runtime sort/TTL field within a companyScoped partition; no independent family (core-host-lessons tests). | companyScoped(LESSON_LOAD, LESSON_USE, LESSON_LIST) |
+| forwarding | packages/broker/src/lessons/host-glue.ts:126:85:sk | request.operationId | Moved from local/app/lessons.ts: runtime sort/TTL field within a companyScoped partition; no independent family (core-host-lessons tests). | companyScoped(LESSON_LOAD, LESSON_USE, LESSON_LIST) |
+| forwarding | packages/broker/src/lessons/host-glue.ts:129:115:sk | task.taskId | Moved from local/app/lessons.ts: runtime sort/TTL field within a companyScoped partition; no independent family (core-host-lessons tests). | companyScoped(LESSON_LOAD, LESSON_USE, LESSON_LIST) |
+| forwarding | packages/broker/src/lessons/host-glue.ts:148:87:sk | operation.id | Moved from local/app/lessons.ts: runtime sort/TTL field within a companyScoped partition; no independent family (core-host-lessons tests). | companyScoped(LESSON_LOAD, LESSON_USE, LESSON_LIST) |
+| forwarding | packages/broker/src/lessons/host-glue.ts:167:119:sk | repositoryId | Moved from local/app/lessons.ts: runtime sort/TTL field within a companyScoped partition; no independent family (core-host-lessons tests). | companyScoped(LESSON_LOAD, LESSON_USE, LESSON_LIST) |
+| forwarding | packages/broker/src/local/app/lessons.ts:199:43:pk | orgProjectCatalogKey(companyId, "x").pk | Projects the partition supplied by the named key constructor; no new family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
+| forwarding | packages/broker/src/local/app/lessons.ts:359:128:sk | lessonId | Runtime sort component forwarded within the feeding partition; not an independent record family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
+| forwarding | packages/broker/src/local/app/lessons.ts:381:260:computed | [flow.store.ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
 
 ## Known gaps: table indexes and change feed
 
@@ -789,7 +803,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/aws/connector-metrics.ts:38:7:computed | [metric] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/aws/connector-metrics.ts (emitConnectorMetric) |
 | forwarding | packages/broker/src/aws/credentials.ts:287:94:pk | token.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | tokenPartition and credential registry constructors in credentials.ts |
 | forwarding | packages/broker/src/aws/credentials.ts:287:108:sk | token.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | tokenPartition and credential registry constructors in credentials.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:484:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:395:39:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:395:54:sk | marker.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:458:43:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
@@ -992,16 +1005,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/lessons/repo-file-state.ts:254:12:computed | [field] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/lessons/repo-file-state.ts (out) |
 | forwarding | packages/broker/src/lessons/sources.ts:46:92:computed | [source] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | pausedKey |
 | forwarding | packages/broker/src/local/app/lessons-routes.ts:84:102:sk | developerId | Runtime sort component forwarded within the feeding partition; not an independent record family. | caller records consumed by packages/broker/src/local/app/lessons-routes.ts (developerId) |
-| forwarding | packages/broker/src/local/app/lessons.ts:244:43:pk | orgProjectCatalogKey(companyId, "x").pk | Projects the partition supplied by the named key constructor; no new family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:423:85:sk | input.operationId | Runtime sort component forwarded within the feeding partition; not an independent record family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:423:248:computed | [flow.store.ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:426:115:sk | task.taskId | Runtime sort component forwarded within the feeding partition; not an independent record family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:426:274:computed | [flow.store.ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:456:87:sk | operation.id | Runtime sort component forwarded within the feeding partition; not an independent record family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:483:119:sk | repositoryId | Runtime sort component forwarded within the feeding partition; not an independent record family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:486:191:computed | [flow.store.ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:500:128:sk | lessonId | Runtime sort component forwarded within the feeding partition; not an independent record family. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
-| forwarding | packages/broker/src/local/app/lessons.ts:522:260:computed | [flow.store.ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | listKey, orgProjectCatalogKey, retireAskKey, taskPointerKey |
 | forwarding | packages/broker/src/local/app/projects.ts:44:36:pk | prefix.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | orgProjectCatalogKey, projectMetaKey, projectRevisionKey |
 | forwarding | packages/broker/src/local/model-egress/adapter.ts:19:59:computed | [laptopScopeBrand] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/local/model-egress/adapter.ts (module factory) |
 | forwarding | packages/broker/src/local/model-proxy/sign-in.ts:51:27:computed | [signIn.header] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/local/model-proxy/sign-in.ts (value) |
