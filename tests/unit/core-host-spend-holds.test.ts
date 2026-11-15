@@ -73,9 +73,9 @@ describe("a task start holds its path's planning allowance on the company's day"
   });
 
   it("holds the full allowance when Understand chooses the path, or the task runs no workflow", async () => {
-    for (const taskStart of [{ workflow: true, pathFrom: "understand" as const }, { workflow: false }, undefined]) {
+    for (const taskStart of [{ workflow: true, pathFrom: "understand" as const }, { workflow: false }, undefined] as const) {
       const w = setup();
-      expect((await startTask(w, TASK, { taskStart })).applied).toBe(true);
+      expect((await startTask(w, TASK, taskStart === undefined ? {} : { taskStart })).applied).toBe(true);
       expect(await w.day()).toMatchObject({ reservedMicros: 5_000_000 });
     }
   });
