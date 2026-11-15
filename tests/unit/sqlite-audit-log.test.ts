@@ -1,11 +1,12 @@
 // Port lane P6 (item L2, owner decision 60; review H1, M2, L1): Code's audit trail. The record COMMITS WITH THE CHANGE (an AUDIT# row staged into the caller's own transaction); the append-only,
 // hash-chained copy in audit.db is fed from committed rows only and is never the primary.
+import type * as Contracts from "@agentx/contracts";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, PLUGIN_POINT_CARDINALITY, change, companyScoped, isAllowedModuleSpecifier, when, type AuditEvent, type AuditSink, type DocumentStore } from "@agentx/contracts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IMPLICIT_COMPANY_ID, PLUGIN_POINT_CARDINALITY, companyChangeFeed, change, companyScoped, isAllowedModuleSpecifier, when, type AuditEvent, type AuditSink, type DocumentStore } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, registerCodeDefaults, type ModuleImporter } from "../../packages/broker/src/ports/index.js";
 import * as pluginModule from "../../packages/local-adapters/src/audit-sink-plugin.js";
@@ -398,4 +399,52 @@ describe("the audit-sink plug-in and Code's defaults", () => {
     const registry = createAdapterRegistry();
     await expect(loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "audit-sink", name: "document", module: "@agentx/local-adapters/audit-sink", settings: { path: "x" } }] }), { registry, importModule: importer })).rejects.toThrow();
   });
+});
+
+describe("T8 audit company guards", () => {
+  it("the feed view rejects key/image ambiguity even when the row claims our company", async () => {
+    const store = new MemoryDocumentStore(); const log = SqliteAuditLog.open({ path: ":memory:" });
+    const sub = await startAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID });
+    try {
+      const sink = new DocumentAuditSink({ store: () => store }); await sink.record(event(1)); await store.settled();
+      const row = (await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1")))!;
+      await store.put({ item: { ...row, pk: companyScoped(`org_${"b".repeat(20)}`, "AUDIT"), eventId: "foreign-key" } });
+      await store.settled(); expect([...log.eventIds()]).toEqual(["evt-1"]);
+    } finally { await sub?.stop(); log.close(); }
+  });
+  it("company B's audit rows never reach company A's copy", async () => {
+    const store = new MemoryDocumentStore(); const log = SqliteAuditLog.open({ path: ":memory:" });
+    const sub = await startAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID });
+    try {
+      const sink = new DocumentAuditSink({ store: () => store });
+      await sink.record(event(1)); await sink.record(event(2, { companyId: `org_${"b".repeat(20)}`, details: { marker: "foreign-canary" } }));
+      await store.settled(); expect([...log.eventIds()]).toEqual(["evt-1"]); expect(log.head().count).toBe(1);
+    } finally { await sub?.stop(); log.close(); }
+  });
+  it("primary backfill refuses a foreign company row in our partition", async () => {
+    const store = new MemoryDocumentStore(); const log = SqliteAuditLog.open({ path: ":memory:" });
+    try {
+      const foreign = `org_${"b".repeat(20)}`; const sink = new DocumentAuditSink({ store: () => store });
+      await sink.record(event(2, { companyId: foreign }));
+      const row = (await store.get(auditRowKey(foreign, "evt-2")))!;
+      await store.put({ item: { ...row, pk: auditRowKey(IMPLICIT_COMPANY_ID, "evt-2").pk } });
+      expect((await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID })).backfilled).toBe(0);
+      expect(log.head().count).toBe(0);
+    } finally { log.close(); }
+  });
+});
+
+vi.mock("@agentx/contracts", async (original) => {
+  const actual = await original<typeof Contracts>();
+  return { ...actual, companyChangeFeed: vi.fn(actual.companyChangeFeed) };
+});
+it("audit handler still rejects a foreign row when the view is bypassed", async () => {
+  vi.mocked(companyChangeFeed).mockImplementationOnce((feed) => feed);
+  const store = new MemoryDocumentStore(); const log = SqliteAuditLog.open({ path: ":memory:" });
+  const sub = await startAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID });
+  try {
+    const sink = new DocumentAuditSink({ store: () => store });
+    await sink.record(event(1)); await sink.record(event(2, { companyId: `org_${"b".repeat(20)}` })); await store.settled();
+    expect([...log.eventIds()]).toEqual(["evt-1"]);
+  } finally { await sub?.stop(); log.close(); }
 });

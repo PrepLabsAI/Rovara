@@ -91,6 +91,7 @@ import { prepareLocalTestServices } from "./test-services-install.js";
 import { createOwnerImageService, createOwnerImageStore } from "./test-services-owner-list.js";
 import { createDockerImageRegistry } from "./docker-image-registry.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { PolicyHookSetupError, applyPolicyHook, type PolicyHookInstall } from "../core/policy-hook/index.js";
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
@@ -248,6 +249,13 @@ export interface LocalRuntimeOptions {
   modelGrants?: ModelGrantSource | undefined;
   /** Where the model proxy calls each provider (tests point these at a fake). Absent: the providers' own addresses. */
   modelProviderEndpoints?: Partial<ProviderEndpoints> | undefined;
+  /**
+   * Lane H: the install's issuer and signing key, which the policy hook signs its questions with. Needed only when the config sets `policyHook`; an install
+   * that sets it without a key does not start. Absent with no `policyHook`: nothing changes.
+   */
+  policyHookInstall?: PolicyHookInstall | undefined;
+  /** The fetch the policy hook asks with (tests give a recorder). Absent: the global fetch. */
+  policyHookFetch?: typeof fetch | undefined;
 }
 
 export interface LocalRuntime {
@@ -575,6 +583,18 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // The monitoring adapters Code ships (Sentry, Datadog, Grafana, PagerDuty, Vercel); a plug-in's own adapter for a kind, loaded above, is left in place. CloudWatch needs AWS access: it is
   // registered by whoever gives this install that access (`cloudwatchMonitoringAdapter`).
   registerNativeMonitoring(registry);
+  // Lane H: the policy hook goes in front of the admission and approvers adapters, whichever they are, last before the seal. No `policyHook` setting: nothing changes.
+  if (config.policyHook !== undefined) {
+    try {
+      applyPolicyHook(registry, config.policyHook, options.policyHookInstall, {
+        audit: registry.require("audit-sink"),
+        ...(options.policyHookFetch === undefined ? {} : { fetch: options.policyHookFetch }),
+        log: (event) => { console.error(JSON.stringify(event)); },
+      });
+    } catch (error) {
+      throw error instanceof PolicyHookSetupError ? new LocalStateError(error.message) : error;
+    }
+  }
   registry.seal();
   // Port lane P6 (item L2): an append-only, hash-chained copy of the committed audit rows (audit.db), fed through the store's change feed. It is never the primary record. Its chain and anchor are checked now.
   if (options.storage !== "memory" && !configured("audit-sink")) {

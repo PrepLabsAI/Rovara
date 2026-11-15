@@ -1,7 +1,9 @@
 // tests/contract/developer-signin-infrastructure.test.ts
-import { Stack } from "aws-cdk-lib";
+import { createHash } from "node:crypto";
+import { Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
+import { serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -26,6 +28,8 @@ function leadingKeysOf(statement: Statement): string[] {
 
 let named: TemplateJson;
 let legacy: TemplateJson;
+let brokerEstimate: number;
+let foundation: TemplateJson;
 
 const controlPlane = (app: ReturnType<typeof buildAgentXApp>, name: string) =>
   Template.fromStack(app.node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === name)!).toJSON() as TemplateJson;
@@ -99,7 +103,13 @@ const SAMPLE_FUNCTION_ARN = "arn:aws:lambda:us-east-1:111122223333:function:agen
 const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-staging-control-plane-DeveloperSignInTable-AbCdEf";
 
 beforeAll(() => {
-  named = controlPlane(buildAgentXApp({ agentxEnv: "staging" }), "agentx-staging-control-plane");
+  const app = buildAgentXApp({ agentxEnv: "staging" });
+  named = controlPlane(app, "agentx-staging-control-plane");
+  foundation = controlPlane(app, "agentx-staging-foundation");
+  const policy = app.node.findAll().find((node) => node instanceof iam.Policy && node.node.path.endsWith("/Broker/ServiceRole/DefaultPolicy")) as iam.Policy;
+  // CDK's splitter uses these estimates on unresolved tokens, not serialized template length.
+  const document = policy.document as unknown as { statements: Array<{ _estimateSize(options: { actionEstimate: number; arnEstimate: number }): number }> };
+  brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: 150 }), 0);
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
@@ -152,7 +162,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
   });
 
   it("signs with an RSA_2048 KMS key only the DeveloperIdentity role may use (R1)", () => {
-    const keys = ofType(named, "AWS::KMS::Key").filter(([, resource]) => resource.Properties.KeySpec === "RSA_2048");
+    const keys = ofType(named, "AWS::KMS::Key").filter(([id]) => id.startsWith("DeveloperSignInTokenKey"));
     expect(keys).toHaveLength(1);
     const [keyId, key] = keys[0]!;
     expect(key.Properties.KeyUsage).toBe("SIGN_VERIFY");
@@ -198,7 +208,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(JSON.stringify(permissions[0]!.SourceArn)).toContain("/*/*/v1/auth/*");
   });
 
-  it("gives the broker only session, developer, email-index and sign-in client reads on the sign-in table", () => {
+  it("gives the broker only session, developer, email-index, sign-in client and membership reads on the sign-in table", () => {
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
     const tableStatements = statementsOfRole(named, "BrokerServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
     expect(tableStatements).toHaveLength(2);
@@ -206,7 +216,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
     const creatorChecks = tableStatements.filter((statement) => actionsOf(statement).includes("dynamodb:ConditionCheckItem"));
     expect(reads).toHaveLength(1);
     expect(reads[0]!.Action).toBe("dynamodb:GetItem");
-    expect(reads[0]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } });
+    expect(reads[0]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", "COMPANY_MEMBER#*"] } });
     expect(creatorChecks).toHaveLength(1);
     expect(actionsOf(creatorChecks[0]!)).toEqual(["dynamodb:ConditionCheckItem"]);
     expect(creatorChecks[0]!.Condition).toEqual({
@@ -285,12 +295,12 @@ describe("developer sign-in infrastructure (named environments)", () => {
   });
 });
 
-describe("the legacy deployment (R3, spec 064)", () => {
-  it("has sign-in for account linking only: no developer task settings, grants or JWT authorizer", () => {
+describe("the legacy deployment (production)", () => {
+  it("has the full developer sign-in and tasks, as named environments do, under its legacy names", () => {
     const text = JSON.stringify(legacy);
-    for (const absent of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
-      "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "MCP_CONFIRM_ELICITATION", "agentx-developer-jwt", "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
-      expect(text, absent).not.toContain(absent);
+    for (const present of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
+      "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "MCP_CONFIRM_ELICITATION", "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
+      expect(text, present).toContain(present);
     }
     for (const present of ["SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId", "DeveloperOidcSince"]) expect(legacy.Parameters[present], present).toBeDefined();
     expect(legacy.Parameters.DeveloperSignInSlack).toMatchObject({ Default: "disabled" });
@@ -301,13 +311,13 @@ describe("the legacy deployment (R3, spec 064)", () => {
     expect((signIn.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ AGENTX_ENV: "production", DEVELOPER_OIDC_SECRET_ID: "agentx/production/developer-oidc" });
     const broker = legacy.Resources[functionId(legacy, "Broker")]!;
     const brokerEnvironment = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(brokerEnvironment).toMatchObject({ AGENTX_ENV: "production", DEVELOPER_API_SCOPE: "linking" });
-    // No developer-task grants: no TASK# turn records and no cross-table condition check. Spec 064: the sign-in client
-    // admin changes are audited under CHANGE#.
+    expect(brokerEnvironment).toMatchObject({ AGENTX_ENV: "production" });
+    expect(brokerEnvironment).not.toHaveProperty("DEVELOPER_API_SCOPE");
+    // The developer-task grants: TASK# turn records and the cross-table condition check; admin changes audited under CHANGE#.
     const brokerRole = ((broker.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
     const brokerStatements = grants(legacy).filter(({ role }) => role === brokerRole).map(({ statement }) => statement);
-    expect(brokerStatements.some((statement) => allows(statement, "dynamodb:ConditionCheckItem") && JSON.stringify(statement.Resource).includes("DeveloperSignInTable"))).toBe(false);
-    expect(JSON.stringify(brokerStatements)).not.toMatch(/TASK#\*/);
+    expect(brokerStatements.some((statement) => allows(statement, "dynamodb:ConditionCheckItem") && JSON.stringify(statement.Resource).includes("DeveloperSignInTable"))).toBe(true);
+    expect(JSON.stringify(brokerStatements)).toMatch(/TASK#\*/);
     expect(JSON.stringify(brokerStatements)).toContain("CHANGE#*");
     // The routes and their throttle, as in named environments; still only the one admin JWT authorizer.
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toEqual(expect.arrayContaining(["ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", "ANY /review/{proxy+}"]));
@@ -348,9 +358,9 @@ describe("AI-tool turn records (spec 025 FR-037, R27)", () => {
     expect(updates.map(({ statement }) => statement.Condition)).toEqual([{ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } }]);
   });
 
-  it("adds nothing to the legacy templates", () => {
+  it("gives the legacy template (production) the same TASK# grants", () => {
     expect(grants(legacy).some(({ statement }) => (statement.Condition as Record<string, Record<string, unknown>> | undefined)?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"] !== undefined
-      && JSON.stringify(statement.Condition).includes("TASK#"))).toBe(false);
+      && JSON.stringify(statement.Condition).includes("TASK#"))).toBe(true);
   });
 });
 
@@ -469,11 +479,243 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     }
   });
 
-  it("adds none of it to the legacy template", () => {
-    expect(ofType(legacy, "AWS::Lambda::Function").map(([id]) => withoutHash(id))).not.toContain("DeveloperTaskNotifierFunction");
-    expect(ofType(legacy, "AWS::CloudWatch::Alarm").map(([, resource]) => JSON.stringify(resource.Properties.AlarmName))).not.toContainEqual(expect.stringContaining("DeveloperNotice"));
-    expect(streamMappings(legacy)).toHaveLength(1);
+  it("runs in the legacy template (production) too, with Slack task threads on", () => {
+    expect(ofType(legacy, "AWS::Lambda::Function").map(([id]) => withoutHash(id))).toContain("DeveloperTaskNotifierFunction");
+    expect(ofType(legacy, "AWS::CloudWatch::Alarm").map(([, resource]) => JSON.stringify(resource.Properties.AlarmName))).toContainEqual(expect.stringContaining("DeveloperNotice"));
+    expect(streamMappings(legacy)).toHaveLength(streamMappings(named).length);
     const [, ingress] = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "SlackIngress")!;
-    expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("SHARED_TASKS");
+    expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ SHARED_TASKS: "enabled" });
+  });
+});
+
+
+const roleArn = (role: string) => ({ "Fn::GetAtt": [role, "Arn"] });
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Restricted evaluator for these KMS policies: explicit Deny wins; ArnNotEquals is NOR.
+ * Only root delegation permits identity-policy grants. Unknown conditions fail the test. */
+function keyAllows(template: TemplateJson, keyId: string, role: string, action: string, identityOverride?: Statement[]): boolean {
+  const statements = statementsIn(template.Resources[keyId]!.Properties.KeyPolicy);
+  const arn = roleArn(role);
+  const matchesPrincipal = (statement: Statement) => {
+    const aws = (statement.Principal as { AWS?: unknown })?.AWS;
+    return [aws].flat().some((principal) => principal === "*" || same(principal, arn));
+  };
+  const matchesCondition = (statement: Statement) => {
+    if (statement.Condition === undefined) return true;
+    expect(Object.keys(statement.Condition)).toEqual(["ArnNotEquals"]);
+    const condition = statement.Condition.ArnNotEquals as Record<string, unknown>;
+    expect(Object.keys(condition)).toEqual(["aws:PrincipalArn"]);
+    return ![condition["aws:PrincipalArn"]].flat().some((exempt) => same(exempt, arn));
+  };
+  const matching = statements.filter((s) => allows(s, action) && reaches(template, s, keyId, SAMPLE_KEY_ARN) && matchesPrincipal(s) && matchesCondition(s));
+  if (matching.some((s) => s.Effect === "Deny")) return false;
+  if (matching.some((s) => s.Effect === "Allow")) return true;
+  const rootDelegates = statements.some((s) => s.Effect === "Allow" && allows(s, action) && s.Condition === undefined && s.Resource === "*"
+    && same(s.Principal, { AWS: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":iam::", { Ref: "AWS::AccountId" }, ":root"]] } }));
+  const identity = identityOverride ?? statementsOfRole(template, withoutHash(role));
+  const applicable = identity.filter((s) => allows(s, action) && reaches(template, s, keyId, SAMPLE_KEY_ARN));
+  return rootDelegates && !applicable.some((s) => s.Effect === "Deny") && applicable.some((s) => s.Effect === "Allow");
+}
+
+function signingKey(template: TemplateJson, prefix: string): [string, Resource] {
+  const entries = ofType(template, "AWS::KMS::Key").filter(([id]) => id.startsWith(prefix));
+  expect(entries, `${prefix} must exist even before the gateway is enabled`).toHaveLength(1);
+  return entries[0]!;
+}
+
+describe("task-token key and membership IAM", () => {
+  it("creates the named task key before gateway enablement, with no key in legacy", () => {
+    const [id, key] = signingKey(named, "DeveloperSignInTaskTokenKey");
+    expect(key.Properties).toMatchObject({ KeySpec: "RSA_2048", KeyUsage: "SIGN_VERIFY", PendingWindowInDays: 7, Description: "Signs AgentX staging task tokens" });
+    expect(key.Properties.EnableKeyRotation ?? false).toBe(false);
+    expect(key.DeletionPolicy).toBe("Delete");
+    expect(key.UpdateReplacePolicy).toBe("Delete");
+    expect(ofType(named, "AWS::KMS::Alias").filter(([, r]) => r.Properties.AliasName === "alias/agentx/staging/task-tokens").map(([, r]) => r.Properties.TargetKeyId)).toEqual([{ "Fn::GetAtt": [id, "Arn"] }]);
+    expect(JSON.stringify(legacy)).not.toContain("TaskTokenKey");
+    expect(JSON.stringify(legacy)).not.toContain("TASK_TOKEN_KEY_ARN");
+    for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
+      const variables = (named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+      expect(variables.TASK_TOKEN_KEY_ARN).toEqual(roleArn(id));
+      if (prefix === "DeveloperSignInFunction") expect(variables.DEVELOPER_TOKEN_KEY_ARN).toEqual(roleArn(signingKey(named, "DeveloperSignInTokenKey")[0]));
+    }
+  });
+
+  it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
+    const remainder = structuredClone(named);
+    const [taskId] = signingKey(remainder, "DeveloperSignInTaskTokenKey");
+    delete remainder.Resources[taskId];
+    const aliases = ofType(remainder, "AWS::KMS::Alias").filter(([, r]) => r.Properties.AliasName === "alias/agentx/staging/task-tokens");
+    expect(aliases).toHaveLength(1);
+    delete remainder.Resources[aliases[0]![0]];
+    for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
+      const variables = (remainder.Resources[functionId(remainder, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+      delete variables.TASK_TOKEN_KEY_ARN;
+    }
+    let reads = 0;
+    let families = 0;
+    for (const [, policy] of ofType(remainder, "AWS::IAM::Policy")) {
+      const document = policy.Properties.PolicyDocument as { Statement: Statement[] };
+      document.Statement = document.Statement.filter((s) => {
+        if (!JSON.stringify(s.Resource).includes(taskId)) return true;
+        expect(actionsOf(s)).toEqual(["kms:GetPublicKey"]);
+        expect(JSON.stringify(policy.Properties.Roles)).toContain("DeveloperSignInFunctionServiceRole");
+        reads += 1;
+        return false;
+      });
+      for (const s of document.Statement) {
+        const condition = s.Condition?.["ForAllValues:StringLike"] as { "dynamodb:LeadingKeys"?: string[] } | undefined;
+        if (condition?.["dynamodb:LeadingKeys"]?.includes("COMPANY_MEMBER#*")) {
+          condition["dynamodb:LeadingKeys"] = condition["dynamodb:LeadingKeys"].filter((key) => key !== "COMPANY_MEMBER#*");
+          families += 1;
+        }
+      }
+    }
+    expect([reads, families]).toEqual([1, 1]);
+    const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("13e884c1a3523a029f84bf48ff1b44604604bcab4a09635f0af57a14386a7103");
+  });
+
+  it("keeps the developer key resource byte-identical to the base", () => {
+    const [, key] = signingKey(named, "DeveloperSignInTokenKey");
+    expect(createHash("sha256").update(JSON.stringify(key)).digest("hex")).toBe("985e0782f6f8b959676a82fb7253a1b6d909109a2dbef0db16678f35e0640b47");
+  });
+
+  it("allows only the broker to sign task tokens and only DeveloperIdentity to sign developer tokens, including an overprivileged probe", () => {
+    const [taskId, task] = signingKey(named, "DeveloperSignInTaskTokenKey");
+    const [devId] = signingKey(named, "DeveloperSignInTokenKey");
+    const roles = ofType(named, "AWS::IAM::Role").map(([id]) => id);
+    const broker = roles.find((id) => withoutHash(id) === "BrokerServiceRole")!;
+    const developer = roles.find((id) => withoutHash(id) === "DeveloperSignInFunctionServiceRole")!;
+    const broad: Statement[] = [{ Effect: "Allow", Action: "kms:*", Resource: "*" }];
+    for (const role of [...roles, "ProbeRole"]) {
+      for (const [key, action, expected] of [
+        [taskId, "kms:Sign", role === broker], [taskId, "kms:GetPublicKey", role === broker || role === developer],
+        [devId, "kms:Sign", role === developer], [devId, "kms:GetPublicKey", role === developer],
+      ] as const) expect(keyAllows(named, key, role, action, role === "ProbeRole" ? broad : undefined), `${role} ${action} ${key}`).toBe(expected);
+    }
+    expect(keyAllows(named, taskId, developer, "kms:Sign", broad)).toBe(false);
+    // M1: a redundant identity grant is still forbidden even while the Deny masks it.
+    const direct = statementsIn(task.Properties.KeyPolicy).filter((s) => s.Effect === "Allow" && same(s.Principal, { AWS: roleArn(broker) }));
+    expect(direct).toHaveLength(1);
+    expect(actionsOf(direct[0]!).sort()).toEqual(["kms:GetPublicKey", "kms:Sign"]);
+    expect(statementsIn(task.Properties.KeyPolicy).filter((s) => s.Effect === "Allow" && allows(s, "kms:Sign"))).toHaveLength(2); // root and broker only
+    expect(statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((s) => touches(s, "kms") && reaches(named, s, taskId, SAMPLE_KEY_ARN)).flatMap(actionsOf)).toEqual(["kms:GetPublicKey"]);
+  });
+
+  it("pins broker inline size exactly and never spills into a managed policy", () => {
+    const message = `broker inline policy at ${brokerEstimate} of 10,000; the next statement makes CDK split it into a managed policy the deploy role can't create`;
+    const policies = ofType(named, "AWS::IAM::Policy").filter(([, r]) => JSON.stringify(r.Properties.Roles).includes("BrokerServiceRole"));
+    expect(policies, message).toHaveLength(1);
+    expect(ofType(named, "AWS::IAM::ManagedPolicy"), message).toHaveLength(0);
+    expect(Object.keys(named.Resources).filter((id) => id.includes("Overflow")), message).toEqual([]);
+    expect(brokerEstimate, message).toBe(9989);
+    expect(brokerEstimate, message).toBeLessThan(10000);
+    expect(JSON.stringify(policies[0]![1].Properties.PolicyDocument).length, message).toBe(7537);
+    expect(JSON.stringify(statementsOfRole(named, "BrokerServiceRole"))).not.toContain("TaskTokenKey");
+  });
+
+  it("keeps State-table reads unconditioned; tightening them must retain COMPANY_MEMBER and ORG families", () => {
+    const [id] = ofType(named, "AWS::DynamoDB::Table").find(([id]) => withoutHash(id) === "State")!;
+    const statements = statementsOfRole(named, "BrokerServiceRole").filter((s) => allows(s, "dynamodb:GetItem") && reaches(named, s, id, "arn:aws:dynamodb:us-east-1:111122223333:table/state"));
+    expect(statements).toHaveLength(1);
+    expect(statements[0]!.Condition, "State LeadingKeys tightening must explicitly keep COMPANY_MEMBER#* and ORG#*").toBeUndefined();
+    for (const template of [named, legacy]) {
+      const [signIn] = ofType(template, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))!;
+      const grants = statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && reaches(template, s, signIn, SAMPLE_TABLE_ARN));
+      for (const action of ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"]) expect(grants.some((s) => allows(s, action))).toBe(false);
+      if (template === legacy) expect(leadingKeysOf(grants.find((s) => allows(s, "dynamodb:GetItem"))!)).toEqual(["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"]);
+      for (const s of statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && s.Condition?.["ForAllValues:StringLike"] !== undefined)) {
+        const keys = leadingKeysOf(s);
+        expect(keys).not.toContain("ORG#*");
+        if (keys.includes("COMPANY_MEMBER#*")) expect(actionsOf(s)).toEqual(["dynamodb:GetItem"]);
+      }
+    }
+  });
+});
+
+// Pure policy checks: no AWS API calls and no additional identity grants.
+
+const policyScope = { env: "staging", partition: "aws", region: "us-east-1", account: "111122223333", artifactBucketArn: "arn:aws:s3:::agentx-artifacts", pullThroughPrefix: "agentx", cloudFormationRoleName: "agentx-staging-cloudformation" };
+const boundary = defaultBoundaryStatements(policyScope);
+const deploy = serviceRoleStatements(policyScope);
+const boundaryArn = "arn:aws:iam::111122223333:policy/agentx/staging/agentx-staging-boundary";
+const sampleRole = "arn:aws:iam::111122223333:role/agentx/staging/example";
+function policyAllows(policy: PolicyStatementJson[], action: string, resource: string, context: Record<string, string> = {}): boolean {
+  const matches = policy.filter((s) => allows(s, action) && [s.Resource].flat().some((r) => globRegExp(r).test(resource))
+    && Object.entries(s.Condition ?? {}).every(([operator, entries]) => Object.entries(entries).every(([key, values]) => {
+      const equal = [values].flat().some((value) => operator === "StringLike" ? globRegExp(value).test(context[key] ?? "") : value === context[key]);
+      expect(["StringNotEquals", "StringLike", "StringEquals"]).toContain(operator);
+      return operator === "StringNotEquals" ? !equal : equal;
+    })));
+  return matches.some((s) => s.Effect === "Allow") && !matches.some((s) => s.Effect === "Deny");
+}
+
+describe("task key deployment boundary coverage", () => {
+  it("maps every rendered resource type to an allowed deploy service, with existing scoped IAM and Budget exceptions", () => {
+    const types: Record<string, string> = {
+      "AWS::DynamoDB::Table": "dynamodb", "AWS::S3::Bucket": "s3", "AWS::S3::BucketPolicy": "s3", "AWS::SQS::Queue": "sqs", "AWS::SQS::QueuePolicy": "sqs",
+      "AWS::Logs::LogGroup": "logs", "AWS::Logs::MetricFilter": "logs", "AWS::Lambda::Function": "lambda", "AWS::Lambda::Permission": "lambda",
+      "AWS::Lambda::EventInvokeConfig": "lambda", "AWS::Lambda::EventSourceMapping": "lambda", "AWS::KMS::Key": "kms", "AWS::KMS::Alias": "kms",
+      "AWS::SecretsManager::Secret": "secretsmanager", "AWS::SNS::Topic": "sns", "AWS::SNS::TopicPolicy": "sns", "AWS::CloudWatch::Alarm": "cloudwatch",
+      "AWS::ApiGatewayV2::Api": "apigateway", "AWS::ApiGatewayV2::Integration": "apigateway", "AWS::ApiGatewayV2::Authorizer": "apigateway",
+      "AWS::ApiGatewayV2::Route": "apigateway", "AWS::ApiGatewayV2::Stage": "apigateway", "AWS::Scheduler::Schedule": "scheduler", "AWS::StepFunctions::StateMachine": "states",
+    };
+    for (const type of new Set(Object.values(named.Resources).map((r) => r.Type))) {
+      let action: string;
+      let resource = "*";
+      let context: Record<string, string> = {};
+      if (type === "AWS::IAM::Role" || type === "AWS::IAM::Policy") {
+        action = type === "AWS::IAM::Role" ? "iam:CreateRole" : "iam:PutRolePolicy";
+        resource = sampleRole;
+        context = { "iam:PermissionsBoundary": boundaryArn };
+        expect(deploy.find((s) => s.Sid === "IamRoles")?.Resource).toBe("arn:aws:iam::111122223333:role/agentx/staging/*");
+      } else if (type === "AWS::Budgets::Budget") {
+        action = "budgets:ModifyBudget";
+        resource = "arn:aws:budgets::111122223333:budget/agentx-staging-monthly";
+        expect(deploy.find((s) => s.Sid === "Budget")?.Resource).toBe(resource);
+      } else {
+        const service = types[type];
+        expect(service, `unknown resource type ${type}: map and check its deployment permissions`).toBeDefined();
+        expect(SERVICE_ROLE_SERVICES, type).toContain(service);
+        action = `${service}:*`;
+      }
+      expect(policyAllows(deploy, action, resource, context), `${type} deploy`).toBe(true);
+      expect(policyAllows(boundary, action, resource, context), `${type} boundary`).toBe(true);
+    }
+    expect(policyAllows(deploy, "iam:CreateRole", sampleRole)).toBe(false);
+    expect(policyAllows(deploy, "iam:CreateRole", sampleRole.replace("staging", "other"), { "iam:PermissionsBoundary": boundaryArn })).toBe(false);
+    expect(policyAllows(deploy, "budgets:ModifyBudget", "arn:aws:budgets::111122223333:budget/agentx-other-monthly")).toBe(false);
+  });
+
+  it("covers KMS lifecycle actions while refusing managed-policy creation", () => {
+    for (const action of ["kms:CreateKey", "kms:PutKeyPolicy", "kms:DescribeKey", "kms:GetKeyPolicy", "kms:TagResource", "kms:ScheduleKeyDeletion", "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:ListAliases"]) {
+      for (const policy of [deploy, boundary]) expect(policyAllows(policy, action, "*"), action).toBe(true);
+    }
+    for (const policy of [deploy, boundary]) expect(policyAllows(policy, "iam:CreatePolicy", "*"), "the deploy role cannot create a split managed policy").toBe(false);
+    expect(boundary.some((s) => s.Effect === "Deny" && allows(s, "iam:CreatePolicy"))).toBe(true);
+  });
+
+  it("bounds every role-policy Allow action without a matching boundary Deny", () => {
+    for (const { role, statement } of grants(named).filter(({ statement }) => statement.Effect === "Allow")) {
+      for (const action of actionsOf(statement)) {
+        // All non-IAM runtime actions are service-wide in the default boundary.
+        // PassRole is the only scoped runtime exception; verify its rendered resource too.
+        const resource = action.toLowerCase() === "iam:passrole" ? sampleRole : "*";
+        expect(policyAllows(boundary, action, resource), `${role}: ${action}`).toBe(true);
+        if (action.toLowerCase() === "iam:passrole") {
+          for (const r of [statement.Resource].flat()) {
+            const text = JSON.stringify(r);
+            const localRole = ofType(named, "AWS::IAM::Role").find(([id]) => text.includes(`"${id}"`));
+            if (localRole !== undefined) expect(localRole[1].Properties.Path).toBe("/agentx/staging/");
+            else if (same(r, { Ref: "Ec2WorkerInstanceRoleArn" })) {
+              const output = foundation.Outputs.Ec2WorkerInstanceRoleArn!.Value as { "Fn::GetAtt": [string, string] };
+              expect(output["Fn::GetAtt"][1]).toBe("Arn");
+              expect(foundation.Resources[output["Fn::GetAtt"][0]]!.Properties.Path).toBe("/agentx/staging/");
+            } else expect(text).toContain(":role/agentx/staging/");
+          }
+        }
+      }
+    }
   });
 });
