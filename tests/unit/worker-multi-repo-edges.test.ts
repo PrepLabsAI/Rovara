@@ -249,6 +249,22 @@ describe("MR2 deadline and syntax guards", () => {
     const f = await fixture([{ "pyproject.toml": '[project\nname="app"\ndependencies=["lib"]\n' }, { "setup.cfg": "[metadata]\nname=lib\n" }]);
     expect(await f.derive()).toEqual({ edges: [], notes: ["dependency manifest unreadable"] });
   });
+  it.each([
+    ["setup.py, unclosed call with trailing spaces", { "setup.py": "from setuptools import setup\nsetup(" + " ".repeat(Number(process.env.MR2_ADVERSARIAL_SIZE ?? 300_000)) }, false],
+    ["setup.py, valid call padded with spaces", { "setup.py": "from setuptools import setup\nsetup(name='app'" + " ".repeat(Number(process.env.MR2_ADVERSARIAL_SIZE ?? 300_000)) + ")\n", "requirements.txt": "lib\n" }, true],
+    ["pyproject.toml, key with spaces and no equals sign", { "pyproject.toml": "[project]\nname" + " ".repeat(Number(process.env.MR2_ADVERSARIAL_SIZE ?? 300_000)) + "x\n" }, false],
+    ["setup.cfg, key with spaces and no equals sign", { "setup.cfg": "[metadata]\nname" + " ".repeat(Number(process.env.MR2_ADVERSARIAL_SIZE ?? 300_000)) + "x\n" }, false],
+    ["setup.py, field padded with spaces around the equals sign", { "setup.py": "from setuptools import setup\nsetup(name" + " ".repeat(Number(process.env.MR2_ADVERSARIAL_SIZE ?? 300_000)) + "=" + " ".repeat(Number(process.env.MR2_ADVERSARIAL_SIZE ?? 300_000)) + "'app')\n", "requirements.txt": "lib\n" }, true],
+  ] as const)("adversarial %s parses in linear time", async (_label, manifest, wired) => {
+    const f = await fixture([manifest, { "setup.cfg": "[metadata]\nname=lib\n" }]);
+    const started = performance.now(); const result = await f.derive(); const elapsed = performance.now() - started;
+    expect(result).toEqual(wired ? { edges: [edge("both", "python")], notes: [] } : { edges: [], notes: ["dependency manifest unreadable"] });
+    expect(elapsed).toBeLessThan(3_000);
+  });
+  it("a CRLF go.mod with comments is read like an LF one", async () => {
+    const f = await fixture([{ "go.mod": "module example.com/app\r\n// app\r\nrequire example.com/lib v1.0.0 // pinned\r\n" }, { "go.mod": "module example.com/lib\r\n" }]);
+    expect(await f.derive()).toEqual({ edges: [edge("both", "go")], notes: [] });
+  });
   it("a large multiline dependency array is processed in bounded time", async () => {
     const f = await fixture([{ "pyproject.toml": '[project]\nname="app"\ndependencies=[\n' + ' "lib",\n'.repeat(16000) + ']\n' }, { "setup.cfg": "[metadata]\nname=lib\n" }]);
     const started = performance.now(); expect((await f.derive()).edges).toEqual([edge("both", "python")]); expect(performance.now() - started).toBeLessThan(10_000);

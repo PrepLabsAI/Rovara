@@ -40,7 +40,7 @@ function node(text: string): Declaration {
 }
 function go(text: string): Declaration {
   const result = empty(); let block = "";
-  for (const raw of text.split("\n")) {
+  for (const raw of text.split(/\r?\n/u)) {
     const line = raw.replace(/\/\/.*$/u, "").trim(); if (!line) continue;
     if (line === ")") { if (!block) return invalid(); block = ""; continue; }
     const start = /^(require|replace|exclude|retract)\s*\($/u.exec(line);
@@ -66,6 +66,13 @@ function requirement(value: string, result: Declaration): void {
   const match = /^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9_,.-]+\])?(?:\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9.*+!-]+(?:\s*,\s*(?:==|!=|<=|>=|<|>)\s*[A-Za-z0-9.*+!-]+)*)?$/u.exec(value);
   if (!match) return invalid(); result.needs.push(normalized(identifier(match[1], PYTHON_NAME)));
 }
+// Linear on every input (no backtracking regex on customer-sized text): split at the FIRST "=", then check the key's shape on its own.
+const KEY = /^[A-Za-z0-9_-]+$/u;
+function keyValue(line: string): [string, string] | undefined {
+  const at = line.indexOf("="); if (at < 0) return undefined;
+  const key = line.slice(0, at).trimEnd(); if (!KEY.test(key)) return undefined;
+  return [key, line.slice(at + 1).trimStart()];
+}
 function quoted(value: string): string {
   const match = /^(?:"([^"\\\r\n]*)"|'([^'\\\r\n]*)')$/u.exec(value.trim());
   if (!match) return invalid(); return match[1] ?? match[2]!;
@@ -90,9 +97,9 @@ function python(files: Map<string, string>): Declaration {
         if (line.startsWith("[project.") || line.startsWith("[tool.poetry")) return invalid();
         section = line; continue;
       }
-      const match = /^([A-Za-z0-9_-]+)\s*=\s*(.*)$/u.exec(line);
-      if (!match || seen.has(`${section}.${match[1]}`)) return invalid(); seen.add(`${section}.${match[1]}`);
-      const key = match[1]!; let value = match[2]!;
+      const match = keyValue(line);
+      if (!match || seen.has(`${section}.${match[0]}`)) return invalid(); seen.add(`${section}.${match[0]}`);
+      const key = match[0]; let value = match[1];
       if (value.startsWith("[")) {
         const parts = [value];
         while (!parts[parts.length - 1]!.trimEnd().endsWith("]") && i + 1 < lines.length) parts.push(lines[++i]!);
@@ -117,21 +124,26 @@ function python(files: Map<string, string>): Declaration {
       }
       if (dependencies && /^\s/u.test(raw)) { requirement(line, result); continue; }
       dependencies = false;
-      const match = /^([A-Za-z0-9_-]+)\s*=\s*(.*)$/u.exec(line); if (!match) return invalid();
-      if (seen.has(`${section}.${match[1]}`)) return invalid(); seen.add(`${section}.${match[1]}`);
-      if (!(section === "[metadata]" && ["name", "version", "description"].includes(match[1]!) || section === "[options]" && match[1] === "install_requires")) return invalid();
-      if (section === "[metadata]" && match[1] === "name") name(match[2]!);
-      if (section === "[options]" && match[1] === "install_requires") { dependencies = true; if (match[2]) requirement(match[2], result); }
+      const match = keyValue(line); if (!match) return invalid();
+      const [key, value] = match;
+      if (seen.has(`${section}.${key}`)) return invalid(); seen.add(`${section}.${key}`);
+      if (!(section === "[metadata]" && ["name", "version", "description"].includes(key) || section === "[options]" && key === "install_requires")) return invalid();
+      if (section === "[metadata]" && key === "name") name(value);
+      if (section === "[options]" && key === "install_requires") { dependencies = true; if (value) requirement(value, result); }
     }
   }
   const setup = files.get("setup.py");
   if (setup !== undefined) {
     // This deliberately small literal-only grammar is data inspection, NEVER Python execution.
-    const match = /^\s*from setuptools import setup\s+setup\(\s*([\s\S]*?)\s*\)\s*$/u.exec(setup); if (!match) return invalid();
-    const fields = match[1]!.split(",").map(s => s.trim()).filter(Boolean); let found = false;
+    // Same grammar as `from setuptools import setup<whitespace>setup( <fields> )`, read with prefix/suffix checks so it stays linear.
+    const PREFIX = "from setuptools import setup"; const text = setup.trim();
+    if (!text.startsWith(PREFIX)) return invalid();
+    const rest = text.slice(PREFIX.length); const call = rest.trimStart();
+    if (call.length === rest.length || !call.startsWith("setup(") || !call.endsWith(")") || call.length < "setup()".length) return invalid();
+    const fields = call.slice("setup(".length, -1).split(",").map(s => s.trim()).filter(Boolean); let found = false;
     for (const field of fields) {
-      const part = /^(name|version|description)\s*=\s*(.*)$/u.exec(field); if (!part) return invalid();
-      const value = quoted(part[2]!); if (part[1] === "name") { if (found) return invalid(); found = true; name(value); }
+      const part = keyValue(field); if (!part || !["name", "version", "description"].includes(part[0])) return invalid();
+      const value = quoted(part[1]); if (part[0] === "name") { if (found) return invalid(); found = true; name(value); }
     }
     if (!found) return invalid();
   }

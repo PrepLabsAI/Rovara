@@ -13,6 +13,9 @@ import { gitOriginalCode, type OriginalCodeRepository } from "./verification/ori
  */
 export const MULTI_REPO_CHECKS_LIVE: boolean = false;
 
+/** The most an evidence-time derivation may take, whatever the round has left (it is informational and never changes a check). */
+export const EVIDENCE_EDGES_MAX_MS = 15_000;
+
 /** One supplier per invocation. Construction does not read manifests: the agent has not edited them yet. */
 export function createRepositoryCheckSupplier(input: {
   rootPath: string; repositories: MultiRepoChecks["repositories"]; explicit?: Omit<MultiRepoChecks, "rootPath"> | undefined;
@@ -42,7 +45,7 @@ export function createRepositoryCheckSupplier(input: {
     async evidence(round: { kind: CheckRunners["kind"]; signal: AbortSignal; budgetMs: number }): Promise<RepositoryEdges | undefined> {
       if (live) return recorded;
       if (!automatic(round.kind) || round.signal.aborted || round.budgetMs <= 0) return undefined;
-      const deadline = Date.now() + round.budgetMs;
+      const deadline = Date.now() + Math.min(round.budgetMs, EVIDENCE_EDGES_MAX_MS);
       const derived = await derive(round.signal, () => deadline - Date.now()).catch(() => undefined);
       return derived !== undefined && derived.edges.length > 0 ? derived : undefined;
     },
