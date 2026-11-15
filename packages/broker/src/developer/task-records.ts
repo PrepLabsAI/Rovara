@@ -49,7 +49,26 @@ export interface CounterKey { pk: string; sk: string }
 export interface WorkspaceCharge { member: CounterKey; organization: CounterKey }
 
 /** DEVTASK#<taskId> / META: the task. */
-export interface DeveloperTaskRecord {
+/** #651: one usage record of a task's runs: when, its cost (null when the provider gave none) and its tokens. */
+export interface TaskRunSpend { at: string; usd: number | null; inputTokens: number; outputTokens: number }
+
+/** #651: the totals kept on the task as its usage is recorded. */
+export interface TaskSpendTotals { spentUsd?: number; spentInputTokens?: number; spentOutputTokens?: number; spentRuns?: number; spentUnpricedRuns?: number; spentUpdatedAt?: string }
+
+/** #651: the marker of one usage record counted on its task, in its own partition: a replayed record finds it and is not counted again. */
+export const taskSpendMarkerKey = (taskId: string, usageId: string) => ({ pk: `TASKSPEND#${taskId}`, sk: usageId });
+
+/** #651: what the task has cost so far, from its totals: priced dollars, tokens, records and unpriced records, and when the newest was counted. */
+export function taskSpent(task: TaskSpendTotals): { usd: number; inputTokens: number; outputTokens: number; runs: number; unpricedRuns: number; updatedAt: string } | undefined {
+  const runs = task.spentRuns;
+  if (typeof runs !== "number" || runs <= 0) return undefined;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0);
+  const usd = typeof task.spentUsd === "number" && Number.isFinite(task.spentUsd) && task.spentUsd > 0 ? task.spentUsd : 0;
+  // Cents are what a person reads; the running sum of floats is rounded once, here.
+  return { usd: Math.round(usd * 10_000) / 10_000, inputTokens: count(task.spentInputTokens), outputTokens: count(task.spentOutputTokens), runs: count(runs), unpricedRuns: count(task.spentUnpricedRuns), updatedAt: task.spentUpdatedAt ?? "" };
+}
+
+export interface DeveloperTaskRecord extends TaskSpendTotals {
   pk: string;
   sk: "META";
   entityType: "DEVELOPER_TASK";
