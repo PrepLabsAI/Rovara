@@ -23,6 +23,8 @@ const ALL_SERVICES = () => ({
   "notify-deliver": { pass: async () => ({ sent: 0 }) }, "admission-hold-sweep": { pass: async () => ({ charged: 0 }) },
 });
 
+const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
+
 function appOver(world: FakeWorld, env: NodeJS.ProcessEnv, extra: { servedCompanies?: () => Promise<readonly string[]>; services?: () => Partial<Record<CoreServiceName, CoreService>> } = {}): CoreHostApp {
   return createCoreHostApp({
     env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
@@ -31,6 +33,8 @@ function appOver(world: FakeWorld, env: NodeJS.ProcessEnv, extra: { servedCompan
       callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
       services: extra.services ?? ALL_SERVICES,
+      // Switch blocker honest-ci: a deployment hands in the project's own CI mode reader (core-host-switch-blockers.test.ts covers the refusals).
+      ciReporting: HONEST_CI,
     }),
   });
 }
@@ -284,7 +288,7 @@ describe("review fixes: a start the switch does not send to the core is refused,
     await registerProject(world, OTHER);
     const app = createCoreHostApp({
       env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES, ciReporting: HONEST_CI }),
     });
     expect(await app.handleScheduledJob({ source: "agentx.core-job", job: "dispatch-sweep" })).toMatchObject({ companies: [{ companyId: FAKE_COMPANY }] });
     const runtime = await app.runtimeFor(OTHER);
@@ -299,7 +303,16 @@ describe("review fixes: a start the switch does not send to the core is refused,
     const world = createFakeWorld();
     const app = createCoreHostApp({
       env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(),
-      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: undefined as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: undefined as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES, ciReporting: HONEST_CI }),
+    });
+    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
+  });
+
+  it("refuses a null access rule too (the core's own fallback would take it as absent)", async () => {
+    const world = createFakeWorld();
+    const app = createCoreHostApp({
+      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: null as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
     });
     await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
   });
