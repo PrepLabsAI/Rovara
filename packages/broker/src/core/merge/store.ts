@@ -23,7 +23,7 @@ export const recoveryRowKey = (taskId: string): { pk: "WORKFLOW_MERGE_RECOVERY";
 
 const TRACKING_FIELDS = [
   "orgId", "taskId", "repositoryId", "number", "version", "headSha", "draft", "state", "baseBranch", "ci", "ciBasis", "ciUnreadableSince", "ciMissingChecks", "ciMissingSince", "checksEverSeen", "failingChecks", "review", "approval",
-  "branch", "headByRovara", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "nudges", "syncs", "mergeClaim", "decisionDigest", "observedAt",
+  "branch", "headByRovara", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "nudges", "syncs", "mergeClaim", "decisionDigest", "observedAt", "ciMarked", "ciMarkedSince",
 ] as const;
 
 /** A stored item as the schema reads it, or undefined (never an item of another org or task). */

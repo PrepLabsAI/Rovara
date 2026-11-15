@@ -4,6 +4,8 @@
 // before it reaches a model, and it can change nothing about the run's tools, limits or path. A round is paid work: it is started like any coding run, so the payer, the step budget,
 // the planning limit and the run limit apply to it as to the first build.
 import {
+  CI_EVIDENCE_ASK_WORDS,
+  environmentLine,
   CI_BLOCK_BYTES_MAX,
   CI_FAILED_JOBS_MAX,
   CI_FIX_ROUNDS_MAX,
@@ -258,6 +260,18 @@ const milestonesOf = (milestoneToRecord: CodeMilestone, revision: number): Merge
 export async function ciFixDecider(input: MergeActionInput): Promise<MergeActionRequest | undefined> {
   const { item, workflow, autonomy, context } = input;
   if (context === undefined) return undefined;
+  // TE-E0 option A: a check the customer marked as running in their test environment. Its environment's failure, or a question for a person (no result in time, the rounds used, no detail, a fix that
+  // would weaken a test), stops the task with that reason and changes no code. A person's Retry for this head lets the CI fix run as before.
+  const approvedHead = workflow.ciFixApproved?.includes(item.headSha) === true;
+  const marked = context.marked;
+  if (marked !== undefined && !approvedHead && (marked.verdict.kind === "environment" || marked.verdict.kind === "ask")) {
+    const at = new Date(input.now).toISOString();
+    const reason = marked.verdict.kind === "environment"
+      ? environmentLine({ check: marked.name, reason: marked.verdict.reason, baseBranch: marked.baseBranch, rerunUrl: marked.rerunUrl })
+      : CI_EVIDENCE_ASK_WORDS[marked.verdict.reason](marked.name);
+    const next = blockWorkflowCiFix(workflow, { reason, now: at });
+    return { slot: "ci_fix", workflow: next, steps: [], milestones: milestonesOf(milestone(context, "stuck", at, next.blockReason ?? ""), next.revision) };
+  }
   const decision = decideCiFix({ item, workflow, autonomy });
   if (decision === "none") return undefined;
   const at = new Date(input.now).toISOString();
@@ -282,7 +296,7 @@ export async function ciFixDecider(input: MergeActionInput): Promise<MergeAction
     steps: [ciEvidenceItem({ orgId: context.orgId, taskId: context.taskId, revision: next.revision, block: ciOutputBlock(evidence), now: input.now, ttlAttribute: context.ttlAttribute })],
     dispatch: { kind: "IMPLEMENT", workflowRevision: next.revision, candidateDigest: next.candidate?.digest ?? WORKFLOW_NO_CANDIDATE_DIGEST, at },
     milestones: milestonesOf(milestone(context, "fixing", at,
-      counted ? `CI is failing on ${names(evidence.map((check) => check.name))}, so Rovara is fixing it (round ${String(round)} of ${String(CI_FIX_ROUNDS_MAX)}).`
+      counted ? `CI is failing on ${names(evidence.map((check) => check.name))}, so Rovara is fixing it (round ${String(round)} of ${String(marked?.verdict.kind === "fix" ? marked.verdict.roundsMax : CI_FIX_ROUNDS_MAX)}).`
         : `CI is still failing on ${names(evidence.map((check) => check.name))}, so Rovara is trying once more because you asked.`), next.revision),
   };
 }

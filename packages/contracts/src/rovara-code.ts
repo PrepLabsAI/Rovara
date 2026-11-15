@@ -10,6 +10,7 @@ import { CommitIdSchema } from "./plugins/common.js";
 import { EVIDENCE_NOT_TESTED_KINDS, ProofDetailSchema } from "./evidence.js";
 import { MODEL_COMPANIES, ModelCompanySchema, ModelIdentifierSchema } from "./models.js";
 import { redactText } from "./redaction.js";
+import { CI_EVIDENCE_BLOCK_PREFIXES, CI_EVIDENCE_LIMITS } from "./ci-evidence.js";
 import { SetupApplyBodySchema, SetupProposalSchema, SetupReviewEntrySchema } from "./setup-proposal.js";
 
 // ---- limits (placeholder values, exact names)
@@ -334,7 +335,9 @@ export function ciFixUnrelatedMessage(check: string): string {
 }
 /** Whether a workflow's block reason is one of the three above: the task is waiting for a person to retry the CI fix. */
 export function isCiFixBlockReason(reason: string | undefined): boolean {
-  return reason !== undefined && (reason.startsWith(CI_FIX_ASK_PREFIX) || reason.startsWith(CI_FIX_STOP_PREFIX) || reason.startsWith(CI_FIX_UNRELATED_PREFIX));
+  return reason !== undefined && (reason.startsWith(CI_FIX_ASK_PREFIX) || reason.startsWith(CI_FIX_STOP_PREFIX) || reason.startsWith(CI_FIX_UNRELATED_PREFIX)
+    // TE-E0 option A: a marked check that is the customer's environment, or that needs a person (no result in time, the rounds used, no detail, a fix that weakens a test).
+    || CI_EVIDENCE_BLOCK_PREFIXES.some((prefix) => reason.startsWith(prefix)));
 }
 
 // ---- keeping the branch up to date (Plan 6 Task 17)
@@ -440,6 +443,24 @@ export function ciEvidenceLevel(ci: "none" | "pending" | "passing" | "failing" |
   return ci === "none" ? "no_ci" : ci === "unreadable" ? "ci_not_readable" : ci === "pending" || ci === "required_missing" ? undefined : "their_ci";
 }
 
+/** TE-E0 option A: a marked check's state on one head, as the tracking item keeps it. `announced` says its result was told on the pull request. */
+export const MarkedCheckEntrySchema = z.object({
+  name: z.string().min(1).max(CI_EVIDENCE_LIMITS.checkNameMax),
+  source: z.string().min(1).max(CI_EVIDENCE_LIMITS.sourceMax).optional(),
+  state: z.enum(["waiting", "passed", "failed", "not_run"]),
+  reason: z.enum(["timed_out", "skipped", "neutral"]).optional(),
+  until: InstantSchema.optional(),
+  expectedMs: z.number().int().positive().max(CI_EVIDENCE_LIMITS.waitCapMinutesMax * 60_000).optional(),
+  afterMs: z.number().int().positive().max(CI_EVIDENCE_LIMITS.waitCapMinutesMax * 60_000).optional(),
+  runId: z.string().min(1).max(200).optional(),
+  attempt: z.number().int().min(1).max(1_000).optional(),
+  startedAt: InstantSchema.optional(),
+  completedAt: InstantSchema.optional(),
+  url: z.string().min(1).max(2_048).optional(),
+  announced: z.literal(true).optional(),
+}).strict();
+export type MarkedCheckEntry = z.infer<typeof MarkedCheckEntrySchema>;
+
 /** The separate item that holds what GitHub says about one pull request of a task (`DEVTASK#<taskId>` / `MERGE_TRACKING#<repositoryId>#<number>`). `decisionDigest` hashes every field but `observedAt`, `version` and itself. */
 export const MergeTrackingItemSchema = z
   .object({
@@ -461,6 +482,10 @@ export const MergeTrackingItemSchema = z
     /** TE-B5 (L1): since when a head a PERSON pushed has had a required check unreported (its own clock; Rovara's heads use `lastRovaraPushAt`). Absent on every row written before. */
     ciMissingSince: InstantSchema.optional(),
     ciMissingChecks: z.array(z.string().min(1).max(120)).max(10).optional(),
+    /** TE-E0 option A: one entry per check the customer marked as running in their test environment, for this head (absent on every row written before, and on every project with nothing marked). */
+    ciMarked: z.array(MarkedCheckEntrySchema).max(CI_EVIDENCE_LIMITS.markedChecksMax).optional(),
+    /** TE-E0 option A: since when a head a PERSON pushed has been waited on for its marked checks (Rovara's heads use `lastRovaraPushAt`). */
+    ciMarkedSince: InstantSchema.optional(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),
     approval: z.object({ hostUserId: z.string().min(1).max(200), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
