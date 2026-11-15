@@ -2,12 +2,12 @@
 // companies with the same project name never see or change each other's lessons; only a project or company admin sets the learning mode; every write is audited; an erased person's words never come back.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
+import { AgentXError, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
-import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MODE_NEEDS_ADMIN, NO_SUCH_PROJECT, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
+import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MODE_NEEDS_ADMIN, NO_SUCH_PROJECT, SUMMARY_NEEDS_ADMIN, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import type { CoreSwitch } from "../../packages/broker/src/core-host/flags.js";
@@ -118,6 +118,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", `${P}/lessons/les_aaaa1111/approve`, { version: 1 }], ["POST", `${P}/lessons/les_aaaa1111/reject`, { version: 1, reason: "wrong" }], ["POST", `${P}/lessons/les_aaaa1111/retire`, { reason: "outdated" }],
   ["POST", `${P}/lessons/les_aaaa1111/retire-request`, {}], ["GET", `${P}/tasks/${randomUUID()}/lessons`],
   ["POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_aaaa1111", version: 1, decision: "keep" }] }], ["POST", `${P}/tasks/${randomUUID()}/lessons/les_aaaa1111/not-helpful`, {}],
+  ["GET", `${P}/lessons/weekly-summary`], ["PUT", `${P}/lessons/weekly-summary`, { on: true }],
 ];
 
 describe("the paths", () => {
@@ -127,7 +128,7 @@ describe("the paths", () => {
       "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
-      "PUT /v1/dev/projects/{project}/lessons/mode",
+      "PUT /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary",
     ]].sort());
     expect(rows.every((route) => route.requires === "full")).toBe(true);
     const samples = [...rows.map((route) => route.path.replace(/\{[A-Za-z]+\}/g, "x1")), "/v1/dev/projects/x1", "/v1/dev/projects/x1/lessons/", "/v1/dev/projects/x1/lessons/a/b", "/v1/dev/projects/x1/lessons/a/approve/b", "/v1/dev/projects/x1/tasks/t1", "/v1/dev/projects/x1/lessonsx"];
@@ -478,5 +479,35 @@ describe("not helpful", () => {
     expect(await call(target, "a-contrib", "POST", path("les_aaaa1111"), {})).toEqual({ ok: true, body: { project: "payments", taskId, lessonId: "les_aaaa1111", marked: "not_helpful" } });
     expect((await store.get({ workspaceId: A, project: "payments" }, "les_aaaa1111"))?.counters.harmful).toBe(1);
     expect(await call(target, "a-contrib", "POST", path("les_aaaa1111"), {})).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+  });
+});
+
+describe("the weekly summary setting", () => {
+  const PATH = `${P}/lessons/weekly-summary`;
+  it("off by default; only a project admin or a company owner or admin turns it on, never a script token; audited before the write; two companies with one project name are apart", async () => {
+    const w = await setUp();
+    const { api: target } = api(w);
+    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: false, canChange: false } });
+    expect(await call(target, "a-contrib", "PUT", PATH, { on: true })).toEqual({ ok: false, code: "FORBIDDEN", status: 403, message: SUMMARY_NEEDS_ADMIN });
+    expect(await call(target, "a-admin", "PUT", PATH, { on: true }, undefined, { scriptToken: { tokenId: "t1" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    for (const body of [{}, { on: "yes" }, { on: true, extra: 1 }]) expect(await call(target, "a-admin", "PUT", PATH, body)).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    expect(w.world.audit.filter((e) => e.action === "lesson.digest_switched")).toEqual([]);
+    expect(await call(target, "a-maint", "PUT", PATH, { on: true })).toEqual({ ok: true, body: { project: "payments", on: true, canChange: true } });
+    expect(await call(target, "a-contrib", "GET", PATH)).toMatchObject({ ok: true, body: { on: true } });
+    expect(await call(target, "b-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: false } });
+    expect(await w.world.store.get({ pk: companyScoped(B, "LESSON_DIGEST#payments"), sk: "SETTING" })).toBeUndefined();
+    const records = w.world.audit.filter((e) => e.action === "lesson.digest_switched");
+    expect(records.map((e) => [e.actor.id, e.companyId, e.details])).toEqual([["a-maint", A, expect.objectContaining({ enabled: true })]]);
+    expect(JSON.stringify(records)).not.toContain("payments");
+    expect(await call(target, "a-admin", "PUT", PATH, { on: false })).toMatchObject({ ok: true, body: { on: false } });
+  });
+
+  it("a change that cannot be audited is not saved", async () => {
+    const w = await setUp();
+    const real = w.lessons.get(A)!;
+    const failing = { emit: async () => { throw new Error("ledger down"); } };
+    const { api: target } = api(w, { lessonsOf: async (companyId) => (companyId === A ? { ...real, runtime: { ...real.runtime, audit: failing } } : undefined) });
+    expect(await call(target, "a-admin", "PUT", PATH, { on: true })).toMatchObject({ ok: false, code: "AUDIT_UNAVAILABLE" });
+    expect(await call(api(w).api, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: false } });
   });
 });

@@ -13,6 +13,8 @@
 //   POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful   {}                       a person on the project marks a lesson the task was given as not helpful (thumbs-down)
 //   GET  /v1/dev/projects/{project}/lessons/mode                                                             the project's learning mode
 //   PUT  /v1/dev/projects/{project}/lessons/mode                        { mode: off | suggest | auto }       a project admin (maintainer) or a company owner or admin only
+//   GET  /v1/dev/projects/{project}/lessons/weekly-summary                                                   whether the weekly lessons summary goes to the chats (`lessons/digest-notice.ts`; off by default)
+//   PUT  /v1/dev/projects/{project}/lessons/weekly-summary              { on: boolean }                      who may set the mode sets it; audited before the write
 //
 // Rules:
 //   - The switch (`ROVARA_CORE_LESSONS`) is read first: a company it does not cover gets the fixed "Lessons are off." and nothing is read or written. With the switch `off` not even membership is read.
@@ -35,12 +37,13 @@ import { attributionNameOf } from "../lessons/people.js";
 import { DEFAULT_LEARNING_MODE, requireAudit, resolveLearning, type LearningMode } from "../lessons/policy.js";
 import { readVisible } from "../lessons/read-visible.js";
 import { idIn } from "../lessons/types.js";
+import { readDigestSetting, writeDigestSetting } from "../lessons/digest-notice.js";
 import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
@@ -50,6 +53,7 @@ export const NO_SUCH_PROJECT = "No such project.";
 export const NO_SUCH_TASK = "No such task.";
 export const NO_SUCH_LESSON = "That lesson is no longer there.";
 export const MODE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change its learning mode.";
+export const SUMMARY_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change the weekly summary.";
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 const SIGN_IN_AGAIN = "Sign in again.";
 const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
@@ -85,6 +89,7 @@ const RejectBody = z.object({ version: z.number().int().min(1).max(1_000_000), r
 const RetireBody = z.object({ reason: z.enum(RETIRE_REASONS) }).strict();
 const EmptyBody = z.object({}).strict();
 const ModeBody = z.object({ mode: z.enum(LESSON_API_MODES) }).strict();
+const WeeklySummaryBody = z.object({ on: z.boolean() }).strict();
 const PageQuery = z.object({
   list: z.enum(LESSON_PAGE_LISTS).default("approved"),
   limit: z.string().regex(/^[1-9][0-9]{0,2}$/u).transform(Number).refine((n) => n <= 100).optional(),
@@ -197,7 +202,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     const method = request.method;
     const route = rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
     const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", decisions: "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
-    if (route === "mode" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
+    if (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
     if (options.lessonsSwitch.mode === "off") throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
@@ -261,16 +266,29 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       return { ...page, ...(page.next === undefined ? {} : { next: encodeLessonCursor(page.next) }) };
     }
 
+    /** Who may change the project's lessons settings (the mode, the weekly summary): a company owner or admin, or a project admin (maintainer), read live. */
+    const mayChange = async (): Promise<boolean> => {
+      if (role === "owner" || role === "admin") return true;
+      try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
+    };
+
+    if (route === "weekly-summary") {
+      if (method === "GET") return { project, on: await readDigestSetting(runtime.documents, companyId, project), canChange: await mayChange() };
+      const body = bodyOf(WeeklySummaryBody, request.body, "the weekly summary takes on: true or false");
+      if (!(await mayChange())) throw agentXError("FORBIDDEN", SUMMARY_NEEDS_ADMIN);
+      // The record first: no record, no change.
+      if (!(await requireAudit(runtime.audit, { action: "lesson.digest_switched", workspaceId: companyId, project, actor: personId, facts: { enabled: body.on } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+      try { await writeDigestSetting(runtime.documents, companyId, project, body.on, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+      log("weekly_summary_set", { companyId, on: body.on });
+      return { project, on: body.on, canChange: true };
+    }
+
     if (route === "mode") {
       const settings = await runtime.settings.read(companyId, project).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
       const resolved = await resolveLearning(runtime.settings, companyId, project);
       // No settings, or no mode stored, is the default (Suggest, DEC 226).
       const stored = (settings as { mode?: unknown } | undefined)?.mode ?? DEFAULT_LEARNING_MODE;
       const own: LessonApiMode = typeof stored === "string" && stored in FROM_STORED ? FROM_STORED[stored as LearningMode] : "off";
-      const mayChange = async (): Promise<boolean> => {
-        if (role === "owner" || role === "admin") return true;
-        try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
-      };
       if (method === "GET") {
         const effective = FROM_STORED[resolved.chosenMode];
         return { project, mode: own, effective, lockedByCompany: effective !== own, canChange: await mayChange() };

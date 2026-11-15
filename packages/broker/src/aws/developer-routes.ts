@@ -1378,7 +1378,7 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
 }
 
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
-export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
