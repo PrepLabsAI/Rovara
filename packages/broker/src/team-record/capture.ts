@@ -5,7 +5,8 @@
 // read through the outcome rows (who sent it back and why). No model call is made.
 //
 // Search answers only for a task of the company and project asked about; every hit is the project's own row, which every project member may read (the rows come from project tasks and project
-// repositories). The caller frames the hits as data (`context-sources/routes.ts`).
+// repositories). A review comment is restricted to its repository's readers at the source; it is treated as project-wide here exactly as lessons treat words from the project's OWN repositories
+// (`lessons/project-repo-audience.ts`): the subject source reads comments only from the repositories of the task's project. The caller frames the hits as data (`context-sources/routes.ts`).
 import type { OrgId } from "@agentx/contracts";
 import type { TaskSubjectSource } from "../lessons/task-end.js";
 import type { OutcomeRowReader } from "../lessons/task-outcome-rows.js";
@@ -14,7 +15,26 @@ import { RECORD_SNIPPET_MAX, TeamRecordCompanyError, type TeamRecord, type TeamR
 
 const OUTCOME_WORDS = { merged: "merged", closed: "closed without merging" } as const;
 
-export async function recordEndedTask(input: { record: TeamRecord; source: TaskSubjectSource; rows: OutcomeRowReader; companyId: OrgId; taskId: string; now: () => number }): Promise<{ written: number }> {
+/**
+ * The ways a task starts where its request is what the task's own person typed (the app, the command line, a local tool). A task from a ticket, an issue, a chat, an event, a schedule or a
+ * chain carries someone else's words (the ticket's author, an outside system) as its request, so its request is never recorded as its person's. An unknown way (an older task) is not recorded either.
+ */
+export const TYPED_REQUEST_ORIGINS: ReadonlySet<string> = new Set(["app", "cli", "mcp"]);
+
+/** The pull request link a comment belongs to: the task's link that ends with the comment's own pull request number (`<place>#pr<n>:...`), or none. */
+function linkOfComment(eventId: string, links: readonly string[]): string | undefined {
+  const number = /#pr(\d+):/u.exec(eventId)?.[1];
+  if (number === undefined) return undefined;
+  const matches = links.filter((link) => link.endsWith(`/pull/${number}`) || link.endsWith(`/merge_requests/${number}`));
+  // Two repositories of the task may share a pull request number: then no link is claimed.
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+export async function recordEndedTask(input: {
+  record: TeamRecord; source: TaskSubjectSource; rows: OutcomeRowReader; companyId: OrgId; taskId: string; now: () => number;
+  /** How the task started (the task record's `origin`); only a request its own person typed is recorded as theirs (`TYPED_REQUEST_ORIGINS`). */
+  origin: string | undefined;
+}): Promise<{ written: number }> {
   if (input.record.companyId !== input.companyId) throw new TeamRecordCompanyError();
   const subject = await input.source.read({ workspaceId: input.companyId, taskId: input.taskId });
   if (subject === undefined) return { written: 0 };
@@ -23,15 +43,16 @@ export async function recordEndedTask(input: { record: TeamRecord; source: TaskS
   const occurredAt = new Date(input.now()).toISOString();
   const drafts: TeamRecordDraft[] = [];
   const outcome = facts.outcome === undefined ? undefined : OUTCOME_WORDS[facts.outcome as keyof typeof OUTCOME_WORDS];
-  const link = facts.rest.links?.[0];
-  for (const span of facts.rest.spans) {
+  const links = facts.rest.links ?? [];
+  for (const span of facts.rest.spans ?? []) {
     if (span.trust !== "member" || span.authorId === undefined || span.text === undefined) continue;
     if (span.kind === "intent") {
-      drafts.push({ project, kind: "task", text: `${outcome === undefined ? "Task" : `Task (${outcome})`}: ${span.text}`, taskId: input.taskId, authorId: span.authorId, sourceRef: `task:${input.taskId}:request`, url: link, occurredAt });
+      if (input.origin === undefined || !TYPED_REQUEST_ORIGINS.has(input.origin)) continue;
+      drafts.push({ project, kind: "task", text: `${outcome === undefined ? "Task" : `Task (${outcome})`}: ${span.text}`, taskId: input.taskId, authorId: span.authorId, sourceRef: `task:${input.taskId}:request`, url: links[0], occurredAt });
     } else if (span.kind === "close_reason") {
       drafts.push({ project, kind: "decision", text: `Closed the task: ${span.text}`, taskId: input.taskId, authorId: span.authorId, sourceRef: `task:${input.taskId}:close`, occurredAt });
     } else if (span.kind === "pr_comment" && span.eventId !== undefined) {
-      drafts.push({ project, kind: "review_feedback", text: span.text, taskId: input.taskId, authorId: span.authorId, sourceRef: span.eventId, url: link, occurredAt });
+      drafts.push({ project, kind: "review_feedback", text: span.text, taskId: input.taskId, authorId: span.authorId, sourceRef: span.eventId, url: linkOfComment(span.eventId, links), occurredAt });
     }
   }
   for (const requestId of subject.sendBackRequestIds) {

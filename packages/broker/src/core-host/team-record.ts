@@ -5,6 +5,7 @@
 // Wiring (the deployment, after `createCoreLessons`): `const record = attachCoreTeamRecord(lessons)`, then give `record.search` to the context sources as `teamSearch`.
 import type { DocumentStore, OrgId } from "@agentx/contracts";
 import type { TeamRecordSearch } from "../context-sources/team-record.js";
+import { readTask } from "../core/task-flow/reads.js";
 import { recordEndedTask, teamRecordSearchOver } from "../team-record/capture.js";
 import { createTeamRecord, type TeamRecord } from "../team-record/record.js";
 import { companyProjects, type CoreLessons } from "./lessons.js";
@@ -24,7 +25,8 @@ export function attachCoreTeamRecord(lessons: CoreLessons, input: { store: Docum
       // Only a task of this company (the subject source checks it again).
       if (await lessons.readTask(event.taskId) === undefined) return;
       try {
-        await recordEndedTask({ record, source: lessons.sources.source, rows: lessons.sources.rows, companyId: lessons.companyId, taskId: event.taskId, now: input.now });
+        const task = await readTask({ store: input.store }, event.taskId);
+        await recordEndedTask({ record, source: lessons.sources.source, rows: lessons.sources.rows, companyId: lessons.companyId, taskId: event.taskId, now: input.now, origin: task?.companyId === lessons.companyId ? task.origin : undefined });
       } catch (error) {
         input.log?.({ component: "core-team-record", companyId: lessons.companyId, event: "capture_failed", error: error instanceof Error ? error.name : "unknown" });
         throw error;

@@ -12,8 +12,10 @@
 //   TREC#<occurredAt ISO>#<row id>    the row: kind, text (cleaned, capped), task id, author id, source ref, when; expires after RECORD_KEEP_DAYS
 //   TRECA#<author hash>#<row id>      the author pointer (the row's sort key), for the person erase
 //   TRECS#<source hash>               "this source was recorded" (idempotency: one row per source, however often a task end is heard)
+//   TRECF#<person hash>               the erased-person fence (no expiry): a write of that person's words never commits after it
+// Every item but the fence expires after RECORD_KEEP_DAYS under the store's expiry attribute (or the index expiry attribute), and a reader never shows an expired row.
 import { createHash } from "node:crypto";
-import { OrgIdSchema, queryAll, teamRecordPk, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, queryAll, teamRecordPk, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { cleanForLearning } from "../lessons/guards.js";
 import { bm25PassageScores, keywordNeedles } from "./search-fusion.js";
 
@@ -35,6 +37,7 @@ const ROW_PREFIX = "TREC#";
 /** The most items one store query returns (the document store port's limit). */
 const QUERY_PAGE_MAX = 1_000;
 const AUTHOR_PREFIX = "TRECA#";
+const FENCE_PREFIX = "TRECF#";
 const SOURCE_PREFIX = "TRECS#";
 
 export interface TeamRecordDraft {
@@ -60,6 +63,8 @@ export class TeamRecordCompanyError extends Error {
   constructor() { super("the team record was asked about another company"); this.name = "TeamRecordCompanyError"; }
 }
 
+/** A person id as the fences compare it (the lessons' own normal form). */
+const normPerson = (id: string): string => id.normalize("NFC").trim().toLowerCase();
 const hex = (value: string, length: number): string => createHash("sha256").update(value).digest("hex").slice(0, length);
 
 export interface TeamRecord {
@@ -77,8 +82,14 @@ export function createTeamRecord(input: { store: DocumentStore; companyId: OrgId
   if (!OrgIdSchema.safeParse(companyId).success) throw new TeamRecordCompanyError();
   const pkOf = (project: string): string => teamRecordPk(companyId, project);
   // The author pointer is keyed by a hash of the company and the person, so a raw person id is never part of a key.
-  const authorHash = (personId: string): string => hex(`team-record-author\u0000${companyId}\u0000${personId}`, 32);
-  const ttl = (): Record<string, number> => (store.ttlAttribute === undefined ? {} : { [store.ttlAttribute]: Math.floor(input.now() / 1000) + RECORD_KEEP_DAYS * 86_400 });
+  const authorHash = (personId: string): string => hex(`team-record-author\u0000${companyId}\u0000${normPerson(personId)}`, 32);
+  // Every item carries its expiry (seconds since the epoch) under the store's expiry attribute, or the install's index expiry attribute where the store names none; a reader checks it itself,
+  // so a store that never sweeps still never shows an expired row.
+  const expiryAttribute = store.ttlAttribute ?? INDEX_EXPIRY_ATTRIBUTE;
+  // The erased-person fence: written by `erasePerson` BEFORE anything is removed, and checked by every write in the same transaction, so a capture that read the person before the erase can never
+  // write their words after it. Hash of the person only (the raw id is never a key). The lessons' own person fence in the same partition is checked too.
+  const fenceSk = (personId: string): string => `${FENCE_PREFIX}${hex(`team-record-fence\u0000${companyId}\u0000${normPerson(personId)}`, 32)}`;
+  const lessonFenceSk = (personId: string): string => `LESSONSET#FENCE#P#${createHash("sha256").update(normPerson(personId)).digest("hex")}`;
 
   async function put(draft: TeamRecordDraft): Promise<boolean> {
     if (!(TEAM_RECORD_KINDS as readonly string[]).includes(draft.kind) || draft.project === "" || draft.authorId === "") return false;
@@ -87,14 +98,18 @@ export function createTeamRecord(input: { store: DocumentStore; companyId: OrgId
     const id = hex(`team-record-row\u0000${companyId}\u0000${draft.project}\u0000${draft.sourceRef}`, 24);
     const pk = pkOf(draft.project);
     const sk = `${ROW_PREFIX}${draft.occurredAt}#${id}`;
+    // One expiry for the row, its pointer and its source mark, so the sweep never leaves a row its pointer no longer finds.
+    const expiry = { [expiryAttribute]: Math.floor(input.now() / 1000) + RECORD_KEEP_DAYS * 86_400 };
     const row: StoredDocument = {
       pk, sk, entityType: "TEAM_RECORD_ROW", id, kind: draft.kind, project: draft.project, text, taskId: draft.taskId, authorId: draft.authorId, sourceRef: draft.sourceRef.slice(0, 300),
-      occurredAt: draft.occurredAt, ...(draft.url === undefined ? {} : { url: draft.url.slice(0, 500) }), ...ttl(),
+      occurredAt: draft.occurredAt, ...(draft.url === undefined ? {} : { url: draft.url.slice(0, 500) }), ...expiry,
     };
     const result = await store.transact([
-      { kind: "put", item: { pk, sk: `${SOURCE_PREFIX}${hex(draft.sourceRef, 32)}`, entityType: "TEAM_RECORD_SOURCE", rowSk: sk, ...ttl() }, condition: { op: "notExists", path: ["pk"] } },
+      { kind: "check", key: { pk, sk: fenceSk(draft.authorId) }, condition: { op: "notExists", path: ["pk"] } },
+      { kind: "check", key: { pk, sk: lessonFenceSk(draft.authorId) }, condition: { op: "notExists", path: ["pk"] } },
+      { kind: "put", item: { pk, sk: `${SOURCE_PREFIX}${hex(draft.sourceRef, 32)}`, entityType: "TEAM_RECORD_SOURCE", rowSk: sk, ...expiry }, condition: { op: "notExists", path: ["pk"] } },
       { kind: "put", item: row },
-      { kind: "put", item: { pk, sk: `${AUTHOR_PREFIX}${authorHash(draft.authorId)}#${id}`, entityType: "TEAM_RECORD_AUTHOR", rowSk: sk, ...ttl() } },
+      { kind: "put", item: { pk, sk: `${AUTHOR_PREFIX}${authorHash(draft.authorId)}#${id}`, entityType: "TEAM_RECORD_AUTHOR", rowSk: sk, ...expiry } },
     ]);
     return result.applied;
   }
@@ -107,22 +122,22 @@ export function createTeamRecord(input: { store: DocumentStore; companyId: OrgId
     const id = field("id"), text = field("text"), taskId = field("taskId"), authorId = field("authorId"), sourceRef = field("sourceRef"), occurredAt = field("occurredAt");
     if (id === undefined || text === undefined || taskId === undefined || authorId === undefined || sourceRef === undefined || occurredAt === undefined) return undefined;
     // A row past its time may still be read until it is swept: it is not shown.
-    const expiry = store.ttlAttribute === undefined ? undefined : item[store.ttlAttribute];
-    if (typeof expiry === "number" && expiry * 1000 <= input.now()) return undefined;
+    const expiry = item[expiryAttribute];
+    if (typeof expiry !== "number" || expiry * 1000 <= input.now()) return undefined;
     return { id, project, kind: kind as TeamRecordKind, text, taskId, authorId, sourceRef, occurredAt, ...(field("url") === undefined ? {} : { url: field("url") }) };
   };
 
   async function search(project: string, query: string, limit: number): Promise<TeamRecordHitRow[]> {
     if (keywordNeedles(query).length === 0) return [];
-    // The newest rows, a page (the store's limit) at a time, up to the window.
+    // The newest rows, a page at a time (the same request on every page, as a cursor requires), up to the window.
     const items: StoredDocument[] = [];
     let cursor: string | undefined;
     do {
-      const page = await store.query({ pk: pkOf(project), sk: { op: "beginsWith", prefix: ROW_PREFIX }, descending: true, limit: Math.min(QUERY_PAGE_MAX, RECORD_SEARCH_WINDOW - items.length), ...(cursor === undefined ? {} : { cursor }) });
+      const page = await store.query({ pk: pkOf(project), sk: { op: "beginsWith", prefix: ROW_PREFIX }, descending: true, limit: QUERY_PAGE_MAX, ...(cursor === undefined ? {} : { cursor }) });
       items.push(...page.items);
       cursor = page.cursor;
     } while (cursor !== undefined && items.length < RECORD_SEARCH_WINDOW);
-    const rows = items.flatMap((item) => { const row = rowOf(item, project); return row === undefined ? [] : [row]; });
+    const rows = items.slice(0, RECORD_SEARCH_WINDOW).flatMap((item) => { const row = rowOf(item, project); return row === undefined ? [] : [row]; });
     const scores = bm25PassageScores(query, rows.map((row) => row.text));
     return rows.map((row, index) => ({ row, score: scores[index] ?? 0 })).filter((hit) => hit.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.max(0, Math.min(limit, RECORD_SEARCH_LIMIT_MAX)));
   }
@@ -132,14 +147,15 @@ export function createTeamRecord(input: { store: DocumentStore; companyId: OrgId
     const prefix = `${AUTHOR_PREFIX}${authorHash(personId)}#`;
     for (const project of projects) {
       const pk = pkOf(project);
+      // The fence first: from now on no write of this person's words can commit in this project, whatever a capture read before.
+      await store.put({ item: { pk, sk: fenceSk(personId), entityType: "TEAM_RECORD_FENCE" } });
       for (const pointer of await queryAll(store, { pk, sk: { op: "beginsWith", prefix } })) {
         const rowSk = pointer["rowSk"];
         if (typeof rowSk === "string" && rowSk.startsWith(ROW_PREFIX)) {
           const row = await store.get({ pk, sk: rowSk });
           // The source mark goes too, so nothing about the person's words is left; the row is removed before its pointer (a retry finds the pointer again).
           if (row !== undefined && typeof row["sourceRef"] === "string") await store.delete({ key: { pk, sk: `${SOURCE_PREFIX}${hex(row["sourceRef"], 32)}` } });
-          await store.delete({ key: { pk, sk: rowSk } });
-          removed += 1;
+          if (row !== undefined) { await store.delete({ key: { pk, sk: rowSk } }); removed += 1; }
         }
         await store.delete({ key: { pk, sk: pointer.sk } });
       }
