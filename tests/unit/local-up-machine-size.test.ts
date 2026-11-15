@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, TestEnvironmentBodySchema, testEnvDigest, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { recordMachineMeasurement, readMachineChoice } from "../../packages/broker/src/core/test-env/machine-size.js";
+import { recordMachineMeasurement, readMachineChoice, setMachineChoice } from "../../packages/broker/src/core/test-env/machine-size.js";
+import { CHOOSE_MACHINE_SIZE_ON_THE_PAGE } from "../../packages/broker/src/local/app/test-environment.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { raw } from "../support/local-pages-fakes.js";
 
@@ -84,21 +85,28 @@ describe("rovara up: the machine size at setup", () => {
     expect(page).toContain("peak memory 6246 MiB");
     expect(page).toContain("Stored only: Rovara does not launch this size yet.");
 
-    const chosen = await h.api("/v1/app/projects/payments/test-environment/machine", { method: "POST", body: { rowId: "x86_64-4-16" } });
-    expect(chosen.status, chosen.text).toBe(200);
+    // The choice is made on the page (the form comes with part C); here it is stored the way that form will store it.
+    await setMachineChoice(h.deps(), { orgId: IMPLICIT_COMPANY_ID, project: "payments", rowId: "x86_64-4-16" });
     expect(await readMachineChoice(h.deps(), IMPLICIT_COMPANY_ID, "payments")).toBe("x86_64-4-16");
     expect((await h.api("/v1/app/projects/payments/test-environment")).body["machine"]).toMatchObject({ chosenRowId: "x86_64-4-16" });
     expect(await h.pageOf("/test-environment/payments")).toContain("Your choice: x86, 4 vCPU, 16 GB");
   });
 
-  it("refuses a choice that is not a listed size, an unknown project, and a body that is not JSON, without repeating them", async () => {
+  it("the API cannot choose the machine size, whatever the body (a cost choice is the page's alone); an unknown project is not found; nothing is stored or repeated", async () => {
     const h = await proposed(ON);
-    const bad = await h.api("/v1/app/projects/payments/test-environment/machine", { method: "POST", body: { rowId: "CANARY-evil" } });
-    expect(bad.status).toBe(400);
-    expect(bad.text).not.toContain("CANARY-evil");
-    expect((await h.api("/v1/app/projects/payments/test-environment/machine", { method: "POST", body: {} })).status).toBe(400);
+    for (const body of [{ rowId: "x86_64-4-16" }, { rowId: "CANARY-evil" }, {}]) {
+      const refused = await h.api("/v1/app/projects/payments/test-environment/machine", { method: "POST", body });
+      expect(refused.status).toBe(403);
+      expect(refused.text).toContain(CHOOSE_MACHINE_SIZE_ON_THE_PAGE.slice(0, 40));
+      expect(refused.text).not.toContain("CANARY-evil");
+    }
     expect((await h.api("/v1/app/projects/other/test-environment/machine", { method: "POST", body: { rowId: "arm64-2-8" } })).status).toBe(404);
-    expect((await h.api("/v1/app/projects/payments/test-environment/machine")).status).not.toBe(200);
+    const get = await h.api("/v1/app/projects/payments/test-environment/machine");
+    const unknown = await h.api("/v1/app/projects/payments/test-environment/nothing");
+    // A GET of the choice route answers as an unknown route does (its words name the path, so only the status is compared).
+    expect(get.status).toBe(unknown.status);
+    const withoutRequestId = (text: string) => text.replace(/"requestId":"[^"]*"/u, "");
+    expect(withoutRequestId(get.text)).toBe(withoutRequestId(unknown.text));
     expect(await readMachineChoice(h.deps(), IMPLICIT_COMPANY_ID, "payments")).toBeUndefined();
   });
 

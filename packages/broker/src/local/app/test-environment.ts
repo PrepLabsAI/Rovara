@@ -16,7 +16,7 @@ import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { TEST_ENVIRONMENT_KIND, createTestEnvironmentSubject, proposeTestEnvironment, testEnvironmentSubjectId } from "../../core/test-env/environment.js";
 import { testEnvironmentView, type TestEnvironmentView } from "../../core/test-env/local-view.js";
 import { createTaskTestEnvironment, type TaskTestEnvironment } from "../../core/test-env/seam.js";
-import { machineCard, machineSizeEnabled, setMachineChoice } from "../../core/test-env/machine-size.js";
+import { machineCard, machineSizeEnabled } from "../../core/test-env/machine-size.js";
 import { testEnvironmentEnabled } from "../../core/test-env/switch.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { listProjects } from "./projects.js";
@@ -25,6 +25,8 @@ export const APPROVE_TEST_ENVIRONMENT_ON_THE_PAGE = "A test environment is appro
 const PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment(?:\/(propose|open|machine))?$/u;
 const IMAGES_PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment\/service-images(?:\/(approve|remove))?$/u;
 /** The API token (which an assistant may hold) and the MCP tools never approve an image: that is the owner's act, on the page. */
+/** TE-C5: the machine size is a cost choice: it is made on the page, by the owner, never through the API an assistant may hold (the page form comes with part C). */
+export const CHOOSE_MACHINE_SIZE_ON_THE_PAGE = "The machine size is chosen on the test environment page, by you. Run `rovara test-env open <project>` to open it; an assistant cannot choose it for you.";
 export const APPROVE_SERVICE_IMAGE_ON_THE_PAGE = "A service image is approved on the test environment page, by you, in a page you opened a few minutes ago. Run `rovara test-env open <project>` to open it; an assistant cannot approve for you.";
 const OPEN_NOT_AVAILABLE = "Rovara could not open a browser. Open the review pages from the terminal where `rovara up` runs.";
 
@@ -194,13 +196,8 @@ export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions)
           const machine = await machineCard(deps, options.companyId, project, view.proposal?.digest ?? view.approved?.digest).catch(() => undefined);
           return json(200, machine === undefined ? view : { ...view, machine });
         }
-        if (action === "machine" && request.method === "POST") {
-          const body = bodyOf(request) as { rowId?: unknown };
-          if (typeof body !== "object" || body === null) throw agentXError("CONFIG_INVALID", "rowId: send one of the listed machine sizes");
-          await setMachineChoice(deps, { orgId: options.companyId, project, rowId: body.rowId });
-          const view = await testEnvironmentView(deps, options.companyId, project);
-          return json(200, { machine: await machineCard(deps, options.companyId, project, view.proposal?.digest ?? view.approved?.digest) });
-        }
+        // The choice is the page's alone, whatever credential the caller holds (a cost choice: review M3-C5 M1).
+        if (action === "machine" && request.method === "POST") throw agentXError("FORBIDDEN", CHOOSE_MACHINE_SIZE_ON_THE_PAGE);
         if (action === "propose" && request.method === "POST") {
           const body = bodyOf(request) as { environment?: unknown; valueSources?: unknown };
           if (typeof body !== "object" || body === null || body.environment === undefined) throw agentXError("CONFIG_INVALID", "environment: send the test environment to propose");
