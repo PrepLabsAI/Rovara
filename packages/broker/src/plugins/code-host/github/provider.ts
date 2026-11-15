@@ -182,7 +182,7 @@ export interface GitHubCodeHostProvider {
   /** TE-E0 option A: the latest run of a named check on a commit or a branch's head. */
   getLatestCheckRun?(repositoryUrl: string, at: { revision: string } | { branch: string }, check: { name: string; appId?: number | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<LatestCheckRun | undefined>;
   /** TE-E0 option B: the per-test report files of one GitHub Actions workflow run. */
-  getRunReportFiles?(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" }>;
+  getRunReportFiles?(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: ReadBudget, options?: { since?: string }): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" } | { kind: "ambiguous" }>;
   /** TE-E0 option A, setup: the check names seen on recent pull requests. */
   listSeenCheckNames?(repositoryUrl: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ checks: SeenCheckName[]; complete: boolean }>;
 }

@@ -70,8 +70,8 @@ export function githubActionsCheckRunner(provider: GitHubActionsProvider): Check
       },
     }),
     ...(provider.getRunReportFiles === undefined ? {} : {
-      async reportFiles(repository: RepositoryRef, workflowRunId: string, scope: HostScope, budget?: ReadBudget) {
-        return provider.getRunReportFiles!(repository.url, workflowRunId, checkedScope(scope), budget);
+      async reportFiles(repository: RepositoryRef, workflowRunId: string, scope: HostScope, budget?: ReadBudget, options?: { since?: string }) {
+        return provider.getRunReportFiles!(repository.url, workflowRunId, checkedScope(scope), budget, options);
       },
     }),
     ...(provider.listSeenCheckNames === undefined ? {} : {

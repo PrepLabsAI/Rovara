@@ -180,8 +180,11 @@ export const PipelineReportSchema = z.object({
 }).strict();
 export type PipelineReport = z.infer<typeof PipelineReportSchema>;
 
+/** What the parser says of one file: a report read whole, a file that is not a test report, or one that claims to be and could not be read whole (never a partial report). */
+export type PipelineReportReading = { kind: "report"; report: PipelineReport } | { kind: "not_report" } | { kind: "unreadable" };
+
 /**
- * The port that reads a report file's text (JUnit and the other formats of the report adapters, #529). The host fills it with the worker's adapters; the broker never parses a report itself. Undefined:
- * the text is not a report this parser reads (never a guess, never a partial report).
+ * The port that reads a report file's text (JUnit and the other formats of the report adapters, #529). The host fills it with the worker's adapters (`parsePipelineReport`); the broker never parses a
+ * report itself.
  */
-export type PipelineReportParser = (text: string) => PipelineReport | undefined;
+export type PipelineReportParser = (text: string) => PipelineReportReading;

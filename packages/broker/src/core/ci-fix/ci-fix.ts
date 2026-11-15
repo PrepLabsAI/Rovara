@@ -264,6 +264,8 @@ export async function ciFixDecider(input: MergeActionInput): Promise<MergeAction
   // would weaken a test), stops the task with that reason and changes no code. A person's Retry for this head lets the CI fix run as before.
   const approvedHead = workflow.ciFixApproved?.includes(item.headSha) === true;
   const marked = context.marked;
+  // TE-E0 option B: a marked check's report is still being read; nothing is started on half the facts (the pass looks again soon).
+  if (marked?.pending === true) return undefined;
   if (marked !== undefined && !approvedHead && (marked.verdict.kind === "environment" || marked.verdict.kind === "ask")) {
     const at = new Date(input.now).toISOString();
     const reason = marked.verdict.kind === "environment"

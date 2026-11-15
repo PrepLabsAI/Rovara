@@ -460,7 +460,9 @@ export const MarkedCheckEntrySchema = z.object({
   announced: z.literal(true).optional(),
   /** TE-E0 option B: the workflow run the check's run belongs to (where its reports are), and what its per-test report said. */
   workflowRunId: z.string().min(1).max(200).optional(),
-  report: z.enum(["read", "none", "unreadable"]).optional(),
+  report: z.enum(["read", "none", "unreadable", "ambiguous"]).optional(),
+  /** How many times the report was read without an answer to keep (`none` or `unreadable` before the run's artifacts were all there): read again until the limit. */
+  reportTries: z.number().int().min(1).max(10).optional(),
   counts: z.object({ passed: z.number().int().min(0), failed: z.number().int().min(0), skipped: z.number().int().min(0) }).strict().optional(),
   /** Tests that passed here and failed by the same name on the base commit's run of this check: change proof, reported by the customer's pipeline. */
   proven: z.number().int().min(0).optional(),

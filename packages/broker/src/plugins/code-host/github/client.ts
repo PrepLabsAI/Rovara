@@ -12,7 +12,7 @@ import {
 } from "../../../github-pull-status.js";
 
 export type { PullRequestCheck, PullRequestReview, PullRequestStatus } from "../../../github-pull-status.js";
-import { ARTIFACT_ZIP_BYTES_MAX, ZIP_REPORT_FILES_MAX, zipReports } from "../../../core/ci-evidence/zip.js";
+import { ARTIFACT_ZIP_BYTES_MAX, ZIP_REPORTS_TOTAL_BYTES_MAX, ZIP_REPORT_FILES_MAX, zipReports } from "../../../core/ci-evidence/zip.js";
 import { addSeenCheckNames, latestCheckRunOf, latestStatusOf, parseCheckRunFacts, recentPullRequestHeads, type CheckRunFacts, type LatestCheckRun, type SeenCheckName } from "../../../github-check-facts.js";
 export type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
 
@@ -1444,9 +1444,11 @@ export class GitHubAppCredentialProvider {
   /**
    * TE-E0 option B: the per-test report files of one GitHub Actions workflow run. Its artifacts are listed (`actions: read`, already asked), the ones named like test results (`junit`, `test-results`,
    * `test-report`) are downloaded (at most `REPORT_ARTIFACTS_MAX`, each at most `ARTIFACT_ZIP_BYTES_MAX` zipped, from GitHub's own storage hosts only, with no credentials), and their `.xml`/`.json` entries
-   * read whole. `none` when the run has no such artifact (or the App may not read Actions); `unreadable` when one that matched could not be read whole. Logs and other artifacts are never read here.
+   * read whole. `none` when the run has no such artifact (or the App may not read Actions); `unreadable` when one that matched could not be read whole (or one expired); `ambiguous` when the run's latest
+   * attempt has more than one job, so its artifacts cannot be told to belong to the one check (they are then not read at all). `since` (the check run's start) leaves out artifacts an earlier attempt
+   * made. Logs and other artifacts are never read here.
    */
-  async getRunReportFiles(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" }> {
+  async getRunReportFiles(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget, options: { since?: string } = {}): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" } | { kind: "ambiguous" }> {
     if (!/^[1-9][0-9]{0,19}$/u.test(workflowRunId)) throw agentXError("CONFIG_INVALID", "GitHub workflow run id is invalid");
     const provider = this.trackingProvider(budget);
     const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
@@ -1458,13 +1460,21 @@ export class GitHubAppCredentialProvider {
       if (isAgentXError(error) && (error.code === "GITHUB_NOT_CONNECTED" || error.code === "RUNTIME_UNAVAILABLE")) return { kind: "none" };
       throw error;
     }
+    // The run's artifacts are the run's, not one job's: they speak for the marked check only when its latest attempt has that one job.
+    const jobs = await provider.trackingJson(`${root}/actions/runs/${workflowRunId}/jobs?filter=latest&per_page=1`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (jobs.status === 404 || jobs.status === 403 || jobs.status === 410) return { kind: "none" };
+    const jobCount = (jobs.body as { total_count?: unknown } | undefined)?.total_count;
+    if (jobs.status !== 200 || jobs.tooLarge === true || typeof jobCount !== "number") throw agentXError("RUNTIME_UNAVAILABLE", `GitHub job list failed with HTTP ${jobs.status}`);
+    if (jobCount !== 1) return { kind: "ambiguous" };
     const listed = await provider.trackingJson(`${root}/actions/runs/${workflowRunId}/artifacts?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
     if (listed.status === 404 || listed.status === 403 || listed.status === 410) return { kind: "none" };
     if (listed.status !== 200 || listed.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub artifact list failed with HTTP ${listed.status}`);
-    const chosen = reportArtifactsOf(listed.body);
+    const since = options.since === undefined ? undefined : Date.parse(options.since);
+    const chosen = reportArtifactsOf(listed.body, since !== undefined && Number.isFinite(since) ? since : undefined);
     if (chosen === "unreadable") return { kind: "unreadable" };
     if (chosen.length === 0) return { kind: "none" };
     const files: Array<{ name: string; text: string }> = [];
+    let total = 0;
     for (const artifact of chosen) {
       const located = await provider.fetchImplementation(`${root}/actions/artifacts/${String(artifact.id)}/zip`, { method: "GET", headers: githubHeaders(token), redirect: "manual", signal: AbortSignal.timeout(8_000) });
       const limitedAt = mergeRateLimitRetryAt(located, this.now());
@@ -1479,6 +1489,9 @@ export class GitHubAppCredentialProvider {
       if (body === undefined) return { kind: "unreadable" };
       const read = zipReports(body);
       if (read.kind === "unreadable") return read;
+      // One total for the whole run, across its artifacts.
+      for (const file of read.files) total += Buffer.byteLength(file.text, "utf8");
+      if (total > ZIP_REPORTS_TOTAL_BYTES_MAX) return { kind: "unreadable" };
       files.push(...read.files);
       if (files.length > ZIP_REPORT_FILES_MAX) return { kind: "unreadable" };
     }
@@ -3204,18 +3217,26 @@ export interface WorkingBranchPage { branches: string[]; page: number; mayHaveMo
 /** TE-E0 option B: the most test-result artifacts read for one run. */
 const REPORT_ARTIFACTS_MAX = 3;
 /** An artifact named like test results. */
-const REPORT_ARTIFACT_NAME = /junit|test[-_ ]?results?|test[-_ ]?reports?/iu;
+const REPORT_ARTIFACT_NAME = /junit|surefire|test[-_ ]?results?|test[-_ ]?reports?/iu;
 
-/** The test-result artifacts of a run's artifact list: unexpired, named like test results, at most `ARTIFACT_ZIP_BYTES_MAX` each; more than `REPORT_ARTIFACTS_MAX` of them, or a list that does not parse, is `unreadable`. */
-function reportArtifactsOf(body: unknown): Array<{ id: number }> | "unreadable" {
+/**
+ * The test-result artifacts of a run's artifact list, named like test results, at most `ARTIFACT_ZIP_BYTES_MAX` each. Made before `since` (an earlier attempt's): left out. An expired one, more than
+ * `REPORT_ARTIFACTS_MAX`, a creation time that does not parse while `since` is given, or a list that does not parse: `unreadable` (the rest would be a partial report).
+ */
+function reportArtifactsOf(body: unknown, since?: number): Array<{ id: number }> | "unreadable" {
   const list = (body as { artifacts?: unknown; total_count?: unknown } | undefined)?.artifacts;
   const total = (body as { total_count?: unknown } | undefined)?.total_count;
   if (!Array.isArray(list) || (typeof total === "number" && total > list.length)) return "unreadable";
   const chosen: Array<{ id: number }> = [];
   for (const value of list) {
-    const artifact = value as { id?: unknown; name?: unknown; expired?: unknown; size_in_bytes?: unknown } | null;
+    const artifact = value as { id?: unknown; name?: unknown; expired?: unknown; size_in_bytes?: unknown; created_at?: unknown } | null;
     if (artifact === null || typeof artifact !== "object" || typeof artifact.name !== "string" || !REPORT_ARTIFACT_NAME.test(artifact.name)) continue;
-    if (artifact.expired === true) continue;
+    if (since !== undefined) {
+      const created = typeof artifact.created_at === "string" ? Date.parse(artifact.created_at) : Number.NaN;
+      if (!Number.isFinite(created)) return "unreadable";
+      if (created < since) continue;
+    }
+    if (artifact.expired === true) return "unreadable";
     if (typeof artifact.id !== "number" || !Number.isSafeInteger(artifact.id) || artifact.id <= 0 || typeof artifact.size_in_bytes !== "number" || artifact.size_in_bytes > ARTIFACT_ZIP_BYTES_MAX) return "unreadable";
     chosen.push({ id: artifact.id });
   }

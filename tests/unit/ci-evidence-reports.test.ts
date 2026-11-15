@@ -73,23 +73,38 @@ describe("reading an artifact zip", () => {
 
 describe("the worker's report adapters as the port", () => {
   it("gives ids, outcomes and failure text paired with its own case", () => {
-    expect(parsePipelineReport(junit([{ name: "ok" }, { name: "bad", failure: "expected 1 to be 2 &amp; more" }, { name: "skip", skipped: true }]))).toEqual({ tests: [
+    expect(parsePipelineReport(junit([{ name: "ok" }, { name: "bad", failure: "expected 1 to be 2 &amp; more" }, { name: "skip", skipped: true }]))).toEqual({ kind: "report", report: { tests: [
       { id: "suite::ok", outcome: "passed" }, { id: "suite::bad", outcome: "failed", failureText: "expected 1 to be 2 & more" }, { id: "suite::skip", outcome: "skipped" },
-    ] });
+    ] } });
   });
-  it("never puts a failure text on the wrong test: cases it cannot pair give no text at all", () => {
-    const text = junit([{ name: "a", failure: "real failure" }]).replace("<testcase", "<!-- <testcase classname=\"old\" name=\"gone\"><failure message=\"stale\"/></testcase> --><testcase");
-    const read = parsePipelineReport(text);
-    expect(read?.tests).toEqual([{ id: "suite::a", outcome: "failed" }]);
+  it("never puts a failure text on another test: cases hidden in comments or CDATA are not cases", () => {
+    const hidden = "<!-- <testcase classname=\"old\" name=\"gone\"><failure message=\"stale\"/></testcase> -->";
+    const read = parsePipelineReport(junit([{ name: "a", failure: "real failure" }]).replace("<testcase", `${hidden}<testcase`));
+    expect(read).toEqual({ kind: "report", report: { tests: [{ id: "suite::a", outcome: "failed", failureText: "real failure" }] } });
   });
-  it("gives no report for text that is not one, and caps failure text in total", () => {
-    expect(parsePipelineReport("{\"coverage\": 1}")).toBeUndefined();
-    expect(parsePipelineReport("<?xml version=\"1.0\"?><testsuites><testsuite name=\"deploy\" tests=\"0\"/></testsuites>")).toEqual({ tests: [] });
-    expect(parsePipelineReport("<coverage line-rate=\"1\"/>")).toBeUndefined();
+  it.each([
+    ["a coverage file", "<?xml version=\"1.0\"?><coverage line-rate=\"1\"/>", "not_report"],
+    ["plain JSON", "{\"coverage\": 1}", "not_report"],
+    ["a truncated JUnit file", junit([{ name: "a" }, { name: "b" }]).slice(0, 80), "unreadable"],
+    ["a summary-only suite (no cases)", "<?xml version=\"1.0\"?><testsuite name=\"s\" tests=\"40\" failures=\"3\"></testsuite>", "unreadable"],
+    ["an empty suite", "<testsuites><testsuite name=\"deploy\" tests=\"0\"/></testsuites>", "unreadable"],
+    ["Jest-shaped JSON it cannot read", "{\"testResults\": 5}", "unreadable"],
+  ])("tells %s apart: %s", (_label, text, kind) => {
+    expect(parsePipelineReport(text).kind).toBe(kind);
+  });
+  it("caps failure text in total", () => {
     const many = parsePipelineReport(junit(Array.from({ length: 30 }, (_, index) => ({ name: `t${String(index)}`, failure: "x".repeat(1_500) }))));
-    const texts = many!.tests.flatMap((test) => (test.failureText === undefined ? [] : [test.failureText]));
-    expect(texts.join("").length).toBeLessThanOrEqual(PIPELINE_FAILURE_TEXT_TOTAL_MAX);
-    expect(many!.tests.filter((test) => test.outcome === "failed")).toHaveLength(30);
+    expect(many.kind).toBe("report");
+    const tests = many.kind === "report" ? many.report.tests : [];
+    expect(tests.flatMap((test) => (test.failureText === undefined ? [] : [test.failureText])).join("").length).toBeLessThanOrEqual(PIPELINE_FAILURE_TEXT_TOTAL_MAX);
+    expect(tests.filter((test) => test.outcome === "failed")).toHaveLength(30);
+  });
+  it("is linear on hostile input (no regular expression backtracks over the document)", () => {
+    const started = performance.now();
+    expect(parsePipelineReport(`${"<!---->".repeat(5_000)}x`).kind).toBe("not_report");
+    const cdata = `<testsuite name="s"><testcase classname="s" name="a"><failure message="m"/></testcase><system-out><![CDATA[${"<testcase ".repeat(200_000)}]]></system-out></testsuite>`;
+    expect(parsePipelineReport(cdata)).toEqual({ kind: "report", report: { tests: [{ id: "s::a", outcome: "failed", failureText: "m" }] } });
+    expect(performance.now() - started).toBeLessThan(3_000);
   });
 });
 
@@ -114,25 +129,37 @@ describe("the client's artifact read", () => {
   const API = "api.github.com/repos/acme/svc";
   const BLOB = "productionresultssa3.blob.core.windows.net";
   const list = (artifacts: unknown[]) => () => new Response(JSON.stringify({ total_count: artifacts.length, artifacts }), { status: 200 });
+  const oneJob = () => new Response(JSON.stringify({ total_count: 1, jobs: [] }), { status: 200 });
   const redirect = (to: string) => () => new Response(null, { status: 302, headers: { location: to } });
   const ORG = { orgId: IMPLICIT_COMPANY_ID };
   it("reads only test-result artifacts, through GitHub's storage, with no credentials", async () => {
     const { provider, asked } = client({
-      [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit-results", expired: false, size_in_bytes: 100 }, { id: 2, name: "screenshots", expired: false, size_in_bytes: 100 }, { id: 3, name: "test-results-old", expired: true, size_in_bytes: 1 }]),
+      [`${API}/actions/runs/9/jobs`]: oneJob,
+      [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit-results", expired: false, size_in_bytes: 100, created_at: "2026-11-15T10:05:00Z" }, { id: 2, name: "screenshots", expired: false, size_in_bytes: 100 }, { id: 3, name: "test-results-attempt-1", expired: false, size_in_bytes: 1, created_at: "2026-11-15T09:00:00Z" }]),
       [`${API}/actions/artifacts/1/zip`]: redirect(`https://${BLOB}/a/b.zip?sig=x`),
       [`${BLOB}/a/b.zip`]: () => new Response(zip([{ name: "report.xml", text: "<x/>" }]), { status: 200 }),
     });
-    expect(await provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "read", files: [{ name: "report.xml", text: "<x/>" }] });
+    expect(await provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG, undefined, { since: "2026-11-15T10:00:00Z" })).toEqual({ kind: "read", files: [{ name: "report.xml", text: "<x/>" }] });
+    // Another artifact, and the one an earlier attempt made, are never downloaded.
     expect(asked.some((path) => path.includes("/artifacts/2/") || path.includes("/artifacts/3/"))).toBe(false);
   });
+  it("reads nothing for a run with more than one job (its artifacts are not this check's alone)", async () => {
+    const { provider, asked } = client({ [`${API}/actions/runs/9/jobs`]: () => new Response(JSON.stringify({ total_count: 2, jobs: [] }), { status: 200 }) });
+    expect(await provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "ambiguous" });
+    expect(asked.some((path) => path.includes("/artifacts"))).toBe(false);
+  });
+  it("says unreadable when a matching artifact expired (the rest would be a partial report)", async () => {
+    const { provider } = client({ [`${API}/actions/runs/9/jobs`]: oneJob, [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit", size_in_bytes: 1, expired: true }, { id: 4, name: "test-results", size_in_bytes: 1 }]) });
+    expect(await provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "unreadable" });
+  });
   it("says none for a run with no such artifact, and unreadable for one sent elsewhere or too large", async () => {
-    expect(await client({ [`${API}/actions/runs/9/artifacts`]: list([{ id: 2, name: "screenshots", size_in_bytes: 1 }]) }).provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "none" });
-    const elsewhere = client({ [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit", size_in_bytes: 1 }]), [`${API}/actions/artifacts/1/zip`]: redirect("https://evil.example/x.zip") });
+    expect(await client({ [`${API}/actions/runs/9/jobs`]: oneJob, [`${API}/actions/runs/9/artifacts`]: list([{ id: 2, name: "screenshots", size_in_bytes: 1 }]) }).provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "none" });
+    const elsewhere = client({ [`${API}/actions/runs/9/jobs`]: oneJob, [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit", size_in_bytes: 1 }]), [`${API}/actions/artifacts/1/zip`]: redirect("https://evil.example/x.zip") });
     expect(await elsewhere.provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "unreadable" });
     expect(elsewhere.asked.some((path) => path.startsWith("evil.example"))).toBe(false);
-    const large = client({ [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit", size_in_bytes: ARTIFACT_ZIP_BYTES_MAX + 1 }]) });
+    const large = client({ [`${API}/actions/runs/9/jobs`]: oneJob, [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit", size_in_bytes: ARTIFACT_ZIP_BYTES_MAX + 1 }]) });
     expect(await large.provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "unreadable" });
-    const cut = client({ [`${API}/actions/runs/9/artifacts`]: () => new Response(JSON.stringify({ total_count: 200, artifacts: [] }), { status: 200 }) });
+    const cut = client({ [`${API}/actions/runs/9/jobs`]: oneJob, [`${API}/actions/runs/9/artifacts`]: () => new Response(JSON.stringify({ total_count: 200, artifacts: [] }), { status: 200 }) });
     expect(await cut.provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "unreadable" });
     await expect(cut.provider.getRunReportFiles("https://github.com/acme/svc", "../9", ORG)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
@@ -214,17 +241,56 @@ describe("per-test reports in a tracking pass", () => {
     expect(block).toContain("suite::bad: expected 1 to be 2");
     expect(block).not.toContain("a log that must never be read");
   });
-  it("calls a run whose report has no tests the environment, and a report with no failed test a question", async () => {
-    const empty: Fake = { reports: { "7700": ["<testsuite name=\"s\" tests=\"0\"></testsuite>"] }, reads: [], base: undefined };
+  it("decides nothing until a report that could not be read has been tried again, then asks; a report with no failed test asks", async () => {
+    const empty: Fake = { reports: { "7700": ["<testsuites><testsuite name=\"deploy\" tests=\"0\"/></testsuites>"] }, reads: [], base: undefined };
     const first = await world(settings(), empty);
     setChecks(first.w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask(first.deps, TASK_ID);
-    expect((await first.w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ENVIRONMENT_PREFIX}e2e-real failed before any test ran`, "u"));
+    for (let pass = 0; pass < 3; pass += 1) {
+      expect((await first.w.task()).workflow.state).toBe("WAITING");
+      await trackTask(first.deps, TASK_ID);
+      first.w.now.value += 2 * MIN;
+    }
+    expect(empty.reads).toEqual(["7700", "7700", "7700"]);
+    expect(await entry(first.w)).toMatchObject({ report: "unreadable", reportTries: 3 });
+    expect((await first.w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ASK_PREFIX}e2e-real failed without saying which test failed`, "u"));
+    // Never "your environment" from a report alone.
+    expect((await first.w.task()).workflow.blockReason).not.toMatch(new RegExp(`^${CI_EVIDENCE_ENVIRONMENT_PREFIX}`, "u"));
     const green: Fake = { reports: { "7700": [junit([{ name: "ok" }])] }, reads: [], base: undefined };
     const second = await world(settings(), green);
     setChecks(second.w, [unit, e2e({ conclusion: "failure" })]);
     await trackTask(second.deps, TASK_ID);
     expect((await second.w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ASK_PREFIX}e2e-real failed without saying which test failed`, "u"));
+  });
+  it("reads one run's report a pass: two marked checks landing together are read on two passes", async () => {
+    const two: CiEvidenceSettings = settings({ markedChecks: [MARKED, { name: "e2e-gpu", calledAs: "gpu", longOrPaid: true }] });
+    const fake: Fake = { reports: { "7700": [junit([{ name: "a" }])], "8800": [junit([{ name: "b" }])] }, reads: [], base: undefined };
+    const { w, deps } = await world(two, fake);
+    setChecks(w, [unit, e2e(), e2e({ name: "e2e-gpu", runId: "88" })]);
+    const outcome = await trackTask(deps, TASK_ID);
+    expect(fake.reads).toEqual(["7700"]);
+    expect(outcome.recheckAt).toBeLessThanOrEqual(CLOCK + MIN);
+    w.now.value += MIN;
+    await trackTask(deps, TASK_ID);
+    expect(fake.reads).toEqual(["7700", "8800"]);
+  });
+  it("drops what was read when the customer turns per-test reports off", async () => {
+    const fake: Fake = { reports: { "7700": [junit([{ name: "bad", failure: "secret-ish text" }])] }, reads: [], base: undefined };
+    const { w, deps } = await world(settings({ shareLogs: true }), fake);
+    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
+    await trackTask({ ...deps, autonomy: () => "suggest" }, TASK_ID);
+    expect((await entry(w))?.["failedTests"]).toBeDefined();
+    await trackTask({ ...deps, ciEvidence: () => settings({ shareLogs: true, perTestReports: false }), autonomy: () => "suggest" }, TASK_ID);
+    expect((await entry(w))?.["failedTests"]).toBeUndefined();
+    expect((await entry(w))?.["counts"]).toBeUndefined();
+  });
+  it("keeps the report text on one item within its byte budget", async () => {
+    const huge = junit(Array.from({ length: 20 }, (_, index) => ({ name: `t${String(index)}${"é".repeat(250)}`, failure: "ü".repeat(2_000) })));
+    const fake: Fake = { reports: { "7700": [huge] }, reads: [], base: undefined };
+    const { w, deps } = await world(settings(), fake);
+    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
+    await trackTask({ ...deps, autonomy: () => "suggest" }, TASK_ID);
+    const kept = (await entry(w))?.["failedTests"] as Array<{ id: string; text?: string }>;
+    expect(Buffer.byteLength(kept.map((test) => test.id + (test.text ?? "")).join(""), "utf8")).toBeLessThanOrEqual(32 * 1024);
   });
   it("keeps a flaky history: a test that failed on an earlier run of this head and passes on the re-run", async () => {
     const fake: Fake = { reports: { "7700": [junit([{ name: "wobbly", failure: "timeout" }])], "7800": [junit([{ name: "wobbly" }])] }, reads: [], base: { revision: "c".repeat(40), check: e2e() } };
