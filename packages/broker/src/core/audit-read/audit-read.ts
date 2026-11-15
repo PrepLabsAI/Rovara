@@ -17,6 +17,9 @@ export { COMPANY_AUDIT_SCAN_MAX };
 /** The most rows asked of the store in one query. */
 const QUERY_ROWS = 300;
 const ROW_KEY_PREFIX = "EVENT#";
+/** The most store queries one call makes: enough for the row cap, plus slack for pages a store ends early. Past it the call stops and says where to go on. */
+const QUERIES_MAX = Math.ceil(COMPANY_AUDIT_SCAN_MAX / QUERY_ROWS) + 20;
+const KEY_MAX = 400;
 const text = (value: unknown, max: number): string | undefined => (typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined);
 
 interface Shown { record: EngineAuditRecord; atMs: number; project?: string }
@@ -87,7 +90,13 @@ export async function readCompanyAudit(store: Pick<DocumentStore, "query">, comp
   let lastKey = after;
   let more = false;
   let storeCursor: string | undefined;
+  let queries = 0;
   scan: for (;;) {
+    if (queries >= QUERIES_MAX) {
+      more = true;
+      break;
+    }
+    queries += 1;
     let page;
     try {
       page = await store.query({
@@ -100,8 +109,10 @@ export async function readCompanyAudit(store: Pick<DocumentStore, "query">, comp
     }
     for (const [index, row] of page.items.entries()) {
       scanned += 1;
-      lastKey = row.sk;
-      const record = rowBelongsToCompany(row, companyId) ? recordOfRow(row) : undefined;
+      // A key a cursor could not carry is never a position to resume from.
+      const resumable = row.sk.startsWith(ROW_KEY_PREFIX) && row.sk.length <= KEY_MAX;
+      if (resumable) lastKey = row.sk;
+      const record = resumable && rowBelongsToCompany(row, companyId) ? recordOfRow(row) : undefined;
       if (record === undefined) skipped += 1;
       else if (matches(record, filters, fromMs, toMs)) shown.push(record);
       if (shown.length >= limit) {

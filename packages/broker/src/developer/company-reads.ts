@@ -17,7 +17,7 @@ export interface CompanyReadsConfiguration {
   /** The company the caller belongs to, from membership. Absent: the install is one company (the implicit one). Undefined or a throw: the caller is refused. */
   companyOf?: (developerId: string) => Promise<string | undefined>;
   /** The display name of a person, for the audit list; absent, a failure or an unusable answer shows the person's id. */
-  personName?: (developerId: string) => Promise<string | undefined>;
+  personName?: (developerId: string, companyId: string) => Promise<string | undefined>;
 }
 export interface CompanyReadCaller { developerId: string; administrator: boolean }
 
@@ -51,7 +51,7 @@ async function companyOfCaller(config: CompanyReadsConfiguration, caller: Compan
   return company;
 }
 
-async function withNames(config: CompanyReadsConfiguration, page: CompanyAuditResponse): Promise<CompanyAuditResponse> {
+async function withNames(config: CompanyReadsConfiguration, company: string, page: CompanyAuditResponse): Promise<CompanyAuditResponse> {
   const lookup = config.personName;
   if (lookup === undefined) return page;
   // One lookup for each person on the page (at most the page's size), a failure shows the id.
@@ -59,7 +59,7 @@ async function withNames(config: CompanyReadsConfiguration, page: CompanyAuditRe
   const names = new Map<string, string>();
   await Promise.all(ids.map(async (id) => {
     try {
-      const name = await lookup(id);
+      const name = await lookup(id, company);
       if (typeof name === "string" && name.trim() !== "") names.set(id, name.trim().slice(0, NAME_MAX));
     } catch { /* the id stays */ }
   }));
@@ -73,5 +73,5 @@ export async function routeCompanyReads(config: CompanyReadsConfiguration, calle
   if (caller.administrator !== true) throw agentXError("FORBIDDEN", COMPANY_READ_FORBIDDEN);
   const company = await companyOfCaller(config, caller);
   const query = queryOf(url, audit ? AUDIT_KEYS : EVENT_KEYS);
-  return audit ? withNames(config, await readCompanyAudit(config.store, company, query)) : readCompanyEvents(config.store, company, query, now);
+  return audit ? withNames(config, company, await readCompanyAudit(config.store, company, query)) : readCompanyEvents(config.store, company, query, now);
 }

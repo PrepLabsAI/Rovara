@@ -253,6 +253,24 @@ describe("the event read: a bounded page at a time, polled with a cursor", () =>
     expect(idsOf(await readCompanyEvents(store, COMPANY_A, WIDE, NOW))).toEqual([atFrom, later]);
   });
 
+  it("stops, and says where to go on, when a store keeps answering empty pages that carry a cursor", async () => {
+    let queries = 0;
+    const stubborn = { async query(): Promise<{ items: never[]; cursor: string }> { queries += 1; return { items: [], cursor: "more" }; } };
+    const page = await readCompanyEvents(stubborn, COMPANY_A, WIDE, NOW);
+    expect(page).toMatchObject({ events: [], hasMore: true });
+    expect(queries).toBeLessThan(60);
+  });
+
+  it("does not move the cursor onto a row whose key a cursor cannot carry, and counts it as unreadable", async () => {
+    const store = newStore();
+    const good = await seedEvent(store, COMPANY_A, { at: D(1) });
+    await store.put({ item: { pk: workEventPartition(COMPANY_A, "2026-11", 2), sk: `${D(2)}#odd`, entityType: "WORK_EVENT", orgId: COMPANY_A } });
+    const page = await readCompanyEvents(store, COMPANY_A, WIDE, NOW);
+    expect(idsOf(page)).toEqual([good]);
+    expect(page.unreadable).toBe(1);
+    await expect(readCompanyEvents(store, COMPANY_A, { cursor: page.next }, NOW)).resolves.toBeDefined();
+  });
+
   it("answers a store failure with fixed words, no cause, and never writes", async () => {
     const failing = { async query(): Promise<never> { throw new Error("dynamodb said: secret-table-name"); } };
     const failure = await readCompanyEvents(failing, COMPANY_A, WIDE, NOW).catch((error: Error & { code?: string }) => error) as Error & { code?: string };

@@ -154,6 +154,13 @@ describe("the query string", () => {
     expect(asked).toEqual([ADA.developerId]);
   });
 
+  it("asks for a name with the caller's company, so a lookup can refuse a person of another company", async () => {
+    const { config } = await world();
+    const seen: Array<[string, string]> = [];
+    await read({ ...config, personName: async (id, company) => { seen.push([id, company]); return "N"; } }, ADA, url(AUDIT));
+    expect(seen).toEqual([[ADA.developerId, COMPANY_A]]);
+  });
+
   it("falls back to the person's id when no name is known, or the lookup fails", async () => {
     const { config } = await world();
     const page = await read({ ...config, personName: async () => { throw new Error("nope"); } }, ADA, url(AUDIT)) as { records: Array<{ actor: { name: string } }> };

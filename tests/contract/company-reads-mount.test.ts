@@ -1,6 +1,5 @@
 // Lanes AU and EV: the company reads on the developer API. A sign-in client's token reaches them through the same checks as the other
 // /v1/dev/client routes (a live session, the registration's audience), and then the read is the company administrator's, for their company only.
-import { decodeJwt } from "jose";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -77,6 +76,13 @@ describe("the company audit read on the developer API", () => {
     expect((read.body as unknown as Records).records.map((record) => record.eventId)).toEqual(["evt_b1", "evt_b0"]);
   });
 
+  it("shows a person's name only for a person of the caller's own company", async () => {
+    await seedAudit(store, COMPANY_A, { eventId: "evt_stranger", at: "2026-11-10T10:09:00.000Z", actor: { type: "person", id: BO } });
+    const read = (await call("GET", AUDIT, await token())).body as unknown as Records;
+    expect(read.records.find((record) => record.eventId === "evt_stranger")!.actor.name).toBe(BO);
+    expect(read.records.find((record) => record.eventId === "evt_a0")!.actor.name).toBe("Ada");
+  });
+
   it("filters and pages from the query string", async () => {
     const first = await call("GET", AUDIT, await token(), "limit=1");
     expect(first.status).toBe(200);
@@ -149,8 +155,10 @@ describe("the reads are off unless the host wires them", () => {
 
   it("serves one company, the implicit one, when the host gives a store and no resolver", async () => {
     await broker({ clientRoutes: true, companyReads: { store } });
-    expect((await call("GET", AUDIT, await token())).status).toBe(200);
-    expect(IMPLICIT_COMPANY_ID).toBeDefined();
-    expect(decodeJwt((await token()).replace("Bearer ", "")).sub).toBe(ADA);
+    const read = await call("GET", AUDIT, await token());
+    expect(read.status).toBe(200);
+    expect((read.body as unknown as Records).records).toEqual([]);
+    await seedAudit(store, IMPLICIT_COMPANY_ID, { eventId: "evt_implicit", at: "2026-11-10T10:05:00.000Z", actor: { type: "person", id: ADA } });
+    expect(((await call("GET", AUDIT, await token())).body as unknown as Records).records.map((record) => record.eventId)).toEqual(["evt_implicit"]);
   });
 });

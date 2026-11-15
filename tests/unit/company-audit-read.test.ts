@@ -260,6 +260,28 @@ describe("the audit read: a bounded page at a time", () => {
   });
 });
 
+describe("the audit read: a store that misbehaves", () => {
+  it("stops, and says where to go on, when a store keeps answering empty pages that carry a cursor", async () => {
+    let queries = 0;
+    const stubborn = { async query(): Promise<{ items: never[]; cursor: string }> { queries += 1; return { items: [], cursor: "more" }; } };
+    const first = await readCompanyAudit(stubborn, COMPANY_A, {});
+    expect(first.records).toEqual([]);
+    expect(queries).toBeLessThan(40);
+  });
+
+  it("never makes a row with a key a cursor cannot carry the place to resume from", async () => {
+    const store = newStore();
+    await seedAudit(store, COMPANY_A, { eventId: "evt_1", at: T(1) });
+    await store.put({ item: { pk: companyScoped(COMPANY_A, "AUDIT"), sk: "ZZZ-odd-key", entityType: "AUDIT", companyId: COMPANY_A } });
+    const first = await readCompanyAudit(store, COMPANY_A, { limit: 1 });
+    expect(ids(first)).toEqual(["evt_1"]);
+    const rest = await readCompanyAudit(store, COMPANY_A, { limit: 1, cursor: first.next! });
+    expect(rest.records).toEqual([]);
+    expect(rest.skipped).toBe(1);
+    expect(rest.next).toBeUndefined();
+  });
+});
+
 describe("the audit read: failures and writes", () => {
   it("answers a store failure with fixed words, no cause", async () => {
     const failing = { async query(): Promise<never> { throw new Error("dynamodb said: secret-table-name arn:aws:123"); } };

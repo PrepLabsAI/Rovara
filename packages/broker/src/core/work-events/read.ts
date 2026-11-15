@@ -24,6 +24,8 @@ const STORED_ONLY = new Set(["pk", "sk", "entityType", INDEX_EXPIRY_ATTRIBUTE]);
 
 interface ShardState { request: Omit<QueryRequest, "cursor">; rows: StoredDocument[]; at: number; cursor: string | undefined; fetched: boolean }
 
+class BudgetSpent extends Error {}
+
 function unavailable(): never {
   throw agentXError("AUDIT_UNAVAILABLE", "the events could not be read");
 }
@@ -57,7 +59,11 @@ export async function readCompanyEvents(store: Pick<DocumentStore, "query">, com
   let last = start;
   let hasMore = false;
 
+  let queries = 0;
+  const queriesMax = WORK_EVENT_SHARDS * months.length + Math.ceil(COMPANY_EVENTS_SCAN_MAX / SHARD_PAGE) + 20;
   const fill = async (state: ShardState): Promise<void> => {
+    if (queries >= queriesMax) throw new BudgetSpent();
+    queries += 1;
     let page;
     try {
       page = await store.query({ ...state.request, limit: SHARD_PAGE, ...(state.cursor === undefined ? {} : { cursor: state.cursor }) });
@@ -76,6 +82,7 @@ export async function readCompanyEvents(store: Pick<DocumentStore, "query">, com
     return state.at < state.rows.length;
   };
 
+  try {
   month: for (const [index, month] of months.entries()) {
     const lowRange = index === 0 ? (filters.cursor === undefined ? { sk: { op: "gte" as const, value: filters.from! } } : { sk: { op: "gt" as const, value: start } }) : {};
     const shards: ShardState[] = Array.from({ length: WORK_EVENT_SHARDS }, (_, shard) => ({
@@ -98,6 +105,11 @@ export async function readCompanyEvents(store: Pick<DocumentStore, "query">, com
       }
       best.at += 1;
       scanned += 1;
+      // A key a cursor could not carry is counted as unreadable and is never a position to resume from.
+      if (!POSITION.test(row.sk) || row.sk.length > 400) {
+        unreadable += 1;
+        continue;
+      }
       last = row.sk;
       const expires = row[INDEX_EXPIRY_ATTRIBUTE];
       if (typeof expires === "number" && expires <= nowSeconds) continue;
@@ -127,6 +139,11 @@ export async function readCompanyEvents(store: Pick<DocumentStore, "query">, com
         break month;
       }
     }
+  }
+  } catch (error) {
+    // The store ended pages early too often for one call: stop here and say where to go on.
+    if (!(error instanceof BudgetSpent)) throw error;
+    hasMore = true;
   }
   return { events, next: encodeCursor("p", companyId, digest, last), hasMore, unreadable, skipped };
 }

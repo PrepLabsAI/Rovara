@@ -800,8 +800,12 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
     const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${reader.developerId}`);
     if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-    // A person's name: the host's lookup, else the sign-in table's display name.
-    const personName = deps.companyReads.personName ?? (async (developerId: string) => (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName);
+    // A person's name: the host's lookup, else the sign-in table's display name, shown only for a person of the caller's own company.
+    const resolveCompany = deps.companyReads.companyOf;
+    const personName = deps.companyReads.personName ?? (async (developerId: string, companyId: string) => {
+      if (resolveCompany !== undefined && (await resolveCompany(developerId)) !== companyId) return undefined;
+      return (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName;
+    });
     return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator }, url, deps.now());
   }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
