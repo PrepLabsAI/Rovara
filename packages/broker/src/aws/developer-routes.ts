@@ -1,3 +1,4 @@
+import { boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -124,6 +125,7 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
+  companies?: CompanyMembershipReader;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   developer: DeveloperApiConfiguration;
@@ -504,24 +506,25 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
 }
 
 /** The latest revision's number and task policy: the only fields read, so only they are fetched. */
-async function latestDefinition(deps: DeveloperRouteDependencies, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+async function latestDefinition(deps: DeveloperRouteDependencies, project: string, companyId?: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
   const response = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
-    ProjectionExpression: "#definition.#revision, #definition.#developerTasks",
-    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
+    ProjectionExpression: "#definition.#revision, #definition.#developerTasks" + (companyId === undefined ? "" : ", #companyId"),
+    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks", ...(companyId === undefined ? {} : { "#companyId": "companyId" }) },
     ScanIndexForward: false,
     Limit: 1,
     ConsistentRead: true,
   })) as { Items?: Array<{ definition: { revision: number; developerTasks?: unknown } }> };
-  return response.Items?.[0]?.definition;
+  const row = response.Items?.[0];
+  return recordInCompany(row, companyId) ? row?.definition : undefined;
 }
 
 /** Each named project's latest revision and task policy; projects with no revision are left out. */
-export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names: readonly string[]): Promise<Map<string, { revision: number; policy: DeveloperTaskPolicy }>> {
+export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names: readonly string[], companyId?: string): Promise<Map<string, { revision: number; policy: DeveloperTaskPolicy }>> {
   const unique = [...new Set(names)].sort();
-  const definitions = await mapLimit(unique, REVISION_READS_AT_ONCE, (name) => latestDefinition(deps, name));
+  const definitions = await mapLimit(unique, REVISION_READS_AT_ONCE, (name) => latestDefinition(deps, name, companyId));
   const found = new Map<string, { revision: number; policy: DeveloperTaskPolicy }>();
   unique.forEach((name, index) => {
     const definition = definitions[index];
@@ -709,13 +712,13 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   return checked.data;
 }
 
-async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
+async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
   const grants = await grantsOf(deps, caller);
   const bindings = await bindingsOf(deps);
-  const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)]);
+  const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)], companyId);
   const access = await resolveDeveloperAccess({
-    grants,
-    bindings,
+    grants: companyId === undefined ? grants : grants.filter((name) => policies.has(name)),
+    bindings: companyId === undefined ? bindings : bindings.filter((binding) => policies.has(binding.projectName)),
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
     // FR-013 with FR-014: a project's own switch decides whether channel members may use it.
     channelMembersMayUse: (project) => policies.get(project)?.policy.channelMembersMayUse === true,
@@ -1053,11 +1056,25 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
-  if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
+  if (request.method === "GET" && url.pathname === "/v1/dev/projects") {
+    const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
+    const companyId = await resolveCompany(deps.companies, caller.developerId);
+    const result = await listProjects(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller, companyId);
+    scope?.check();
+    return result;
+  }
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
-    return routeDeveloperTaskRequest(developerTaskRouteDependencies(deps, caller), caller, request, url);
+    const checked = request.method === "GET" && (url.pathname === "/v1/dev/tasks" || /^\/v1\/dev\/tasks\/[^/]+$/.test(url.pathname));
+    const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
+    const companyId = checked ? await resolveCompany(deps.companies, caller.developerId) : undefined;
+    const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
+    const checkedDeps = scope === undefined ? taskDeps : { ...taskDeps, actions: companyReadActions(taskDeps.actions, scope),
+      ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }) };
+    const result = await routeDeveloperTaskRequest({ ...checkedDeps, ...(companyId === undefined ? {} : { companyId }) }, caller, request, url);
+    scope?.check();
+    return result;
   }
   if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) {
     return routeChatGptConnection(deps, caller, request, url);

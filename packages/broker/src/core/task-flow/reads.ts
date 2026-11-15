@@ -1,5 +1,5 @@
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
-import { queryAll, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
@@ -33,8 +33,22 @@ export async function loadOwnedTask(deps: TaskFlowDeps, caller: TaskCaller, task
   return task;
 }
 
-export async function workspaceOperations(deps: Pick<TaskFlowDeps, "store">, workspaceId: string): Promise<OperationRecord[]> {
-  const items = await queryAll(deps.store, { pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX } });
+export async function workspaceOperations(deps: Pick<TaskFlowDeps, "store"> & Partial<Pick<TaskFlowDeps, "companyId">>, workspaceId: string): Promise<OperationRecord[]> {
+  if (!OrgIdSchema.safeParse(deps.companyId).success) throw agentXError("CONFIG_INVALID", "workspace company is invalid");
+  const items: StoredDocument[] = [];
+  let cursor: string | undefined;
+  // Ten 200-row reads plus one 1-row probe: exactly 2,000 rows can still complete.
+  for (let reads = 0; reads <= 10; reads++) {
+    const page = await deps.store.query({ pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX }, limit: reads === 10 ? 1 : 200,
+      ...(cursor === undefined ? {} : { cursor }) });
+    if (reads === 10) {
+      if (page.items.length > 0 || page.cursor !== undefined) throw agentXError("CONFIG_INVALID", "workspace operation limit exceeded");
+      break;
+    }
+    items.push(...page.items.filter((item) => (item["companyId"] === undefined ? IMPLICIT_COMPANY_ID : item["companyId"]) === deps.companyId));
+    cursor = page.cursor;
+    if (cursor === undefined) break;
+  }
   // Oldest first; a hold of the workspace takes the next fence, so the fence orders operations made in one instant.
   return items.map((item: StoredDocument) => item as unknown as OperationRecord).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.fence - right.fence);
 }
@@ -78,13 +92,28 @@ export async function getTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: st
 
 /** The caller's own tasks, newest first (the index of `DEVELOPER#<person>`). */
 export async function listTasks(deps: TaskFlowDeps, caller: TaskCaller, options: { limit?: number; cursor?: string } = {}): Promise<{ tasks: DeveloperTaskIndexRecord[]; cursor?: string }> {
-  if (caller.principal.companyId !== deps.companyId) return { tasks: [] };
-  const page = await deps.store.query({
-    pk: taskIndexKey(caller.principal.personId, "", "").pk,
-    sk: { op: "beginsWith", prefix: "TASK#" },
-    descending: true,
-    limit: Math.min(options.limit ?? 50, 200),
-    ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
-  });
-  return { tasks: page.items.map((item) => item as unknown as DeveloperTaskIndexRecord), ...(page.cursor === undefined ? {} : { cursor: page.cursor }) };
+  if (!OrgIdSchema.safeParse(deps.companyId).success || caller.principal.companyId !== deps.companyId) return { tasks: [] };
+  const requested = options.limit ?? 50;
+  if (!Number.isSafeInteger(requested) || requested < 1) throw agentXError("CONFIG_INVALID", "list limit is invalid");
+  const limit = Math.min(requested, 200);
+  const tasks: DeveloperTaskIndexRecord[] = [];
+  let cursor = options.cursor;
+  // At most ten page reads and 2,000 index rows per call. A bounded partial page always
+  // carries the store's continuation when more rows may exist; no accepted row is skipped.
+  for (let reads = 0; reads < 10; reads++) {
+    const page = await deps.store.query({
+      pk: taskIndexKey(caller.principal.personId, "", "").pk,
+      sk: { op: "beginsWith", prefix: "TASK#" },
+      descending: true,
+      limit: limit - tasks.length,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    for (const item of page.items) {
+      const company = item["orgId"] === undefined ? IMPLICIT_COMPANY_ID : item["orgId"];
+      if (company === deps.companyId) tasks.push(item as unknown as DeveloperTaskIndexRecord);
+    }
+    cursor = page.cursor;
+    if (tasks.length === limit || cursor === undefined) break;
+  }
+  return { tasks, ...(cursor === undefined ? {} : { cursor }) };
 }
