@@ -39,8 +39,8 @@ export function decideMarkedCheck(input: {
   const { state } = input;
   if (state.kind === "passed") return { kind: "none" };
   if (state.kind === "waiting") return { kind: "wait" };
-  // Nothing answered: a person looks. A skip or a neutral answer is not a failure either, and nothing in it says what to fix.
-  if (state.kind === "not_run") return state.reason === "timed_out" ? { kind: "ask", reason: "timed_out" } : { kind: "none" };
+  // Nothing answered, or the pipeline skipped the check (a draft-skipping pipeline, a path filter): not a failure and nothing to fix, but CI cannot pass without it, so a person looks.
+  if (state.kind === "not_run") return { kind: "ask", reason: state.reason === "timed_out" ? "timed_out" : "skipped" };
   if (input.testsRan === 0) return { kind: "environment", reason: "failed_before_tests" };
   if (input.mainRun === "failed") return { kind: "environment", reason: "red_on_main" };
   if (input.testsRan === undefined && !input.logShared) return { kind: "ask", reason: "no_detail" };

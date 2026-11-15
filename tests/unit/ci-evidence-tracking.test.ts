@@ -227,6 +227,8 @@ describe("review fixes (A3 review 1)", () => {
       const stored = await item(w);
       expect(stored.ci).toBe("pending");
       expect(stored.ciMarked?.[0]).toMatchObject({ state: "not_run", reason: conclusion });
+      // Never a silent wait: a person is asked (a draft-skipping pipeline would otherwise keep the draft pending for ever).
+      expect((await w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ASK_PREFIX}e2e-real did not run`, "u"));
     }
   });
   it("tells a result once even when another pass committed first", async () => {
@@ -258,6 +260,31 @@ describe("review fixes (A3 review 1)", () => {
     await trackTask(deps, TASK_ID);
     expect(w.milestones.written.some((entry) => entry.kind === "fixing" && entry.text.includes("trying once more because you asked"))).toBe(true);
     expect((await w.task()).workflow.fixRounds?.ci).toBe(2);
+  });
+});
+
+describe("run facts (A3 re-check N3)", () => {
+  it("reads a finished run's facts once even when the runner gave no finish time", async () => {
+    const { w, deps } = await world(settings());
+    let asked = 0;
+    const plain: MergeTrackingDependencies = { ...deps, repository: async (...args) => { const home = await deps.repository(...args); return home === undefined ? undefined : { ...home, checkRunner: { ...home.checkRunner!, runFacts: async () => { asked += 1; return { attempt: 1 }; } } }; } };
+    setChecks(w, [unit, e2e()]);
+    await trackTask(plain, TASK_ID);
+    w.now.value += MIN;
+    await trackTask(plain, TASK_ID);
+    expect(asked).toBe(1);
+  });
+  it("never stores a run attempt the item cannot read back (tracking would stop for that pull request)", async () => {
+    const { w, deps } = await world(settings());
+    const odd: MergeTrackingDependencies = { ...deps, repository: async (...args) => { const home = await deps.repository(...args); return home === undefined ? undefined : { ...home, checkRunner: { ...home.checkRunner!, runFacts: async () => ({ attempt: 5_000 }) } }; } };
+    setChecks(w, [unit, e2e()]);
+    await trackTask(odd, TASK_ID);
+    const stored = await item(w);
+    expect(stored.ciMarked?.[0]).toMatchObject({ state: "passed" });
+    expect(stored.ciMarked?.[0]?.attempt).toBeUndefined();
+    w.now.value += MIN;
+    await trackTask(odd, TASK_ID);
+    expect((await item(w)).version).toBeGreaterThanOrEqual(1);
   });
 });
 

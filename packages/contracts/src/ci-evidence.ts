@@ -117,7 +117,7 @@ export function environmentLine(input: { check: string; reason: EnvironmentReaso
 }
 
 /** Why Rovara stops and asks a person about a marked check. */
-export type CiEvidenceAskReason = "timed_out" | "cap_reached" | "no_detail" | "weakens_test";
+export type CiEvidenceAskReason = "timed_out" | "cap_reached" | "no_detail" | "weakens_test" | "skipped";
 
 /** Every stop for a marked check starts with one of these, so a person's Retry knows it (`isCiFixBlockReason`). */
 export const CI_EVIDENCE_ENVIRONMENT_PREFIX = "Your environment: ";
@@ -128,6 +128,7 @@ export const CI_EVIDENCE_ASK_WORDS: Record<CiEvidenceAskReason, (check: string) 
   timed_out: (check) => `${CI_EVIDENCE_ASK_PREFIX}no result from ${name(check)} in time. Check your pipeline, then re-run it or retry to let Rovara carry on.`,
   cap_reached: (check) => `${CI_EVIDENCE_ASK_PREFIX}${name(check)} is still failing after the fixes Rovara may try on its own. Look at it, then retry or take over.`,
   no_detail: (check) => `${CI_EVIDENCE_ASK_PREFIX}${name(check)} failed without saying which test failed, so Rovara won't guess at a fix. Look at the run, or turn on per-test reports.`,
+  skipped: (check) => `${CI_EVIDENCE_ASK_PREFIX}${name(check)} did not run (your pipeline skipped it). If it skips draft pull requests, mark this one ready on the code host or let the check run on drafts, then retry.`,
   weakens_test: (check) => `${CI_EVIDENCE_ASK_PREFIX}the fix for ${name(check)} would weaken a test, so Rovara did not push it. Decide whether that is right.`,
 };
 

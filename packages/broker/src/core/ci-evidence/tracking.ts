@@ -140,8 +140,8 @@ export async function markedDecision(input: {
 }): Promise<MarkedDecision | undefined> {
   for (const marked of input.settings.markedChecks) {
     const entry = input.entries.find((candidate) => candidate.name === marked.name && candidate.source === marked.source);
-    if (entry === undefined || (entry.state !== "failed" && !(entry.state === "not_run" && entry.reason === "timed_out"))) continue;
-    const state: MarkedState = entry.state === "failed" ? { kind: "failed", run: { check: { name: marked.name, state: "completed", conclusion: "failure", required: false, url: entry.url ?? "" } } } : { kind: "not_run", reason: "timed_out", ...(entry.afterMs === undefined ? {} : { afterMs: entry.afterMs }) };
+    if (entry === undefined || (entry.state !== "failed" && entry.state !== "not_run")) continue;
+    const state: MarkedState = entry.state === "failed" ? { kind: "failed", run: { check: { name: marked.name, state: "completed", conclusion: "failure", required: false, url: entry.url ?? "" } } } : { kind: "not_run", reason: entry.reason ?? "timed_out", ...(entry.afterMs === undefined ? {} : { afterMs: entry.afterMs }) };
     const mainRun = entry.state === "failed" ? await mainRunOf({ runner: input.runner, repository: input.repository, baseBranch: input.baseBranch, marked, scope: input.scope, budget: input.budget }) : "unknown";
     const verdict = decideMarkedCheck({
       state, longOrPaid: marked.longOrPaid, testsRan: undefined, testsFailed: undefined, logShared: input.settings.shareLogs && input.logReadable(entry), mainRun, roundsUsed: input.roundsUsed, roundsMax: CI_FIX_ROUNDS_MAX,

@@ -216,7 +216,8 @@ describe("environment, ask or fix", () => {
   it("does nothing on a pass, waits while waiting, and leaves a skip alone", () => {
     expect(decideMarkedCheck({ ...base, state: markedCheckState({ run: run(), waitStart: T0, expectedMs: MIN, now: T0 }) })).toEqual({ kind: "none" });
     expect(decideMarkedCheck({ ...base, state: { kind: "waiting", until: T0, expectedMs: MIN } })).toEqual({ kind: "wait" });
-    expect(decideMarkedCheck({ ...base, state: { kind: "not_run", reason: "skipped" } })).toEqual({ kind: "none" });
+    expect(decideMarkedCheck({ ...base, state: { kind: "not_run", reason: "skipped" } })).toEqual({ kind: "ask", reason: "skipped" });
+    expect(decideMarkedCheck({ ...base, state: { kind: "not_run", reason: "neutral" } })).toEqual({ kind: "ask", reason: "skipped" });
   });
   it("asks a person on a timeout, never fixes it", () => {
     expect(decideMarkedCheck({ ...base, state: { kind: "not_run", reason: "timed_out", afterMs: MIN } })).toEqual({ kind: "ask", reason: "timed_out" });
