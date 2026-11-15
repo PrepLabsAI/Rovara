@@ -10,6 +10,7 @@ import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { devRouteOf, type DevRoute } from "./dev-route-scopes.js";
+import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import {
   AgentXNameSchema, AgentXError,
   IMPLICIT_COMPANY_ID, OrgIdSchema,
@@ -136,6 +137,8 @@ export interface DeveloperApiConfiguration {
   signInClients?: SignInClientRegistry;
   companies?: CompanyMembershipReader;
   companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<boolean>;
+  /** Lane W part 4: T3b's member helper (companyMemberActionsThroughLambda), the only way the admin routes list, remove or change a member. Absent: those routes are unknown. */
+  companyMembers?: CompanyMemberActions;
   /**
    * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
    * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
@@ -1420,7 +1423,24 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   return { ok: true };
 }
 
+/** Lane W part 4: the company administrator's routes (company-member-routes.ts). Unknown, before anyone is authenticated, when the deployment has no company layer or no member helper. */
+async function companyAdminRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const members = deps.developer.companyMembers;
+  if (deps.companies === undefined || members === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // Full access only (DEC ANSWER-4): the route table's `full` row is applied while authenticating, before any membership is read.
+  const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeCompanyMembers({
+    documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
+    projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
+  }, { caller, stepUp, companyId }, request, url);
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
   if (url.pathname.startsWith("/review/link/")) {
