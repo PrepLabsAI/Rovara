@@ -240,6 +240,7 @@ import {
 } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
+import { TASK_ENTRY_AREAS, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -281,6 +282,8 @@ export interface DeveloperTaskRouteDependencies {
   projectChannelIds(project: string): Promise<string[]>;
   /** The developer sign-in issuer; the task page the draft pull request links to is on its origin. */
   issuer?: string;
+  /** Lane E2: the core's own handlers, for a task stamped `core` (engine-boundary.ts). Absent: a core task reads exactly like a missing one here. */
+  coreTasks?: CoreTaskEntry;
   /** Spec 061 slice 2: the Slack service's request queue, for "Ask AgentX to reply to this comment"; without it the page says AgentX can't answer here. */
   slackRequestQueue?: SlackRequestQueue;
   now(): number;
@@ -565,6 +568,8 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
     // A malformed ID is never echoed back: it could be long or carry markup.
     throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
+  // Lane E2: a task the core owns is never read here (engine-boundary.ts); it answers exactly like a missing one.
+  if (await ownerOfExistingTask(deps, taskId) === "core") throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
   return task;
 }
 
@@ -578,7 +583,7 @@ async function loadReadableTask(deps: DeveloperTaskRouteDependencies, caller: De
   } catch (error) {
     if (!TASK_ID.test(taskId) || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (task !== undefined && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
+    if (task !== undefined && await ownerOfExistingTask(deps, taskId) === "workflow" && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
     throw error;
   }
 }
@@ -1736,7 +1741,8 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
       // A closed task never changes again, so only open rows are derived afresh.
       if (row.status !== "CLOSED") {
         const task = await get<DeveloperTaskRecord>(deps, taskKey(row.taskId));
-        if (task !== undefined && task.developerId === caller.developerId) {
+        // Lane E2: a core task's row is listed as its index row says; the workflow never works out (or rewrites) its status.
+        if (task !== undefined && task.developerId === caller.developerId && await ownerOfExistingTask(deps, row.taskId) === "workflow") {
           const view = await taskView(deps, task, { events: 0, details: false });
           current = view.status;
           if (current !== row.status) {
@@ -6293,9 +6299,34 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 }
 
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
+/**
+ * Lane E2: what this route answers for an id with no task behind it, said for a core task the caller may not see here. The same request is routed with a fresh id that has no rows (so
+ * nothing of the core task is read), and the real id is put back in the answer: its input checks, wrong-method answer and words are exactly a missing task's.
+ */
+async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL, taskId: string): Promise<unknown> {
+  const stand = randomUUID();
+  const swap = (text: string) => text.replaceAll(stand, taskId);
+  const path = request.path.replace(`/v1/dev/tasks/${taskId}`, `/v1/dev/tasks/${stand}`);
+  const standUrl = new URL(url.href.replace(`/v1/dev/tasks/${taskId}`, `/v1/dev/tasks/${stand}`));
+  try {
+    const value = await routeDeveloperTaskRequest(deps, caller, { ...request, path, ...(request.body === undefined ? {} : { body: request.body.replaceAll(taskId, stand) }) }, standUrl);
+    return JSON.parse(swap(JSON.stringify(value ?? null))) as unknown;
+  } catch (error) {
+    if (error instanceof Error) error.message = swap(error.message);
+    throw error;
+  }
+}
+
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
+  // Lane E2: a task's route goes by the task's stored engine. A task the core owns is answered by the core's own handlers (or refused), never by the readers below.
+  const entry = /^\/v1\/dev\/tasks\/([^/]+)(.*)$/u.exec(url.pathname);
+  const operation = entry === null ? undefined : taskEntryOperation(entry[2]!);
+  if (entry !== null && operation !== undefined) {
+    const entryTaskId = safeDecode(entry[1]!);
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId));
+  }
   const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
   if (publicationContextRoute !== null && request.method === "POST") {
     return e2ePublicationContext(deps, caller, safeDecode(publicationContextRoute[1]!), body(request));
