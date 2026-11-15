@@ -96,7 +96,7 @@ async function setup(options: { permissive?: boolean } = {}) {
   const app: CoreHostApp = createCoreHostApp({
     env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: (_registry, companyId) => ({
-      callbackSigningKey: Buffer.alloc(32, 7), access: hostedTaskAccess({ companyId: companyId as OrgId, membershipOf: people.membershipOf, projectGrant: async (p, project) => (await people.projectGrantRole(p, project)) !== undefined }),
+      callbackSigningKey: Buffer.alloc(32, 7), access: hostedTaskAccess({ companyId, membershipOf: people.membershipOf, projectGrant: async (p, project) => (await people.projectGrantRole(p, project)) !== undefined }),
       repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI,
     }),
   });
@@ -117,7 +117,7 @@ async function setup(options: { permissive?: boolean } = {}) {
     const { task } = await flow.start({ principal: principalOf(personId, companyId), client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     const stored = (await world.store.get(taskKey(task.taskId)))!;
     const ownerKey = stored["ownerKey"] as string;
-    const objectKey = `private/${ownerKey}/${String(stored["workspaceId"])}/plan-v1.${plan.structured === undefined ? "md" : "json"}`;
+    const objectKey = `private/${ownerKey}/${stored["workspaceId"] as string}/plan-v1.${plan.structured === undefined ? "md" : "json"}`;
     const text = "# Plan\n\nChange src/health.ts to answer 200.\n";
     const bytes = new TextEncoder().encode(text);
     await registry.require("object-storage").put(objectKey, bytes, { contentType: "text/markdown", metadata: {}, retention: "evidence-std" });
@@ -268,6 +268,17 @@ describe("the deployed decision cards: what is listed", () => {
     expect(get).toHaveBeenCalledTimes(DECISION_SOURCE_TASKS_MAX);
     expect(t.log).toHaveBeenCalledWith(expect.objectContaining({ event: "core_engine.decision_cards_cut", read: DECISION_SOURCE_TASKS_MAX }));
   });
+
+  it("stops after a bounded number of index reads even when every page holds only another company's rows", async () => {
+    const t = await setup();
+    const query = vi.fn(async () => ({ items: Array.from({ length: 100 }, () => ({ taskId: randomUUID(), orgId: OTHER })), cursor: "more" }));
+    const runtime = { companyId: ORG, flow: { deps: { ...t.runtime.flow.deps, companyId: ORG, store: { ...t.runtime.flow.deps.store, query } } } } as unknown as CoreRuntime;
+    const deps = deployedDecisionCards({ runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
+    expect(await deps.sources.list(cardCaller("dev-a", ORG, { stepUp: false }))).toEqual([]);
+    // Five listings of at most ten index reads each (listTasks' own bound).
+    expect(query.mock.calls.length).toBeLessThanOrEqual(50);
+    expect(t.log).toHaveBeenCalledWith(expect.objectContaining({ event: "core_engine.decision_cards_cut", read: 0 }));
+  });
 });
 
 describe("the deployed decision cards: acting", () => {
@@ -358,7 +369,7 @@ describe("the deployed decision cards: acting", () => {
     expect((await t.stored(changed)).stage).not.toBe("PLAN_REVIEW");
     // A coding plan's card offers no Reject; the performer's reject still goes through the gate with its own outcome (a design or requirements card's).
     const item = await itemFor(t, rejected);
-    expect(await t.deps.performer.reject(who, { card: item.card, item: item.item, requestId: randomUUID(), reason: "wrong_approach" })).toMatchObject({ kind: expect.any(String) });
+    expect(await t.deps.performer.reject(who, { card: item.card, item: item.item, requestId: randomUUID(), reason: "wrong_approach" })).toHaveProperty("kind");
     expect(t.point.acts.map((act) => [act.taskId, act.outcome])).toEqual([[changed, "request_changes"], [rejected, "reject"]]);
   });
 });

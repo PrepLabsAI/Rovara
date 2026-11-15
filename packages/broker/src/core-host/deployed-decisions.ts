@@ -46,9 +46,9 @@ import { STEP_UP_APPROVAL_METHOD, issueStepUpApproval, type StepUpApprovalInput 
 /** The company's own records of its people, as the broker keeps them. A read that fails throws (the caller refuses); `undefined` is "none". */
 export interface DeployedPeople {
   /** The person's LIVE company membership and role (`COMPANY_MEMBER#<person>`). Undefined: none, or revoked. */
-  membershipOf(personId: string): Promise<{ companyId: OrgId; role: OrgRole } | undefined>;
+  membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>;
   /** The person's project grant (`MEMBER#<person>` / `PROJECT#<name>`): `developer` or `administrator`, else undefined. */
-  projectGrantRole(personId: string, project: string): Promise<"developer" | "administrator" | undefined>;
+  projectGrantRole: (personId: string, project: string) => Promise<"developer" | "administrator" | undefined>;
 }
 
 const PERSON_ID = /^[^#\s]{1,256}$/u;
@@ -116,7 +116,7 @@ export function deployedSessionMembers(companyId: OrgId, people: DeployedPeople)
 export interface DecisionProofIssuer {
   /** The approval method the point accepts for a fresh step-up (one of its `ApprovalRequirement.methods`). */
   readonly method: string;
-  issue(act: DecisionAct): Credential | Promise<Credential>;
+  issue: (act: DecisionAct) => Credential | Promise<Credential>;
 }
 
 /**
@@ -236,7 +236,9 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       const items: DecisionItem[] = [];
       let cursor: string | undefined;
       let read = 0;
+      let calls = 0;
       do {
+        calls += 1;
         const page = await listTasks(deps, { principal: caller.principal }, { limit: Math.min(DECISION_SOURCE_PAGE, DECISION_SOURCE_TASKS_MAX - read), ...(cursor === undefined ? {} : { cursor }) });
         read += page.tasks.length;
         for (let start = 0; start < page.tasks.length; start += DECISION_SOURCE_PARALLEL) {
@@ -248,7 +250,8 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
           for (const item of drawn) if (item !== undefined) items.push(item);
         }
         cursor = page.cursor;
-      } while (cursor !== undefined && read < DECISION_SOURCE_TASKS_MAX);
+      // Bounded by rows AND by index reads: pages of another company's rows (read and dropped by listTasks) never walk the whole index.
+      } while (cursor !== undefined && read < DECISION_SOURCE_TASKS_MAX && calls < DECISION_SOURCE_TASKS_MAX / DECISION_SOURCE_PAGE);
       // An older task past the bound is not shown here (it is still decided on its own page); the log says the listing was cut.
       if (cursor !== undefined) log({ event: "core_engine.decision_cards_cut", companyId, read });
       return items;

@@ -253,11 +253,15 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const settlesClaims = typeof deps.approvers.commitClaim === "function" && typeof deps.approvers.releaseClaim === "function";
   /** Gives claims back; a release that fails leaves the claim to lapse to spent (never free). */
   const release = async (claimIds: readonly string[]): Promise<void> => {
-    for (const claimId of claimIds) await deps.approvers.releaseClaim?.(claimId).catch(() => undefined);
+    for (const claimId of claimIds) {
+      try { await deps.approvers.releaseClaim?.(claimId); } catch { /* lapses to spent */ }
+    }
   };
   /** Spends claims once the decision's transaction applied; a commit that fails leaves the claim to lapse to spent. */
   const commit = async (claimIds: readonly string[]): Promise<void> => {
-    for (const claimId of claimIds) await deps.approvers.commitClaim?.(claimId).catch(() => undefined);
+    for (const claimId of claimIds) {
+      try { await deps.approvers.commitClaim?.(claimId); } catch { /* lapses to spent */ }
+    }
   };
   const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
   /** The marker of a one-decision credential (a comment) that names no request: it is spent once, anywhere. */
