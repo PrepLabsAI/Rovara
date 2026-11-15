@@ -91,6 +91,17 @@ describe("recording a measurement", () => {
     expect(await readMachineFacts(w.deps, BENCH_ORG, "other", w.digest)).toBeUndefined();
     await expect(recordMachineMeasurement(w.deps, { orgId: COMPANY_B_ID as never, project: w.project, body: body(reportFor(w.digest)) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
   });
+  it("a row copied under another company's or project's key is not read there (the row names its own company, project and digest)", async () => {
+    const w = await world();
+    await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest)) });
+    const row = (await w.store.get(testEnvMachineKey(BENCH_ORG, w.project, w.digest)))!;
+    await w.store.put({ item: { ...row, ...testEnvMachineKey(COMPANY_B_ID as never, w.project, w.digest) } });
+    expect(await readMachineFacts(w.deps, COMPANY_B_ID as never, w.project, w.digest)).toBeUndefined();
+    await w.store.put({ item: { ...row, ...testEnvMachineKey(BENCH_ORG, "other", w.digest) } });
+    expect(await readMachineFacts(w.deps, BENCH_ORG, "other", w.digest)).toBeUndefined();
+    await w.store.put({ item: { ...row, ...testEnvMachineKey(BENCH_ORG, w.project, "d".repeat(64)) } });
+    expect(await readMachineFacts(w.deps, BENCH_ORG, w.project, "d".repeat(64))).toBeUndefined();
+  });
   it("a stored row that does not read back (wrong digest, extra field, expired) is none", async () => {
     const w = await world();
     await recordMachineMeasurement(w.deps, { orgId: BENCH_ORG, project: w.project, body: body(reportFor(w.digest)) });
@@ -134,6 +145,13 @@ describe("the person's choice", () => {
     const off = { ...on.deps, env: { ROVARA_TEST_ENVIRONMENT: "1" } };
     await expect(setMachineChoice(off, { orgId: BENCH_ORG, project: on.project, rowId: "arm64-4-16" })).rejects.toMatchObject({ code: "NOT_AVAILABLE_HERE" });
     expect(await readMachineChoice(off, BENCH_ORG, on.project)).toBeUndefined();
+  });
+  it("a choice row copied under another company's key is not read there", async () => {
+    const w = await world();
+    await setMachineChoice(w.deps, { orgId: BENCH_ORG, project: w.project, rowId: "arm64-2-8" });
+    const row = (await w.store.get(testEnvMachineChoiceKey(BENCH_ORG, w.project)))!;
+    await w.store.put({ item: { ...row, ...testEnvMachineChoiceKey(COMPANY_B_ID as never, w.project) } });
+    expect(await readMachineChoice(w.deps, COMPANY_B_ID as never, w.project)).toBeUndefined();
   });
   it("a stored row that does not read back is none", async () => {
     const w = await world();
