@@ -125,6 +125,17 @@ export const CI_EVIDENCE_ASK_WORDS: Record<CiEvidenceAskReason, (check: string) 
   weakens_test: (check) => `The fix for ${name(check)} would weaken a test, so Rovara did not push it. Decide whether that is right.`,
 };
 
+/** What setup tells the customer about draft pull requests: their CI skips them (in these workflow files), runs on them, or Rovara could not tell. */
+export function draftSkipWords(skip: { verdict: "skips_drafts"; workflows: readonly string[] } | { verdict: "runs_on_drafts" } | { verdict: "unknown" }): string {
+  if (skip.verdict === "skips_drafts") {
+    const files = skip.workflows.slice(0, 3).map((path) => inertEvidenceText(path.replace(/^\.github\/workflows\//u, ""), 60)).join(", ");
+    const more = skip.workflows.length > 3 ? ` and ${String(skip.workflows.length - 3)} more` : "";
+    return `Your CI skips draft pull requests (${files}${more}). Rovara opens drafts first, so your checks would not run until a person marks the pull request ready. Let them run on drafts, or expect "Not run" on the checks you mark.`;
+  }
+  if (skip.verdict === "runs_on_drafts") return "Your CI runs on draft pull requests.";
+  return "Rovara could not tell whether your CI runs on draft pull requests. If it skips drafts, the checks you mark will say \"Not run\".";
+}
+
 /** A plain https address with no credentials, query or fragment, at most 300 characters; anything else is not shown. */
 function safeLink(address: string | undefined): string | undefined {
   if (address === undefined) return undefined;

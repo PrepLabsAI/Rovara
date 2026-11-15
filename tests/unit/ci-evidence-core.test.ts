@@ -3,7 +3,7 @@
 // that failed by the same name on the base commit's main run; added tests keep their sandbox label) and what Rovara does about a red marked check (environment, ask, or fix within the cap).
 import { describe, expect, it } from "vitest";
 import {
-  CI_EVIDENCE_ASK_WORDS, CI_EVIDENCE_REAL_LABEL, CI_EVIDENCE_SETTINGS_INVALID, DEFAULT_CI_EVIDENCE_SETTINGS, environmentLine, notRunLine, parseCiEvidenceSettings, realCheckLine, waitingCheckLine, waitWords,
+  CI_EVIDENCE_ASK_WORDS, CI_EVIDENCE_REAL_LABEL, draftSkipWords, CI_EVIDENCE_SETTINGS_INVALID, DEFAULT_CI_EVIDENCE_SETTINGS, environmentLine, notRunLine, parseCiEvidenceSettings, realCheckLine, waitingCheckLine, waitWords,
   type Check,
 } from "@agentx/contracts";
 import {
@@ -11,7 +11,7 @@ import {
 } from "../../packages/broker/src/core/ci-evidence/marked-checks.js";
 import { PIPELINE_PROOF_TESTS_MAX, pipelineProof, type PipelineTestOutcome } from "../../packages/broker/src/core/ci-evidence/change-proof.js";
 import { LONG_CHECK_FIX_ROUNDS_MAX, decideMarkedCheck, judgeMarkedFixPush } from "../../packages/broker/src/core/ci-evidence/fix-or-ask.js";
-import { DRAFT_SCAN_FILES_MAX, detectDraftSkip, draftSkipWords, draftVerdictOf } from "../../packages/broker/src/core/ci-evidence/draft-skip.js";
+import { DRAFT_SCAN_FILES_MAX, detectDraftSkip, draftVerdictOf } from "../../packages/broker/src/core/ci-evidence/draft-skip.js";
 import type { CiDefinitionReader } from "../../packages/broker/src/rovara-code/ci-checks.js";
 
 const MIN = 60_000;

@@ -2,7 +2,6 @@
 // marked check. Setup reads the workflow files of the default branch (as data, never run) and says one of three things: skips drafts (and in which files), runs on drafts, or "can't tell". It never
 // guesses: a file it cannot read or parse, a trigger shape it does not know, too many files, or no pull request workflow at all is "can't tell", for the whole repository.
 import { parse } from "yaml";
-import { inertEvidenceText } from "@agentx/contracts";
 import { WORKFLOW_FOLDER, type CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 
 /** At most this many workflow files are read (more: "can't tell"), each at most this many bytes, and this many bytes in all. */
@@ -36,7 +35,7 @@ export function draftVerdictOf(text: string): FileVerdict {
   if (!isRecord(workflow)) return "unknown";
   const on = workflow["on"] ?? workflow["true"];
   let triggers: Record<string, unknown>;
-  if (typeof on === "string") triggers = { [on]: null };
+  if (typeof on === "string") triggers = Object.fromEntries([[on, null]]);
   else if (Array.isArray(on)) {
     if (!on.every((event) => typeof event === "string")) return "unknown";
     triggers = Object.fromEntries(on.map((event: string) => [event, null]));
@@ -87,15 +86,4 @@ export async function detectDraftSkip(reader: CiDefinitionReader): Promise<Draft
   } catch {
     return { verdict: "unknown" };
   }
-}
-
-/** What setup tells the customer. */
-export function draftSkipWords(skip: DraftSkip): string {
-  if (skip.verdict === "skips_drafts") {
-    const files = skip.workflows.slice(0, 3).map((path) => inertEvidenceText(path.slice(WORKFLOW_FOLDER.length + 1), 60)).join(", ");
-    const more = skip.workflows.length > 3 ? ` and ${String(skip.workflows.length - 3)} more` : "";
-    return `Your CI skips draft pull requests (${files}${more}). Rovara opens drafts first, so your checks would not run until a person marks the pull request ready. Let them run on drafts, or expect "Not run" on the checks you mark.`;
-  }
-  if (skip.verdict === "runs_on_drafts") return "Your CI runs on draft pull requests.";
-  return "Rovara could not tell whether your CI runs on draft pull requests. If it skips drafts, the checks you mark will say \"Not run\".";
 }
