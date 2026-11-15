@@ -4,10 +4,11 @@
 //
 //   - The tally reads the project's own lessons only (the company's partition, through the lesson store), over the last `TRIAL_OFFER_WINDOW_DAYS`: an APPROVAL is a lesson a person approved (an approval
 //     whose mode is a person's, by a person, not the system or the repository edit) that is no longer waiting; a DROP is a lesson a person rejected. Counts only.
-//   - Due when approvals >= `TRIAL_OFFER_APPROVALS` and drops are at most `TRIAL_OFFER_DROP_SHARE` of the decisions. Bounded: at most `TRIAL_OFFER_LESSONS_MAX` lessons are looked at; past it the
-//     tally is not trusted and no offer is made (never a guess).
+//   - Due when approvals >= `TRIAL_OFFER_APPROVALS` and drops are at most `TRIAL_OFFER_DROP_SHARE` of the decisions. Bounded: one page of at most `TRIAL_OFFER_LESSONS_MAX` lessons is read; a project with
+//     more gets no offer (never a guess). Offered only where accepting would really start trials (`trialWouldStart`).
 //   - "Not now" is one company-scoped row per project, kept `TRIAL_OFFER_SNOOZE_DAYS` (it names no person: the audit record says who). The company purge removes it with the company's partition.
 import { companyScoped, type DocumentStore, type OrgId } from "@agentx/contracts";
+import type { LearningSettings, ResolvedLearning } from "./policy.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import type { Lesson } from "./types.js";
 
@@ -15,8 +16,8 @@ export const TRIAL_OFFER_APPROVALS = 10;
 export const TRIAL_OFFER_DROP_SHARE = 0.2;
 export const TRIAL_OFFER_WINDOW_DAYS = 90;
 export const TRIAL_OFFER_SNOOZE_DAYS = 30;
-/** The most lessons one tally looks at. */
-export const TRIAL_OFFER_LESSONS_MAX = 5_000;
+/** The most lessons one tally looks at: the hosted store's own bound on a project's set (`MAX_SET_MEMBERS`), so a whole hosted project is always read in one page. */
+export const TRIAL_OFFER_LESSONS_MAX = 2_000;
 const DAY = 86_400_000;
 /** Approval modes that are a person's own decision (`auto` and `trial` are the system's). */
 const PERSON_MODES: ReadonlySet<string> = new Set(["one", "second_person", "sole_owner_exception"]);
@@ -28,21 +29,42 @@ export interface TrialOfferTally { approvals: number; drops: number; since: numb
 const byPerson = (approval: Lesson["approvals"][number], since: number): boolean =>
   PERSON_MODES.has(approval.mode) && approval.at >= since && !approval.by.startsWith("system:");
 
-/** The project's person decisions over the window, or undefined when they could not all be read (too many lessons, or the store failed). */
-export async function tallyTrialOffer(store: Pick<LessonStore, "list">, key: ScopeKey, now: number): Promise<TrialOfferTally | undefined> {
+/**
+ * The project's person decisions over the window, or undefined when they could not all be read (more than `TRIAL_OFFER_LESSONS_MAX` lessons in the project's set, or the store failed). One page of the set
+ * is read, so at most that many lessons are ever loaded.
+ *   - approval: a lesson a person approved in the window that is still kept (active, stale, or faded by itself);
+ *   - drop: a lesson a person rejected in the window after it waited for a person (`pendingExpiresAt` set: the system's own refusals never wait for anyone and are not counted), or one a person approved
+ *     that was retired since (someone, or its harm marks, took it back).
+ */
+export async function tallyTrialOffer(store: Pick<LessonStore, "listPage">, key: ScopeKey, now: number): Promise<TrialOfferTally | undefined> {
   const since = now - TRIAL_OFFER_WINDOW_DAYS * DAY;
   let lessons: Lesson[];
-  try { lessons = await store.list(key, { statuses: DECIDED }); } catch { return undefined; }
+  try {
+    const page = await store.listPage(key, { statuses: DECIDED, limit: TRIAL_OFFER_LESSONS_MAX });
+    if (page.next !== undefined) return undefined;
+    lessons = page.lessons;
+  } catch { return undefined; }
   if (lessons.length > TRIAL_OFFER_LESSONS_MAX) return undefined;
   let approvals = 0;
   let drops = 0;
   for (const lesson of lessons) {
     // The store is not trusted to filter: another project's or company's lesson is never counted.
     if (lesson.workspaceId !== key.workspaceId || lesson.project !== key.project) continue;
-    if (lesson.status === "rejected") { if (lesson.updatedAt >= since) drops += 1; continue; }
-    if (lesson.approvals.some((approval) => byPerson(approval, since))) approvals += 1;
+    if (lesson.status === "rejected") { if (lesson.updatedAt >= since && lesson.pendingExpiresAt !== undefined) drops += 1; continue; }
+    if (!lesson.approvals.some((approval) => byPerson(approval, since))) continue;
+    if (lesson.status === "retired") drops += 1; else approvals += 1;
   }
   return { approvals, drops, since };
+}
+
+/**
+ * Whether accepting would really let low-risk lessons go live ON TRIAL (`resolveLearning`'s `trialAllowed` once the mode is On), and nothing more: Standard preset, no company approval floor, no required
+ * group, no two-person rule, and tier 0 not set to go live by itself (that would be automatic go-live, not a trial). Otherwise there is nothing to offer.
+ */
+export function trialWouldStart(settings: Pick<LearningSettings, "companyApproval" | "tier0Approval" | "approval">, resolved: Pick<ResolvedLearning, "preset" | "requiredGroups" | "approval">): boolean {
+  return resolved.preset === "standard" && settings.companyApproval === undefined && resolved.requiredGroups.length === 0
+    && resolved.approval.tier0 !== "two" && resolved.approval.tier1 !== "two"
+    && resolved.approval.tier0 !== "auto" && settings.tier0Approval !== "auto" && settings.approval?.tier0 !== "auto";
 }
 
 /** Whether a tally earns the offer. */

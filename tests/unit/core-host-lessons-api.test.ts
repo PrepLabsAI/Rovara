@@ -10,7 +10,7 @@ import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESS
 import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MODE_NEEDS_ADMIN, NO_SUCH_PROJECT, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
-import { DocumentPresetStore } from "../../packages/broker/src/lessons/document-settings.js";
+import { DocumentPresetStore, DocumentTier0Settings, writeLearningMode } from "../../packages/broker/src/lessons/document-settings.js";
 import type { CoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { DEV_ROUTES } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { LESSONS_API_ROUTES } from "../../packages/broker/src/aws/developer-routes.js";
@@ -491,7 +491,7 @@ describe("earned trust (DEC 231): the offer to let low-risk lessons go live on t
     const at = over.at ?? w.world.clock.now;
     const by = over.by ?? (companyId === A ? "a-maint" : "b-maint");
     const kept = Array.from({ length: approved }, (_, i) => lesson(companyId, `les_kept${String(i).padStart(4, "0")}`, { status: "active", approvals: [{ approvalId: `ap${String(i)}`, by, at, mode: over.mode ?? "one" }], updatedAt: at }));
-    const gone = Array.from({ length: dropped }, (_, i) => lesson(companyId, `les_drop${String(i).padStart(4, "0")}`, { status: "rejected", approvals: [], updatedAt: at }));
+    const gone = Array.from({ length: dropped }, (_, i) => lesson(companyId, `les_drop${String(i).padStart(4, "0")}`, { status: "rejected", approvals: [], pendingExpiresAt: at, updatedAt: at }));
     await put(w, companyId, ...kept, ...gone);
   }
   const offerOf = async (target: ReturnType<typeof createLessonsApi>, personId: string) => {
@@ -578,10 +578,10 @@ describe("earned trust (DEC 231): the offer to let low-risk lessons go live on t
     expect(await call(target, "a-admin", "GET", OFFER)).toMatchObject({ ok: false, code: "NOT_FOUND", message: "route not found" });
     expect(lessonEvents(w).filter((e) => e.action === "lesson.trial_offer_answered" || e.action === "lesson.mode_changed")).toEqual([]);
     expect(await call(target, "a-maint", "POST", OFFER, { decision: "accept" })).toEqual({ ok: true, body: { project: "payments", decision: "accept", mode: "auto", effective: "auto" } });
+    // One record: the mode change, marked as the offer's answer, with the tally.
     const records = w.world.audit.filter((e) => e.action === "lesson.trial_offer_answered" || e.action === "lesson.mode_changed");
-    expect(records.map((e) => [e.action, e.actor.id, e.companyId])).toEqual([["lesson.trial_offer_answered", "a-maint", A], ["lesson.mode_changed", "a-maint", A]]);
-    expect(records[0]!.details).toMatchObject({ answer: "accepted", approvals: 10, drops: 0 });
-    expect(records[1]!.details).toMatchObject({ fromMode: "suggest", toMode: "auto" });
+    expect(records.map((e) => [e.action, e.actor.id, e.companyId])).toEqual([["lesson.mode_changed", "a-maint", A]]);
+    expect(records[0]!.details).toMatchObject({ fromMode: "suggest", toMode: "auto", via: "trial_offer", approvals: 10, drops: 0 });
     expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toEqual({ ok: true, body: { project: "payments", mode: "auto", effective: "auto", lockedByCompany: false, canChange: true } });
     expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT", message: "There is no offer to answer now." });
     // Going back to Suggest by hand does not bring the offer straight back.
@@ -606,6 +606,37 @@ describe("earned trust (DEC 231): the offer to let low-risk lessons go live on t
     expect(await offerOf(target, "a-admin")).toMatchObject({ approvals: 10 });
   });
 
+  it("an accept never writes over a mode someone changed after the offer was read", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0);
+    const documents = w.lessons.get(A)!.runtime.documents;
+    const put = documents.put.bind(documents);
+    let raced = false;
+    const spy = vi.spyOn(documents, "put").mockImplementation(async (request) => {
+      if (!raced && request.item["entityType"] === "LESSON_MODE") { raced = true; await writeLearningMode(documents, { workspaceId: A, project: "payments" }, "Off", 1); }
+      return await put(request);
+    });
+    const { api: target } = api(w);
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+    spy.mockRestore();
+    expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "off" } });
+  });
+
+  it("no offer where accepting would not start trials, or would let tier 0 go live by itself", async () => {
+    const floor = await setUp();
+    await decide(floor, A, 10, 0);
+    await new DocumentTier0Settings(floor.world.store).write({ kind: "company", workspaceId: A }, "one", { by: "a-admin", at: 1 }, "auto");
+    expect(await offerOf(api(floor).api, "a-admin")).toBeUndefined();
+    const autoTier0 = await setUp();
+    await decide(autoTier0, A, 10, 0);
+    await new DocumentTier0Settings(autoTier0.world.store).write({ kind: "project", workspaceId: A, project: "payments" }, "auto", { by: "a-admin", at: 1 }, "one");
+    expect(await offerOf(api(autoTier0).api, "a-admin")).toBeUndefined();
+    const twoPeople = await setUp();
+    await decide(twoPeople, A, 10, 0);
+    await new DocumentTier0Settings(twoPeople.world.store).write({ kind: "project", workspaceId: A, project: "payments" }, "two", { by: "a-admin", at: 1 }, "one");
+    expect(await offerOf(api(twoPeople).api, "a-admin")).toBeUndefined();
+  });
+
   it("an answer that cannot be audited changes nothing", async () => {
     const w = await setUp();
     await decide(w, A, 10, 0);
@@ -622,7 +653,7 @@ describe("earned trust (DEC 231): the offer to let low-risk lessons go live on t
     const w = await setUp();
     await decide(w, A, 10, 0);
     const real = w.lessons.get(A)!;
-    const broken = { ...real.runtime.store, list: async () => { throw new Error("down"); } };
+    const broken = { ...real.runtime.store, listPage: async () => { throw new Error("down"); } };
     const { api: target } = api(w, { lessonsOf: async (companyId) => (companyId === A ? { ...real, runtime: { ...real.runtime, store: broken } } : undefined) });
     expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "suggest" } });
     expect(await offerOf(target, "a-admin")).toBeUndefined();

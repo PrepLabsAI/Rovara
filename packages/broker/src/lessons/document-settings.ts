@@ -189,6 +189,15 @@ export async function writeLearningMode(store: DocumentStore, scope: { workspace
   await store.put({ item: { ...learningModeKey(scope.workspaceId, scope.project), entityType: "LESSON_MODE", mode: mode.toLowerCase(), updatedAt: at } });
 }
 
+/**
+ * Writes the project's learning mode only while it is still Suggest (no mode stored is Suggest, the default): the earned-trust accept, so a mode someone changed meanwhile is never written over. False: it
+ * was not Suggest any more and nothing was written.
+ */
+export async function writeLearningModeFromSuggest(store: DocumentStore, scope: { workspaceId: string; project: string }, mode: Mode, at: number): Promise<boolean> {
+  const written = await store.put({ item: { ...learningModeKey(scope.workspaceId, scope.project), entityType: "LESSON_MODE", mode: mode.toLowerCase(), updatedAt: at }, condition: when.or(when.absent(), when.eq("mode", "suggest")) });
+  return written.applied;
+}
+
 const LOCAL_TOOLS_PROJECT_SK = "LESSONSET#LOCALTOOLS";
 const LOCAL_TOOLS_COMPANY_SK = "LESSONSET#COMPANYSTAY";
 /**

@@ -30,13 +30,13 @@ import { AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, agentXError,
 import { z } from "zod";
 import { approveLesson, rejectLesson, retireByPerson, type ApprovalFailure } from "../lessons/approve.js";
 import { recordFeedback } from "../lessons/counters.js";
-import { writeLearningMode } from "../lessons/document-settings.js";
+import { writeLearningMode, writeLearningModeFromSuggest } from "../lessons/document-settings.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { attributionNameOf } from "../lessons/people.js";
 import { DEFAULT_LEARNING_MODE, requireAudit, resolveLearning, type LearningMode } from "../lessons/policy.js";
 import { readVisible } from "../lessons/read-visible.js";
 import { idIn } from "../lessons/types.js";
-import { snoozeTrialOffer, tallyTrialOffer, trialOfferEarned, trialOfferSnoozed, type TrialOfferTally } from "../lessons/earned-trust.js";
+import { snoozeTrialOffer, tallyTrialOffer, trialOfferEarned, trialOfferSnoozed, trialWouldStart, type TrialOfferTally } from "../lessons/earned-trust.js";
 import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
@@ -275,11 +275,13 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
         try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
       };
       /**
-       * The earned-trust offer (DEC 231): only while the project's own mode and the mode in force are both Suggest (no company lock), its preset is Standard (Regulated has no trial), the offer is earned
-       * and nobody said "not now" lately. Undefined: no offer. Who may not change the mode is never offered it.
+       * The earned-trust offer (DEC 231): only while the project's own mode and the mode in force are both Suggest (no company lock), accepting would really start trials and nothing more (Standard preset,
+       * no approval floor, required group or two-person rule, tier 0 not set to go live by itself: `trialWouldStart`), the offer is earned and nobody said "not now" lately. Undefined: no offer. Who may not
+       * change the mode is never offered it.
        */
       const offerDue = async (): Promise<TrialOfferTally | undefined> => {
         if (own !== "suggest" || FROM_STORED[resolved.chosenMode] !== "suggest" || resolved.preset !== "standard") return undefined;
+        if (!trialWouldStart(settings ?? {}, resolved)) return undefined;
         if (await trialOfferSnoozed(runtime.documents, companyId, project, options.now())) return undefined;
         const tally = await tallyTrialOffer(runtime.store, where, options.now());
         return tally !== undefined && trialOfferEarned(tally) ? tally : undefined;
@@ -290,16 +292,19 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
         // Answered against the offer as it stands now: one that is no longer due (the mode changed, a lock came, a drop, someone answered) is not answered under the person.
         const tally = await offerDue();
         if (tally === undefined) throw agentXError("IDEMPOTENCY_CONFLICT", "There is no offer to answer now.");
-        const facts = { answer: body.decision === "accept" ? "accepted" : "not_now", approvals: tally.approvals, drops: tally.drops };
-        // The records first: no record, no change.
-        if (!(await requireAudit(runtime.audit, { action: "lesson.trial_offer_answered", workspaceId: companyId, project, actor: personId, facts }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
         if (body.decision === "not_now") {
+          // The record first: no record, no change.
+          if (!(await requireAudit(runtime.audit, { action: "lesson.trial_offer_answered", workspaceId: companyId, project, actor: personId, facts: { answer: "not_now", approvals: tally.approvals, drops: tally.drops } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
           try { await snoozeTrialOffer(runtime.documents, companyId, project, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
           log("trial_offer_not_now", { companyId });
           return { project, decision: "not_now", mode: own };
         }
-        if (!(await requireAudit(runtime.audit, { action: "lesson.mode_changed", workspaceId: companyId, project, actor: personId, facts: { from: own, to: "auto" } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
-        try { await writeLearningMode(runtime.documents, where, TO_STORED.auto, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "The mode could not be saved. Try again."); }
+        // Accepting is a change of mode: ONE record (the mode change, marked as the offer's), before the write. The write holds only while the mode is still Suggest, so a mode someone changed since the
+        // offer was read is never written over (the person is told there is no offer now; the record then stands for an answer that changed nothing, the safe way round).
+        if (!(await requireAudit(runtime.audit, { action: "lesson.mode_changed", workspaceId: companyId, project, actor: personId, facts: { from: own, to: "auto", via: "trial_offer", approvals: tally.approvals, drops: tally.drops } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+        let written: boolean;
+        try { written = await writeLearningModeFromSuggest(runtime.documents, where, TO_STORED.auto, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "The mode could not be saved. Try again."); }
+        if (!written) throw agentXError("IDEMPOTENCY_CONFLICT", "There is no offer to answer now.");
         // Best effort: a project that goes back to Suggest later is not offered trial again at once.
         await snoozeTrialOffer(runtime.documents, companyId, project, options.now()).catch(() => undefined);
         log("trial_offer_accepted", { companyId });
