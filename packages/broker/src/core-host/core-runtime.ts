@@ -15,6 +15,7 @@ import { withStepFenceRetry } from "./step-fence.js";
 import { startFenceItems } from "../core/task-flow/start-fence.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
+import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
 
 /** A core service a scheduled job runs, per company. */
 export interface CoreService {
@@ -36,6 +37,13 @@ export interface CoreRuntime {
   companyId: OrgId;
   flow: TaskFlow;
   services: Partial<Record<CoreServiceName, CoreService>>;
+  /** The deployment's CI reporting, validated (switch-blockers.ts). Undefined when none, or an invalid one, was given: the root then refuses the merge area (`honest-ci`). */
+  ciReporting?: CheckedCiReporting | undefined;
+}
+
+/** What the services builder is handed besides the flow: the validated CI mode reader, so merge tracking reads the same mode the task readers do. Undefined when not wired. */
+export interface CoreServiceWiring {
+  ciMode?: CheckedCiReporting["ciMode"] | undefined;
 }
 
 export interface CoreRuntimeOptions {
@@ -52,8 +60,10 @@ export interface CoreRuntimeOptions {
   log: (entry: Record<string, unknown>) => void;
   /** Extra flow options (limits, prompts, the design review, ...): whatever the deployment wires. */
   flowOptions?: Partial<RegistryTaskFlowOptions>;
-  /** The services beyond the flow, built for this company. */
-  services?: (flow: TaskFlow) => Partial<Record<CoreServiceName, CoreService>>;
+  /** The services beyond the flow, built for this company. Merge tracking takes its CI mode from `wiring.ciMode`, never a default. */
+  services?: (flow: TaskFlow, wiring: CoreServiceWiring) => Partial<Record<CoreServiceName, CoreService>>;
+  /** The project's own CI mode reader (switch blocker `honest-ci`). Required for the merge area; checked at run time. */
+  ciReporting?: CiReporting;
 }
 
 /**
@@ -123,8 +133,15 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
       return await base.start(caller, request);
     },
   };
-  return { companyId, flow, services: options.services?.(flow) ?? {} };
+  // Validated here, refused by the root (`switchBlockers`): an invalid wiring is the same as none, so the switch is blocked by id rather than failing here with the given value.
+  const ciReporting = checkedCiReporting((options as { ciReporting?: unknown }).ciReporting);
+  // An invalid wiring never reaches the services as "no reader" (which merge tracking would read as its default mode): they get a reader that always refuses.
+  const services = options.services?.(flow, { ciMode: ciReporting?.ciMode ?? refusingCiMode }) ?? {};
+  return { companyId, flow, services, ...(ciReporting === undefined ? {} : { ciReporting }) };
 }
+
+/** The CI mode reader a runtime without a valid `ciReporting` hands its services: every read is refused with the fixed words, never the default mode. */
+const refusingCiMode = (): Promise<never> => Promise.reject(new Error(CI_MODE_UNREADABLE_WORDS));
 
 /** The services an area needs that this runtime lacks. */
 export function serviceGaps(services: Partial<Record<CoreServiceName, CoreService>>, areas: readonly CoreArea[]): CoreServiceName[] {
