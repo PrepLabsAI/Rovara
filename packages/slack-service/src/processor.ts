@@ -3,7 +3,6 @@ import {
   VIEW_ONLY_NOTICE,
   checksReplyPrefix,
   WorkspaceClosePreflightResultSchema,
-  type QuickAutoStartRequest, type QuickAutoStartResult,
   type CommentAnsweredRequest, type ThreadNoteAnsweredRequest,
   type ThreadPrepareResult,
   type ThreadWorkspaceResult,

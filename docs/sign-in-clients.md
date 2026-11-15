@@ -108,6 +108,9 @@ A service registered with `--scope` asks for those scopes when it starts a sign-
 `scope`. A scope it may not use is dropped, not refused. Removing a scope from the registration ends it at the next
 token refresh.
 
+These routes are off unless the broker runs with `SIGN_IN_CLIENT_ROUTES=enabled` (nothing in `infra` sets it); while off,
+every `/v1/dev/client/*` route answers 404, and a registered scope does nothing yet.
+
 With such a token, the `/v1/dev/client/*` routes act as the signed-in person, within their own rights:
 
 | Scope | Route | Does |
