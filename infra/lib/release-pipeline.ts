@@ -84,7 +84,7 @@ export class ReleasePipelineStack extends Stack {
         version: "0.2",
         env: {
           shell: "bash",
-          variables: { AWS_CLI_VERSION: AGENTX_RELEASE_AWS_CLI_VERSION },
+          variables: { AWS_CLI_VERSION: AGENTX_RELEASE_AWS_CLI_VERSION, GITLEAKS_VERSION: "8.30.1", GITLEAKS_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080" },
         },
         phases: {
           install: {
@@ -97,8 +97,12 @@ export class ReleasePipelineStack extends Stack {
               'mkdir -p /opt/node && tar -xJf "/tmp/${node_archive}" -C /opt/node --strip-components=1',
               'curl -fsSL -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip"',
               "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
-              'export PATH="/opt/node/bin:/opt/aws-cli/bin:$PATH"',
-              "node --version && npm --version && aws --version && docker buildx version",
+              // The port guard's tests run the real secret scan (tests/unit/port-guard.test.ts): the same gitleaks release CI pins, for this machine's arm64.
+              'curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz"',
+              'echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -',
+              "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
+              'export PATH="/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH"',
+              "node --version && npm --version && aws --version && gitleaks version && docker buildx version",
             ],
           },
           pre_build: {

@@ -119,9 +119,10 @@ export class DeveloperSignIn extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Named environments publish a stable task kid before a gateway is enabled.
-    const taskTokenKey = tasks === undefined ? undefined : new kms.Key(this, "TaskTokenKey", {
-      alias: props.naming.taskTokenKeyAlias!,
+    // Named environments publish a stable task kid before a gateway is enabled. The legacy deployment (production) runs tasks too but has no such key: its template stays as deployed.
+    const taskTokenKeyAlias = tasks === undefined ? undefined : props.naming.taskTokenKeyAlias;
+    const taskTokenKey = taskTokenKeyAlias === undefined ? undefined : new kms.Key(this, "TaskTokenKey", {
+      alias: taskTokenKeyAlias,
       description: `Signs AgentX ${props.naming.environmentTagValue} task tokens`,
       keySpec: kms.KeySpec.RSA_2048,
       keyUsage: kms.KeyUsage.SIGN_VERIFY,
@@ -252,7 +253,7 @@ export class DeveloperSignIn extends Construct {
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [table.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", ...(tasks === undefined ? [] : ["COMPANY_MEMBER#*"])] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", ...(taskTokenKeyAlias === undefined ? [] : ["COMPANY_MEMBER#*"])] } },
     }));
     // The output first: the rest is for developer tasks and admin changes. Spec 064: the legacy deployment takes the
     // sign-in client changes, so it gets their audit records (below) and none of the task grants.

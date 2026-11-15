@@ -1,0 +1,30 @@
+{
+  "events": [
+    {
+      "seq": 1,
+      "hash": "add6c1f9bdc1db27999cf5e5e44fdab1e6b43cf2a9a05c8d06b9ffec982a46f6",
+      "eventId": "golden",
+      "companyId": "org_00000000000000000000",
+      "at": "2026-11-10T00:00:00.000Z",
+      "actor": {
+        "type": "person",
+        "id": "owner"
+      },
+      "action": "task.started",
+      "details": {
+        "marker": "ordinary"
+      }
+    }
+  ],
+  "head": {
+    "count": 1,
+    "hash": "add6c1f9bdc1db27999cf5e5e44fdab1e6b43cf2a9a05c8d06b9ffec982a46f6"
+  },
+  "row": {
+    "pk": "ORG#org_00000000000000000000#AUDIT_COPY",
+    "sk": "HEAD",
+    "entityType": "AUDIT_COPY_HEAD",
+    "count": 1,
+    "hash": "add6c1f9bdc1db27999cf5e5e44fdab1e6b43cf2a9a05c8d06b9ffec982a46f6"
+  }
+}

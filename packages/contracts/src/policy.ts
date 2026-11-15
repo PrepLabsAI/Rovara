@@ -107,6 +107,11 @@ const stricter = (row: PolicyField, a: PolicyValue, b: PolicyValue): boolean => 
   if (b === null) return true;
   return row.stricter === "lower" ? upward(row, a, b) < 0 : upward(row, a, b) > 0;
 };
+/** Whether `candidate` is stricter than `current` for this field, by the field's own direction (null is "no rule", never stricter). False for an unknown field. */
+export function stricterPolicyValue(fieldId: string, candidate: PolicyValue, current: PolicyValue): boolean {
+  const row = POLICY_FIELDS.find((entry) => entry.id === fieldId);
+  return row !== undefined && stricter(row, candidate, current);
+}
 const asValues = (value: unknown): PolicyValues => value as PolicyValues;
 function expand(values: PolicyValues, floors = false): PolicyValues {
   const level = values["preset_level"];
