@@ -43,6 +43,11 @@ export interface TaskActionsOptions {
    * refused, never started on a guess. A function that throws refuses the round the same way.
    */
   roundCap?: (task: TaskRecord) => Promise<{ limitUsd: number; spentUsd: number | undefined } | undefined>;
+  /**
+   * The company's step-up window in seconds, through the policy hook (it may only shorten the ten-minute default; a throw or an answer that is not a whole number from 0 to 86400 refuses the act). Absent: the default.
+   * Read only by acts that need a fresh sign-in (accepting a security finding).
+   */
+  stepUpWindowSeconds?: () => Promise<unknown>;
 }
 
 /** The person acting as the task's owner, as the workflow engine will check them. */

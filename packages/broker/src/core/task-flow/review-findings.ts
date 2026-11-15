@@ -2,7 +2,8 @@
 // (optional instructions); only the findings to fix go back to coding. Cloud's `resolveTaskWorkflowFindings`, over the ports. Today Code has no way for the owner to decide a finding.
 //
 // The move is the engine's own (`resolveWorkflowReviewFindings`: owner only, every blocking finding answered exactly once, an accept needs a reason of 1 to 500 characters, at the exact revision and candidate; the
-// accepted findings are recorded for that candidate only). A fix returns the task to coding like a send-back does (`send-back.ts`), with the findings to fix as the problems (the accepted ones are no longer blocking, so
+// accepted findings are recorded for that candidate only). Accepting a SECURITY finding is the web page's alone, with a fresh step-up (`security-accept.ts`, DEC 236h): a script token or an API token may accept only the
+// code review's findings. A fix returns the task to coding like a send-back does (`send-back.ts`), with the findings to fix as the problems (the accepted ones are no longer blocking, so
 // the coding step lists only the others) and the owner's per-finding instructions kept whole beside the workflow (`owner-note.ts`). With every finding accepted and no other review problem the draft pull request is due,
 // committed with the decision as a passing review's result commits it.
 //
@@ -20,6 +21,7 @@ import { findingAcceptItem, type FindingAcceptMethod } from "./finding-accept.js
 import { ownerNoteItem, ownerRoundPlaceOf } from "./owner-note.js";
 import { CLOSED_TASK, NEVER_STARTED_TASK, WAITING_FOR_SPEND, admitRound, loadTaskAsOwner, ownerWords, parseBody, requireMayStartWork, waitingForSpend, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
+import { acceptedOfRole, requirePageForSecurityAccept } from "./security-accept.js";
 import { commitWorkflow, readWorkspace, runDispatchRow } from "./stage-machine.js";
 import { iso, log } from "./support.js";
 
@@ -45,10 +47,12 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     if (prior.source !== "FINDINGS" || prior.workflowRevision !== request.expectedRevision || !sameAnswers(workflow, request, prior.reason)) throw agentXError("IDEMPOTENCY_CONFLICT", REQUEST_ID_USED);
     return taskViewOf(deps, task);
   }
+  // Accepting a security finding is the web page's, with a fresh sign-in (DEC 236h): refused before anything else is read or written.
+  const now = iso(deps);
+  await requirePageForSecurityAccept(options, caller, via, workflow, request, (deps.now?.() ?? new Date()).getTime());
   // A person's move never skips an approval of more spend.
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) throw agentXError("IDEMPOTENCY_CONFLICT", FINDINGS_OUT_OF_DATE);
-  const now = iso(deps);
   let next: WorkflowSnapshot;
   try {
     next = resolveWorkflowReviewFindings(workflow, request, { actorId: acting.actorId }, { now }, acting.authority);
@@ -122,12 +126,6 @@ function fixInstructions(before: WorkflowSnapshot, next: WorkflowSnapshot, reque
   return lines.length === 0
     ? "Fix only the problems listed. The owner gave no further instructions for them."
     : `Fix only the problems listed. The owner's instructions for them, numbered in the order the problems are listed:\n${lines.join("\n")}`;
-}
-
-/** How many of the findings the request accepts are the given review's. */
-function acceptedOfRole(workflow: WorkflowSnapshot, request: WorkflowResolveFindingsInput, role: "CRITIC" | "SECURITY"): number {
-  const open = new Map(openReviewFindings(workflow).map((finding) => [finding.findingId, finding]));
-  return request.resolutions.filter((resolution) => resolution.action === "ACCEPT" && open.get(resolution.findingId)?.role === role).length;
 }
 
 /**

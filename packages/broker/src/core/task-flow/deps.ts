@@ -58,6 +58,11 @@ export interface TaskCaller {
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
    */
   scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
+  /**
+   * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
+   * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
+   */
+  stepUp?: { at: string; method: string } | undefined;
 }
 
 /** Starting work always names the trusted server surface; other task actions need no origin. */

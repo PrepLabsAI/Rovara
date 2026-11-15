@@ -21,6 +21,7 @@ export * from "./records.js";
 export * from "./results.js";
 export * from "./review-findings.js";
 export * from "./routes.js";
+export * from "./security-accept.js";
 export * from "./send-back.js";
 export * from "./run-watch-rows.js";
 export * from "./run-watch.js";
