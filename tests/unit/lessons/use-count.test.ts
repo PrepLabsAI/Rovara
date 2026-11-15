@@ -40,6 +40,7 @@ describe("used in N tasks", () => {
     await use(db, A, "billing", "les_one", "x1");
     expect((await count(db, ["les_one"])).counts.get("les_one")).toEqual({ tasks: 1 });
     expect((await countLessonUses(db, { companyId: B, project: "payments", lessonIds: ["les_one"], now: NOW })).counts.get("les_one")).toEqual({ tasks: 3 });
+    expect((await countLessonUses(db, { companyId: A, project: "billing", lessonIds: ["les_one"], now: NOW })).counts.get("les_one")).toEqual({ tasks: 1 });
   });
 
   it("a row past its keep time (not yet swept), older than 180 days, or not shaped like a use row is not counted", async () => {
@@ -69,9 +70,13 @@ describe("used in N tasks", () => {
     const faulted = await count(db, ["les_one"]);
     expect(faulted.counts.has("les_one")).toBe(false);
     expect(faulted.incomplete).toBe(true);
-    const capped = await count(db, ["les_one", "les_two"], { limits: { rowsTotal: 2 } });
+    let queries = 0;
+    const watched = { ttlAttribute: TTL, query: async (request: Parameters<MemoryDocumentStore["query"]>[0]) => { queries += 1; return await db.query(request); } };
+    const capped = await countLessonUses(watched, { companyId: A, project: "payments", lessonIds: ["les_one", "les_two"], now: NOW, limits: { rowsTotal: 2 } });
     expect(capped.counts.has("les_one")).toBe(false);
     expect(capped.incomplete).toBe(true);
+    // Once the total is read, no further page is asked for.
+    expect(queries).toBe(2);
     const late = await count(db, ["les_one"], { limits: { deadlineMs: 0 } });
     expect(late.counts.size).toBe(0);
     expect(late.incomplete).toBe(true);
