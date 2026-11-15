@@ -86,7 +86,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:OPEN_APPROVALS | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:OPEN_CHAIN_RUNS | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:OPERATION; entity:OPERATION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | pk:ORG | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | pk:ORG | needs-company | State table | no | - | T1/T6: mixed org-prefixed families include connection metadata/directories; a company-shaped key alone does not prove membership at every caller. T6 isolates secret adapters, not every ORG record read. |
 | record | pk:OUTBOX; entity:OUTBOX | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:OWNER | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:PENDING_TRIGGER_SCHEDULES | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -124,7 +124,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | builder:packages/broker/src/chatgpt/connections.ts:pkOf | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/context-sources/citations.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/context-sources/controller-events.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | builder:packages/broker/src/context-sources/mcp-servers.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | builder:packages/broker/src/context-sources/mcp-servers.ts:partition | needs-company | State table | no | - | T6: orgScoped(orgId, MCPSRV) separates registered MCP metadata; HTTP tokens and stdio secret documents use org-connectors. R2/T2 membership binding of all callers remains unproven. |
 | record | builder:packages/broker/src/context-sources/quotes.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/context-sources/store.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/core/channel/links.ts:channelLinksPartition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -230,8 +230,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:DIAGNOSIS_RATE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:DIAGNOSIS_RECORD | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:DIAGNOSIS_REQUEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:E2E_ACCOUNT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:E2E_ACCOUNT_LATEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:E2E_ACCOUNT | needs-company | State table | no | - | T6/T7: account definitions use company/project keys and secret references, not values. T6 guards org-test-accounts adapter reads; T7 worker dynamic-reference authorization remains unproven. |
+| record | entity:E2E_ACCOUNT_LATEST | needs-company | State table | no | - | T6/T7: company/project latest-account pointers select revisions, not secret values. T7 must prove worker/account authority together; T6 adapter isolation alone does not promote this family. |
 | record | entity:E2E_MODEL_BUDGET_RESERVATION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:E2E_MODEL_CHECK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:E2E_MODEL_CHECK_LATEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -308,8 +308,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:MODEL_SELECTION_POLICY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:NOTICE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:OPERATION_EVENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:ORG_CONNECTION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:ORG_CONNECTION_DIRECTORY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:ORG_CONNECTION | needs-company | State table | no | - | T6: connectionKey scopes metadata and secretVersion by org; secret values live outside State. Store callers still supply orgId; R2 membership-bound hosted wiring and T2 route proof remain. |
+| record | entity:ORG_CONNECTION_DIRECTORY | needs-company | State table | no | - | T6: connectionsKey scopes directory entries by org; entries hold no secret value. R2/T2 must bind all listing callers to membership before promoting this record family. |
 | record | entity:PAGE_COMMENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:PLANNER_REPLIES | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:PLAN_EVIDENCE_POINTER | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -547,8 +547,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/threads/workspace/prepare | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workflows/quick-start | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workspaces/{id}/artifacts/{id} | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
-| route | /v1/workspaces/{id}/connectors/{id}/call | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
-| route | /v1/workspaces/{id}/connectors/{id}/tools | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
+| route | /v1/workspaces/{id}/connectors/{id}/call | needs-company | State table | no | POST | T6/T2: POST executes a workspace connector with its configured secret reference. T6 adapter membership helpers are not wired at this dispatcher; R2/T2 caller binding and T7 execution proof remain. |
+| route | /v1/workspaces/{id}/connectors/{id}/tools | needs-company | State table | no | GET | T6/T2: GET discovers workspace connector tools. Secret adapter isolation does not prove route membership; R2/T2 binding remains, so checked=no. |
 | route | /v1/workspaces/{id}/conversations | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workspaces/{id}/github/call | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workspaces/{id}/github/tools | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
@@ -1123,10 +1123,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/developer/task-records.ts:61:102:sk | usageId | Usage record id as the sort key of the task's own spend-marker partition. | taskSpendMarkerKey / TASK_SPEND |
 | forwarding | packages/broker/src/ports/memory-document-store.ts:172:54:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | all constructors through the DocumentStore port (scanPage cursor position) |
 | forwarding | packages/broker/src/ports/memory-document-store.ts:172:67:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | all constructors through the DocumentStore port (scanPage cursor position) |
-| forwarding | packages/broker/src/developer/store.ts:563:55:sk | passkey.credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
-| forwarding | packages/broker/src/developer/store.ts:574:135:sk | credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
-| forwarding | packages/broker/src/developer/store.ts:608:137:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
-| forwarding | packages/broker/src/developer/store.ts:618:80:sk | credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
 
 ## Merge-up: spec 065 and new task routes
 
@@ -1154,6 +1150,31 @@ The three conflict regions retain upstream nameChosen/displayNameChosen, adminis
 The new loadReadableTask viewer fallback rechecks recordInCompany before consulting a reader grant, so it cannot undo an owner's company refusal. GET events and GET readers resolve membership at dispatch. Reader-grant writes remain a T2/T3 follow-up; the new linking workspace catalog retains the existing catalog's known company gap. Install-wide own-name updates are deliberately not company data. SIGN_IN_CLIENT.fullAccess and DEVELOPER.displayNameChosen extend existing records, not new families. The DEVTASK row explicitly includes READER sort records; the scanner groups these under the existing partition family.
 
 All incoming source identities are classified without changing the scanner; forwarding expressions are identical and only source locations moved. No new API Gateway path appeared. The inventory's method column remains manual, and optional-company read checks do not claim isolation for unchecked writers, recipient metadata or workspace providers.
+
+## T6 secret records and entry points
+
+T6 uses R4's `CompanyMembershipReader` from `packages/broker/src/aws/company-check.ts`. Each bound operation resolves membership afresh; missing, malformed or throwing membership refuses with the existing fixed sentence. A valid foreign connector, hook, MCP or test-account name reads as missing before secret-client selection or any Secrets Manager call. The adapter's absent-options byte goldens and R4's absent-`deps.companies` route goldens remain the compatibility controls. This type-only reader swap changes no runtime guard or default.
+
+The counted rows above retain **needs-company** for mixed or incompletely wired record/route families. The rows below classify secret storage and entry points outside the scanner's record/dispatch grammar; they are **not extra counted identities**. A company-scoped secret adapter does not establish end-to-end route isolation. Local routes are outside the scanner's `aws/` dispatch set; contract-only hook paths and worker references must not be presented as scanned, checked routes.
+
+| Surface / record kind | Class | Storage / route | Evidence and remaining owner |
+|---|---|---|---|
+| Connector secret values | company-scoped | other: `agentx/<env>/org-connectors/<company>/<id>` | `company-secrets.ts`, `secrets-manager/index.ts`, `connection-secrets.ts`; `secrets-company-member`, `aws-secrets-manager-company`, `secrets-tagged-session` tests. Membership-bound composition is opt-in; R2 wires hosted callers. |
+| Connection metadata and directory | needs-company | State: `ORG_CONNECTION`, `ORG_CONNECTION_DIRECTORY`, `connectionKey`, `connectionsKey` (counted above) | Keys include company; records store only presence/version. `connections-store.test.ts` covers versions and cross-company refusal. Caller membership is still an R2/T2 obligation. |
+| Hook secret values | company-scoped | other: `agentx/<env>/org-hooks/<company>/<id>` | Same T6 reader/writer guards; create uses `rovara:use=hook`. `secrets-company-names`, `aws-secrets-manager-company`, `secrets-tagged-session` tests. |
+| Hook record, directory, replay and rate; hook lookup | needs-company | State: contract constructors `hookKey`, `hookDirectoryKey`, `hookEventKey`, `hookRateKey`; global `hookLookupKey` | `contracts/src/event-hooks.ts` scopes the first four; lookup is deliberately global before signature verification. No corresponding hook dispatcher/store is present in this Code tree. T2/T8 must prove signature, lookup, replay and membership authority; T6 does not promote them. |
+| Registered MCP token / stdio secret document | company-scoped | other: `orgMcpServerSecretName` uses `org-connectors/<company>/<serverId>` | `context-sources/wiring.ts` uses the connection secret port; T6 name and adapter tests include this shared family. Hosted membership wiring remains R2. |
+| Registered MCP metadata | needs-company | State: `orgScoped(orgId, "MCPSRV")` / `SRV#<serverId>` (partition builder counted above) | `context-sources/mcp-servers.ts` scopes keys; local caller authority alone does not prove all callers. R2/T2 integration remains. |
+| Test-account secret values | company-scoped | other: `agentx/<env>/org-test-accounts/<company>/<account>` | `contracts/src/test-account.ts` builds names/tags; T6 reader same-answer tests cover this family. T6 connection writer accepts connector/hook names only. T7 owns worker dynamic-reference authorization; this lane does not supply a test-account writer. |
+| Account definitions / latest pointers | needs-company | State: `E2E_ACCOUNT`, `E2E_ACCOUNT_LATEST` (counted above) | Company/project keys hold references; T7 must bind worker execution and secret resolution to the approved account. |
+| Connector execution and discovery | needs-company | POST `/v1/workspaces/{id}/connectors/{id}/call`; GET `/v1/workspaces/{id}/connectors/{id}/tools` (counted above, checked=no) | T6 helpers do not add `deps.companies` at these routes; R2/T2/T7 retain wiring and execution proof. |
+| Local connection and MCP reads / page writes | needs-company | GET `/v1/dev/connections`, GET `/v1/dev/connections/{id}`, GET `/v1/dev/mcp-servers`; owner page actions | `local/app/connections.ts` compares the caller principal with the install company and gates writes on a fresh page. It does not resolve R4 membership; other HTTP methods refuse. R2/T2 multi-company binding remains; these local paths are outside the scanned AWS route set. |
+| Hook delivery | needs-company | Contract-only POST `/v1/hooks/{source}/{hookId}` | Described by `contracts/src/event-hooks.ts`; no matching Code dispatcher in this tree. T2/T8 must prove delivery authority, with T6 secret guard as one layer. |
+| Test-account dynamic reference | needs-company | Worker `test-account-secret.ts`, no dedicated scanned secret HTTP route | T7 owns worker authority and role cutover; T6 cannot claim the worker path is membership-checked. |
+| GitHub App key/webhook and Slack install secrets | install-wide | other: configured install secret names/ARNs | T4/T5; outside T6 company-name families. |
+| Model provider keys | install-wide | other: model-key port and model-runtime environment ARNs | lane G; no model-key family is admitted by T6. |
+
+Old unscoped names belong only to the explicitly configured implicit company in hosted mode; `companyPaths` without an owner refuses them. GitHub App/Slack install secrets remain T4/T5; model keys remain lane G. Real IAM/TagSession policies, backfill, role split and staging evidence remain in `T6-SECRETS-IAM-20261114-v2`; fake tests do not establish deployed IAM behavior. No checked=yes row is added by T6.
 
 ## Merge-up 3: proof holds and mark-ready overrides
 
@@ -1223,5 +1244,9 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 | record | pk:PASSKEYS; entity:PASSKEY | install-wide | sign-in table | no | - | Lane ID step-up factor: a person's passkeys in the sign-in table. Install identity and sign-in state; one identity per person across the shared install, membership is checked separately. |
 | record | pk:STEPUP; entity:STEP_UP | install-wide | sign-in table | no | - | Lane ID step-up page state, keyed by a secret's hash. Install identity and sign-in state; one identity per person across the shared install, membership is checked separately. |
 | record | pk:STEPUP_RATE; entity:STEP_UP_RATE | install-wide | sign-in table | no | - | Lane ID per-person step-up page rate window. Install identity and sign-in state; one identity per person across the shared install, membership is checked separately. |
+| forwarding | packages/broker/src/developer/store.ts:563:55:sk | passkey.credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
+| forwarding | packages/broker/src/developer/store.ts:574:135:sk | credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
+| forwarding | packages/broker/src/developer/store.ts:608:137:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
+| forwarding | packages/broker/src/developer/store.ts:618:80:sk | credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
 
 Forwarding rows were relocated by exact expression; the extracted host-glue rows and core-host erase/catalog forwarding are enumerated separately above. No scanner rule or limit changed.

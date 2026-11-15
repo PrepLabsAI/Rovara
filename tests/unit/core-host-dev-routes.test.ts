@@ -19,7 +19,7 @@ const PROJECT: ProjectDefinition = {
   name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
-/** The deployment reports CI honestly (the honest-ci switch blocker, #680, stands otherwise). */
+// Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 

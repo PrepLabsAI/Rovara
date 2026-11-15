@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { EvalSpendGrant } from "@agentx/contracts";
 import { createEvalMeter } from "../../packages/worker/src/verification/eval-model-access.js";
-import { EvalCallRefused } from "../../packages/worker/src/verification/eval-spend-guard.js";
+import { EvalCallRefused, openMeteredStage } from "../../packages/worker/src/verification/eval-spend-guard.js";
 import { answer, classAnswer, frame, scriptedAccess, settle, type Script } from "../support/eval-model-access.js";
 
 const grant: EvalSpendGrant = { company: "company-a", project: "project-a", selection: "eval", role: "owner", inputsDigest: "d".repeat(64), provider: "customer", connected: true, maxCalls: 400, maxCostMicros: 4_000_000 };
@@ -147,6 +147,36 @@ describe("calls in flight", () => {
     const closing = reservation.close();
     open(); await Promise.all(first); await closing;
     expect(await queued).toBe("refused"); expect(world.forwarded).toHaveLength(4);
+  });
+});
+
+describe("budget refusals through the stage", () => {
+  it("a call refused after waiting in the queue is cap with the cost known, and is not counted", async () => {
+    let open!: () => void; const gate = new Promise<void>(resolve => { open = resolve; });
+    const gated: Script = async function* () { await gate; yield* answer({ costMicros: 10 }); } as never;
+    const world = scriptedAccess(gated);
+    const stage = (await openMeteredStage({ grant, meter: createEvalMeter(world.access), calls: 5, costMicros: 40 }))!;
+    const all = Array.from({ length: 5 }, () => stage.call(frame()).then(() => "ran", () => "refused"));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(world.forwarded).toHaveLength(4); open();
+    const outcomes = await Promise.all(all);
+    expect(outcomes.filter(o => o === "ran")).toHaveLength(4); expect(outcomes.filter(o => o === "refused")).toHaveLength(1);
+    expect(stage.failure()).toBe("cap"); expect(stage.callFailure()).toBe("cap");
+    expect(stage.usage()).toEqual({ calls: 4, costMicros: 40 });
+    await stage.close(); expect(world.released).toEqual([{ calls: 4, costMicros: 40, unknown: false }]);
+  });
+  it("a stage held for zero cost refuses its first call as cap, forwards nothing and releases it whole", async () => {
+    const world = scriptedAccess();
+    const stage = (await openMeteredStage({ grant, meter: createEvalMeter(world.access), calls: 3, costMicros: 0 }))!;
+    await expect(stage.call(frame())).rejects.toBeInstanceOf(Error);
+    expect(stage.failure()).toBe("cap"); expect(stage.usage()).toEqual({ calls: 0, costMicros: 0 });
+    expect(world.forwarded).toEqual([]);
+    await stage.close(); expect(world.released).toEqual([{ calls: 0, costMicros: 0, unknown: false }]);
+  });
+  it("the meter itself says cap for a zero held cost, before any dispatch", async () => {
+    const { world, reservation } = await ok(undefined, undefined, { calls: 2, costMicros: 0 });
+    await expect(reservation.call(frame())).rejects.toBeInstanceOf(EvalCallRefused);
+    expect(world.forwarded).toEqual([]);
   });
 });
 
