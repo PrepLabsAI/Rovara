@@ -833,10 +833,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     ensureProjectCatalogPointer: (name) => ensureProjectCatalogPointer(dependencies, name),
     preparation: (identity, project, requestId) => newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId),
     // Lane E2: these readers answer only a workflow task's workspace. A core task's workspace reads as missing (engine-boundary.ts); its own handlers read it.
-    workspace: async (id) => {
-      if (await ownerOfWorkspace(dependencies, id) === "core") throw agentXError("NOT_FOUND", "workspace not found");
-      return requireWorkspace(dependencies, id);
-    },
+    workspace: (id) => requireWorkspace(dependencies, id),
     operations: async (workspaceId) => (await ownerOfWorkspace(dependencies, workspaceId) === "core" ? [] : await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as unknown as OperationRecord)),
@@ -14118,6 +14115,8 @@ async function requireOwnedWorkspace(
 }
 
 async function requireWorkspace(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<WorkspaceInstance> {
+  // Lane E2: a core task's workspace is not the workflow's to read or act on (engine-boundary.ts); it answers like a missing one.
+  if (await ownerOfWorkspace(dependencies, workspaceId) === "core") throw agentXError("NOT_FOUND", "workspace not found");
   const item = await getItem<Record<string, unknown>>(dependencies, workspaceKey(workspaceId));
   if (!item) throw agentXError("NOT_FOUND", "workspace not found");
   return WorkspaceInstanceSchema.parse(workspaceRecordFields(item));

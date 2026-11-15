@@ -14,7 +14,7 @@
 // A stamp is written once, with the core task, in the start's own transaction, and never changes; a task without one never gets one. So a verdict about a task that EXISTS is fixed for
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXErrorCodeSchema, agentXError, type AgentXErrorCode } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, agentXError } from "@agentx/contracts";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
@@ -66,7 +66,7 @@ function remembered(table: EngineStateTable): { get(key: string): Engine | undef
 
 function remember(table: EngineStateTable, name: string, engine: Engine): void {
   let known = verdicts.get(table.documentClient);
-  if (known === undefined) verdicts.set(table.documentClient, known = new Map());
+  if (known === undefined) verdicts.set(table.documentClient, known = new Map<string, Engine>());
   const key = `${table.tableName}\u0000${name}`;
   // Bounded: when full, the oldest verdict goes (it is read again when next needed).
   if (known.size >= VERDICTS_MAX && !known.has(key)) known.delete(known.keys().next().value as string);
@@ -79,9 +79,16 @@ async function readItem(table: EngineStateTable, key: { pk: string; sk: string }
   return response.Item;
 }
 
-/** The task's stamp (undefined: none, or one that cannot be read; both mean the workflow). A read that fails throws: a failed read is never taken for the workflow. */
+/**
+ * The task's stamp (undefined: none, which means the workflow). A read that fails throws, and so does a stamp item that is there but cannot be read as one: only the core's start
+ * writes that item, so it is never taken for the workflow.
+ */
 export async function readTaskStamp(table: EngineStateTable, taskId: string): Promise<EngineStamp | undefined> {
-  return stampOf(await readItem(table, engineStampKey(taskId)));
+  const item = await readItem(table, engineStampKey(taskId));
+  if (item === undefined) return undefined;
+  const stamp = stampOf(item);
+  if (stamp === undefined) throw new Error("a task's engine stamp could not be read");
+  return stamp;
 }
 
 /**
@@ -91,7 +98,9 @@ export async function readTaskStamp(table: EngineStateTable, taskId: string): Pr
 export async function ownerOfTaskId(table: EngineStateTable, taskId: string, area: CoreArea = "flow"): Promise<Engine> {
   if (!TASK_ID.test(taskId)) return "workflow";
   const key = `task:${taskId}`;
-  if (remembered(table).get(key) === "core") return "core";
+  // A kept verdict is fixed (a `workflow` one is kept only for a task that exists).
+  const known = remembered(table).get(key);
+  if (known !== undefined) return known;
   const owner = entryOwner(await readTaskStamp(table, taskId), area);
   if (owner === "core") remember(table, key, owner);
   return owner;
@@ -170,7 +179,7 @@ export function coreAnswerValue(answer: BrokerResponse): unknown {
   const error = (parsed as { error?: { code?: unknown; message?: unknown } } | null)?.error;
   const code = AgentXErrorCodeSchema.safeParse(error?.code);
   if (!code.success || typeof error?.message !== "string") throw agentXError("RUNTIME_UNAVAILABLE", CORE_ANSWER_UNREADABLE);
-  throw agentXError(code.data as AgentXErrorCode, error.message);
+  throw agentXError(code.data, error.message);
 }
 
 /**
@@ -182,10 +191,10 @@ export function coreAnswerValue(answer: BrokerResponse): unknown {
 export async function serveCoreTask(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: { developerId: string; sessionId: string; name: string }, taskId: string, missing: () => Promise<unknown>): Promise<unknown> {
   if (entry === undefined) return await missing();
   const answer = await entry.route(request, caller);
-  if (answer !== undefined) return answer.statusCode === 404 ? await missing() : coreAnswerValue(answer);
+  // The broker has already signed the caller in: a 401 or 404 from the core means only "not the core's to show this caller", which is a missing task's answer here.
+  if (answer !== undefined) return answer.statusCode === 404 || answer.statusCode === 401 ? await missing() : coreAnswerValue(answer);
   if (request.method === "GET" && request.path.split("?")[0] === `/v1/dev/tasks/${taskId}`) return await missing();
   const read = await entry.route({ method: "GET", path: `/v1/dev/tasks/${taskId}`, headers: {}, ...(request.requestId === undefined ? {} : { requestId: request.requestId }) }, caller);
   if (read?.statusCode === 200) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-  if (read?.statusCode === 401) return coreAnswerValue(read);
   return await missing();
 }

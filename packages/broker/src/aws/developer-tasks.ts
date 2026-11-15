@@ -6303,11 +6303,14 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
  * Lane E2: what this route answers for an id with no task behind it, said for a core task the caller may not see here. The same request is routed with a fresh id that has no rows (so
  * nothing of the core task is read), and the real id is put back in the answer: its input checks, wrong-method answer and words are exactly a missing task's.
  */
-async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL, taskId: string): Promise<unknown> {
+async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL, taskId: string, rest: string): Promise<unknown> {
   const stand = randomUUID();
   const swap = (text: string) => text.replaceAll(stand, taskId);
-  const path = request.path.replace(`/v1/dev/tasks/${taskId}`, `/v1/dev/tasks/${stand}`);
-  const standUrl = new URL(url.href.replace(`/v1/dev/tasks/${taskId}`, `/v1/dev/tasks/${stand}`));
+  // Rebuilt from the parts the route matched (never a search for the id in the raw path, which may be percent-encoded): the stand-in path always names the stand-in id.
+  const path = `/v1/dev/tasks/${stand}${rest}${url.search}`;
+  const standUrl = new URL(path, url);
+  // The stand-in has no stamp, so this can never come back here; checked anyway, failing closed.
+  if (await ownerOfTaskId(deps, stand) !== "workflow") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
   try {
     const value = await routeDeveloperTaskRequest(deps, caller, { ...request, path, ...(request.body === undefined ? {} : { body: request.body.replaceAll(taskId, stand) }) }, standUrl);
     return JSON.parse(swap(JSON.stringify(value ?? null))) as unknown;
@@ -6325,7 +6328,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   const operation = entry === null ? undefined : taskEntryOperation(entry[2]!);
   if (entry !== null && operation !== undefined) {
     const entryTaskId = safeDecode(entry[1]!);
-    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId));
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]!));
   }
   const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
   if (publicationContextRoute !== null && request.method === "POST") {

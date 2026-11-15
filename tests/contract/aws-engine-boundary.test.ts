@@ -12,6 +12,7 @@ import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type 
 import {
   TASK_ENTRY_AREAS, coreAnswerValue, coreTaskEntryFrom, entryOwner, ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace, taskEntryOperation, type CoreTaskEntry,
 } from "../../packages/broker/src/aws/engine-boundary.js";
+import { workspaceOwner } from "../../packages/broker/src/aws/admin-reads.js";
 import { getTaskPageState, getWorkflowFeedbackReview, listPageComments, loadOwnedTask } from "../../packages/broker/src/aws/developer-tasks.js";
 import { resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
@@ -61,11 +62,11 @@ describe("the owner of each operation, for every stamp", () => {
 
 describe("reading the stamp", () => {
   const table = (db: FakeDynamoDb) => ({ documentClient: db, tableName: "state" });
-  it("a stamp that cannot be read as one is the workflow; a read that fails is an error, never the workflow", async () => {
+  it("a stamp item that is there but cannot be read as one is an error (only the core writes it), and so is a read that fails; neither is ever the workflow", async () => {
     const db = new FakeDynamoDb();
     const taskId = randomUUID();
     db.set({ ...engineStampKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core" }, flags: "x", stampedAt: "y" } });
-    expect(await ownerOfTaskId(table(db), taskId)).toBe("workflow");
+    await expect(ownerOfTaskId(table(db), taskId)).rejects.toThrow("a task's engine stamp could not be read");
     const failing = new FakeDynamoDb();
     failing.injectFault({ command: "GetCommand", error: { name: "ProvisionedThroughputExceededException" } });
     await expect(ownerOfTaskId(table(failing), randomUUID())).rejects.toThrow();
@@ -143,7 +144,7 @@ async function partition(world: FakeWorld, pk: string): Promise<StoredDocument[]
 }
 
 /** A core task and the AWS broker sharing its table. MAYA is the core task's owner (the deployment's caller mapping); OMAR belongs to another company. */
-async function coreWorld(options: { wired?: boolean } = {}) {
+async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership" } = {}) {
   const world = createFakeWorld();
   await registerProject(world, FAKE_COMPANY);
   await registerProject(world, OTHER);
@@ -153,6 +154,9 @@ async function coreWorld(options: { wired?: boolean } = {}) {
   const { task } = await runtime.flow.start({ principal: owner, client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
   const principals = new Map<string, DeployedCaller>([[MAYA.developerId, { principal: owner, client: "cli" }], [OMAR.developerId, { principal: localOwnerPrincipal({ companyId: OTHER }), client: "cli" }]]);
   const members = new Map<string, CompanyMembership>([[`${owner.personId}${FAKE_COMPANY}`, { companyId: FAKE_COMPANY, role: "owner" }], [`${owner.personId}${OTHER}`, { companyId: OTHER, role: "owner" }]]);
+  // OMAR signed in to the broker but unknown to the core: no principal for him, or a principal with no membership.
+  if (options.unknown === "principal") principals.delete(OMAR.developerId);
+  if (options.unknown === "membership") members.delete(`${owner.personId}${OTHER}`);
   const routes = createCoreDevRoutes({ app, companyOf: async (caller) => members.get(caller.principal.personId + caller.principal.companyId), wiring: () => ({ origin: () => "https://api.example" }) });
   const coreTasks: CoreTaskEntry = coreTaskEntryFrom(routes, async (caller) => principals.get(caller.developerId));
   const harness = await createDeveloperTaskBroker(options.wired === false ? {} : { developerExtra: { coreTasks } });
@@ -169,7 +173,8 @@ async function coreWorld(options: { wired?: boolean } = {}) {
   // The broker stamps each answer with its own request id; the rest of the body is what is compared.
   const dev = async (...args: Parameters<typeof harness.dev>) => {
     const answer = await harness.dev(...args);
-    const { requestId: _requestId, ...body } = answer.body;
+    const body = { ...answer.body };
+    delete body.requestId;
     return { status: answer.status, body };
   };
   return { ...harness, dev, world, app, routes, coreTasks, task, owner, coreRead, sent, workspaceReads };
@@ -228,6 +233,39 @@ describe("a core task on the AWS developer routes", () => {
     expect(workspaceReads()).toEqual([]);
   });
 
+  it("a percent-encoded core task id answers exactly like an encoded id with no task, at once (never loops, with or without the core's handlers)", async () => {
+    for (const wired of [true, false]) {
+      const { dev, task, workspaceReads } = await coreWorld({ wired });
+      const encode = (id: string) => `%${id.charCodeAt(0).toString(16)}${id.slice(1)}`;
+      const missingId = randomUUID();
+      for (const [who, suffix] of [[OMAR, ""], [OMAR, "/events"], [MAYA, "/continue"]] as const) {
+        const method = suffix === "/continue" ? "POST" : "GET";
+        const body = method === "POST" ? { requestId: randomUUID(), instructions: "x" } : undefined;
+        const theirs = await dev(who, method, `/v1/dev/tasks/${encode(task.taskId)}${suffix}`, body);
+        const missing = await dev(who, method, `/v1/dev/tasks/${encode(missingId)}${suffix}`, body);
+        if (who === OMAR || !wired) expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), `${String(wired)} ${suffix}`).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
+        else expect(theirs.body).toEqual({ error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } });
+      }
+      expect(workspaceReads()).toEqual([]);
+    }
+  }, 30_000);
+
+  it("a signed-in caller the core does not know (no principal mapping, or no membership) gets a missing task's answer, not a sign-in refusal", async () => {
+    for (const unknown of ["principal", "membership"] as const) {
+      const { dev, task, workspaceReads } = await coreWorld({ unknown });
+      for (const suffix of ["", "/continue"]) {
+        const method = suffix === "" ? "GET" : "POST";
+        const body = method === "POST" ? { requestId: randomUUID(), instructions: "x" } : undefined;
+        const missingId = randomUUID();
+        const theirs = await dev(OMAR, method, `/v1/dev/tasks/${task.taskId}${suffix}`, body);
+        const missing = await dev(OMAR, method, `/v1/dev/tasks/${missingId}${suffix}`, body);
+        expect(theirs.status, `${unknown} ${suffix}`).toBe(missing.status);
+        expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), `${unknown} ${suffix}`).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
+      }
+      expect(workspaceReads()).toEqual([]);
+    }
+  });
+
   it("without the core's handlers on this install, reads exactly like a task that does not exist, for its owner too", async () => {
     const { dev, task, workspaceReads } = await coreWorld({ wired: false });
     const theirs = await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`);
@@ -255,7 +293,7 @@ describe("the AWS readers see only workflow rows", () => {
     expect(await actions.operations(task.workspaceId)).toEqual([]);
     expect(await actions.artifacts(task.workspaceId, "any")).toEqual([]);
     expect(await actions.pullRequests(task.workspaceId)).toEqual([]);
-    expect(await actions.failedPublications(task.workspaceId, { repositoryId: "demo", candidateDigest: "d", treeSha: "t" } as never)).toBe(0);
+    expect(await actions.failedPublications(task.workspaceId, { repositoryId: "demo", candidateDigest: "d", treeSha: "t" })).toBe(0);
   });
 
   it("a workflow task's workspace still reads as before through the same actions", async () => {
@@ -303,5 +341,11 @@ describe("the AWS readers see only workflow rows", () => {
     const answer = await handler({ source: "agentx.slack-ingress", action: "thread-note", taskId: task.taskId, userId: "U0TEAMMATE", thread, messageTs: "1695500002.000001", eventId: "Ev1", text: "Please also log it" });
     expect(answer).toMatchObject({ statusCode: 200, body: JSON.stringify({ outcome: "refused" }) });
     expect(writes).toEqual([]);
+  });
+
+  it("the admin console names a core task's workspace by its task only; it never reads the core's task record", async () => {
+    const { db, task, brokerInput } = await coreWorld();
+    const owner = await workspaceOwner({ documentClient: db, tableName: brokerInput.tableName } as never, { id: task.workspaceId, ownerKey: "k" } as never);
+    expect(owner).toEqual({ origin: "ai_tool", owner: { taskId: task.taskId } });
   });
 });
