@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 // Lane L9-wire: what the local review pages read (L8's `LocalPageData`) and the one write the task flow owns that the pages ask for (a comment on a plan), over the task flow's
 // records. The pages know nothing of these records; this is the only place that does.
 //
@@ -39,7 +40,7 @@ import { designPanelOf, designQuestionsOf } from "../../core/design-review/panel
 import { proofReportOf } from "./proof-report.js";
 import { planGraphOf } from "../../core/work-breakdown/plan-graph.js";
 import { workBreakdownView, type WorkBreakdownView } from "../../core/work-breakdown/view.js";
-import { operationKey } from "../../core/task-flow/keys.js";
+
 import type { SecondReview } from "../../core/second-review/index.js";
 import type { ModelSelectionService } from "../../core/model-selection/service.js";
 import { designNotRunLine } from "../../core/design-review/not-run.js";
@@ -100,7 +101,7 @@ async function breakdownOf(flow: TaskFlowDeps, task: TaskRecord, workflow: Workf
   if (graph === undefined) return undefined;
   const approval = workflow.workflowDependenciesApproval;
   const approved = approval !== undefined && approval.artifactDigest === artifact.sha256 && approval.graphDigest === taskGraphDigest(graph);
-  const bound = approved && workflow.workflowDependenciesOperationId !== undefined ? fromDocument<OperationRecord>(await flow.store.get(operationKey(task.workspaceId, workflow.workflowDependenciesOperationId))) : undefined;
+  const bound = approved && workflow.workflowDependenciesOperationId !== undefined ? fromDocument<OperationRecord>(await flow.store.get((await workspaceKeys(flow, task.workspaceId)).operationKey(workflow.workflowDependenciesOperationId))) : undefined;
   return workBreakdownView(graph, approved ? workflow.workflowDependenciesProgress ?? [] : [], approved, bound?.workflowDependencies?.parallel?.max);
 }
 

@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 // The design review on `rovara up`. It builds the review's runtime (core/design-review/round-ports.ts) from what the laptop has: the registry's model choice and providers (one model, fixed by the owner), the model
 // proxy's slot keys (one token per reviewer, with its own ceiling and spend record), the object storage for the files workers save, and the document store. It also gives the proxy's grant source the two functions a design review needs
 // (`describeSlot`, `slotMinted`), which look a slot up in the binding the broker stored and never in anything the worker sends.
@@ -23,7 +24,7 @@ import { designReviewProxyCheck } from "../../core/design-review/proxy-check.js"
 import { bindingSlotOf, putSlotKey, readSlotCeiling, recordSlotReask, slotKeyRowExists } from "../../core/design-review/slot-keys.js";
 import type { DesignReviewRuntime } from "../../core/design-review/round-ports.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
-import { operationKey, taskPointerKey } from "../../core/task-flow/keys.js";
+
 import { readTask } from "../../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import type { LocalModelChoice } from "../model-choice.js";
@@ -108,7 +109,7 @@ export interface LocalDesignReview {
 export function createLocalDesignReview(options: LocalDesignReviewOptions): LocalDesignReview {
   const { flow, blobs, companyId } = options;
   const store = flow.store;
-  const operationOf = async (operation: { workspaceId: string; operationId: string }) => fromDocument<OperationRecord>(await store.get(operationKey(operation.workspaceId, operation.operationId)));
+  const operationOf = async (operation: { workspaceId: string; operationId: string }) => fromDocument<OperationRecord>(await store.get((await workspaceKeys(flow, operation.workspaceId)).operationKey(operation.operationId)));
 
   const runtime: DesignReviewRuntime = {
     reader: { get: (key) => store.get(key), allowedWhenAbsent: true },
@@ -149,7 +150,7 @@ export function createLocalDesignReview(options: LocalDesignReviewOptions): Loca
       keySpend: async (keyIds) => options.slotKeys()?.spendUsd(keyIds),
     },
     async readArtifactText(operation, name, maxBytes) {
-      const found = await store.get(artifactKey(operation.workspaceId, operation.id, name));
+      const found = await store.get(artifactKey((await workspaceKeys(flow, operation.workspaceId)).workspaceKey, operation.id, name));
       if (found === undefined || typeof found["objectKey"] !== "string" || typeof found["sha256"] !== "string") return undefined;
       const read = await readVerifiedText(blobs, { objectKey: found["objectKey"], sha256: found["sha256"] }, maxBytes);
       return "text" in read ? read.text : undefined;
@@ -186,7 +187,7 @@ export function createLocalDesignReview(options: LocalDesignReviewOptions): Loca
     if (stored === undefined || !binding.success || stored.kind !== "task" || stored.workflowMode !== "PLAN_CRITIQUE") return undefined;
     const slot = bindingSlotOf(binding.data, slotName);
     if (slot === undefined) return undefined;
-    const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
+    const pointer = fromDocument<TaskPointerRecord>(await store.get((await workspaceKeys(flow, operation.workspaceId)).taskPointerKey()));
     const task = pointer === undefined ? undefined : await readTask(flow, pointer.taskId);
     const review = task?.workflow?.designReview;
     if (task === undefined || review === undefined || !designReviewActive(review)) return undefined;

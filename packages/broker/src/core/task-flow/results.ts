@@ -1,8 +1,9 @@
+import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // Lane L6a, task flow core: a worker's terminal result. This is the entry the callback API calls once it has checked the worker's capability
 // and read what the worker sent (Cloud's `terminal-result.ts`, whose artifact reading is not ported: it hands the flow a `StepOutcome`).
 import { agentXError, change, when, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, taskIndexKey, workspaceKey } from "./keys.js";
+import { taskIndexKey } from "./keys.js";
 import { runWatchKey } from "./run-watch-rows.js";
 import type { OperationResult, StepOutcome } from "./outcome.js";
 import { readTask, taskViewOf } from "./reads.js";
@@ -10,13 +11,16 @@ import { fromDocument, toDocument, type OperationRecord, type TaskPointerRecord 
 import { onOperationEnded, readWorkspace } from "./stage-machine.js";
 import { learnModelNotEnabled } from "../model-selection/learn-not-enabled.js";
 import { iso } from "./support.js";
-import { taskPointerKey } from "./keys.js";
+
 
 const TERMINAL: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 export const isTerminalStatus = (status: string): boolean => TERMINAL.has(status);
 
-export async function readOperation(deps: Pick<TaskFlowDeps, "store">, workspaceId: string, operationId: string): Promise<OperationRecord | undefined> {
-  return fromDocument<OperationRecord>(await deps.store.get(operationKey(workspaceId, operationId)));
+export async function readOperation(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string, operationId: string): Promise<OperationRecord | undefined> {
+  const location = await locateWorkspace(deps, workspaceId);
+  if (location === undefined) return undefined;
+  const operation = fromDocument<OperationRecord>(await deps.store.get(location.operationKey(operationId)));
+  return operation?.companyId === deps.companyId ? operation : undefined;
 }
 
 const RESULT_ATTEMPTS = 3;
@@ -41,9 +45,10 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
     const workspace = await readWorkspace(deps, operation.workspaceId);
     const now = iso(deps);
     const holds = workspace !== undefined && workspace.activeOperationId === operation.id && workspace.fence === operation.fence;
+    const location = await workspaceKeys(deps, operation.workspaceId);
     const items: TransactItem[] = [{
       kind: "update",
-      key: operationKey(operation.workspaceId, operation.id),
+      key: location.operationKey(operation.id),
       ops: [
         change.set("status", status), change.set("updatedAt", now),
         ...(error === undefined ? [] : [change.set("error", error.slice(0, 16_384))]),
@@ -57,7 +62,7 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
       const prepared = operation.kind === "prepare";
       items.push({
         kind: "update",
-        key: workspaceKey(operation.workspaceId),
+        key: location.workspaceKey,
         ops: [
           change.set("activeOperationId", null), change.set("updatedAt", now),
           change.set("status", prepared ? (status === "SUCCEEDED" ? "READY" : "PREPARATION_FAILED") : "READY"),
@@ -90,7 +95,7 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
 /** Keeps the task's index row (what a list shows) in step with the status its records give. Best effort: the records are the truth. */
 export async function syncTaskIndex(deps: TaskFlowDeps, workspaceId: string): Promise<void> {
   try {
-    const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(workspaceId)));
+    const pointer = fromDocument<TaskPointerRecord>(await deps.store.get((await workspaceKeys(deps, workspaceId)).taskPointerKey()));
     const task = pointer === undefined ? undefined : await readTask(deps, pointer.taskId);
     if (task === undefined) return;
     const view = await taskViewOf(deps, task);

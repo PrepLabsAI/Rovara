@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 // Lane L12, slice 3: proof on a laptop. When a task's checks are recorded for a candidate (a coding run's report, or a rerun of the checks), the evidence of that run is assembled and kept (Cloud's
 // `keepEvidenceAfterChecks`, `aws/broker/evidence-wiring.ts`), so the proof page and the pull request have something to show:
 //   - what the worker saved as `evidence-raw.json` for that operation (a rerun of the checks asks for it; a coding run saves none, and the pack then holds only what the broker itself knows: its own verdict for each check);
@@ -9,7 +10,7 @@ import { scanText } from "@agentx/verifier";
 import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, SANDBOX_MODEL_HOSTS_ITEM_ID, workflowSelectedChecks, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
 import { keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
-import { workspaceKey } from "../../core/task-flow/keys.js";
+
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
 import { readVerifiedText } from "./documents.js";
 
@@ -40,7 +41,7 @@ export function createLocalEvidence(options: {
   // out on a guess that it was denied; anything unreadable and no setting says nothing.
   const modelHostsAllowed = async (workspaceId: string): Promise<boolean> => {
     try {
-      const record = await flow.store.get(workspaceKey(workspaceId));
+      const record = await flow.store.get((await workspaceKeys(flow, workspaceId)).workspaceKey);
       const machine = record?.["machine"];
       const machineId = typeof machine === "object" && machine !== null && typeof (machine as Record<string, unknown>)["machineId"] === "string" ? (machine as Record<string, string>)["machineId"] : undefined;
       if (machineId !== undefined && options.sandboxModelHostsOf !== undefined) {
@@ -63,7 +64,7 @@ export function createLocalEvidence(options: {
         actions: {
           async artifacts(workspaceId, operationId) {
             if (workspaceId !== task.workspaceId || operationId !== operation.id) return [];
-            const found = await flow.store.query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
+            const found = await flow.store.query({ pk: (await workspaceKeys(flow, workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
             const listed: Array<{ name: string; objectKey: string }> = [];
             for (const row of found.items) {
               if (typeof row["name"] !== "string" || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") continue;

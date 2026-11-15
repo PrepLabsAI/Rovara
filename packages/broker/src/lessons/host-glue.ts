@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The parts of joining the lessons library to the task flow that every host does the same way, whether one person on a laptop (`local/app/lessons.ts`) or a company on a deployed install
 // (`core-host/lessons.ts`). Each is built for ONE company: a task, a load record or a queue message of another company is not this company's, and is ignored.
 //   loading     at the dispatch of a step: the lessons that fit the task, the load record (so the worker's report is applied to this stage only) and which tasks used which lessons;
@@ -12,7 +13,7 @@ import {
   type LearnedContext, type ObjectStorage, type OrgId, type QueueService,
 } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
-import { taskPointerKey } from "../core/task-flow/keys.js";
+
 import { readTask } from "../core/task-flow/reads.js";
 import { fromDocument, type TaskPointerRecord, type TaskRecord } from "../core/task-flow/records.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
@@ -105,7 +106,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     if (stage === undefined || !enabled() || !request.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const pointer = fromDocument<TaskPointerRecord>(await flow.store.get(taskPointerKey(request.workspaceId)));
+      const pointer = fromDocument<TaskPointerRecord>(await flow.store.get((await workspaceKeys(flow, request.workspaceId)).taskPointerKey()));
       const task = pointer === undefined ? undefined : await ownTask(pointer.taskId);
       if (task === undefined || task.workflow === undefined) return {};
       const round = task.workflow.revision;

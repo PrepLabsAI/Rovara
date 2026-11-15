@@ -95,7 +95,7 @@ export async function startSavedEnvRebuild(deps: RebuildStartDeps, ids: { orgId:
   const ownerKey = taskOwnerKey(owner, `saved-env-${job.jobId}`);
   // The workspace is written WITHOUT the project index attributes: it is in no list of workspaces, the project's or a person's.
   const workspace: StoredDocument = documentOf({
-    ...workspaceKey(workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: deps.flow.companyId, orgId: deps.flow.companyId, ownerKey, projectName: ids.projectId, projectRevision: project.definition.revision,
+    ...workspaceKey(deps.flow.companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: deps.flow.companyId, orgId: deps.flow.companyId, ownerKey, projectName: ids.projectId, projectRevision: project.definition.revision,
     status: "PREPARING", activeOperationId: operationId, fence: 1, createdAt: now, updatedAt: now,
   });
   const pins = names.map((repository) => ({ repository, commit: job.commits[repository]! }));
@@ -104,7 +104,7 @@ export async function startSavedEnvRebuild(deps: RebuildStartDeps, ids: { orgId:
     expectedKey: job.expectedKey, environment: approved.environment, commits: job.commits, detectorGlobs: [...build.detectorGlobs], secretNames: [...build.secretNames], baseImageDigest: build.baseImageDigest,
   };
   const prepare = buildOperation(deps.flow, {
-    workspace: { id: workspaceId, fence: 1, ownerKey }, kind: "prepare", requestId: (deps.flow.newId ?? randomUUID)(), operationId, now, recordRequest: false,
+    workspace: { pk: workspace.pk, id: workspaceId, fence: 1, ownerKey }, kind: "prepare", requestId: (deps.flow.newId ?? randomUUID)(), operationId, now, recordRequest: false,
     dispatch: {
       kind: "prepare", projectRevision: project.definition.revision, payload: JSON.parse(JSON.stringify({ readOnly: true, pins, savedEnvBuild })) as Record<string, never>,
       // The push login and the result are this preparation's alone; a worker that cannot build is refused the job, never sent it without the field.

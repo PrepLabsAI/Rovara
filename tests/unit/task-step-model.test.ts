@@ -1,10 +1,11 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The model a task step is handed to a worker with: chosen once per operation, kept on it, and the same on a repeat delivery; a step with no model of its own, a design-review round and a step that is not a task
 // step are left to the install's one model; a step no model fits ends with the reason in words.
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, type ModelIdentifier } from "@agentx/contracts";
 import { chooseStepModel } from "../../packages/broker/src/core/task-flow/step-model.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { StepChoice } from "../../packages/broker/src/core/model-selection/service.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { CRITIC_MODEL_ATTEMPTS_MAX, PLAN_CHECK_NO_MODEL_LEFT, planCheckFailures, retriesPlanCheck } from "../../packages/broker/src/core/plan/check-retry.js";
@@ -21,13 +22,14 @@ let counter = 0;
 function operation(extra: Partial<OperationRecord> = {}): OperationRecord {
   counter += 1;
   return {
-    pk: `WORKSPACE#${WORKSPACE}`, sk: `OPERATION#${String(counter)}`, entityType: "OPERATION", companyId: COMPANY, eventSequence: 0, id: `00000000-0000-4000-8000-${String(counter).padStart(12, "0")}`, workspaceId: WORKSPACE, kind: "task",
+    pk: workspacePartition(COMPANY, WORKSPACE), sk: `OPERATION#${String(counter)}`, entityType: "OPERATION", companyId: COMPANY, eventSequence: 0, id: `00000000-0000-4000-8000-${String(counter).padStart(12, "0")}`, workspaceId: WORKSPACE, kind: "task",
     requestId: "r", payloadHash: "h", status: "ACCEPTED", fence: counter, createdAt: new Date(Date.UTC(2026, 10, 10, 10, 0, counter)).toISOString(), updatedAt: "2026-11-10T10:00:00.000Z",
     dispatch: { kind: "task", payload: {} }, workflowMode: "PLAN", ...extra,
   } as unknown as OperationRecord;
 }
 const world = (answer: StepChoice) => {
   const store = new MemoryDocumentStore();
+  void store.put({ item: { ...workspaceKey(COMPANY, WORKSPACE), id: WORKSPACE, companyId: COMPANY } });
   const choose = vi.fn<(input: { stage: string; reference?: ModelIdentifier | undefined }) => Promise<StepChoice>>(async () => answer);
   return { store, choose, deps: { store, companyId: COMPANY, stepModels: { choose } } };
 };
@@ -78,7 +80,7 @@ describe("the model a step is handed to a worker with", () => {
     const w = world(step(SONNET));
     const choice = (model: ModelIdentifier) => ({ stage: "plan" as const, model, route: { alias: "a", api: "anthropic-messages" as const, catalog: "m" }, reason: "x" });
     for (const earlier of [operation({ workflowMode: "PLAN", modelChoice: choice(GPT) }), operation({ workflowMode: "PLAN", modelChoice: choice(SONNET) }), operation({ workflowMode: "IMPLEMENT", modelChoice: choice(m("openai", "other")) }), operation({ workflowMode: "PLAN" })]) {
-      await w.store.put({ item: { ...operationKey(WORKSPACE, earlier.id), ...(earlier as unknown as Record<string, never>) } });
+      await w.store.put({ item: { ...operationKey(T1_COMPANY, WORKSPACE, earlier.id), ...(earlier as unknown as Record<string, never>) } });
     }
     await chooseStepModel(w.deps, operation({ workflowMode: "PLAN_CRITIQUE" }));
     // The newest PLAN operation that recorded a model is the second one (Sonnet); the later PLAN without one and the build's are not what the plan check checks.
@@ -93,7 +95,7 @@ describe("the model a step is handed to a worker with", () => {
   it("a plan check after tries whose model the account refused leaves those models out, counts its tries from the latest plan, takes the last try, and with none left ends with its own words", async () => {
     const w = world(step(SONNET));
     const choice = (model: ModelIdentifier) => ({ stage: "plan_check" as const, model, route: { alias: "a", api: "anthropic-messages" as const, catalog: "m" }, reason: "x" });
-    const put = async (earlier: OperationRecord) => w.store.put({ item: { ...operationKey(WORKSPACE, earlier.id), ...(earlier as unknown as Record<string, never>) } });
+    const put = async (earlier: OperationRecord) => w.store.put({ item: { ...operationKey(T1_COMPANY, WORKSPACE, earlier.id), ...(earlier as unknown as Record<string, never>) } });
     const refused = "the model call failed: key-rejected ModelNotEnabled";
     // Before the latest plan: one refused check (its model stays left out, its try does not count).
     await put(operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: refused, modelChoice: choice(m("anthropic", "old")) } as never));

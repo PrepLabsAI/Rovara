@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The three uploads a coding run makes besides its result (`candidate-export`, `candidate-build-source`, `baseline-source`). They carry the exact committed source of the candidate (and of the
 // unchanged code), and feed the browser and API checks. A task that does not need those checks has no use for them: its uploads are answered and nothing is kept, as the worker needs to finish
 // its run, so a code base too big for this install's object storage never holds a result up. A task that needs the checks has its uploads judged and kept by `core/e2e/uploads.ts` on the document
@@ -6,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { agentXError, type JsonValue } from "@agentx/contracts";
 import { handleBaselineSource, handleCandidateBuildSource, handleCandidateExport } from "../core/e2e/uploads.js";
 import type { UploadOperation, UploadStores } from "../core/e2e/uploads-chunks.js";
-import { taskKey, taskPointerKey } from "../core/task-flow/keys.js";
+import { taskKey } from "../core/task-flow/keys.js";
 
 export type CodingRunUploadAction = "candidate-export" | "candidate-build-source" | "baseline-source";
 
@@ -57,7 +58,7 @@ export function acknowledgeUpload(rawBody: unknown, options: { allowUnavailable:
 async function keepsUpload(action: CodingRunUploadAction, stores: UploadStores, operation: UploadOperation): Promise<boolean> {
   if (action === "baseline-source" && operation.workflowMode === "PLAN" && operation.groundingSourceAsked === true) return true;
   if (action === "candidate-build-source" && operation.candidateSourceRefused !== undefined) return false;
-  const pointer = await stores.store.get(taskPointerKey(operation.workspaceId));
+  const pointer = await stores.store.get((await workspaceKeys({ store: stores.store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey());
   const taskId = typeof pointer?.["taskId"] === "string" ? pointer["taskId"] : undefined;
   if (taskId === undefined) return false;
   const workflow = (await stores.store.get(taskKey(taskId)))?.["workflow"] as { e2e?: { required?: unknown } } | undefined;

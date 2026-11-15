@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The two callbacks a checks run makes to the broker, on the ports: it reads the admission it was started with (`e2e-admission`), and it posts its evidence (`e2e-evidence`): one upload per
 // admitted group and then one aggregate. Both are bound to the exact admission the broker stored, content addressed, and to the round that is current: the worker's word on which round it runs
 // is never taken. The handlers are plain functions of the two ports, the operation as the callback layer read it, and the records of the round kinds, so whatever starts rounds supplies those.
@@ -11,7 +12,7 @@ import {
 } from "@agentx/contracts";
 import { decodeE2EApplicationExecutionAdmission, e2ePrivateTransferMaxBytes } from "@agentx/verifier";
 import { applicationEvidenceLimits } from "../../e2e/application-evidence.js";
-import { operationKey } from "../task-flow/keys.js";
+
 import { E2E_OBJECT_RETENTION, E2E_STAGING_RETENTION, UPLOAD_CHUNK_BYTES, expectedChunkBytes, isLiveOperation, newUploadId, nowIso, parseUploadBody, readChunk, sha256Of, uploadRowKey, whenOperationLive, type UploadOperation, type UploadStores } from "./uploads-chunks.js";
 
 /** The most an admission (and so an aggregate of evidence) may hold. */
@@ -130,7 +131,7 @@ const evidenceBodySchema = z.discriminatedUnion("stage", [
 ]);
 
 const evidenceRowKey = (operation: UploadOperation, groupRunId: string | undefined) =>
-  uploadRowKey(operation.workspaceId, "WORKFLOW_E2E_UPLOAD", operation.id, groupRunId === undefined ? "" : `#${groupRunId}`);
+  uploadRowKey(operation, "WORKFLOW_E2E_UPLOAD", operation.id, groupRunId === undefined ? "" : `#${groupRunId}`);
 const stagingKeyOf = (operation: UploadOperation, groupRunId: string | undefined, uploadId: string, index: number): string =>
   `workflow-e2e-staging/${operation.workspaceId}/${operation.id}/${groupRunId ?? "aggregate"}/${uploadId}/${index}.chunk`;
 
@@ -277,7 +278,7 @@ async function evidenceUploadStep(stores: UploadStores, operation: ChecksOperati
   if (bytes.byteLength !== Number(upload["totalBytes"]) || bytes.byteLength > transferLimit || sha256Of(bytes) !== body.sha256) { for (const chunkKey of chunkKeys) await stores.objects.delete(chunkKey); throw agentXError("CONFIG_INVALID", "assembled E2E evidence failed its bound or digest"); }
   const drop = async (): Promise<void> => { for (const chunkKey of chunkKeys) await stores.objects.delete(chunkKey); };
   const sameBytes = (existing: Uint8Array | undefined): boolean => existing !== undefined && existing.byteLength === bytes.byteLength && Buffer.from(existing).equals(bytes) && sha256Of(existing) === body.sha256;
-  const opKey = operationKey(operation.workspaceId, operation.id);
+  const opKey = (await workspaceKeys({ store: stores.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id);
   const uploadCondition = (extra: ReturnType<typeof when.eq>[]) => when.and(when.eq("status", "OPEN"), when.eq("nextChunkIndex", Number(upload["chunkCount"])), when.eq("chunkCount", Number(upload["chunkCount"])),
     when.eq("uploadId", body.uploadId), when.eq("operationId", operation.id), when.eq("fence", operation.fence), when.eq("admissionSha256", admissionRef.admissionRef.sha256), ...extra);
   const decodedEnvelope = (): Record<string, unknown> => { try { return asRecord(JSON.parse(bytes.toString("utf8"))); } catch { throw agentXError("CONFIG_INVALID", "E2E evidence is not readable"); } };

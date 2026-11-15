@@ -1,3 +1,4 @@
+import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 // The verification of a finished browser and API round on the document store and object storage: the evidence is read back from where the broker stored it, held to its content address,
 // recollected by the broker alone, and judged against the install's current authority. A round whose authority cannot be shown is UNKNOWN, never a pass.
 // Runs on the pinned Node (22.23.2), like every suite built on the application evidence fixture, which signs the toolchain version into the evidence: run it with `vt`, not under another patch version.
@@ -52,12 +53,12 @@ async function roundOf(options: Parameters<typeof createApplicationEvidenceFixtu
   await objects.put(aggregateRef.key, aggregateBytes, meta);
   const reference: E2EWorkflowAdmissionRef = { schemaVersion: 1, taskId: admission.taskId, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest, roundId: admission.round.roundId,
     groupRunIds: runIds, admissionRef };
-  const operation = { id: admission.operationId, workspaceId: WORKSPACE, fence: admission.operationFence, kind: "task", workflowMode: "CHECKS", status: "SUCCEEDED", updatedAt: "2026-11-10T10:00:00.000Z",
+  const operation = { pk: workspacePartition(COMPANY, WORKSPACE), companyId: COMPANY, id: admission.operationId, workspaceId: WORKSPACE, fence: admission.operationFence, kind: "task", workflowMode: "CHECKS", status: "SUCCEEDED", updatedAt: "2026-11-10T10:00:00.000Z",
     workflowE2EAdmission: reference,
     ...(tweak.skipAggregate === true ? {} : { workflowE2EEvidenceRef: aggregateRef }),
     workflowE2EGroupEvidenceRefs: [{ groupRunId: fixture.runId, evidenceRef: groupRef }], workflowE2EGroupRunIds: [fixture.runId] } as unknown as OperationRecord;
   if (tweak.dropReceipt !== true) {
-    await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: `WORKFLOW_E2E_UPLOAD#${admission.operationId}#${fixture.runId}`, entityType: "WORKFLOW_E2E_EVIDENCE_UPLOAD", status: "COMPLETE", operationId: admission.operationId,
+    await store.put({ item: { pk: workspacePartition(COMPANY, WORKSPACE), sk: `WORKFLOW_E2E_UPLOAD#${admission.operationId}#${fixture.runId}`, entityType: "WORKFLOW_E2E_EVIDENCE_UPLOAD", status: "COMPLETE", operationId: admission.operationId,
       groupRunId: fixture.runId, fence: admission.operationFence, admissionSha256, groupEvidenceRef: { groupRunId: fixture.runId, evidenceRef: groupRef },
       receivedAt: ((fixture.groupRun.actual as { collection: { receivedAt: string } }).collection.receivedAt) } });
   }

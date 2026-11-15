@@ -1,3 +1,4 @@
+const T1_COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";
 // the pull login exchange. The worker names nothing; the broker decides from the grant, the running preparation and the digest it recorded with the operation.
 import { describe, expect, it } from "vitest";
 import { HostedSavedEnvRegistryAuthSchema } from "@agentx/contracts";
@@ -94,35 +95,35 @@ describe("the saved environment login exchange", () => {
 describe("the operation as the handlers read it, and the counter on its record", () => {
   const seeded = async (dispatch: Record<string, unknown> = {}) => {
     const store = new MemoryDocumentStore();
-    await store.put({ item: { ...operationKey("ws-1", "op-1"), entityType: "OPERATION", kind: "prepare", status: "RUNNING", dispatch: { kind: "prepare", payload: dispatch } } as never });
-    await store.put({ item: { ...workspaceKey("ws-1"), entityType: "WORKSPACE", orgId: "org_aaaaaaaaaaaaaaaaaaaa", projectName: "payments", status: "PREPARING", activeOperationId: "op-1" } });
+    await store.put({ item: { ...operationKey(T1_COMPANY, "ws-1", "op-1"), entityType: "OPERATION", kind: "prepare", status: "RUNNING", dispatch: { kind: "prepare", payload: dispatch } } as never });
+    await store.put({ item: { ...workspaceKey(T1_COMPANY, "ws-1"), entityType: "WORKSPACE", orgId: "org_aaaaaaaaaaaaaaaaaaaa", projectName: "payments", status: "PREPARING", activeOperationId: "op-1" } });
     return store;
   };
 
   it("names the image and the job from what the BROKER stored with the dispatch, nothing from the worker", async () => {
     const store = await seeded({ savedEnv: { digest: DIGEST }, savedEnvBuild: { jobId: "job-1" } });
-    expect(await readSavedEnvOperation(store, "ws-1", "op-1")).toEqual({
+    expect(await readSavedEnvOperation(store, T1_COMPANY, "ws-1", "op-1")).toEqual({
       kind: "prepare", status: "RUNNING", savedEnvJobId: "job-1", savedEnvDigest: DIGEST, orgId: "org_aaaaaaaaaaaaaaaaaaaa", projectName: "payments", workspace: { status: "PREPARING", activeOperationId: "op-1" },
     });
-    expect(await readSavedEnvOperation(await seeded(), "ws-1", "op-1")).toMatchObject({ savedEnvJobId: undefined, savedEnvDigest: undefined });
+    expect(await readSavedEnvOperation(await seeded(), T1_COMPANY, "ws-1", "op-1")).toMatchObject({ savedEnvJobId: undefined, savedEnvDigest: undefined });
   });
 
   it("an operation or a workspace that is not there is NOT_FOUND", async () => {
-    await expect(readSavedEnvOperation(new MemoryDocumentStore(), "ws-1", "op-1")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(readSavedEnvOperation(new MemoryDocumentStore(), T1_COMPANY, "ws-1", "op-1")).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
   it("counts a login on that operation only while it is under the limit, and never on an operation that is not there", async () => {
     const store = await seeded();
     const results: boolean[] = [];
-    for (let attempt = 0; attempt < SAVED_ENV_LOGIN_MAX_PER_OPERATION + 2; attempt += 1) results.push(await countOperationAttribute(store, "ws-1", "op-1", "savedEnvLoginCount", SAVED_ENV_LOGIN_MAX_PER_OPERATION));
+    for (let attempt = 0; attempt < SAVED_ENV_LOGIN_MAX_PER_OPERATION + 2; attempt += 1) results.push(await countOperationAttribute(store, T1_COMPANY, "ws-1", "op-1", "savedEnvLoginCount", SAVED_ENV_LOGIN_MAX_PER_OPERATION));
     expect(results).toEqual([true, true, true, false, false]);
-    expect((await store.get(operationKey("ws-1", "op-1")))?.["savedEnvLoginCount"]).toBe(SAVED_ENV_LOGIN_MAX_PER_OPERATION);
-    expect(await countOperationAttribute(store, "ws-1", "op-missing", "savedEnvLoginCount", 3)).toBe(false);
+    expect((await store.get(operationKey(T1_COMPANY, "ws-1", "op-1")))?.["savedEnvLoginCount"]).toBe(SAVED_ENV_LOGIN_MAX_PER_OPERATION);
+    expect(await countOperationAttribute(store, T1_COMPANY, "ws-1", "op-missing", "savedEnvLoginCount", 3)).toBe(false);
   });
 
   it("two requests at once cannot both take the last slot", async () => {
     const store = await seeded();
-    const answers = await Promise.all(Array.from({ length: 6 }, () => countOperationAttribute(store, "ws-1", "op-1", "savedEnvPushLoginCount", 3)));
+    const answers = await Promise.all(Array.from({ length: 6 }, () => countOperationAttribute(store, T1_COMPANY, "ws-1", "op-1", "savedEnvPushLoginCount", 3)));
     expect(answers.filter(Boolean)).toHaveLength(3);
   });
 });

@@ -1,9 +1,10 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // the ordered-work invocation of a coding run (Cloud's `approvedWorkflowDependencies` and `workflowWithCurrentGraphOperation`, in `developer-tasks/workflow-inputs.ts`).
 //
 // A coding run of an approved plan with a work breakdown carries the graph, the approval it was bound by, the progress cursor and, for a run that goes on from an earlier one, the retained checkpoints and the tree the
 // workspace must hold. The record of that run (the operation's `workflowDependencies`) is the binding every later checkpoint, result and retry is read against.
 import { agentXError, canonicalJson, taskGraphDigest, workflowDependencyAttemptTerminalProgress, type WorkflowDependencyInvocation, type WorkflowSnapshot } from "@agentx/contracts";
-import { operationKey } from "../task-flow/keys.js";
+
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { fromDocument, type OperationRecord, type TaskRecord } from "../task-flow/records.js";
 import { approvedGraphOf } from "./plan-graph.js";
@@ -38,7 +39,7 @@ export async function resumeGraphInvocation(deps: TaskFlowDeps, task: TaskRecord
   if (graph === undefined) return undefined;
   const progress = workflow.workflowDependenciesProgress ?? [];
   const operationId = workflow.workflowDependenciesOperationId;
-  const bound = operationId === undefined ? undefined : fromDocument<OperationRecord>(await deps.store.get(operationKey(task.workspaceId, operationId)));
+  const bound = operationId === undefined ? undefined : fromDocument<OperationRecord>(await deps.store.get((await workspaceKeys(deps, task.workspaceId)).operationKey(operationId)));
   const binding = bound?.workflowDependencies;
   if (bound === undefined || binding === undefined || bound.kind !== "task" || bound.workflowMode !== "IMPLEMENT" || bound.workspaceId !== task.workspaceId || bound.conversationId !== task.conversationId
     || !TERMINAL_OPERATION.has(bound.status)

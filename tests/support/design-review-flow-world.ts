@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // A world to test the design review stage in (the task flow on its fakes, a simulated worker).
 // The design review stage on the task flow's fakes. A Full task whose project asks for design review goes through Understand, the requirements, the design, a round of fresh
 // reviewers (their packets and keys are the broker's), the planner's answer to their findings, a second round, and ends at the owner's approval card: nothing here approves anything, the approval gate does that.
@@ -69,11 +70,11 @@ export async function nextJob(w: World): Promise<{ invocation: WorkerInvocation;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     await w.h.flow.relayOnce();
     await w.h.flow.dispatchOnce({ maxMessages: 10 });
-    const machineId = ((await w.h.store.get(workspaceKey(w.workspaceId)))?.["machine"] as { machineId?: string } | undefined)?.machineId;
+    const machineId = ((await w.h.store.get(workspaceKey(T1_COMPANY, w.workspaceId)))?.["machine"] as { machineId?: string } | undefined)?.machineId;
     const fresh = machineId === undefined ? undefined : w.h.machines.delivered(machineId).find((job) => !w.seen.has(job.operationId));
     if (fresh !== undefined) {
       w.seen.add(fresh.operationId);
-      return { invocation: fresh, operation: fromDocument<OperationRecord>(await w.h.store.get(operationKey(w.workspaceId, fresh.operationId)))! };
+      return { invocation: fresh, operation: fromDocument<OperationRecord>(await w.h.store.get(operationKey(T1_COMPANY, w.workspaceId, fresh.operationId)))! };
     }
     w.h.clock.advance(20);
   }

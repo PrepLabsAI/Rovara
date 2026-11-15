@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Starting a saved image's rebuild on the task flow: the job becomes a read-only preparation pinned to the job's commits, with no credential in anything stored; the build systems' key files are in
 // both the job's globs and the broker's key; every refusal that will not mend ends the job.
 import { describe, expect, it } from "vitest";
@@ -28,11 +29,11 @@ describe("starting a rebuild", () => {
     const { job } = await queued(w);
     const marker = await w.h.store.get(startMarkerKey(job.jobId));
     expect(marker).toMatchObject({ orgId: COMPANY, projectId: PROJECT, jobId: job.jobId });
-    const workspace = (await w.h.store.get(workspaceKey(textOf(marker, "workspaceId")))) as Record<string, unknown>;
+    const workspace = (await w.h.store.get(workspaceKey(T1_COMPANY, textOf(marker, "workspaceId")))) as Record<string, unknown>;
     expect(workspace).toMatchObject({ status: "PREPARING", projectName: PROJECT, activeOperationId: textOf(marker, "operationId"), fence: 1 });
     // in no list of workspaces: no by-project index attributes
     expect(workspace["workspaceProject"]).toBeUndefined();
-    const operation = (await w.h.store.get(operationKey(textOf(marker, "workspaceId"), textOf(marker, "operationId")))) as unknown as StoredOperation;
+    const operation = (await w.h.store.get(operationKey(T1_COMPANY, textOf(marker, "workspaceId"), textOf(marker, "operationId")))) as unknown as StoredOperation;
     expect(operation).toMatchObject({ kind: "prepare", status: "ACCEPTED" });
     expect(operation["dispatch"]).toMatchObject({ kind: "prepare", extraActions: ["saved-env-push-login", "saved-env-result"], requires: [PREPARE_SAVED_ENV_BUILD_FEATURE] });
     const payload = operation["dispatch"].payload;
@@ -43,7 +44,7 @@ describe("starting a rebuild", () => {
     // the dispatch message went to its queue, and the lease token is in no stored document but the registry's own row
     const [message] = await (await w.h.queues.queue("task-dispatch")).receive();
     expect(message?.body).toMatchObject({ workspaceId: textOf(marker, "workspaceId"), operationId: textOf(marker, "operationId") });
-    for (const item of await queryAll(w.h.store, { pk: workspaceKey(textOf(marker, "workspaceId")).pk })) expect(JSON.stringify(item)).not.toContain(job.leaseToken);
+    for (const item of await queryAll(w.h.store, { pk: workspaceKey(T1_COMPANY, textOf(marker, "workspaceId")).pk })) expect(JSON.stringify(item)).not.toContain(job.leaseToken);
     expect(JSON.stringify(marker)).not.toContain(job.leaseToken);
   });
 
@@ -131,7 +132,7 @@ describe("the key's inputs and the build systems' key files", () => {
     // the queued job carries exactly these globs
     const { job } = await queued(w);
     const marker = (await w.h.store.get(startMarkerKey(job.jobId)))!;
-    const operation = (await w.h.store.get(operationKey(textOf(marker, "workspaceId"), textOf(marker, "operationId")))) as unknown as StoredOperation;
+    const operation = (await w.h.store.get(operationKey(T1_COMPANY, textOf(marker, "workspaceId"), textOf(marker, "operationId")))) as unknown as StoredOperation;
     expect(operation["dispatch"].payload.savedEnvBuild.detectorGlobs).toEqual(inputs?.detectorGlobs);
   });
 

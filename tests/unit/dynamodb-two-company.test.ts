@@ -5,7 +5,7 @@ import { createTaskFlow, TASK_FLOW_INDEXES } from "../../packages/broker/src/cor
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 import { workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { taskKey, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createHarness, definition, newRequestId } from "../support/task-flow-harness.js";
 import { dynamoWorld } from "../support/ports/dynamodb-harness.js";
 
@@ -106,9 +106,12 @@ describe("core company list paging", () => {
 describe("workspace operation rows in the same read module", () => {
   it("filters each operation by company even if a foreign row uses the same workspace key", async () => {
     const { world, a, b } = await sharedFlows();
+    for (const company of [COMPANY_A.orgId, COMPANY_B.orgId, IMPLICIT_COMPANY_ID]) {
+    await world.store.put({ item: { ...workspaceKey(company, "shared"), companyId: company, id: "shared" } });
     for (const [id, companyId] of [["a", COMPANY_A.orgId], ["b", COMPANY_B.orgId], ["old", undefined], ["bad", null]] as const) {
-      await world.store.put({ item: { pk: "WORKSPACE#shared", sk: `OPERATION#${id}`, entityType: "OPERATION", id,
+      await world.store.put({ item: { pk: workspacePartition(company, "shared"), sk: `OPERATION#${id}`, entityType: "OPERATION", id,
         createdAt: "2026-11-09T10:00:00.000Z", fence: 1, ...(companyId === undefined ? {} : { companyId }) } });
+    }
     }
     expect((await workspaceOperations(a.flow.deps, "shared")).map((row) => row.id)).toEqual(["a"]);
     expect((await workspaceOperations(b.flow.deps, "shared")).map((row) => row.id)).toEqual(["b"]);
@@ -120,11 +123,12 @@ describe("workspace operation rows in the same read module", () => {
 describe("workspace operation total bound", () => {
   it("refuses beyond ten pages and accepts 2,000 small rows when they fit those pages", async () => {
     const world = dynamoWorld({ indexes: TASK_FLOW_INDEXES });
-    for (let i = 0; i < 2001; i++) await world.store.put({ item: { pk: "WORKSPACE#large", sk: `OPERATION#${String(i).padStart(4, "0")}`,
+    await world.store.put({ item: { ...workspaceKey(COMPANY_A.orgId, "large"), id: "large", companyId: COMPANY_A.orgId } });
+    for (let i = 0; i < 2001; i++) await world.store.put({ item: { pk: workspacePartition(COMPANY_A.orgId, "large"), sk: `OPERATION#${String(i).padStart(4, "0")}`,
       companyId: COMPANY_A.orgId, createdAt: "2026-11-09T10:00:00.000Z", fence: i } });
     const deps = { store: world.store, companyId: OrgIdSchema.parse(COMPANY_A.orgId) };
     await expect(workspaceOperations(deps, "large")).rejects.toThrow("workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)");
-    await world.store.delete({ key: { pk: "WORKSPACE#large", sk: "OPERATION#2000" } });
+    await world.store.delete({ key: { pk: workspacePartition(COMPANY_A.orgId, "large"), sk: "OPERATION#2000" } });
     expect(await workspaceOperations(deps, "large")).toHaveLength(2000);
   });
   it("refuses missing company context with fixed words", async () => {
@@ -173,7 +177,7 @@ it("isolates prefix-related company keys and refuses delimiters", async () => {
   for (const company of ["", "a#b", "a b", "a\nb"]) expect(() => companyScoped(company, "shared")).toThrow();
 });
 
-it.each(["bySessionState", "github-webhook-recovery"])("known gap: %s lists both companies (T1/T8)", async (index) => {
+it.each(["bySessionState"])("known gap: %s lists both companies (T1/T8)", async (index) => {
   const { store } = dynamoWorld({ indexes: STATE_TABLE_INDEXES });
   const definition = STATE_TABLE_INDEXES.find((entry) => entry.name === index)!;
   for (const company of [COMPANY_A, COMPANY_B]) await store.put({ item: {
@@ -251,7 +255,7 @@ it.each([false, true])("membership kit probes through DynamoDocumentStore (fallb
 
 it("counts short operation pages as reads, with fixed words and an eleven-read bound", async () => {
   const query = vi.fn(async () => ({ items: [], cursor: "private-canary" }));
-  await expect(workspaceOperations({ store: { query } as never, companyId: OrgIdSchema.parse(COMPANY_A.orgId) }, "private-canary"))
+  await expect(workspaceOperations({ store: { query, get: async () => ({ ...workspaceKey(COMPANY_A.orgId, "private-canary"), companyId: COMPANY_A.orgId }) } as never, companyId: OrgIdSchema.parse(COMPANY_A.orgId) }, "private-canary"))
     .rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)" });
   expect(query).toHaveBeenCalledTimes(11);
 });

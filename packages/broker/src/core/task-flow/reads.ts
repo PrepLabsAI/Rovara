@@ -1,9 +1,10 @@
+import { locateWorkspace, type WorkspaceLocation } from "./workspace-location.js";
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
-import { OPERATION_SK_PREFIX, taskKey, taskPointerKey, workspaceKey } from "./keys.js";
+import { OPERATION_SK_PREFIX, taskKey } from "./keys.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 
 export interface TaskView {
@@ -35,12 +36,17 @@ export async function loadOwnedTask(deps: TaskFlowDeps, caller: TaskCaller, task
 
 export async function workspaceOperations(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string): Promise<OperationRecord[]> {
   if (!OrgIdSchema.safeParse(deps.companyId).success) throw agentXError("CONFIG_INVALID", "workspace company is invalid");
+  const location = await locateWorkspace(deps, workspaceId);
+  return location === undefined ? [] : operationsAt(deps, location);
+}
+
+async function operationsAt(deps: Pick<TaskFlowDeps, "store" | "companyId">, location: WorkspaceLocation): Promise<OperationRecord[]> {
   const items: StoredDocument[] = [];
   let cursor: string | undefined;
   // Ten reads of at most 200 rows and DynamoDB's 1 MB page each, plus a 1-row completion probe.
   // Large rows can exhaust the read bound before 2,000 rows; never return partial operations.
   for (let reads = 0; reads <= 10; reads++) {
-    const page = await deps.store.query({ pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX }, limit: reads === 10 ? 1 : 200,
+    const page = await deps.store.query({ pk: location.workspaceKey.pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX }, limit: reads === 10 ? 1 : 200,
       ...(cursor === undefined ? {} : { cursor }) });
     if (reads === 10) {
       if (page.items.length > 0 || page.cursor !== undefined) throw agentXError("CONFIG_INVALID", "workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)");
@@ -55,10 +61,11 @@ export async function workspaceOperations(deps: Pick<TaskFlowDeps, "store" | "co
 }
 
 export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<TaskView> {
-  const [workspace, pointer, operations] = await Promise.all([
-    deps.store.get(workspaceKey(task.workspaceId)).then((item) => fromDocument<WorkspaceRecord>(item)),
-    deps.store.get(taskPointerKey(task.workspaceId)).then((item) => fromDocument<TaskPointerRecord>(item)),
-    workspaceOperations(deps, task.workspaceId),
+  const location = await locateWorkspace(deps, task.workspaceId);
+  const workspace = fromDocument<WorkspaceRecord>(location?.workspace);
+  const [pointer, operations] = location === undefined ? [undefined, []] : await Promise.all([
+    deps.store.get(location.taskPointerKey()).then((item) => fromDocument<TaskPointerRecord>(item)),
+    operationsAt(deps, location),
   ]);
   const derived = deriveTaskStatus({
     ...(task.closedAt === undefined ? {} : { closedAt: task.closedAt }),

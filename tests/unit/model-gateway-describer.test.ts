@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 import { expect, it } from "vitest";
 import { ROVARA_CODE_AGENT_ID, type Payer, type WorkOrigin } from "@agentx/contracts";
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
@@ -7,9 +8,9 @@ import { type TaskTokenOperation } from "../../packages/broker/src/core/model-ga
 async function world() {
   const h = createHarness(); await h.registerProject();
   const started = await h.flow.start(h.owner, { project: "payments", instructions: "Build it", requestId: newRequestId() });
-  const workspace = (await h.store.get(workspaceKey(started.task.workspaceId)))!;
+  const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId)))!;
   const scope: TaskTokenOperation = { workspaceId: started.task.workspaceId, operationId: workspace["activeOperationId"] as string, fence: 1 };
-  const key = operationKey(scope.workspaceId, scope.operationId);
+  const key = operationKey(T1_COMPANY, scope.workspaceId, scope.operationId);
   const original = (await h.store.get(key))!;
   await h.store.put({ item: { ...original, kind: "task", status: "RUNNING", programStepId: "build", requester: { personId: "a".repeat(64), provider: "test" }, dispatch: { kind: "task", payload: {} } } });
   h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };

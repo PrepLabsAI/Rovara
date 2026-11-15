@@ -1,10 +1,11 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The two callbacks of a browser and API checks run, on the document store and object storage: the read of its admission and the upload of its evidence.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type DocumentStore, type E2EWorkflowAdmissionRef, type ObjectStorage } from "@agentx/contracts";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import {
   handleE2EEvidenceUpload, readE2EAdmissionChunk, storeE2EAdmission, type ChecksOperation, type RoundRecordReaders, type RoundTask, type StartedRoundRecord,
 } from "../../packages/broker/src/core/e2e/callbacks.js";
@@ -43,10 +44,10 @@ async function world(options: { padding?: number; ref?: Record<string, unknown>;
   const admission = buildAdmission(options.padding ?? 0);
   if (options.store !== false) await storeE2EAdmission(stores, { key: `workflow-e2e-admissions/sha256/${admission.sha}.json`, sha256: admission.sha, bytes: admission.bytes, taskId, candidateDigest: CANDIDATE });
   const ref = refOf(admission, options.ref);
-  const seed = async (more: Record<string, unknown> = {}) => store.put({ item: { ...operationKey(workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS",
+  const seed = async (more: Record<string, unknown> = {}) => store.put({ item: { ...operationKey(T1_COMPANY, workspaceId, operationId), entityType: "OPERATION", companyId: T1_COMPANY, id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS",
     status: "RUNNING", fence: 1, workflowE2EAdmission: ref as never, ...more } });
   await seed();
-  const operation = async (): Promise<ChecksOperation> => (await store.get(operationKey(workspaceId, operationId))) as unknown as ChecksOperation;
+  const operation = async (): Promise<ChecksOperation> => (await store.get(operationKey(T1_COMPANY, workspaceId, operationId))) as unknown as ChecksOperation;
   const keysWith = async (needle: string) => (await store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#EVIDENCE_BLOB` })).items.map((item) => item.sk).filter((key) => key.includes(needle));
   return { store, objects, stores, admission, ref, seed, operation, keysWith };
 }
@@ -218,8 +219,8 @@ describe("the evidence upload", () => {
     expect((await w.operation() as unknown as Record<string, unknown>)["workflowE2EEvidenceRef"]).toEqual({ key: `workflow-e2e-evidence/sha256/${done.digest}.json`, sha256: done.digest, byteLength: aggregate.byteLength });
     expect(Buffer.from((await w.objects.get(`workflow-e2e-evidence/sha256/${done.digest}.json`, aggregate.byteLength))!).equals(aggregate)).toBe(true);
     expect(await w.keysWith("workflow-e2e-staging/")).toEqual([]);
-    expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operationId}` })).toMatchObject({ status: "COMPLETE", evidenceRef: { sha256: done.digest } });
-    expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operationId}#${runIds[0]}` })).toMatchObject({ status: "COMPLETE", groupRunId: runIds[0] });
+    expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `WORKFLOW_E2E_UPLOAD#${operationId}` })).toMatchObject({ status: "COMPLETE", evidenceRef: { sha256: done.digest } });
+    expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `WORKFLOW_E2E_UPLOAD#${operationId}#${runIds[0]}` })).toMatchObject({ status: "COMPLETE", groupRunId: runIds[0] });
   });
 
   it("answers a repeated init of a finished group with its accepted reference", async () => {
@@ -281,7 +282,7 @@ describe("the evidence upload", () => {
     await uploadEvidence(w, bytesOf(e.envelope(0)), runIds[0]);
     await uploadEvidence(w, bytesOf(e.envelope(1)), runIds[1]);
     const operation = await w.operation() as unknown as Record<string, unknown>;
-    await w.store.update({ key: operationKey(workspaceId, operationId), ops: [{ op: "set", path: ["workflowE2EGroupEvidenceRefs"], value: (operation["workflowE2EGroupEvidenceRefs"] as never[]).slice(0, 1) }] });
+    await w.store.update({ key: operationKey(T1_COMPANY, workspaceId, operationId), ops: [{ op: "set", path: ["workflowE2EGroupEvidenceRefs"], value: (operation["workflowE2EGroupEvidenceRefs"] as never[]).slice(0, 1) }] });
     await rejects(uploadEvidence(w, bytesOf(e.aggregate()), undefined), "STALE_FENCE");
   });
 
