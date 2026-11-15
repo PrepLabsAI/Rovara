@@ -7,7 +7,7 @@ import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-req
 import { inertLine } from "./inert-text.js";
 import { boundEvidence } from "./evidence-lines.js";
 import { notComparedLines, weakeningBlock } from "./weakening-flags.js";
-import { evidenceV2Lines } from "./evidence-v2-lines.js";
+import { evidencePublicAiLines, evidenceV2Lines } from "./evidence-v2-lines.js";
 import { reviewModelLines } from "./review-model-lines.js";
 import { testingSectionLines } from "./testing-section.js";
 import { linearCloseLine, neutralizeLinearWords, normalizeIssueKey, sealLinearText } from "./linear-close.js";
@@ -267,7 +267,7 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
   const flags = weakeningBlock(context.changedFiles?.files ?? [], boundEvidence(context.proof?.evidence, workflow.candidate?.digest), weakeningProof);
   // TE-A2b: with the v2 writer and a v2 pack for this code, the shared renderer's block comes first and carries the same flags (once) and the same "could not compare" lines. It shrinks to its compact form with the lists.
   const notCompared = weakeningProof === undefined ? [] : notComparedLines(weakeningProof.testProof, weakeningProof.candidateDigest);
-  const evidenceBlock = (level: number): string[] | undefined => (context.evidenceWriter === 2 && context.repositoryKnownPrivate === true ? evidenceV2Lines(context.proof?.evidence, workflow.candidate?.digest, context.changedFiles?.files, level, notCompared) : undefined);
+  const evidenceBlock = (level: number): string[] | undefined => (context.evidenceWriter !== 2 ? undefined : context.repositoryKnownPrivate === true ? evidenceV2Lines(context.proof?.evidence, workflow.candidate?.digest, context.changedFiles?.files, level, notCompared) : evidencePublicAiLines(context.proof?.evidence, workflow.candidate?.digest));
   // The Proof section shrinks with the lists: its evidence text first, then its proven and passed rows, never a failed row or a not-tested item. One more step after the lists are empty shortens it again.
   const steps = [...LIST_LIMITS.map((limit, index) => ({ limit, proofLevel: Math.min(index, 3) })), { limit: 0, proofLevel: PROOF_LEVEL_LAST }];
   for (const [level, { limit, proofLevel }] of steps.entries()) {
