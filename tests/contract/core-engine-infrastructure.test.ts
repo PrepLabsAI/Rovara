@@ -11,7 +11,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES,
+  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES,
   SERVICE_ROLE_SERVICES, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -20,7 +20,7 @@ import { CORE_BROKER_QUEUE_ACTIONS, CORE_DISPATCH_DEAD_LETTERS_ALARM } from "../
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { DISPATCH_ATTEMPTS_MAX } from "../../packages/broker/src/core/task-flow/dispatch.js";
 import { CORE_ENGINE_VARIABLE as BROKER_SWITCH_VARIABLE, CORE_JOBS, CORE_SCHEDULE_SOURCE, parseCoreSwitch, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
-import { configKey } from "../../packages/cli/src/config/keys.js";
+import { CORE_ENGINE_NOT_WIRED_WORDS, configKey, coreEngineValueWhenWired } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -84,8 +84,15 @@ describe("the switch (stack parameter CoreEngine)", () => {
     const entry = configKey("coreEngine.switch");
     expect(entry.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "CoreEngine" });
     expect(entry.defaultValue).toBe("off");
-    for (const value of ["off", "on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) expect(entry.parse(value)).toBe(value);
-    expect(entry.parse(" on ")).toBe("on");
+    // Until the broker runs the core engine, only off is accepted (the parameter's pattern still takes every value, so turning it on later needs no template change).
+    expect(CORE_ENGINE_BROKER_WIRED).toBe(false);
+    expect(entry.parse(" off ")).toBe("off");
+    for (const value of ["on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) {
+      expect(() => entry.parse(value), value).toThrow(CORE_ENGINE_NOT_WIRED_WORDS);
+      expect(new RegExp(CORE_ENGINE_PARAMETER_PATTERN, "u").test(value), value).toBe(true);
+      expect(coreEngineValueWhenWired(value)).toBe(value);
+    }
+    expect(coreEngineValueWhenWired(" on ")).toBe("on");
     for (const value of ["", "1", "true", "on:", "drained", `drain:${ORG_A}`, `on:${ORG_A},${ORG_B}`, `on:${ORG_A}:${ORG_B}:${ORG_A}`]) {
       expect(() => entry.parse(value), value).toThrow("coreEngine.switch must be off, on, drain, or on:<company id>");
     }

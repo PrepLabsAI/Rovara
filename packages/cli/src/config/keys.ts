@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_ENGINE_BROKER_WIRED, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
@@ -44,10 +44,17 @@ const wholeNumber = (key: string, min: number, max: number) => (value: string): 
 };
 
 /** The core engine switch (stack parameter CoreEngine): exactly the parameter's own pattern. */
-const coreEngineValue = (key: string) => (value: string): string => {
+export const CORE_ENGINE_NOT_WIRED_WORDS = "coreEngine.switch can only be off on this release: the broker does not run the core engine yet";
+
+const coreEngineValue = (key: string, wired: boolean = CORE_ENGINE_BROKER_WIRED) => (value: string): string => {
   const trimmed = value.trim();
-  return new RegExp(CORE_ENGINE_PARAMETER_PATTERN, "u").test(trimmed) ? trimmed : refuse(key, "off, on, drain, or on:<company id>[:<company id>] (a company id is org_ and 20 lowercase letters or digits; at most two)");
+  if (!new RegExp(CORE_ENGINE_PARAMETER_PATTERN, "u").test(trimmed)) return refuse(key, "off, on, drain, or on:<company id>[:<company id>] (a company id is org_ and 20 lowercase letters or digits; at most two)");
+  // Until the broker answers the core's scheduled jobs and starts tasks on it, anything but off would only enable schedules that do nothing useful.
+  if (!wired && trimmed !== CORE_ENGINE_DEFAULT) throw agentXError("CONFIG_INVALID", CORE_ENGINE_NOT_WIRED_WORDS);
+  return trimmed;
 };
+/** The switch's parser as it will be once the broker is wired (tests only). */
+export const coreEngineValueWhenWired = (value: string): string => coreEngineValue("coreEngine.switch", true)(value);
 
 const oneOf = (key: string, values: readonly string[]) => (value: string): string =>
   (values.includes(value.trim()) ? value.trim() : refuse(key, `one of ${values.join(", ")}`));
@@ -117,7 +124,7 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   { key: "slack.viaChannel", description: "enabled: Slack goes through the channel API as the built-in Slack adapter; disabled: Slack's own path, as before",
     target: parameter("control-plane", "SlackViaChannel"), defaultValue: "disabled", parse: oneOf("slack.viaChannel", ["enabled", "disabled"]) },
   // Migration plan v3.2 lane E2: the core engine switch, named environments only.
-  { key: "coreEngine.switch", description: "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do (at most two); drain: no new task starts on the core, and the tasks it already runs finish there (set drain and wait until none is in flight before off). A running task keeps the engine it started on. The core's scheduled jobs run only while this is not off",
+  { key: "coreEngine.switch", description: "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do (at most two); drain: no new task starts on the core, and the tasks it already runs finish there (set drain and wait until none is in flight before off). A running task keeps the engine it started on. The core's scheduled jobs run only while this is not off. NOT ACTIVE YET: only off is accepted until the broker runs the core engine",
     target: parameter("control-plane", "CoreEngine"), defaultValue: CORE_ENGINE_DEFAULT, parse: coreEngineValue("coreEngine.switch") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
 ];

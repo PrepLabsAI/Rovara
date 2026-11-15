@@ -35,6 +35,11 @@ export const CORE_JOB_SCHEDULES: readonly CoreJobSchedule[] = [
 export const CORE_ENGINE_PARAMETER_PATTERN = "^(off|on|drain|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$";
 export const CORE_ENGINE_PARAMETER_MAX_LENGTH = 64;
 export const CORE_ENGINE_DEFAULT = "off";
+/**
+ * Whether the broker runs the core engine yet. False until the broker wiring lands (lane E2 step 6, after the second mainline sync): until then the CLI refuses every value but `off`,
+ * so switching on cannot enable schedules the broker does not answer. The stack parameter itself already takes every value, so turning this on needs no template change.
+ */
+export const CORE_ENGINE_BROKER_WIRED = false;
 
 /** The core's most dispatch attempts for one message (DISPATCH_ATTEMPTS_MAX in core/task-flow/dispatch.ts). The queue's redrive limit must be above it, or SQS dead-letters a message the core still retries. */
 export const CORE_DISPATCH_ATTEMPTS_MAX = 20;

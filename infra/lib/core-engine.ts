@@ -4,7 +4,7 @@
 // What is here:
 //   - the `CoreEngine` stack parameter (default `off`), passed to the broker as ROVARA_CORE_ENGINE;
 //   - the core dispatch queue and its dead-letter queue, with a redrive limit above the core's own retry budget (CORE_DISPATCH_MAX_RECEIVES). Fixed per-environment names, so the broker can build
-//     both URLs. The broker may send to, receive from, delete from and change the visibility of both (the core's `queue` point runs inside the broker; the dead letters for a redrive or a purge),
+//     both URLs. The broker may send to, receive from, delete from and change the visibility of both (the core's `queue` point runs inside the broker; the queue adapter reads and re-sends dead letters itself),
 //     by the queues' own resource policies;
 //   - a schedule per scheduled row of the core's job table (CORE_JOB_SCHEDULES), in a group of their own, that invokes the broker with `{ source: "agentx.core-job", job: <name> }` through a role
 //     of its own. The role trusts only the scheduler for THIS group and may invoke the broker function and nothing else. The schedules always exist and are ENABLED only while `CoreEngine` is not
@@ -12,7 +12,7 @@
 //   - an alarm on the dead-letter queue.
 //
 // Not here yet (a later R2 step, with the broker wiring after the second mainline sync): the dispatcher's event source mapping on the core queue and its grants. Until then nothing consumes the
-// queue, and nothing sends to it: the broker answers a scheduled core job `{ skipped: "off" }` while the switch is off, and the dispatch queue stays empty until a task starts on the core.
+// queue and nothing sends to it, and the broker has no branch for a scheduled core job event yet, so the CLI accepts only `off` (CORE_ENGINE_BROKER_WIRED); the schedules stay DISABLED.
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, type aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
