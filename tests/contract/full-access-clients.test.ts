@@ -67,12 +67,13 @@ for (const mode of ["linking", "developer"] as const) {
     });
 
     it("refuses a client without full access, and stops at once when full access is turned off", async () => {
+      // Plan v3.2 lane ID: without full access (and with no named scope) the refusal is a 403 naming the scope.
       client(false);
-      expect((await call("/v1/dev/projects", await bearer())).status).toBe(401);
+      expect((await call("/v1/dev/projects", await bearer())).status).toBe(403);
       client(true);
       expect((await call("/v1/dev/projects", await bearer())).status).toBe(200);
       client(false);
-      expect((await call("/v1/dev/projects", await bearer())).status).toBe(401);
+      expect(await call("/v1/dev/projects", await bearer())).toMatchObject({ status: 403, body: { error: { message: "Web App needs the tasks:read scope for GET /v1/dev/projects; an administrator can allow it with that scope" } } });
       expect((await call("/v1/dev/projects", await cli())).status).toBe(200);
     });
 

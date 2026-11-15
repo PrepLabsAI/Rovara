@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
+import { devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import {
   AgentXNameSchema,
   scopesOf,
@@ -826,22 +827,36 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
 }
 
 /**
- * A developer API caller: the Rovara CLI's token, or (spec 066) a full-access sign-in client's, as its signed-in person.
- * The unverified azp only picks the path; each then verifies the token in full. A client without full access is refused
- * here as before, and the setting is read at every request, so turning it off takes effect at once.
+ * Plan v3.2 lane ID: a sign-in client's token reaches a route only with the route's named scope, or with full access
+ * (spec 066) for a `full` route. The refusal names what is missing, never anything the request carried.
  */
-async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined): Promise<DeveloperCaller> {
+function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord; scopes: readonly ClientScope[] }): void {
+  if (route.requires === "none") return;
+  if (route.requires === "full" ? caller.client.fullAccess === true : caller.scopes.includes(route.requires)) return;
+  console.log(JSON.stringify({ component: "broker", event: "client.scope_refused", clientId: caller.client.clientId, method: route.method, route: route.path, requires: route.requires }));
+  throw agentXError("FORBIDDEN", route.requires === "full"
+    ? `${caller.client.name} needs full access for ${route.method} ${route.path}, which is off for it; an administrator can turn it on`
+    : `${caller.client.name} needs the ${route.requires} scope for ${route.method} ${route.path}; an administrator can allow it with that scope`);
+}
+
+/**
+ * A developer API caller: the Rovara CLI's token, with all the person's rights; or a registered sign-in client's, as its
+ * signed-in person, within the route's scope (plan v3.2 lane ID) or, for a `full` route, only with full access (spec
+ * 066). The unverified azp only picks the path; each then verifies the token in full. The client's registration is
+ * read at every request, so removing a scope or full access takes effect at once.
+ */
+async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<DeveloperCaller> {
   let azp: unknown;
   try {
     azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
   } catch {
     azp = undefined;
   }
-  if (typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID || (await signInClientOf(deps, azp))?.fullAccess !== true) {
+  if (typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID || (await signInClientOf(deps, azp)) === undefined) {
     return authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization));
   }
   const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));
-  if (person.client.fullAccess !== true) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  requireRouteScope(route, person);
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   return {
@@ -876,11 +891,14 @@ const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]
  */
 export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (deps.developer.clientRoutes !== true) throw agentXError("NOT_FOUND", "route not found");
+  // Plan v3.2 lane ID: only a route in the table, and only with its scope.
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
   if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
     const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
-    if (!creator.scopes.includes("projects:create")) throw agentXError("FORBIDDEN", `${creator.client.name} may not create projects; an administrator can allow it with the projects:create scope`);
+    requireRouteScope(route, creator);
     if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
     if (!creating) {
       if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
@@ -896,6 +914,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const read = CLIENT_PROJECT.exec(url.pathname);
   if (read !== null && request.method === "GET") {
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    requireRouteScope(route, reader);
     const project = decodeURIComponent(read[1]!);
     if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
     return readClientProject(deps, reader.developerId, project);
@@ -903,7 +922,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const members = CLIENT_MEMBERS.exec(url.pathname);
   if (members === null) throw agentXError("NOT_FOUND", "route not found");
   const caller = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
-  if (!caller.scopes.includes("projects:members")) throw agentXError("FORBIDDEN", `${caller.client.name} may not manage project members; an administrator can allow it with the projects:members scope`);
+  requireRouteScope(route, caller);
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${caller.developerId}`);
   if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   const project = decodeURIComponent(members[1]!);
@@ -1276,12 +1295,15 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     });
     return web(request, url);
   }
+  // Plan v3.2 lane ID: a method and path with no row in the route table is refused before anyone is authenticated.
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
   // Spec 063 FR-004: a registered service's own route, authenticated as such, never as a Rovara caller.
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   // Spec 065: a registered service acting as its signed-in person, within its scopes.
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
-  const caller = await authenticateCaller(deps, request.headers.authorization);
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
@@ -1305,6 +1327,9 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
  */
 export async function routeLinkingRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (url.pathname.startsWith("/review/link/")) return routeDeveloperRequest(deps, request, url);
+  // Plan v3.2 lane ID: as routeDeveloperRequest, only a route in the table.
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   const projects = request.method === "GET" && url.pathname === "/v1/dev/projects";
@@ -1312,7 +1337,7 @@ export async function routeLinkingRequest(deps: DeveloperRouteDependencies, requ
   const links = url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/");
   const name = request.method === "PUT" && url.pathname === "/v1/dev/me/name";
   if (!projects && !workspaces && !links && !name) throw agentXError("NOT_FOUND", "route not found");
-  const caller = await authenticateCaller(deps, request.headers.authorization);
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
   if (projects) return listProjects(deps, caller);
   if (name) return setMyName(deps, caller, request);
   if (workspaces) return listWorkspaces(deps, caller);
