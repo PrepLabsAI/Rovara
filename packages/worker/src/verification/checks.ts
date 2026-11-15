@@ -53,6 +53,8 @@ export interface CheckRunners {
   scopeRound?(plan: CheckPlan, signal: AbortSignal, run: (runners: CheckRunners) => Promise<CheckRound>, remainingMs: () => number): Promise<CheckRound>;
   /** Applies old-code phases inside that execution scope, leaving the candidate directories alone. */
   originalCode?(this: void, repositories: readonly OriginalCodeRepository[]): OriginalCode;
+  /** Attributes commands issued by prepareRound separately from planned checks. */
+  scopeSetup?(run: () => Promise<void>): Promise<void>;
   /** Setup inside the round, after its service helpers are ready. */
   prepareRound?(signal: AbortSignal): Promise<void>;
   /**
@@ -246,7 +248,8 @@ async function runChecksRound(
     }
   }
   if (runners.prepareRound !== undefined && !signal.aborted) {
-    const ready = await untilAborted(Promise.resolve().then(() => runners.prepareRound?.(signal)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
+    const prepare = async () => { await runners.prepareRound?.(signal); };
+    const ready = await untilAborted(Promise.resolve().then(() => runners.scopeSetup === undefined ? prepare() : runners.scopeSetup(prepare)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
     if (!ready) return { entries: plannedChecks(plan, runners).map((check) => ({ id: check.id, label: check.label, source: check.source, before: check.before, after: "not_run", class: classifyCheck(check.before, "not_run"), output: signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: multi-repository setup failed.", durationMs: 0 })), stopped: signal.aborted };
   }
   let resetFailed = false;

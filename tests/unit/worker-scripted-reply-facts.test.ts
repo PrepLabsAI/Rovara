@@ -120,13 +120,13 @@ describe("candidate reply facts", () => {
   });
 });
 
-it("one TOTAL read-time allowance bounds stalled summaries, including finalization", async () => {
+it("separate bounded allowances stop stalled per-check and final summary reads", async () => {
   vi.useFakeTimers();
   try {
     const f = fixture([summary()]);
     f.helper.readSummary = () => new Promise(() => undefined);
     const running = round(withModelHelperRound(f.plan, f.base), 3);
-    await vi.advanceTimersByTimeAsync(1100);
+    await vi.advanceTimersByTimeAsync(2100);
     await running;
     expect(facts(f.results)).toBe("unknown");
     expect(f.stop).toHaveBeenCalledOnce();
@@ -139,6 +139,8 @@ it("a TOTAL summary byte allowance refuses repeated large summaries", async () =
   await round(f.wrapped, 200);
   expect(facts(f.results)).toBe("unknown");
   expect(f.readSummary.mock.calls.length).toBeLessThan(200);
+  expect(f.results[0]?.summary).toEqual(wide);
+  expect(f.results[0]?.evidence.result).toBe("ran");
 });
 
 it.each([
@@ -175,5 +177,64 @@ it("caps TOTAL reads even when every command belongs to the same check", async (
   }
   await f.wrapped.endRound?.();
   expect(facts(f.results)).toBe("unknown");
-  expect(f.readSummary.mock.calls.length).toBeLessThanOrEqual(201);
+  expect(f.readSummary.mock.calls.length).toBeLessThanOrEqual(202);
+  expect(f.results[0]?.summary).toEqual(summary());
+  expect(f.results[0]?.evidence.result).toBe("ran");
+});
+
+// Golden taken from code/next's final evidence path; no checkout-history reads in tests.
+it("four healthy 300 ms reads preserve code/next evidence bytes after the facts time budget expires", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+  try {
+    const f = fixture([summary()]);
+    f.helper.readSummary = () => new Promise((resolve) => setTimeout(() => resolve(summary()), 300));
+    const running = round(f.wrapped, 4);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect((await running).entries.map((entry) => entry.after)).toEqual(["passed", "passed", "passed", "passed"]);
+    expect(JSON.stringify({ summary: f.results[0]?.summary, evidence: f.results[0]?.evidence })).toBe(JSON.stringify({
+      summary: summary(), evidence: { result: "ran", lines: ["not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked"], countsTowardProof: 0, escapedHosts: [] },
+    }));
+    expect(facts(f.results)).toBe("unknown");
+  } finally { vi.useRealTimers(); }
+});
+
+it("the final evidence read has its own timeout even after healthy per-check reads", async () => {
+  vi.useFakeTimers();
+  try {
+    const f = fixture([summary()]);
+    f.helper.readSummary = vi.fn().mockResolvedValueOnce(summary()).mockImplementation(() => new Promise(() => undefined));
+    const running = round(f.wrapped, 1);
+    await vi.advanceTimersByTimeAsync(1100);
+    await running;
+    expect(f.results[0]?.evidence.result).toBe("not_run");
+    expect(facts(f.results)).toBe("unknown");
+    expect(f.stop).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});
+
+it.each([
+  ["no replies", summary(), false],
+  ["task-made", summary(1), true],
+  ["before-task", summary(0, 1), true],
+  ["independent", { ...summary(), scripted: { before_task: 0, independent: 1, task_made: 0 }, countsTowardProof: 1 }, true],
+  ["failure-pack", { ...summary(), failurePack: 1 }, true],
+  ["backend", { ...summary(), backend: 1 }, true],
+  ["unreadable", undefined, true],
+])("setup %s is attributed separately and never hides uncertainty", async (_name, value, unknown) => {
+  const f = fixture([value]);
+  await f.wrapped.scopeSetup!(async () => { await f.wrapped.runProjectCommand(command, signal); });
+  await round(f.wrapped, 1);
+  expect(facts(f.results)).toEqual(unknown ? "unknown" : [fact(0, 0)]);
+});
+
+it.each([false, true])("setup scope closes after rejection=%s; later commands without ids still fail closed", async (reject) => {
+  const f = fixture([summary()]);
+  await f.wrapped.scopeSetup!(async () => {
+    await f.wrapped.runProjectCommand(command, signal);
+    if (reject) throw new Error("private setup error");
+  }).catch(() => undefined);
+  await f.wrapped.runProjectCommand(command, signal);
+  await f.wrapped.endRound?.();
+  expect(facts(f.results)).toBe("unknown");
+  expect(JSON.stringify(f.results)).not.toContain("private setup error");
 });

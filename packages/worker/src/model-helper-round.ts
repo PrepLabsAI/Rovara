@@ -140,7 +140,8 @@ export function modelHelperReplyCollector(): { wrap(plan: ModelHelperRoundPlan |
   };
 }
 
-// One total allowance per round, not per command. The summary port reads no project files and late read results are ignored.
+// One total allowance for per-command facts in each round. Final evidence has its own allowance,
+// so collecting optional facts cannot consume F2-B's evidence read. Late results are ignored.
 const REPLY_FACTS_MAX = 200;
 const SUMMARY_READ_MAX_BYTES = 256 * 1024;
 const SUMMARY_READ_MAX_MS = 1000;
@@ -152,23 +153,22 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
   if (typeof (plan as { onResult?: unknown }).onResult !== "function") throw new TypeError("a model helper plan needs an onResult consumer that turns an escape into 'not run' checks (TE-B5/TE-A3)");
   let helper: Promise<StartedModelHelper | undefined> | undefined;
   let currentId: string | undefined;
+  let inSetup = false;
   let unknown = false;
   let previous = { taskMade: 0, counted: 0 };
   let facts = new Map<string, { checkId: string; taskMade: number; counted: number }>();
-  let readMs = 0;
-  let readBytes = 0;
-  let reads = 0;
+  let readBudget = { ms: 0, bytes: 0, reads: 0 };
   const ensure = (signal: AbortSignal): Promise<StartedModelHelper | undefined> => {
     helper ??= plan.start(signal).catch((): never => {
       throw new CheckNotRunError(MODEL_HELPER_START_FAILED_SENTENCE);
     });
     return helper;
   };
-  const read = async (started: StartedModelHelper, signal?: AbortSignal): Promise<ModelHelperSummary | undefined> => {
+  const read = async (started: StartedModelHelper, signal?: AbortSignal, budget = readBudget): Promise<ModelHelperSummary | undefined> => {
     const began = performance.now();
-    const left = SUMMARY_READ_MAX_MS - readMs;
-    if (left <= 0 || reads >= REPLY_FACTS_MAX + 1 || readBytes >= SUMMARY_READ_MAX_BYTES || signal?.aborted === true) { unknown = true; return undefined; }
-    reads++;
+    const left = SUMMARY_READ_MAX_MS - budget.ms;
+    if (left <= 0 || budget.reads >= REPLY_FACTS_MAX + 1 || budget.bytes >= SUMMARY_READ_MAX_BYTES || signal?.aborted === true) { unknown = true; return undefined; }
+    budget.reads++;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abort: (() => void) | undefined;
     try {
@@ -177,15 +177,15 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
         new Promise<undefined>((resolve) => {
           abort = () => resolve(undefined);
           signal?.addEventListener("abort", abort, { once: true });
-          timer = setTimeout(() => { readMs = SUMMARY_READ_MAX_MS; resolve(undefined); }, left);
+          timer = setTimeout(() => { budget.ms = SUMMARY_READ_MAX_MS; resolve(undefined); }, left);
         }),
       ]);
       // Bound arrays before schema traversal (the port's TS type is not a runtime check).
       if (!Array.isArray(result?.escapes?.hosts) || result.escapes.hosts.length > MODEL_SUMMARY_MAX_ESCAPE_HOSTS) { unknown = true; return undefined; }
       const parsed = ModelHelperSummarySchema.safeParse(result);
       if (!parsed.success) { unknown = true; return undefined; }
-      readBytes += Buffer.byteLength(JSON.stringify(parsed.data));
-      if (readBytes > SUMMARY_READ_MAX_BYTES) { unknown = true; return undefined; }
+      budget.bytes += Buffer.byteLength(JSON.stringify(parsed.data));
+      if (budget.bytes > SUMMARY_READ_MAX_BYTES) { unknown = true; return undefined; }
       if (!parsed.data.trusted || parsed.data.replySetDigest !== started.pinnedDigest) { unknown = true; return UNTRUSTED_MODEL_SUMMARY; }
       if (parsed.data.scripted.task_made < previous.taskMade || parsed.data.countsTowardProof < previous.counted) unknown = true;
       return parsed.data;
@@ -195,17 +195,24 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       if (abort !== undefined) signal?.removeEventListener("abort", abort);
-      readMs += performance.now() - began;
+      budget.ms += performance.now() - began;
     }
   };
   const afterCommand = async (started: StartedModelHelper, signal: AbortSignal) => {
-    const id = currentId;
+    const id = inSetup ? "setup" : currentId;
     currentId = undefined;
     // Without an id, attribution is already impossible. Keep the existing final evidence read, but never guess a position.
     if (id === undefined) { unknown = true; return; }
     const summary = await read(started, signal);
     if (summary === undefined || !summary.trusted || unknown) return;
     const next = { taskMade: summary.scripted.task_made, counted: summary.countsTowardProof };
+    if (id === "setup") {
+      // Setup can seed later checks. Any served reply here has no single proving check,
+      // so mark the round; a healthy zero-reply setup must not manufacture uncertainty.
+      if (summary.scripted.before_task + summary.scripted.independent + next.taskMade + summary.failurePack + summary.backend > 0) unknown = true;
+      previous = next;
+      return;
+    }
     const old = facts.get(id) ?? { checkId: id, taskMade: 0, counted: 0 };
     if (!facts.has(id) && facts.size >= REPLY_FACTS_MAX) { unknown = true; return; }
     facts.set(id, { checkId: id, taskMade: old.taskMade + next.taskMade - previous.taskMade, counted: old.counted + next.counted - previous.counted });
@@ -215,6 +222,13 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
     ...runners,
     // The inner scope's own runners must get the same wrapper; spreading scopeRound alone bypasses the helper entirely.
     ...(runners.scopeRound === undefined ? {} : { scopeRound: (checkPlan, signal, run, remainingMs) => runners.scopeRound!(checkPlan, signal, (scoped) => run(withModelHelperRound(plan, scoped)), remainingMs) }),
+    async scopeSetup(run) {
+      const wasSetup = inSetup;
+      inSetup = true;
+      currentId = undefined;
+      try { await (runners.scopeSetup === undefined ? run() : runners.scopeSetup(run)); }
+      finally { inSetup = wasSetup; currentId = undefined; }
+    },
     beginCheck(checkId) {
       currentId = typeof checkId === "string" && /^(?:readiness|agent):(0|[1-9]\d{0,5})$/u.test(checkId) ? checkId : undefined;
       if (currentId === undefined) unknown = true;
@@ -243,7 +257,7 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       try {
         const started = current === undefined ? undefined : await current.catch(() => undefined);
         if (started !== undefined) {
-          const summary = await read(started);
+          const summary = await read(started, undefined, { ms: 0, bytes: 0, reads: 0 });
           const evidence = modelHelperEvidence(summary, plan.blockList, plan.hostSuffixes === undefined ? {} : { hostSuffixes: plan.hostSuffixes });
           // Any calls after the last command settled have no reliable check attribution.
           if (summary?.scripted.task_made !== previous.taskMade || summary?.countsTowardProof !== previous.counted || evidence.result === "not_run") unknown = true;
@@ -255,8 +269,8 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
           await started.stop().catch(() => undefined);
         }
       } finally {
-        helper = undefined; currentId = undefined; unknown = false;
-        previous = { taskMade: 0, counted: 0 }; facts = new Map(); readMs = 0; readBytes = 0; reads = 0;
+        helper = undefined; currentId = undefined; inSetup = false; unknown = false;
+        previous = { taskMade: 0, counted: 0 }; facts = new Map(); readBudget = { ms: 0, bytes: 0, reads: 0 };
         await runners.endRound?.();
       }
     },

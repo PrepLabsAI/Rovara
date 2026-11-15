@@ -10,6 +10,7 @@ import { UNTRUSTED_MODEL_SUMMARY } from "../../packages/worker/src/model-helper-
 import type { ModelHelperRoundSource, ModelHelperRoundResult } from "../../packages/worker/src/model-helper-round.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
+import * as testProofModule from "../../packages/worker/src/verification/test-proof.js";
 import * as e2eChecks from "../../packages/worker/src/workflow-e2e-checks.js";
 import { AgentFilesRestoreError } from "../../packages/worker/src/verification/original-code.js";
 import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
@@ -21,6 +22,12 @@ import { fakeTestRunner, git } from "../support/test-proof-fixture.js";
 vi.mock("../../packages/worker/src/workflow-e2e-checks.js", async (importOriginal) => {
   const original: typeof e2eChecks = await importOriginal();
   return { ...original, executeWorkflowE2EChecks: vi.fn(original.executeWorkflowE2EChecks) };
+});
+
+
+vi.mock("../../packages/worker/src/verification/test-proof.js", async (importOriginal) => {
+  const original: typeof testProofModule = await importOriginal();
+  return { ...original, runTestProof: vi.fn(original.runTestProof) };
 });
 
 const check: ProjectCommand = { cwd: "app", executable: "npm", args: ["test"], timeoutSeconds: 60 };
@@ -188,4 +195,29 @@ describe("candidate-only scripted reply proof wiring", () => {
     expect(bytes(noSet)).toBe(bytes(ordinary));
     expect(bytes(noSet)).not.toContain("scriptedReplies");
   });
+});
+
+
+it("a strict reply-proof schema refusal saves no proof and never fails CHECKS or leaks its label", async () => {
+  const stopBeforeReading = { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) };
+  const root = await workspace({ "src/bug.ts": "export const value = 2;\n", "src/bug.test.ts": 'import { value } from "./bug.js";\nexpect(value).toBe(2);\n' });
+  const modelHelperRound: ModelHelperRoundSource = { blockList: [], onResult: () => undefined,
+    start: async () => ({ pinnedDigest: "a".repeat(64), commandEnvironment: {}, unsetEnvironment: [], stop: async () => undefined,
+      readSummary: async () => ({ ...UNTRUSTED_MODEL_SUMMARY, trusted: true, replySetDigest: "a".repeat(64) }),
+    }),
+  };
+  const control = await checksRun(root, { stopBeforeReading, modelHelperRound });
+  expect(control.result.checks?.status).toBe("verified");
+  const proof = TestProofWriteSchema.parse(JSON.parse(control.artifacts.find((a) => a.name === "test-proof.json")!.content));
+  expect(proof.scriptedReplies).toEqual([{ checkId: "readiness:0", taskMade: 0, counted: 0 }]);
+  const label = `private-${"hostile".repeat(200)}`;
+  const invalid = { ...proof, items: proof.items.map((item) => ({ ...item, label })) };
+  expect(TestProofWriteSchema.safeParse(invalid).success).toBe(false);
+  vi.mocked(testProofModule.runTestProof).mockResolvedValueOnce(invalid);
+  const refused = await checksRun(root, { stopBeforeReading, modelHelperRound });
+  expect(refused.result.checks?.status).toBe("verified");
+  expect(refused.artifacts.some((a) => a.name === "test-proof.json")).toBe(false);
+  expect(refused.events.filter((event) => event.type === "progress").map((event) => event.payload)).toContainEqual({ message: "AgentX could not save its check of the new tests against the original code." });
+  expect(JSON.stringify(refused.events)).not.toContain(label);
+  expect(JSON.stringify(refused.artifacts)).not.toContain(label);
 });

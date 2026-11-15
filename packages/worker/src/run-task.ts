@@ -100,7 +100,7 @@ import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import { localBashOperations, taskSandboxFor, taskShellSelection, type TaskSandbox, type TaskShellSelection } from "./task-sandbox.js";
 import { withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
 import { startTaskTestServices, withTestServices, type TestServicesConfig } from "./test-services-run.js";
-import { modelHelperPlanFor, modelHelperReplyCollector, withModelHelperRound, type ModelHelperRoundSource } from "./model-helper-round.js";
+import { modelHelperPlanFor, modelHelperReplyCollector, withModelHelperRound, type ModelHelperRoundSource, type ScriptedReplyFacts } from "./model-helper-round.js";
 import type { FixtureSetCallback } from "./fixture-delivery.js";
 
 export interface TaskInvocationResult {
@@ -630,7 +630,7 @@ async function runTask(
         // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
-        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, withScriptedReplyFacts(testProof, plan.source, candidateReplyFacts), events);
+        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts);
       }
       // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
       if (invocation.payload.evalRequest !== undefined) {
@@ -2168,9 +2168,9 @@ async function runTestProofStep(input: {
 }
 
 /** Saves the proof. A failed save is only a missing note, never a failed round. */
-async function saveTestProof(sink: ArtifactSink, proof: NonNullable<Awaited<ReturnType<typeof runTestProofStep>>>, events: EventBatcher): Promise<void> {
+async function saveTestProof(sink: ArtifactSink, proof: NonNullable<Awaited<ReturnType<typeof runTestProofStep>>>, events: EventBatcher, facts: ScriptedReplyFacts | undefined): Promise<void> {
   try {
-    await sink({ name: TEST_PROOF_ARTIFACT, mediaType: "application/json", content: serializeTestProof(proof) });
+    await sink({ name: TEST_PROOF_ARTIFACT, mediaType: "application/json", content: serializeTestProof(withScriptedReplyFacts(proof, "project", facts)) });
   } catch {
     await events.append("progress", { message: "AgentX could not save its check of the new tests against the original code." }).catch(() => undefined);
   }
