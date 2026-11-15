@@ -48,9 +48,6 @@ const DIGEST = /^[a-f0-9]{64}$/u;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const NONCE = /^[A-Za-z0-9_-]{43}$/u;
 const KIND = /^[A-Za-z0-9_.-]{1,64}$/u;
-/** The token's two parts in canonical base64url only: a variant spelling of the same bytes is a different string to the gate's markers, so it is refused here. */
-const BODY = /^[A-Za-z0-9_-]{1,4000}$/u;
-const MAC = /^[A-Za-z0-9_-]{43}$/u;
 const CLAIM_ID = /^(org_[0-9a-z]{20})\.([a-f0-9]{64})\.([0-9a-f-]{36})$/u;
 const ANSWERS: ReadonlySet<unknown> = new Set<ApprovalAnswer>(["approve", "reject", "request_changes"]);
 const FACTORS: ReadonlySet<unknown> = new Set<unknown>(STEP_UP_METHODS);
@@ -90,7 +87,10 @@ export interface StepUpApprovalInput {
   stepUp: { at: string; method: string };
   /** The decision's request id (the one the decision gate is given). */
   requestId: string;
-  /** What is being decided (`ApprovalRequest.kind`: the subject's current document type for a plan). */
+  /**
+   * What is being decided: the `ApprovalRequest.kind` the decision gate will ask about (the subject's `request.kind`, e.g. the plan's current document type; the gate's record keeps it as
+   * `approvalKind`), NOT the gate's subject kind (`DecisionAttempt.kind`). A mismatch is refused (`other_kind`).
+   */
   kind: string;
   /** The task the card is about. */
   taskId: string;
@@ -124,15 +124,14 @@ function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   const parts = token.slice(TOKEN_PREFIX.length).split(".");
   if (parts.length !== 2) return undefined;
   const [body, mac] = parts as [string, string];
-  if (!BODY.test(body) || !MAC.test(mac)) return undefined;
   const presented = Buffer.from(mac, "base64url");
+  // Canonical base64url only: a variant spelling of the same signature is a different string to the gate's markers, so it is refused. (The body needs no such check: the signature is over
+  // the body's exact text.)
   if (b64(presented) !== mac) return undefined;
   const expected = sign(key, body);
   if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) return undefined;
   let value: unknown;
-  const decoded = Buffer.from(body, "base64url");
-  if (b64(decoded) !== body) return undefined;
-  try { value = JSON.parse(decoded.toString("utf8")); } catch { return undefined; }
+  try { value = JSON.parse(Buffer.from(body, "base64url").toString("utf8")); } catch { return undefined; }
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const c = value as Record<string, unknown>;
   const card = c["k"];
@@ -177,7 +176,8 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
 
   /**
    * The window for this company: the install's, or the company's own "fresh sign-in" setting when that is a SHORTER window (lane P3, decision 62). A longer window, `any-active` (a step-up is
-   * always asked for here) or no setting keep the install's. A read that fails throws: the caller refuses, never falls back.
+   * always asked for here) or no setting keep the install's. A read that fails throws: `verify` turns it into a refusal (`company_rules_unreadable`); `requirement` lets it throw (a store
+   * fault, as the decision gate treats its own reads), so a page or probe errors instead of showing a window the company may have shortened.
    */
   const windowFor = async (companyId: unknown): Promise<number> => {
     if (typeof companyId !== "string" || !OrgIdSchema.safeParse(companyId).success) return windowSeconds;

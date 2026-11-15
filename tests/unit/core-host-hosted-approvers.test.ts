@@ -1,5 +1,6 @@
 // Switch-on lane L2a: the deployed approvers point. The task owner (the broker's existing rule), a live member, a fresh step-up proved for one act and bound to its card, and the act's
 // one-time part claimed in the company's own partition (commit spends it, release gives a live claim back, a lapsed claim stays spent).
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   NEEDS_SETTLING_CALLER, type ApprovalAnswer, type ApprovalProof, type ApprovalRequest, type IdentityProvider, type OrgId,
@@ -223,6 +224,31 @@ describe("review round 1 (Lows)", () => {
     expect(await other.approvers.verify(late, proofFor(late, issued({ stepUp: { at: new Date(NOW - 600_001).toISOString(), method: "passkey" } })))).toEqual({ approved: false, reason: "sign_in_not_fresh" });
   });
 
+  it("a step-up factor Code does not own is refused even in a token signed with the install's key", async () => {
+    const { approvers } = world();
+    const body = Buffer.from(JSON.stringify({ c: A, p: "ada", r: "decision-request-0001", q: "plan", s: TASK_A, v: 3, d: DIGEST, o: "approve", k: [cardOf(TASK_A).cardId, DIGEST], a: STEP_UP.at, m: "slack", e: NOW + 60_000, n: "n".repeat(43) })).toString("base64url");
+    const token = `su1.${body}.${createHmac("sha256", KEY).update(`su1.${body}`).digest("base64url")}`;
+    const request = requestFor();
+    expect(await approvers.verify(request, proofFor(request, token))).toEqual({ approved: false, reason: "sign_in_not_fresh" });
+    // The same token with a factor Code owns is accepted (the hand-signed form is the issuer's).
+    const good = Buffer.from(JSON.stringify({ c: A, p: "ada", r: "decision-request-0001", q: "plan", s: TASK_A, v: 3, d: DIGEST, o: "approve", k: [cardOf(TASK_A).cardId, DIGEST], a: STEP_UP.at, m: "passkey", e: NOW + 60_000, n: "n".repeat(43) })).toString("base64url");
+    expect((await approvers.verify(request, proofFor(request, `su1.${good}.${createHmac("sha256", KEY).update(`su1.${good}`).digest("base64url")}`))).approved).toBe(true);
+  });
+
+  it("refuses a card that is not a readable card, and a card version other than the one signed even when it equals the content", async () => {
+    const { approvers } = world();
+    const unreadable = requestFor({ card: { cardId: 5, contentVersion: DIGEST } as never });
+    expect(await approvers.verify(unreadable, proofFor(unreadable, issued()))).toEqual({ approved: false, reason: "card_not_named" });
+    const request = requestFor();
+    expect(await approvers.verify(request, proofFor(request, issued({ card: cardOf(TASK_A, "v-signed") })))).toEqual({ approved: false, reason: "other_card" });
+  });
+
+  it("requirement throws (a store fault) when the company's setting cannot be read, rather than show a window the company may have shortened", async () => {
+    const { store } = world();
+    const failing = createHostedApprovers({ store: { get: async (key) => { if (key.sk === "SETTING") throw new Error("down"); return await store.get(key); }, put: (r) => store.put(r), update: (r) => store.update(r), delete: (r) => store.delete(r) }, identity: identity(), key: KEY, now: () => new Date(NOW) });
+    await expect(failing.requirement(requestFor())).rejects.toThrow("down");
+  });
+
   it("a setting that cannot be read refuses, never falls back to the install's window", async () => {
     const { store } = world();
     const failing = createHostedApprovers({ store: { ...store, get: async (key) => { if (key.sk === "SETTING") throw new Error("down"); return await store.get(key); }, put: (r) => store.put(r), update: (r) => store.update(r), delete: (r) => store.delete(r) }, identity: identity(), key: KEY, now: () => new Date(NOW) });
@@ -234,7 +260,12 @@ describe("review round 1 (Lows)", () => {
     const { approvers } = world();
     const token = issued();
     const request = requestFor();
-    for (const variant of [`${token}=`, `${token} `, token.replace("su1.", "su1.+"), `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`]) {
+    // The signature's last character carries 2 unused bits: its "twin" decodes to the same bytes, so only the canonical check refuses it.
+    const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const last = ALPHABET.indexOf(token.at(-1)!);
+    expect(last % 4).toBe(0);
+    const twin = `${token.slice(0, -1)}${ALPHABET[last + 1]!}`;
+    for (const variant of [twin, `${token}=`, `${token} `, token.replace("su1.", "su1.+")]) {
       expect(await approvers.verify(request, proofFor(request, variant))).toEqual({ approved: false, reason: "not_a_valid_proof" });
     }
     // Signed with the install's key but stating an expiry beyond the lifetime: refused.
