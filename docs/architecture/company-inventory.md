@@ -1,4 +1,4 @@
-386 record kinds: 37 company-scoped, 8 install-wide, 341 needs-company. 174 routes: 10 company-scoped, 2 install-wide, 162 needs-company.
+389 record kinds: 37 company-scoped, 11 install-wide, 341 needs-company. 174 routes: 10 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -910,8 +910,8 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/proof/evidence-blob-store.ts:78:76:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | assertObjectKey |
 | forwarding | packages/broker/src/core/proof/revert/merge-commit-index.ts:58:95:computed | [ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | mergeCommitIndexKey, mergeCommitKey |
 | forwarding | packages/broker/src/core/script-tokens/authenticate.ts:93:69:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | startIdempotencyKey, taskKey |
-| forwarding | packages/broker/src/core/script-tokens/store.ts:164:45:pk | partition | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | agentRequestKey, orgScriptTokensKey, scriptTokenKey |
-| forwarding | packages/broker/src/core/script-tokens/store.ts:229:91:sk | developerId | Runtime sort component forwarded within the feeding partition; not an independent record family. | agentRequestKey, orgScriptTokensKey, scriptTokenKey |
+| forwarding | packages/broker/src/core/script-tokens/store.ts:170:45:pk | partition | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | agentRequestKey, orgScriptTokensKey, scriptTokenKey |
+| forwarding | packages/broker/src/core/script-tokens/store.ts:235:91:sk | developerId | Runtime sort component forwarded within the feeding partition; not an independent record family. | agentRequestKey, orgScriptTokensKey, scriptTokenKey |
 | forwarding | packages/broker/src/core/sessions/access.ts:109:38:pk | agentSessionKey(orgId, sessionId, "META").pk | Projects the partition supplied by the named key constructor; no new family. | agentSessionKey, taskKey |
 | forwarding | packages/broker/src/core/sessions/ask.ts:122:139:sk | askerKey | Runtime sort component forwarded within the feeding partition; not an independent record family. | askLockKey, askRequestKey, personAllTasksKey, sessionAskKey, sessionRateKey |
 | forwarding | packages/broker/src/core/sessions/create.ts:66:152:entityType | entityType | Generic runtime entityType forwarding; preserves caller/loaded record identity rather than assigning a new record family. | agentSessionKey, liveSessionKey, mySessionsKey, openAgentSessionKey, projectSessionsKey |
@@ -954,7 +954,7 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/developer/company-membership.ts:21:136:sk | emailIndexKey(CompanyEmail.parse(email)).pk | The existing normalized email hash becomes the preapproval sort key inside its company partition. | preapprovalKey -> companyScoped(companyId, "PREAPPROVAL") |
 | forwarding | packages/broker/src/developer/company-membership.ts:139:47:pk | z.literal(pk) | Runtime validation of the queried company partition, not a new key family. | preapprovalKey / preapprovalHashKey |
 | forwarding | packages/broker/src/developer/company-membership.ts:139:66:sk | z.string().regex(/^EMAIL#[a-f0-9]{64}$/) | Runtime validation of the normalized email hash sort key within its company partition. | preapprovalKey / preapprovalHashKey |
-| forwarding | packages/broker/src/developer/store.ts:98:116:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | emailIndexKey, signInClientKey |
+| forwarding | packages/broker/src/developer/store.ts:143:116:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | emailIndexKey, signInClientKey |
 | forwarding | packages/broker/src/developer/task-person-identity.ts:82:100:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | DEVELOPER identity / MEMBER grant / PROJECT revision constructors |
 | forwarding | packages/broker/src/developer/task-person-identity.ts:82:104:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | DEVELOPER identity / MEMBER grant / PROJECT revision constructors |
 | forwarding | packages/broker/src/developer/task-project-access.ts:88:5:pk | revision.pk! | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | PROJECT revision / MEMBER grant / channelBindingKey constructors |
@@ -1113,6 +1113,10 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/developer/task-records.ts:61:102:sk | usageId | Usage record id as the sort key of the task's own spend-marker partition. | taskSpendMarkerKey / TASK_SPEND |
 | forwarding | packages/broker/src/ports/memory-document-store.ts:172:54:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | all constructors through the DocumentStore port (scanPage cursor position) |
 | forwarding | packages/broker/src/ports/memory-document-store.ts:172:67:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | all constructors through the DocumentStore port (scanPage cursor position) |
+| forwarding | packages/broker/src/developer/store.ts:563:55:sk | passkey.credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
+| forwarding | packages/broker/src/developer/store.ts:574:135:sk | credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
+| forwarding | packages/broker/src/developer/store.ts:608:137:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
+| forwarding | packages/broker/src/developer/store.ts:618:80:sk | credentialId | Runtime sort component forwarded within the feeding partition; not an independent record family. | PASSKEYS#<developerId> partition in developer/store.ts |
 
 ## Merge-up: spec 065 and new task routes
 
@@ -1181,5 +1185,8 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 | record | builder:packages/broker/src/core/people/erase.ts:personErasePendingPartition; entity:PERSON_ERASE_PENDING | company-scoped | State table | no | - | ORG-prefixed key constructor (orgScoped); person-erase tests pin company scope. |
 | record | entity:PERSON_ERASED | company-scoped | State table | no | - | Receipt row under personErasedKey, an ORG-prefixed key (orgScoped); person-erase tests pin company scope. |
 | record | pk:TASKSPEND; entity:TASK_SPEND | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | pk:PASSKEYS; entity:PASSKEY | install-wide | sign-in table | no | - | Lane ID step-up factor: a person's passkeys in the sign-in table. Install identity and sign-in state; one identity per person across the shared install, membership is checked separately. |
+| record | pk:STEPUP; entity:STEP_UP | install-wide | sign-in table | no | - | Lane ID step-up page state, keyed by a secret's hash. Install identity and sign-in state; one identity per person across the shared install, membership is checked separately. |
+| record | pk:STEPUP_RATE; entity:STEP_UP_RATE | install-wide | sign-in table | no | - | Lane ID per-person step-up page rate window. Install identity and sign-in state; one identity per person across the shared install, membership is checked separately. |
 
 Forwarding rows were relocated by exact expression; the extracted host-glue rows and core-host erase/catalog forwarding are enumerated separately above. No scanner rule or limit changed.
