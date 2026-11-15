@@ -119,3 +119,36 @@ describe("the feature the broker asks for", () => {
     expect(WORKER_IMPLEMENTED_FEATURES).toContain(EVIDENCE_CAPTURE_FEATURE);
   });
 });
+
+describe("repository edge evidence", () => {
+  const repositoryEdges = { edges: [{ consumer: "app", provider: "lib", language: "node" as const, source: "base" as const }], notes: [] };
+  it("records source facts only with existing evidence; empty edges preserve golden bytes", async () => {
+    await writeFile(join(root, "report.xml"), JUNIT);
+    const input = { rootPath: root, commands: [command(["--junitxml=report.xml"])], entries: [entry(0)], candidateDigest: DIGEST, repositories: [] };
+    const ordinary = await collectEvidenceRaw(input);
+    expect(ordinary).toBeDefined();
+    expect(JSON.stringify(ordinary)).toMatchInlineSnapshot(`"{"schemaVersion":1,"candidateDigest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","checks":[{"checkId":"readiness:0","tests":{"total":3,"passed":2,"failed":0,"skipped":1,"errored":0,"names":[{"name":"tests/test_match.py::test_no_region","status":"passed","durationMs":10},{"name":"tests/test_match.py::test_scores","status":"passed","durationMs":20},{"name":"tests/test_old.py::test_old","status":"skipped","durationMs":10}],"newTests":[]}}],"selection":{"method":"full","selected":3,"total":3}}"`);
+    expect(JSON.stringify(await collectEvidenceRaw({ ...input, repositoryEdges: { edges: [], notes: [] } }))).toBe(JSON.stringify(ordinary));
+    expect((await collectEvidenceRaw({ ...input, repositoryEdges }))?.repositoryEdges).toEqual(repositoryEdges);
+    expect(await collectEvidenceRaw({ ...input, commands: [], entries: [], repositoryEdges })).toBeUndefined();
+    expect(EvidenceRawSchema.parse(ordinary)).toEqual(ordinary);
+  });
+  it.each([
+    { edges: [repositoryEdges.edges[0], repositoryEdges.edges[0]], notes: [] },
+    { edges: [{ ...repositoryEdges.edges[0], provider: "app" }], notes: [] },
+    { edges: [{ ...repositoryEdges.edges[0], language: "rust" }], notes: [] },
+    { edges: [{ ...repositoryEdges.edges[0], source: "guess" }], notes: [] },
+    { edges: [{ ...repositoryEdges.edges[0], consumer: "bad\n" }], notes: [] },
+    { edges: [{ ...repositoryEdges.edges[0], extra: true }], notes: [] },
+    { edges: repositoryEdges.edges, notes: ["untrusted secret"] },
+    { edges: Array.from({ length: 65 }, (_, i) => ({ ...repositoryEdges.edges[0], consumer: `app${i}` })), notes: [] },
+    { edges: [{ consumer: "app", provider: "lib", language: "node" }], notes: [] },
+    { edges: [null], notes: [] },
+    { edges: "wrong", notes: [] },
+    { edges: repositoryEdges.edges, notes: null },
+    { edges: repositoryEdges.edges, notes: Array.from({ length: 9 }, () => "ambiguous") },
+    null,
+  ])("refuses malformed facts without accepting free text: %j", value => {
+    expect(EvidenceRawSchema.safeParse({ schemaVersion: 1, candidateDigest: DIGEST, checks: [], repositoryEdges: value }).success).toBe(false);
+  });
+});
