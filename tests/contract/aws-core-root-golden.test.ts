@@ -26,7 +26,7 @@ function normalise(text: string): string {
     .replace(/[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)*/gu, "<token>")
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/gu, "<time>")
     .replace(/"durationMs":\d+/gu, "\"durationMs\":<ms>")
-    .replace(/"(?:expiresAt|indexExpiresAt|ttl|updatedAtEpoch|startedAtEpoch|at)":\d{9,13}/gu, (match) => match.replace(/\d{9,13}/u, "<epoch>"));
+    .replace(/"(?:expiresAt|indexExpiresAt|ttl|updatedAtEpoch|startedAtEpoch|endsAt|at)":\d{9,13}/gu, (match) => match.replace(/\d{9,13}/u, "<epoch>"));
 }
 
 async function script(withCore: boolean): Promise<{ answers: string[]; rows: string[]; coreReads: number }> {
