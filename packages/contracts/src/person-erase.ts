@@ -25,5 +25,5 @@ export const PersonEraseReceiptSchema = z.object({
 }).strict();
 export type PersonEraseReceipt = z.infer<typeof PersonEraseReceiptSchema>;
 
-/** What the person is told when the evidence is still owed: the walk continues on its own, and the same request finishes it sooner. */
-export const PERSON_ERASE_OWED_WORDS = "The person is erased. Some of their stored test evidence is still being removed; send the same request again to finish it sooner.";
+/** What the person is told when the evidence is still owed: the same request continues the walk from where it stopped. */
+export const PERSON_ERASE_OWED_WORDS = "The person is erased, but some of their stored test evidence is not removed yet. Send the same request again to finish it.";

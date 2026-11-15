@@ -1,7 +1,7 @@
 // Person erase (row 13.1): the engine erase is company-scoped, records its receipt and audit event together, removes the person's chat links and learning data, and erases EVERY version of the
 // evidence of the person's tasks in the company (DEC 212), bounded and resumable.
 import { describe, expect, it } from "vitest";
-import { orgChannelLinkKey, orgDeveloperChannelLinkKey, orgScoped, when, type AuditEvent, type AuditSink, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, orgChannelLinkKey, orgDeveloperChannelLinkKey, orgScoped, when, type AuditEvent, type AuditSink, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { S3ObjectStorage } from "../../packages/aws-adapters/src/s3/index.js";
 import { evidencePrefixesOf } from "../../packages/broker/src/core/proof/evidence-erase.js";
@@ -10,6 +10,8 @@ import {
   PERSON_ERASE_RETRY_MAX, erasePerson, noLearningToErase, personErasePendingPartition, personErasedKey, resumePersonErases, unversionedEraseObjects, type PersonEraseDeps,
 } from "../../packages/broker/src/core/people/erase.js";
 import { VersionedBucket } from "../support/versioned-bucket.js";
+import { prefsKey } from "../../packages/broker/src/core/notify/prefs.js";
+import { notifySentKey } from "../../packages/broker/src/core/notify/attention.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -92,8 +94,47 @@ describe("person erase: what it removes", () => {
     expect(left(w, theirs.prefixes)).toBe(10);
     expect(left(w, others.prefixes)).toBe(10);
     expect(left(w, noCompany.prefixes)).toBe(10);
-    expect(receipt.counts).toMatchObject({ tasks: 2, erased: 0, skipped: 2 });
+    // The other company's row is passed over uncounted and its record is never fetched; the record that names no valid company is skipped.
+    expect(receipt.counts).toMatchObject({ tasks: 1, erased: 0, skipped: 1 });
     expect(receipt.evidence).toBe("done");
+  });
+
+  it("never fetches another company's task record, nor counts its row in the receipt", async () => {
+    const w = world();
+    await task(w, MALLORY, B);
+    await task(w, MALLORY, B);
+    const fetched: string[] = [];
+    const getMany = w.store.getMany.bind(w.store);
+    w.store.getMany = async (keys) => { fetched.push(...keys.map((key) => key.pk)); return await getMany(keys); };
+    const receipt = await erase(w);
+    expect(receipt.counts).toMatchObject({ tasks: 0, skipped: 0, erased: 0 });
+    expect(fetched).toEqual([]);
+  });
+
+  it("in the implicit company, a legacy task whose record and index row name no company is erased (the repo's company rule)", async () => {
+    const w = world();
+    const legacy = await task(w, MALLORY, IMPLICIT_COMPANY_ID);
+    // Rewrite both rows the way the legacy path wrote them: no company named at all.
+    const strip = (row: StoredDocument): StoredDocument => Object.fromEntries(Object.entries(row).filter(([field]) => field !== "companyId" && field !== "orgId")) as StoredDocument;
+    await w.store.put({ item: strip((await w.store.get(taskKey(legacy.taskId)))!) });
+    const index = (await w.store.query({ pk: `DEVELOPER#${MALLORY}` })).items;
+    for (const row of index) await w.store.put({ item: strip(row) });
+    const receipt = await erasePerson(w.deps, { companyId: IMPLICIT_COMPANY_ID, personId: MALLORY, by: ADMIN, requestId: REQ });
+    expect(receipt).toMatchObject({ evidence: "done", counts: { erased: 1 } });
+    expect(left(w, legacy.prefixes)).toBe(0);
+  });
+
+  it("removes the person's notification settings and last-sent row in this company only", async () => {
+    const w = world();
+    for (const company of [A, B]) {
+      await w.store.put({ item: { ...prefsKey(company, MALLORY), entityType: "NOTIFY_PREFS", orgId: company, developerId: MALLORY } });
+      await w.store.put({ item: { ...notifySentKey(company, MALLORY), entityType: "NOTIFY_SENT", orgId: company, developerId: MALLORY } });
+    }
+    await erase(w);
+    expect(await w.store.get(prefsKey(A, MALLORY))).toBeUndefined();
+    expect(await w.store.get(notifySentKey(A, MALLORY))).toBeUndefined();
+    expect(await w.store.get(prefsKey(B, MALLORY))).toBeDefined();
+    expect(await w.store.get(notifySentKey(B, MALLORY))).toBeDefined();
   });
 
   it("removes the person's chat links in this company, but not an actor row a re-link gave someone else, nor their links in another company", async () => {
@@ -183,7 +224,7 @@ describe("person erase: refusals and failures (fixed words)", () => {
 
   it("a learning erase that fails says so in fixed words, never its cause; the receipt stays and the walk stays owed", async () => {
     const w = world({ eraseLearning: async () => { throw new Error(`secret ${MALLORY} correction text`); } });
-    const failure = await erase(w).catch((error: unknown) => error as Error);
+    const failure = await erase(w).then(() => new Error("no failure"), (error: unknown) => error as Error);
     expect(failure.message).toMatch(/suggested-rule data could not be cleared/u);
     expect(failure.message).not.toContain(MALLORY);
     expect(JSON.stringify(w.logs)).not.toContain(MALLORY);
@@ -240,6 +281,32 @@ describe("person erase: bounded and resumable", () => {
     expect((await erase(w)).evidence).toBe("owed");
     w.store.getMany = getMany;
     expect(await resumePersonErases(w.deps, A, 5_000)).toEqual({ finished: 1, owed: 0 });
+  });
+
+  it("a full retry list never stalls the walk: the earlier failures are retried first, and the walk then goes on", async () => {
+    const w = world();
+    const real = w.deps.objects;
+    let failing = true;
+    w.deps.objects = { deleteEveryVersion: async (prefix, options) => (failing ? false : await real.deleteEveryVersion(prefix, options)) };
+    for (let i = 0; i < PERSON_ERASE_RETRY_MAX + 3; i += 1) await task(w, MALLORY, A);
+    expect((await erase(w, { budgetMs: 60_000 })).evidence).toBe("owed");
+    failing = false;
+    expect(await resumePersonErases(w.deps, A, 60_000)).toEqual({ finished: 1, owed: 0 });
+    expect(await w.store.get({ pk: personErasePendingPartition(A), sk: MALLORY })).toBeUndefined();
+  });
+
+  it("an empty page that still carries a cursor is not the end of the index", async () => {
+    const w = world();
+    const one = await task(w, MALLORY, A);
+    const query = w.store.query.bind(w.store);
+    let first = true;
+    w.store.query = async (request) => {
+      if (request.pk.startsWith("DEVELOPER#") && first) { first = false; return { items: [], cursor: "more" }; }
+      if (request.cursor === "more") { const { cursor: _c, ...rest } = request; void _c; return await query(rest); }
+      return await query(request);
+    };
+    expect(await erase(w)).toMatchObject({ evidence: "done", counts: { erased: 1 } });
+    expect(left(w, one.prefixes)).toBe(0);
   });
 
   it("a prefix delete that ran out of time leaves the task owed, never counted erased", async () => {

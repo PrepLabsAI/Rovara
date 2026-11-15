@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { when, type AuditSink, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { personErasedKey, type PersonEraseDeps } from "../../packages/broker/src/core/people/erase.js";
-import { ERASE_NEEDS_ADMIN, ERASE_NOT_YOURSELF, ERASE_ON_A_PAGE, createPersonEraseRoute, type PersonEraseCaller, type PersonEraseRouteOptions } from "../../packages/broker/src/core-host/person-erase-route.js";
+import { ERASE_NEEDS_ADMIN, ERASE_NOT_YOURSELF, ERASE_REMOVE_FIRST, ERASE_ON_A_PAGE, createPersonEraseRoute, type PersonEraseCaller, type PersonEraseRouteOptions } from "../../packages/broker/src/core-host/person-erase-route.js";
 import { STEP_UP_WINDOW_NO_ANSWER, freshStepUp } from "../../packages/broker/src/core-host/step-up.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -28,6 +28,7 @@ function setup(overrides: Partial<PersonEraseRouteOptions> & { serving?: boolean
   const options: PersonEraseRouteOptions = {
     app: { serving: overrides.serving ?? true },
     companyOf: async () => { reads.push("membership"); return { companyId: overrides.company ?? A, role: overrides.role ?? "admin" }; },
+    standing: async () => "former",
     eraseDeps: (companyId) => { reads.push(`deps:${companyId}`); return deps(); },
     ...overrides,
   };
@@ -116,6 +117,20 @@ describe("person erase route", () => {
       const got = await answer(setup({ stepUpWindowSeconds: bad }));
       expect(got).toEqual({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: STEP_UP_WINDOW_NO_ANSWER } } });
     }
+  });
+
+  it("only a person the company removed is erased: a member is told to remove them first, a stranger is not found (no probing), an unreadable answer refuses", async () => {
+    const member = setup({ standing: async () => "member" });
+    expect(await answer(member)).toEqual({ status: 403, body: { error: { code: "FORBIDDEN", message: ERASE_REMOVE_FIRST } } });
+    const stranger = setup({ standing: async () => "unknown" });
+    expect(await answer(stranger)).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: "route not found" } } });
+    for (const standing of [async () => { throw new Error(TARGET); }, async () => "junk" as never]) {
+      const s = setup({ standing });
+      const got = await answer(s);
+      expect(got?.status).toBe(503);
+      expect(JSON.stringify(got)).not.toContain(TARGET);
+    }
+    for (const s of [member, stranger]) { expect(s.erased).toEqual([]); expect(await s.store.get(personErasedKey(A, TARGET))).toBeUndefined(); }
   });
 
   it("nobody erases themselves here", async () => {

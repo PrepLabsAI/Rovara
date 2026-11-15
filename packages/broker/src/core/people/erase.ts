@@ -2,26 +2,33 @@
 //
 // One call, in this order, repeatable with the same request:
 //   1. The receipt and the audit record, in ONE transaction: the receipt row (`ORG#<company>#PERSON_ERASED#<person>`, written once, so a repeat keeps the first time and records nothing again), the
-//      `person.erased` event through the audit sink's `stage`, and the pending walk of the person's evidence (put only if absent, so a saved cursor is never overwritten). The erase is recorded or it
+//      `person.erased` event through the audit sink's `stage`, and the pending walk of the person's evidence (only absent fields are set, so a saved cursor is never overwritten). The erase is recorded or it
 //      does not happen: a sink that stages nothing still writes the receipt, a transaction that fails writes nothing.
-//   2. The person's chat links in this company (both rows of each link; the actor row only while it still names this person).
+//   2. The person's chat links in this company (both rows of each link; the actor row only while it still names this person), their notification settings and their last-sent row.
 //   3. The learning data (`eraseLearning`, REQUIRED: a wiring that forgets it fails, it never reads as "nothing to erase").
 //   4. The evidence of the person's tasks in this company: the person's task index (`DEVELOPER#<person>` / `TASK#...`, the tasks they started) -> each task's record -> its owner key and workspace ->
 //      the two evidence prefixes (`evidencePrefixesOf`) -> EVERY stored version under them (DEC 212: current objects, non-current versions and delete markers, `deleteEveryVersion`).
 //
 // Rules held here:
-//  - Company-scoped. Every key written is under the company (or names the company), and a task is erased only when its record names THIS company (`companyId`); another company's task, a task with
-//    no record company, or a record that names no owner key or workspace is skipped, never read further. Nothing is deleted outside the two prefixes of a task of this company.
+//  - Company-scoped. Every key written is under the company (or names the company). The person's task index is theirs across companies, so an index row of another company (the repo's company rule,
+//    `rowInCompany`: `companyId` or `orgId`, none = the implicit company) is passed over uncounted and its record is never fetched; the record's own company is checked again.
+//    A record that names no owner key or workspace is skipped. Nothing is deleted outside the two prefixes of a task of this company.
 //  - Bounded and resumable. The walk stops at its deadline, checked before every page, every task and inside every prefix delete. The pending row holds the index sort key the walk has gone past
 //    (`cursor`) and the index rows of tasks whose erase failed (`retry`, at most PERSON_ERASE_RETRY_MAX): a failing task never holds the cursor. A walk that reached the end of the index with nothing
 //    left to retry deletes its pending row; one that stopped early, has a retry left or met a fault is never reported done (`evidence: "owed"`). `resumePersonErases` finishes owed walks (the same
 //    request repeated does too).
 //  - A record the store could not read is not "missing": it is a failure kept for retry. A task whose ids are not plain ids can never name a prefix: counted `refused`, not retried.
+//  - Not erased here (follow-ups, listed in the port's notes): the name and words kept on task records and pointers (developerName, title, the first prompt, thread notes), the task index rows, the
+//    diagnosis-by-person index, session followers and presence, and limit, rate and idempotency rows (no personal content). The route erases only a person already removed from the company, so their
+//    sign-in, sessions and script tokens are refused by membership.
 //  - Reports are counts. Log lines and errors name no person, task or key (a fault's text may carry a key).
 import { ActorRefSchema, OrgIdSchema, agentXError, orgChannelLinkKey, orgScoped, when, type AuditSink, type DocumentKey, type DocumentStore, type StoredDocument, type TransactItem } from "@agentx/contracts";
 import { channelLinksPartition } from "../channel/links.js";
 import { evidencePrefixesOf } from "../proof/evidence-erase.js";
 import { taskKey } from "../../developer/task-records.js";
+import { rowInCompany } from "../../developer/company-rows.js";
+import { prefsKey } from "../notify/prefs.js";
+import { notifySentKey } from "../notify/attention.js";
 
 /** A person id as a key part: letters, digits, `_`, `.` and `-`, never `#`, `|`, a space or a newline. */
 const PERSON_ID = /^[A-Za-z0-9_.-]{1,100}$/u;
@@ -133,6 +140,8 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
   const items: TransactItem[] = [
     { kind: "put", item: { ...receiptKey, entityType: "PERSON_ERASED", companyId, personId, erasedAt, by: input.by, requestId: input.requestId }, condition: when.absent() },
     ...audit,
+    // The walk is owed from the same moment: created if absent, and an earlier pass's cursor and retries are kept (only absent fields are set).
+    { kind: "update", key: pendingKey(companyId, personId), ops: [{ op: "setIfAbsent", path: ["entityType"], value: "PERSON_ERASE_PENDING" }, { op: "setIfAbsent", path: ["companyId"], value: companyId }, { op: "setIfAbsent", path: ["personId"], value: personId }] },
   ];
   let alreadyErased = false;
   let firstAt = erasedAt;
@@ -144,16 +153,19 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
     alreadyErased = true;
     if (typeof existing["erasedAt"] === "string") firstAt = existing["erasedAt"];
   }
-  // The walk is owed from now on (an earlier pass's cursor is kept).
-  await deps.store.put({ item: pendingItem(companyId, personId, undefined), condition: when.absent() });
+  // A repeat (the receipt's transaction refused on step 0) still makes sure the walk is owed; an earlier pass's cursor is kept.
+  if (alreadyErased) await deps.store.put({ item: pendingItem(companyId, personId, undefined), condition: when.absent() });
 
   // ---- 2. chat links
   let links: number;
   try {
     links = await eraseChatLinks(deps.store, companyId, personId);
+    // Their notification settings (contact targets, time zone, unsubscribe) and what was last sent to them, in this company.
+    await deps.store.delete({ key: prefsKey(companyId, personId) });
+    await deps.store.delete({ key: notifySentKey(companyId, personId) });
   } catch (error) {
     log({ event: "person_erase.links_failed", level: "error", error: errorName(error) });
-    throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their chat links could not be removed just now. Send the same request again.");
+    throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their chat links or notification settings could not be removed just now. Send the same request again.");
   }
 
   // ---- 3. learning data
@@ -213,7 +225,7 @@ export async function walkPersonEvidence(deps: Pick<PersonEraseDeps, "store" | "
     const taskId = row?.["taskId"];
     if (typeof taskId !== "string") { counts.skipped += 1; return "skip"; }
     if (record === "unreadable") return false;
-    if (record === undefined || record["companyId"] !== companyId) { counts.skipped += 1; return "skip"; }
+    if (record === undefined || !rowInCompany(record, companyId)) { counts.skipped += 1; return "skip"; }
     const ownerKey = record["ownerKey"];
     const workspaceId = record["workspaceId"];
     if (typeof ownerKey !== "string" || typeof workspaceId !== "string") { counts.skipped += 1; return "skip"; }
@@ -241,44 +253,52 @@ export async function walkPersonEvidence(deps: Pick<PersonEraseDeps, "store" | "
     return ids.map((id) => (typeof id === "string" ? found[at++] : undefined));
   };
 
-  /** Rows that failed in this run's main walk: not tried again in the same run (they wait for the next one). */
-  const triedNow = new Set<string>();
-  // ---- the main walk, from the cursor
+  // ---- first the tasks that failed in an earlier run (so a full retry list can never stall the walk), then the main walk from the cursor
   const indexPk = `DEVELOPER#${personId}`;
+  if (state.retry.length > 0) {
+    const keep: string[] = [];
+    for (const sk of state.retry) {
+      if (outOfTime()) { keep.push(sk); stopped = true; continue; }
+      const row = await deps.store.get({ pk: indexPk, sk });
+      if (row === undefined || !rowInCompany(row, companyId)) continue;
+      const [record] = await recordsOf([row]);
+      if ((await eraseRow(row, record)) === false) { keep.push(sk); counts.incomplete += 1; }
+    }
+    state.retry = keep;
+  }
+  /** The store's own cursor, for a page that came back empty but not finished; reset once a page holds rows (the range then restarts after `state.cursor`). */
+  let pageCursor: string | undefined;
   while (!state.scanned && !stopped) {
     if (outOfTime()) { stopped = true; break; }
-    const page = await deps.store.query({ pk: indexPk, sk: state.cursor === undefined ? { op: "beginsWith", prefix: "TASK#" } : { op: "between", low: `${state.cursor}\u0000`, high: "TASK#￿" }, limit: PAGE });
-    const rows = page.items.filter((row) => typeof row.sk === "string" && row.sk.startsWith("TASK#"));
-    if (rows.length === 0) { state.scanned = true; break; }
+    const page = await deps.store.query({
+      pk: indexPk, sk: state.cursor === undefined ? { op: "beginsWith", prefix: "TASK#" } : { op: "between", low: `${state.cursor}\u0000`, high: "TASK#\uffff" }, limit: PAGE,
+      ...(pageCursor === undefined ? {} : { cursor: pageCursor }),
+    });
+    const all = page.items.filter((row) => typeof row.sk === "string" && row.sk.startsWith("TASK#"));
+    if (all.length === 0) {
+      if (page.cursor === undefined) { state.scanned = true; break; }
+      pageCursor = page.cursor;
+      continue;
+    }
+    pageCursor = undefined;
+    // The index is the person's across companies: a row of another company is passed over unread and uncounted (its record is never fetched). The record's own company is checked again below.
+    const rows = all.filter((row) => rowInCompany(row, companyId));
     const records = await recordsOf(rows);
-    for (let index = 0; index < rows.length; index += 1) {
+    let at = 0;
+    for (const row of all) {
       if (outOfTime()) { stopped = true; break; }
-      const row = rows[index]!;
+      if (!rowInCompany(row, companyId)) { state.cursor = row.sk; continue; }
+      const record = records[at++];
       counts.tasks += 1;
-      const outcome = await eraseRow(row, records[index]);
+      const outcome = await eraseRow(row, record);
       if (outcome === false) {
         if (state.retry.length >= PERSON_ERASE_RETRY_MAX) { stopped = true; counts.incomplete += 1; log({ event: "person_erase.retry_full" }); break; }
         if (!state.retry.includes(row.sk)) state.retry.push(row.sk);
-        triedNow.add(row.sk);
         counts.incomplete += 1;
       }
       state.cursor = row.sk;
     }
-    if (page.cursor === undefined && !stopped && rows.length < PAGE) state.scanned = true;
-  }
-
-  // ---- the retries, after the main walk
-  if (!stopped && state.retry.length > 0) {
-    const keep: string[] = [];
-    for (const sk of state.retry) {
-      if (triedNow.has(sk)) { keep.push(sk); continue; }
-      if (outOfTime()) { keep.push(sk); stopped = true; continue; }
-      const row = await deps.store.get({ pk: indexPk, sk });
-      const [record] = row === undefined ? [undefined] : await recordsOf([row]);
-      const outcome = row === undefined ? "skip" : await eraseRow(row, record);
-      if (outcome === false) { keep.push(sk); counts.incomplete += 1; }
-    }
-    state.retry = keep;
+    if (page.cursor === undefined && !stopped && all.length < PAGE) state.scanned = true;
   }
 
   const complete = state.scanned && state.retry.length === 0 && !stopped;

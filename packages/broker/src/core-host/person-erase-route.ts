@@ -7,6 +7,8 @@
 //   - Only an owner or an admin of the company may erase, and only with a FRESH STEP-UP (`freshStepUp`, the decision routes' contract): a tool holding an API token, a script token, or a Slack,
 //     Google or GitHub round trip never can.
 //   - A person never erases themselves here (another admin does it), so nobody can lock a company out of its last admin by mistake.
+//   - Only a person the company REMOVED is erased (`standing`, from the company's own records): a current member is refused (remove them first, so their sign-in, sessions and script tokens stop),
+//     and a person the company never had answers "not found", exactly like a malformed id, so the route cannot be used to probe other companies' people.
 //   - The erase is the engine's (`erasePerson`), company-scoped to the member company, and repeatable with the same request id. The answer is the receipt (counts, no names); refusals are fixed words.
 import { AgentXError, OrgRoleSchema, PERSON_ERASE_OWED_WORDS, PersonEraseReceiptSchema, PersonEraseRequestSchema, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -20,6 +22,7 @@ const ORG_ID = /^org_[0-9a-z]{20}$/u;
 export const ERASE_ON_A_PAGE = "A person is erased right after you confirm it's you on the sign-in page: a tool that holds an API token cannot erase anyone. Confirm it's you, then try again within a few minutes.";
 export const ERASE_NEEDS_ADMIN = "Only an owner or an admin of the company can erase a person.";
 export const ERASE_NOT_YOURSELF = "You cannot erase yourself here. Ask another admin of the company.";
+export const ERASE_REMOVE_FIRST = "Remove this person from the company first, then erase them.";
 export const ERASE_NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 const SIGN_IN_AGAIN = "Sign in again.";
 
@@ -35,6 +38,8 @@ export interface PersonEraseRouteOptions {
   companyOf(caller: PersonEraseCaller): Promise<{ companyId: string; role: OrgRole } | undefined>;
   /** The engine erase's ports for this company (the State store, the evidence bucket's version delete, the company's audit sink, the learning erase). */
   eraseDeps(companyId: string): PersonEraseDeps;
+  /** What the company's own records say about a person: a current `member`, a `former` member (removed), or `unknown` (never one of its people). Anything else, or a throw, refuses with 503. */
+  standing(companyId: string, personId: string): Promise<"member" | "former" | "unknown">;
   /** The company's step-up window through the policy hook (may only shorten the default). Absent: the default. */
   stepUpWindowSeconds?: (companyId: string) => Promise<unknown>;
   log?: (entry: Record<string, unknown>) => void;
@@ -69,6 +74,11 @@ export function createPersonEraseRoute(options: PersonEraseRouteOptions): { rout
         if (target === caller.principal.personId) throw agentXError("FORBIDDEN", ERASE_NOT_YOURSELF);
         const body = PersonEraseRequestSchema.safeParse(bodyOf(request));
         if (!body.success) throw agentXError("CONFIG_INVALID", "the request body must be { requestId } with a UUID");
+        let standing: unknown;
+        try { standing = await options.standing(companyId, target); } catch { standing = undefined; }
+        if (standing === "unknown") throw agentXError("NOT_FOUND", "route not found");
+        if (standing === "member") throw agentXError("FORBIDDEN", ERASE_REMOVE_FIRST);
+        if (standing !== "former") throw agentXError("RUNTIME_UNAVAILABLE", "The company's records could not be read just now, so nothing was done. Try again in a moment.");
         const deps = options.eraseDeps(companyId);
         await freshStepUp(caller, options.stepUpWindowSeconds === undefined ? undefined : () => options.stepUpWindowSeconds!(companyId), deps.now(), ERASE_ON_A_PAGE);
         const receipt = PersonEraseReceiptSchema.parse(await erasePerson(deps, { companyId, personId: target, by: caller.principal.personId, requestId: body.data.requestId }));
