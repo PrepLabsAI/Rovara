@@ -8,6 +8,8 @@ import { describe, expect, it } from "vitest";
 import type { Admission, AdmissionRequest } from "@agentx/contracts";
 import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll, when } from "@agentx/contracts";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
+import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
+import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { OWNER_ROUND_ADMISSION_ACTION } from "../../packages/broker/src/core/task-flow/owner-round.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
@@ -65,6 +67,24 @@ describe("send back to coding", () => {
     expect(prompt).toContain("Owner note (the owner's own instructions for this step)");
     expect(prompt).toContain("Rename retryFlag to retryEnabled before this is published.");
     expect(prompt).toContain("no check or review problems were recorded; follow the owner note");
+  });
+
+  it("gives the owner's words only to the round their decision started: a later round at another revision with nothing recorded gets the plain coding prompt", async () => {
+    const decided = { requestId: REQUEST_B, workflowRevision: 6, decision: "REQUEST_CHANGES", actorId: OWNER_KEY, actorRole: "TASK_OWNER", reason: "Rename the flag.", source: "SEND_BACK", at: "2026-11-10T09:00:00.000Z" };
+    const clear = [report("CRITIC", "PASS", []), report("SECURITY", "PASS", [])];
+    const promptAt = async (revision: number): Promise<string> => {
+      const workflow = WorkflowSnapshotSchema.parse({ ...blockedReview({ decisions: [decided] }, clear), stage: "IMPLEMENT", state: "READY", blockReason: undefined, revision });
+      const { h } = await seed({ workflow });
+      await h.store.transact([ownerNoteItem({ taskId: TASK_ID, requestId: REQUEST_B, text: "SENTINEL-OWNER-WORDS", now: new Date("2026-11-10T09:00:00.000Z") })]);
+      expect(await startImplementation(h.deps, { taskId: TASK_ID, workflowRevision: revision })).toBe("STARTED");
+      return promptOf((await codingOperations(h))[0]!);
+    };
+    // The round the send-back started (decided at 6, ready at 7): the owner's words.
+    expect(await promptAt(7)).toContain("SENTINEL-OWNER-WORDS");
+    // A round much later (the decision is stale): not the owner's round.
+    const later = await promptAt(11);
+    expect(later).not.toContain("SENTINEL-OWNER-WORDS");
+    expect(later).not.toContain("Owner note");
   });
 
   it("is refused for anyone but the owner or a co-owner, and writes nothing", async () => {

@@ -151,7 +151,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       else {
         // A run that goes on from an earlier one: a retry resumes from the checkpoints the history acknowledged; a send-back runs the whole plan again over the code the workspace holds.
         const resumed = await resumeGraphInvocation(deps, task);
-        if (resumed !== undefined) graph = { invocation: found2.length > 0 ? restartedGraphInvocation(resumed, workflow) : resumed };
+        if (resumed !== undefined) graph = { invocation: found2.length > 0 || ownerRound ? restartedGraphInvocation(resumed, workflow) : resumed };
       }
     } catch (error) {
       if (!(error instanceof AgentXError)) throw error;
@@ -191,10 +191,14 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   return settled(deps, row, accepted.result);
 }
 
-/** Whether this coding round is the one an owner's send-back or findings decision just started: the newest decision is theirs (not Rovara's own autofix). */
+/**
+ * Whether this coding round is the one an owner's send-back or findings decision just started: the newest decision is theirs (not Rovara's own autofix) AND it moved the workflow to this
+ * very revision. A later round (a CI, conflict or feedback fix after the pull request was opened, which adds no decision) is not the owner's, so it keeps its own prompt and evidence.
+ */
 function ownerStartedRound(workflow: WorkflowSnapshot): boolean {
   const last = workflow.decisions.at(-1);
-  return last !== undefined && last.decision === "REQUEST_CHANGES" && last.actorRole !== "AGENTX" && (last.source === "SEND_BACK" || last.source === "FINDINGS");
+  return last !== undefined && last.decision === "REQUEST_CHANGES" && last.actorRole !== "AGENTX" && (last.source === "SEND_BACK" || last.source === "FINDINGS")
+    && last.workflowRevision + 1 === workflow.revision;
 }
 
 /**
