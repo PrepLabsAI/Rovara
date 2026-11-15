@@ -38,7 +38,7 @@ export async function handleTaskRoute(flow: TaskFlow, request: TaskRouteRequest)
   if (path !== TASKS && !path.startsWith(`${TASKS}/`)) return undefined;
   try {
     if (path === TASKS && request.method === "POST") {
-      const started = await flow.start(request.caller, jsonBody(request.body));
+      const started = await flow.start({ ...request.caller, origin: "app" }, jsonBody(request.body));
       return { status: started.duplicate ? 200 : 201, body: { task: started.task } };
     }
     if (path === TASKS && request.method === "GET") return { status: 200, body: await flow.list(request.caller) };

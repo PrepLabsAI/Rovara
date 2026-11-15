@@ -83,7 +83,7 @@ export function intakePortsOf(wiring: IntakeWiring): IntakePorts {
       if (principal === undefined) throw agentXError("FORBIDDEN", "The person this run is for isn't a member of the company.");
       if (request.input.text === undefined || request.binding?.kind !== "tracker_item") throw agentXError("CONFIG_INVALID", "A ticket's task needs the ticket's words and its link.");
       // `ticket` is how the task says its request is the ticket's: the plan credits the words to the ticket, not to the owner who started it.
-      const caller: TaskCaller = { principal, client: cleanClientName(request.source), ticket: { system: request.binding.system, id: request.binding.id, url: request.binding.url } };
+      const caller: TaskCaller = { principal, origin: "tracker", client: cleanClientName(request.source), ticket: { system: request.binding.system, id: request.binding.id, url: request.binding.url } };
       const title = request.input.context?.[0]?.title;
       // The same start as any other: the task flow's own, so admission, run limits and the project's rules apply. The ticket's words ride in the request under their "information only" line; the task
       // starts as a workflow, so its plan waits for the owner's approval like every plan.

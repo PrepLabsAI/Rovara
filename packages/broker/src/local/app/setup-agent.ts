@@ -97,7 +97,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
   const store = flow.store;
   const ownerDeveloperId = developerIdOf(options.owner);
   const control = createSessionControlHost(flow);
-  const callerOf = (principal: Principal = options.owner): TaskCaller => ({ principal, client: "app" });
+  const callerOf = (principal: Principal = options.owner): TaskCaller => ({ principal, client: "app", origin: "app" });
 
   const depsFor = async (principal: Principal = options.owner): Promise<SetupApplyDeps> => ({
     store, companyId, now: options.now, flow, modelAccessConfigured: await options.modelAccessConfigured(),
