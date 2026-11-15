@@ -31,6 +31,10 @@ describe("the route table", () => {
       .toEqual(["GET /v1/dev/client/projects/{project}", "POST /v1/dev/access"]);
   });
 
+  it("settings reads and writes require full access, with no new named scope", () => {
+    for (const method of ["GET", "PUT"]) expect(devRouteOf(method, "/v1/dev/projects/web/settings")?.requires).toBe("full");
+  });
+
   it("has one row per method and path", () => {
     const keys = DEV_ROUTES.map((route) => `${route.method} ${route.path.replace(/\{[A-Za-z]+\}/g, "{}")}`);
     expect(new Set(keys).size).toBe(keys.length);

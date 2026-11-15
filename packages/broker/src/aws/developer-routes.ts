@@ -1,3 +1,4 @@
+import { projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
@@ -103,6 +104,8 @@ import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 
 export interface DeveloperApiConfiguration {
+  /** Host-owned company rules configuration; absence preserves today's policy. */
+  policyHook?: ProjectSettingsHook;
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
   /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
   since?: Partial<Record<DeveloperSignInMethod, number>>;
@@ -153,6 +156,7 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
+  policyHook?: ProjectSettingsHook;
   companies?: CompanyMembershipReader;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
@@ -1447,6 +1451,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
+  if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") {
     const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
     const companyId = await resolveCompany(deps.companies, caller.developerId);

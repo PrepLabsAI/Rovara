@@ -173,3 +173,11 @@ describe("merge-up 3 proof record classifications", () => {
     expect(await world.store.get(key)).toEqual(foreign);
   });
 });
+
+it("classifies the M4a settings owner and both full-access company-checked methods", () => {
+  const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
+  expect(markdown).toContain("| record | entity:PROJECT_SETTINGS | company-scoped |");
+  expect(markdown).toContain("| route | /v1/dev/projects/{id}/settings | company-scoped | State table | yes | GET, PUT |");
+  expect(COMPANY_CHECKED_ROUTES).toContain("GET /v1/dev/projects/{id}/settings");
+  expect(COMPANY_CHECKED_ROUTES).toContain("PUT /v1/dev/projects/{id}/settings");
+});

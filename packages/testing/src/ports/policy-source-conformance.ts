@@ -39,7 +39,7 @@ export const policySourceChecks: readonly ContractCheck<PolicySourceWorld>[] = [
     async run({ source, scope, lockedScope }) {
       const a = await source.resolve(lockedScope!, { taskRaises: { real_check: "sandbox_only" } });
       const b = await source.resolve(scope, {});
-      expect(a.values["real_check"]).toMatchObject({ value: "rovara_real_run", origin: "company_lock" });
+      expect(a.values["real_check"]).toMatchObject({ value: "rovara_real_run", origin: "company_minimum" });
       expect(b.values["real_check"]).toEqual({ value: "their_ci_fix", origin: "rovara_default" });
     },
   },

@@ -24,6 +24,8 @@ export interface DevRoute {
 }
 
 export const DEV_ROUTES: readonly DevRoute[] = [
+  { method: "GET", path: "/v1/dev/projects/{name}/settings", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{name}/settings", requires: "full" },
   // Spec 063 FR-004: a registered service's own route, authenticated by its secret or the person's token.
   { method: "POST", path: "/v1/dev/access", requires: "none" },
   // #634: the person chooses their own name.

@@ -1,4 +1,4 @@
-386 record kinds: 37 company-scoped, 8 install-wide, 341 needs-company. 174 routes: 10 company-scoped, 2 install-wide, 162 needs-company.
+387 record kinds: 38 company-scoped, 8 install-wide, 341 needs-company. 175 routes: 11 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -785,8 +785,8 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/aws/connector-metrics.ts:38:7:computed | [metric] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/aws/connector-metrics.ts (emitConnectorMetric) |
 | forwarding | packages/broker/src/aws/credentials.ts:287:94:pk | token.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | tokenPartition and credential registry constructors in credentials.ts |
 | forwarding | packages/broker/src/aws/credentials.ts:287:108:sk | token.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | tokenPartition and credential registry constructors in credentials.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:515:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:536:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
+| forwarding | packages/broker/src/aws/developer-routes.ts:519:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
+| forwarding | packages/broker/src/aws/developer-routes.ts:540:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:395:39:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:395:54:sk | marker.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:458:43:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
@@ -1183,3 +1183,12 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 | record | pk:TASKSPEND; entity:TASK_SPEND | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 
 Forwarding rows were relocated by exact expression; the extracted host-glue rows and core-host erase/catalog forwarding are enumerated separately above. No scanner rule or limit changed.
+
+## M4a project settings (ANSWER-1)
+
+| kind | identity | class | table | checked | methods | reason |
+|---|---|---|---|---|---|---|
+| record | entity:PROJECT_SETTINGS | company-scoped | State table | no | - | Code is the sole owner. projectSettingsKey uses companyScoped(companyId, PROJECT_SETTINGS plus validated project name); the rows reader validates the stored company and project. Revision-conditional transaction includes one COMPANY_LOG audit under that same company. |
+| route | /v1/dev/projects/{id}/settings | company-scoped | State table | yes | GET, PUT | Full-access routes resolve live membership and check the project row before any settings read. PUT also checks the project administrator grant in that company. tests/contract/project-settings.test.ts covers both companies, foreign grants, stale revision and atomic audit. |
+
+New key construction sites: aws/project-settings.ts projectSettingsKey and the COMPANY_LOG audit partition both use the existing companyScoped builder. The audit entity reuses COMPANY_LOG. No generic forwarding site was added. The raw-name PROJECT and MEMBER families retain their existing needs-company classifications: this adapter checks their company before using them; it does not migrate their writers. The developer-routes forwarding expressions are unchanged and relocated by four lines.
