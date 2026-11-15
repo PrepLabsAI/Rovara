@@ -204,7 +204,7 @@ const cancellationCodes = (error: unknown): string[] =>
  */
 export async function takeRate(
   deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now">,
-  key: { taskId: string; kind: "comment" | "suggestion" | "change" | "ask"; actor: string },
+  key: { taskId: string; kind: "comment" | "suggestion" | "change" | "ask" | "steer"; actor: string },
   limit: number,
   windowMs: number,
   access?: Pick<TaskAccess, "peopleRevision" | "task">,
