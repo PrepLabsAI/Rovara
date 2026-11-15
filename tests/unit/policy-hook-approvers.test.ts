@@ -87,6 +87,14 @@ describe("policy hook: decisions", () => {
     expect(await w.approvers.requirement(request({ requestId: "req-2" }))).toEqual(baseRequirement);
     answer = { ...loose, minApprovers: 3 };
     expect(await w.approvers.verify(request({ requestId: "req-2" }), { ...proof, requestId: "req-2" })).toEqual({ approved: false, reason: "company_rules_changed" });
+    // The same request stays held to the count first handed out (another caller may still count with it), even after a stricter read.
+    expect((await w.approvers.requirement(request({ requestId: "req-2" }))).minApprovers).toBe(3);
+    expect(await w.approvers.verify(request({ requestId: "req-2" }), { ...proof, requestId: "req-2" })).toEqual({ approved: false, reason: "company_rules_changed" });
+    // A new request reads the new rule and passes; the old one recovers once its entry lapses (10 minutes).
+    expect((await w.approvers.requirement(request({ requestId: "req-3" }))).minApprovers).toBe(3);
+    expect((await w.approvers.verify(request({ requestId: "req-3" }), { ...proof, requestId: "req-3" })).approved).toBe(true);
+    w.advance(10 * 60_000);
+    await w.approvers.verify(request({ requestId: "req-4" }), { ...proof, requestId: "req-4" });
     expect((await w.approvers.requirement(request({ requestId: "req-2" }))).minApprovers).toBe(3);
     expect((await w.approvers.verify(request({ requestId: "req-2" }), { ...proof, requestId: "req-2" })).approved).toBe(true);
   });

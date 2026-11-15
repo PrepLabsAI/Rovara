@@ -5,7 +5,7 @@
 // needed). A caller that decides on `requirement` alone therefore never decides on an answer older than the service allowed.
 // `verify` enforces what one verdict can carry by itself (a "no", no answer, the sign-in age, the asker approving, the sole-approver mark) and checks the count
 // the caller counts with: the smallest `minApprovers` ever handed out for this exact request (company, id, kind, subject, revision, digest), or the install's
-// own count when none was. When the fresh answer needs more, the verdict is refused (`company_rules_changed`) and the next `requirement` carries the new rule.
+// own count when none was (entries lapse after 10 minutes). When the fresh answer needs more, the verdict is refused (`company_rules_changed`); a new request reads the new rule.
 // A claim a refused verdict holds is given back.
 // A "second person needed" answer (owner row 11.5: loosening a setting needs a second admin) means: the person who asked may not approve, no sole-approver
 // exception, and at least two approvers when the request names no one who asked.
@@ -13,6 +13,9 @@ import {
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalSignInRule, type ApprovalVerdict, type Approvers, type PolicyHookDecideAnswer, type PolicyHookDecideQuestion, type Principal,
 } from "@agentx/contracts";
 import type { PolicyHookClient } from "./client.js";
+
+/** How long the smallest count handed out for a request is held against its verdicts. */
+const HANDED_OUT_LIFE_MS = 10 * 60_000;
 
 /** A sign-in time this far ahead of the clock is not believed. */
 const SIGN_IN_SKEW_MS = 30_000;
@@ -74,8 +77,16 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
   const maxEntries = options.maxEntries ?? 1000;
   /** The last signed answer, by company, project, kind, subject type, risk and asker, until the answer's own expiry. A "no" is kept as the stricter default. */
   const known = new Map<string, { answer: PolicyHookDecideAnswer; expiresAt: number }>();
-  /** The smallest approver count handed out for each exact request, so `verify` knows the count the caller counts with. */
-  const handedOut = new Map<string, number>();
+  /**
+   * The smallest approver count handed out for each exact request, so `verify` knows the count the caller counts with. It is never raised or cleared while it
+   * lives (a caller may still hold it); it lapses 10 minutes after it was first handed out, far longer than any caller holds a requirement between reading it and
+   * verifying (one request), and a lapsed or missing entry falls back to the install's own count, the loosest a caller can hold.
+   */
+  const handedOut = new Map<string, { count: number; since: number }>();
+  const handedOutCount = (key: string): number | undefined => {
+    const entry = handedOut.get(key);
+    return entry !== undefined && now() - entry.since < HANDED_OUT_LIFE_MS ? entry.count : undefined;
+  };
   const kindKey = (request: ApprovalRequest): string => JSON.stringify([request.companyId, request.projectName ?? "", request.kind, request.subject.type, request.risk ?? "", request.requestedBy?.provider ?? "", request.requestedBy?.personId ?? ""]);
   const requestKey = (request: ApprovalRequest): string => JSON.stringify([request.companyId, request.requestId, request.kind, request.subject.type, request.subject.id, request.revision, request.artifactDigest]);
   const knownAnswer = (request: ApprovalRequest): PolicyHookDecideAnswer => {
@@ -99,7 +110,9 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
       const requirement = stricterRequirement(await base.requirement(request), knownAnswer(request), request);
       // Keep the loosest count handed out for this request: a later, stricter read never hides what an earlier caller counts with.
       const key = requestKey(request);
-      remember(handedOut, key, Math.min(handedOut.get(key) ?? Number.POSITIVE_INFINITY, requirement.minApprovers), maxEntries);
+      const held = handedOutCount(key);
+      if (held === undefined) remember(handedOut, key, { count: requirement.minApprovers, since: now() }, maxEntries);
+      else if (requirement.minApprovers < held) handedOut.get(key)!.count = requirement.minApprovers;
       return requirement;
     },
     async verify(request: ApprovalRequest, proof: ApprovalProof) {
@@ -126,12 +139,9 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
         return refuse(verdict, "company_rules_refused");
       }
       const key = requestKey(request);
-      const usedCount = handedOut.get(key) ?? baseRequirement.minApprovers;
-      if (stricterRequirement(baseRequirement, answer, request).minApprovers > usedCount) {
-        // The caller must read the requirement again; until it does, it is held to the install's own count, so nothing it counted with earlier survives.
-        handedOut.delete(key);
-        return refuse(verdict, "company_rules_changed");
-      }
+      const usedCount = handedOutCount(key) ?? baseRequirement.minApprovers;
+      // The entry is kept as it is: another caller may still count with it. A new request (a new id or revision) reads the new rule.
+      if (stricterRequirement(baseRequirement, answer, request).minApprovers > usedCount) return refuse(verdict, "company_rules_changed");
       if (answer.secondPerson || !answer.selfApproval || answer.minApprovers > 1) {
         const rest: Extract<ApprovalVerdict, { approved: true }> = { ...verdict };
         delete rest.soleApprover;
