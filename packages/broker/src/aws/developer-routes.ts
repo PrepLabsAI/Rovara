@@ -835,7 +835,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
 function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord; scopes: readonly ClientScope[] }): void {
   if (route.requires === "none") return;
   if (route.requires === "full" ? caller.client.fullAccess === true : caller.scopes.includes(route.requires)) return;
-  console.log(JSON.stringify({ component: "broker", event: "client.scope_refused", clientId: caller.client.clientId, method: route.method, route: route.path, requires: route.requires }));
+  // No company in scope here (the caller is a sign-in client acting as a person), so this uses the file's one company-less logger, already in the log-site inventory, rather than a new console call.
+  logDeveloperEvent({ event: "client.scope_refused", clientId: caller.client.clientId, method: route.method, route: route.path, requires: route.requires });
   throw agentXError("FORBIDDEN", route.requires === "full"
     ? `${caller.client.name} needs full access for ${route.method} ${route.path}, which is off for it; an administrator can turn it on`
     : `${caller.client.name} needs the ${route.requires} scope for ${route.method} ${route.path}; an administrator can allow it with that scope`);
