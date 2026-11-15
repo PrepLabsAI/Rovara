@@ -4,7 +4,7 @@ import type { DurableOutboxRecord } from "./lambda.js";
 import { taskOpen } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, type CheckTaskPerson } from "../developer/task-people.js";
 import { taskKey, taskOwnerKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord } from "../developer/task-records.js";
-import type { ProjectAuthorityWitness } from "../developer/task-project-access.js";
+import { mayUseProject, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 
 type TransactItem = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
@@ -158,10 +158,11 @@ async function allowedStillCurrent(
     if (witness.access === "granted") {
       const membership = witness.membership;
       if (membership === undefined || membership.pk !== `MEMBER#${witness.developerId}` || membership.sk !== `PROJECT#${task.project}`
-        || membership.projectName !== task.project || membership.role !== "developer") return false;
+        || membership.projectName !== task.project || !mayUseProject(membership.role)) return false;
       checks.push({ ConditionCheck: { TableName: deps.tableName, Key: { pk: membership.pk, sk: membership.sk },
-        ConditionExpression: "projectName = :project AND #role = :developer", ExpressionAttributeNames: { "#role": "role" },
-        ExpressionAttributeValues: { ":project": task.project, ":developer": "developer" } } });
+        // The row must still hold the role the start saw: a change in between refuses the dispatch.
+        ConditionExpression: "projectName = :project AND #role = :role", ExpressionAttributeNames: { "#role": "role" },
+        ExpressionAttributeValues: { ":project": task.project, ":role": membership.role } } });
     } else {
       const binding = witness.binding;
       if (binding === undefined || !isChannelBindingKeyOf(binding, { channel: SLACK_CHANNEL, tenant: binding.teamId, space: binding.channelId })

@@ -81,7 +81,8 @@ jobs:
     if: needs.scope.outputs.docs_only != 'true'
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -297,9 +298,10 @@ jobs:
           else
             npm run port:guard -- --range origin/mainline..HEAD --allow-guard-edits
           fi
+      # Commits already on mainline are public, so their own private-name findings are skipped here (--public-base, a full ref name: a short one can resolve to a tag); the net diff and every other rule still count.
       - name: Edits to the guard need the controller's review (pull requests only)
         if: github.event_name == 'pull_request'
-        run: node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD
+        run: node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD --public-base refs/remotes/origin/mainline
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:

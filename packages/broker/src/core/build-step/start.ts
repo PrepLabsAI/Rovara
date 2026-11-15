@@ -7,6 +7,7 @@ import {
   AgentXError, EVIDENCE_CAPTURE_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { evalRequestForChecks } from "../proof/eval-round-reader.js";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
 import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
 import { withTestRule } from "../proof/verification-report.js";
@@ -225,7 +226,8 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     await commitWorkflow(deps, task, blockWorkflow(workflow, testPlan, receivedAt));
     return settled(deps, row, "STALE");
   }
-  const payload = jsonOf({ ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
+  const evalRequest = await evalRequestForChecks(deps, task, workflow);
+  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,

@@ -16,6 +16,8 @@ import {
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
   EndDeveloperSessionsRequestSchema,
+  SetDisplayNameRequestSchema,
+  SetMyNameBodySchema,
   ListSignInClientsRequestSchema,
   PutSignInClientRequestSchema,
   RemoveSignInClientRequestSchema,
@@ -39,9 +41,12 @@ import {
   type TaskPeopleDisplayReadResponse,
   type DeveloperSignInMethod,
   type EndDeveloperSessionsRequest,
+  type SetDisplayNameRequest,
+  type SetDisplayNameResponse,
   type ListSignInClientsRequest,
   type PutSignInClientRequest,
   type RemoveSignInClientRequest,
+  type ClientScope,
   type SignInClientRecord,
   type SignInClientsResponse,
   type EndDeveloperSessionsResponse,
@@ -55,7 +60,7 @@ import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
-import { issueAccessToken, pkceChallengeMatches, type TokenSigner } from "./tokens.js";
+import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk } from "./tokens.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
@@ -64,6 +69,7 @@ export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
   signer: TokenSigner;
+  extraPublicKeys?: ReadonlyArray<{ publicJwk(): Promise<PublicSigningJwk> }>;
   providers: Partial<Record<DeveloperSignInMethod, SignInProvider>>;
   directory: SlackDirectory;
   now: () => number;
@@ -135,6 +141,12 @@ function toClient(redirectUri: string, params: Record<string, string>): HttpResu
 /** The CLI is public ("none"); a confidential registered client sends its secret either way (spec 063). */
 const CLIENT_AUTH_METHODS = ["none", "client_secret_basic", "client_secret_post"];
 
+/** Spec 065: the scopes a client asked for (space-separated) that its registration allows, unique and in order. */
+function grantedScopes(requested: string | null, client: SignInClientRecord): { scopes?: string[] } {
+  const scopes = [...new Set((requested ?? "").split(" "))].filter((scope) => client.scopes?.includes(scope as ClientScope) === true);
+  return scopes.length === 0 ? {} : { scopes };
+}
+
 /** RFC 6749 2.3.1: HTTP Basic with the form-encoded client ID and secret; undefined without the header. */
 function basicCredentials(authorization: string | undefined): { clientId: string; secret: string } | "malformed" | undefined {
   if (authorization === undefined) return undefined;
@@ -175,10 +187,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   };
 
   /** Spec 063 FR-002: a registered client's session gets tokens addressed to that client, which Rovara's API refuses. */
+  // Spec 065 FR-002: the scopes asked for at sign-in that the client's registration still allows, so removing one from
+  // the registration ends it at the next refresh.
   const accessToken = (session: SessionRecord, client?: SignInClientRecord) =>
     issueAccessToken(deps.signer, {
       issuer: config.issuer, subject: session.developerId, amr: session.amr, env: config.env, sessionId: session.sessionId, now: deps.now(),
-      ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience } }),
+      ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience, scopes: (session.scopes ?? []).filter((scope) => client.scopes?.includes(scope as ClientScope) === true) } }),
     });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
@@ -259,6 +273,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       request = await store.createAuthRequest({
         clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url"),
         ...(client === undefined ? {} : { clientId: client.clientId }),
+        // Spec 065 FR-002: a scope the registration does not allow is dropped, not refused.
+        ...(client === undefined ? {} : grantedScopes(query.get("scope"), client)),
       });
       if (methods.length === 1) {
         const method = methods[0]!;
@@ -420,6 +436,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const agentxCode = await store.issueCode({
       developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
       ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
+      ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
       // FR-005: only a company sign-in can make an administrator.
       ...(method === "oidc" && identity.administrator === true ? { administrator: true as const } : {}),
     });
@@ -570,8 +587,22 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       switch (pathname) {
         case "/v1/auth/.well-known/openid-configuration":
           return publicJson(discovery());
-        case "/v1/auth/.well-known/jwks.json":
-          return publicJson({ keys: [await deps.signer.publicJwk()] });
+        case "/v1/auth/.well-known/jwks.json": {
+          const developerKey = await deps.signer.publicJwk();
+          const extras = deps.extraPublicKeys ?? [];
+          // Preserve legacy bytes when no task key is configured. In a dual-key JWKS,
+          // purposes are symmetric and remain stable even if the task key read fails.
+          if (extras.length === 0) return publicJson({ keys: [developerKey] });
+          const keys = [{ ...developerKey, rovara_purpose: "developer" }];
+          for (const extra of extras) {
+            try {
+              keys.push({ ...await extra.publicJwk(), rovara_purpose: "task" });
+            } catch {
+              deps.log({ event: "developer.jwks_task_key_failed" });
+            }
+          }
+          return publicJson({ keys });
+        }
         case "/v1/auth/.well-known/agentx-configuration":
           return jsonResult(200, configuration());
         case "/v1/auth/authorize":
@@ -593,15 +624,24 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse> => {
+      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse> => {
     if ("kind" in event) {
       // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        await store.putClient(parsed.data.client);
-        deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId });
+        let client = parsed.data.client;
+        // An update that keeps the secret: only this server holds the hash, so it carries it over.
+        if (parsed.data.keepSecret === true) {
+          const current = await store.getClient(client.clientId);
+          if (current?.secretHash === undefined) return { ok: false, error: "no_secret" };
+          client = { ...client, secretHash: current.secretHash };
+        }
+        // Spec 066: full access only for a client with a secret, so its tokens only ever reach the service itself.
+        if (client.fullAccess === true && client.secretHash === undefined) return { ok: false, error: "invalid_request" };
+        await store.putClient(client);
+        deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId, ...(client.fullAccess === true ? { fullAccess: true } : {}) });
         return { ok: true };
       }
       if (event.kind === "remove-sign-in-client") {
@@ -621,6 +661,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         const result = await store.endSessions(parsed.data.developerId, parsed.data.at);
         deps.log({ event: "signin.sessions_ended_by_admin", developerId: parsed.data.developerId, result });
         return result === "ended" ? { ok: true } : { ok: false, error: "not_found" };
+      }
+      if (event.kind === "set-display-name") {
+        const parsed = SetDisplayNameRequestSchema.safeParse(event);
+        // Checked again here, so no caller of this Lambda can store a name the route would refuse (an email address, a placeholder).
+        const name = parsed.success ? SetMyNameBodySchema.safeParse({ name: parsed.data.name }) : undefined;
+        if (!parsed.success || name?.success !== true || name.data.name !== parsed.data.name) return { ok: false, error: "invalid_request" };
+        try {
+          const stored = await store.setChosenDisplayName(parsed.data.developerId, name.data.name);
+          // No name in the log: it is the person's choice, not an operational fact.
+          deps.log({ event: "signin.display_name_chosen", developerId: parsed.data.developerId });
+          return { ok: true, name: stored.displayName };
+        } catch (error) {
+          if ((error as { code?: unknown }).code === "NOT_FOUND") return { ok: false, error: "not_found" };
+          throw error;
+        }
       }
       if (event.kind === "channel-by-name") {
         const parsed = ChannelByNameRequestSchema.safeParse(event);

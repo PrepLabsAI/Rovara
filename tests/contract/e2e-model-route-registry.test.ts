@@ -274,9 +274,12 @@ describe("the broker-backed day budget", () => {
     const sent: Array<Record<string, unknown>> = [];
     const spy = { send: async (command: { input: Record<string, unknown> }) => { sent.push(command.input); return db.send(command); } };
     await createBrokerE2EDayBudget({ documentClient: spy as unknown as DynamoDBDocumentClient, tableName: TABLE, orgId: TEST_ORG, projectName: "payments", now: () => DAY }).reserve(100, LIMITS);
-    expect(sent).toHaveLength(1);
-    expect(String(sent[0]!.ConditionExpression)).toMatch(/attribute_not_exists/);
-    expect(String(sent[0]!.UpdateExpression)).toMatch(/ADD/);
+    // One read of the old unscoped day row (the implicit company's spending before the key move), then the one conditional write.
+    const writes = sent.filter((input) => input.UpdateExpression !== undefined);
+    expect(sent).toHaveLength(2);
+    expect(writes).toHaveLength(1);
+    expect(String(writes[0]!.ConditionExpression)).toMatch(/attribute_not_exists/);
+    expect(String(writes[0]!.UpdateExpression)).toMatch(/ADD/);
   });
 
   it("settles to the tokens the provider reported", async () => {

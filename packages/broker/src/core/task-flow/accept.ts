@@ -41,6 +41,7 @@ export interface AcceptInput {
 /** The dispatch message's body. Small and secret-free: the dispatcher reads the operation and builds the invocation itself. */
 export interface DispatchMessage {
   v: 1;
+  companyId: string;
   workspaceId: string;
   operationId: string;
 }
@@ -79,7 +80,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     ...(input.designReview === undefined ? {} : { designReview: input.designReview }),
     ...(input.modelSourceId === undefined ? {} : { modelSourceId: input.modelSourceId }),
   };
-  const message: DispatchMessage = { v: 1, workspaceId: input.workspace.id, operationId: id };
+  const message: DispatchMessage = { v: 1, companyId: deps.companyId, workspaceId: input.workspace.id, operationId: id };
   const first: TransactItem[] = input.firstEvent === undefined ? [] : [{
     kind: "put",
     item: {

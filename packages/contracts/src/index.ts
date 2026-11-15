@@ -135,6 +135,7 @@ export * from "./checks-reply.js";
 export * from "./cancel-callback-key.js";
 export * from "./task-comments.js";
 export * from "./task-people.js";
+export * from "./task-readers.js";
 export * from "./e2e-openapi-fixture.js";
 export * from "./e2e-executor.js";
 export * from "./e2e-model-channel.js";
@@ -154,6 +155,7 @@ export * from "./record-trust.js";
 export * from "./open-ids.js";
 export * from "./standing-instructions.js";
 export * from "./signing-key.js";
+export * from "./policy-hook.js";
 export * from "./task-budget.js";
 export * from "./model-not-enabled.js";
 export * from "./org-scoped-keys.js";
@@ -184,7 +186,7 @@ export * from "./script-tokens.js";
 
 
 export { TICKET_PATTERN } from "./confirmation.js";
-export { SetMyNameBodySchema, type SetMyNameBody, SetMyNameResponseSchema, type SetMyNameResponse, SetMyNameResponseReaderSchema } from "./developer-web.js";
+export { SetMyNameBodySchema, type SetMyNameBody, SetMyNameResponseSchema, type SetMyNameResponse, SetMyNameResponseReaderSchema, SetDisplayNameRequestSchema, type SetDisplayNameRequest, type SetDisplayNameResponse } from "./developer-web.js";
 
 export { TaskResponseSchema, TaskResponseReaderSchema } from "./task-response.js";
 
@@ -218,6 +220,8 @@ export { formatUsdMicrodollars } from "./money-format.js";
 
 // Lane A G1: versioned project intent, preserved but not set by legacy settings writes.
 export * from "./test-proof.js";
+// TE-B5a: the one table of who may decide what (task owner, maintainer, admin).
+export * from "./can-decide.js";
 export * from "./real-model-check.js";
 export * from "./plugins/index.js";
 export * from "./ports/index.js";
@@ -229,6 +233,7 @@ export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";
 export * from "./evidence-inert.js";
+export * from "./evidence-public.js";
 export * from "./evidence-render.js";
 export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
@@ -383,3 +388,10 @@ export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReserva
 export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
 export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";
+
+export * from "./setup-prove.js";
+export * from "./eval-round-artifact.js";
+
+export * from "./model-gateway-token.js";
+export * from "./payer.js";
+export * from "./ports/company-log.js";

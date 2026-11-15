@@ -200,6 +200,14 @@ export function createLaptopModelEgress(options: LaptopModelEgressOptions): Mode
           whole.set(part, at);
           at += part.byteLength;
         }
+        if (!complete) {
+          // The provider's 200 covers its headers, not a body that never finished.
+          // Keep any maybe-spent usage, but never expose a buffered partial answer.
+          yield { kind: "head", status: 502, headers: [["content-type", "application/json"]] };
+          yield { kind: "chunk", bytes: familyErrorBody(row.family, 502, UNREACHABLE, "rovara_unreachable") };
+          yield await finish({ status: 502, usage: usageFromBody(row.family, whole), cls: "provider_error", complete });
+          return;
+        }
         const scrubbed = scrubResponseBody({ family: row.family, status: response.status, headers: response.headers, body: whole, key: secret });
         const cls = classifyProviderResponse({ status: response.status, body: whole });
         yield { kind: "head", status: response.status, headers };
@@ -233,7 +241,9 @@ export function createLaptopModelEgress(options: LaptopModelEgressOptions): Mode
         hit = end.hit;
         if (hit) complete = false;
       }
-      yield await finish({ status: response.status, usage: usage.finish(), cls: hit ? "provider_error" : classifyProviderResponse({ status: response.status }), complete });
+      // Stream bytes may already be sent; the final settlement must mark a cut
+      // answer as a provider error (eval: not run), while retaining uncertain cost.
+      yield await finish({ status: complete || hit ? response.status : 502, usage: usage.finish(), cls: !complete ? "provider_error" : classifyProviderResponse({ status: response.status }), complete });
     },
   };
 }
