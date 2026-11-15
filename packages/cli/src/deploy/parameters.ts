@@ -76,7 +76,9 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     // Spec 062: channel adapters and Slack through the channel API, as the operator set them (agentx config set).
     "ChannelAdapters", "SlackViaChannel",
     // Migration plan v3.2 lane E2: the core engine switch (agentx config set coreEngine.switch).
-    "CoreEngine"],
+    "CoreEngine",
+    // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
+    "StepUpEmailSender"],
   slack: ["SlowTurnMinutes", "ModelFallback"],
 };
 

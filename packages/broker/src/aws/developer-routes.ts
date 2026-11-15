@@ -917,9 +917,9 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
   // Lanes AU and EV: the company's audit records and events, read as the company administrator of the caller's own company.
   if (url.pathname === COMPANY_AUDIT_RECORDS_PATH || url.pathname === COMPANY_EVENTS_PATH) {
-    if (deps.companyReads === undefined || request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
     requireRouteScope(route, reader);
+    if (deps.companyReads === undefined) throw agentXError("NOT_FOUND", "route not found");
     const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${reader.developerId}`);
     if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
     // A person's name: the host's lookup, else the sign-in table's display name, shown only for a person of the caller's own company.

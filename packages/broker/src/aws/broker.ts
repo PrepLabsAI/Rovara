@@ -309,7 +309,7 @@ import {
   storedCharge,
   type ChannelConversationDependencies,
 } from "./channel-conversation.js";
-import type { CompanyReadsConfiguration } from "../developer/company-reads.js";
+import { companyReadsFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import type { DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
@@ -14923,9 +14923,12 @@ function json(
 }
 
 const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
-const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), {
+const dynamoClient = new DynamoDBClient(awsClientConfiguration);
+const documentClient = DynamoDBDocumentClient.from(dynamoClient, {
   marshallOptions: { removeUndefinedValues: true },
 });
+// Hosted wiring (d): lanes AU and EV's company reads, only where infra turns them on (COMPANY_READS=enabled, named environments).
+const companyReads = companyReadsFromEnvironment(process.env, { dynamo: dynamoClient, documentClient });
 const s3 = new S3Client(awsClientConfiguration);
 const secretsManager = new SecretsManagerClient(awsClientConfiguration);
 const codeBuild = createCodeBuildGateway(awsClientConfiguration);
@@ -15055,6 +15058,7 @@ export const handler = createAwsBrokerHandler({
     : {}),
   ...(developer ? { developer } : {}),
   ...(linking ? { linking } : {}),
+  ...(companyReads ? { companyReads } : {}),
   ...(chatgpt ? { chatgpt } : {}),
   // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
   ...(process.env.CHANNEL_ADAPTERS === "enabled"

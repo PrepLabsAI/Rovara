@@ -70,12 +70,21 @@ export class CoreEngine extends Construct {
     });
     broker.addEnvironment(CORE_ENGINE_VARIABLE, this.parameter.valueAsString);
 
-    this.deadLetters = new sqs.Queue(this, "DeadLetterQueue", { queueName: coreDispatchDeadLetterName(env), encryption: sqs.QueueEncryption.SQS_MANAGED, retentionPeriod: Duration.days(14) });
+    // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
+    // policy already references this queue (a reference back would be a cycle).
+    const dispatchQueueArn = stack.formatArn({ service: "sqs", resource: coreDispatchQueueName(env) });
+    this.deadLetters = new sqs.Queue(this, "DeadLetterQueue", {
+      queueName: coreDispatchDeadLetterName(env), encryption: sqs.QueueEncryption.SQS_MANAGED, retentionPeriod: Duration.days(14),
+      redriveAllowPolicy: { redrivePermission: sqs.RedrivePermission.BY_QUEUE, sourceQueues: [sqs.Queue.fromQueueArn(this, "DispatchQueueSource", dispatchQueueArn)] },
+      // #663 review: every request over TLS (the queue policy denies aws:SecureTransport false).
+      enforceSSL: true,
+    });
     this.queue = new sqs.Queue(this, "Queue", {
       queueName: coreDispatchQueueName(env),
       deadLetterQueue: { queue: this.deadLetters, maxReceiveCount: CORE_DISPATCH_MAX_RECEIVES },
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       visibilityTimeout: CORE_DISPATCH_VISIBILITY_TIMEOUT,
+      enforceSSL: true,
     });
     // Exactly these two queues, granted on each queue's own resource policy, not on the broker's role: the broker role's inline policy is at IAM's size limit (one more statement there makes
     // CDK split it into a managed policy, which the deploy role may not create). Same account, so the queue policy alone grants it; the permissions boundary still bounds the role (it allows sqs).

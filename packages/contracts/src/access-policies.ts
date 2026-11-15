@@ -202,6 +202,9 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     // The operator's EC2 quota reads (prerequisites on a resume); named like CallerIdentity above,
     // not scoped further, since scoped ARNs in the identity policy already limit it to two quotas.
     { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
+    // Hosted wiring (a): the sign-in function sends step-up codes through SES. Only sending, and only as an email identity of this account and region (the function's own policy narrows it
+    // to the one identity the StepUpEmailSender parameter names); never ses:* (identity, configuration and suppression-list changes stay outside every AgentX role).
+    { Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: `arn:${partition}:ses:${scope.region}:${account}:identity/*` },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {

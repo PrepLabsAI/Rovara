@@ -234,13 +234,16 @@ describe("developer sign-in infrastructure (named environments)", () => {
   it("gives DeveloperIdentity exactly the item operations its store uses on the sign-in table, nothing table-wide", () => {
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
     const tableStatements = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
-    expect(tableStatements).toHaveLength(2);
+    expect(tableStatements).toHaveLength(3);
     // TransactWriteItems is authorized per item as PutItem and UpdateItem; the store never condition-checks.
     expect(actionsOf(tableStatements[0]!).sort()).toEqual(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]);
     expect(tableStatements[0]!.Resource).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
     // Spec 063: it lists and removes sign-in clients, and deletes or queries nothing else.
     expect(actionsOf(tableStatements[1]!).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
     expect(tableStatements[1]!.Condition).toEqual({ "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["SIGNIN_CLIENTS"] }, Null: { "dynamodb:LeadingKeys": "false" } });
+    // Lane ID part 2b (hosted wiring (b)): it lists and removes a person's passkeys, only in PASSKEYS# partitions (named environments only).
+    expect(actionsOf(tableStatements[2]!).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
+    expect(tableStatements[2]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } });
   });
 
   it("throttles the public /v1/auth/*, /v1/dev/*, and /review/* routes on the default stage (burst 50, 20 requests a second)", () => {
@@ -579,8 +582,9 @@ describe("task-token key and membership IAM", () => {
     }
     expect([reads, families]).toEqual([1, 1]);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("a1dd557411883920332ddf90e23cec2c6c20be9bc3e178fcd378f4dfad9bfc7b");
+    // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
+    // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny); each is asserted in hosted-wiring-infrastructure.test.ts.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("c0c9a143913d6b623942803bcafcf12f89cbb353cde4cd6e7607c3a3aaeef238");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -640,6 +644,7 @@ const boundary = defaultBoundaryStatements(policyScope);
 const deploy = serviceRoleStatements(policyScope);
 const boundaryArn = "arn:aws:iam::111122223333:policy/agentx/staging/agentx-staging-boundary";
 const sampleRole = "arn:aws:iam::111122223333:role/agentx/staging/example";
+const sampleSesIdentity = `arn:${policyScope.partition}:ses:${policyScope.region}:${policyScope.account}:identity/codes@example.com`;
 function policyAllows(policy: PolicyStatementJson[], action: string, resource: string, context: Record<string, string> = {}): boolean {
   const matches = policy.filter((s) => allows(s, action) && [s.Resource].flat().some((r) => globRegExp(r).test(resource))
     && Object.entries(s.Condition ?? {}).every(([operator, entries]) => Object.entries(entries).every(([key, values]) => {
@@ -658,7 +663,7 @@ describe("task key deployment boundary coverage", () => {
       "AWS::Lambda::EventInvokeConfig": "lambda", "AWS::Lambda::EventSourceMapping": "lambda", "AWS::KMS::Key": "kms", "AWS::KMS::Alias": "kms",
       "AWS::SecretsManager::Secret": "secretsmanager", "AWS::SNS::Topic": "sns", "AWS::SNS::TopicPolicy": "sns", "AWS::CloudWatch::Alarm": "cloudwatch",
       "AWS::ApiGatewayV2::Api": "apigateway", "AWS::ApiGatewayV2::Integration": "apigateway", "AWS::ApiGatewayV2::Authorizer": "apigateway",
-      "AWS::ApiGatewayV2::Route": "apigateway", "AWS::ApiGatewayV2::Stage": "apigateway", "AWS::Scheduler::Schedule": "scheduler", "AWS::StepFunctions::StateMachine": "states",
+      "AWS::ApiGatewayV2::Route": "apigateway", "AWS::ApiGatewayV2::Stage": "apigateway", "AWS::Scheduler::Schedule": "scheduler", "AWS::Scheduler::ScheduleGroup": "scheduler", "AWS::StepFunctions::StateMachine": "states",
     };
     for (const type of new Set(Object.values(named.Resources).map((r) => r.Type))) {
       let action: string;
@@ -700,7 +705,8 @@ describe("task key deployment boundary coverage", () => {
       for (const action of actionsOf(statement)) {
         // All non-IAM runtime actions are service-wide in the default boundary.
         // PassRole is the only scoped runtime exception; verify its rendered resource too.
-        const resource = action.toLowerCase() === "iam:passrole" ? sampleRole : "*";
+        // Hosted wiring (a): ses:SendEmail is bounded to this account's email identities; check it on one.
+        const resource = action.toLowerCase() === "iam:passrole" ? sampleRole : action === "ses:SendEmail" ? sampleSesIdentity : "*";
         expect(policyAllows(boundary, action, resource), `${role}: ${action}`).toBe(true);
         if (action.toLowerCase() === "iam:passrole") {
           for (const r of [statement.Resource].flat()) {
@@ -1507,20 +1513,63 @@ function resolvedInlineSize(template: TemplateJson): number {
 
 const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRequestQueue", "queue:DispatchDeadLetterQueue", "queue:SlackRequestDeadLetterQueue", "queue:DeveloperTaskNotifierNoticeDeadLetterQueue", "queue:DeveloperTaskNotifierStreamFailureQueue", "queue:ChannelApiEventDeadLetters", "key:ChatGptConnectionKey"];
 
+/** #663 (R2 core engine): the core dispatch queues' broker grants (queue policies) and the scheduler's invoke role, which #666's list predates. */
+const coreEngineTuples: AccessTuple[] = [
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsQueue","{}"],
+  ["role:CoreEngineJobsInvokeRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
+];
+/**
+ * Hosted wiring: (a) SES SendEmail for the sign-in function on the StepUpEmailSender identity; (b) its passkey Query/DeleteItem on PASSKEYS#; (c) the policy hook's key (broker Sign,
+ * public key to the broker and the sign-in function, key-policy Denies); (h) the company-secrets role; (i) the TLS-only Deny on both core dispatch queues. All additive.
+ */
+const hostedWiringTuples: AccessTuple[] = [
+  ["*","Deny","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\",\"role:DeveloperSignInFunctionServiceRole\"]}}"],
+  ["*","Deny","kms:Sign","key:DeveloperSignInPolicyHookKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"],
+  ["*","Deny","sqs:*","queue:CoreEngineJobsDeadLetterQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:CoreEngineJobsQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["role:BrokerServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
+  ["role:BrokerServiceRole","Allow","kms:Sign","key:DeveloperSignInPolicyHookKey","{}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:CreateSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"ForAllValues:StringEquals\":{\"aws:TagKeys\":[\"rovara:org\"]},\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]},\"StringEquals\":{\"aws:RequestTag/rovara:org\":[\"${aws:PrincipalTag/rovara:org}\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:CreateSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"ForAllValues:StringEquals\":{\"aws:TagKeys\":[\"rovara:org\"]},\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]},\"StringEquals\":{\"aws:RequestTag/rovara:org\":[\"${aws:PrincipalTag/rovara:org}\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:DeleteSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:DeleteSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:DescribeSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:DescribeSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:CompanySecretsRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:DeleteItem","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PASSKEYS#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:Query","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PASSKEYS#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
+];
+const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...coreEngineTuples, ...hostedWiringTuples].sort(byText);
+
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {
-    expect(accessTuples(named)).toEqual(beforeTuples);
+    expect([...accessTuples(named)].sort(byText)).toEqual(pinnedTuples);
   });
 
   it("has the same semantic results for every role, resource, condition and sibling", () => {
     const after = accessTuples(named);
-    const roles = [...new Set([...beforeTuples, ...after].map(([p]) => p).filter((p) => p !== "*")), "role:agentx-other-env"];
+    const roles = [...new Set([...pinnedTuples, ...after].map(([p]) => p).filter((p) => p !== "*")), "role:agentx-other-env"];
     const extras = { s3: ["GetObject", "PutObject", "DeleteObject", "GetBucketPolicy", "PutBucketPolicy", "ListBucket", "GetObjectVersion"], sqs: ["SendMessage", "ReceiveMessage", "DeleteMessage", "PurgeQueue", "SetQueueAttributes", "GetQueueAttributes"], kms: ["Encrypt", "Decrypt", "GenerateDataKey", "Sign", "ScheduleKeyDeletion"], dynamodb: ["GetItem", "PutItem", "DeleteItem", "Scan", "Query"] };
-    const actions = [...new Set([...beforeTuples, ...after].filter(([p]) => p === "role:BrokerServiceRole").map(([, , a]) => a).concat(Object.entries(extras).flatMap(([service, names]) => names.map((name) => `${service}:${name}`))))];
-    const resources = [...new Set([...beforeTuples, ...after].map(([, , , r]) => r).concat(Object.entries(named.Resources).filter(([, r]) => Object.hasOwn(symbolicTypes, r.Type)).map(([id]) => symbol(named, { "Fn::GetAtt": [id, "Arn"] })), ["bucket:Sibling", "bucket:Sibling/object", "queue:Sibling", "key:Sibling", "table:Sibling"]))];
+    const actions = [...new Set([...pinnedTuples, ...after].filter(([p]) => p === "role:BrokerServiceRole").map(([, , a]) => a).concat(Object.entries(extras).flatMap(([service, names]) => names.map((name) => `${service}:${name}`))))];
+    const resources = [...new Set([...pinnedTuples, ...after].map(([, , , r]) => r).concat(Object.entries(named.Resources).filter(([, r]) => Object.hasOwn(symbolicTypes, r.Type)).map(([id]) => symbol(named, { "Fn::GetAtt": [id, "Arn"] })), ["bucket:Sibling", "bucket:Sibling/object", "queue:Sibling", "key:Sibling", "table:Sibling"]))];
     // Index role-specific tuples once; this is a finite synthesized template, not customer input.
     for (const role of roles) {
-      const b = beforeTuples.filter(([p]) => p === role || p === "*");
+      const b = pinnedTuples.filter(([p]) => p === role || p === "*");
       const a = after.filter(([p]) => p === role || p === "*");
       const beforeResults: boolean[] = []; const afterResults: boolean[] = [];
       for (const action of actions) for (const resource of resources) for (const key of ["TASK#1", "COMPANY_MEMBER#1", undefined]) {
@@ -1538,7 +1587,7 @@ describe("broker IAM headroom", () => {
     for (const [id, r] of Object.entries(resourceOnly.Resources)) if (["AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"].includes(r.Type)) delete resourceOnly.Resources[id];
     for (const [, r] of ofType(resourceOnly, "AWS::IAM::Role")) delete r.Properties.Policies;
     const moved = accessTuples(resourceOnly).filter(([, e, , r]) => e === "Allow" && movedResources.includes(r));
-    expect(moved).toEqual(beforeTuples.filter(([p, e, , r]) => p === "role:BrokerServiceRole" && e === "Allow" && movedResources.includes(r)));
+    expect(moved).toEqual(pinnedTuples.filter(([p, e, , r]) => p === "role:BrokerServiceRole" && e === "Allow" && movedResources.includes(r)));
     for (const { statement } of resourceStatements(named).filter(({ statement }) => statement.Effect === "Allow" && JSON.stringify(statement.Principal).includes(broker))) {
       expect(statement.Principal).toEqual({ AWS: roleArn(broker) });
     }

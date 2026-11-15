@@ -73,7 +73,7 @@ import type { SlackDirectory } from "./slack-directory.js";
 import { createFactorAdmin } from "./factor-admin.js";
 import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
-import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk } from "./tokens.js";
+import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
@@ -82,7 +82,8 @@ export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
   signer: TokenSigner;
-  extraPublicKeys?: ReadonlyArray<{ publicJwk(): Promise<PublicSigningJwk> }>;
+  /** Other keys the JWKS publishes, each with its purpose (absent: `task`, as before). A key whose public half cannot be read is left out with a fixed log line; sign-in stays up. */
+  extraPublicKeys?: ReadonlyArray<{ purpose?: Exclude<SigningKeyPurpose, "developer">; publicJwk(): Promise<PublicSigningJwk> }>;
   providers: Partial<Record<DeveloperSignInMethod, SignInProvider>>;
   directory: SlackDirectory;
   now: () => number;
@@ -651,10 +652,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           if (extras.length === 0) return publicJson({ keys: [developerKey] });
           const keys = [{ ...developerKey, rovara_purpose: "developer" }];
           for (const extra of extras) {
+            const purpose = extra.purpose ?? "task";
             try {
-              keys.push({ ...await extra.publicJwk(), rovara_purpose: "task" });
+              keys.push({ ...await extra.publicJwk(), rovara_purpose: purpose });
             } catch {
-              deps.log({ event: "developer.jwks_task_key_failed" });
+              deps.log({ event: purpose === "task" ? "developer.jwks_task_key_failed" : "developer.jwks_policy_key_failed" });
             }
           }
           return publicJson({ keys });
