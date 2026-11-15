@@ -276,12 +276,28 @@ export function authorizeQuery(overrides: Record<string, string> = {}): string {
 }
 
 /** The sign-in server with fake Slack, fake OIDC, fake DynamoDB and the fake KMS signer. */
+interface IdentityHarness {
+  db: FakeDynamoDb;
+  slack: ReturnType<typeof fakeSlack>;
+  oidc: ReturnType<typeof fakeOidc>;
+  fetch: ReturnType<typeof routeFetch>;
+  signer: ReturnType<typeof localSigner>;
+  logs: Array<Record<string, unknown>>;
+  deps: DeveloperIdentityDependencies;
+  handler: ReturnType<typeof createDeveloperIdentityHandler>;
+  http(event: HttpApiV2Event): Promise<HttpResult>;
+  tick(ms: number): void;
+  now(this: void): number;
+  signIn(method: "slack" | "oidc", who: string, extra?: { teamId?: string; query?: Record<string, string> }): Promise<URL>;
+  exchange(code: string, overrides?: Record<string, string>): Promise<{ status: number; body: Record<string, unknown> }>;
+  refresh(refreshToken: string): Promise<{ status: number; body: Record<string, unknown> }>;
+}
 export function identityHarness(options: {
   slack?: boolean; teamId?: string | undefined; oidc?: { requiredClaim?: string; requiredValues?: string[]; administrator?: { claim: string; values: string[] } };
   slackUsers?: FakeSlackUser[]; oidcUsers?: FakeOidcUser[]; channels?: Record<string, string[]>;
   channelInfo?: Record<string, { name: string; isPrivate?: boolean }>;
   slackCredentials?: { clientId?: string; clientSecret?: string };
-} = {}) {
+} = {}): IdentityHarness {
   let clock = T0;
   const now = () => clock;
   const db = new FakeDynamoDb();
@@ -315,7 +331,7 @@ export function identityHarness(options: {
     now,
     log: (entry) => logs.push(entry),
   };
-  const handler = createDeveloperIdentityHandler(deps);
+  const handler: ReturnType<typeof createDeveloperIdentityHandler> = createDeveloperIdentityHandler(deps);
   const http = async (event: HttpApiV2Event) => handler(event) as Promise<HttpResult>;
   return {
     db, slack, oidc, fetch, signer, logs, deps, handler, http,

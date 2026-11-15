@@ -2,7 +2,7 @@
 // an unmapped action under `requireAudit` fails (so the change is refused), and the moved-citation and merge events reach the ledger.
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "../../../packages/contracts/src/index.js";
-import { BOOKKEEPING, LEDGERED, lessonAuditSink } from "../../../packages/broker/src/lessons/audit-sink.js";
+import { BOOKKEEPING, LEDGERED, auditProjectRef, lessonAuditSink } from "../../../packages/broker/src/lessons/audit-sink.js";
 import { emitAudit, requireAudit } from "../../../packages/broker/src/lessons/policy.js";
 import { LESSON_AUDIT_ACTIONS, type LessonAuditAction } from "../../../packages/broker/src/lessons/types.js";
 import { PROJECT, WS } from "./lesson-helpers.js";
@@ -13,6 +13,24 @@ function sink() {
   const written: AuditEvent[] = [];
   return { written, sink: lessonAuditSink({ stage: () => [], record: async (e) => { written.push(e); } }, () => NOW, WS) };
 }
+
+describe("the audit chain never holds a project's name (LESSONS-AUDIT-PROJECT-NAME-IN-CHAIN)", () => {
+  it("a project-level event (no lesson) is named by the project's reference, never its name, in the subject and the details", async () => {
+    const s = sink();
+    const named = "Payments Platform (secret)";
+    await s.sink.emit({ action: "lesson.preset_changed", workspaceId: WS, project: named, actor: "a".repeat(64), facts: { scope: "project", from: "standard", to: "regulated", mode: "direct" } });
+    expect(s.written).toHaveLength(1);
+    expect(JSON.stringify(s.written[0])).not.toContain(named);
+    expect(s.written[0]!.subject?.id).toBe(auditProjectRef(WS, named));
+    expect(s.written[0]!.details).toMatchObject({ project: auditProjectRef(WS, named) });
+  });
+  it("the reference is stable for one company and project, differs across companies and projects, and has a fixed shape", () => {
+    expect(auditProjectRef(WS, "a")).toBe(auditProjectRef(WS, "a"));
+    expect(auditProjectRef(WS, "a")).not.toBe(auditProjectRef(WS, "b"));
+    expect(auditProjectRef(WS, "a")).not.toBe(auditProjectRef("org_bbbbbbbbbbbbbbbbbbbb", "a"));
+    expect(auditProjectRef(WS, "a")).toMatch(/^p_[0-9a-f]{24}$/u);
+  });
+});
 
 describe("the audit sink decides every action of the library", () => {
   it("each action is either given a ledger name or listed as bookkeeping, never both", () => {
@@ -26,7 +44,8 @@ describe("the audit sink decides every action of the library", () => {
       const s = sink();
       await s.sink.emit(event(action, { tier: 1, count: 2, scope: "project", from: "one", to: "auto", mode: "second_person", type: "convention", cause: "person", reason: "refused", citations: 1 }));
       expect(s.written, action).toHaveLength(1);
-      expect(s.written[0], action).toMatchObject({ companyId: WS, subject: { type: "lesson", id: "les_aaaa1111" }, details: { project: PROJECT } });
+      expect(s.written[0], action).toMatchObject({ companyId: WS, subject: { type: "lesson", id: "les_aaaa1111" }, details: { project: auditProjectRef(WS, PROJECT) } });
+      expect(JSON.stringify(s.written[0]), action).not.toContain(PROJECT);
       expect(s.written[0]!.action, action).toMatch(/^[a-z_]+(\.[a-z_0-9]+)+$/u);
     }
   });

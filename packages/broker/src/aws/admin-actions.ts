@@ -4,10 +4,13 @@
 import type { SignInClientRegistry } from "./developer-routes.js";
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { z } from "zod";
 import { type DeveloperSignInMethod, SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
 import { emailIndexKey } from "../developer/store.js";
 import { ownerKeyForSubject } from "./lambda.js";
+import { resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { OrgIdSchema } from "@agentx/contracts";
 
 export interface AdminActionDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -19,6 +22,7 @@ export interface AdminActionDependencies {
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
   /** Spec 063: the sign-in clients' registry; absent where developer sign-in is not set up. */
   signInClients?: SignInClientRegistry;
+  companies?: CompanyMembershipReader;
   now(): number;
 }
 export interface ResolvedDeveloper {
@@ -57,7 +61,8 @@ function profileFrom(item: Record<string, unknown> | undefined): ResolvedDevelop
 
 const developerItem = (deps: AdminActionDependencies, developerId: string) => signInItem(deps, { pk: `DEVELOPER#${developerId}`, sk: "META" });
 
-export async function resolveDeveloper(deps: AdminActionDependencies, reference: string): Promise<ResolvedDeveloper> {
+export async function resolveDeveloper(deps: AdminActionDependencies, reference: string, companyId?: string): Promise<ResolvedDeveloper> {
+  const read = async (): Promise<ResolvedDeveloper> => {
   const value = reference.trim();
   if (HEX64.test(value)) {
     const profile = profileFrom(await developerItem(deps, value));
@@ -69,7 +74,8 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
     return { developerId, via: "slack", slackUserId: value, ...(profile === undefined ? {} : { profile }) };
   }
   if (EMAIL.test(value)) {
-    const indexed = await signInItem(deps, emailIndexKey(value));
+    const indexed = await signInItem(deps, emailIndexKey(value, companyId));
+    if (companyId !== undefined && !z.object({ entityType: z.literal("DEVELOPER_EMAIL"), developerId: z.string().regex(HEX64), updatedAt: z.iso.datetime() }).safeParse(indexed).success) throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN);
     // Q4: an email names only someone who signed in with it (from this release on).
     if (typeof indexed?.developerId !== "string" || !HEX64.test(indexed.developerId)) throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN);
     const item = await developerItem(deps, indexed.developerId);
@@ -80,6 +86,14 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
     return { developerId: indexed.developerId, via: "email", ...(profile === undefined ? {} : { profile }) };
   }
   throw agentXError("CONFIG_INVALID", "developer must be a developer ID, an email or a Slack user ID such as U0123456789");
+  };
+  if (companyId === undefined) return read();
+  try {
+    if (!OrgIdSchema.safeParse(companyId).success) throw new Error("unreadable company");
+    const person = await read();
+    if (await resolveCompany(deps.companies, person.developerId) !== companyId) throw new Error("no such person");
+    return person;
+  } catch { throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN); }
 }
 
 /** The membership row's role, and when it was granted (null for a row without that, such as an administrator's). */

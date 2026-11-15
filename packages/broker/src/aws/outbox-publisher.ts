@@ -1,8 +1,9 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import type { StreamRecord } from "../developer/notifications.js";
+import { taskSpendMarkerKey, type TaskRunSpend } from "../developer/task-records.js";
 import { INDEX_DEFAULT_BUDGET_MS, byDeadline, indexActivity } from "./activity-index.js";
 import { requiredEnvironment, type DurableOutboxRecord } from "./lambda.js";
 
@@ -91,8 +92,32 @@ export const handler = createOutboxPublisherHandler({
         if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
       }
     },
+    addTaskUsage: taskUsageWriter(documentClient, () => required(tableName, "STATE_TABLE_NAME")),
   }, (entry) => console.log(JSON.stringify({ component: "outbox-publisher", ...entry })), options?.deadline ?? Date.now() + INDEX_DEFAULT_BUDGET_MS),
 });
+
+/**
+ * #651: counts one usage record on its developer task, once. In one transaction: the record's marker (`TASKSPEND#<task>`, conditioned on not existing)
+ * and the task's totals (`ADD`, conditioned on the task existing). A replayed record finds its marker, and a deleted task fails its condition: either way
+ * the transaction is refused and nothing is counted.
+ */
+export function taskUsageWriter(client: Pick<DynamoDBDocumentClient, "send">, table: () => string) {
+  return async (taskId: string, usageId: string, usage: TaskRunSpend, requestOptions?: { signal?: AbortSignal }): Promise<void> => {
+    const priced = typeof usage.usd === "number" && Number.isFinite(usage.usd) && usage.usd >= 0;
+    try {
+      await client.send(new TransactWriteCommand({ TransactItems: [
+        { Put: { TableName: table(), Item: { ...taskSpendMarkerKey(taskId, usageId), entityType: "TASK_SPEND", taskId, ...usage }, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Update: {
+          TableName: table(), Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConditionExpression: "attribute_exists(pk)",
+          UpdateExpression: "ADD spentUsd :usd, spentInputTokens :input, spentOutputTokens :output, spentRuns :one, spentUnpricedRuns :unpriced SET spentUpdatedAt = :at",
+          ExpressionAttributeValues: { ":usd": priced ? usage.usd : 0, ":input": usage.inputTokens, ":output": usage.outputTokens, ":one": 1, ":unpriced": priced ? 0 : 1, ":at": usage.at },
+        } },
+      ] }), abortOptions(requestOptions?.signal));
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== "TransactionCanceledException") throw error;
+    }
+  };
+}
 
 /** The SDK's per-request options: the index's abort signal, when it gave one. */
 function abortOptions(signal: AbortSignal | undefined): { abortSignal?: AbortSignal } {
