@@ -202,18 +202,19 @@ describe("the named TEST proof-only installation gate", () => {
 
     // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged. Named/foreign re-pinned for lane E2 (the core engine construct, #663,
     // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.
+    // #722: named/foreign re-pinned for the combined stacked baseline (#689 + R2 step 4; no template change of #722's own), the same values as L1a (#731) measured before its edits.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "887f2aacf4ad6cf43657db990897e8ad36b463ef27b793cf95bf126c0ba2cdcd",
-        withoutRoute: "e048dcb490f16a22ee56b811e63ab2231f223fe5ecd15fa5bb9868e27a1ad1c6",
+        withRoute: "db5deff9f38e2113f6fd80f63229e88657156952e90633356e65f910d5ce151d",
+        withoutRoute: "24fb68933fbdffaedcd8b364d3dcde3ad15f676e218e9d374e2160c466891d46",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "bf41389629e90c7cf187f5428647a74289366b3e89ae85b4510dd07ee7ea1b2e",
-        withoutRoute: "be6db0b8a994c3398a9ef917c1ee65ca128d54b0b1efeaa4fe99acec07bdf892",
+        withRoute: "7c24fb2c33b49464b564d4ee7489f29fc9d99f8760323a7f0388bffbdb932c65",
+        withoutRoute: "cd310bbfcab2337921f6312cdf54366a482d334901eb8c0ba0823cd12c045b9b",
       },
       {
         label: "legacy",
