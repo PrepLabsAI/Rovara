@@ -429,6 +429,8 @@ describe("no callers", () => {
       "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
       // setup-prove.ts (DEC 185 / #629) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
       "packages/worker/src/setup-prove.ts",
+      // The v1 test-proof description loader uses the unconfirmed-replies words (TE-192a B-0).
+      "packages/broker/src/developer/test-proof-lines.ts",
     ]);
     expect(hits.filter((file) => !file.startsWith("packages/contracts/") && !approved.has(file))).toEqual([]);
   });
