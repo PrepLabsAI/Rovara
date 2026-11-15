@@ -96,8 +96,35 @@ describe("the conclusion through the pass", () => {
     const { tracking, latest, pr } = await world({ draft: true, facts: PROVEN, check: source() });
     pr.model.requiredChecks = ["Rovara"];
     await trackPullRequest(tracking, TASK_ID);
+    await trackPullRequest(tracking, TASK_ID);
     expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
     expect(latest()?.payload.conclusion).toBe("success");
+  });
+  it("a head Rovara is still working on (not waiting for the merge) is in progress, never success, though the pull request was ready before", async () => {
+    const { tracking, latest, w } = await world({ check: source() });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload.conclusion).toBe("success");
+    await w.setWorkflow({ state: "RUNNING" });
+    await w.store.delete({ key: summaryCheckKey(ORG, TASK_ID, "app", 1) });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload.status).toBe("in_progress");
+  });
+  it("a source whose facts read throws: neutral (a Rovara problem), never failure", async () => {
+    const { tracking, latest } = await world({ draft: true, facts: VACUOUS, check: source({ facts: async () => { throw new Error("boom"); } }) });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "neutral" });
+  });
+  it("the gate switched off while a run is in progress: that run is finished as neutral, once", async () => {
+    let on = true;
+    const { tracking, latest, pr } = await world({ check: source({ enabled: () => on, facts: async () => ({ fullSuite: "pending" }) }) });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload.status).toBe("in_progress");
+    on = false;
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "neutral" });
+    const writes = pr.model.summaryCheckWrites;
+    await trackPullRequest(tracking, TASK_ID);
+    expect(pr.model.summaryCheckWrites).toBe(writes);
   });
   it("a head a person pushed: neutral, Rovara's checks did not run on it", async () => {
     const { tracking, latest, pr } = await world({ check: source() });
@@ -214,6 +241,18 @@ describe("Rovara stops following the task", () => {
     expect(await trackPullRequest(tracking, TASK_ID)).toBe("gone");
     expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "neutral" });
     expect(latest()?.payload.title).toContain("stopped following");
+    const writes = pr.model.summaryCheckWrites;
+    await trackPullRequest(tracking, TASK_ID);
+    expect(pr.model.summaryCheckWrites).toBe(writes);
+  });
+  it("a held failure is finished as neutral (its 'mark ready anyway' is no longer reachable), once", async () => {
+    const { tracking, latest, w, pr } = await world({ draft: true, facts: VACUOUS, check: source() });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload.conclusion).toBe("failure");
+    const { change } = await import("../../packages/contracts/src/index.js");
+    await w.store.update({ key: taskRecordKey(TASK_ID), ops: [change.set(["closedAt"], new Date(w.now.value).toISOString())] });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "neutral" });
     const writes = pr.model.summaryCheckWrites;
     await trackPullRequest(tracking, TASK_ID);
     expect(pr.model.summaryCheckWrites).toBe(writes);

@@ -726,7 +726,9 @@ async function trackOne(
     if (deps.summaryCheck === undefined) return;
     await syncSummaryCheck({ store: deps.store, now: deps.now, source: deps.summaryCheck, ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }) }, {
       task, pullRequest, codeHost, repositoryUrl: url, scope, budget, status: { headRevision: status.headRevision, draft: status.draft && !markedReady, state: status.state },
-      ci: ci.ci, ciMode, headByRovara: fields.headByRovara, ready: readyNow || fields.readyAt !== undefined, proofHoldOn: deps.proofHold !== undefined,
+      ci: ci.ci, ciMode, headByRovara: fields.headByRovara, proofHoldOn: deps.proofHold !== undefined,
+      // Ready for THIS head only while the task waits for the merge: `readyAt` outlives a head, and a head of a fix round or a sync is still being worked on.
+      ready: (readyNow || fields.readyAt !== undefined) && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING",
     });
   };
 

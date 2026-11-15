@@ -38,6 +38,9 @@ describe("the conclusion table (O48)", () => {
     expect(over).toMatchObject({ status: "completed", conclusion: "success" });
     expect(over.title).toContain("overridden by Priya");
   });
+  it("ready with nothing proven claims no proof: the title is only 'Ready'", () => {
+    expect(of({ proof: { ...PROCEED, provenCount: 0 } })).toMatchObject({ conclusion: "success", title: "Ready" });
+  });
   it("an override with no hold changes nothing", () => {
     expect(of({ proof: PROCEED, override: { by: "Priya" } }).title).not.toContain("overridden");
   });
@@ -159,6 +162,10 @@ describe("Rovara's own Check is never read as the customer's CI", () => {
     expect(out.requiredChecks).toEqual([]);
     expect(out.targetHasRequiredChecks).toBe(false);
     expect(out.checks.every((check) => check.name !== "Rovara")).toBe(true);
+  });
+  it("a required 'Rovara' with no source is kept while Rovara's own Check is not on the head (a customer's own job of that name is still waited for)", () => {
+    const out = withoutOwnRovaraCheck(status([unit], [{ name: "Rovara" }]), "999");
+    expect(out.requiredChecks).toEqual([{ name: "Rovara" }]);
   });
   it("no source known: the status is returned unchanged (same object)", () => {
     const input = status([unit, ours], [{ name: "Rovara" }]);

@@ -1217,14 +1217,14 @@ export class GitHubAppCredentialProvider {
     };
     let runId = input.runId;
     if (runId === undefined) {
-      const listed = await provider.trackingJson(`${root}/commits/${input.headSha}/check-runs?check_name=${ROVARA_CHECK_NAME}&app_id=${appId}&filter=all&per_page=20`, token);
+      const listed = await provider.trackingJson(`${root}/commits/${input.headSha}/check-runs?check_name=${ROVARA_CHECK_NAME}&app_id=${appId}&filter=all&per_page=20`, token, { rateLimit: true });
       if (listed.status === 403) return "no_permission";
       if (listed.status !== 200 || !Array.isArray(statusRecord(listed.body).check_runs)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run lookup failed with HTTP ${listed.status}`);
       runId = (statusRecord(listed.body).check_runs as unknown[]).map(ours).find((id) => id !== undefined);
     }
     if (runId !== undefined) {
       const update = Object.fromEntries(Object.entries(body).filter(([name]) => name !== "head_sha"));
-      const patched = await provider.trackingJson(`${root}/check-runs/${runId}`, token, { method: "PATCH", body: update });
+      const patched = await provider.trackingJson(`${root}/check-runs/${runId}`, token, { method: "PATCH", body: update, rateLimit: true });
       if (patched.status === 403) return "no_permission";
       if (patched.status === 200) {
         const id = ours(patched.body);
@@ -1233,7 +1233,7 @@ export class GitHubAppCredentialProvider {
       }
       if (patched.status !== 404) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run update failed with HTTP ${patched.status}`);
     }
-    const created = await provider.trackingJson(`${root}/check-runs`, token, { method: "POST", body });
+    const created = await provider.trackingJson(`${root}/check-runs`, token, { method: "POST", body, rateLimit: true });
     if (created.status === 403) return "no_permission";
     if (created.status !== 201) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run create failed with HTTP ${created.status}`);
     const id = ours(created.body);

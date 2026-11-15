@@ -2,8 +2,9 @@
 //
 // After a tracking pass has read a pull request (and judged its change proof, TE-B5), `syncSummaryCheck` works out the Check for the head (contracts' pure `rovaraCheckOf`) and writes it to the code host
 // only when it changed. A new head gets a new run; the old head's run is left as it is. The write uses the host's own narrow Check permission: an install that has not granted it answers
-// `no_permission`, and the pull request body stays the only summary (asked again after an hour). When Rovara stops following a task, `stopSummaryChecks` sets any run still in progress to
-// neutral once, so a required Check never hangs. Everything here is best effort: a failure is logged and never fails the pass.
+// `no_permission`, and the pull request body stays the only summary (asked again after an hour). When Rovara stops following a task, `stopSummaryChecks` sets any run still in progress, and
+// any held failure (whose "mark ready anyway" can no longer be reached), to neutral once, so a required Check never hangs or blocks for good; the same happens to a pull request's open run when
+// the gate is switched off. A source whose facts or proof read throws is a Rovara problem (neutral), never a failure. Everything here is best effort: a failure is logged and never fails the pass.
 //
 // One small record per pull request, not part of the tracking item (its digest and stored shape are untouched), in the company's own partition:
 //   ORG#<co>#ROVARA_CHECK / <task>#<repo>#<n>   the head, the run id, the digest of what was last written, when the head was first seen, its status
@@ -51,6 +52,7 @@ export interface SummaryCheckRecord {
   runId?: string;
   digest?: string;
   status?: RovaraCheckPayload["status"];
+  conclusion?: RovaraCheckPayload["conclusion"];
   noPermissionAtMs?: number;
 }
 
@@ -58,13 +60,14 @@ const SHA = /^[a-f0-9]{40}$/u;
 /** A stored record of this org and task, or undefined (never one of another). */
 export function summaryCheckRecordOf(stored: Record<string, unknown> | undefined, orgId: OrgId, taskId: string): SummaryCheckRecord | undefined {
   if (stored === undefined || stored["entityType"] !== SUMMARY_CHECK_ENTITY || stored["orgId"] !== orgId || stored["taskId"] !== taskId) return undefined;
-  const { repositoryId, number, headSha, firstSeenAtMs, runId, digest, status, noPermissionAtMs } = stored;
+  const { repositoryId, number, headSha, firstSeenAtMs, runId, digest, status, conclusion, noPermissionAtMs } = stored;
   if (typeof repositoryId !== "string" || typeof number !== "number" || !Number.isSafeInteger(number) || typeof headSha !== "string" || !SHA.test(headSha) || typeof firstSeenAtMs !== "number" || !Number.isFinite(firstSeenAtMs)) return undefined;
   return {
     orgId, taskId, repositoryId, number, headSha, firstSeenAtMs,
     ...(typeof runId === "string" && runId.length > 0 && runId.length <= 100 ? { runId } : {}),
     ...(typeof digest === "string" ? { digest } : {}),
     ...(status === "in_progress" || status === "completed" ? { status } : {}),
+    ...(conclusion === "success" || conclusion === "failure" || conclusion === "neutral" ? { conclusion } : {}),
     ...(typeof noPermissionAtMs === "number" && Number.isFinite(noPermissionAtMs) ? { noPermissionAtMs } : {}),
   };
 }
@@ -110,7 +113,7 @@ export interface SummaryCheckPass {
   ciMode: RovaraCheckInput["ciMode"];
   /** The head is one Rovara pushed (a person's head was never checked by Rovara). */
   headByRovara: boolean;
-  /** The pull request is ready for review as Rovara reads it (taken out of draft, or never a draft and given its reviewers). */
+  /** The pull request is ready for review as Rovara reads it, for this head, while the task waits for the merge (a head of a fix round or a sync is not ready: Rovara is still working). */
   ready: boolean;
   /** The pass judged the proof with a `ProofHoldSource`. False: there is no proof hold, so a ready pull request is simply ready. */
   proofHoldOn: boolean;
@@ -138,7 +141,12 @@ async function proofOf(deps: SummaryCheckDependencies, pass: SummaryCheckPass): 
 export async function syncSummaryCheck(deps: SummaryCheckDependencies, pass: SummaryCheckPass): Promise<"written" | "unchanged" | "off" | "no_permission" | "failed"> {
   try {
     if (pass.codeHost.upsertSummaryCheck === undefined || pass.status.state !== "open") return "off";
-    if (!(await deps.source.enabled(pass.task))) return "off";
+    if (!(await deps.source.enabled(pass.task))) {
+      // The gate was switched off: a run this pull request still has open (in progress, or a held failure) is finished as neutral once, so the switch-off never leaves a required Check hanging.
+      const open = summaryCheckRecordOf(await deps.store.get(summaryCheckKey(pass.task.orgId, pass.task.taskId, pass.pullRequest.repositoryId, pass.pullRequest.number)), pass.task.orgId, pass.task.taskId);
+      if (open !== undefined && stillOpen(open)) await finishOpen(deps, { url: pass.repositoryUrl, codeHost: pass.codeHost }, pass.scope, open, pass.budget);
+      return "off";
+    }
     if ((await ownCheckSourceOf(pass.codeHost, pass.scope)) === undefined) return "off";
     const now = deps.now();
     const head = pass.status.headRevision;
@@ -148,9 +156,13 @@ export async function syncSummaryCheck(deps: SummaryCheckDependencies, pass: Sum
     const same = stored !== undefined && stored.headSha === head ? stored : undefined;
     if (same?.noPermissionAtMs !== undefined && now - same.noPermissionAtMs < SUMMARY_CHECK_PERMISSION_RETRY_MS) return "no_permission";
     const firstSeenAtMs = same?.firstSeenAtMs ?? now;
-    const facts = await deps.source.facts?.({ task: pass.task, repositoryId: pass.pullRequest.repositoryId, number: pass.pullRequest.number, headSha: head });
-    const { proof, override } = await proofOf(deps, pass);
-    const problem = facts?.problem ?? (pass.headByRovara ? undefined : "not_run");
+    // A source that cannot say what it knows is a Rovara problem: neutral, never a failure and never a guess.
+    let unreadable = false;
+    const facts = await (async () => deps.source.facts?.({ task: pass.task, repositoryId: pass.pullRequest.repositoryId, number: pass.pullRequest.number, headSha: head }))().catch(() => { unreadable = true; return undefined; });
+    const read = await proofOf(deps, pass).catch(() => { unreadable = true; return { proof: { kind: "not_judged" as const } }; });
+    const { proof } = read;
+    const override = "override" in read ? read.override : undefined;
+    const problem = unreadable ? "rovara_problem" : facts?.problem ?? (pass.headByRovara ? undefined : "not_run");
     const payload = rovaraCheckOf({
       proof, ...(override === undefined ? {} : { override }), ...(problem === undefined ? {} : { problem }),
       ci: pass.ci, ciMode: pass.ciMode, fullSuite: facts?.fullSuite ?? "not_needed", firstSeenAtMs, nowMs: now,
@@ -161,7 +173,7 @@ export async function syncSummaryCheck(deps: SummaryCheckDependencies, pass: Sum
     const written = await pass.codeHost.upsertSummaryCheck({ url: pass.repositoryUrl }, { headRevision: head, payload, ...(same?.runId === undefined ? {} : { runId: same.runId }), ...(detailsUrl === undefined ? {} : { detailsUrl }) }, pass.scope, pass.budget);
     const record: SummaryCheckRecord = {
       orgId: pass.task.orgId, taskId: pass.task.taskId, repositoryId: pass.pullRequest.repositoryId, number: pass.pullRequest.number, headSha: head, firstSeenAtMs,
-      ...(written === "no_permission" ? { noPermissionAtMs: now } : { runId: written.runId, digest, status: payload.status }),
+      ...(written === "no_permission" ? { noPermissionAtMs: now } : { runId: written.runId, digest, status: payload.status, ...(payload.conclusion === undefined ? {} : { conclusion: payload.conclusion }) }),
     };
     await deps.store.put({ item: plain({ ...key, entityType: SUMMARY_CHECK_ENTITY, ...record }) });
     if (written === "no_permission") {
@@ -181,22 +193,31 @@ export interface StopDependencies extends SummaryCheckDependencies {
   scope(orgId: OrgId): HostScope;
 }
 
-/** Rovara stopped following the task: every run of it still in progress is set to neutral, once. Best effort: never throws. Returns how many were finished. */
+/** A run that may still hold a required Check: in progress, or a held failure. */
+const stillOpen = (record: SummaryCheckRecord): boolean => record.runId !== undefined && (record.status === "in_progress" || record.conclusion === "failure");
+
+/** Finishes one open run as neutral ("Rovara stopped following this pull request") and records it. False when the host refused the write. */
+async function finishOpen(deps: SummaryCheckDependencies, home: { url: string; codeHost: CodeHost }, scope: HostScope, record: SummaryCheckRecord, budget?: ReadBudget): Promise<boolean> {
+  if (home.codeHost.upsertSummaryCheck === undefined || record.runId === undefined) return false;
+  const payload = rovaraCheckOf({ proof: { kind: "not_judged" }, ci: "pending", ciMode: "their_ci_fix", fullSuite: "not_needed", firstSeenAtMs: record.firstSeenAtMs, nowMs: deps.now(), stopped: true });
+  const written = await home.codeHost.upsertSummaryCheck({ url: home.url }, { headRevision: record.headSha, payload, runId: record.runId }, scope, budget);
+  if (written === "no_permission") return false;
+  await deps.store.put({ item: plain({ ...summaryCheckKey(record.orgId, record.taskId, record.repositoryId, record.number), entityType: SUMMARY_CHECK_ENTITY, ...record, digest: digestOf(payload, undefined), status: payload.status, conclusion: payload.conclusion }) });
+  return true;
+}
+
+/** Rovara stopped following the task: every run of it still in progress, and every held failure (its "mark ready anyway" is no longer reachable), is set to neutral, once. Best effort: never throws. Returns how many were finished. */
 export async function stopSummaryChecks(deps: StopDependencies, task: MergeTask & { orgId: OrgId }): Promise<number> {
   let finished = 0;
   try {
     const page = await deps.store.query({ pk: companyScoped(task.orgId, SUMMARY_CHECK_ENTITY), sk: { op: "beginsWith", prefix: `${part(task.taskId, "a task id")}#` }, limit: STOP_MAX });
     for (const item of page.items) {
       const record = summaryCheckRecordOf(item, task.orgId, task.taskId);
-      if (record === undefined || record.status !== "in_progress" || record.runId === undefined) continue;
+      if (record === undefined || !stillOpen(record)) continue;
       try {
         const home = await deps.repository(task.project, task.startingRevision, record.repositoryId, task.orgId);
-        if (home?.codeHost.upsertSummaryCheck === undefined) continue;
-        const payload = rovaraCheckOf({ proof: { kind: "not_judged" }, ci: "pending", ciMode: "their_ci_fix", fullSuite: "not_needed", firstSeenAtMs: record.firstSeenAtMs, nowMs: deps.now(), stopped: true });
-        const written = await home.codeHost.upsertSummaryCheck({ url: home.url }, { headRevision: record.headSha, payload, runId: record.runId }, deps.scope(task.orgId));
-        if (written === "no_permission") continue;
-        await deps.store.put({ item: plain({ ...summaryCheckKey(task.orgId, task.taskId, record.repositoryId, record.number), entityType: SUMMARY_CHECK_ENTITY, ...record, digest: digestOf(payload, undefined), status: payload.status }) });
-        finished += 1;
+        if (home === undefined) continue;
+        if (await finishOpen(deps, home, deps.scope(task.orgId), record)) finished += 1;
       } catch (error) {
         deps.log?.("summary_check.stop_failed", { taskId: task.taskId, number: record.number, error: errorName(error) });
       }

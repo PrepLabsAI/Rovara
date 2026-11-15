@@ -151,19 +151,23 @@ export function rovaraCheckOf(raw: RovaraCheckInput): RovaraCheckPayload {
   if (input.ci === "none") return done("neutral", "No CI (it does not block the merge)");
   if (input.fullSuite === "pending") return running("Draft checked; full suite running");
   if (input.fullSuite === "not_run") return done("neutral", "Full suite not run (it does not block the merge)");
-  if (input.proof.kind === "proceed") return done("success", input.proof.warns ? "Ready, with a warning about the change proof" : "Ready: the change proof holds");
+  // A proof is claimed only where one was judged and proved something; a head that is ready with nothing judged says only "Ready".
+  if (input.proof.kind === "proceed") return done("success", input.proof.warns ? "Ready, with a warning about the change proof" : input.proof.provenCount > 0 ? "Ready: the change proof holds" : "Ready");
   return running("Rovara is checking this change");
 }
 
 /**
  * The status without Rovara's own Check, so the Check is never read as the customer's CI (no fix loop on Rovara's own failure, no wait on itself when a person makes it required).
- * Dropped: a check named "Rovara" whose source is Rovara's own App, and a required entry named "Rovara" that names no source or Rovara's own. A check with no source is never taken for ours.
+ * Dropped: a check named "Rovara" whose source is Rovara's own App; a required entry named "Rovara" that names Rovara's own App; and one that names no source, only while Rovara's own Check is on the head
+ * (so a customer's own job called "Rovara" is still waited for when Rovara has not posted). A check with no source is never taken for ours.
  * Without a known source the status is returned as it is (the same object).
  */
 export function withoutOwnRovaraCheck(status: ChangeRequestStatus, ownSource: string | undefined): ChangeRequestStatus {
   if (ownSource === undefined || ownSource.length === 0) return status;
-  const checks = status.checks.filter((check) => !(check.name === ROVARA_CHECK_NAME && check.source === ownSource));
-  const requiredChecks = status.requiredChecks.filter((entry) => !(entry.name === ROVARA_CHECK_NAME && (entry.source === undefined || entry.source === ownSource)));
+  const ours = (check: ChangeRequestStatus["checks"][number]): boolean => check.name === ROVARA_CHECK_NAME && check.source === ownSource;
+  const ownPresent = status.checks.some(ours);
+  const checks = status.checks.filter((check) => !ours(check));
+  const requiredChecks = status.requiredChecks.filter((entry) => !(entry.name === ROVARA_CHECK_NAME && (entry.source === ownSource || (entry.source === undefined && ownPresent))));
   if (checks.length === status.checks.length && requiredChecks.length === status.requiredChecks.length) return status;
   return { ...status, checks, requiredChecks, targetHasRequiredChecks: status.targetHasRequiredChecks && (requiredChecks.length > 0 || checks.some((check) => check.required)) };
 }
