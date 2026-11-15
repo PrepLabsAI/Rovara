@@ -76,12 +76,18 @@ describe("the health route's grants (A13)", () => {
     }, 120_000);
 
   it("lets the broker read the attributes of exactly the five dead-letter queues", () => {
-    const queues = brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes");
-    expect(queues).toHaveLength(1);
-    expect(queues[0]?.Resource).toHaveLength(5);
+    expect(brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes")).toEqual([]);
+    const brokerRole = Object.keys(named.findResources("AWS::IAM::Role")).find((id) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id))!;
+    const policies = Object.values(named.findResources("AWS::SQS::QueuePolicy")) as Array<{ Properties: { PolicyDocument: { Statement: Array<Statement & { Effect: string; Principal: unknown }> } } }>;
+    const queues = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement).filter((s) => s.Action === "sqs:GetQueueAttributes");
+    expect(queues).toHaveLength(5);
+    for (const statement of queues) {
+      expect(statement.Effect).toBe("Allow");
+      expect(statement.Principal).toEqual({ AWS: { "Fn::GetAtt": [brokerRole, "Arn"] } });
+    }
     // Exactly the five queues' own ARNs, one each: no wildcard, no other queue. Spec 062 added the channel event one.
     const queueIds = [/^DispatchDeadLetterQueue[0-9A-F]{8}$/, /^SlackRequestDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierNoticeDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierStreamFailureQueue[0-9A-F]{8}$/, /^ChannelApiEventDeadLetters[0-9A-F]{8}$/];
-    const resources = queues[0]?.Resource as Array<{ "Fn::GetAtt"?: [string, string] }>;
+    const resources = queues.map((statement) => statement.Resource) as Array<{ "Fn::GetAtt"?: [string, string] }>;
     for (const resource of resources) {
       expect(resource).toEqual({ "Fn::GetAtt": [expect.any(String), "Arn"] });
       expect(Object.keys(named.findResources("AWS::SQS::Queue"))).toContain(resource["Fn::GetAtt"]?.[0]);
@@ -181,6 +187,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
       // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
       "packages/broker/src/core/work-events/work-events.ts",
+      // Engine host (E2): the State table's TTL attribute is named to strip the core's expiries (retention.ts) and to tell the deployed store which attribute it is (code-modules.ts). Neither writes one.
+      "packages/broker/src/core-host/retention.ts", "packages/broker/src/core-host/code-modules.ts",
       // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item core/sessions/notes.ts writes, with the same 400-day expiry; it reads that item back too.
       "packages/broker/src/developer/task-code-routes.ts",
     ]);

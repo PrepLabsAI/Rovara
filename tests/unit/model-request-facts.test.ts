@@ -13,6 +13,12 @@ describe("readModelRequestFacts", () => {
     expect(facts({ stream: "true" }).stream).toBe(false);
     expect(facts({}).model).toBeUndefined();
   });
+  it("includeUsage is true only for stream_options.include_usage === true", () => {
+    expect(facts({ stream_options: { include_usage: true } }).includeUsage).toBe(true);
+    for (const stream_options of [undefined, {}, { include_usage: false }, { include_usage: "true" }, { include_usage: 1 }, null, [true], "x"]) expect(facts({ stream_options }).includeUsage).toBe(false);
+    expect(facts("{").includeUsage).toBe(false);
+    expect(facts(`{"stream_options":{"__proto__":{"include_usage":true}}}`).includeUsage).toBe(false);
+  });
   it("a body that is not a JSON object gives the empty facts", () => {
     for (const body of ["", "nope", "[1]", "null", "3", '"s"', "{"]) expect(facts(body), body).toMatchObject({ model: undefined, stream: false, promptText: undefined, inputCount: 1, documentCount: 0 });
   });
