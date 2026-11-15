@@ -27,6 +27,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 
 ## Record constructors, dispatch paths and gateway paths
 
+| kind | identity | class | table | checked | methods | reason |
+|---|---|---|---|---|---|---|
 | record | pk:CORE_ENGINE_IN_USE; entity:CORE_ENGINE_IN_USE | install-wide | State table | no | - | Internal root-job directory of companies with core work; intentionally enumerates all companies, not a customer data endpoint. |
 | record | pk:TASK_ENGINE; entity:TASK_ENGINE | needs-company | State table | no | - | T1/T2: stamp carries orgId but engineOfStoredTask reads an unscoped task key without a company argument. |
 | record | pk:PROJECT_MEMBERS; entity:PROJECT_MEMBER | needs-company | State table | no | - | T1/T3: reverse project-member index is keyed by project name only; client member reads/writes need company-aware grants and targets. |
@@ -1139,6 +1141,8 @@ Forwarding sites were re-anchored to the merged sources without weakening the sc
 
 ## Merge-up 2: full-access callers, chosen names and task readers
 
+| kind | identity | class | table | checked | methods | reason |
+|---|---|---|---|---|---|---|
 | record | builder:packages/broker/src/e2e/legacy-key-scope.ts:scopedProjectPk | needs-company | State table | no | - | T1: mixed scoped/legacy constructor accepts a legacy-unscoped selector without resolving membership; named known-gap test pins that responsibility. Incoming e2e-legacy-scope-fallback tests prove existing callers restrict legacy reads to the implicit company. |
 | route | /v1/dev/me/name | install-wide | sign-in table | no | PUT | Verified person's own sign-in identity/display name, deliberately shared across their company contexts; developer-own-name tests cover caller-only updates. |
 | route | /v1/dev/tasks/{taskId}/readers | needs-company | State table | yes | GET | Membership-resolved task gate, including viewer fallback, under the total read budget. Returned person/project-grant metadata is still install-wide; T2/T3 recipient membership binding is a named known gap. |
@@ -1177,6 +1181,8 @@ Old unscoped names belong only to the explicitly configured implicit company in 
 
 ## Merge-up 3: proof holds and mark-ready overrides
 
+| kind | identity | class | table | checked | methods | reason |
+|---|---|---|---|---|---|---|
 | record | entity:PROOF_HOLD | needs-company | State table | no | - | T1: proofHoldKey constructs DEVTASK/task + PROOF_HOLD/repository/number without company. holdRecordOf/readProofHold check orgId and taskId, but judgeProofHold compares the raw stateKey and writes without a company fence: a same-task collision can suppress or replace another company's judgement. Named known-gap test in company-inventory.test.ts. |
 | record | entity:PROOF_OVERRIDE | needs-company | State table | no | - | T1: proofOverrideKey constructs DEVTASK/task + PROOF_OVERRIDE/repository/number without company. overrideRecordOf and markReadyAnyway check company/task and live roles; their absent/head conditions do not namespace uniqueness by company. A foreign row at that key blocks an otherwise authorized mark-ready. Named known-gap test in company-inventory.test.ts; foreign override contents are refused. |
 | record | entity:PROOF_HOLD_HISTORY | company-scoped | State table | no | - | historyKey uses companyScoped(orgId, "PROOF_HOLD_HISTORY") and validates the project sort key; every history reader/writer uses that constructor. The same-project two-company behavioural test in company-inventory.test.ts proves separate history totals. |
@@ -1205,6 +1211,8 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 
 ## T3 merge-up: code/next lessons extraction
 
+| kind | identity | class | table | checked | methods | reason |
+|---|---|---|---|---|---|---|
 | record | entity:LESSONS_NIGHTLY | company-scoped | State table | no | - | core-host/lessons.ts nightlyKey uses companyScoped(companyId, LESSONS_NIGHTLY) for both claimNightly and releaseNightly; core-host-lessons tests exercise two-company nightly isolation. |
 | record | pk:COMPANY_PURGE; entity:COMPANY_PURGE | install-wide | State table | no | - | Company purge state, one row per company (sort key = company id). The operator-only resume job enumerates every company's purge by design; no customer route reads it; every write is conditioned on that row's status, request id and lease. |
 | record | builder:packages/broker/src/core/company/purge.ts:marksPk; entity:COMPANY_PURGE_MARK | company-scoped | State table | no | - | Partition named by the purging company's id (COMPANY_PURGE_MARK#<company>), read and written only with that purge's own company; company-purge two-company tests pin separation. |
