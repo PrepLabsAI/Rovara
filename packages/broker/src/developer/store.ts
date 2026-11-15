@@ -1,29 +1,82 @@
 // packages/broker/src/developer/store.ts
 // The DeveloperSignIn table (spec 025 FR-005, FR-008). Codes and refresh tokens are stored only as
 // SHA-256 hashes. Every expiry is checked here; the table's TTL only cleans up afterwards.
+import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import {
   DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_CODE_SECONDS,
+  DEVELOPER_PASSKEYS_MAX,
   DEVELOPER_SESSION_SECONDS,
+  DEVELOPER_STEP_UP_ATTEMPTS_MAX,
+  DEVELOPER_STEP_UP_EMAILS_MAX,
+  DEVELOPER_STEP_UP_PAGES_PER_HOUR,
+  DEVELOPER_STEP_UP_SECONDS,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped,
   SIGN_IN_CLIENTS_PK,
+  agentXError,
   SignInClientRecordSchema,
   signInClientKey,
   type DeveloperSignInMethod,
+  type DeveloperStepUpMethod,
   type SignInClientRecord,
+  SignInClientIdSchema,
 } from "@agentx/contracts";
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
 /** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string }
-export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
+/** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[]; companyId?: string;
+  /** Lane ID part 2: the client asked for a step-up (`acr_values=step-up`). The sign-in at the provider then only says who it is; Code's own factor follows. */
+  stepUp?: true }
+export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
+  /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
+  displayNameChosen?: boolean;
+  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
+  /**
+   * ID-STEPUP-FOLLOWUPS (a): where step-up codes go. Captured once, from the verified email of the person's FIRST sign-in, or set by a company admin; a later sign-in never changes it,
+   * whatever the provider now says (`email` follows the provider; this does not). Absent: no email factor until an admin sets one.
+   */
+  factorEmail?: string; factorEmailSetAt?: string;
+  /** `first_sign_in`, or the developer id of the admin who set it. */
+  factorEmailSetBy?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
 
-/** What a code carries into its session. */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true }
+/**
+ * What a code carries into its session. `stepUpAt` (epoch seconds) and `stepUpMethod` (lane ID part 2): when and how the person last proved it was them with a factor Code owns.
+ * Set only by a completed step-up; a refresh carries them over unchanged, so the step-up ages and is never renewed by a refresh.
+ */
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
+
+/**
+ * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
+ * is the SHA-256 of the last emailed code bound to this record. `emailsSent` and `attempts` count up to their limits and never reset.
+ */
+/** Lane ID part 2b: one passkey registered with Code. `publicKey` is the COSE public key, base64url. */
+export interface PasskeyRecord { credentialId: string; publicKey: string; counter: number; createdAt: string; transports?: string[]; lastUsedAt?: string }
+
+/** The most passkey rows one removal of all of a person's passkeys reads (registration keeps a person at DEVELOPER_PASSKEYS_MAX; more rows than this is an error, never a partial removal). */
+const PASSKEY_ROWS_REMOVE_MAX = 100;
+
+export interface StepUpRecord {
+  grant: CodeGrant & { codeChallenge: string; redirectUri: string };
+  clientState: string;
+  /** Where the code goes: the person's email as it stood before the sign-in that started this page. Absent: no email factor (a passkey only). */
+  email?: string;
+  /** Lane ID part 2b: the WebAuthn challenge handed out last on this page, and for which ceremony (`get` signs in with a passkey; `create` registers one). */
+  challenge?: string;
+  challengeKind?: "get" | "create";
+  /** Set when the emailed code was right and the person is offered a passkey before going back: the step-up's time (epoch seconds). */
+  verifiedAt?: number;
+  expiresAt: number;
+  emailsSent: number;
+  attempts: number;
+  emailCodeHash?: string;
+  consumedAt?: string;
+}
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
 export function methodSince(text: string | undefined): number | undefined {
@@ -64,8 +117,10 @@ interface CancellationReason { Code?: string }
 export const META = "META";
 
 /** E8: the email index's key, the SHA-256 of the trimmed, lowercased email, so no email is stored as a key. */
-export function emailIndexKey(email: string): { pk: string; sk: "META" } {
-  return { pk: `EMAIL#${sha256Hex(email.trim().toLowerCase())}`, sk: META };
+export function emailIndexKey(email: string, companyId?: string): { pk: string; sk: "META" } {
+  const key = `EMAIL#${sha256Hex(email.trim().toLowerCase())}`;
+  if (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) return { pk: key, sk: META };
+  return { pk: companyScoped(OrgIdSchema.parse(companyId), key), sk: META };
 }
 const conditionFailed = (error: unknown) =>
   error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
@@ -96,25 +151,66 @@ export class DeveloperSignInStore {
   // ---- Spec 063: the sign-in clients an administrator registered ----
 
   /** Registers a client or replaces it; its first registration's time is kept. */
-  async putClient(client: SignInClientRecord): Promise<void> {
+  async putClient(client: SignInClientRecord, companyId?: string, options: { keepSecret?: true; operator?: true; commit?: (writes: NonNullable<TransactWriteCommandInput["TransactItems"]>) => Promise<void> } = {}): Promise<void> {
+    if (companyId !== undefined) {
+      const started = this.input.now();
+      const scope = OrgIdSchema.parse(companyId);
+      const record = SignInClientRecordSchema.parse(client);
+      if (options.operator !== true && (record.installLevel === true || (record.companyId ?? IMPLICIT_COMPANY_ID) !== scope)) throw new Error("client unavailable");
+      const revision = await this.clientRevision();
+      const clients = await this.clientSnapshot(started, { revision });
+      const current = clients.find((row) => row.clientId === record.clientId);
+      if (current !== undefined && (current.installLevel === true ? options.operator !== true || record.installLevel !== true : record.installLevel === true || (current.companyId ?? IMPLICIT_COMPANY_ID) !== scope)) throw new Error("client unavailable");
+      if (clients.some((row) => row.clientId !== record.clientId && row.audience === record.audience) || (current === undefined && clients.length >= 100)) throw new Error("client unavailable");
+      if (options.keepSecret === true) {
+        if (current?.secretHash === undefined) throw new Error("client unavailable");
+        record.secretHash = current.secretHash;
+      }
+      if (record.fullAccess === true && record.secretHash === undefined) throw new Error("client unavailable");
+      const writes = [{ Put: { TableName: this.input.tableName, Item: { ...signInClientKey(record.clientId), entityType: "SIGN_IN_CLIENT", ...record, createdAt: current?.createdAt ?? record.createdAt } } }, this.reviseClients(revision)];
+      if (this.input.now() - started > 10_000) throw new Error("client unavailable");
+      if (options.commit !== undefined) await options.commit(writes);
+      else await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: writes }));
+      return;
+    }
     const record = SignInClientRecordSchema.parse(client);
     const current = await this.getClient(record.clientId);
     await this.input.documentClient.send(new PutCommand({ TableName: this.input.tableName,
       Item: { ...signInClientKey(record.clientId), entityType: "SIGN_IN_CLIENT", ...record, createdAt: current?.createdAt ?? record.createdAt } }));
   }
 
-  async removeClient(clientId: string): Promise<boolean> {
+  async removeClient(clientId: string, companyId?: string): Promise<boolean> {
+    if (companyId !== undefined) {
+      const started = this.input.now();
+      const scope = OrgIdSchema.parse(companyId);
+      SignInClientIdSchema.parse(clientId);
+      const revision = await this.clientRevision();
+      const clients = await this.clientSnapshot(started, { revision });
+      const current = clients.find((row) => row.clientId === clientId);
+      if (current === undefined || current.installLevel === true || (current.companyId ?? IMPLICIT_COMPANY_ID) !== scope) return false;
+      await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Delete: { TableName: this.input.tableName, Key: signInClientKey(clientId) } }, this.reviseClients(revision),
+      ] }));
+      return true;
+    }
     const response = await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ReturnValues: "ALL_OLD" })) as { Attributes?: unknown };
     return response.Attributes !== undefined;
   }
 
   /** A registered client, or undefined for one never registered or since removed (an unreadable row reads as none). */
-  async getClient(clientId: string): Promise<SignInClientRecord | undefined> {
+  async getClient(clientId: string, companyId?: string, companyMode = false): Promise<SignInClientRecord | undefined> {
     const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ConsistentRead: true })) as { Item?: Record<string, unknown> };
-    return response.Item === undefined ? undefined : clientOf(response.Item);
+    const client = response.Item === undefined ? undefined : clientOf(response.Item);
+    if ((companyMode || companyId !== undefined) && response.Item !== undefined && (response.Item.pk !== SIGN_IN_CLIENTS_PK || response.Item.sk !== `CLIENT#${clientId}` || response.Item.entityType !== "SIGN_IN_CLIENT" || client?.clientId !== clientId)) return undefined;
+    if (companyId !== undefined && (!OrgIdSchema.safeParse(companyId).success || client?.installLevel === true || (client?.companyId ?? IMPLICIT_COMPANY_ID) !== companyId)) return undefined;
+    return client;
   }
 
-  async listClients(): Promise<SignInClientRecord[]> {
+  async listClients(companyId?: string): Promise<SignInClientRecord[]> {
+    if (companyId !== undefined) {
+      const scope = OrgIdSchema.parse(companyId);
+      return (await this.clientSnapshot(this.input.now())).filter((row) => row.installLevel !== true && (row.companyId ?? IMPLICIT_COMPANY_ID) === scope);
+    }
     const clients: SignInClientRecord[] = [];
     let start: Record<string, unknown> | undefined;
     do {
@@ -126,6 +222,39 @@ export class DeveloperSignInStore {
       }
       start = response.LastEvaluatedKey;
     } while (start !== undefined);
+    return clients.sort((a, b) => a.clientId.localeCompare(b.clientId));
+  }
+
+  /** The revision must precede the complete snapshot: all company-mode writers serialize here. */
+  private async clientRevision(): Promise<string | undefined> {
+    const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: { pk: SIGN_IN_CLIENTS_PK, sk: "REVISION" }, ConsistentRead: true })) as { Item?: unknown };
+    if (response.Item === undefined) return undefined;
+    return z.object({ pk: z.literal(SIGN_IN_CLIENTS_PK), sk: z.literal("REVISION"), entityType: z.literal("SIGN_IN_CLIENT_REGISTRY"), revision: z.uuid() }).strict().parse(response.Item).revision;
+  }
+  private reviseClients(revision: string | undefined) {
+    return { Put: { TableName: this.input.tableName, Item: { pk: SIGN_IN_CLIENTS_PK, sk: "REVISION", entityType: "SIGN_IN_CLIENT_REGISTRY", revision: randomUUID() },
+      ...(revision === undefined ? { ConditionExpression: "attribute_not_exists(pk)" } : { ConditionExpression: "revision = :revision", ExpressionAttributeValues: { ":revision": revision } }),
+    } };
+  }
+  /** One query, 100 clients plus the revision, one total byte/time budget. Pagination is not proof. */
+  private async clientSnapshot(started: number, expected?: { revision: string | undefined }): Promise<SignInClientRecord[]> {
+    const response = await this.input.documentClient.send(new QueryCommand({ TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": SIGN_IN_CLIENTS_PK }, ConsistentRead: true, Limit: 102 })) as { Items?: unknown[]; LastEvaluatedKey?: unknown };
+    if (!Array.isArray(response.Items) || response.Items.length > 101 || response.LastEvaluatedKey !== undefined || Buffer.byteLength(JSON.stringify(response)) > 900_000 || this.input.now() - started > 10_000) throw new Error("client unavailable");
+    const clients: SignInClientRecord[] = []; const ids = new Set<string>(); const audiences = new Set<string>();
+    let revisionSeen = false; let snapshotRevision: string | undefined;
+    for (const value of response.Items) {
+      const row = z.record(z.string(), z.unknown()).parse(value);
+      if (row.sk === "REVISION") {
+        z.object({ pk: z.literal(SIGN_IN_CLIENTS_PK), sk: z.literal("REVISION"), entityType: z.literal("SIGN_IN_CLIENT_REGISTRY"), revision: z.uuid() }).strict().parse(row);
+        if (revisionSeen) throw new Error("client unavailable");
+        snapshotRevision = row.revision as string; revisionSeen = true; continue;
+      }
+      const client = clientOf(row);
+      if (client === undefined || row.pk !== SIGN_IN_CLIENTS_PK || row.sk !== `CLIENT#${client.clientId}` || row.entityType !== "SIGN_IN_CLIENT" || ids.has(client.clientId) || audiences.has(client.audience)) throw new Error("client unavailable");
+      ids.add(client.clientId); audiences.add(client.audience); clients.push(client);
+    }
+    if (expected !== undefined && snapshotRevision !== expected.revision) throw new Error("client unavailable");
+    if (clients.length > 100) throw new Error("client unavailable");
     return clients.sort((a, b) => a.clientId.localeCompare(b.clientId));
   }
 
@@ -175,19 +304,21 @@ export class DeveloperSignInStore {
     return item === undefined ? undefined : strip(item);
   }
 
-  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked">): Promise<DeveloperRecord> {
+  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string): Promise<DeveloperRecord> {
     // One atomic update, not a read-then-overwrite: a concurrent revocation (or another sign-in)
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
     const at = this.iso();
+    const mark = randomUUID();
     const setClauses = [
       "entityType = :entityType",
       "provider = :provider",
       "issuer = :issuer",
       "subject = :subject",
-      "displayName = :displayName",
       "lastSignInAt = :at",
       "firstSignInAt = if_not_exists(firstSignInAt, :at)",
+      // ID-STEPUP-FOLLOWUPS (a): a mark only the write that first sets it holds (two sign-ins in one millisecond have different marks).
+      "firstSignInMark = if_not_exists(firstSignInMark, :mark)",
       "revoked = if_not_exists(revoked, :false)",
     ];
     const removeClauses: string[] = [];
@@ -196,28 +327,90 @@ export class DeveloperSignInStore {
       ":provider": profile.provider,
       ":issuer": profile.issuer,
       ":subject": profile.subject,
-      ":displayName": profile.displayName,
       ":at": at,
       ":false": false,
+      ":mark": mark,
     };
     if (profile.email === undefined) removeClauses.push("email");
     else { setClauses.push("email = :email"); values[":email"] = profile.email; }
     if (profile.slackUserId === undefined) removeClauses.push("slackUserId");
     else { setClauses.push("slackUserId = :slackUserId"); values[":slackUserId"] = profile.slackUserId; }
 
-    await this.input.documentClient.send(new UpdateCommand({
+    const update = (withName: boolean) => this.input.documentClient.send(new UpdateCommand({
       TableName: this.input.tableName,
       Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
-      UpdateExpression: `SET ${setClauses.join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
-      ExpressionAttributeValues: values,
+      UpdateExpression: `SET ${[...setClauses, ...(withName ? ["displayName = :displayName"] : [])].join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
+      // A name the person chose is theirs: the sign-in writes the provider's name only while they have not chosen one. The check is part of
+      // the write, so a name chosen while this sign-in is in flight is not overwritten either (ported from an earlier private release).
+      ...(withName ? { ConditionExpression: "attribute_not_exists(displayNameChosen) OR displayNameChosen = :false" } : {}),
+      ExpressionAttributeValues: { ...values, ...(withName ? { ":displayName": profile.displayName } : {}) },
     }));
+    try {
+      await update(true);
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+      await update(false);
+    }
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
-      await this.put({ ...emailIndexKey(profile.email), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+      await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+      // ID-STEPUP-FOLLOWUPS (a): the factor email is captured on the FIRST sign-in only. Both conditions hold only for the write that created the record: if_not_exists keeps an earlier
+      // first sign-in's time and mark (a record from before the mark has an older time), so a later sign-in, with whatever email the provider now says, never sets or moves it.
+      try {
+        await this.input.documentClient.send(new UpdateCommand({
+          TableName: this.input.tableName, Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
+          UpdateExpression: "SET factorEmail = :email, factorEmailSetAt = :at, factorEmailSetBy = :by",
+          ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(factorEmail) AND firstSignInAt = :at AND firstSignInMark = :mark",
+          ExpressionAttributeValues: { ":email": profile.email, ":at": at, ":by": "first_sign_in", ":mark": mark },
+        }));
+      } catch (error) {
+        if (!conditionFailed(error)) throw error;
+      }
     }
     const stored = await this.getDeveloper(profile.developerId);
     if (stored === undefined) throw new Error("developer upsert did not persist");
     return stored;
+  }
+
+  /**
+   * The person chooses their own name. `developerId` is the verified caller's, never anything a request carries; `name` was checked with
+   * `SetMyNameBodySchema` at the route. Marks it chosen, so a sign-in leaves it alone. A revoked or unknown person is NOT_FOUND.
+   */
+  async setChosenDisplayName(developerId: string, name: string): Promise<DeveloperRecord> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `DEVELOPER#${developerId}`, sk: META },
+        UpdateExpression: "SET displayName = :name, displayNameChosen = :chosen",
+        ConditionExpression: "attribute_exists(pk) AND revoked = :false",
+        ExpressionAttributeValues: { ":name": name, ":chosen": true, ":false": false },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) throw agentXError("NOT_FOUND", "your sign-in record was not found; sign in again");
+      throw error;
+    }
+    const stored = await this.getDeveloper(developerId);
+    if (stored === undefined) throw agentXError("NOT_FOUND", "your sign-in record was not found; sign in again");
+    return stored;
+  }
+
+  /**
+   * ID-STEPUP-FOLLOWUPS (a): a company admin sets a person's factor email. Only while it is still `expected` (undefined: none), so two changes cannot cross. False: the person's record is
+   * gone, or the factor email changed meanwhile.
+   */
+  async setFactorEmail(developerId: string, email: string, expected: string | undefined, by: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `DEVELOPER#${developerId}`, sk: META },
+        UpdateExpression: "SET factorEmail = :email, factorEmailSetAt = :at, factorEmailSetBy = :by",
+        ConditionExpression: `attribute_exists(pk) AND ${expected === undefined ? "attribute_not_exists(factorEmail)" : "factorEmail = :expected"}`,
+        ExpressionAttributeValues: { ":email": email, ":at": this.iso(), ":by": by, ...(expected === undefined ? {} : { ":expected": expected }) },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
   }
 
   async getDeveloper(developerId: string): Promise<DeveloperRecord | undefined> {
@@ -254,7 +447,243 @@ export class DeveloperSignInStore {
       ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }),
       ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
       ...(record.administrator === true ? { administrator: true as const } : {}),
+      ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
+      ...(record.stepUpAt === undefined || record.stepUpMethod === undefined ? {} : { stepUpAt: record.stepUpAt, stepUpMethod: record.stepUpMethod }),
+      ...(record.companyId === undefined ? {} : { companyId: record.companyId }),
     };
+  }
+
+  // ---- Lane ID part 2: a step-up page in progress ----
+
+  /**
+   * Starts a step-up page for a person the provider just named. Answers the secret for the browser's cookie (only its hash is stored), or undefined when this person already started
+   * DEVELOPER_STEP_UP_PAGES_PER_HOUR pages in the current hour (one rolling counter row per person, changed only by conditional writes), which bounds the emails and the guesses.
+   */
+  async createStepUp(input: Pick<StepUpRecord, "grant" | "clientState" | "email">): Promise<string | undefined> {
+    if (!await this.takeStepUpRate(input.grant.developerId)) return undefined;
+    const secret = randomToken("");
+    const record: StepUpRecord = { ...input, expiresAt: this.seconds() + DEVELOPER_STEP_UP_SECONDS, emailsSent: 0, attempts: 0 };
+    await this.put({ pk: `STEPUP#${sha256Hex(secret)}`, sk: META, entityType: "STEP_UP", ...record }, "attribute_not_exists(pk)");
+    return secret;
+  }
+
+  private async takeStepUpRate(developerId: string): Promise<boolean> {
+    const key = { pk: `STEPUP_RATE#${developerId}`, sk: META };
+    const now = this.seconds();
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: key, UpdateExpression: "SET pages = pages + :one",
+        ConditionExpression: "attribute_exists(pk) AND windowStart > :cutoff AND pages < :max",
+        ExpressionAttributeValues: { ":one": 1, ":cutoff": now - 3600, ":max": DEVELOPER_STEP_UP_PAGES_PER_HOUR },
+      }));
+      return true;
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+    }
+    try {
+      // A new hour: only when there is no row, or its hour is over (a full current hour is never reset here).
+      await this.input.documentClient.send(new PutCommand({
+        TableName: this.input.tableName, Item: { ...key, entityType: "STEP_UP_RATE", windowStart: now, pages: 1, expiresAt: now + 7200 },
+        ConditionExpression: "attribute_not_exists(pk) OR windowStart <= :cutoff", ExpressionAttributeValues: { ":cutoff": now - 3600 },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Hands out a WebAuthn challenge on a live page (replacing any earlier one). False: the page is gone. */
+  async setStepUpChallenge(secret: string, challenge: string, kind: "get" | "create"): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET challenge = :challenge, challengeKind = :kind",
+        // A registration challenge only on a page whose code was proved; a sign-in challenge only on one whose code was not.
+        ConditionExpression: `attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND ${kind === "create" ? "attribute_exists(verifiedAt)" : "attribute_not_exists(verifiedAt)"}`,
+        ExpressionAttributeValues: { ":challenge": challenge, ":kind": kind, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Spends the page's WebAuthn challenge, once, before the answer to it is checked. False: it was spent already, replaced, or is for the other ceremony. */
+  async takeStepUpChallenge(secret: string, challenge: string, kind: "get" | "create"): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "REMOVE challenge, challengeKind",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND challenge = :challenge AND challengeKind = :kind",
+        ExpressionAttributeValues: { ":challenge": challenge, ":kind": kind, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Marks the emailed code as proved, once, at `at` (epoch seconds), and spends the code. False: already marked, or the page is gone. */
+  async markStepUpVerified(secret: string, at: number): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET verifiedAt = :at REMOVE emailCodeHash",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND attribute_not_exists(verifiedAt)",
+        ExpressionAttributeValues: { ":at": at, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  // ---- Lane ID part 2b: the passkeys a person registered with Code ----
+
+  /** The person's passkeys (at most DEVELOPER_PASSKEYS_MAX are ever read). Rows that do not read are left out. */
+  async listPasskeys(developerId: string): Promise<PasskeyRecord[]> {
+    const response = await this.input.documentClient.send(new QueryCommand({
+      TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: DEVELOPER_PASSKEYS_MAX,
+    })) as { Items?: Array<Record<string, unknown>> };
+    return (response.Items ?? []).flatMap((item) => {
+      const { credentialId, publicKey, counter, createdAt, transports, lastUsedAt } = item;
+      if (typeof credentialId !== "string" || typeof publicKey !== "string" || typeof counter !== "number" || !Number.isSafeInteger(counter) || counter < 0 || typeof createdAt !== "string") return [];
+      const listed = Array.isArray(transports) ? transports.filter((entry): entry is string => typeof entry === "string").slice(0, 8) : undefined;
+      return [{ credentialId, publicKey, counter, createdAt, ...(listed === undefined ? {} : { transports: listed }), ...(typeof lastUsedAt === "string" ? { lastUsedAt } : {}) }];
+    });
+  }
+
+  /** Registers a passkey; false when this credential is already registered (to anyone's row of this person). */
+  async addPasskey(developerId: string, passkey: PasskeyRecord): Promise<boolean> {
+    try {
+      await this.put({ pk: `PASSKEYS#${developerId}`, sk: passkey.credentialId, entityType: "PASSKEY", ...passkey }, "attribute_not_exists(pk)");
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** ID-STEPUP-FOLLOWUPS (b): removes one of a person's passkeys. False: they have no passkey with that id. */
+  async removePasskey(developerId: string, credentialId: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk: credentialId }, ConditionExpression: "attribute_exists(pk)" }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * ID-STEPUP-FOLLOWUPS (b): removes every passkey row of a person, readable or not, and answers how many. A person with more than PASSKEY_ROWS_REMOVE_MAX rows throws before anything is
+   * removed (never a partial removal), and the caller says it could not finish.
+   */
+  async removeAllPasskeys(developerId: string): Promise<number> {
+    // Counted first: more rows than one removal reads is refused before anything is deleted.
+    let counted = 0;
+    let start: Record<string, unknown> | undefined;
+    do {
+      const page = await this.input.documentClient.send(new QueryCommand({
+        TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: 25,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: unknown[]; LastEvaluatedKey?: Record<string, unknown> };
+      counted += (page.Items ?? []).length;
+      if (counted > PASSKEY_ROWS_REMOVE_MAX) throw new Error("more passkey rows than one removal reads");
+      start = page.LastEvaluatedKey;
+    } while (start !== undefined);
+    let removed = 0;
+    for (;;) {
+      const response = await this.input.documentClient.send(new QueryCommand({
+        TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: 25,
+      })) as { Items?: Array<Record<string, unknown>> };
+      const rows = (response.Items ?? []).flatMap((item) => (typeof item.sk === "string" ? [item.sk] : []));
+      if (rows.length === 0) return removed;
+      for (const sk of rows) {
+        if (removed >= PASSKEY_ROWS_REMOVE_MAX) throw new Error("more passkey rows than one removal reads");
+        await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk } }));
+        removed += 1;
+      }
+    }
+  }
+
+  /** Moves a passkey's signature counter on, only from the value it was read at (two uses of one assertion cannot both pass). */
+  async setPasskeyCounter(developerId: string, credentialId: string, from: number, to: number): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk: credentialId },
+        UpdateExpression: "SET #counter = :to, lastUsedAt = :at", ConditionExpression: "attribute_exists(pk) AND #counter = :from",
+        ExpressionAttributeNames: { "#counter": "counter" }, ExpressionAttributeValues: { ":to": to, ":from": from, ":at": this.iso() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** A live step-up page (not expired, not used), or undefined. */
+  async getStepUp(secret: string): Promise<StepUpRecord | undefined> {
+    if (secret === "") return undefined;
+    const item = await this.get<StepUpRecord>(`STEPUP#${sha256Hex(secret)}`);
+    return item === undefined || item.expiresAt <= this.seconds() || item.consumedAt !== undefined ? undefined : strip(item);
+  }
+
+  /** Binds a newly emailed code to the page, if it may send another (at most DEVELOPER_STEP_UP_EMAILS_MAX, and none once its tries are used up). False: it may not, or the page is gone. */
+  async recordStepUpEmail(secret: string, codeHash: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET emailCodeHash = :hash, emailsSent = emailsSent + :one",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND emailsSent < :max AND attempts < :tries",
+        ExpressionAttributeValues: { ":hash": codeHash, ":one": 1, ":now": this.seconds(), ":max": DEVELOPER_STEP_UP_EMAILS_MAX, ":tries": DEVELOPER_STEP_UP_ATTEMPTS_MAX },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Counts one try at a code BEFORE it is compared (at most DEVELOPER_STEP_UP_ATTEMPTS_MAX per page), and answers the page as it stands after the count. Undefined: no tries left, or the page is gone. */
+  async countStepUpAttempt(secret: string): Promise<StepUpRecord | undefined> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET attempts = attempts + :one",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND attempts < :max",
+        ExpressionAttributeValues: { ":one": 1, ":now": this.seconds(), ":max": DEVELOPER_STEP_UP_ATTEMPTS_MAX },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) return undefined;
+      throw error;
+    }
+    return this.getStepUp(secret);
+  }
+
+  /** Uses the page up, once. Undefined: it was already used, expired, or never existed. */
+  async consumeStepUp(secret: string): Promise<StepUpRecord | undefined> {
+    const pk = `STEPUP#${sha256Hex(secret)}`;
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk, sk: META },
+        UpdateExpression: "SET consumedAt = :at",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt)",
+        ExpressionAttributeValues: { ":at": this.iso(), ":now": this.seconds() },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) return undefined;
+      throw error;
+    }
+    const item = await this.get<StepUpRecord>(pk);
+    return item === undefined ? undefined : strip(item);
   }
 
   /** `endsAt` (epoch seconds) is for a browser review sign-in, which has its own fixed length; every other session lasts DEVELOPER_SESSION_SECONDS. The stored record's clean-up time follows `endsAt`. */

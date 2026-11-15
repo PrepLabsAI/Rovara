@@ -143,6 +143,21 @@ describe("developers without a Slack link (FR-020, R6)", () => {
     expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION")).toMatchObject({ count: 1 });
   });
 
+  it("can use a project they administer, since an administrator may do all a developer may (#630)", async () => {
+    const { db, dev } = await createDeveloperTaskBroker();
+    db.set({ pk: `MEMBER#${OMAR.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: OMAR.developerId, projectName: "payments", role: "administrator" });
+    const response = await dev(OMAR, "POST", "/v1/dev/tasks", start());
+    expect(response.status).toBe(200);
+    expect(db.get(`DEVELOPER_LIMIT#${OMAR.developerId}`, "MEMBER")).toMatchObject({ count: 1 });
+  });
+
+  it("still refuses a membership row with any other role", async () => {
+    const { db, dev } = await createDeveloperTaskBroker();
+    db.set({ pk: `MEMBER#${OMAR.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: OMAR.developerId, projectName: "payments", role: "viewer" });
+    const response = await dev(OMAR, "POST", "/v1/dev/tasks", start());
+    expect(response.body.error).toEqual({ code: "PROJECT_ACCESS_DENIED", message: "you don't have access to `payments`: ask an admin" });
+  });
+
   it("counts on the developer organization counter when the environment has no Slack team ID", async () => {
     const { db, dev } = await createDeveloperTaskBroker({ slackTeamId: null });
     db.set({ pk: `MEMBER#${OMAR.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: OMAR.developerId, projectName: "payments", role: "developer" });

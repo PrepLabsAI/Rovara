@@ -18,6 +18,7 @@
 //   - A reset kind with no hook, or a hook that fails, is a refusal, never a silent skip (`ServiceRunnerError`).
 import { randomBytes } from "node:crypto";
 import type { ProjectCommand, SeedScriptLock, TaskDependencyPlan } from "@agentx/contracts";
+import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { HELPER_CREDENTIAL_PATTERNS, controlCallArgs, type HelperFiles } from "./service-helpers.js";
 import type { ResetContext, ResetHook, ResetHooks, ResetOutcome, ServiceSession } from "./service-runner.js";
 
@@ -67,7 +68,11 @@ export async function runSeeds(dependencyId: string, seeds: readonly SeedRef[], 
     if (signal.aborted) throw new SeedError("stopped");
     if ("command" in seed) {
       if (seed.lock !== undefined && (ports.lockHolds === undefined || !await ports.lockHolds(seed.command, seed.lock).catch(() => false))) throw new SeedError("seed_changed");
-      const result = await ports.runCommand(seed.command, signal).catch(() => { throw new SeedError(signal.aborted ? "stopped" : "seed_failed"); });
+      const result = await ports.runCommand(seed.command, signal).catch((error: unknown) => {
+        // A stop that could not be confirmed is not "stopped": the seed command may still be running (FIX-RUNNER-ABORT-JOIN).
+        if (error instanceof RunnerKillUnconfirmedError) throw error;
+        throw new SeedError(signal.aborted ? "stopped" : "seed_failed");
+      });
       if (signal.aborted) throw new SeedError("stopped");
       if (result.timedOut) throw new SeedError("seed_timeout");
       if (result.exitCode !== 0) throw new SeedError("seed_failed");

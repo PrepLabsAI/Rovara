@@ -61,13 +61,19 @@ export const PromptChangeItemSchema = z.discriminatedUnion("kind", [
   if (item.verb === "modified" && (item.fingerprintBefore === null || item.fingerprintAfter === null || item.fingerprintBefore === item.fingerprintAfter)) ctx.addIssue({ code: "custom", message: "invalid modified fingerprints" });
 });
 export type PromptChangeItem = z.infer<typeof PromptChangeItemSchema>;
+const NEW_KINDS = ["provider", "retrieval", "context_assembly", "output_parsing"] as const;
 const Count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const PromptChangeReportSchema = z.object({
   schemaVersion: z.union([z.literal(1), z.literal(PROMPT_CHANGE_SCHEMA_VERSION)]), status: z.enum(["changes", "none_found", "incomplete"]),
   coverage: z.enum(["complete", "hunks_only", "partial"]), incompleteReasons: z.array(z.enum(PROMPT_CHANGE_INCOMPLETE_REASONS)).max(PROMPT_CHANGE_INCOMPLETE_REASONS.length),
-  counts: z.object({ prompt_file: Count, prompt_text: Count, system_prompt: Count, model_name: Count, model_setting: Count, tool_schema: Count, model_endpoint: Count, provider: Count.default(0), retrieval: Count.default(0), context_assembly: Count.default(0), output_parsing: Count.default(0) }).strict(),
+  counts: z.object({ prompt_file: Count, prompt_text: Count, system_prompt: Count, model_name: Count, model_setting: Count, tool_schema: Count, model_endpoint: Count, provider: Count.optional(), retrieval: Count.optional(), context_assembly: Count.optional(), output_parsing: Count.optional() }).strict(),
   items: z.array(PromptChangeItemSchema).max(PROMPT_CHANGE_LIMITS.items), itemsTruncated: z.boolean(), reportDigest: Hash,
 }).strict().superRefine((report, ctx) => {
+  // v1 predates the four DEC170 counts: they must be absent (or 0). v2 must state every count.
+  for (const kind of NEW_KINDS) {
+    if (report.schemaVersion === 2 && report.counts[kind] === undefined) ctx.addIssue({ code: "custom", message: "schema version 2 needs every count" });
+    if (report.schemaVersion === 1 && report.counts[kind] !== undefined && report.counts[kind] !== 0) ctx.addIssue({ code: "custom", message: "new kinds need schema version 2" });
+  }
   if (report.schemaVersion === 1 && (report.items.some((item) => ["provider", "retrieval", "context_assembly", "output_parsing"].includes(item.kind)) || report.incompleteReasons.includes("unclassified_ai"))) ctx.addIssue({ code: "custom", message: "new kinds need schema version 2" });
   if (report.status === "none_found" && (report.coverage !== "complete" || report.items.length > 0 || report.incompleteReasons.length > 0)) ctx.addIssue({ code: "custom", message: "no changes needs complete coverage" });
   if (report.coverage === "complete" && report.incompleteReasons.length > 0) ctx.addIssue({ code: "custom", message: "complete coverage cannot have refusals" });
@@ -88,20 +94,24 @@ export const PromptChangeReportSchema = z.object({
   for (const item of report.items) actual[item.kind]++;
   let total = 0;
   for (const kind of PROMPT_CHANGE_KINDS) {
-    total += report.counts[kind];
-    if (report.itemsTruncated ? report.counts[kind] < actual[kind] : report.counts[kind] !== actual[kind]) ctx.addIssue({ code: "custom", message: "counts disagree with items" });
+    const count = report.counts[kind] ?? 0;
+    total += count;
+    if (report.itemsTruncated ? count < actual[kind] : count !== actual[kind]) ctx.addIssue({ code: "custom", message: "counts disagree with items" });
   }
   if (report.itemsTruncated && (report.items.length !== PROMPT_CHANGE_LIMITS.items || total <= PROMPT_CHANGE_LIMITS.items)) ctx.addIssue({ code: "custom", message: "invalid truncation" });
   if (report.itemsTruncated && report.status !== "changes") ctx.addIssue({ code: "custom", message: "truncated items are changes" });
-}).transform((report) => ({ ...report, schemaVersion: PROMPT_CHANGE_SCHEMA_VERSION }));
+// A v1 report keeps reading as v1: only its missing DEC170 counts are zero-filled, for consumers that index them.
+}).transform((report) => ({ ...report, counts: { ...report.counts, provider: report.counts.provider ?? 0, retrieval: report.counts.retrieval ?? 0, context_assembly: report.counts.context_assembly ?? 0, output_parsing: report.counts.output_parsing ?? 0 } }));
 export type PromptChangeReport = z.infer<typeof PromptChangeReportSchema>;
 export interface PromptChangeDecision { needed: boolean; reason: "incomplete" | "changes" | "none_found" }
+/** A v1 detector could not see provider, retrieval, context-assembly or output-parsing changes, so its "none found" is incomplete for DEC170. */
+const legacyNoneFound = (report: PromptChangeReport): boolean => report.schemaVersion === 1 && report.status === "none_found";
 export function promptChangesNeedEval(report: PromptChangeReport): PromptChangeDecision {
-  if (report.status === "incomplete" || report.coverage !== "complete") return { needed: true, reason: "incomplete" };
+  if (report.status === "incomplete" || report.coverage !== "complete" || legacyNoneFound(report)) return { needed: true, reason: "incomplete" };
   return { needed: report.items.length > 0, reason: report.items.length > 0 ? "changes" : "none_found" };
 }
 export function promptChangesNeedSideBySide(report: PromptChangeReport): PromptChangeDecision {
-  if (report.status === "incomplete" || report.coverage !== "complete") return { needed: true, reason: "incomplete" };
+  if (report.status === "incomplete" || report.coverage !== "complete" || legacyNoneFound(report)) return { needed: true, reason: "incomplete" };
   const needed = report.items.length > 0;
   return { needed, reason: needed ? "changes" : "none_found" };
 }

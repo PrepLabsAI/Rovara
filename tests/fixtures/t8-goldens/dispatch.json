@@ -1,0 +1,17 @@
+{
+  "report": {
+    "received": 1,
+    "delivered": 0,
+    "retried": 0,
+    "failed": 0,
+    "dropped": 1
+  },
+  "operation": {
+    "pk": "WORKSPACE#workspace",
+    "sk": "OPERATION#operation",
+    "id": "operation",
+    "workspaceId": "workspace",
+    "companyId": "org_00000000000000000000",
+    "status": "SUCCEEDED"
+  }
+}

@@ -73,7 +73,7 @@ export interface PassObservation {
   permissionOf(login: string): Promise<"admin" | "write" | "read" | "none">;
   /** The status the host gave, as the port types it. */
   status: ChangeRequestStatus;
-  ci: "none" | "pending" | "passing" | "failing";
+  ci: MergeTrackingItem["ci"];
 }
 
 /**

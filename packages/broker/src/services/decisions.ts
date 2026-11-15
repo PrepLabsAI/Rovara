@@ -9,7 +9,7 @@
 // kinds of decision (a test environment, a setup run) with `subjects`.
 import { WorkflowArtifactSchema, type Approvers, type AuditSink, type DocumentStore, type IdentityProvider, type ObjectStorage } from "@agentx/contracts";
 import { textReaderOf } from "../core/build-step/plan-input.js";
-import { createDecisionGate, type DecisionGate, type DecisionSubject } from "../core/decisions/approval-gate.js";
+import { createDecisionGate, type DecisionGate, type DecisionGatePolicy, type DecisionSubject } from "../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../core/decisions/local-actions.js";
 import { createWorkflowDocumentSubject, currentDocumentType, type WorkflowSubjectOptions } from "../core/decisions/workflow-subject.js";
 import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } from "../core/design-review/decision.js";
@@ -32,6 +32,8 @@ export interface DecisionServiceOptions {
   subjects?: readonly DecisionSubject[];
   /** Who decides as the task's owner. Default: one owner who decides everything, and a verified collaborator as a project approver. */
   workflowSubject?: Pick<WorkflowSubjectOptions, "ownerProvider" | "collaboratorsMayDecide" | "actorFor">;
+  /** Optional host policy for the approval gate; omitted keeps the gate defaults. */
+  policy?: DecisionGatePolicy;
   identity?: Pick<IdentityProvider, "capabilities">;
   now?: () => Date;
 }
@@ -81,6 +83,7 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
   });
   const gate = createDecisionGate({
     store, approvers: options.approvers, audit: options.audit, subjects: [...(options.subjects ?? []), workflowSubject],
+    ...(options.policy === undefined ? {} : { policy: options.policy }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });

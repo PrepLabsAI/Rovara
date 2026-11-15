@@ -2,7 +2,7 @@
 // fetches the issuer's discovery document when it is created, and the issuer is served by the same
 // API, so a fresh install could never create it. Every refusal is the same AUTH_REQUIRED, and the
 // token is never logged or repeated.
-import { agentXError, DEVELOPER_TOKEN_AUDIENCE } from "@agentx/contracts";
+import { agentXError, DEVELOPER_STEP_UP_METHODS, DEVELOPER_TOKEN_AUDIENCE, type DeveloperStepUpMethod } from "@agentx/contracts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type CryptoKey, type JWTPayload, type KeyObject } from "jose";
 
 type VerifyKey = CryptoKey | KeyObject | Uint8Array;
@@ -30,6 +30,9 @@ async function importKeys(jwks: unknown[]): Promise<Map<string, VerifyKey>> {
   const keys = new Map<string, VerifyKey>();
   for (const entry of jwks) {
     if (typeof entry !== "object" || entry === null) continue;
+    // Legacy JWKS have no purpose. Once both keys are published, only developer keys
+    // may authenticate sign-in; unknown or malformed purposes fail closed too.
+    if ("rovara_purpose" in entry && entry.rovara_purpose !== "developer") continue;
     const jwk = entry as { kty?: unknown; kid?: unknown; n?: unknown; e?: unknown; alg?: unknown; use?: unknown };
     if (jwk.kty !== "RSA" || typeof jwk.kid !== "string" || typeof jwk.n !== "string" || typeof jwk.e !== "string") continue;
     if ((jwk.alg !== undefined && jwk.alg !== "RS256") || (jwk.use !== undefined && jwk.use !== "sig")) continue;
@@ -94,4 +97,17 @@ export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (aut
     if (STRING_CLAIMS.some((claim) => typeof payload[claim] !== "string" || payload[claim] === "")) throw refused();
     return payload;
   };
+}
+
+/**
+ * Lane ID part 2: the step-up a VERIFIED token's payload carries, for the route's own age check, or undefined when it carries none or carries one that does not read (a time that is not
+ * a whole number of seconds, a method that is not one of Code's, either claim alone). It is never taken from anything else a request sends. `at` is an ISO time, as `Principal.authTime` is.
+ */
+export function stepUpOf(payload: JWTPayload): { at: string; method: DeveloperStepUpMethod } | undefined {
+  const at = payload["step_up_at"];
+  const method = payload["step_up_amr"];
+  // A time past what a Date can hold (8.64e12 seconds) does not read either.
+  if (typeof at !== "number" || !Number.isSafeInteger(at) || at <= 0 || at > 8_640_000_000_000) return undefined;
+  if (typeof method !== "string" || !(DEVELOPER_STEP_UP_METHODS as readonly string[]).includes(method)) return undefined;
+  return { at: new Date(at * 1000).toISOString(), method: method as DeveloperStepUpMethod };
 }

@@ -242,15 +242,24 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
   const { imports, roles, modelSignal } = inspectTokens(tokens, mode === "config", work);
   const signal = info.ai || imports.size > 0 || modelSignal;
   // Parent summaries are computed once, rather than walking up to 64 ancestors for every token.
-  const rootContext = { system: false, sdk: false, tool: false, promptBlock: false, fromMessages: false, contents: false };
+  const rootContext = { system: false, sdk: false, tool: false, promptBlock: false, fromMessages: false, contents: false, ai: false };
   const contexts: Array<typeof rootContext> = [];
+  // An AI region is the inside of an SDK/provider call or a messages/system/prompt/tool/setting construct.
+  // Code after an AI construct on the same line is "beside" it. Unrelated code elsewhere in an AI-importing file is not unclassified,
+  // and neither is the target of an assignment whose value is the AI construct (`client = new OpenAI()`).
+  const firstAi = new Map<number, number>();
+  const aiLabel = (label: string) => SDK_CALLS.has(label) || EXTENDED_CALLS.has(label) || extendedKeyKind(label) !== undefined || SYSTEM_KEYS.has(label) || PROMPT_KEYS.has(label) || TOOL_KEYS.has(label) || ["messages", "content", "contents", "parts"].includes(label);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!; const parent = contexts[token.parent] ?? rootContext;
     work.stats.steps += 7;
-    contexts.push({ system: parent.system || SYSTEM_KEYS.has(token.label) || roles.get(i) === "system",
+    const context = { system: parent.system || SYSTEM_KEYS.has(token.label) || roles.get(i) === "system",
       sdk: parent.sdk || SDK_CALLS.has(token.label), tool: parent.tool || TOOL_KEYS.has(token.label),
       promptBlock: parent.promptBlock || SYSTEM_KEYS.has(token.label) || ["messages", "content", "contents", "parts"].includes(token.label),
-      fromMessages: parent.fromMessages || token.label === "from_messages", contents: parent.contents || token.label === "contents" });
+      fromMessages: parent.fromMessages || token.label === "from_messages", contents: parent.contents || token.label === "contents",
+      ai: parent.ai || aiLabel(token.label) };
+    contexts.push(context);
+    const marker = token.type === "word" && (tokens[i + 1]?.value === ":" || tokens[i + 1]?.value === "=") && (aiLabel(token.value) || MODEL_KEYS.has(token.value) || SETTING_ALIASES.has(token.value));
+    if ((context.ai || marker) && !firstAi.has(token.line)) firstAi.set(token.line, i);
   }
   const ordinals = new Map<string, number>();
   const add = (kind: PromptChangeKind, token: Token, value: string, key: string, basis: PromptChangeItem["basis"], family: ModelFamily | null = null, settingKey?: ModelSettingKey) => {
@@ -269,7 +278,6 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
   // Each new region is fingerprinted once; nested regions are already represented by it.
   let extendedEnd = -1;
   let importing = false; let importLine = -1;
-  let importValues = 0;
   const piecesFor = (start: number, end: number): string => {
     const pieces: string[] = [];
     for (let j = start; j <= end; j++) {
@@ -279,15 +287,21 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     }
     return pieces.join("");
   };
+  // A value continues on later lines through a leading operator (`.filter(...)`, `?.k`, `+ x`) or after a trailing one.
+  // A trailing backslash is a Python line continuation. Code only: in config files a leading `-` or `*` is a list item or alias, not a continuation.
+  const continues = (value: string, leading: boolean) => mode !== "config" && (leading ? [".", "?", "+", "*", "/", "%", "&", "|", ":"] : [".", "?", "+", "-", "*", "/", "%", "&", "|", ":", "\\"]).includes(value);
   const expressionEnd = (start: number): number => {
     const first = tokens[start]!;
     let end = start;
+    let lastLine = first.line;
     for (let j = start; j < tokens.length; j++) {
       work.stats.steps++;
       const t = tokens[j]!;
-      if (j > start && (t.parent !== first.parent || t.line > first.line || [",", ";", ")", "]", "}"].includes(t.value))) break;
+      if (j > start && (t.parent !== first.parent || [",", ";", ")", "]", "}"].includes(t.value))) break;
+      if (j > start && t.line > lastLine && !(t.type === "punct" && continues(t.value, true)) && !(tokens[end]!.type === "punct" && continues(tokens[end]!.value, false))) break;
       end = t.close >= j ? t.close : j;
       j = end;
+      lastLine = tokens[end]!.line;
     }
     return end;
   };
@@ -301,7 +315,6 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     const importedModule = imports.get(i);
     if (importedModule !== undefined && providerSdk(importedModule)) {
       add("provider", token, importedModule, "sdk_import", "sdk_call");
-      importValues++;
     }
     if (previous?.value === ":" && token.type === "word" && tokens[i + 1]?.value === "=" && tokens[i - 2]?.type === "word") continue;
     // A simple TS/Python annotation sits between the declaration name and '='.
@@ -369,12 +382,14 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     // Nested tokens covered by an extended region have already contributed to its fingerprint.
     if (signal && i > extendedEnd && !importing) {
       const knownKey = extendedKind !== undefined || modelKey || settingKey !== undefined || tool || promptArgument || SYSTEM_KEYS.has(key) || PROMPT_KEYS.has(key) || ["role", "content", "contents", "parts", "text", "messages"].includes(key);
-      if ((isKey && !knownKey && (!isContainer || token.close === i + 1) && endpointFamily(token.value, work) === undefined) ||
+      // Unknown keys, calls, spreads and computed keys count only inside or beside an AI region.
+      const inRegion = context.ai || (firstAi.get(token.line) ?? Infinity) < i;
+      if ((inRegion && isKey && !knownKey && (!isContainer || token.close === i + 1) && endpointFamily(token.value, work) === undefined) ||
           (isKey && (modelKey || settingKey !== undefined) && !isLiteral && !isContainer) ||
-          (token.value === "(" && token.label !== "" && callKind === undefined && !SDK_CALLS.has(token.label)) ||
+          (inRegion && token.value === "(" && token.label !== "" && callKind === undefined && !SDK_CALLS.has(token.label)) ||
           (token.value === "(" && SDK_CALLS.has(token.label) && next?.type === "word" && tokens[i + 2]?.value !== "=") ||
-          (token.value === "." && next?.value === ".") ||
-          (token.value === "[" && previous?.value === "{")) work.reasons.add("unclassified_ai");
+          (inRegion && token.value === "." && next?.value === ".") ||
+          (inRegion && token.value === "[" && previous?.value === "{")) work.reasons.add("unclassified_ai");
     }
     if ((tool || (settingKey !== undefined && signal && i > extendedEnd && extendedKind === undefined)) && (isContainer || isLiteral)) {
       const end = isContainer ? token.close : i;
@@ -409,6 +424,7 @@ export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: 
     if (kind === "prompt_text" && context.system) kind = "system_prompt";
     if (kind) add(kind, token, token.value, key || parent?.label || "argument", sdk ? "sdk_call" : "key_name");
   }
-  if (signal && tokens.length > 0 && values.length === importValues) work.reasons.add("unclassified_ai");
+  // Nothing recognized at all (no AI import either): a path- or model-signalled file we cannot read as AI code.
+  if (signal && tokens.length > 0 && values.length === 0 && imports.size === 0) work.reasons.add("unclassified_ai");
   return values;
 }

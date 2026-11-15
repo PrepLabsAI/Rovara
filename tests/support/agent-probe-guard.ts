@@ -25,6 +25,8 @@ export type GuardWorld = Readonly<{
   /** Switches off the fast interval check of the socket, or the loop that repeats the full check, or both, so a test can tell the checks apart (the one at start and the one before each request stay). */
   intervalOff?: boolean;
   loopOff?: boolean;
+  /** Every name lookup takes this long, as it does on a starved runner: the loop's first check then runs after the test has acted (see startGuard). */
+  slowLookupMs?: number;
 }>;
 
 export const GUARD_PATHS = ["/run/rovara/model.sock", "/proc/net/route", "/etc/resolv.conf"] as const;
@@ -70,6 +72,7 @@ net.connect = (options) => {
 };
 dns.lookup = async (name) => {
   log({ lookup: name });
+  if (world.slowLookupMs) await new Promise((resolve) => setTimeout(resolve, world.slowLookupMs));
   if (world.proxyAddress === null) throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' });
   return { address: world.proxyAddress, family: 4 };
 };
@@ -77,7 +80,11 @@ const realSetTimeout = globalThis.setTimeout;
 const realSetInterval = globalThis.setInterval;
 const inert = { unref() { return this; } };
 globalThis.setInterval = (fn, ms, ...rest) => (world.intervalOff ? inert : realSetInterval(fn, ms, ...rest));
-globalThis.setTimeout = (fn, ms, ...rest) => (ms === 250 && world.loopOff ? inert : realSetTimeout(fn, ms, ...rest));
+// The guard's loop checks once at once and only then waits 250 ms. With the loop off that wait never ends, and saying so is how a test knows the loop's one check is over (see startGuard).
+globalThis.setTimeout = (fn, ms, ...rest) => {
+  if (ms === 250 && world.loopOff) { log({ loopParked: true }); return inert; }
+  return realSetTimeout(fn, ms, ...rest);
+};
 syncBuiltinESMExports();
 `;
 
@@ -127,9 +134,12 @@ export async function startGuard(script: string, world: GuardWorld): Promise<Gua
   child.stdout?.on("data", (chunk: Buffer) => { out += chunk.toString(); });
   child.stderr?.on("data", (chunk: Buffer) => { err += chunk.toString(); });
   const closed = new Promise<void>((resolve) => child.on("close", (status) => { code = status ?? -1; done = true; resolve(); }));
-  const lines = () => out.split("\n").filter(Boolean).map((line) => JSON.parse(line) as { connect?: string; lookup?: string; started?: boolean; port?: number });
+  const lines = () => out.split("\n").filter(Boolean).map((line) => JSON.parse(line) as { connect?: string; lookup?: string; started?: boolean; port?: number; loopParked?: boolean });
   const deadline = Date.now() + 15_000;
   while (!done && !lines().some((line) => line.started === true) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  // `loopOff` parks the loop that repeats the full check only AFTER the loop's first check, which starts with the app and reads the world when it dials. A test that changes the world right after the
+  // start would race that check: it could see the changed world, end the app mid-request, and reset the test's connection (ECONNRESET on a loaded runner). So wait until the loop has parked.
+  if (world.loopOff === true) while (!done && !lines().some((line) => line.loopParked === true) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
   const started = lines().some((line) => line.started === true);
   const port = lines().find((line) => line.started === true)?.port ?? null;
   const stop = () => { child.kill("SIGKILL"); rmSync(root, { recursive: true, force: true }); };
