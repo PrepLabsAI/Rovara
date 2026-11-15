@@ -75,7 +75,7 @@ describe("the route table", () => {
 
 // ---- Every route the broker registers has a row (and every row is a route) ----
 
-/** The concrete paths a router regex literal matches, each `([^/]+)` as `{}`. */
+/** The concrete paths a router regex literal matches, each `([^/]+)` or bare `[^/]+` (R4's grouped task-read pattern) as `{}`. */
 function expandRegex(source: string): string[] {
   const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}").replaceAll("([a-f0-9]{64})", "{}");
   const expand = (text: string): string[] => {
@@ -107,7 +107,8 @@ function expandRegex(source: string): string[] {
 /** Every /v1/dev path the routers name: string literals, a named path constant with suffixes, and regex literals. */
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts"]) {
+  // The company reads' paths are constants of their contract (#649), which the router imports.
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
