@@ -77,6 +77,9 @@ it("only the member helper constructs member payloads and derives company/actor 
     }",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch {
         return { ok: false, error: "unavailable" };
+    };finally:none > if:"personId" in input.data && !MemberPersonId.safeParse(forwarded.createdBy).success:condition | BinaryExpression: "personId" in input.data && !MemberPersonId.safeParse(forwarded.createdBy).success",
+      "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch {
+        return { ok: false, error: "unavailable" };
     };finally:none > if:input.data.kind === "company-member-list" && input.data.cursor !== undefined:condition | BinaryExpression: input.data.kind === "company-member-list" && input.data.cursor !== undefined",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch {
         return { ok: false, error: "unavailable" };
@@ -157,6 +160,7 @@ it.each([
   ["createdBy: member.personId", "createdBy: authenticated.data.developerId"],
   ["companyId: member.companyId", "companyId: caller.companyId"],
   ["createdBy: member.personId", "createdBy: request.actorId"],
+  ["{ createdBy: member.personId }", "{}"],
   ["member = CompanyMember.parse(response.Item)", "member = CompanyMember.parse(request)"],
   ["ConsistentRead: true", "ConsistentRead: false"],
   ["Key: membershipKey(authenticated.data.developerId)", "Key: membershipKey(request.actorId)"],

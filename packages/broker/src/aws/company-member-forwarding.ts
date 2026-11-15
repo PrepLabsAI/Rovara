@@ -35,6 +35,8 @@ export function companyMembersThroughLambda(deps: {
       const forwarded = { ...input.data, companyId: member.companyId,
         ...(input.data.kind === "company-member-list" ? {} : { createdBy: member.personId }),
       };
+      // An actorless write would be an operator invoke. Refuse before transport.
+      if ("personId" in input.data && !MemberPersonId.safeParse(forwarded.createdBy).success) return { ok: false, error: "unavailable" };
       if (input.data.kind === "company-member-list" && input.data.cursor !== undefined) {
         try { memberCursorPerson(member.companyId, input.data.cursor); }
         catch { return { ok: false, error: "invalid_request" }; }

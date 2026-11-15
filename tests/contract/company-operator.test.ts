@@ -82,7 +82,6 @@ it.each(["used", "withdrawn", "expired"])("repreapproval replaces a valid %s row
 it("revokes and restores through the one R4 reader; revocation blocks joining anywhere", async () => {
   const h = world(); await h.invoke(create);
   expect(await h.store.join({ personId, companyId, email: create.firstAdminEmail })).toMatchObject({ ok: true, membership: { role: "admin", joinedVia: "preapproval" } });
-  vi.spyOn(h.store as unknown as { requireMemberStepUp(role: string): void }, "requireMemberStepUp").mockImplementation(() => {});
   const reader = companyMembershipFromDynamo(h.db, "signin");
   expect(await reader.companyOf(personId)).toBe(companyId);
   expect(await h.invoke({ kind: "company-member-revoke", companyId, personId })).toEqual({ ok: true });
