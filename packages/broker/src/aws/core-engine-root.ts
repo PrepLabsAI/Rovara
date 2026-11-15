@@ -16,8 +16,9 @@
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
 //
-// What the registry still lacks (approvers, model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
-// the admission hold sweep) refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use.
+// What the registry still lacks (approvers, model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices)
+// refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use. The admission's hold sweep is the root's own (lane L8),
+// and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
@@ -28,7 +29,8 @@ import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modul
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
-import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
+import { HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
+import { createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
@@ -44,7 +46,7 @@ import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
-import { createCallbackService } from "../services/index.js";
+import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
@@ -216,6 +218,21 @@ export function outboxCompaniesOf(event: unknown): string[] | undefined {
   return [...companies];
 }
 
+// ---- money (lane L8)
+
+/**
+ * One company's money wiring over the sealed registry: the callback layer's usage booking (the usage the company's workers report is booked into the task's cost ledger before the batch
+ * is acknowledged, core-host/usage-booking.ts) and the admission's own hold sweep. The company is the runtime's own, never the operation's word (the callback layer has checked they agree).
+ */
+export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date): { bookUsage: NonNullable<CallbackServiceOptions["bookUsage"]>; holdSweep: CoreService } {
+  const store = registry.require("storage");
+  const booking = createUsageBooking({ store, metering: registry.require("metering"), now });
+  return {
+    bookUsage: (operation, events) => booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events),
+    holdSweep: createHostedHoldSweep({ store, companyId, now }),
+  };
+}
+
 // ---- the root
 
 export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRoot {
@@ -278,7 +295,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
           }
         }
-        return { ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }) };
+        // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
+        return {
+          ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
+        };
       },
     }),
   });
@@ -342,12 +363,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const runtime = await app.runtimeFor(companyId);
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
+        const money = coreMoneyWiring(registry, companyId, now);
         return createCallbackService({
           flow: runtime.flow.deps,
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
           grants: new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential),
           ...(lessons === undefined ? {} : { onEvents: (operation, events) => lessons.host.onEvents(operation, events) }),
+          bookUsage: money.bookUsage,
         });
       })();
       found.catch(() => callbackHandlers.delete(companyId));

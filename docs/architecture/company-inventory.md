@@ -1,4 +1,4 @@
-394 record kinds: 40 company-scoped, 13 install-wide, 341 needs-company. 184 routes: 21 company-scoped, 2 install-wide, 161 needs-company.
+396 record kinds: 42 company-scoped, 13 install-wide, 341 needs-company. 184 routes: 21 company-scoped, 2 install-wide, 161 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -205,6 +205,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:CONVERSATION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:COST_ENTRY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:COST_ENTRY_ONCE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:COST_HOLD | company-scoped | State table | no | - | Lane L8 spend hold: `ORG#<company>#COST_HOLD`, reached only from a reservation id that names its company (`hold:<company>:<hash>`); two-company test in core-host-spend-holds. |
+| record | entity:COST_HOLD_OPEN | company-scoped | State table | no | - | Lane L8 open-hold index: `ORG#<company>#COST_HOLD_OPEN`, swept per company only; two-company test in core-host-spend-holds. |
 | record | entity:CREDENTIAL | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:CREDENTIAL_LEASE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:CREDENTIAL_TOKEN | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -886,7 +888,7 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/channel/thread-notices.ts:78:137:sk | key | Runtime sort component forwarded within the feeding partition; not an independent record family. | claimKey, planCardKey, taskKey |
 | forwarding | packages/broker/src/core/ci-fix/ci-fix.ts:217:5:computed | [input.ttlAttribute ?? INDEX_EXPIRY_ATTRIBUTE] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | ciEvidenceKey |
 | forwarding | packages/broker/src/core/cost/estimate.ts:49:41:pk | key.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | runCostKey |
-| forwarding | packages/broker/src/core/cost/ledger.ts:69:73:sk | entry.entryId | Runtime sort component forwarded within the feeding partition; not an independent record family. | costPartition |
+| forwarding | packages/broker/src/core/cost/ledger.ts:78:73:sk | entry.entryId | Runtime sort component forwarded within the feeding partition; not an independent record family. | costPartition |
 | forwarding | packages/broker/src/core/decisions/approval-gate.ts:188:60:sk | proofKey | Runtime sort component forwarded within the feeding partition; not an independent record family. | approvalProofKey, approvalProofMarkerKey, approvalRecordKey, spentOnceKey |
 | forwarding | packages/broker/src/core/design-review/effective-setting.ts:9:68:computed | [EFFECTIVE] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/core/design-review/effective-setting.ts (EFFECTIVE) |
 | forwarding | packages/broker/src/core/design-review/lock.ts:55:17:pk | orgMetaKey(orgId).pk | Projects the partition supplied by the named key constructor; no new family. | orgMetaKey |

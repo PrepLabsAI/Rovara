@@ -77,6 +77,11 @@ export interface CallbackDeps {
   setupAgent?: Omit<SetupAgentCallbackDeps, "store" | "companyId" | "now"> | undefined;
   /** The project's context sources (the monitoring connections and MCP servers the owner ticked). Absent: a stage is told there are none. */
   contextSources?: ContextSourcesRuntime;
+  /**
+   * Books the model usage a batch of the worker's events reports (a deployed install: core-host/usage-booking.ts), BEFORE the batch is acknowledged. A booking that fails fails the batch, so
+   * the worker sends it again (booking counts each usage once). Absent: nothing is booked here (the laptop books each call at its model proxy).
+   */
+  bookUsage?: ((operation: OperationRecord, events: ReadonlyArray<{ type: string; timestamp: string; payload: unknown }>) => Promise<unknown>) | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -157,6 +162,8 @@ async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body
     if (record === null || typeof record !== "object" || typeof record["type"] !== "string" || typeof record["timestamp"] !== "string") throw agentXError("CONFIG_INVALID", "an event needs a type and a timestamp");
     return { type: record["type"], timestamp: record["timestamp"], payload: record["payload"] ?? null };
   });
+  // The usage the batch reports is booked first: an acknowledged batch is a booked one.
+  if (deps.bookUsage !== undefined) await deps.bookUsage(operation, parsed);
   // The work item checkpoints of an ordered run (spec 059) are judged against the approved run and written into the task's workflow BEFORE the batch is acknowledged: the worker goes on to the next item only
   // when this returns, so what a retry resumes from is what was durably recorded. A checkpoint that does not continue the approved run is refused (the worker then fails the operation).
   await recordWorkItemProgress(deps.flow, operation, parsed);
