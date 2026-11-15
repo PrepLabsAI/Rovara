@@ -106,7 +106,11 @@ describe.skipIf(!haveChromium)("browser evidence in a real Chromium", () => {
       expect(altA.length).toBe(64);
       expect(altA).toBe(await take("/alt-b"));
       expect((await take("/signin")).length).toBe(64);
-      for (const route of ["/shadow-split", "/split-label", "/dl-label"]) expect(await take(route), route).toBe("masked_content");
+      expect((await take("/signin-inline")).length).toBe(64);
+      const nbsp = await take("/nbsp-label");
+      expect(nbsp.length).toBe(64);
+      expect(nbsp).toBe(await take("/nbsp-label-b"));
+      for (const route of ["/shadow-split", "/split-label", "/dl-label", "/dl-copy", "/div-show", "/slot-label"]) expect(await take(route), route).toBe("masked_content");
     } finally { await driver.stopApp("after"); }
   }, 180_000);
 

@@ -101,7 +101,7 @@ export async function startProjectApp(input: { command: string; cwd: string; por
 
 // ---- the page
 
-type PageArg = { masks: ReadonlyArray<{ source: string; flags: string }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
+type PageArg = { masks: ReadonlyArray<{ source: string; flags: string; label?: boolean }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
 type PageVerdict = "clean" | "dirty" | "too_large";
 
 /**
@@ -118,12 +118,14 @@ function maskPage(arg: PageArg): PageVerdict {
   type Doc = Root & { documentElement: unknown; title: string; body: { innerText?: unknown } | null; createTreeWalker(root: unknown, show: number): { nextNode(): Node | null } };
   const doc = (globalThis as unknown as { document: Doc }).document;
   const patterns = arg.masks.map((item) => new RegExp(item.source, item.flags));
+  const plain = arg.masks.filter((item) => item.label !== true).map((item) => new RegExp(item.source, item.flags));
+  const labelled = arg.masks.filter((item) => item.label === true).map((item) => new RegExp(item.source, item.flags));
   const hits = (text: string): boolean => text.length > arg.maxText || patterns.some((pattern) => text.search(pattern) !== -1);
   // Joined text may be long: it is read in overlapping windows (the character budget already bounds it), so a long page is not withheld for its length alone.
-  const joinedHits = (text: string): boolean => {
+  const joinedHits = (text: string, among: RegExp[]): boolean => {
     for (let start = 0; start < text.length; start += arg.maxText - 1_000) {
       const window = text.slice(start, start + arg.maxText);
-      if (patterns.some((pattern) => window.search(pattern) !== -1)) return true;
+      if (among.some((pattern) => window.search(pattern) !== -1)) return true;
       if (start + arg.maxText >= text.length) break;
     }
     return false;
@@ -190,24 +192,56 @@ function maskPage(arg: PageArg): PageVerdict {
   }
   if (!arg.verify) { doc.title = scrub(doc.title); return "clean"; }
   if (hits(doc.title)) return "dirty";
-  const visible = doc.body?.innerText;
-  if (typeof visible === "string" && joinedHits(visible)) return "dirty";
-  // A shadow root's text as it is rendered (the page's innerText does not enter shadow roots): inline children run together, as on screen, so a secret split over inline elements is
-  // seen whole; a block child starts a new line, so digits in neighbouring cells do not read as one number. Nested roots are roots of their own in this list.
-  const view = globalThis as unknown as { getComputedStyle?(element: unknown): { display?: string } };
-  for (const { root } of roots.slice(1)) {
-    let text = "";
-    for (const child of Array.from(root.childNodes ?? [])) {
-      if (child.nodeType === 3) { text += child.nodeValue ?? ""; continue; }
-      if (child.nodeType !== 1) continue;
-      let display = "block";
-      try { display = view.getComputedStyle?.(child).display ?? "block"; } catch { /* unknown is a block */ }
-      const inner = typeof child.innerText === "string" ? child.innerText : "";
-      text += display.startsWith("inline") ? inner : `\n${inner}\n`;
-      if (text.length > arg.maxChars) return "too_large";
+  // The page's text as it is composed on screen (shadow roots in place of their hosts' children, slotted nodes where their slot is, hidden elements left out, whitespace
+  // collapsed, a line break at every block edge and <br>), read whole so a secret split over several elements is seen. Two views from one walk: `shown`, everything as rendered, for
+  // the ordinary masks; and `labels`, where links, buttons, selects and form fields are line breaks and a label's edges start a line, for the labelled masks.
+  type El = Child & { tagName?: string; getAttribute?(name: string): string | null; shadowRoot?: { childNodes: ArrayLike<Child> } | null; childNodes?: ArrayLike<Child>; assignedNodes?(options: { flatten: boolean }): ArrayLike<Child> };
+  const view = globalThis as unknown as { getComputedStyle(element: unknown): { display: string; visibility: string } };
+  const skipped = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "TITLE"]);
+  const controls = new Set(["A", "BUTTON", "SELECT", "OPTION", "INPUT", "TEXTAREA", "IMG"]);
+  let shown = "";
+  let labels = "";
+  let walked = 0;
+  let tooLarge = false;
+  const walk = (node: El, visible: boolean, inControl: boolean): void => {
+    if (tooLarge) return;
+    walked += 1;
+    if (walked > arg.maxNodes || shown.length > arg.maxChars) { tooLarge = true; return; }
+    if (node.nodeType === 3) {
+      if (!visible) return;
+      const text = (node.nodeValue ?? "").replace(/[ \t\n\r\f]+/gu, " ");
+      shown += text;
+      if (!inControl) labels += text;
+      return;
     }
-    if (joinedHits(text)) return "dirty";
-  }
+    if (node.nodeType !== 1 && node.nodeType !== 11) return;
+    const tag = node.tagName ?? "";
+    if (skipped.has(tag)) return;
+    let block = false;
+    let seen = visible;
+    if (node.nodeType === 1) {
+      const style = view.getComputedStyle(node);
+      if (style.display === "none") return;
+      seen = style.visibility !== "hidden" && style.visibility !== "collapse";
+      block = !style.display.startsWith("inline") && style.display !== "contents";
+    }
+    const control = controls.has(tag) || node.getAttribute?.("role") === "button";
+    if (tag === "BR") { shown += "\n"; labels += "\n"; return; }
+    // In the label view a control is a line of its own holding only a marker (too short to be a value), so a label is never "followed" across a field, a button or a link.
+    const edge = block || tag === "LABEL";
+    if (block) shown += "\n";
+    if (control && !inControl) labels += "\n\u25aa\n";
+    else if (edge) labels += "\n";
+    const slotted = tag === "SLOT" && typeof node.assignedNodes === "function" ? Array.from(node.assignedNodes({ flatten: true })) : [];
+    const children = node.shadowRoot ? Array.from(node.shadowRoot.childNodes) : slotted.length > 0 ? slotted : Array.from(node.childNodes ?? []);
+    for (const child of children) walk(child as El, seen, inControl || control);
+    if (block) shown += "\n";
+    if (edge) labels += "\n";
+  };
+  walk(doc.documentElement as El, true, false);
+  if (tooLarge) return "too_large";
+  // Empty lines left by nested block edges are folded, so a <dt> label and its <dd> value are on neighbouring lines.
+  if (joinedHits(shown, plain) || joinedHits(labels.replace(/(?:[^\S\n]*\n)+/gu, "\n"), labelled)) return "dirty";
   return "clean";
 }
 

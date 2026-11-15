@@ -118,6 +118,7 @@ describe("masking", () => {
     // A labelled value on the next line is masked when it stands alone there (dt/dd), never a sign-in page's "Forgot password?" link.
     expect(scrubVisibleText("API key:\nabcd1234\nmore")).not.toContain("abcd1234");
     expect(scrubVisibleText("Password:\nForgot password? Sign in")).toBe("Password:\nForgot password? Sign in");
+    expect(scrubVisibleText("Password:\u00a0hunter2x")).not.toContain("hunter2x");
     expect(out).toContain("Signed in as");
     expect(scrubVisibleText("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.")).toBe("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.");
   });
