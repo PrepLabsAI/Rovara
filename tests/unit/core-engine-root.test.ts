@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, policyHookSettingsFromEnvironment, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
@@ -142,5 +142,19 @@ describe("the stream hook", () => {
     expect(outboxCompaniesOf({ Records: [] })).toBeUndefined();
     expect(outboxCompaniesOf({ source: "agentx.core-job" })).toBeUndefined();
     expect(outboxCompaniesOf(null)).toBeUndefined();
+  });
+});
+
+describe("the install's policy hook settings (one setting for the engine and the developer API)", () => {
+  it("is absent with no setting, and refuses in fixed words (no echo) anything that is not readable settings", () => {
+    expect(policyHookSettingsFromEnvironment({})).toBeUndefined();
+    expect(policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: "  " })).toBeUndefined();
+    expect(() => policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: "zzq{" })).toThrow(/^the policy hook settings are not JSON$/u);
+    expect(() => policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: JSON.stringify({ address: "http://evil.example/zzq", keys: [] }) })).toThrow(/^the policy hook settings are not readable$/u);
+  });
+
+  it("reads well-formed settings (the engine applies them before the seal; #717's settings routes take the same value)", () => {
+    const settings = JSON.stringify({ address: "https://hook.example/answer", keys: [{ kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "k1", alg: "RS256" }] });
+    expect(policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: settings })).toMatchObject({ address: "https://hook.example/answer" });
   });
 });

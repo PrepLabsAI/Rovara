@@ -21,7 +21,7 @@
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
-  type AdapterRegistry, type DocumentStore, type OrgId, type OrgRole, type Principal,
+  type AdapterRegistry, type PolicyHookSettings, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
@@ -95,6 +95,21 @@ export interface BrokerCoreRoot {
 
 const CORE_CALLBACK = /^\/v1\/internal\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/operations\/[0-9a-f-]{36}\/[a-z-]+$/u;
 const callbackAnswer = (statusCode: number, code: string, message: string): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code, message } }) });
+
+/**
+ * The install's policy hook settings (ROVARA_POLICY_HOOK, JSON `{ address, keys }`), read the same way for the core engine (here) and for the developer API's company bounds on project
+ * settings (#717: `DeveloperApiConfiguration.policyHook = { settings, install }`). Absent or empty: undefined (no hook; today's behaviour). Anything that is not readable settings throws in
+ * fixed words, so an install meant to ask never runs without asking.
+ */
+export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): PolicyHookSettings | undefined {
+  const raw = env[CORE_POLICY_HOOK_VARIABLE]?.trim() ?? "";
+  if (raw === "") return undefined;
+  let settings: unknown;
+  try { settings = JSON.parse(raw); } catch { throw new Error("the policy hook settings are not JSON"); }
+  const parsed = PolicyHookSettingsSchema.safeParse(settings);
+  if (!parsed.success) throw new Error("the policy hook settings are not readable");
+  return parsed.data;
+}
 
 // ---- membership and project grants (the broker's own records)
 
@@ -193,13 +208,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
-      const raw = env[CORE_POLICY_HOOK_VARIABLE]?.trim() ?? "";
-      if (raw === "") return;
-      let settings: unknown;
-      try { settings = JSON.parse(raw); } catch { throw new Error("the policy hook settings are not JSON"); }
-      const parsed = PolicyHookSettingsSchema.safeParse(settings);
-      if (!parsed.success) throw new Error("the policy hook settings are not readable");
-      applyPolicyHook(registry, parsed.data, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log });
+      const settings = policyHookSettingsFromEnvironment(env);
+      if (settings === undefined) return;
+      applyPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log });
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
