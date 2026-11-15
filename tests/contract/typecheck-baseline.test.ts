@@ -380,11 +380,11 @@ describe("wiring", () => {
 
   it("runs the ratchet in CI right after the typecheck, behind the docs-only check", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
-    const checks = workflow.jobs.checks!;
-    const typecheck = checks.steps.findIndex((step) => step.run === "npm run typecheck");
-    const ratchet = checks.steps.findIndex((step) => step.run === "npm run typecheck:all");
+    const quick = workflow.jobs.quick!;
+    const typecheck = quick.steps.findIndex((step) => step.run === "npm run typecheck");
+    const ratchet = quick.steps.findIndex((step) => step.run === "npm run typecheck:all");
     expect(ratchet).toBe(typecheck + 1);
-    expect(checks.if).toBe("needs.scope.outputs.docs_only != 'true'");
+    expect(quick.steps[ratchet]!.if).toBe("steps.scope.outputs.docs_only != 'true'");
   });
 
   it("runs the ratchet in the release workflow's test job after the typecheck", async () => {

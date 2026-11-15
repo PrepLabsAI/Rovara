@@ -183,7 +183,7 @@ describe("the lint shards: one config, one command", () => {
   it("run through npm run lint, in CI, as one step", () => {
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { scripts: Record<string, string> };
     expect(manifest.scripts.lint).toBe("node scripts/lint-shards.ts");
-    expect(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8").match(/^\s+- run: npm run lint$/gm)).toHaveLength(1);
+    expect(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8").match(/^\s+run: npm run lint$/gm)).toHaveLength(1);
   });
 
   it("read their options", () => {

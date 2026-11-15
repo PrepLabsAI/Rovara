@@ -2,15 +2,15 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
-import { gateVerdict, needsVerdict } from "../../scripts/ci-gate.js";
 
 interface Job {
   name?: string;
+  permissions?: unknown;
   needs?: string | string[];
   if?: string;
   "timeout-minutes"?: number;
   strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] } };
-  steps: Array<{ name?: string; run?: string; uses?: string; env?: Record<string, string> }>;
+  steps: Array<{ id?: string; name?: string; if?: string; run?: string; uses?: string; env?: Record<string, string>; "timeout-minutes"?: number }>;
 }
 interface Workflow {
   on?: unknown;
@@ -28,15 +28,45 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(test.steps.some((step) => step.run === "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}")).toBe(true);
   });
 
-  it("keeps checks, tests, the release check and the Linux runtime check in jobs of their own, none waiting on another", async () => {
+  it("keeps the quick checks, the tests and the Linux runtime check in jobs of their own, none waiting on another, and no job left over from before", async () => {
     const { jobs } = await workflow();
-    for (const name of ["checks", "test", "release", "linux-runtime"]) expect(jobs[name]!.needs, name).toBe("scope");
+    expect(Object.keys(jobs).sort()).toEqual(["linux-runtime", "live-aws", "port-guard", "quick", "test"]);
+    for (const [name, job] of Object.entries(jobs)) expect(job.needs, name).toBeUndefined();
+  });
+
+  it("puts the old scope, checks and release jobs into `quick`, one after another with their own commands, conditions and time limits, on one checkout and one install", async () => {
+    const quick = (await workflow()).jobs.quick! as Job & { "runs-on"?: string };
+    expect(quick["runs-on"]).toBe("ubuntu-latest");
+    // Read-only like the workflow's default: no permissions of its own, so nothing the merged jobs lacked.
+    expect(quick.permissions).toBeUndefined();
+    expect(JSON.stringify(quick)).not.toContain("secrets.");
+    expect(quick.steps.filter((step) => (step.uses ?? "").startsWith("actions/checkout"))).toHaveLength(1);
+    expect(quick.steps.filter((step) => step.run === "npm ci" || step.name === "checks: npm ci")).toHaveLength(1);
+    const GUARD = "steps.scope.outputs.docs_only != 'true'";
+    const parts = quick.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
+    expect(parts).toEqual([
+      ["scope: Docs-only change?", "github.event_name == 'pull_request'", 5, expect.stringContaining("node scripts/ci-docs-only.ts")],
+      ["scope: Markdown-only change", "steps.scope.outputs.docs_only == 'true'", 5, expect.stringContaining("Only Markdown that no test reads changed")],
+      ["checks: npm ci", GUARD, 15, "npm ci"],
+      ["checks: npm run typecheck", GUARD, 15, "npm run typecheck"],
+      ["checks: npm run typecheck:all", GUARD, 15, "npm run typecheck:all"],
+      ["checks: npm run lint", GUARD, 15, "npm run lint"],
+      ["release: npm run build", GUARD, 15, "npm run build"],
+      ["release: npm run infra:synth", GUARD, 15, "npm run infra:synth"],
+      ["release: Release builds are reproducible", GUARD, 15, expect.stringContaining("npm run release:verify -- \"$RUNNER_TEMP/release-a\"")],
+    ]);
+    // The job's own limit is the sum of the old jobs' (scope 5 + checks 15 + release 15), and each step may take at most its old job's limit.
+    expect(quick["timeout-minutes"]).toBe(35);
   });
 
   it("runs the Linux runtime check on an ARM64 runner, behind the same Markdown-only skip as the other heavy jobs", async () => {
     const job = (await workflow()).jobs["linux-runtime"] as Job & { "runs-on"?: string };
     expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
-    expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
+    expect(job.if).toBe("github.event.pull_request.draft != true");
+    // Every step after the docs-only check carries its condition, so a Markdown-only change leaves this job green with its steps skipped.
+    const afterScope = job.steps.slice(job.steps.findIndex((step) => step.id === "scope") + 1);
+    expect(afterScope.length).toBeGreaterThan(10);
+    for (const step of afterScope) expect(step.if, step.name ?? step.run).toBe("steps.scope.outputs.docs_only != 'true'");
     const run = job.steps.map((step) => step.run ?? "").join("\n");
     // The job installs the firewall by running the heredoc inside boot.sh as it is (never a copy of the rules), before anything builds or runs a container.
     const firewall = job.steps.map((step) => step.run ?? "").find((text) => text.includes("<<'FIREWALL'"))!;
@@ -141,75 +171,12 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
       pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
       push: { branches: ["code/next"] },
     });
-    expect(parsed.jobs.scope!.if).toBe("github.event.pull_request.draft != true");
+    for (const name of ["quick", "test", "linux-runtime"]) expect(parsed.jobs[name]!.if, name).toBe("github.event.pull_request.draft != true");
   });
 
   it("supersedes a pull request's run in progress when it is pushed again, and never cancels a manual run", async () => {
     const { concurrency } = await workflow();
     expect(concurrency?.group).toContain("github.ref");
     expect(concurrency?.["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
-  });
-
-  it("reports one check called local that waits for every other job, so it cannot go green while one is missing", async () => {
-    const { jobs } = await workflow();
-    const gate = jobs.local!;
-    expect(gate.name).toBeUndefined();
-    expect(gate.if).toBe("always() && github.event.pull_request.draft != true");
-    // port-guard (the Rovara Code port's check, tests/contract/port-guard-ci.test.ts) runs on code/next only; a skipped job would fail the gate on mainline's pull requests.
-    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard").sort();
-    expect([...(gate.needs as string[])].sort()).toEqual(others);
-    const run = gate.steps.map((step) => step.run ?? "").join("\n");
-    expect(run).toContain("node scripts/ci-gate.ts");
-    expect(gate.steps.some((step) => step.env?.NEEDS === "${{ toJSON(needs) }}")).toBe(true);
-  });
-});
-
-describe("the gate behind the local check", () => {
-  const ran = { scope: "success", checks: "success", "test": "success", release: "success" };
-
-  it("passes when every job succeeded", () => {
-    expect(gateVerdict({ docsOnly: false, results: ran }).ok).toBe(true);
-  });
-
-  it("fails when any job failed, was cancelled or was skipped", () => {
-    for (const result of ["failure", "cancelled", "skipped"]) {
-      const verdict = gateVerdict({ docsOnly: false, results: { ...ran, test: result } });
-      expect(verdict, result).toEqual({ ok: false, reason: `test was ${result}, not success` });
-    }
-  });
-
-  it("fails when the scope job did not succeed, even though every job it feeds was skipped", () => {
-    const skipped = { scope: "failure", checks: "skipped", test: "skipped", release: "skipped" };
-    expect(gateVerdict({ docsOnly: false, results: skipped })).toEqual({ ok: false, reason: "scope was failure, not success" });
-    expect(gateVerdict({ docsOnly: true, results: skipped }).ok).toBe(false);
-  });
-
-  it("passes a Markdown-only change only when every heavy job was skipped", () => {
-    const skipped = { scope: "success", checks: "skipped", test: "skipped", release: "skipped" };
-    expect(gateVerdict({ docsOnly: true, results: skipped }).ok).toBe(true);
-    expect(gateVerdict({ docsOnly: true, results: { ...skipped, test: "success" } })).toEqual({ ok: false, reason: "test was success, not skipped" });
-    expect(gateVerdict({ docsOnly: true, results: { ...skipped, release: "failure" } }).ok).toBe(false);
-  });
-
-  it("fails a gate that was given no jobs to judge", () => {
-    expect(gateVerdict({ docsOnly: false, results: { scope: "success" } }).ok).toBe(false);
-    expect(gateVerdict({ docsOnly: false, results: {} }).ok).toBe(false);
-  });
-
-  it("reads the needs context GitHub provides", () => {
-    const needs = JSON.stringify({
-      scope: { result: "success", outputs: { docs_only: "false" } },
-      checks: { result: "success", outputs: {} },
-      test: { result: "success", outputs: {} },
-      release: { result: "success", outputs: {} },
-    });
-    expect(needsVerdict(needs).ok).toBe(true);
-    const manualRun = JSON.stringify({
-      scope: { result: "success", outputs: {} },
-      checks: { result: "success", outputs: {} },
-    });
-    expect(needsVerdict(manualRun).ok).toBe(true);
-    expect(needsVerdict("not json").ok).toBe(false);
-    expect(needsVerdict(JSON.stringify({ checks: { result: "success", outputs: {} } })).ok).toBe(false);
   });
 });
