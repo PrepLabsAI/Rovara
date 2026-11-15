@@ -75,6 +75,7 @@ it("the real server lets only one of two identities racing spend the same approv
 
 it("first admin joins through the real server, and both code redemption and refresh recheck membership", async () => {
   const h = world(); h.deps.company = h.company;
+  // This test exercises token revocation after a future successful fresh sign-in check.
   await h.invoke({ kind: "company-preapprove", companyId: IMPLICIT_COMPANY_ID, email, role: "admin", expiresInHours: 1 });
   const back = await h.signIn("oidc", "person");
   const code = back.searchParams.get("code")!;

@@ -99,20 +99,22 @@ it.each([{ entityType: "OTHER" }, { personId: "2".repeat(64) }, { companyId: "wr
   expect(await h.store.join({ personId, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: false, reason: "not_invited" });
 });
 
-const operatorKinds = ["company-create", "company-preapprove", "company-preapproval-withdraw", "company-preapprovals-list", "company-member-revoke", "company-member-restore", "company-issuer-set", "company-signin-client-set"];
+const operatorKinds = ["company-create", "company-preapprove", "company-preapproval-withdraw", "company-preapprovals-list", "company-member-revoke", "company-member-restore", "company-member-role-set", "company-member-list", "company-issuer-set", "company-signin-client-set"];
 const operatorOwners = new Set([
   "packages/broker/src/developer/server.ts", "packages/broker/src/developer/company-operator.ts",
   "packages/broker/src/developer/company-membership.ts", "packages/broker/src/developer/company-issuer.ts",
   "packages/broker/src/aws/developer-identity.ts",
 ]);
-it("no broker source imports operator dispatch or builds an operator-only kind", () => {
+// ANSWER-2: company-member-boundary.test.ts adds the all-source AST/provenance ratchet,
+// including these identity owners; this original operator-only check remains in force.
+it("only the strict member helper constructs member kinds; broker sources never import operator dispatch", () => {
   const sources = loadCompanySources(resolve("."));
   const schema = sources.find((source) => source.path === "packages/broker/src/developer/company-operator.ts")!.text;
   expect([...schema.matchAll(/kind: z\.literal\("(company-[a-z-]+)"\)/g)].map((match) => match[1]).sort()).toEqual([...operatorKinds].sort());
   // All broker directories, with exact owner exceptions (no company-*.ts wildcard).
   for (const source of sources.filter((entry) => entry.path.startsWith("packages/broker/src/") && !operatorOwners.has(entry.path))) {
     expect(source.text, source.path).not.toContain("company-operator");
-    const allowed = source.path === "packages/broker/src/aws/developer-routes.ts" ? ["company-preapprove", "company-preapproval-withdraw"] : [];
+    const allowed = source.path === "packages/broker/src/aws/developer-routes.ts" ? ["company-preapprove", "company-preapproval-withdraw"] : source.path === "packages/broker/src/aws/company-member-forwarding.ts" ? ["company-member-revoke", "company-member-role-set", "company-member-list"] : [];
     for (const kind of operatorKinds.filter((kind) => !allowed.includes(kind))) {
       expect(source.text, source.path).not.toMatch(new RegExp(`["'\x60]${kind}["'\x60]`));
     }
