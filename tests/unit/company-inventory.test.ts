@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { COMPANY_CHECKED_ROUTES } from "../support/company-route-harness.js";
 import { scanCompanySources, loadCompanySources, validateCompanyInventory, forwardingCoverage } from "../support/company-inventory-scan.js";
+import { judgeProofHold, markReadyAnyway, proofHoldKey, proofOverrideKey, readProofHold, readProofHoldHistory } from "../../packages/broker/src/core/merge/proof-hold.js";
+import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
+import { mergeWorld } from "../support/merge-world.js";
 
 const source = (text: string, path = "packages/broker/src/aws/broker.ts") => ({ path, text });
 const markdown = (count = "1 record kinds: 0 company-scoped, 0 install-wide, 1 needs-company. 1 routes: 0 company-scoped, 0 install-wide, 1 needs-company.") => `${count}\n\n| kind | identity | class | table | checked | methods | reason |\n|---|---|---|---|---|---|---|\n| record | entity:TASK | needs-company | State table | no | - | T1 |\n| route | /v1/dev/tasks | needs-company | State table | no | GET | T2 |\n`;
@@ -108,4 +111,65 @@ it("uses work rather than elapsed wall time to bound the inventory", () => {
   let elapsed = 0;
   const clock = vi.spyOn(performance, "now").mockImplementation(() => elapsed += 60_000);
   try { expect(basic().records).toEqual(["entity:TASK"]); } finally { clock.mockRestore(); }
+});
+
+describe("merge-up 3 proof record classifications", () => {
+  async function proofWorld() {
+    const world = await mergeWorld();
+    const task = { ...await world.task(), orgId: COMPANY_A.orgId };
+    const pr = world.prs[0]!;
+    const request = { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head };
+    const judge = (companyTask = task, headSha = pr.head) => judgeProofHold({
+      store: world.store, timeline: world.timeline,
+      proofHold: { mode: () => "hold", facts: async () => ({ absentOnNew: ["changed check"] }) },
+    }, companyTask, pr, headSha, world.now.value);
+    const press = () => markReadyAnyway({
+      store: world.store, audit: world.audit, now: () => world.now.value,
+      roles: { read: async () => ({ orgRole: "owner" }) },
+      loadTask: async () => task,
+    }, { companyId: task.orgId, taskId: task.taskId, repositoryId: pr.repositoryId, number: pr.number, expectedHeadSha: pr.head, actorId: task.ownerId });
+    await world.seedTracking({ orgId: task.orgId, draft: true });
+    return { world, task, request, judge, press };
+  }
+
+  it("keeps proof history separate for the same project in two companies", async () => {
+    const { world, task, judge } = await proofWorld();
+    expect(await readProofHoldHistory(world.store, task.orgId, task.project)).toEqual({ held: 0, total: 0 });
+    expect(await judge()).toMatchObject({ kind: "held" });
+    expect(await readProofHoldHistory(world.store, task.orgId, task.project)).toEqual({ held: 1, total: 1 });
+    expect(await readProofHoldHistory(world.store, COMPANY_B.orgId, task.project)).toEqual({ held: 0, total: 0 });
+    expect(await judge({ ...task, orgId: COMPANY_B.orgId })).toMatchObject({ kind: "held" });
+    expect(await readProofHoldHistory(world.store, task.orgId, task.project)).toEqual({ held: 1, total: 1 });
+    expect(await readProofHoldHistory(world.store, COMPANY_B.orgId, task.project)).toEqual({ held: 1, total: 1 });
+  });
+
+  it("known gap: proof-hold judgement writers replace another company's row at the same task key", async () => {
+    const { world, task, request, judge } = await proofWorld();
+    expect(await judge()).toMatchObject({ kind: "held" });
+    expect((await readProofHold(world.store, task, request))?.record.orgId).toBe(task.orgId);
+    const foreignTask = { ...task, orgId: COMPANY_B.orgId };
+    expect(await readProofHold(world.store, foreignTask, request)).toBeUndefined();
+    expect(await judge(foreignTask)).toMatchObject({ kind: "held" });
+    // Equal state keys suppress the foreign judgement write; a new head replaces the row.
+    expect(await readProofHold(world.store, foreignTask, request)).toBeUndefined();
+    const nextHead = "b".repeat(40);
+    expect(await judge(foreignTask, nextHead)).toMatchObject({ kind: "held" });
+    expect((await world.store.get(proofHoldKey(task.taskId, request.repositoryId, request.number)))?.["orgId"]).toBe(COMPANY_B.orgId);
+    expect(await readProofHold(world.store, task, request)).toBeUndefined();
+    expect((await readProofHold(world.store, foreignTask, { ...request, headSha: nextHead }))?.record.orgId).toBe(COMPANY_B.orgId);
+  });
+
+  it("known gap: a foreign proof-override row blocks mark-ready at the same task key despite the read fence", async () => {
+    const { world, task, request, judge, press } = await proofWorld();
+    expect(await judge()).toMatchObject({ kind: "held" });
+    const key = proofOverrideKey(task.taskId, request.repositoryId, request.number);
+    expect(await press()).toMatchObject({ overridden: true, already: false });
+    const own = (await world.store.get(key))!;
+    expect((await readProofHold(world.store, task, request))?.override?.orgId).toBe(task.orgId);
+    const foreign = { ...own, orgId: COMPANY_B.orgId };
+    await world.store.put({ item: foreign });
+    expect((await readProofHold(world.store, task, request))?.override).toBeUndefined();
+    await expect(press()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(await world.store.get(key)).toEqual(foreign);
+  });
 });
