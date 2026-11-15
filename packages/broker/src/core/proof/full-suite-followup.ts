@@ -11,7 +11,7 @@
 //   - the day's count is read before the budget is asked (`admit`), so a run past the cap is never charged; a charge for a run that did not queue (a lost race) is released (`release`); a budget refusal is
 //     "not run", any other error goes on up (at publication, a store fault is "not queued: a Rovara problem");
 //   - asking again for the same commit is a replay and never moves the task's pointer (a delayed replay of an older commit cannot supersede a newer one); only a follow-up that Rovara could not finish
-//     (errored, or past the longest run) is queued again by a replay, and it then takes the pointer only if it is the newest;
+//     (errored, or past the longest run) is queued again by a replay, and only while the task's pointer still names that commit (an older commit is never re-run and never takes the pointer back);
 //   - a run Rovara could not finish (its own fault: the machine, the sandbox) is `errored`: never a failed suite, so a Rovara fault never blocks a merge or turns the Check to failure;
 //   - one that waited longer than a run can take reads expired, never passed;
 //   - merge stays allowed while pending, on a MEDIUM card (Q3 option a), unless the company chose to block until it passes (option b); a failed follow-up is a HIGH card and is not mergeable from the card;
@@ -100,8 +100,12 @@ export async function queueFullSuiteFollowup(deps: FollowupDeps, input: Followup
   const since = typeof existing?.["startedAtMs"] === "number" ? existing["startedAtMs"] : existing?.["queuedAtMs"];
   const unfinished = existing !== undefined && (existing["state"] === "errored"
     || ((existing["state"] === "queued" || existing["state"] === "running") && typeof since === "number" && now - since > FOLLOWUP_MAX_RUN_MS));
-  // Same task and commit: the same follow-up (also after it finished: it is not run twice). Only one Rovara could not finish is queued again.
+  // Same task and commit: the same follow-up (also after it finished: it is not run twice). Only one Rovara could not finish is queued again, and only while it is still the task's current commit.
   if (existing !== undefined && !unfinished) return { queued: true, replayed: true };
+  if (existing !== undefined) {
+    const latest = await deps.store.get(latestKey(input));
+    if (latest?.["digest"] !== input.candidateDigest || latest["orgId"] !== input.orgId) return { queued: true, replayed: true };
+  }
   // The day's count first: a run past the cap is never charged.
   const day = await deps.store.get(dayKey(input.orgId, input.project, now));
   if (typeof day?.["count"] === "number" && day["count"] >= FOLLOWUP_DAILY_CAP) return { queued: false, reason: "daily_cap" };
@@ -127,13 +131,20 @@ export async function queueFullSuiteFollowup(deps: FollowupDeps, input: Followup
       ops: [change.set("entityType", FOLLOWUP_ENTITY), change.add("count", 1), change.set(INDEX_EXPIRY_ATTRIBUTE, Math.floor((now + DAY_TTL_MS) / 1000))],
       condition: when.or(when.notExists("count"), when.lt("count", FOLLOWUP_DAILY_CAP)),
     },
-    // The pointer: taken only by the newest queueing, so a late or replayed write of an older commit cannot take it back.
+    // The pointer: a first queueing takes it (a late write never takes it back from a later one); a re-queue only keeps it, while it still names this commit.
     {
-      kind: "put", condition: when.or(when.absent(), when.lte("queuedAtMs", now)),
+      kind: "put", condition: existing === undefined ? when.or(when.absent(), when.lte("queuedAtMs", now)) : when.and(when.present(), when.eq("digest", input.candidateDigest)),
       item: { ...latestKey(input), entityType: FOLLOWUP_ENTITY, kind: "latest", orgId: input.orgId, digest: input.candidateDigest, queuedAtMs: now, ...expiry(now + TTL_MS) },
     },
   ];
-  const written = await deps.store.transact(items);
+  let written: Awaited<ReturnType<FollowupDeps["store"]["transact"]>>;
+  try {
+    written = await deps.store.transact(items);
+  } catch (error) {
+    // Nothing was queued: the charge goes back, and the fault goes on up.
+    await deps.release?.(charge).catch(() => undefined);
+    throw error;
+  }
   if (written.applied) return { queued: true, replayed: false };
   await deps.release?.(charge).catch(() => undefined);
   // Lost a race with the same follow-up, or the day filled up meanwhile, or a newer commit holds the pointer.
@@ -276,7 +287,7 @@ export function fullSuiteMergeGate(input: { policy: FullSuiteMergePolicy; follow
 export async function followupAtPublication(
   deps: FollowupDeps,
   input: FollowupTarget & { headSha: string; selection: Parameters<typeof needsFullSuiteFollowup>[0]["selection"]; testChecks: Parameters<typeof needsFullSuiteFollowup>[0]["testChecks"] },
-): Promise<{ needed: boolean; queued?: QueueOutcome; fullSuite: FullSuiteState; line?: string }> {
+): Promise<{ needed: boolean; queued?: QueueOutcome; fullSuite: FullSuiteState | undefined; line?: string }> {
   const needed = needsFullSuiteFollowup({ selection: input.selection, testChecks: input.testChecks });
   if (!needed) return { needed: false, fullSuite: "not_needed" };
   let queued: QueueOutcome;
@@ -290,7 +301,8 @@ export async function followupAtPublication(
     followup = undefined;
   }
   const line = followupLine(followup, queued);
-  return { needed, queued, fullSuite: fullSuiteStateOf(followup, needed) ?? "not_run", ...(line === undefined ? {} : { line }) };
+  // Undefined for a follow-up that failed (show no testing view; the line says it failed): never "not run" for a suite that ran.
+  return { needed, queued, fullSuite: fullSuiteStateOf(followup, needed), ...(line === undefined ? {} : { line }) };
 }
 
 /** For the "Rovara" Check's source (`SummaryCheckSource.facts`): the full-suite fact of a head's commit. A read that fails is `not_run` (neutral), never a guess. */

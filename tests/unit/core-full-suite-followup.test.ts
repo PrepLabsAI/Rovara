@@ -103,6 +103,43 @@ describe("queueing", () => {
     expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: false });
     expect(await recordFollowupResult(d, { ...at(), result: PASSED })).toBe(true);
   });
+  it("an older commit's unfinished run is never re-run once a newer commit holds the pointer (no charge, no pointer steal)", async () => {
+    const { d, now, admitted } = deps();
+    await queueFullSuiteFollowup(d, at());
+    await recordFollowupResult(d, { ...at(), result: { outcome: "rovara_problem", finishedAt: "2026-11-15T10:40:00.000Z" } });
+    await queueFullSuiteFollowup(d, at(ORG, "task-1", D2, H2));
+    now.value += 1_000;
+    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: true });
+    expect(admitted).toEqual(["task-1", "task-1"]);
+    expect((await readFollowup(d, at(ORG, "task-1", D2, H2)))?.state).toBe("queued");
+    expect(await recordFollowupResult(d, { ...at(ORG, "task-1", D2, H2), result: FAILED })).toBe(true);
+  });
+  it("the same after an older commit's run expired", async () => {
+    const { d, now } = deps();
+    await queueFullSuiteFollowup(d, at());
+    await queueFullSuiteFollowup(d, at(ORG, "task-1", D2, H2));
+    now.value += FOLLOWUP_MAX_RUN_MS + 1;
+    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: true });
+    expect((await readFollowup(d, at()))?.state).toBe("superseded");
+  });
+  it("a charge for a run that did not queue is given back: a lost race and a store fault", async () => {
+    const released: string[] = [];
+    const lost = deps({ release: async (input) => { released.push(input.taskId); } });
+    const raced = { ...lost.d, store: { get: lost.store.get.bind(lost.store), update: lost.store.update.bind(lost.store), transact: async () => ({ applied: false as const, reason: "condition_failed" as const, failed: [2] }) } } as FollowupDeps;
+    expect(await queueFullSuiteFollowup(raced, at())).toEqual({ queued: false, reason: "unavailable" });
+    const broken = { ...lost.d, store: { get: lost.store.get.bind(lost.store), update: lost.store.update.bind(lost.store), transact: async () => { throw new Error("down"); } } } as FollowupDeps;
+    await expect(queueFullSuiteFollowup(broken, at(ORG, "task-2"))).rejects.toThrow("down");
+    expect(released).toEqual(["task-1", "task-2"]);
+  });
+  it("a race lost to the same follow-up reads as queued (replayed), not as a Rovara problem", async () => {
+    const { d, store } = deps();
+    let first = true;
+    const racing = { ...d, store: { get: store.get.bind(store), update: store.update.bind(store), transact: async (items: Parameters<typeof store.transact>[0]) => {
+      if (first) { first = false; await queueFullSuiteFollowup(d, at()); }
+      return store.transact(items);
+    } } } as FollowupDeps;
+    expect(await queueFullSuiteFollowup(racing, at())).toEqual({ queued: true, replayed: true });
+  });
   it("two commits whose digests share the stored prefix are refused, never mixed up", async () => {
     const { d } = deps();
     await queueFullSuiteFollowup(d, at());
@@ -269,6 +306,14 @@ describe("the seams part B calls", () => {
     const out = await followupAtPublication(broken, { ...at(), selection: affected, testChecks: [] });
     expect(out).toMatchObject({ needed: true, queued: { queued: false, reason: "unavailable" }, fullSuite: "not_run" });
     expect(out.line).toContain("a Rovara problem");
+  });
+  it("at publication again after the follow-up failed: no testing view (never 'not run'), and the line says failed", async () => {
+    const { d } = deps();
+    await queueFullSuiteFollowup(d, at());
+    await recordFollowupResult(d, { ...at(), result: FAILED });
+    const out = await followupAtPublication(d, { ...at(), selection: affected, testChecks: [] });
+    expect(out.fullSuite).toBeUndefined();
+    expect(out.line).toContain("failed on this commit");
   });
   it("the Check's fact: a read that fails is not run (neutral), never passed", async () => {
     const { d } = deps();
