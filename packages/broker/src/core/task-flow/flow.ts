@@ -11,7 +11,7 @@ import { createTransactionalOutbox } from "../../ports/transactional-outbox.js";
 import { createBuildSteps } from "../build-step/index.js";
 import { createOwnerTaskAccess } from "./access.js";
 import { closeTask } from "./close.js";
-import type { TaskCaller, TaskFlowDeps } from "./deps.js";
+import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "./deps.js";
 import { WORKFLOW_DISPATCH_INDEX } from "./dispatch-rows.js";
 import { runDispatchOnce, type DispatchReport } from "./dispatch.js";
 import { getTask, listTasks } from "./reads.js";
@@ -31,7 +31,7 @@ export const TASK_FLOW_INDEXES: readonly IndexDefinition[] = [
 
 export interface TaskFlow {
   readonly deps: TaskFlowDeps;
-  start(caller: TaskCaller, request: unknown): ReturnType<typeof startTask>;
+  start(caller: TaskStartCaller, request: unknown): ReturnType<typeof startTask>;
   get(caller: TaskCaller, taskId: string): ReturnType<typeof getTask>;
   list(caller: TaskCaller, options?: { limit?: number; cursor?: string }): ReturnType<typeof listTasks>;
   close(caller: TaskCaller, taskId: string): ReturnType<typeof closeTask>;

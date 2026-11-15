@@ -2,8 +2,8 @@
 
 A service built on Rovara (a dashboard, or a scheduler that acts as a channel adapter) can let Rovara users sign in
 with Rovara rather than with an identity system of its own. An administrator registers it as a **sign-in client**.
-Its tokens carry its own audience, so Rovara's API refuses them, unless the service has
-[full access](#full-access).
+Its tokens carry its own audience, so Rovara's API refuses them, except on the routes its
+[scopes](#named-scopes-on-the-developer-api) open, or everywhere with [full access](#full-access).
 
 Developer sign-in must be set up (`agentx signin enable`). Every change is an admin change: the CLI shows what it will
 do and asks before applying it, and `agentx admin changes` records it.
@@ -75,7 +75,8 @@ The service uses Rovara's sign-in server as an OAuth 2.0 authorization server. I
    client.
 4. Sign out with `<api>/v1/auth/revoke`.
 
-Rovara's own API refuses these tokens.
+Rovara's own API refuses these tokens, except on the routes the client's scopes open (see
+[Named scopes on the developer API](#named-scopes-on-the-developer-api)).
 
 A session records whether the person is a Rovara administrator. Only a company sign-in counts, and only when it uses
 the same identity provider as the admin client and its ID token carries the administrator claim (`AdminClaim`,
@@ -129,9 +130,31 @@ The member list shows grants made once this release is in. A grant made before i
 See the specs: [sign-in clients](../specs/063-sign-in-clients/spec.md) and
 [scoped actions](../specs/065-client-scopes/spec.md).
 
+## Named scopes on the developer API
+
+Every developer API route (`/v1/dev/*`) has one row in the broker's route table
+(`packages/broker/src/aws/dev-route-scopes.ts`) naming what a service's token needs to use it. A method and path with
+no row is refused with 404 before anyone is signed in, so a new route can't be reached until it has a row.
+
+| Scope | What it opens |
+| --- | --- |
+| `profile:name` | `PUT /v1/dev/me/name`: the person chooses their own name |
+| `projects:members` | A project's members (above) |
+| `projects:create` | Creating a project, and the repositories to create it from |
+| `tasks:read` | The person's projects, their tasks, one task, its events, plan, people, a pending people change, the feedback review, its messages, a pull request's diff, plan comments |
+| `tasks:start` | `POST /v1/dev/tasks`: start a task |
+| `tasks:act` | Add a message or steer the running step, comment on a plan document, cancel, close, continue, open pull requests, propose a role change or taking a task over, retry, review again, send back, resolve findings, publish again, keep pull requests, retry a feedback review |
+| `tasks:share` | Share a task, and list, add and remove its readers |
+| `decisions:decide` | Approve a plan or request changes, and decide on a feedback proposal |
+
+The rest (workspaces, the person's links, Sign in with ChatGPT, and two routes only the CLI uses) need
+[full access](#full-access). A token without the scope a route needs gets 403, naming the missing scope; a service registered with no scope and no full access gets 401, as before. A scope only
+narrows what the person may do; it never adds a right. The Rovara CLI's own token reaches every route, as before.
+
 ## Full access
 
-A service you trust as much as the Rovara CLI, such as a web app, can act as the signed-in person on Rovara's whole
+Full access is off for every service unless an administrator turns it on; a web app needs only the named scopes
+above. A service you trust as much as the Rovara CLI can act as the signed-in person on Rovara's whole
 developer API (`/v1/dev/*`): their projects, workspaces, links and, where the deployment runs them, tasks. Its people
 then use Rovara through it with exactly their own rights.
 

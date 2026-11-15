@@ -174,7 +174,7 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
     async message({ message, projectName, personId }) {
       // One owner: a link to anyone else (a stale row from another install) starts nothing.
       if (personId !== ownerId) { log({ event: "chat.not_the_owner", channel }); return; }
-      const started = await deps.flow.start({ principal: deps.owner, client: channel }, { project: projectName, instructions: message.text, requestId: uuidOf(`${channel}/${message.eventId}`), workflow: true });
+      const started = await deps.flow.start({ principal: deps.owner, origin: channel === "slack" ? "slack" : "app", client: channel }, { project: projectName, instructions: message.text, requestId: uuidOf(`${channel}/${message.eventId}`), workflow: true });
       await recordTaskThread({ store, orgId, now: deps.now }, { sessionId: taskSessionId(started.task.taskId), conversation: message.conversation, personId, actor: message.actor });
     },
     async decide({ card, decision, personId }: { card: ApprovalCard; decision: ChannelDecision; personId: string; projectName: string }): Promise<ChannelDecisionAnswer> {
