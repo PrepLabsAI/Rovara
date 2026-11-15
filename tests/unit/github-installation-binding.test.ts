@@ -198,3 +198,43 @@ it("bounds aggregate list bytes even when each installation and repository is in
     repositories: Array.from({ length: 100 }, () => ({ fullName: "r".repeat(201), githubRepositoryId: 42, private: true, defaultBranch: "b".repeat(256) })) }));
   await expect(filterInstallationsFor(IMPLICIT_COMPANY_ID, rows, store)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
 });
+
+it("operator backfill finishes 125 installations in bounded pages with a fresh write clock", async () => {
+  const db = new FakeDynamoDb(); let clock = Date.parse(NOW);
+  const store = new GithubInstallationBindings(db, "state", () => clock);
+  const pages: number[] = [];
+  const list = async (page: number) => {
+    pages.push(page); clock += 10_001;
+    return { installations: page <= 5 ? listed(25).map(row => ({ ...row, installationId: row.installationId + (page - 1) * 25 })) : [], more: page <= 5 };
+  };
+  for (let page = 1; page <= 6; page++) {
+    const result = await store.backfillPage(list, page);
+    expect(result).toEqual(page <= 5 ? { more: true, continuation: page + 1 } : { more: false });
+    if (page <= 5) expect(db.get("GITHUB_INSTALLATION_BINDING", "BACKFILL")).toBeUndefined();
+  }
+  expect(pages).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(db.find(row => row.entityType === "GITHUB_INSTALLATION_BINDING")).toHaveLength(125);
+  expect(await store.ownerOf(125)).toBe(IMPLICIT_COMPANY_ID);
+  expect(await store.backfillPage(async () => { throw new Error("completed must not list"); })).toEqual({ more: false });
+});
+
+it("operator pages reject every malformed input before any binding write", async () => {
+  for (const value of [null, { installations: listed(26), more: false }, { installations: [listed(1)[0], listed(1)[0]], more: false },
+    { installations: [{ installationId: 1, accountLogin: "private-canary" }, { installationId: 2, accountLogin: null }], more: false },
+    { installations: listed(1), more: "private-canary" }, { installations: [{ installationId: 1, accountLogin: "x".repeat(1_000_001) }], more: false }]) {
+    const { db, store } = setup();
+    const answer = await refusal(store.backfillPage(async () => value as never));
+    expect(answer).toEqual({ code: "GITHUB_NOT_CONNECTED", message: "GITHUB_NOT_CONNECTED: the GitHub installation is not connected" });
+    expect(db.items.size).toBe(0);
+  }
+});
+
+
+it("operator store validates every claim field before its atomic write", async () => {
+  for (const [companyId, installation] of [["private-canary", { installationId: 1, accountLogin: "example" }],
+    [A, { installationId: 0, accountLogin: "example" }], [A, { installationId: 1, accountLogin: null }]] as const) {
+    const { db, store } = setup();
+    await expect(store.claimOperator(companyId, installation as never)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
+    expect(db.items.size).toBe(0);
+  }
+});

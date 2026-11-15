@@ -1,3 +1,4 @@
+import type { ReadableStreamReadResult } from "node:stream/web";
 import { createHash, createSign } from "node:crypto";
 import { z } from "zod";
 import { PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, isSafeE2ESourcePath, type AgentXError, type ClientRepositoriesResponse, type E2ESourceSnapshot } from "@agentx/contracts";
@@ -11,6 +12,11 @@ const InstallationsSchema = z.array(z.object({
   repository_selection: z.enum(["all", "selected"]),
   suspended_at: z.string().nullable().optional(),
 }));
+const BindingInstallationSchema = z.object({
+  id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  account: z.object({ login: z.string().min(1).max(256), type: z.enum(["User", "Organization"]) }),
+  repository_selection: z.enum(["all", "selected"]),
+});
 const InstallationRepositoriesSchema = z.object({
   repositories: z.array(z.object({ id: z.number().int().positive(), full_name: z.string(), private: z.boolean(), default_branch: z.string() })),
 });
@@ -869,12 +875,12 @@ export class GitHubAppCredentialProvider {
     return treeSha;
   }
 
-  /** The repository's installation, cached by owner; a failed lookup is not cached. */
   /** Installation lookup for company checks at the AWS seams; shares the existing cache. */
   async installationIdFor(repositoryUrl: string): Promise<number> {
     return (await this.installed(parseGitHubRepository(repositoryUrl))).installationId;
   }
 
+  /** The repository's installation, cached by owner; a failed lookup is not cached. */
   private async installed(repository: { owner: string; name: string }): Promise<InstalledRepository> {
     const key = repository.owner.toLowerCase();
     let installation = this.installations.get(key);
@@ -941,6 +947,47 @@ export class GitHubAppCredentialProvider {
       if (repositories?.success !== true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository list failed with HTTP ${reposResponse.status}`);
       return { ...listed, repositories: repositories.data.repositories.map((repository) => ({ fullName: repository.full_name, githubRepositoryId: repository.id, private: repository.private, defaultBranch: repository.default_branch })) };
     }));
+  }
+
+  /** Operator binding discovery: one GitHub request, no repository/token fan-out. */
+  async bindingInstallations(page: number): Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }> {
+    try {
+      z.number().int().positive().max(1_000_000).parse(page);
+      const body = await this.bindingRead(`/app/installations?per_page=25&page=${page}`);
+      const rows = z.array(BindingInstallationSchema).max(25).parse(body);
+      if (new Set(rows.map(row => row.id)).size !== rows.length) throw new Error();
+      return { installations: rows.map(row => ({ installationId: row.id, accountLogin: row.account.login })), more: rows.length === 25 };
+    } catch { throw agentXError("GITHUB_NOT_CONNECTED", "the GitHub installation is not connected"); }
+  }
+
+  async bindingInstallation(installationId: number): Promise<{ installationId: number; accountLogin: string }> {
+    try {
+      z.number().int().positive().max(Number.MAX_SAFE_INTEGER).parse(installationId);
+      const row = BindingInstallationSchema.parse(await this.bindingRead(`/app/installations/${installationId}`));
+      if (row.id !== installationId) throw new Error();
+      return { installationId: row.id, accountLogin: row.account.login };
+    } catch { throw agentXError("GITHUB_NOT_CONNECTED", "the GitHub installation is not connected"); }
+  }
+
+  private async bindingRead(path: string): Promise<unknown> {
+    const response = await this.fetchImplementation(`https://api.github.com${path}`, {
+      headers: await this.appHeaders(), signal: AbortSignal.timeout(5_000), redirect: "error",
+    });
+    if (!response.ok) throw new Error();
+    // Bound bytes while reading, before parsing; the request timeout also covers the body.
+    const reader = response.body?.getReader();
+    if (reader === undefined) throw new Error();
+    const chunks: Uint8Array[] = []; let bytes = 0;
+    try {
+      for (;;) {
+        const part: ReadableStreamReadResult<Uint8Array> = await reader.read();
+        if (part.done) break;
+        bytes += part.value.byteLength;
+        if (bytes > 1_000_000) throw new Error();
+        chunks.push(part.value);
+      }
+      return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    } finally { await reader.cancel(); reader.releaseLock(); }
   }
 
   /** Spec 025 A13: how many accounts the App is installed on (the first 100), for the health route. */

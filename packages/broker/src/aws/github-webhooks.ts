@@ -737,6 +737,7 @@ export async function listDueGithubWebhookDeliveries(input: {
   tableName: string;
   now: string;
   limit?: number;
+  continuation?: GithubDeliveryContinuation;
 }): Promise<CompanyGithubDeliveries> {
   if (input.companyId !== undefined) return listCompanyGithubDeliveries({ ...input, companyId: input.companyId });
   const response = await input.documentClient.send(new QueryCommand({
@@ -752,8 +753,21 @@ export async function listDueGithubWebhookDeliveries(input: {
     : []);
 }
 
-export type CompanyGithubDeliveries = Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"]; companyId?: string }> & { more?: boolean };
-async function listCompanyGithubDeliveries(input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: string; limit?: number; companyId: string }): Promise<CompanyGithubDeliveries> {
+const deliveryContinuationSchema = z.object({
+  partition: z.number().int().min(0).max(1),
+  after: z.object({ pk: z.string().regex(/^GITHUB_DELIVERY#[0-9a-f-]{36}$/i), sk: z.literal("META"),
+    webhookRecoveryPk: z.string().max(200), webhookRecoverySk: z.string().max(100) }).strict().optional(),
+}).strict();
+export type GithubDeliveryContinuation = z.infer<typeof deliveryContinuationSchema>;
+const recoveryContinuationSchema = z.object({ afterCompany: OrgIdSchema.optional(), companyId: OrgIdSchema.optional(), delivery: deliveryContinuationSchema.optional() }).strict();
+export function readGithubRecoveryContinuation(value: unknown): z.infer<typeof recoveryContinuationSchema> {
+  if (value === undefined) return {};
+  if (typeof value !== "string" || value.length > 2_000) throw deliveryScopeRefusal();
+  try { return recoveryContinuationSchema.parse(JSON.parse(Buffer.from(value, "base64url").toString("utf8"))); }
+  catch { throw deliveryScopeRefusal(); }
+}
+export type CompanyGithubDeliveries = Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"]; companyId?: string }> & { more?: boolean; continuation?: GithubDeliveryContinuation; skipped?: number };
+async function listCompanyGithubDeliveries(input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: string; limit?: number; companyId: string; continuation?: GithubDeliveryContinuation }): Promise<CompanyGithubDeliveries> {
   const partition = githubRecoveryPartition(input.companyId);
   const limit = input.limit ?? 25;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isFinite(Date.parse(input.now))) throw deliveryScopeRefusal();
@@ -761,21 +775,36 @@ async function listCompanyGithubDeliveries(input: { documentClient: { send(comma
   const result: CompanyGithubDeliveries = [];
   const seen = new Set<string>();
   const partitions = input.companyId === IMPLICIT_COMPANY_ID ? [partition, GITHUB_WEBHOOK_RECOVERY_PK] : [partition];
+  let scanned = 0;
   try {
-    for (const pk of partitions) {
-      if (result.length >= limit) { result.more = true; break; }
+    const cursor = input.continuation === undefined ? { partition: 0 } : deliveryContinuationSchema.parse(input.continuation);
+    if (cursor.partition >= partitions.length || (cursor.after !== undefined && cursor.after.webhookRecoveryPk !== partitions[cursor.partition])) throw deliveryScopeRefusal();
+    for (let index = cursor.partition; index < partitions.length; index++) {
+      const pk = partitions[index]!;
+      if (scanned >= limit) { result.more = true; result.continuation = { partition: index }; break; }
       const page = await budget.client.send(new QueryCommand({ TableName: input.tableName, IndexName: GITHUB_WEBHOOK_RECOVERY_INDEX,
-        KeyConditionExpression: "webhookRecoveryPk = :pk AND webhookRecoverySk <= :sk", ExpressionAttributeValues: { ":pk": pk, ":sk": `${input.now}#~` }, Limit: limit - result.length })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: unknown };
-      if (page.LastEvaluatedKey !== undefined) result.more = true;
-      if (!Array.isArray(page.Items ?? []) || (page.Items?.length ?? 0) > limit - result.length) throw deliveryScopeRefusal();
+        KeyConditionExpression: "webhookRecoveryPk = :pk AND webhookRecoverySk <= :sk", ExpressionAttributeValues: { ":pk": pk, ":sk": `${input.now}#~` }, Limit: limit - scanned,
+        ...(index === cursor.partition && cursor.after !== undefined ? { ExclusiveStartKey: cursor.after } : {}) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: GithubDeliveryContinuation["after"] };
+      if (!Array.isArray(page.Items ?? []) || (page.Items?.length ?? 0) > limit - scanned) throw deliveryScopeRefusal();
+      scanned += page.Items?.length ?? 0;
       for (const row of page.Items ?? []) {
-        if (!recordInCompany(row, input.companyId) || row.entityType !== "GITHUB_WEBHOOK_DELIVERY"
-          || typeof row.deliveryId !== "string" || !DELIVERY_ID.test(row.deliveryId)
-          || !["RECEIVED", "RETRYABLE", "PROCESSING"].includes(String(row.status))) throw deliveryScopeRefusal();
-        const event = readGithubWebhookEvent(row.event);
-        if (row.installationId !== event.installationId || row.repositoryId !== event.repositoryId || seen.has(row.deliveryId)) throw deliveryScopeRefusal();
-        seen.add(row.deliveryId);
-        result.push({ deliveryId: row.deliveryId, event });
+        try {
+          if (!recordInCompany(row, input.companyId) || row.entityType !== "GITHUB_WEBHOOK_DELIVERY"
+            || typeof row.deliveryId !== "string" || !DELIVERY_ID.test(row.deliveryId)
+            || !["RECEIVED", "RETRYABLE", "PROCESSING"].includes(String(row.status))) throw deliveryScopeRefusal();
+          const event = readGithubWebhookEvent(row.event);
+          if (row.installationId !== event.installationId || row.repositoryId !== event.repositoryId || seen.has(row.deliveryId)) throw deliveryScopeRefusal();
+          seen.add(row.deliveryId);
+          result.push({ deliveryId: row.deliveryId, event });
+        } catch {
+          // Old install-wide rows can be poisoned by a disabled-mode retry. Never route
+          // them to another company; count them and advance past them for this sweep.
+          if (pk !== GITHUB_WEBHOOK_RECOVERY_PK) throw deliveryScopeRefusal();
+          result.skipped = (result.skipped ?? 0) + 1;
+        }
+      }
+      if (page.LastEvaluatedKey !== undefined) {
+        result.more = true; result.continuation = deliveryContinuationSchema.parse({ partition: index, after: page.LastEvaluatedKey }); break;
       }
     }
     return result;
@@ -783,17 +812,19 @@ async function listCompanyGithubDeliveries(input: { documentClient: { send(comma
 }
 
 /** Install-wide registry carries only company ids, never delivery or repository data. */
-export async function listGithubWebhookCompanies(input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string }): Promise<{ companies: string[]; more: boolean }> {
+export async function listGithubWebhookCompanies(input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; afterCompany?: string }): Promise<{ companies: string[]; more: boolean }> {
   try {
-  const response = await input.documentClient.send(new QueryCommand({ TableName: input.tableName, KeyConditionExpression: "pk = :pk",
-    ExpressionAttributeValues: { ":pk": "GITHUB_WEBHOOK_COMPANIES" }, Limit: 49, ConsistentRead: true })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: unknown };
-  if (!Array.isArray(response.Items ?? []) || (response.Items?.length ?? 0) > 49) throw deliveryScopeRefusal();
-  const companies = new Set([IMPLICIT_COMPANY_ID]);
-  for (const row of response.Items ?? []) {
-    if (row.pk !== "GITHUB_WEBHOOK_COMPANIES" || !OrgIdSchema.safeParse(row.sk).success) throw deliveryScopeRefusal();
-    companies.add(row.sk as string);
-  }
-  return { companies: [...companies], more: response.LastEvaluatedKey !== undefined };
+    if (input.afterCompany !== undefined) OrgIdSchema.parse(input.afterCompany);
+    const response = await input.documentClient.send(new QueryCommand({ TableName: input.tableName, KeyConditionExpression: "pk = :pk",
+      ExpressionAttributeValues: { ":pk": "GITHUB_WEBHOOK_COMPANIES" }, Limit: 49, ConsistentRead: true,
+      ...(input.afterCompany === undefined ? {} : { ExclusiveStartKey: { pk: "GITHUB_WEBHOOK_COMPANIES", sk: input.afterCompany } }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: unknown };
+    if (!Array.isArray(response.Items ?? []) || (response.Items?.length ?? 0) > 49) throw deliveryScopeRefusal();
+    const companies = new Set(input.afterCompany === undefined ? [IMPLICIT_COMPANY_ID] : []);
+    for (const row of response.Items ?? []) {
+      if (row.pk !== "GITHUB_WEBHOOK_COMPANIES" || !OrgIdSchema.safeParse(row.sk).success) throw deliveryScopeRefusal();
+      companies.add(row.sk as string);
+    }
+    return { companies: [...companies], more: response.LastEvaluatedKey !== undefined };
   } catch { throw deliveryScopeRefusal(); }
 }
 

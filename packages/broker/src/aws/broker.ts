@@ -278,7 +278,7 @@ import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
 import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, type GithubInstallationBindings } from "./github-credentials.js";
 import { boundedCompanyReads, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
-import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubWebhookEvent } from "./github-webhooks.js";
+import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
@@ -585,6 +585,10 @@ interface AwsBrokerDependencies {
   e2eAgentInstallation?: () => Promise<E2EAgentInstallation>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubBindings?: GithubInstallationBindings;
+  githubBindingInstallations?: {
+    get(installationId: number): Promise<{ installationId: number; accountLogin: string } | undefined>;
+    page(page: number): Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }>;
+  };
   companies?: CompanyMembershipReader;
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
@@ -948,7 +952,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill" } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -959,25 +963,28 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
       }
     }
-    if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-backfill") {
-      let more = false;
+    if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-claim") {
       try {
-        if (dependencies.githubBindings === undefined || dependencies.clientProjects === undefined) throw githubBindingRefusal();
-        const budget = boundedCompanyReads(dependencies.documentClient);
-        const result = await dependencies.githubBindings.withBudget(budget).backfill(async () => {
-          const listed = await budget.read(() => dependencies.clientProjects!.repositories());
-          // The provider exposes one page, with no continuation token. A full page is not proof of completeness.
-          if (listed.length >= 100) { more = true; throw githubBindingRefusal(); }
-          return listed;
-        });
-        return json(result, "github-binding-backfill");
-      } catch {
-        return more ? json({ more: true }, "github-binding-backfill")
-          : json({ error: "backfill_failed" }, "github-binding-backfill", 500);
-      }
+        // IAM protects direct Lambda invocation. HTTP/admin-shaped envelopes are
+        // refused even if they carry the source string; no body flag grants authority.
+        const input = z.object({ source: z.literal("agentx.github-binding-claim"), installationId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), companyId: OrgIdSchema }).strict().parse(event);
+        if (dependencies.githubBindings === undefined || dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
+        const installation = await dependencies.githubBindingInstallations.get(input.installationId);
+        if (installation === undefined || installation.installationId !== input.installationId) throw githubBindingRefusal();
+        await dependencies.githubBindings.claimOperator(input.companyId, installation);
+        console.log(JSON.stringify({ component: "broker", event: "github.binding_claimed", installationId: input.installationId, companyId: input.companyId }));
+        return json({ claimed: true }, "github-binding-claim");
+      } catch { return json({ error: { code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" } }, "github-binding-claim", 403); }
+    }
+    if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-backfill") {
+      try {
+        const input = z.object({ source: z.literal("agentx.github-binding-backfill"), continuation: z.number().int().positive().max(1_000_000).optional() }).strict().parse(event);
+        if (dependencies.githubBindings === undefined || dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
+        return json(await dependencies.githubBindings.backfillPage(page => dependencies.githubBindingInstallations!.page(page), input.continuation), "github-binding-backfill");
+      } catch { return json({ error: "backfill_failed" }, "github-binding-backfill", 500); }
     }
     if (isGithubWebhookRecoveryEvent(event)) {
-      try { return json(await retryDueGithubWebhookEvents(dependencies), "github-webhook-recovery"); }
+      try { return json(await retryDueGithubWebhookEvents(dependencies, "continuation" in event ? event.continuation : undefined), "github-webhook-recovery"); }
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
         return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
@@ -1983,6 +1990,7 @@ const TAKEOVER_REASON_MAX = 500;
 /** Missing membership wiring cannot turn on the legacy path when bindings are enabled. */
 async function githubCallerCompany(dependencies: AwsBrokerDependencies, personId: string, budget: ReturnType<typeof boundedCompanyReads>) {
   if (dependencies.githubBindings === undefined) return undefined;
+  if (personId === "") throw agentXError("AUTH_REQUIRED", "your AgentX sign-in has ended; run agentx login <url> again");
   return budget.read(() => resolveCompany(dependencies.companies ?? { companyOf: async () => undefined }, personId));
 }
 
@@ -2020,7 +2028,7 @@ async function registrationChecks(dependencies: AwsBrokerDependencies, identity:
   if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
   // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
   const companyBudget = scoped?.budget ?? boundedCompanyReads(dependencies.documentClient);
-  const companyId = scoped === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? identity.ownerKey, companyBudget) : scoped.companyId;
+  const companyId = scoped === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : scoped.companyId;
   await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   for (const repository of definition.repositories) {
     await checkCompanyRepository(dependencies, companyId, repository.url, companyBudget);
@@ -2041,7 +2049,7 @@ async function registerProject(
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
   const companyBudget = checked?.githubCompany?.budget ?? boundedCompanyReads(dependencies.documentClient);
-  const companyId = checked?.githubCompany === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? identity.ownerKey, companyBudget) : checked.githubCompany.companyId;
+  const companyId = checked?.githubCompany === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : checked.githubCompany.companyId;
   await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
@@ -10826,31 +10834,48 @@ async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, e
   });
 }
 
-async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; processed: number; delayed: number; more?: true }> {
+async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies, continuation?: unknown): Promise<{ attempted: number; processed: number; delayed: number; more?: true; continuation?: string; skipped?: number }> {
   const now = new Date().toISOString();
-  const budget = dependencies.githubBindings === undefined ? undefined : boundedCompanyReads(dependencies.documentClient);
-  const deps = budget === undefined ? dependencies : { ...dependencies, documentClient: new Proxy(dependencies.documentClient, { get: (target, property) => property === "send" ? budget.client.send : (Reflect.get(target, property) as unknown) }), githubBindings: dependencies.githubBindings!.withBudget(budget) };
   const due: Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"]; companyId?: string }> = [];
-  let more = false;
-  if (dependencies.githubBindings === undefined) due.push(...await listDueGithubWebhookDeliveries({ documentClient: deps.documentClient, tableName: deps.tableName, now, limit: 25 }));
+  let next: ReturnType<typeof readGithubRecoveryContinuation> | undefined;
+  let skipped = 0;
+  if (dependencies.githubBindings === undefined) due.push(...await listDueGithubWebhookDeliveries({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now, limit: 25 }));
   else {
-    const registry = await listGithubWebhookCompanies(deps);
-    more = registry.more;
-    for (const companyId of registry.companies) {
-      budget!.check();
-      if (due.length >= 100) { more = true; break; }
-      const rows = await listDueGithubWebhookDeliveries({ documentClient: deps.documentClient, tableName: deps.tableName, now, limit: Math.min(25, 100 - due.length), companyId });
-      more ||= rows.more === true;
-      due.push(...rows.map(row => ({ ...row, companyId })));
+    const cursor = readGithubRecoveryContinuation(continuation);
+    // Only registry/partition listing spends this budget. Finish listing before any
+    // delivery is claimed, so provider latency and retry writes cannot exhaust it.
+    const budget = boundedCompanyReads(dependencies.documentClient);
+    const reads = { documentClient: budget.client, tableName: dependencies.tableName };
+    let registry: Awaited<ReturnType<typeof listGithubWebhookCompanies>>;
+    try { registry = await listGithubWebhookCompanies({ ...reads, ...(cursor.afterCompany === undefined ? {} : { afterCompany: cursor.afterCompany }) }); }
+    catch { return { attempted: 0, processed: 0, delayed: 0, more: true, continuation: Buffer.from(JSON.stringify(cursor)).toString("base64url") }; }
+    const companies = [...new Set([...(cursor.companyId === undefined ? [] : [cursor.companyId]), ...registry.companies])];
+    let afterCompany = cursor.afterCompany;
+    for (const companyId of companies) {
+      const resume = { ...(afterCompany === undefined ? {} : { afterCompany }), companyId,
+        ...(companyId === cursor.companyId && cursor.delivery !== undefined ? { delivery: cursor.delivery } : {}) };
+      if (due.length >= 100) { next = resume; break; }
+      try {
+        budget.check();
+        const rows = await listDueGithubWebhookDeliveries({ ...reads, now, limit: Math.min(25, 100 - due.length), companyId,
+          ...(resume.delivery === undefined ? {} : { continuation: resume.delivery }) });
+        skipped += rows.skipped ?? 0;
+        due.push(...rows.map(row => ({ ...row, companyId })));
+        if (rows.more) { next = { ...resume, delivery: rows.continuation! }; break; }
+      } catch {
+        // No claim has occurred. Resume before the unfinished page on a bounded read.
+        next = resume; break;
+      }
+      afterCompany = companyId;
     }
+    if (next === undefined && registry.more) next = { afterCompany: registry.companies.at(-1)! };
   }
   let processed = 0;
   let delayed = 0;
   for (const delivery of due) {
-    budget?.check();
     try {
       const result = await processGithubWebhookDelivery({
-        documentClient: deps.documentClient,
+        documentClient: dependencies.documentClient,
         ...(delivery.companyId === undefined ? {} : { companyId: delivery.companyId }),
         tableName: dependencies.tableName,
         received: { delivery: "ACCEPTED", deliveryId: delivery.deliveryId, event: delivery.event },
@@ -10859,14 +10884,13 @@ async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies):
           // errors consume the ordinary bounded retry budget instead of leaving a hot due row.
           let owner: string | undefined;
           if (dependencies.githubBindings !== undefined) {
-            try { owner = await deps.githubBindings!.ownerOf(event.installationId); } catch { /* fixed refusal below */ }
-            budget!.check();
+            try { owner = await dependencies.githubBindings.ownerOf(event.installationId); } catch { /* fixed refusal below */ }
             if (owner !== delivery.companyId || owner === undefined) throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
           }
-          if (!await githubEventStillAuthorized(deps, event)) {
+          if (!await githubEventStillAuthorized(dependencies, event)) {
             throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
           }
-          await processGithubWorkflowEvent(deps, event, delivery.deliveryId);
+          await processGithubWorkflowEvent(dependencies, event, delivery.deliveryId);
         },
         now: () => new Date().toISOString(),
       });
@@ -10876,13 +10900,15 @@ async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies):
       console.log(JSON.stringify({ component: "broker", event: "github.webhook_retry_failed", deliveryId: delivery.deliveryId, error: error instanceof Error ? error.name : "unknown" }));
     }
   }
-  return { attempted: due.length, processed, delayed, ...(more ? { more: true as const } : {}) };
+  return { attempted: due.length, processed, delayed, ...(next === undefined ? {} : { more: true as const, continuation: Buffer.from(JSON.stringify(next)).toString("base64url") }), ...(skipped === 0 ? {} : { skipped }) };
 }
 
 export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, deliveryId: string) {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
-  const companyId = await resolveCompany(dependencies.companies, identity.developer?.developerId ?? identity.subject);
+  const checked = dependencies.companies !== undefined || dependencies.githubBindings !== undefined;
+  if (checked && identity.developer === undefined) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in has ended; run agentx login <url> again");
+  const companyId = checked ? await resolveCompany(dependencies.companies ?? { companyOf: async () => undefined }, identity.developer!.developerId) : undefined;
   const key = { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: "META" };
   const stored = await getItem<Record<string, unknown>>(dependencies, key);
   if (companyId !== undefined && !recordInCompany(stored, companyId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
@@ -15145,6 +15171,7 @@ export const handler = createAwsBrokerHandler({
   repositoryGrants,
   githubPullRequests: githubCredentials,
   // Spec 065b: where the foundation's worker settings are given, a sign-in client may create projects.
+  githubBindingInstallations: { get: id => githubCredentials.bindingInstallation(id), page: page => githubCredentials.bindingInstallations(page) },
   ...(process.env.EC2_WORKER_SUBNETS && process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID ? { clientProjects: {
     credentialRef: githubCredentials.credentialRef,
     repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),

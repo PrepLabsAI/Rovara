@@ -2,7 +2,7 @@
 // (GITHUB_APP_CREDENTIAL_REF, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN) and the same secret.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, type ClientRepositoriesResponse } from "@agentx/contracts";
-import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { boundedCompanyReads } from "./company-check.js";
 import { isConditional } from "./broker-shared.js";
@@ -169,6 +169,60 @@ export class GithubInstallationBindings {
       OrgIdSchema.parse(companyId); installationSchema.parse({ installationId, accountLogin }); bindingText.parse(by);
       if (!await this.marker(send) && companyId !== IMPLICIT_COMPANY_ID) throw githubBindingRefusal();
       await this.put(send, companyId, installationId, accountLogin, by);
+    });
+  }
+
+  /** Only the direct operator event calls this; the conditional transaction is the
+   * claim and its durable audit record. Replays, including same-company, refuse. */
+  async claimOperator(companyId: string, installation: { installationId: number; accountLogin: string }): Promise<void> {
+    return this.run(async send => {
+      OrgIdSchema.parse(companyId); installationSchema.parse(installation);
+      const at = new Date(this.clock()).toISOString();
+      await send(new TransactWriteCommand({ TransactItems: [
+        { Put: { TableName: this.tableName, Item: { ...bindingKey(installation.installationId), ...installation,
+          entityType: "GITHUB_INSTALLATION_BINDING", companyId, boundAt: at, boundBy: "operator-lambda" }, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Put: { TableName: this.tableName, Item: { pk: `GITHUB_INSTALLATION#${installation.installationId}`, sk: "AUDIT#CLAIM",
+          entityType: "GITHUB_INSTALLATION_CLAIM_AUDIT", ...installation, companyId, at, actor: "operator-lambda" }, ConditionExpression: "attribute_not_exists(pk)" } },
+      ] }));
+    });
+  }
+
+  /** Each operator invocation reads one page and writes at most 25 bindings. The
+   * durable page number prevents a forged/skipped continuation from sealing early. */
+  async backfillPage(list: (page: number) => Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }>, page = 1): Promise<{ more: boolean; continuation?: number }> {
+    const progressKey = { pk: "GITHUB_INSTALLATION_BINDING", sk: "PROGRESS" };
+    const expected = await this.run(async send => {
+      z.number().int().positive().max(1_000_000).parse(page);
+      if (await this.marker(send)) return undefined;
+      const saved = await send(new GetCommand({ TableName: this.tableName, Key: progressKey, ConsistentRead: true }));
+      return saved.Item === undefined ? 1 : z.object({ page: z.number().int().positive().max(1_000_000) }).parse(saved.Item).page;
+    });
+    if (expected === undefined) return { more: false };
+    if (page !== expected) throw githubBindingRefusal();
+    // Listing has its own bounded HTTP request; its latency never spends the write budget.
+    let input: { installations: Array<{ installationId: number; accountLogin: string }>; more: boolean };
+    try {
+      const value = await list(page);
+      if (Buffer.byteLength(JSON.stringify(value) ?? "") > 1_000_000) throw githubBindingRefusal();
+      input = z.object({ installations: z.array(installationSchema).max(25), more: z.boolean() }).strict().parse(value);
+      if (new Set(input.installations.map(row => row.installationId)).size !== input.installations.length) throw githubBindingRefusal();
+    } catch { throw githubBindingRefusal(); }
+    return this.run(async send => {
+      for (const installation of input.installations) {
+        // A pilot explicitly claimed before backfill belongs to that company permanently.
+        if (await this.binding(send, installation.installationId) === undefined) {
+          try { await this.put(send, IMPLICIT_COMPANY_ID, installation.installationId, installation.accountLogin, "operator-backfill"); }
+          catch { if (await this.binding(send, installation.installationId) === undefined) throw githubBindingRefusal(); }
+        }
+      }
+      // Page advancement and the completion marker share the same compare-and-swap.
+      await send(new TransactWriteCommand({ TransactItems: [
+        { Put: { TableName: this.tableName, Item: { ...progressKey, page: page + 1 },
+          ConditionExpression: page === 1 ? "attribute_not_exists(pk)" : "#page = :page",
+          ...(page === 1 ? {} : { ExpressionAttributeNames: { "#page": "page" }, ExpressionAttributeValues: { ":page": page } }) } },
+        ...(input.more ? [] : [{ Put: { TableName: this.tableName, Item: backfillKey, ConditionExpression: "attribute_not_exists(pk)" } }]),
+      ] }));
+      return input.more ? { more: true, continuation: page + 1 } : { more: false };
     });
   }
 

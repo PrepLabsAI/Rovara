@@ -9,6 +9,11 @@ const A = "org_aaaaaaaaaaaaaaaaaaaa";
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const installation = (id: number) => ({ installationId: id, accountLogin: `account-${id}`, accountType: "Organization" as const, repositorySelection: "selected" as const, status: "active" as const, repositories: [{ fullName: "example/demo", githubRepositoryId: 42, private: true, defaultBranch: "main" }] });
 beforeAll(loadSlackBroker);
+async function registerClient(h: Awaited<ReturnType<typeof world>>, _options?: unknown) {
+  void _options;
+  const response = await h.call("/v1/dev/client/projects", { repository: "example/demo" });
+  if (response.statusCode !== 200) throw new Error(response.body);
+}
 async function world(enabled = true, company: string = A, mode: "developer" | "linking" = "linking") {
   const h = companyRouteHarness();
   const bindings = new GithubInstallationBindings(h.db, "state");
@@ -29,6 +34,7 @@ async function world(enabled = true, company: string = A, mode: "developer" | "l
   const extra = { documentClient: h.db, [mode]: h.deps.developer, clientProjects,
     ...(enabled ? { companies: { companyOf }, githubBindings: bindings } : {}),
     githubPullRequests: { installationIdFor: vi.fn(async () => 77) },
+    githubBindingInstallations: { get: async () => undefined, page: async () => ({ installations: [], more: false }) },
   };
   const broker = createBroker({ extra });
   const token = `Bearer ${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify({ azp: "web-app" })).toString('base64url')}.test`;
@@ -77,36 +83,36 @@ it("requires operator binding before repository defaults/token work and stores t
   foreign.extra.githubPullRequests.installationIdFor.mockRejectedValue(new Error("private-canary"));
   expect(await foreign.call("/v1/dev/client/projects", { repository: "example/demo" })).toEqual(refused);
 });
-it("registration uses stored project company and refuses foreign or malformed revisions including duplicate registration", async () => {
+it("client creation refuses occupied names across foreign or malformed stored companies", async () => {
   const h = await world();
-  await registerSlackProject(h.handler, { bind: false });
-  expect(h.db.get("PROJECT#payments", "REV#000000000001")?.companyId).toBe(A);
+  await registerClient(h, { bind: false });
+  expect(h.db.get("PROJECT#demo", "REV#000000000001")?.companyId).toBe(A);
   for (const companyId of [B, null, "private-canary"]) {
-    h.db.set({ ...h.db.get("PROJECT#payments", "REV#000000000001")!, companyId });
-    await expect(registerSlackProject(h.handler, { bind: false })).rejects.toThrow(/registered project not found/);
-    await expect(registerSlackProject(h.handler, { bind: false, revision: 2 })).rejects.toThrow(/registered project not found/);
-    expect(h.db.get("PROJECT#payments", "REV#000000000002")).toBeUndefined();
+    h.db.set({ ...h.db.get("PROJECT#demo", "REV#000000000001")!, companyId });
+    await expect(registerClient(h, { bind: false })).rejects.toThrow(/a project named demo already exists/);
+    await expect(registerClient(h, { bind: false, revision: 2 })).rejects.toThrow(/a project named demo already exists/);
+    expect(h.db.get("PROJECT#demo", "REV#000000000002")).toBeUndefined();
   }
 });
 it("registration refuses a foreign installation before writing any project", async () => {
   const h = await world(true, B);
-  await expect(registerSlackProject(h.handler, { bind: false })).rejects.toThrow(/the GitHub App cannot access example\/demo/);
-  expect(h.db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
+  await expect(registerClient(h, { bind: false })).rejects.toThrow(/the GitHub App cannot access example\/demo/);
+  expect(h.db.get("PROJECT#demo", "REV#000000000001")).toBeUndefined();
 });
-it("backfill event is operator-only, bounded, idempotent and never seals a possibly truncated page", async () => {
+it("backfill validates a whole page before writes and refuses HTTP invocations", async () => {
   const h = await world(); h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
-  h.clientProjects.repositories.mockResolvedValue([installation(99)]);
+  const page = vi.fn(async (): Promise<unknown> => ({ installations: [{ installationId: 99, accountLogin: "example" }, { installationId: -1, accountLogin: "private-canary" }], more: false }));
+  const { handler } = createBroker({ extra: { ...h.extra, githubBindingInstallations: { page, get: async () => undefined } } });
   const event = { source: "agentx.github-binding-backfill" };
-  const response = await h.handler(event);
-  expect(response.statusCode).toBe(200); expect(JSON.parse(response.body)).toMatchObject({ more: false });
-  expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")?.companyId).toBe(IMPLICIT_COMPANY_ID);
-  await h.handler(event); expect(h.clientProjects.repositories).toHaveBeenCalledTimes(1);
-  h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
-  h.clientProjects.repositories.mockResolvedValue(Array.from({ length: 100 }, (_, i) => installation(100 + i)));
-  expect(JSON.parse((await h.handler(event)).body)).toMatchObject({ more: true });
-  expect(h.db.get("GITHUB_INSTALLATION_BINDING", "BACKFILL")).toBeUndefined();
-  h.clientProjects.repositories.mockRejectedValue(new Error("private-canary"));
-  const failed = await h.handler(event); expect(failed.statusCode).toBe(500); expect(failed.body).not.toContain("private-canary");
+  const response = await handler(event);
+  expect(response.statusCode).toBe(500); expect(response.body).not.toContain("private-canary");
+  expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")).toBeUndefined();
+  page.mockResolvedValue({ installations: [{ installationId: 99, accountLogin: "example" }], more: false });
+  expect((await handler({ ...event, requestContext: { http: { method: "POST" } } })).statusCode).toBe(500);
+  expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")).toBeUndefined();
+  expect((await handler(event)).statusCode).toBe(200);
+  const calls = page.mock.calls.length;
+  expect((await handler(event)).statusCode).toBe(200); expect(page).toHaveBeenCalledTimes(calls);
 });
 it("pins the absent-dependency repositories response bytes", async () => {
   const h = await world(false); h.clientProjects.repositories.mockResolvedValue([installation(77)]);
@@ -144,9 +150,9 @@ it("refuses missing membership wiring and unreadable bindings without leaking ca
 });
 it("revalidates bindings on duplicate registration and the company of a concurrent winner", async () => {
   const h = await world();
-  await registerSlackProject(h.handler, { bind: false });
+  await registerClient(h, { bind: false });
   h.db.delete("GITHUB_INSTALLATION#77", "BINDING");
-  await expect(registerSlackProject(h.handler, { bind: false })).rejects.toThrow(/cannot access example\/demo/);
+  await expect(registerClient(h, { bind: false })).rejects.toThrow(/cannot access example\/demo/);
   const race = await world();
   const send = race.db.send.bind(race.db);
   race.db.send = async (command) => {
@@ -158,16 +164,16 @@ it("revalidates bindings on duplicate registration and the company of a concurre
     }
     return send(command);
   };
-  await expect(registerSlackProject(race.handler, { bind: false })).rejects.toThrow(/registered project not found/);
+  await expect(registerClient(race, { bind: false })).rejects.toThrow(/registered project not found/);
 });
 
-it("checks the exact stored revision even when the latest revision belongs to the caller", async () => {
+it("client creation refuses an occupied name even when the latest revision belongs to the caller", async () => {
   const h = await world();
-  await registerSlackProject(h.handler, { bind: false });
-  const first = h.db.get("PROJECT#payments", "REV#000000000001")!;
+  await registerClient(h, { bind: false });
+  const first = h.db.get("PROJECT#demo", "REV#000000000001")!;
   h.db.set({ ...first, companyId: B });
   h.db.set({ ...first, sk: "REV#000000000002", companyId: A, definition: { ...(first.definition as object), revision: 2 } });
-  await expect(registerSlackProject(h.handler, { bind: false })).rejects.toThrow(/registered project not found/);
+  await expect(registerClient(h, { bind: false })).rejects.toThrow(/a project named demo already exists/);
 });
 
 it.each([false, true])("pins active/suspended listing and uninstalled-repository bytes (enabled=%s)", async (enabled) => {
@@ -183,4 +189,95 @@ it.each([false, true])("pins active/suspended listing and uninstalled-repository
   h.clientProjects.repositoryDefaults.mockRejectedValue(agentXError("CONFIG_INVALID", "the GitHub App cannot access example/demo; install it on example with access to that repository"));
   h.extra.githubPullRequests.installationIdFor.mockResolvedValue(99);
   expect(JSON.stringify(await h.call("/v1/dev/client/projects", { repository: "example/demo" })) + "\n").toBe(readFileSync("tests/fixtures/github-company-goldens/client-uninstalled-legacy.json", "utf8"));
+});
+
+
+it("operator claim validates the installation, refuses every second claim and audits success", async () => {
+  const h = await world();
+  let lookups = 0;
+  const extra = { ...h.extra, githubBindingInstallations: {
+    get: async (id: number) => { lookups++; return id === 99 ? { installationId: 99, accountLogin: "checked-account" } : undefined; },
+    page: async () => ({ installations: [], more: false }),
+  } };
+  const { handler } = createBroker({ extra });
+  const invoke = (value: unknown) => handler(value);
+  const event = { source: "agentx.github-binding-claim", installationId: 99, companyId: B };
+  const audit = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const fixedBefore = await invoke({ ...event, installationId: 100 });
+    for (const value of [{ ...event, requestContext: { http: { method: "POST" } } }, { ...event, operator: true },
+      { ...event, companyId: "private-canary" }, { ...event, installationId: "99" }]) {
+      const before = lookups;
+      expect(await invoke(value)).toEqual(fixedBefore);
+      expect(lookups).toBe(before);
+      expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")).toBeUndefined();
+    }
+    expect((await invoke(event)).statusCode).toBe(200);
+    expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")).toMatchObject({ companyId: B, accountLogin: "checked-account", boundBy: "operator-lambda" });
+    expect(h.db.get("GITHUB_INSTALLATION#99", "AUDIT#CLAIM")).toMatchObject({ companyId: B, actor: "operator-lambda" });
+    expect(audit.mock.calls.some(([line]) => String(line).includes('"event":"github.binding_claimed"'))).toBe(true);
+    const fixed = await invoke({ ...event, installationId: 100 });
+    expect(fixed.statusCode).toBe(403);
+    for (const value of [event, { ...event, companyId: A }, { ...event, installationId: -1 }, { ...event, companyId: "private-canary" },
+      { ...event, requestContext: { http: { method: "POST" } } }, { ...event, operator: true }, { ...event, installationId: "99" }]) {
+      expect(await invoke(value)).toEqual(fixed);
+    }
+    expect(fixed.body).not.toMatch(/99|100|org_|private-canary|checked-account/);
+  } finally { audit.mockRestore(); }
+});
+
+it("operator claim can reserve the pilot before backfill and backfill preserves it", async () => {
+  const h = await world(); h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
+  const { handler } = createBroker({ extra: { ...h.extra, githubBindingInstallations: {
+    get: async () => ({ installationId: 99, accountLogin: "pilot" }),
+    page: async () => ({ installations: [installation(99)], more: false }),
+  } } });
+  expect((await handler({ source: "agentx.github-binding-claim", installationId: 99, companyId: B })).statusCode).toBe(200);
+  expect((await handler({ source: "agentx.github-binding-backfill" })).statusCode).toBe(200);
+  expect(await h.bindings.ownerOf(99)).toBe(B);
+});
+
+it("backfill uses one validated installation page per call and returns a usable continuation", async () => {
+  const h = await world(); h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
+  const page = vi.fn(async (n: number) => ({ installations: n === 1 ? Array.from({ length: 25 }, (_, i) => installation(100 + i)) : [installation(125)], more: n === 1 }));
+  const { handler } = createBroker({ extra: { ...h.extra, githubBindingInstallations: { page, get: async () => undefined } } });
+  const first = await handler({ source: "agentx.github-binding-backfill" });
+  expect(first.statusCode).toBe(200); expect(JSON.parse(first.body)).toMatchObject({ more: true, continuation: 2 });
+  expect(h.db.get("GITHUB_INSTALLATION_BINDING", "BACKFILL")).toBeUndefined();
+  expect(page).toHaveBeenCalledExactlyOnceWith(1);
+  expect(h.clientProjects.repositories).not.toHaveBeenCalled();
+  expect(JSON.parse((await handler({ source: "agentx.github-binding-backfill", continuation: 2 })).body)).toMatchObject({ more: false });
+  expect(await h.bindings.ownerOf(125)).toBe(IMPLICIT_COMPANY_ID);
+});
+
+
+it("legacy administrator registration has no checked developer identity and fails closed with bindings enabled", async () => {
+  const h = await world();
+  await expect(registerSlackProject(h.handler, { bind: false })).rejects.toThrow(/AUTH_REQUIRED/);
+  expect(h.companyOf).not.toHaveBeenCalled();
+  expect(h.db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
+});
+
+it("backfill refuses skipped cursors and oversized invalid pages without sealing or capturing installations", async () => {
+  const h = await world(); h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
+  const page = vi.fn(async (): Promise<unknown> => ({ installations: Array.from({ length: 26 }, (_, i) => installation(100 + i)), more: false }));
+  const { handler } = createBroker({ extra: { ...h.extra, githubBindingInstallations: { page, get: async () => undefined } } });
+  expect((await handler({ source: "agentx.github-binding-backfill", continuation: 2 })).statusCode).toBe(500);
+  expect(page).not.toHaveBeenCalled();
+  expect((await handler({ source: "agentx.github-binding-backfill" })).statusCode).toBe(500);
+  expect(h.db.get("GITHUB_INSTALLATION_BINDING", "BACKFILL")).toBeUndefined();
+  expect(h.db.get("GITHUB_INSTALLATION#100", "BINDING")).toBeUndefined();
+});
+
+
+it("operator claim refuses a mismatched or unreadable GitHub installation before binding", async () => {
+  const h = await world();
+  for (const get of [async () => ({ installationId: 98, accountLogin: "private-canary" }),
+    async () => ({ installationId: 99, accountLogin: null }), async () => { throw new Error("private-canary"); }]) {
+    const { handler } = createBroker({ extra: { ...h.extra, githubBindingInstallations: { get, page: async () => ({ installations: [], more: false }) } } });
+    const response = await handler({ source: "agentx.github-binding-claim", installationId: 99, companyId: B });
+    expect(response.statusCode).toBe(403); expect(response.body).not.toContain("private-canary");
+    expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")).toBeUndefined();
+    expect(h.db.get("GITHUB_INSTALLATION#98", "BINDING")).toBeUndefined();
+  }
 });
