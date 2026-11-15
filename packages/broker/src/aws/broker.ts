@@ -274,7 +274,9 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials } from "./github-credentials.js";
+import { createGitHubAppCredentials, githubBindingRefusal, type GithubInstallationBindings } from "./github-credentials.js";
+import { boundedCompanyReads, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
@@ -565,7 +567,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "installationIdFor" | "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
   /** Trusted server-side source capture for setup discovery and exact-commit E2E planning context. */
   projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
   /** Server-selected catalog namespace for an already configured setup verifier. */
@@ -578,6 +580,8 @@ interface AwsBrokerDependencies {
    */
   e2eAgentInstallation?: () => Promise<E2EAgentInstallation>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
+  githubBindings?: GithubInstallationBindings;
+  companies?: CompanyMembershipReader;
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
   descriptionUpdateMaxMs?: number;
@@ -1105,17 +1109,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
             rawBody: request.body ?? "",
             headers: request.headers,
             secret: webhookSecret,
-            authorizeRepository: (scope) => authorizeLinkedGithubWebhook({
-              documentClient: dependencies.documentClient,
-              tableName: dependencies.tableName,
-              scope,
-              loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
-              repositoryUrl: async (projectName, revision, repositoryId) => {
-                const project = await requireProject(dependencies, projectName, revision);
-                return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
-              },
-              verifyRepository: (repositoryUrl, webhookScope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, webhookScope),
-            }),
+            ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
+            authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
             process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
             now: () => new Date().toISOString(),
           });
@@ -1708,11 +1703,12 @@ async function routeWorkspaceRequest(
     const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
     const repository = github.repositories.find((entry) => entry.name === repositoryName);
     if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
+    await requireGithubProjectBinding(dependencies, project, repository.url);
     const revision = project.definition.revision;
     if (!parsed?.success) {
       const types = dependencies.connectorTypes ?? BUILT_IN_CONNECTOR_TYPES;
       const discovery = await discoverLegacyGitHubScope({
-        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies), types),
+        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies, project), types),
         githubTypeKnown: Object.hasOwn(types, "github"),
         connectorName: github.name, repository: repository.name, projectName: workspace.projectName,
         context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
@@ -1733,7 +1729,7 @@ async function routeWorkspaceRequest(
   const connectorRoute = /^\/v1\/workspaces\/([0-9a-f-]+)\/connectors\/([a-z][a-z0-9-]{0,19})\/(tools|call)$/.exec(url.pathname);
   if (connectorRoute?.[1] && connectorRoute[2] && ((request.method === "GET" && connectorRoute[3] === "tools") || (request.method === "POST" && connectorRoute[3] === "call"))) {
     const { workspace, project } = await authorizeWorkspaceConnectors(dependencies, identity, connectorRoute[1]);
-    const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies), dependencies.connectorTypes)
+    const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies, project), dependencies.connectorTypes)
       .find((entry) => entry.name === connectorRoute[2]);
     if (!connector) throw agentXError("NOT_FOUND", "connector not found");
     const parsed = request.method === "POST" ? ConnectorCallRequestSchema.safeParse(body) : undefined;
@@ -1850,9 +1846,15 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
   return { workspace, project, github };
 }
 
-function connectorTypeContext(dependencies: AwsBrokerDependencies): ConnectorTypeContext {
+function connectorTypeContext(dependencies: AwsBrokerDependencies, project?: RegisteredProjectRecord): ConnectorTypeContext {
+  const githubMcp = dependencies.githubMcp === undefined || project === undefined || dependencies.githubBindings === undefined
+    ? dependencies.githubMcp
+    : { ...dependencies.githubMcp, credentials: async (repository: { url: string; credentialRef: string }, access: "read" | "write") => {
+      await requireGithubProjectBinding(dependencies, project, repository.url);
+      return dependencies.githubMcp!.credentials(repository, access);
+    } };
   return {
-    ...(dependencies.githubMcp ? { githubMcp: dependencies.githubMcp } : {}),
+    ...(githubMcp ? { githubMcp } : {}),
     ...(dependencies.credentialRegistry ? { credentialRegistry: dependencies.credentialRegistry } : {}),
   };
 }
@@ -10712,30 +10714,59 @@ async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, e
     loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
     repositoryUrl: async (projectName, revision, repositoryId) => {
       const project = await requireProject(dependencies, projectName, revision);
+      if (dependencies.githubBindings !== undefined) {
+        try {
+          const companyId = await dependencies.githubBindings.ownerOf(event.installationId);
+          if (companyId === undefined || !recordInCompany(project, companyId)) return undefined;
+        } catch { return undefined; }
+      }
       return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
     },
     verifyRepository: (repositoryUrl, scope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, scope),
   });
 }
 
-async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; processed: number; delayed: number }> {
+async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; processed: number; delayed: number; more?: true }> {
   const now = new Date().toISOString();
-  const due = await listDueGithubWebhookDeliveries({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now, limit: 25 });
+  const budget = dependencies.githubBindings === undefined ? undefined : boundedCompanyReads(dependencies.documentClient);
+  const deps = budget === undefined ? dependencies : { ...dependencies, documentClient: new Proxy(dependencies.documentClient, { get: (target, property) => property === "send" ? budget.client.send : (Reflect.get(target, property) as unknown) }), githubBindings: dependencies.githubBindings!.withBudget(budget) };
+  const due: Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"]; companyId?: string }> = [];
+  let more = false;
+  if (dependencies.githubBindings === undefined) due.push(...await listDueGithubWebhookDeliveries({ documentClient: deps.documentClient, tableName: deps.tableName, now, limit: 25 }));
+  else {
+    const registry = await listGithubWebhookCompanies(deps);
+    more = registry.more;
+    for (const companyId of registry.companies) {
+      budget!.check();
+      if (due.length >= 100) { more = true; break; }
+      const rows = await listDueGithubWebhookDeliveries({ documentClient: deps.documentClient, tableName: deps.tableName, now, limit: Math.min(25, 100 - due.length), companyId });
+      more ||= rows.more === true;
+      due.push(...rows.map(row => ({ ...row, companyId })));
+    }
+  }
   let processed = 0;
   let delayed = 0;
   for (const delivery of due) {
+    budget?.check();
     try {
       const result = await processGithubWebhookDelivery({
-        documentClient: dependencies.documentClient,
+        documentClient: deps.documentClient,
+        ...(delivery.companyId === undefined ? {} : { companyId: delivery.companyId }),
         tableName: dependencies.tableName,
         received: { delivery: "ACCEPTED", deliveryId: delivery.deliveryId, event: delivery.event },
         process: async (event) => {
           // Revalidate under the delivery lease. Revoked scope is terminal; transient GitHub/API
           // errors consume the ordinary bounded retry budget instead of leaving a hot due row.
-          if (!await githubEventStillAuthorized(dependencies, event)) {
+          let owner: string | undefined;
+          if (dependencies.githubBindings !== undefined) {
+            try { owner = await deps.githubBindings!.ownerOf(event.installationId); } catch { /* fixed refusal below */ }
+            budget!.check();
+            if (owner !== delivery.companyId || owner === undefined) throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
+          }
+          if (!await githubEventStillAuthorized(deps, event)) {
             throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
           }
-          await processGithubWorkflowEvent(dependencies, event, delivery.deliveryId);
+          await processGithubWorkflowEvent(deps, event, delivery.deliveryId);
         },
         now: () => new Date().toISOString(),
       });
@@ -10745,24 +10776,38 @@ async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies):
       console.log(JSON.stringify({ component: "broker", event: "github.webhook_retry_failed", deliveryId: delivery.deliveryId, error: error instanceof Error ? error.name : "unknown" }));
     }
   }
-  return { attempted: due.length, processed, delayed };
+  return { attempted: due.length, processed, delayed, ...(more ? { more: true as const } : {}) };
 }
 
 export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, deliveryId: string) {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
+  const companyId = await resolveCompany(dependencies.companies, identity.developer?.developerId ?? identity.subject);
   const key = { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: "META" };
   const stored = await getItem<Record<string, unknown>>(dependencies, key);
+  if (companyId !== undefined && !recordInCompany(stored, companyId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
   if (stored === undefined || (stored.status !== "RETRYABLE" && stored.status !== "DEAD") || stored.event === undefined) throw agentXError("CONFIG_INVALID", "only a failed GitHub delivery can be retried");
+  if (dependencies.companies !== undefined || dependencies.githubBindings !== undefined) {
+    try {
+      const event = readGithubWebhookEvent(stored.event);
+      if (stored.entityType !== "GITHUB_WEBHOOK_DELIVERY" || stored.deliveryId !== deliveryId
+        || stored.installationId !== event.installationId || stored.repositoryId !== event.repositoryId) throw githubBindingRefusal();
+    } catch { throw agentXError("NOT_FOUND", "webhook delivery not found"); }
+  }
+  const rowCompany = (stored.companyId === undefined ? IMPLICIT_COMPANY_ID : stored.companyId) as string;
+  if (dependencies.githubBindings !== undefined) {
+    try { await dependencies.githubBindings.requireBound(rowCompany, (stored.event as ReceivedGithubWebhook["event"]).installationId); }
+    catch { throw agentXError("NOT_FOUND", "webhook delivery not found"); }
+  }
   const event = stored.event as ReceivedGithubWebhook["event"];
   if (!await githubEventStillAuthorized(dependencies, event)) throw agentXError("FORBIDDEN", "linked GitHub pull request is no longer authorized");
   const now = new Date().toISOString();
   await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Update: { TableName: dependencies.tableName, Key: key,
       UpdateExpression: "SET #status = :received, updatedAt = :now, nextAttemptAt = :now, webhookRecoveryPk = :pk, webhookRecoverySk = :sk REMOVE leaseToken, leaseExpiresAt, attempts",
-      ConditionExpression: "#status = :retryable OR #status = :dead",
+      ConditionExpression: companyId === undefined ? "#status = :retryable OR #status = :dead" : "(#status = :retryable OR #status = :dead)" + (rowCompany === IMPLICIT_COMPANY_ID ? " AND (attribute_not_exists(companyId) OR companyId = :companyId)" : " AND companyId = :companyId"),
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":received": "RECEIVED", ":retryable": "RETRYABLE", ":dead": "DEAD", ":now": now, ":pk": "GITHUB_WEBHOOK_RECOVERY", ":sk": `${now}#${deliveryId}` },
+      ExpressionAttributeValues: { ":received": "RECEIVED", ":retryable": "RETRYABLE", ":dead": "DEAD", ":now": now, ":pk": githubRecoveryPartition(dependencies.githubBindings === undefined ? undefined : rowCompany), ...(companyId === undefined ? {} : { ":companyId": companyId }), ":sk": `${now}#${deliveryId}` },
     } },
     { Put: { TableName: dependencies.tableName, Item: { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: `RETRY#${now}`, entityType: "GITHUB_WEBHOOK_RETRY_AUDIT", deliveryId, actor: identity.subject, at: now }, ConditionExpression: "attribute_not_exists(pk)" } },
   ] }));
@@ -14642,6 +14687,16 @@ function issueRepositoryGrant(
   });
 }
 
+async function requireGithubProjectBinding(dependencies: AwsBrokerDependencies, project: RegisteredProjectRecord, repositoryUrl: string): Promise<void> {
+  if (dependencies.githubBindings === undefined) return;
+  try {
+    const raw = (project as RegisteredProjectRecord & { companyId?: unknown }).companyId;
+    const companyId = OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw);
+    if (dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
+    await dependencies.githubBindings.requireBound(companyId, await dependencies.githubPullRequests.installationIdFor(repositoryUrl));
+  } catch { throw githubBindingRefusal(); }
+}
+
 async function exchangeRepositoryCredential(
   dependencies: AwsBrokerDependencies,
   request: AdaptedHttpRequest,
@@ -14659,6 +14714,15 @@ async function exchangeRepositoryCredential(
   }
   const operation = await requireOperation(dependencies, workspaceId, operationId);
   if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
+  if (dependencies.githubBindings !== undefined) {
+    const claims = dependencies.repositoryGrants.inspect(grant);
+    if (claims.workspaceId !== workspaceId || claims.operationId !== operationId || !claims.repositories.some(repository => repository.credentialRef === credentialRef && repository.repositoryUrl === input.repositoryUrl && repository.access === access)) {
+      throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
+    }
+    const workspace = await requireWorkspace(dependencies, workspaceId);
+    const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    await requireGithubProjectBinding(dependencies, project, input.repositoryUrl);
+  }
   return dependencies.repositoryGrants.exchange(grant, {
     workspaceId,
     operationId,

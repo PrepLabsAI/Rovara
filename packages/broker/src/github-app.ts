@@ -808,6 +808,11 @@ export class GitHubAppCredentialProvider {
   }
 
   /** The repository's installation, cached by owner; a failed lookup is not cached. */
+  /** Installation lookup for company checks at the AWS seams; shares the existing cache. */
+  async installationIdFor(repositoryUrl: string): Promise<number> {
+    return (await this.installed(parseGitHubRepository(repositoryUrl))).installationId;
+  }
+
   private async installed(repository: { owner: string; name: string }): Promise<InstalledRepository> {
     const key = repository.owner.toLowerCase();
     let installation = this.installations.get(key);
