@@ -24,6 +24,24 @@ export const DEVELOPER_AUTH_REQUEST_SECONDS = 600;
 export const FRESH_SIGN_IN_SECONDS = 600;
 export const SLACK_OIDC_ISSUER = "https://slack.com";
 
+// ---- Lane ID part 2 (plan v3.2 section 7.2 change 2, DEC 214 decision 7): the fresh sign-in ("step-up") Code checks, with a factor Code owns ----
+/**
+ * How a person proved it was them again, as the access token's `step_up_amr` says it. Never the round trip through Slack, Google or GitHub: those can send a person straight back
+ * without asking anything. `email_code`: a one-time code Code emailed. `passkey`: a passkey registered with Code. `company_reauth`: the company's own sign-in asked again and said when
+ * (its `auth_time`), inside the window.
+ */
+export const DEVELOPER_STEP_UP_METHODS = ["email_code", "passkey", "company_reauth"] as const;
+export type DeveloperStepUpMethod = (typeof DEVELOPER_STEP_UP_METHODS)[number];
+/** The `acr_values` word a client sends to `/v1/auth/authorize` to ask for a step-up (OpenID Connect Core 3.1.2.1). */
+export const DEVELOPER_STEP_UP_ACR = "step-up";
+/** How long a step-up page, and an emailed code on it, lasts. */
+export const DEVELOPER_STEP_UP_SECONDS = 600;
+/** The window a step-up counts for when the company states none (its own may only be shorter). */
+export const DEVELOPER_STEP_UP_WINDOW_SECONDS = FRESH_SIGN_IN_SECONDS;
+/** Codes emailed per step-up page, and wrong codes tried on it, before it must be started again. */
+export const DEVELOPER_STEP_UP_EMAILS_MAX = 3;
+export const DEVELOPER_STEP_UP_ATTEMPTS_MAX = 5;
+
 export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
 import { ExternalAccountRefSchema, SignInMethodIdSchema, readExternalAccount } from "./outside-account.js";
 

@@ -7,28 +7,51 @@ import {
   DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_CODE_SECONDS,
   DEVELOPER_SESSION_SECONDS,
+  DEVELOPER_STEP_UP_ATTEMPTS_MAX,
+  DEVELOPER_STEP_UP_EMAILS_MAX,
+  DEVELOPER_STEP_UP_SECONDS,
   SIGN_IN_CLIENTS_PK,
   agentXError,
   SignInClientRecordSchema,
   signInClientKey,
   type DeveloperSignInMethod,
+  type DeveloperStepUpMethod,
   type SignInClientRecord,
 } from "@agentx/contracts";
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
 /** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
 /** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[] }
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[];
+  /** Lane ID part 2: the client asked for a step-up (`acr_values=step-up`). The sign-in at the provider then only says who it is; Code's own factor follows. */
+  stepUp?: true }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
   email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[] }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod }
 
-/** What a code carries into its session. */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[] }
+/**
+ * What a code carries into its session. `stepUpAt` (epoch seconds) and `stepUpMethod` (lane ID part 2): when and how the person last proved it was them with a factor Code owns.
+ * Set only by a completed step-up; a refresh carries them over unchanged, so the step-up ages and is never renewed by a refresh.
+ */
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod }
+
+/**
+ * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
+ * is the SHA-256 of the last emailed code bound to this record. `emailsSent` and `attempts` count up to their limits and never reset.
+ */
+export interface StepUpRecord {
+  grant: CodeGrant & { codeChallenge: string; redirectUri: string };
+  clientState: string;
+  expiresAt: number;
+  emailsSent: number;
+  attempts: number;
+  emailCodeHash?: string;
+  consumedAt?: string;
+}
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
 export function methodSince(text: string | undefined): number | undefined {
@@ -289,7 +312,78 @@ export class DeveloperSignInStore {
       ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
       ...(record.administrator === true ? { administrator: true as const } : {}),
       ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
+      ...(record.stepUpAt === undefined || record.stepUpMethod === undefined ? {} : { stepUpAt: record.stepUpAt, stepUpMethod: record.stepUpMethod }),
     };
+  }
+
+  // ---- Lane ID part 2: a step-up page in progress ----
+
+  /** Starts a step-up page for a person the provider just named. Answers the secret for the browser's cookie; only its hash is stored. */
+  async createStepUp(input: Pick<StepUpRecord, "grant" | "clientState">): Promise<string> {
+    const secret = randomToken("");
+    const record: StepUpRecord = { ...input, expiresAt: this.seconds() + DEVELOPER_STEP_UP_SECONDS, emailsSent: 0, attempts: 0 };
+    await this.put({ pk: `STEPUP#${sha256Hex(secret)}`, sk: META, entityType: "STEP_UP", ...record }, "attribute_not_exists(pk)");
+    return secret;
+  }
+
+  /** A live step-up page (not expired, not used), or undefined. */
+  async getStepUp(secret: string): Promise<StepUpRecord | undefined> {
+    if (secret === "") return undefined;
+    const item = await this.get<StepUpRecord>(`STEPUP#${sha256Hex(secret)}`);
+    return item === undefined || item.expiresAt <= this.seconds() || item.consumedAt !== undefined ? undefined : strip(item);
+  }
+
+  /** Binds a newly emailed code to the page, if it may send another (at most DEVELOPER_STEP_UP_EMAILS_MAX, and none once its tries are used up). False: it may not, or the page is gone. */
+  async recordStepUpEmail(secret: string, codeHash: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET emailCodeHash = :hash, emailsSent = emailsSent + :one",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND emailsSent < :max AND attempts < :tries",
+        ExpressionAttributeValues: { ":hash": codeHash, ":one": 1, ":now": this.seconds(), ":max": DEVELOPER_STEP_UP_EMAILS_MAX, ":tries": DEVELOPER_STEP_UP_ATTEMPTS_MAX },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Counts one try at a code BEFORE it is compared (at most DEVELOPER_STEP_UP_ATTEMPTS_MAX per page), and answers the page as it stands after the count. Undefined: no tries left, or the page is gone. */
+  async countStepUpAttempt(secret: string): Promise<StepUpRecord | undefined> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET attempts = attempts + :one",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND attempts < :max",
+        ExpressionAttributeValues: { ":one": 1, ":now": this.seconds(), ":max": DEVELOPER_STEP_UP_ATTEMPTS_MAX },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) return undefined;
+      throw error;
+    }
+    return this.getStepUp(secret);
+  }
+
+  /** Uses the page up, once. Undefined: it was already used, expired, or never existed. */
+  async consumeStepUp(secret: string): Promise<StepUpRecord | undefined> {
+    const pk = `STEPUP#${sha256Hex(secret)}`;
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk, sk: META },
+        UpdateExpression: "SET consumedAt = :at",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt)",
+        ExpressionAttributeValues: { ":at": this.iso(), ":now": this.seconds() },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) return undefined;
+      throw error;
+    }
+    const item = await this.get<StepUpRecord>(pk);
+    return item === undefined ? undefined : strip(item);
   }
 
   /** `endsAt` (epoch seconds) is for a browser review sign-in, which has its own fixed length; every other session lasts DEVELOPER_SESSION_SECONDS. The stored record's clean-up time follows `endsAt`. */

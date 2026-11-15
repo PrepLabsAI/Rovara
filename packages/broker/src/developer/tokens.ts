@@ -2,7 +2,7 @@
 // The private key never leaves KMS; this file builds the JWS signing input and asks KMS to sign it.
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
-import { DEVELOPER_ACCESS_TOKEN_SECONDS, DEVELOPER_TOKEN_AUDIENCE, type DeveloperSignInMethod } from "@agentx/contracts";
+import { DEVELOPER_ACCESS_TOKEN_SECONDS, DEVELOPER_TOKEN_AUDIENCE, type DeveloperSignInMethod, type DeveloperStepUpMethod } from "@agentx/contracts";
 
 export interface PublicSigningJwk { kty: "RSA"; n: string; e: string; kid: string; alg: "RS256"; use: "sig" }
 
@@ -59,6 +59,8 @@ export async function issueAccessToken(signer: TokenSigner, input: {
   issuer: string; subject: string; amr: DeveloperSignInMethod; env: string; sessionId: string; now: number;
   /** Spec 063 FR-002: a registered client's own audience and ID (azp); absent, the token is the CLI's, for Rovara. */
   client?: { clientId: string; audience: string; scopes?: readonly string[] };
+  /** Lane ID part 2: the session's last step-up (epoch seconds) and how it was proved. Absent: the person has not stepped up in this session. */
+  stepUp?: { at: number; method: DeveloperStepUpMethod };
 }): Promise<{ token: string; expiresIn: number }> {
   const { kid } = await signer.publicJwk();
   const iat = Math.floor(input.now / 1000);
@@ -73,6 +75,8 @@ export async function issueAccessToken(signer: TokenSigner, input: {
     amr: input.amr,
     env: input.env,
     sid: input.sessionId,
+    // Lane ID part 2: when and how the person last proved it was them with a factor Code owns. The route checks the age itself; a refresh never renews it.
+    ...(input.stepUp === undefined ? {} : { step_up_at: input.stepUp.at, step_up_amr: input.stepUp.method }),
     iat,
     // Backdated, so a verifier whose clock runs a little behind still accepts a fresh token.
     nbf: iat - NOT_BEFORE_SKEW_SECONDS,
