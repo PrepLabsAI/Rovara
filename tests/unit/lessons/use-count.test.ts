@@ -71,12 +71,14 @@ describe("used in N tasks", () => {
     expect(faulted.counts.has("les_one")).toBe(false);
     expect(faulted.incomplete).toBe(true);
     let queries = 0;
-    const watched = { ttlAttribute: TTL, query: async (request: Parameters<MemoryDocumentStore["query"]>[0]) => { queries += 1; return await db.query(request); } };
+    let rows = 0;
+    const watched = { ttlAttribute: TTL, query: async (request: Parameters<MemoryDocumentStore["query"]>[0]) => { queries += 1; const page = await db.query(request); rows += page.items.length; return page; } };
     const capped = await countLessonUses(watched, { companyId: A, project: "payments", lessonIds: ["les_one", "les_two"], now: NOW, limits: { rowsTotal: 2 } });
     expect(capped.counts.has("les_one")).toBe(false);
     expect(capped.incomplete).toBe(true);
-    // Once the total is read, no further page is asked for.
-    expect(queries).toBe(2);
+    // Lessons counted at the same time never read past the total between them, and once it is used no further page is asked for.
+    expect(rows).toBeLessThanOrEqual(2);
+    expect(queries).toBeLessThanOrEqual(2);
     const late = await count(db, ["les_one"], { limits: { deadlineMs: 0 } });
     expect(late.counts.size).toBe(0);
     expect(late.incomplete).toBe(true);
@@ -86,12 +88,30 @@ describe("used in N tasks", () => {
     const db = store();
     for (let l = 0; l < 100; l += 1) for (let t = 0; t < 600; t += 1) await use(db, A, "payments", `les_${String(l)}`, `t${String(t)}`);
     let queries = 0;
-    const watched = { ttlAttribute: TTL, query: async (request: Parameters<MemoryDocumentStore["query"]>[0]) => { queries += 1; return await db.query(request); } };
+    let rows = 0;
+    const watched = { ttlAttribute: TTL, query: async (request: Parameters<MemoryDocumentStore["query"]>[0]) => { queries += 1; const page = await db.query(request); rows += page.items.length; return page; } };
     const started = Date.now();
     const answer = await countLessonUses(watched, { companyId: A, project: "payments", lessonIds: Array.from({ length: 100 }, (_, l) => `les_${String(l)}`), now: NOW });
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(queries).toBeLessThanOrEqual(20_000 / 200 + 100);
+    expect(rows).toBeLessThanOrEqual(20_000);
     expect(answer.incomplete).toBe(true);
     for (const value of answer.counts.values()) expect(value).toEqual({ tasks: 500, more: true });
   }, 60_000);
+  it("a store query that hangs is cut at the deadline: the lesson is uncounted, the answer is prompt and says incomplete", async () => {
+    const hung = { ttlAttribute: TTL, query: async () => await new Promise<never>(() => undefined) };
+    const started = Date.now();
+    const answer = await countLessonUses(hung, { companyId: A, project: "payments", lessonIds: ["les_one", "les_two"], now: NOW, limits: { deadlineMs: 50 } });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(answer.counts.size).toBe(0);
+    expect(answer.incomplete).toBe(true);
+  });
+
+  it("a store that keeps answering empty pages with a cursor is stopped by the page cap, not only the deadline", async () => {
+    let queries = 0;
+    const spinning = { ttlAttribute: TTL, query: async () => { queries += 1; return { items: [], cursor: "again" }; } };
+    const answer = await countLessonUses(spinning, { companyId: A, project: "payments", lessonIds: ["les_one"], now: NOW, limits: { rowsTotal: 400, deadlineMs: 60_000 } });
+    expect(answer).toEqual({ counts: new Map(), incomplete: true });
+    expect(queries).toBe(3);
+  });
 });

@@ -519,4 +519,18 @@ describe("used in N tasks", () => {
     expect(answer).toMatchObject({ ok: true, body: { usedInIncomplete: true } });
     expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedIn");
   });
+  it("the proposed list is not counted: a proposed lesson was never given to a task", async () => {
+    const w = await setUp();
+    await put(w, A, lesson(A, "les_apend001", { status: "pending" }));
+    const documents = w.lessons.get(A)!.runtime.documents;
+    const spy = vi.spyOn(documents, "query");
+    const { api: target } = api(w);
+    const answer = await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list: "proposed" });
+    const asked = spy.mock.calls.filter(([request]) => request.pk.includes("LESSON_USE#")).length;
+    spy.mockRestore();
+    expect(answer.ok && (answer.body["lessons"] as Array<{ id: string }>).map((one) => one.id)).toEqual(["les_apend001"]);
+    expect(answer.ok && answer.body["usedInIncomplete"]).toBeUndefined();
+    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedIn");
+    expect(asked).toBe(0);
+  });
 });

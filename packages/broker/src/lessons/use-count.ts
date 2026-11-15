@@ -3,7 +3,8 @@
 //
 //   - Every key is under the company's own partition (`companyScoped`), for one project: rows of another company or project are never read.
 //   - A row past its keep time (the store may not have swept it yet), or one that is not shaped like a use row, is not counted.
-//   - One TOTAL limit per call: at most `USED_IN_ROWS_TOTAL` rows and `USED_IN_DEADLINE_MS` across all the lessons asked about. Each lesson counts at most `USED_IN_MAX` tasks (`more`: there were more).
+//   - One TOTAL limit per call: at most `USED_IN_ROWS_TOTAL` rows (reserved before each query, so parallel counts never pass it) and `USED_IN_DEADLINE_MS` (each query is raced against the time left)
+//     across all the lessons asked about. Each lesson counts at most `USED_IN_MAX` tasks (`more`: there were more).
 //   - Never a guess: a lesson whose rows could not all be read (the store failed, the total limit or the deadline was reached) gets NO count, and the answer says it is incomplete.
 import { companyScoped, type DocumentStore, type OrgId } from "@agentx/contracts";
 
@@ -54,19 +55,40 @@ export async function countLessonUses(store: Pick<DocumentStore, "query" | "ttlA
     return typeof expires !== "number" || expires > nowSeconds;
   };
 
+  /** A query raced against the time left: undefined when the deadline came first (a late answer is ignored). */
+  async function queryInTime(request: Parameters<DocumentStore["query"]>[0]): Promise<Awaited<ReturnType<DocumentStore["query"]>> | undefined> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        store.query(request),
+        new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), Math.max(0, deadlineAt - Date.now())); timer.unref?.(); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   async function countOne(lessonId: string): Promise<void> {
     const pk = lessonUsePk(input.companyId, input.project, lessonId);
     const tasks = new Set<string>();
     let cursor: string | undefined;
+    // A store that keeps answering empty pages with a cursor is stopped here as well as by the deadline.
+    const pagesMax = Math.ceil(rowsTotal / PAGE) + 1;
     try {
-      do {
-        if (Date.now() >= deadlineAt || read >= rowsTotal) { incomplete = true; return; }
-        const page = await store.query({ pk: companyScoped(input.companyId, `LESSON_USE#${input.project}#${lessonId}`), limit: Math.min(PAGE, rowsTotal - read), ...(cursor === undefined ? {} : { cursor }) });
-        read += page.items.length;
-        for (const row of page.items) if (row.pk === pk && live(row)) tasks.add(row["taskId"] as string);
+      for (let pages = 0; ; pages += 1) {
+        if (pages >= pagesMax || Date.now() >= deadlineAt) { incomplete = true; return; }
+        // The rows are reserved BEFORE the query, so lessons counted at the same time never pass the total between them; what a page did not use is given back.
+        const take = Math.min(PAGE, rowsTotal - read);
+        if (take <= 0) { incomplete = true; return; }
+        read += take;
+        const page = await queryInTime({ pk: companyScoped(input.companyId, `LESSON_USE#${input.project}#${lessonId}`), limit: take, ...(cursor === undefined ? {} : { cursor }) });
+        if (page === undefined) { incomplete = true; return; }
+        read -= take - Math.min(take, page.items.length);
+        for (const row of page.items.slice(0, take)) if (row.pk === pk && live(row)) tasks.add(row["taskId"] as string);
         if (tasks.size > perLesson) { counts.set(lessonId, { tasks: perLesson, more: true }); return; }
         cursor = page.cursor;
-      } while (cursor !== undefined);
+        if (cursor === undefined) break;
+      }
     } catch { incomplete = true; return; }
     counts.set(lessonId, { tasks: tasks.size });
   }

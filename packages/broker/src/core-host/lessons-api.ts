@@ -260,7 +260,8 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       const after = query.data.cursor === undefined ? undefined : decodeCursor(query.data.cursor, query.data.list);
       const page = await buildLessonsPage(deps, who, project, { list: query.data.list, limit: query.data.limit ?? PAGE_DEFAULT, ...(after === undefined ? {} : { after }), ...(query.data.since === undefined ? {} : { since: query.data.since }) });
       // "Used in N tasks": the distinct tasks each shown lesson was given to (its use rows, this company and project only). A lesson that could not be counted has no `usedIn`, and the page says so.
-      const used = await countLessonUses(runtime.documents, { companyId, project, lessonIds: page.lessons.map((one) => one.id), now: options.now() });
+      // A proposed lesson has never been given to a task, so the proposed list is not counted (no `usedIn`, and the page is not incomplete for it).
+      const used = query.data.list === "proposed" ? { counts: new Map<string, { tasks: number; more?: true }>(), incomplete: false } : await countLessonUses(runtime.documents, { companyId, project, lessonIds: page.lessons.map((one) => one.id), now: options.now() });
       const lessonsShown = page.lessons.map((one) => { const count = used.counts.get(one.id); return count === undefined ? one : { ...one, usedIn: count }; });
       return { ...page, lessons: lessonsShown, ...(used.incomplete ? { usedInIncomplete: true } : {}), ...(page.next === undefined ? {} : { next: encodeLessonCursor(page.next) }) };
     }
