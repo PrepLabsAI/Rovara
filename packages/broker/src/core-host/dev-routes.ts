@@ -143,6 +143,12 @@ function owns(path: string, method: string): boolean {
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
 
+/** A request body as JSON, whatever its shape (the caller's schema judges it); text that is not JSON is a fixed refusal. */
+function jsonBodyOf(request: BrokerRequest): unknown {
+  if (request.body === undefined || request.body === "") return {};
+  try { return JSON.parse(request.body) as unknown; } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
+}
+
 /** A request body as one JSON object; anything else is a fixed refusal (no echo of what was sent). */
 function bodyOf(request: BrokerRequest): Record<string, unknown> {
   if (request.body === undefined || request.body === "") return {};
@@ -233,6 +239,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       // The principal the identity point vouched for must be of the member company (checked before anything is built for it); the task flow checks it again on every task read.
       if (caller.principal.companyId !== companyId) return unauthenticated();
       // A script token reaches only a task's read here (its closed list: its own projects' tasks); never sessions, decisions, playbooks or tokens.
+      // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
+      if (caller.scriptToken !== undefined && TASK_ACTION.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       if (caller.scriptToken !== undefined && !TASK_READ.test(path)) return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       let target: Mounted;
       try {
@@ -260,7 +268,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           // Not wired here: the caller of these routes (the engine boundary) tells a person who may read the task that it is not on the core yet, and anyone else that there is no such task.
           if (target.actions === undefined) return undefined;
           const taskId = action[1]!;
-          const body = bodyOf(request);
+          // The task is read first, so someone who may not see it reads "no such task" whatever they sent (a body the move refuses would otherwise tell them the task exists).
+          await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
+          // The body as JSON, judged by the move's own schema (its words name the field), as the old workflow routes do.
+          const body = jsonBodyOf(request);
           // Each move re-checks who acts (owner or co-owner, else "no such task"), the revision they saw, and the round's money, and writes nothing on a refusal.
           if (action[2] === "workflow/send-back") await target.actions.sendBack(taskCaller, taskId, body);
           else if (action[2] === "workflow/review-findings") await target.actions.resolveFindings(taskCaller, taskId, body, "api-token");

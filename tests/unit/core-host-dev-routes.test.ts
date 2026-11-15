@@ -308,7 +308,7 @@ describe("the owner's moves on a core task (send back, review findings, continue
     }
   });
 
-  it("refuses anyone the company's owner rule does not name, and another company's caller, as no such task, and a script token outright; nothing is written", async () => {
+  it("refuses anyone the company's owner rule does not name, another company's caller and a script token as no such task, whatever body they send; nothing is written", async () => {
     const { world, routes, remember, taskId } = await started();
     const revision = await blockReview(world, taskId);
     const before = JSON.stringify(await world.store.get(taskKey(taskId)));
@@ -319,7 +319,11 @@ describe("the owner's moves on a core task (send back, review findings, continue
     const otherCompany = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody(revision)), remember(OTHER));
     expect(otherCompany?.statusCode).toBe(404);
     const token = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody(revision)), { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
-    expect(errorOf(token)).toEqual({ code: "FORBIDDEN", message: NOT_FOR_SCRIPT_TOKENS });
+    // A script token reads it like a missing task (the boundary then answers exactly as for an id with no task).
+    expect(token?.statusCode).toBe(404);
+    // A body the move would refuse tells someone who may not see the task nothing either: the task is read first.
+    const stranger = remember(OTHER);
+    for (const raw of ["[1]", "null", "not json"]) expect((await routes.route({ ...post(`/v1/dev/tasks/${taskId}/workflow/send-back`), body: raw }, stranger))?.statusCode, raw).toBe(404);
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 });

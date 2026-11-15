@@ -251,6 +251,14 @@ describe("a core task on the AWS developer routes", () => {
       expect(theirs.status, suffix).toBe(missing.status);
       expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), suffix).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
     }
+    // A body that is not an object reads the same too (the core reads the task before the body).
+    for (const suffix of ["/workflow/send-back", "/workflow/review-findings", "/continue"]) for (const body of [[1], null]) {
+      const missingId = randomUUID();
+      const theirs = await dev(OMAR, "POST", `/v1/dev/tasks/${task.taskId}${suffix}`, body);
+      const missing = await dev(OMAR, "POST", `/v1/dev/tasks/${missingId}${suffix}`, body);
+      expect(theirs.status, `${suffix} ${JSON.stringify(body)}`).toBe(missing.status);
+      expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), `${suffix} ${JSON.stringify(body)}`).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
+    }
     // Every answer above was a refusal: the AWS rows are as they were, and no AWS reader touched the core task's workspace.
     expect(JSON.stringify(db.find(() => true))).toBe(before);
     expect(workspaceReads()).toEqual([]);
