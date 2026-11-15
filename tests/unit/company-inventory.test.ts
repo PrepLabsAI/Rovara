@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { COMPANY_CHECKED_ROUTES } from "../support/company-route-harness.js";
-import { scanCompanySources, loadCompanySources, validateCompanyInventory, forwardingCoverage, INVENTORY_LIMITS } from "../support/company-inventory-scan.js";
+import { scanCompanySources, loadCompanySources, validateCompanyInventory, forwardingCoverage } from "../support/company-inventory-scan.js";
 
 const source = (text: string, path = "packages/broker/src/aws/broker.ts") => ({ path, text });
 const markdown = (count = "1 record kinds: 0 company-scoped, 0 install-wide, 1 needs-company. 1 routes: 0 company-scoped, 0 install-wide, 1 needs-company.") => `${count}\n\n| kind | identity | class | table | checked | methods | reason |\n|---|---|---|---|---|---|---|\n| record | entity:TASK | needs-company | State table | no | - | T1 |\n| route | /v1/dev/tasks | needs-company | State table | no | GET | T2 |\n`;
@@ -30,16 +30,15 @@ describe("company inventory", () => {
     const scanned = scanCompanySources([source('const TYPE = "TASK"; const alias = TYPE; const row = {\nentityType: alias,\npk: `DEVTASK#${id}`, sk: "META"\n};')]);
     expect(scanned.records).toEqual(["entity:TASK", "pk:DEVTASK"]);
   });
-  it("refuses total byte, file, item and time limits", () => {
-    for (const limits of [{ files: 1 }, { bytes: 20 }, { items: 1 }, { milliseconds: 0 }]) {
+  it("refuses total byte, file, item and work limits", () => {
+    for (const limits of [{ files: 1 }, { bytes: 20 }, { items: 1 }, { nodes: 1 }]) {
       expect(() => scanCompanySources([source('const a = { entityType: "ONE" };'), source('const b = { entityType: "TWO" };', "packages/broker/src/two.ts")], limits)).toThrow(/^Company inventory limit exceeded\.$/);
     }
   });
   it("handles a large generated input under the existing test timeout", () => {
     const text = Array.from({ length: 10_000 }, (_, i) => `const item${i} = { entityType: "KIND_${i}" };`).join("\n");
-    const start = performance.now();
     expect(scanCompanySources([source(text)]).records).toHaveLength(10_000);
-    expect(performance.now() - start).toBeLessThan(INVENTORY_LIMITS.milliseconds);
+
   });
 });
 
@@ -103,4 +102,10 @@ it("ratchets whitespace inside a forwarded field name as a semantic change", () 
   const coverage = [{ site: "packages/broker/src/aws/broker.ts:1:34:pk", expression: 'key["a b"]', reason: "Runtime field forwarding", constructors: "caller record keys" }];
   expect(scanCompanySources([input], {}, coverage).forwarding).toHaveLength(1);
   expect(() => scanCompanySources([source(input.text.replace('a b', 'a  b'))], {}, coverage)).toThrow("Company inventory unclassifiable.");
+});
+
+it("uses work rather than elapsed wall time to bound the inventory", () => {
+  let elapsed = 0;
+  const clock = vi.spyOn(performance, "now").mockImplementation(() => elapsed += 60_000);
+  try { expect(basic().records).toEqual(["entity:TASK"]); } finally { clock.mockRestore(); }
 });

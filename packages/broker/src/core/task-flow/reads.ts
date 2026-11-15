@@ -33,16 +33,17 @@ export async function loadOwnedTask(deps: TaskFlowDeps, caller: TaskCaller, task
   return task;
 }
 
-export async function workspaceOperations(deps: Pick<TaskFlowDeps, "store"> & Partial<Pick<TaskFlowDeps, "companyId">>, workspaceId: string): Promise<OperationRecord[]> {
+export async function workspaceOperations(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string): Promise<OperationRecord[]> {
   if (!OrgIdSchema.safeParse(deps.companyId).success) throw agentXError("CONFIG_INVALID", "workspace company is invalid");
   const items: StoredDocument[] = [];
   let cursor: string | undefined;
-  // Ten 200-row reads plus one 1-row probe: exactly 2,000 rows can still complete.
+  // Ten reads of at most 200 rows and DynamoDB's 1 MB page each, plus a 1-row completion probe.
+  // Large rows can exhaust the read bound before 2,000 rows; never return partial operations.
   for (let reads = 0; reads <= 10; reads++) {
     const page = await deps.store.query({ pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX }, limit: reads === 10 ? 1 : 200,
       ...(cursor === undefined ? {} : { cursor }) });
     if (reads === 10) {
-      if (page.items.length > 0 || page.cursor !== undefined) throw agentXError("CONFIG_INVALID", "workspace operation limit exceeded");
+      if (page.items.length > 0 || page.cursor !== undefined) throw agentXError("CONFIG_INVALID", "workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)");
       break;
     }
     items.push(...page.items.filter((item) => (item["companyId"] === undefined ? IMPLICIT_COMPANY_ID : item["companyId"]) === deps.companyId));

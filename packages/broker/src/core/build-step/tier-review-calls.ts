@@ -64,7 +64,7 @@ export interface CheckingModel {
 }
 
 /** The checking stage's choice for this task (the code-review stage, told the model the build ran on). Without a per-step rule, the install's one model checks, and it is the build's. */
-export async function checkingModelOf(deps: Pick<TaskFlowDeps, "stepModels" | "store" | "installModel">, workspaceId: string): Promise<CheckingModel> {
+export async function checkingModelOf(deps: Pick<TaskFlowDeps, "stepModels" | "store" | "installModel" | "companyId">, workspaceId: string): Promise<CheckingModel> {
   // What the build ran on must be known to choose a different model: a store that cannot say refuses the choice (never a guess that reports "not the build's model").
   let operations: Awaited<ReturnType<typeof workspaceOperations>>;
   try { operations = await workspaceOperations(deps, workspaceId); } catch { return { model: undefined, sameModelAsChecked: false, refused: "the build's model could not be read" }; }

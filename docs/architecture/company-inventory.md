@@ -8,7 +8,22 @@ Record kinds are groups of static entityType and partition-family identities (in
 
 The route total includes both dispatch patterns and the separately identified API Gateway route keys below. Prefix dispatch literals are included as patterns. Methods are hand-maintained: adding a METHOD on an existing path is NOT caught by this inventory. A checked=yes row proves only its GET entry in COMPANY_CHECKED_ROUTES, and only with the optional membership reader enabled. Core handleTaskRoute trusts its principal; other developer routes, admin, Slack and GitHub paths remain needs-company (T2).
 
-Generic key/field forwarding rows are separately enumerated below and **excluded from the record-kind count**. Their file:line:column:field and exact expression form a ratchet: a new, removed, moved or changed site fails the test until reviewed. Imported constants and aliases use compiler symbols; unreadable constructors, unresolved sites and parse failures refuse the entire inventory. Source is read once under one total file/byte/item/time budget; tests never read git history.
+Generic key/field forwarding rows are separately enumerated below and **excluded from the record-kind count**. Their file:line:column:field and exact expression form a ratchet: a new, removed, moved or changed site fails the test until reviewed. Imported constants and aliases use compiler symbols; unreadable constructors, unresolved sites and parse failures refuse the entire inventory. Source is read once under one total file/byte/item/node-visit budget (4,000 files, 40 MB, 100,000 identities/directory entries and 10 million traversal steps); the test runner retains its timeout; tests never read git history.
+
+## Round 2 bounds and compatibility
+
+Core workspace operations permit **10 reads**, each requesting at most 200 rows and limited by DynamoDB to a **1 MB page**, followed by one 1-row completion probe. Large rows can exhaust the read bound below 2,000 operations. The whole operation read refuses if the probe finds more; no partial operations are returned.
+
+Checked task lists admit at most 2,000 items across SDK and task-action results per call. A result crossing that budget ends the page before the unfinished task; the exclusive-start cursor names the last fully examined index row. The crossing result is not used, still counts toward the 8 MB/512-command/10-second limits, and prevents further reads. A task too large to complete even on a fresh page still refuses with fixed words. Other limit failures remain refusals; shared workspace reads stay cached per call.
+
+### Replaces
+
+The prior blanket claim of byte-identical lists for implicit-company members with the check enabled is replaced by these exact exceptions, pinned in six filtered goldens (checked and legacy):
+- Project/status filters: checked lists examine at most the requested `limit` index rows, instead of the legacy 200-row scan. A filtered-out row can produce an empty/short page with `nextCursor`; following it reaches the remaining tasks.
+- Stale index timestamp: checked lists return the canonical task view's `updatedAt`, while legacy lists retain the index value unless status changes.
+- Aggregate item bound: checked lists now return completed tasks plus continuation instead of the former 400 refusal when a later task crosses the budget. No task is skipped or partly returned.
+
+The membership-absent path and the seven original golden pairs keep their response bytes. These exceptions do not enable the check or add company writers (T2/T3).
 
 ## Record constructors, dispatch paths and gateway paths
 
@@ -718,8 +733,8 @@ Each row names its feeding constructor set. A generic DocumentStore/stream site 
 | forwarding | packages/broker/src/core/task-flow/dispatch-rows.ts:52:12:pk | row.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | dispatchPartition, dispatchRowKey |
 | forwarding | packages/broker/src/core/task-flow/dispatch-rows.ts:52:24:sk | row.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | dispatchPartition, dispatchRowKey |
 | forwarding | packages/broker/src/core/task-flow/keys.ts:38:93:pk | charge.member.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | dispatchPartition, orgLimitKey |
-| forwarding | packages/broker/src/core/task-flow/reads.ts:42:43:pk | workspaceKey(workspaceId).pk | Projects the partition supplied by the named key constructor; no new family. | taskIndexKey, taskKey, taskPointerKey, workspaceKey |
-| forwarding | packages/broker/src/core/task-flow/reads.ts:105:7:pk | taskIndexKey(caller.principal.personId, "", "").pk | Projects the partition supplied by the named key constructor; no new family. | taskIndexKey, taskKey, taskPointerKey, workspaceKey |
+| forwarding | packages/broker/src/core/task-flow/reads.ts:43:43:pk | workspaceKey(workspaceId).pk | Projects the partition supplied by the named key constructor; no new family. | taskIndexKey, taskKey, taskPointerKey, workspaceKey |
+| forwarding | packages/broker/src/core/task-flow/reads.ts:106:7:pk | taskIndexKey(caller.principal.personId, "", "").pk | Projects the partition supplied by the named key constructor; no new family. | taskIndexKey, taskKey, taskPointerKey, workspaceKey |
 | forwarding | packages/broker/src/core/task-flow/records.ts:207:65:pk | document.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | caller records consumed by packages/broker/src/core/task-flow/records.ts (keyOf) |
 | forwarding | packages/broker/src/core/task-flow/records.ts:207:82:sk | document.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | caller records consumed by packages/broker/src/core/task-flow/records.ts (keyOf) |
 | forwarding | packages/broker/src/core/task-flow/run-watch-rows.ts:38:66:computed | [deps.store.ttlAttribute] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | runWatchKey, runWatchPartition |
@@ -905,10 +920,10 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | packages/broker/src/aws/developer-task-notifier.ts:932 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/aws/developer-task-notifier.ts:1287 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/aws/developer-tasks.ts:1355 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/aws/developer-tasks.ts:1687 | in-scope fixed | company-scoped | GET list loads canonical task within requested page size; membership/record check before deriving or returning rows. |
-| packages/broker/src/aws/developer-tasks.ts:4041 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/aws/developer-tasks.ts:5081 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/aws/developer-tasks.ts:5882 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
+| packages/broker/src/aws/developer-tasks.ts:1689 | in-scope fixed | company-scoped | GET list loads canonical task within requested page size; membership/record check before deriving or returning rows. |
+| packages/broker/src/aws/developer-tasks.ts:4056 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
+| packages/broker/src/aws/developer-tasks.ts:5096 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
+| packages/broker/src/aws/developer-tasks.ts:5897 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/aws/dispatcher.ts:355 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/aws/dispatcher.ts:403 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/aws/e2e-account-registry.ts:85 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
@@ -991,8 +1006,8 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | packages/broker/src/core/spec/review-record.ts:35 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/core/task-flow/dispatch-rows.ts:34 | scoped-key (not a hit) | company-scoped | Index query reviewed conservatively; prove all producer partitions and consumer scopes in T1/T8. |
 | packages/broker/src/core/task-flow/project-source.ts:36 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
-| packages/broker/src/core/task-flow/reads.ts:42 | in-scope fixed | company-scoped | Per-row company check, runtime scope validation, bounded reads and continuation/completion tests in dynamodb-two-company. |
-| packages/broker/src/core/task-flow/reads.ts:104 | in-scope fixed | company-scoped | Per-row company check, runtime scope validation, bounded reads and continuation/completion tests in dynamodb-two-company. |
+| packages/broker/src/core/task-flow/reads.ts:43 | in-scope fixed | company-scoped | Per-row company check, runtime scope validation, bounded reads and continuation/completion tests in dynamodb-two-company. |
+| packages/broker/src/core/task-flow/reads.ts:105 | in-scope fixed | company-scoped | Per-row company check, runtime scope validation, bounded reads and continuation/completion tests in dynamodb-two-company. |
 | packages/broker/src/core/task-flow/run-watch.ts:42 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/task-flow/stage-machine.ts:266 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/core/test-env/candidate-check.ts:81 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |

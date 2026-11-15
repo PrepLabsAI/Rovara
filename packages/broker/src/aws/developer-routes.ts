@@ -1073,7 +1073,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     const checkedDeps = scope === undefined ? taskDeps : { ...taskDeps, actions: companyReadActions(taskDeps.actions, scope),
       ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }) };
     const result = await routeDeveloperTaskRequest({ ...checkedDeps, ...(companyId === undefined ? {} : { companyId }) }, caller, request, url);
-    scope?.check();
+    // Only a completed list page with an explicit continuation may consume an item-bound signal.
+    scope?.check(url.pathname === "/v1/dev/tasks" && result !== null && typeof result === "object" && "nextCursor" in result);
     return result;
   }
   if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) {
