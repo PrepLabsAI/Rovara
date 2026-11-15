@@ -162,6 +162,16 @@ export class MemoryDocumentStore implements DocumentStore {
     return this.#page(placed.map((entry) => entry.item), request, (item) => ({ pk: item.pk, sk: item.sk, ...(sortOf.get(idOf(item)) === undefined ? {} : { sort: sortOf.get(idOf(item))! }) }));
   }
 
+  /**
+   * One page of a walk over every document, in (pk, sk) order, resumable from its cursor (a deleted item does not break it). Not part of the port: the company purge's `StoreScan`, as a DynamoDB
+   * `Scan` serves it on a deployed install.
+   */
+  async scanPage(request: { limit?: number; cursor?: string } = {}): Promise<QueryPage> {
+    this.#fault();
+    const ordered = [...this.#items.values()].sort((a, b) => compareText(a.pk, b.pk) || compareText(a.sk, b.sk));
+    return this.#page(ordered, request, (item) => ({ pk: item.pk, sk: item.sk }));
+  }
+
   /** Deletes the documents whose time-to-live attribute is in the past, as a store with a background sweep would. */
   sweepExpired(): number {
     if (this.ttlAttribute === undefined) return 0;

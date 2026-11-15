@@ -6,6 +6,7 @@ import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPT
 import { inertEvidenceText } from "./evidence-inert.js";
 import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
+import { renderAiEvidence } from "./evidence-ai-render.js";
 import { weakeningLines } from "./evidence-weakening.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
 import { rovaraProblem, type RovaraProblemFacts } from "./rovara-problem.js";
@@ -49,6 +50,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 /** Slots other lanes fill: the time-target line (TE-D9) and the "Rovara problem" line (TE-B8). Each is shown only when it is present and not blank. */
 export interface EvidenceRenderOptions {
+  questionLimit?: 10 | 5 | 2 | 0 | undefined;
   timeTargetLine?: string | undefined;
   rovaraProblemLine?: string | undefined;
   /**
@@ -67,7 +69,7 @@ export interface EvidenceRenderOptions {
 export interface EvidenceRendering {
   /** The line a pull request or a check summary leads with. */
   firstLine: string;
-  /** Where the checks ran. Also `body[0]`. */
+  /** Where the checks ran; follows AI checks when recorded. */
   producerLine: string;
   /** Everything after the first line. */
   body: string[];
@@ -135,8 +137,10 @@ function checksLines(checks: readonly Check[]): string[] {
   const other = checks.filter((check) => !(OUTCOME_ORDER as readonly string[]).includes(check.after)).length;
   if (other > 0) counts.push(`${number(other)} ${NEWER_EVIDENCE_WORDS.toLowerCase()}`);
   const listed = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).map(checkLine);
+  const measuresSource = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).some((check) => (check.measures?.length ?? 0) > 0)
+    ? ["Measures: reported by the project's test runner, not measured by Rovara"] : [];
   const more = checks.length - listed.length;
-  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
+  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...measuresSource, ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
 }
 
 function trustOf(entry: Dependency): EvidenceTrustClass | undefined {
@@ -233,7 +237,9 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const isolation = pack.producer.isolation as string;
   const weakest = pack.level.weakest;
   const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
-  const firstLine = evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words });
+  // TE-B5 (O30): keep the override on the first line in both the full and compact forms, also when the AI evidence supplies the first line.
+  const withOverride = (text: string) => line([text, ...(pack.proof?.override === undefined ? [] : ["marked ready anyway"])].join(" · "));
+  let firstLine = withOverride(evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words }));
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
   // The structured problem is already inert (every piece went through `inertEvidenceText`), so it is not made inert again (that would escape an `&` twice).
@@ -243,7 +249,9 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const notTested = pack.notTested;
   const flagged = weakeningPart(pack);
   if (options.compact === true) {
-    const short = [producerLine, ...flagged.flags, ...problemLines, ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
+    const ai = renderAiEvidence(pack.ai, options.questionLimit ?? 0);
+    firstLine = ai.firstLine === undefined ? firstLine : withOverride(ai.firstLine);
+    const short = [...ai.lines, producerLine, ...flagged.flags, ...problemLines, ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
     return { firstLine, producerLine, body: short, text: [firstLine, ...short].join("\n"), ...buttonOf(problem) };
   }
   const body = [
@@ -263,6 +271,11 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
     ]),
     ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []),
   ];
+  const ai = renderAiEvidence(pack.ai, options.questionLimit, Math.max(1000, EVIDENCE_RENDER_LIMITS.textMax - [firstLine, ...body].join("\n").length - 1));
+  firstLine = ai.firstLine === undefined ? firstLine : withOverride(ai.firstLine);
+  body.unshift(...ai.lines);
+  // Keep verdicts and weakening flags; the existing compact pointer records omitted detail.
+  if (pack.ai !== undefined && [firstLine, ...body].join("\n").length > EVIDENCE_RENDER_LIMITS.textMax) return renderEvidence(pack, { ...options, compact: true });
   return { firstLine, producerLine, body, text: [firstLine, ...body].join("\n"), ...buttonOf(problem) };
 }
 
