@@ -7,7 +7,7 @@ import {
   type ChangeRequestStatus, type Check, type CheckRunner, type CiEvidenceSettings, type LatestCheck,
 } from "@agentx/contracts";
 import { readCi, registerMergeActionDecider, trackTask, type MergeTrackingDependencies } from "../../packages/broker/src/core/merge/merge-tracking.js";
-import { installCiFixDecider, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
+import { installCiFixDecider, readCiEvidence, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { LANDED_LINE_MAX, landedLine } from "../../packages/broker/src/core/ci-evidence/tracking.js";
 import { checkTimesKey, readCheckTimes } from "../../packages/broker/src/core/ci-evidence/history.js";
 import { CLOCK, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
@@ -126,6 +126,12 @@ describe("a result that lands", () => {
     expect(stored.ciMarked?.[0]).toMatchObject({ state: "passed", attempt: 2, runId: "77", announced: true });
     expect(comments(w)).toEqual([`Real: reported by your pipeline: real model in our account (e2e-real) passed on run 2, commit ${w.prs[0]!.head.slice(0, 7)}, no per-test counts reported`]);
     expect(runner.facts).toBe(1);
+    // Something else changes on the pull request: the item is written again, and the result is still not told twice.
+    setChecks(w, [unit, e2e(), { name: "lint", state: "pending", required: false, url: "", runId: "12" }]);
+    w.now.value += 5 * MIN;
+    await trackTask(deps, TASK_ID);
+    expect((await item(w)).ci).toBe("pending");
+    expect(comments(w)).toHaveLength(1);
     const times = await readCheckTimes(w.store, IMPLICIT_COMPANY_ID, "web", "app");
     expect(Object.values(times.durations)).toEqual([[40 * MIN]]);
   });
@@ -184,6 +190,20 @@ describe("a marked check that failed", () => {
     setChecks(w, [unit, e2e({ conclusion: "failure" })]);
     await trackTask(deps, TASK_ID);
     expect((await w.task()).workflow.stage).toBe("IMPLEMENT");
+  });
+});
+
+describe("logs stay off until the customer turns them on", () => {
+  it("never hands a marked check's log to a fix round a person asked for", async () => {
+    const { w, deps } = await world(settings(), { facts: 0, main: { revision: "c".repeat(40), check: e2e({ conclusion: "failure" }) } });
+    await w.setWorkflow({ ciFixApproved: [w.prs[0]!.head] });
+    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
+    await trackTask(deps, TASK_ID);
+    const workflow = (await w.task()).workflow;
+    expect(workflow.stage).toBe("IMPLEMENT");
+    const block = await readCiEvidence(w.store, TASK_ID, IMPLICIT_COMPANY_ID, workflow.revision);
+    expect(block).toContain("This check has no log Rovara can read here.");
+    expect(block).not.toContain("AssertionError");
   });
 });
 
