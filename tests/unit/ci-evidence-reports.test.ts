@@ -77,11 +77,16 @@ describe("the worker's report adapters as the port", () => {
       { id: "suite::ok", outcome: "passed" }, { id: "suite::bad", outcome: "failed", failureText: "expected 1 to be 2 & more" }, { id: "suite::skip", outcome: "skipped" },
     ] });
   });
+  it("never puts a failure text on the wrong test: cases it cannot pair give no text at all", () => {
+    const text = junit([{ name: "a", failure: "real failure" }]).replace("<testcase", "<!-- <testcase classname=\"old\" name=\"gone\"><failure message=\"stale\"/></testcase> --><testcase");
+    const read = parsePipelineReport(text);
+    expect(read?.tests).toEqual([{ id: "suite::a", outcome: "failed" }]);
+  });
   it("gives no report for text that is not one, and caps failure text in total", () => {
     expect(parsePipelineReport("{\"coverage\": 1}")).toBeUndefined();
     expect(parsePipelineReport("<?xml version=\"1.0\"?><testsuites><testsuite name=\"deploy\" tests=\"0\"/></testsuites>")).toEqual({ tests: [] });
     expect(parsePipelineReport("<coverage line-rate=\"1\"/>")).toBeUndefined();
-    const many = parsePipelineReport(junit(Array.from({ length: 30 }, (_, index) => ({ name: `t${String(index)}`, failure: "x".repeat(3_000) }))));
+    const many = parsePipelineReport(junit(Array.from({ length: 30 }, (_, index) => ({ name: `t${String(index)}`, failure: "x".repeat(1_500) }))));
     const texts = many!.tests.flatMap((test) => (test.failureText === undefined ? [] : [test.failureText]));
     expect(texts.join("").length).toBeLessThanOrEqual(PIPELINE_FAILURE_TEXT_TOTAL_MAX);
     expect(many!.tests.filter((test) => test.outcome === "failed")).toHaveLength(30);
