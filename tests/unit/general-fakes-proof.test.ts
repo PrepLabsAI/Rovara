@@ -26,7 +26,7 @@ describe("the setting and the payload", () => {
   });
 
   it("refuses reserved, lowercase, duplicate and escaping values", () => {
-    for (const service of [{ variable: "PATH" }, { variable: "NODE_OPTIONS" }, { variable: "LD_PRELOAD" }, { variable: "HTTPS_PROXY" }, { variable: "lower" }, { variable: "OK_URL", spec: "../x.yaml" }, { variable: "OK_URL", spec: "/abs.yaml" }, { variable: "OK_URL", spec: "a/./b.yaml" }]) {
+    for (const service of [{ variable: "PATH" }, { variable: "NODE_OPTIONS" }, { variable: "LD_PRELOAD" }, { variable: "HTTPS_PROXY" }, { variable: "lower" }, { variable: "OK_URL", spec: "../x.yaml" }, { variable: "OK_URL", spec: "/abs.yaml" }, { variable: "OK_URL", spec: "a/./b.yaml" }, { variable: "OPENAI_BASE_URL" }, { variable: "GIT_DIR" }, { variable: "AGENTX_WORKER" }, { variable: "BASH_ENV" }, { variable: "NODE_EXTRA_CA_CERTS" }, { variable: "OK_URL", spec: ".agentx/state.json" }, { variable: "OK_URL", spec: "repo/.hidden/openapi.yaml" }]) {
       expect(GeneralFakesSettingSchema.safeParse({ enabled: true, services: [service] }).success, JSON.stringify(service)).toBe(false);
     }
     expect(GeneralFakesSettingSchema.safeParse({ enabled: true, services: [{ variable: "A_URL" }, { variable: "A_URL" }] }).success).toBe(false);

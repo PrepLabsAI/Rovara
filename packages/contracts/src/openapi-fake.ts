@@ -87,6 +87,8 @@ function answerOf(operation: unknown, where: string, path: string, components: R
       const match = typeof response.$ref === "string" ? /^#\/components\/responses\/([A-Za-z0-9._-]{1,128})$/u.exec(response.$ref) : null;
       if (match === null || !Object.hasOwn(responsesComponents, match[1]!)) return refuse();
       response = responsesComponents[match[1]!];
+      // One hop only: a response that is itself a ref is refused, never answered as "no body".
+      if (object(response) && Object.hasOwn(response, "$ref")) return refuse();
     }
     if (!object(response)) return refuse();
     const content = response.content;
@@ -177,6 +179,8 @@ export function answerOpenApiFake(fake: OpenApiFake, method: string, requestPath
     if (onPath.length === 0) continue;
     // The most specific template that has this method; a path whose operations cannot be listed is unsupported.
     const best = onPath[0]!;
+    // Two different templates equally specific for this path (`/a/{x}` and `/{y}/b` for `/a/b`): refused, never picked by document order.
+    if (onPath.some((operation) => operation.pattern.source !== best.pattern.source && operation.literalSegments === best.literalSegments && operation.segments === best.segments)) return { kind: "cannot_answer", reason: "operation_unsupported" };
     const sameTemplate = onPath.filter((operation) => operation.pattern.source === best.pattern.source);
     const operation = sameTemplate.find((entry) => entry.method === verb) ?? sameTemplate.find((entry) => entry.method === "*");
     if (operation === undefined) return { kind: "cannot_answer", reason: "operation_unknown" };

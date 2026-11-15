@@ -33,6 +33,14 @@ describe("buildOpenApiFake", () => {
     expect(answerOpenApiFake(fake, "DELETE", "/pets/1")).toEqual({ kind: "served", status: 204, body: undefined });
   });
 
+  it("refuses a response ref that is itself a ref, and two equally specific templates for one path (review L2, L3)", () => {
+    const chained = buildOpenApiFake(spec({ "/c": { get: { responses: { "200": { $ref: "#/components/responses/A" } } } } }, { components: { responses: { A: { $ref: "#/components/responses/B" }, B: { description: "b" } } } }), "openapi.yaml");
+    expect(answerOpenApiFake(chained, "GET", "/c")).toEqual({ kind: "cannot_answer", reason: "operation_unsupported" });
+    const tie = buildOpenApiFake(spec({ "/a/{x}": { get: json({ type: "string" }) }, "/{y}/b": { get: json({ type: "boolean" }) } }), "openapi.yaml");
+    expect(answerOpenApiFake(tie, "GET", "/a/b")).toEqual({ kind: "cannot_answer", reason: "operation_unsupported" });
+    expect(answerOpenApiFake(tie, "GET", "/a/z")).toEqual({ kind: "served", status: 200, body: "example" });
+  });
+
   it("an unlisted path or method is operation_unknown", () => {
     const fake = buildOpenApiFake(spec({ "/pets": { get: json({ type: "string" }) } }), "openapi.yaml");
     expect(answerOpenApiFake(fake, "GET", "/owners")).toEqual({ kind: "cannot_answer", reason: "operation_unknown" });

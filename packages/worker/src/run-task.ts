@@ -76,7 +76,7 @@ import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine.js";
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { runTestProof, serializeTestProof, withGeneralFakeFacts, withScriptedReplyFacts } from "./verification/test-proof.js";
-import { generalFakesFactsCollector, generalFakesPlanFor, withGeneralFakesRound, type GeneralFakeFacts } from "./general-fakes-round.js";
+import { generalFakesFactsCollector, generalFakesPlanFor, mergeGeneralFakeFacts, withGeneralFakesRound, type GeneralFakeFacts } from "./general-fakes-round.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
@@ -564,9 +564,11 @@ async function runTask(
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       // General fakes (DEC 234): only when the broker sent the payload (the project setting is on); slice 1 serves them on the local shell only, and says so otherwise.
       const fakesCollector = generalFakesFactsCollector();
+      let candidateFakeFactsTaken = false;
       const fakesPlan = fakesCollector.wrap(generalFakesPlanFor(invocation.payload.generalFakes, {
         localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
-        onResult: (result) => { for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
+        // Only the candidate round's line is posted; later rounds (the original code's) still add their facts.
+        onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
       }));
       if (invocation.payload.generalFakes !== undefined && fakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
       const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(fakesPlan, withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
@@ -581,6 +583,7 @@ async function runTask(
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
       const candidateReplyFacts = replyCollector.take();
       const candidateFakeFacts = fakesCollector.take();
+      candidateFakeFactsTaken = true;
       assertWorkspaceSafe();
       const roundSpentMs = Date.now() - roundStarted;
       const status = round.stopped ? "not_verified" : reportStatus(round.entries);
@@ -639,7 +642,8 @@ async function runTask(
         // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
-        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts, candidateFakeFacts);
+        // General fakes: the original code's run used the fakes too. A fake answer there can make a new test fail on the old code, so its facts join the candidate's (never proof either way).
+        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts, mergeGeneralFakeFacts(candidateFakeFacts, fakesCollector.take()));
       }
       // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
       if (invocation.payload.evalRequest !== undefined) {

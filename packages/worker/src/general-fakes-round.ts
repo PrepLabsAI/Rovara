@@ -10,7 +10,8 @@
 //   - Reasons and lines are fixed words: no path, variable, host, query or body.
 //   - Local shell only (slice 1). In a task sandbox or dev container run-task makes no plan, and says so.
 // Known limit (the same as the model helper's): a background process left by an earlier command that calls the fake during a later command is counted for the later check (it is still fake-answered).
-import { open, readdir, realpath } from "node:fs/promises";
+import type { Dir } from "node:fs";
+import { open, opendir, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join, resolve, sep } from "node:path";
 import { parse } from "yaml";
@@ -53,13 +54,24 @@ export function generalFakesPlanFor(payload: GeneralFakesPayload | undefined, op
   return { services: parsed.data.services, rootPath: options.rootPath, repositoryPaths: [...options.repositoryPaths], onResult: options.onResult };
 }
 
-/** Each invocation owns its collector; take the candidate round's facts right after that round, before the original-code rounds. */
+/** Both sets of facts as one: unknown if either is, served counts added per check. Undefined only when both are. */
+export function mergeGeneralFakeFacts(a: GeneralFakeFacts | undefined, b: GeneralFakeFacts | undefined): GeneralFakeFacts | undefined {
+  if (a === undefined || b === undefined) return a ?? b;
+  const served = new Map<string, number>();
+  for (const entry of [...a.checks, ...b.checks]) served.set(entry.checkId, (served.get(entry.checkId) ?? 0) + entry.served);
+  return { unknown: a.unknown || b.unknown, checks: [...served].map(([checkId, count]) => ({ checkId, served: count })) };
+}
+
+/**
+ * Each invocation owns its collector. Every round's facts accumulate until `take()`: take the candidate round's right after it, then take again after the original-code rounds, whose facts count too
+ * (a fake answer on the old code can make a new test fail there, which must never read as proof).
+ */
 export function generalFakesFactsCollector(): { wrap(plan: GeneralFakesRoundPlan | undefined): GeneralFakesRoundPlan | undefined; take(): GeneralFakeFacts | undefined } {
   let latest: GeneralFakeFacts | undefined;
   return {
     wrap(plan) {
       if (plan === undefined) return plan;
-      return { ...plan, onResult(result) { latest = result.facts; plan.onResult(result); } };
+      return { ...plan, onResult(result) { latest = mergeGeneralFakeFacts(latest, result.facts); plan.onResult(result); } };
     },
     take() { const facts = latest; latest = undefined; return facts; },
   };
@@ -110,9 +122,11 @@ async function discover(root: string, repositoryPaths: readonly string[]): Promi
   }
   while (queue.length > 0 && !truncated) {
     const { dir, depth } = queue.shift()!;
-    let listing;
-    try { listing = await readdir(dir, { withFileTypes: true }); } catch { continue; }
-    for (const entry of listing) {
+    // Streamed: a folder with a huge listing costs only up to the entry limit.
+    let listing: Dir;
+    try { listing = await opendir(dir, { bufferSize: 64 }); } catch { continue; }
+    try {
+    for await (const entry of listing) {
       if (++entries > GENERAL_FAKES_DISCOVERY_LIMITS.entries) { truncated = true; break; }
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
@@ -123,6 +137,7 @@ async function discover(root: string, repositoryPaths: readonly string[]): Promi
         found.push(join(dir, entry.name));
       }
     }
+    } catch { /* a folder that cannot be read has no description */ } finally { await listing.close().catch(() => undefined); }
   }
   if (truncated || found.length > GENERAL_FAKES_DISCOVERY_LIMITS.candidates) return notBuilt("spec_ambiguous");
   const fakes = await Promise.all(found.map((path) => fakeOfFile(root, path)));
@@ -154,7 +169,7 @@ const CANNOT_ANSWER_BODY = JSON.stringify({ error: "rovara_fake_cannot_answer" }
 async function startFakes(plan: GeneralFakesRoundPlan, onCall: (outcome: CallOutcome | "unattributed") => void): Promise<StartedFakes> {
   const fakes = await buildFakes(plan);
   const answer = (request: IncomingMessage, response: ServerResponse): void => {
-    const match = /^\/s\/(0|[1-7])(\/.*|)$/u.exec(request.url ?? "");
+    const match = /^\/s\/(0|[1-7])([/?#].*|)$/u.exec(request.url ?? "");
     const fake = match === null ? undefined : fakes[Number(match[1])];
     const send = (status: number, body: string | undefined) => {
       response.writeHead(status, body === undefined ? {} : { "content-type": "application/json" });
@@ -162,7 +177,8 @@ async function startFakes(plan: GeneralFakesRoundPlan, onCall: (outcome: CallOut
     };
     if (match === null || fake === undefined) { onCall("unattributed"); send(404, CANNOT_ANSWER_BODY); return; }
     if (fake.status !== "built") { onCall(fake.reason); send(501, CANNOT_ANSWER_BODY); return; }
-    const result = answerOpenApiFake(fake.fake, request.method ?? "", match[2] || "/");
+    const rest = match[2] ?? "";
+    const result = answerOpenApiFake(fake.fake, request.method ?? "", rest.startsWith("/") ? rest : `/${rest}`);
     if (result.kind === "cannot_answer") { onCall(result.reason); send(501, CANNOT_ANSWER_BODY); return; }
     onCall("served");
     send(result.status, result.body === undefined || result.status === 204 ? undefined : JSON.stringify(result.body));

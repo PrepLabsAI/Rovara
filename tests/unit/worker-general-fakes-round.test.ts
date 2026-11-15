@@ -90,8 +90,11 @@ describe("withGeneralFakesRound", () => {
     await expect(run(runners, call("/odd"))).rejects.toEqual(new CheckNotRunError(GENERAL_FAKE_NOT_RUN_SENTENCES.operation_unsupported));
     runners.beginCheck?.("readiness:2");
     expect((await run(runners, call("/owners", 501))).exitCode).toBe(0);
+    // A query straight after the base URL is still this service's call (review L1), not an unattributed one.
+    runners.beginCheck?.("readiness:3");
+    await expect(run(runners, call("?x=1"))).rejects.toEqual(new CheckNotRunError(GENERAL_FAKE_NOT_RUN_SENTENCES.operation_unknown));
     await runners.endRound?.();
-    expect(results[0]!.facts.checks).toEqual([{ checkId: "readiness:0", served: 1 }, { checkId: "readiness:1", served: 1 }, { checkId: "readiness:2", served: 1 }]);
+    expect(results[0]!.facts).toEqual({ unknown: false, checks: [{ checkId: "readiness:0", served: 1 }, { checkId: "readiness:1", served: 1 }, { checkId: "readiness:2", served: 1 }, { checkId: "readiness:3", served: 1 }] });
   });
 
   it("no description, two descriptions, an unreadable one and one outside the workspace each give their own Not run reason", async () => {

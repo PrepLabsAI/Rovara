@@ -6,16 +6,19 @@
 // variable, host or body is ever echoed into a reason or a label.
 import { z } from "zod";
 import { EVIDENCE_TRUST_CLASS_WORDS } from "./check-kinds.js";
+import { MODEL_REDIRECT_ENV_NAMES } from "./model-catalog.js";
 
 /** Sent only to a worker whose /ping lists it; an earlier worker's strict payload schema does not know the field. */
 export const GENERAL_FAKES_FEATURE = "task.generalFakes.v1" as const;
 export const GENERAL_FAKES_MAX_SERVICES = 8;
 
 /** Variables a fake's base URL may never replace: the process's own plumbing and proxies. */
-const RESERVED_VARIABLE = /^(?:PATH|HOME|SHELL|USER|LOGNAME|PWD|TMPDIR|TEMP|TMP|LANG|TERM|NODE_OPTIONS|NODE_PATH|NODE_ENV|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|RUBYOPT|PERL5OPT|JAVA_TOOL_OPTIONS|LD_[A-Z0-9_]*|DYLD_[A-Z0-9_]*|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|ALL_PROXY|CI)$/u;
-const VariableSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/u).refine((name) => !RESERVED_VARIABLE.test(name), "reserved variable");
-/** A file under the workspace: relative, no `..` segment, plain characters. */
-const SpecPathSchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+){0,31}$/u).refine((path) => !path.split("/").some((part) => part === "." || part === ".."), "relative path");
+/** Also: shell start-up files, git, TLS trust, the worker's own variables, and every variable the model helper points at itself (a fake must never take a model client's traffic). */
+const RESERVED_VARIABLE = /^(?:PATH|HOME|SHELL|USER|LOGNAME|PWD|TMPDIR|TEMP|TMP|LANG|TERM|NODE_OPTIONS|NODE_PATH|NODE_ENV|NODE_EXTRA_CA_CERTS|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|RUBYOPT|PERL5OPT|JAVA_TOOL_OPTIONS|BASH_ENV|ENV|PROMPT_COMMAND|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|GIT_[A-Z0-9_]*|AGENTX_[A-Z0-9_]*|ROVARA_[A-Z0-9_]*|LD_[A-Z0-9_]*|DYLD_[A-Z0-9_]*|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|ALL_PROXY|CI)$/u;
+const MODEL_VARIABLES: ReadonlySet<string> = new Set(MODEL_REDIRECT_ENV_NAMES);
+const VariableSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/u).refine((name) => !RESERVED_VARIABLE.test(name) && !MODEL_VARIABLES.has(name), "reserved variable");
+/** A file under the workspace: relative, plain characters, and no segment that starts with a dot (no `..`, and never the worker's own `.agentx` state). */
+const SpecPathSchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+){0,31}$/u).refine((path) => !path.split("/").some((part) => part.startsWith(".")), "relative path");
 
 export const GeneralFakeServiceSchema = z.object({
   /** The base-URL variable the customer's code reads for this service (`PAYMENTS_API_URL`). The round sets it to the fake. */

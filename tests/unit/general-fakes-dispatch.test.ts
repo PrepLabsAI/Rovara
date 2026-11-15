@@ -50,7 +50,7 @@ describe("general fakes on the CHECKS payload", () => {
     const baseline = await world(undefined);
     expect(baseline.operation.dispatch.payload).not.toHaveProperty("generalFakes");
     expect(baseline.operation.dispatch.requires).not.toContain(GENERAL_FAKES_FEATURE);
-    // A damaged stored setting never gets this far: the stored definition does not parse, so the project does not load (general-fakes-contracts.test.ts covers generalFakesPayloadOf on damaged values).
+    // A damaged stored setting never gets this far: the stored definition does not parse, so the project does not load (general-fakes-proof.test.ts covers generalFakesPayloadOf on damaged values).
     for (const setting of [{ enabled: false, services: [{ variable: "PAYMENTS_API_URL" }] }, { enabled: true, services: [] }]) {
       const other = await world(setting);
       expect(strip(other.operation.dispatch), JSON.stringify(setting)).toEqual(strip(baseline.operation.dispatch));
