@@ -34,6 +34,8 @@ function spied(db: FakeDynamoDb) {
   };
   return { reads, store: { documentClient: { send } as never, tableName: TABLE } };
 }
+/** The partition of the row a transaction item puts. */
+const putPk = (item: { Put?: { Item?: Record<string, unknown> | undefined } | undefined }): unknown => item.Put?.Item?.["pk"];
 const touchedLegacy = (reads: Array<{ pk: string }>) => reads.some((read) => read.pk === LEGACY_PK);
 
 describe("the account registry across the key move", () => {
@@ -103,7 +105,7 @@ describe("the account registry across the key move", () => {
     seedLegacy(db);
     const plan = await planSetupAccountWrites({ documentClient: { send: db.send } as never, tableName: TABLE }, { orgId: OTHER_ORG, projectId: "payments", snapshot: snapshotOfContract(), setup: { approvedAt: T2, proposalSha256: SHA }, now: T0 });
     expect(plan.written).toBe(4);
-    const keys = plan.items.map((item) => (item as { Put: { Item: { pk: string } } }).Put.Item.pk);
+    const keys = plan.items.map((item) => putPk(item));
     expect(new Set(keys)).toEqual(new Set([`ORG#${OTHER_ORG}#PROJECT#payments`]));
   });
 
@@ -115,7 +117,7 @@ describe("the account registry across the key move", () => {
     // The viewer changed (revision 2); the other three are registered unchanged by a newer setup (a pointer raise). Every row lands under the new key.
     expect(plan.written).toBe(4);
     expect(plan.planKey.split("\n")).toContain([ORDERS_APPLICATION_ID, "orders-viewer", "2"].join("\u0000"));
-    for (const item of plan.items) expect((item as { Put: { Item: { pk: string } } }).Put.Item.pk).toBe(testProjectPk("payments"));
+    for (const item of plan.items) expect(putPk(item)).toBe(testProjectPk("payments"));
     expect(await transact(db, plan.items)).toBeDefined();
     expect(db.get(testProjectPk("payments"), `E2E_ACCOUNT#${ORDERS_APPLICATION_ID}#orders-viewer#REV#2`)).toMatchObject({ revision: 2 });
     expect(db.get(testProjectPk("payments"), `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#orders-viewer`)).toMatchObject({ revision: 2, setupApprovedAt: T2 });
