@@ -246,7 +246,7 @@ export interface MergeDependencies {
    * MR3: the dependency facts between the task's repositories (TE-MR2's `repositoryEdges.edges`, `{ consumer, provider }`), read at runtime by `mergeOrderOf`. Absent, or answering undefined: no
    * facts, and the merge order, digest and words are the ones the merge core always had. A read that throws is "unreadable" (no safe order until a person confirms the override).
    */
-  repositoryEdges?(task: MergeTask): Promise<unknown> | unknown;
+  repositoryEdges?(task: MergeTask): unknown;
 }
 
 const byRepository = <T extends { repositoryId: string; number: number }>(list: readonly T[]): T[] =>
