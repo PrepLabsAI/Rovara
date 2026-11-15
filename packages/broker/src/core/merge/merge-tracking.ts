@@ -30,6 +30,7 @@ import {
   type HostScope,
   type MergeTrackingItem,
   type OrgId,
+  type PipelineReportParser,
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -145,6 +146,8 @@ export interface MergeTrackingDependencies {
    * the pass is today's, byte for byte.
    */
   ciEvidence?(task: TrackedTask): unknown;
+  /** TE-E0 option B: the host's per-test report parser (the worker's report adapters, #529). Absent: no per-test report is read, and a red marked check with logs off asks a person. */
+  reportParser?: PipelineReportParser;
   /** The project's real-check mode (TE-B2): what "No CI" and unreadable CI mean for marking ready. `DEFAULT_CI_MODE` when not given. */
   ciMode?(task: TrackedTask): Promise<ProjectCiMode> | ProjectCiMode;
   /**
@@ -180,6 +183,9 @@ export interface MergeTrackingDependencies {
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
   hooks?: MergePassHooks;
 }
+
+/** The commit the task's change for a repository is based on (the candidate's base), for the change proof. */
+const baseCommitOf = (workflow: WorkflowSnapshot, repositoryId: string): string | undefined => workflow.candidate?.repositories.find((entry) => entry.repositoryId === repositoryId)?.baseCommitSha;
 
 export class TrackingRequestCapError extends Error {
   constructor() {
@@ -727,6 +733,8 @@ async function trackOne(
   // TE-E0 option A: each marked check's entry for this head, on its own clock; the decision the CI slot needs when one failed or timed out; the results that landed on this pass, told once after the commit.
   const pipeline = evidence === undefined || marked === undefined ? undefined : await ciEvidencePass({
     settings: evidence, status, prior, fields, now, runner: home.checkRunner, ref, repository: { url }, scope, budget, store: deps.store, task, pullRequest, host: codeHost,
+    ...(deps.reportParser === undefined ? {} : { reportParser: deps.reportParser }),
+    ...(baseCommitOf(task.workflow, pullRequest.repositoryId) === undefined ? {} : { baseCommit: baseCommitOf(task.workflow, pullRequest.repositoryId) }),
     roundsUsed: workflowFixRounds(task.workflow).ci, ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }),
   });
   if (pipeline !== undefined) {

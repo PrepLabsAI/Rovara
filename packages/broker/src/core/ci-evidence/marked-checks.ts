@@ -52,6 +52,8 @@ export interface MarkedRun {
   attempt?: number | undefined;
   startedAt?: number | undefined;
   completedAt?: number | undefined;
+  /** The workflow run it belongs to (where its per-test reports are), when the runner said. */
+  workflowRunId?: string | undefined;
 }
 
 /** A marked check's state on one head. */

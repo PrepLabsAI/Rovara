@@ -181,12 +181,14 @@ export interface GitHubCodeHostProvider {
   getCheckRunFacts?(repositoryUrl: string, checkRunId: string, scope: GitHubTokenScope, budget?: ReadBudget, options?: { actionsJob?: boolean }): Promise<CheckRunFacts | undefined>;
   /** TE-E0 option A: the latest run of a named check on a commit or a branch's head. */
   getLatestCheckRun?(repositoryUrl: string, at: { revision: string } | { branch: string }, check: { name: string; appId?: number | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<LatestCheckRun | undefined>;
+  /** TE-E0 option B: the per-test report files of one GitHub Actions workflow run. */
+  getRunReportFiles?(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" }>;
   /** TE-E0 option A, setup: the check names seen on recent pull requests. */
   listSeenCheckNames?(repositoryUrl: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ checks: SeenCheckName[]; complete: boolean }>;
 }
 
 /** What the GitHub Actions check runner needs of the client (the TE-E0 reads are optional). */
-export type GitHubActionsProvider = Pick<GitHubCodeHostProvider, "getPullRequestStatus" | "getJobLogTail"> & Partial<Pick<GitHubCodeHostProvider, "getCheckRunFacts" | "getLatestCheckRun" | "listSeenCheckNames">>;
+export type GitHubActionsProvider = Pick<GitHubCodeHostProvider, "getPullRequestStatus" | "getJobLogTail"> & Partial<Pick<GitHubCodeHostProvider, "getCheckRunFacts" | "getLatestCheckRun" | "listSeenCheckNames" | "getRunReportFiles">>;
 
 /** The methods a client must have before an adapter is built over it: a client built from an older tree is refused at start-up, not at its first call. */
 export const GITHUB_CODE_HOST_PROVIDER_METHODS = [

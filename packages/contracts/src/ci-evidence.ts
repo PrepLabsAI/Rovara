@@ -84,9 +84,11 @@ const runWords = (attempt: number | undefined): string => (attempt !== undefined
 export interface PipelineCounts { passed: number; failed: number; skipped: number }
 
 /** A marked check that answered: "Real: reported by your pipeline: real model (e2e-real) passed on run 2, commit 4f2a9c1, 212 passed, 0 failed". Never a plain pass: the run is always said. */
-export function realCheckLine(input: { calledAs: string; check: string; outcome: "passed" | "failed"; attempt?: number | undefined; commit: string; counts?: PipelineCounts | undefined }): string {
-  const counts = input.counts === undefined ? "no per-test counts reported"
-    : `${count(input.counts.passed)} passed, ${count(input.counts.failed)} failed${input.counts.skipped > 0 ? `, ${count(input.counts.skipped)} skipped` : ""}`;
+export function realCheckLine(input: { calledAs: string; check: string; outcome: "passed" | "failed"; attempt?: number | undefined; commit: string; counts?: PipelineCounts | undefined; proven?: number | undefined; flaky?: number | undefined }): string {
+  const counts = (input.counts === undefined ? "no per-test counts reported"
+    : `${count(input.counts.passed)} passed, ${count(input.counts.failed)} failed${input.counts.skipped > 0 ? `, ${count(input.counts.skipped)} skipped` : ""}`)
+    + (input.proven !== undefined && input.proven > 0 ? `, ${count(input.proven)} proven (failed on the base run)` : "")
+    + (input.flaky !== undefined && input.flaky > 0 ? `, ${count(input.flaky)} flaky (failed on an earlier run)` : "");
   return `${CI_EVIDENCE_REAL_LABEL}: ${inertEvidenceText(input.calledAs, CI_EVIDENCE_LIMITS.calledAsMax) || "your check"} (${name(input.check)}) ${input.outcome} ${runWords(input.attempt)}, commit ${shortSha(input.commit)}, ${counts}`;
 }
 
@@ -155,3 +157,31 @@ function safeLink(address: string | undefined): string | undefined {
     return undefined;
   }
 }
+
+// ---- per-test reports (TE-E0 option B)
+
+/** The most tests one pipeline report keeps (the report adapters' own cap). */
+export const PIPELINE_REPORT_TESTS_MAX = 50_000;
+/** The most failed tests whose text is kept, and the most characters of all failure text together. */
+export const PIPELINE_FAILURE_TEXTS_MAX = 20;
+export const PIPELINE_FAILURE_TEXT_TOTAL_MAX = 8_000;
+
+/** One test in a pipeline's per-test report: its id as the report gives it, its outcome, and (failed only) its capped failure text. Untrusted text. */
+export const PipelineReportTestSchema = z.object({
+  id: z.string().min(1).max(1_000),
+  outcome: z.enum(["passed", "failed", "skipped"]),
+  failureText: z.string().min(1).max(CI_EVIDENCE_LIMITS.failureTextMax).optional(),
+}).strict();
+export type PipelineReportTest = z.infer<typeof PipelineReportTestSchema>;
+
+/** A parsed per-test report: names, outcomes and capped failure text only (logs and other artifacts are never part of it). */
+export const PipelineReportSchema = z.object({
+  tests: z.array(PipelineReportTestSchema).max(PIPELINE_REPORT_TESTS_MAX),
+}).strict();
+export type PipelineReport = z.infer<typeof PipelineReportSchema>;
+
+/**
+ * The port that reads a report file's text (JUnit and the other formats of the report adapters, #529). The host fills it with the worker's adapters; the broker never parses a report itself. Undefined:
+ * the text is not a report this parser reads (never a guess, never a partial report).
+ */
+export type PipelineReportParser = (text: string) => PipelineReport | undefined;

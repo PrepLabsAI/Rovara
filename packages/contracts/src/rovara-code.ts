@@ -458,6 +458,18 @@ export const MarkedCheckEntrySchema = z.object({
   completedAt: InstantSchema.optional(),
   url: z.string().min(1).max(2_048).optional(),
   announced: z.literal(true).optional(),
+  /** TE-E0 option B: the workflow run the check's run belongs to (where its reports are), and what its per-test report said. */
+  workflowRunId: z.string().min(1).max(200).optional(),
+  report: z.enum(["read", "none", "unreadable"]).optional(),
+  counts: z.object({ passed: z.number().int().min(0), failed: z.number().int().min(0), skipped: z.number().int().min(0) }).strict().optional(),
+  /** Tests that passed here and failed by the same name on the base commit's run of this check: change proof, reported by the customer's pipeline. */
+  proven: z.number().int().min(0).optional(),
+  /** Tests the base run did not have (added by the change): their proof stays the sandbox one. */
+  added: z.number().int().min(0).optional(),
+  /** Tests that failed on an earlier run of this check on this head and pass on this one (flaky history; Rovara never re-runs). */
+  flaky: z.array(z.string().min(1).max(300)).max(20).optional(),
+  /** The failed tests and their capped failure text (untrusted), what a fix may be based on. */
+  failedTests: z.array(z.object({ id: z.string().min(1).max(300), text: z.string().min(1).max(CI_EVIDENCE_LIMITS.failureTextMax).optional() }).strict()).max(20).optional(),
 }).strict();
 export type MarkedCheckEntry = z.infer<typeof MarkedCheckEntrySchema>;
 

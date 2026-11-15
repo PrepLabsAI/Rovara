@@ -69,6 +69,11 @@ export function githubActionsCheckRunner(provider: GitHubActionsProvider): Check
         return parsed.data;
       },
     }),
+    ...(provider.getRunReportFiles === undefined ? {} : {
+      async reportFiles(repository: RepositoryRef, workflowRunId: string, scope: HostScope, budget?: ReadBudget) {
+        return provider.getRunReportFiles!(repository.url, workflowRunId, checkedScope(scope), budget);
+      },
+    }),
     ...(provider.listSeenCheckNames === undefined ? {} : {
       async seenChecks(repository: RepositoryRef, scope: HostScope, budget?: ReadBudget): Promise<{ checks: SeenCheck[]; complete: boolean }> {
         const listed = await provider.listSeenCheckNames!(repository.url, checkedScope(scope), budget);

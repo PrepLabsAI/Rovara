@@ -286,7 +286,15 @@ export async function ciFixDecider(input: MergeActionInput): Promise<MergeAction
     const next = blockWorkflowCiFix(workflow, { reason: ciFixStopMessage(failing[0] ?? "a check", firstLogLine(first)), now: at });
     return { slot: "ci_fix", workflow: next, steps: [], milestones: milestonesOf(milestone(context, "stuck", at, next.blockReason ?? ""), next.revision) };
   }
-  const evidence = await collectCiEvidence(context);
+  const collected = await collectCiEvidence(context);
+  // TE-E0 option B: for a marked check, what its per-test report said (failed test ids and their capped failure text) is the detail a fix rests on; it is report text, never a log.
+  const reportLines = marked?.failedTests?.map((test) => (test.text === undefined ? test.id : `${test.id}: ${test.text}`)).join("\n");
+  const evidence = reportLines === undefined || reportLines === "" ? collected : collected.map((check) => (check.name === oneLine(marked!.name, 100) ? { ...check, log: cleanLog(reportLines), note: undefined } : check)).map((check) => {
+    if (check.note !== undefined) return check;
+    const { note: _note, ...rest } = check;
+    void _note;
+    return rest;
+  });
   // A round a person asked for after the rounds ran out is not counted: one Retry is one round.
   const cap = marked?.roundsMax ?? CI_FIX_ROUNDS_MAX;
   const counted = workflowFixRounds(workflow).ci < cap;

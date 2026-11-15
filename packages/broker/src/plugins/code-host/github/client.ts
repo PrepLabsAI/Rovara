@@ -12,6 +12,7 @@ import {
 } from "../../../github-pull-status.js";
 
 export type { PullRequestCheck, PullRequestReview, PullRequestStatus } from "../../../github-pull-status.js";
+import { ARTIFACT_ZIP_BYTES_MAX, ZIP_REPORT_FILES_MAX, zipReports } from "../../../core/ci-evidence/zip.js";
 import { addSeenCheckNames, latestCheckRunOf, latestStatusOf, parseCheckRunFacts, recentPullRequestHeads, type CheckRunFacts, type LatestCheckRun, type SeenCheckName } from "../../../github-check-facts.js";
 export type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
 
@@ -1439,6 +1440,50 @@ export class GitHubAppCredentialProvider {
     return { checks, complete };
   }
 
+
+  /**
+   * TE-E0 option B: the per-test report files of one GitHub Actions workflow run. Its artifacts are listed (`actions: read`, already asked), the ones named like test results (`junit`, `test-results`,
+   * `test-report`) are downloaded (at most `REPORT_ARTIFACTS_MAX`, each at most `ARTIFACT_ZIP_BYTES_MAX` zipped, from GitHub's own storage hosts only, with no credentials), and their `.xml`/`.json` entries
+   * read whole. `none` when the run has no such artifact (or the App may not read Actions); `unreadable` when one that matched could not be read whole. Logs and other artifacts are never read here.
+   */
+  async getRunReportFiles(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" }> {
+    if (!/^[1-9][0-9]{0,19}$/u.test(workflowRunId)) throw agentXError("CONFIG_INVALID", "GitHub workflow run id is invalid");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    let token: string;
+    try {
+      token = await provider.createInstallationToken(repository, { actions: "read" }, scope);
+    } catch (error) {
+      if (isAgentXError(error) && (error.code === "GITHUB_NOT_CONNECTED" || error.code === "RUNTIME_UNAVAILABLE")) return { kind: "none" };
+      throw error;
+    }
+    const listed = await provider.trackingJson(`${root}/actions/runs/${workflowRunId}/artifacts?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (listed.status === 404 || listed.status === 403 || listed.status === 410) return { kind: "none" };
+    if (listed.status !== 200 || listed.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub artifact list failed with HTTP ${listed.status}`);
+    const chosen = reportArtifactsOf(listed.body);
+    if (chosen === "unreadable") return { kind: "unreadable" };
+    if (chosen.length === 0) return { kind: "none" };
+    const files: Array<{ name: string; text: string }> = [];
+    for (const artifact of chosen) {
+      const located = await provider.fetchImplementation(`${root}/actions/artifacts/${String(artifact.id)}/zip`, { method: "GET", headers: githubHeaders(token), redirect: "manual", signal: AbortSignal.timeout(8_000) });
+      const limitedAt = mergeRateLimitRetryAt(located, this.now());
+      if (limitedAt !== undefined) throw new GithubMergeRateLimitError(limitedAt);
+      if (located.status < 300 || located.status >= 400) return { kind: "unreadable" };
+      const address = located.headers.get("location") ?? "";
+      if (!isAllowedLogAddress(address)) return { kind: "unreadable" };
+      const signal = AbortSignal.any([AbortSignal.timeout(30_000), ...(budget === undefined ? [] : [budget.signal])]);
+      const zip = await this.fetchImplementation(address, { method: "GET", headers: { accept: "application/zip" }, redirect: "error", signal });
+      if (zip.status !== 200) return { kind: "unreadable" };
+      const body = await cappedBytes(zip, ARTIFACT_ZIP_BYTES_MAX);
+      if (body === undefined) return { kind: "unreadable" };
+      const read = zipReports(body);
+      if (read.kind === "unreadable") return read;
+      files.push(...read.files);
+      if (files.length > ZIP_REPORT_FILES_MAX) return { kind: "unreadable" };
+    }
+    return { kind: "read", files };
+  }
 
   /** Reads a bounded PR diff summary for a code-aware, owner-approved feedback proposal. */
   async getPullRequestChangedFiles(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<GitHubPullRequestChangedFile[]> {
@@ -3156,6 +3201,46 @@ function workingBranchInput(repositoryUrl: string, expected: { installationId: n
 
 export interface WorkingBranchPage { branches: string[]; page: number; mayHaveMore: boolean; omittedUnsupported: boolean }
 /** Bound both metadata and list bodies independently of content-length or unknown provider fields. */
+/** TE-E0 option B: the most test-result artifacts read for one run. */
+const REPORT_ARTIFACTS_MAX = 3;
+/** An artifact named like test results. */
+const REPORT_ARTIFACT_NAME = /junit|test[-_ ]?results?|test[-_ ]?reports?/iu;
+
+/** The test-result artifacts of a run's artifact list: unexpired, named like test results, at most `ARTIFACT_ZIP_BYTES_MAX` each; more than `REPORT_ARTIFACTS_MAX` of them, or a list that does not parse, is `unreadable`. */
+function reportArtifactsOf(body: unknown): Array<{ id: number }> | "unreadable" {
+  const list = (body as { artifacts?: unknown; total_count?: unknown } | undefined)?.artifacts;
+  const total = (body as { total_count?: unknown } | undefined)?.total_count;
+  if (!Array.isArray(list) || (typeof total === "number" && total > list.length)) return "unreadable";
+  const chosen: Array<{ id: number }> = [];
+  for (const value of list) {
+    const artifact = value as { id?: unknown; name?: unknown; expired?: unknown; size_in_bytes?: unknown } | null;
+    if (artifact === null || typeof artifact !== "object" || typeof artifact.name !== "string" || !REPORT_ARTIFACT_NAME.test(artifact.name)) continue;
+    if (artifact.expired === true) continue;
+    if (typeof artifact.id !== "number" || !Number.isSafeInteger(artifact.id) || artifact.id <= 0 || typeof artifact.size_in_bytes !== "number" || artifact.size_in_bytes > ARTIFACT_ZIP_BYTES_MAX) return "unreadable";
+    chosen.push({ id: artifact.id });
+  }
+  return chosen.length > REPORT_ARTIFACTS_MAX ? "unreadable" : chosen;
+}
+
+/** A body read as bytes to at most `maxBytes`; undefined past it. */
+async function cappedBytes(response: Response, maxBytes: number): Promise<Uint8Array | undefined> {
+  if (response.body === null) return undefined;
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk: unknown = next.value;
+      if (!(chunk instanceof Uint8Array)) return undefined;
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) { await reader.cancel(); return undefined; }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  } finally { reader.releaseLock(); }
+}
+
 /** TE-E0: the most bytes one check-run or status answer is read to (100 runs with their output summaries fit well within it). */
 const CHECK_LIST_MAX_BYTES = 2 * 1024 * 1024;
 

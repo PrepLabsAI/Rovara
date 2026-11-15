@@ -80,6 +80,11 @@ export interface CheckRunner {
   runFacts?(target: CheckTarget, check: Check, scope: HostScope, budget?: ReadBudget): Promise<CheckRunFacts | undefined>;
   /** TE-E0 option A: the latest run of a named check (and app, when `source` is given) at a commit or a branch's head. Undefined when there is none; a read that fails throws. */
   latestCheck?(repository: RepositoryRef, at: CheckLookup, check: { name: string; source?: string | undefined }, scope: HostScope, budget?: ReadBudget): Promise<LatestCheck | undefined>;
+  /**
+   * TE-E0 option B: the per-test report files of one workflow run (`CheckRunFacts.workflowRunId`): `none` when the run has none, `unreadable` when one could not be read whole. Report text only; never
+   * logs or other artifacts.
+   */
+  reportFiles?(repository: RepositoryRef, workflowRunId: string, scope: HostScope, budget?: ReadBudget): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" }>;
   /** TE-E0 option A, setup: the check names seen on recent change requests, for a customer to mark. `complete` is false when part could not be read: the list is then not everything seen. */
   seenChecks?(repository: RepositoryRef, scope: HostScope, budget?: ReadBudget): Promise<{ checks: SeenCheck[]; complete: boolean }>;
 }

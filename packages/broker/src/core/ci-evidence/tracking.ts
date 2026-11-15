@@ -3,10 +3,12 @@
 // from past runs, never above the cap) and keeps one entry per marked check on the tracking item. Nothing here holds a machine: the pass is a poll, and the entry says when to look again.
 // When a marked check failed or timed out, the verdict (environment, ask, fix within the cap) is worked out here, with the main branch's latest run of the same check read once, for the CI slot to act on.
 import {
-  CI_FIX_ROUNDS_MAX, MarkedCheckEntrySchema, parseCiEvidenceSettings, realCheckLine,
+  CI_FIX_ROUNDS_MAX, MarkedCheckEntrySchema, PIPELINE_FAILURE_TEXTS_MAX, PIPELINE_REPORT_TESTS_MAX, PipelineReportSchema, parseCiEvidenceSettings, realCheckLine,
+  type PipelineReport, type PipelineReportParser,
   type ChangeRequestRef, type ChangeRequestStatus, type CheckRunner, type CodeHost, type DocumentStore, type OrgId, type CheckTarget, type CiEvidenceSettings, type HostScope, type MarkedCheck, type MarkedCheckEntry, type MergeTrackingItem, type ReadBudget,
 } from "@agentx/contracts";
 import { currentRun, expectedWaitMs, waitCapMs, isMarked, markedCheckState, type MarkedRun, type MarkedState } from "./marked-checks.js";
+import { pipelineProof, type PipelineTestOutcome } from "./change-proof.js";
 import { LONG_CHECK_FIX_ROUNDS_MAX, decideMarkedCheck, type MainRun, type MarkedVerdict } from "./fix-or-ask.js";
 import { durationsOf, readCheckTimes, recordCheckTimes } from "./history.js";
 import type { FailingCheck } from "../branch-sync/merge-action.js";
@@ -30,6 +32,7 @@ function entryOf(marked: MarkedCheck, state: MarkedState, run: MarkedRun | undef
   const runPart = run === undefined ? {} : {
     ...(run.check.runId === undefined ? {} : { runId: run.check.runId }),
     ...(run.attempt === undefined ? {} : { attempt: run.attempt }),
+    ...(run.workflowRunId === undefined ? {} : { workflowRunId: run.workflowRunId }),
     ...(run.startedAt === undefined ? {} : { startedAt: iso(run.startedAt) }),
     ...(run.completedAt === undefined ? {} : { completedAt: iso(run.completedAt) }),
     ...(run.check.url === "" ? {} : { url: run.check.url }),
@@ -67,13 +70,13 @@ export async function observeMarked(input: {
       const finished = check.state === "completed";
       const known = finished && prior !== undefined && check.runId !== undefined && prior.runId === check.runId && (prior.state === "passed" || prior.state === "failed");
       if (known) {
-        runs.push({ check, ...(prior.attempt === undefined ? {} : { attempt: prior.attempt }), ...(ms(prior.startedAt) === undefined ? {} : { startedAt: ms(prior.startedAt)! }), ...(ms(prior.completedAt) === undefined ? {} : { completedAt: ms(prior.completedAt)! }) });
+        runs.push({ check, ...(prior.workflowRunId === undefined ? {} : { workflowRunId: prior.workflowRunId }), ...(prior.attempt === undefined ? {} : { attempt: prior.attempt }), ...(ms(prior.startedAt) === undefined ? {} : { startedAt: ms(prior.startedAt)! }), ...(ms(prior.completedAt) === undefined ? {} : { completedAt: ms(prior.completedAt)! }) });
         continue;
       }
       if (!finished || check.runId === undefined || input.runner?.runFacts === undefined) { runs.push({ check }); continue; }
       try {
         const facts = await input.runner.runFacts(input.target, check, input.scope, input.budget);
-        runs.push({ check, ...(facts?.attempt === undefined ? {} : { attempt: facts.attempt }), ...(ms(facts?.startedAt) === undefined ? {} : { startedAt: ms(facts?.startedAt)! }), ...(ms(facts?.completedAt) === undefined ? {} : { completedAt: ms(facts?.completedAt)! }) });
+        runs.push({ check, ...(facts?.workflowRunId === undefined ? {} : { workflowRunId: facts.workflowRunId }), ...(facts?.attempt === undefined ? {} : { attempt: facts.attempt }), ...(ms(facts?.startedAt) === undefined ? {} : { startedAt: ms(facts?.startedAt)! }), ...(ms(facts?.completedAt) === undefined ? {} : { completedAt: ms(facts?.completedAt)! }) });
       } catch (error) {
         if (isPassLimit(error)) throw error;
         input.log?.("ci_evidence.run_facts_unreadable", { error: error instanceof Error ? error.name : "unknown" });
@@ -97,7 +100,7 @@ export const LANDED_LINE_MAX = 200;
 
 /** The line a landed result is said with on the pull request: the shared words, with no `@` or control character, cut to fit (the customer's words are shortened first, never the run or the commit). */
 export function landedLine(entry: MarkedEntry, marked: MarkedCheck, commit: string): string {
-  const say = (calledAs: string, check: string): string => realCheckLine({ calledAs, check, outcome: entry.state === "passed" ? "passed" : "failed", attempt: entry.attempt, commit })
+  const say = (calledAs: string, check: string): string => realCheckLine({ calledAs, check, outcome: entry.state === "passed" ? "passed" : "failed", attempt: entry.attempt, commit, counts: entry.counts, proven: entry.proven, flaky: entry.flaky?.length })
     .replace(/[\p{Cc}@]+/gu, " ").replace(/\s+/gu, " ").trim();
   const full = say(marked.calledAs, marked.name);
   if (full.length <= LANDED_LINE_MAX) return full;
@@ -110,6 +113,8 @@ export interface MarkedDecision {
   name: string;
   calledAs: string;
   verdict: Exclude<MarkedVerdict, { kind: "none" } | { kind: "wait" }>;
+  /** TE-E0 option B: the failed tests and their capped failure text from the pipeline's report (what a fix is based on when logs are off). */
+  failedTests?: ReadonlyArray<{ id: string; text?: string | undefined }> | undefined;
   /** The fix rounds Rovara may try on its own for this check (2 for a long or paid one, else today's 3): a round past it, after a person's Retry, is not counted as one of them. */
   roundsMax: number;
   baseBranch: string;
@@ -144,10 +149,12 @@ export async function markedDecision(input: {
     const state: MarkedState = entry.state === "failed" ? { kind: "failed", run: { check: { name: marked.name, state: "completed", conclusion: "failure", required: false, url: entry.url ?? "" } } } : { kind: "not_run", reason: entry.reason ?? "timed_out", ...(entry.afterMs === undefined ? {} : { afterMs: entry.afterMs }) };
     const mainRun = entry.state === "failed" ? await mainRunOf({ runner: input.runner, repository: input.repository, baseBranch: input.baseBranch, marked, scope: input.scope, budget: input.budget }) : "unknown";
     const verdict = decideMarkedCheck({
-      state, longOrPaid: marked.longOrPaid, testsRan: undefined, testsFailed: undefined, logShared: input.settings.shareLogs && input.logReadable(entry), mainRun, roundsUsed: input.roundsUsed, roundsMax: CI_FIX_ROUNDS_MAX,
+      state, longOrPaid: marked.longOrPaid,
+      testsRan: entry.report === "read" && entry.counts !== undefined ? entry.counts.passed + entry.counts.failed + entry.counts.skipped : undefined,
+      testsFailed: entry.report === "read" && entry.counts !== undefined ? entry.counts.failed : undefined, logShared: input.settings.shareLogs && input.logReadable(entry), mainRun, roundsUsed: input.roundsUsed, roundsMax: CI_FIX_ROUNDS_MAX,
     });
     if (verdict.kind === "none" || verdict.kind === "wait") continue;
-    return { name: marked.name, calledAs: marked.calledAs, verdict, roundsMax: marked.longOrPaid ? Math.min(LONG_CHECK_FIX_ROUNDS_MAX, CI_FIX_ROUNDS_MAX) : CI_FIX_ROUNDS_MAX, baseBranch: input.baseBranch, ...(entry.url === undefined ? {} : { rerunUrl: entry.url }) };
+    return { name: marked.name, calledAs: marked.calledAs, verdict, ...(entry.failedTests === undefined ? {} : { failedTests: entry.failedTests }), roundsMax: marked.longOrPaid ? Math.min(LONG_CHECK_FIX_ROUNDS_MAX, CI_FIX_ROUNDS_MAX) : CI_FIX_ROUNDS_MAX, baseBranch: input.baseBranch, ...(entry.url === undefined ? {} : { rerunUrl: entry.url }) };
   }
   return undefined;
 }
@@ -217,6 +224,9 @@ export async function ciEvidencePass(input: {
   host: { postComment?: CodeHost["postComment"] };
   roundsUsed: number;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
+  /** TE-E0 option B: the host's report parser (absent: no per-test reports are read), and the commit the change is based on (for the change proof). */
+  reportParser?: PipelineReportParser | undefined;
+  baseCommit?: string | undefined;
 }): Promise<CiEvidencePass> {
   const head = input.status.headRevision;
   const rovaraStart = input.fields.headByRovara && input.fields.lastRovaraPushAt !== undefined ? Date.parse(input.fields.lastRovaraPushAt) : undefined;
@@ -228,8 +238,9 @@ export async function ciEvidencePass(input: {
     settings: input.settings, status: input.status, prior: input.prior, waitStart, now: input.now, history: (check) => durationsOf(times, check), runner: input.runner,
     target: { kind: "change-request", ref: input.ref }, scope: input.scope, budget: input.budget, log: input.log,
   });
+  const reported = await withReports(input, observed.entries);
   // Every entry is checked against the item's schema before it is written: a value an adapter got wrong is left out, never stored where it would stop the next read.
-  const valid = observed.entries.map((entry) => {
+  const valid = reported.map((entry) => {
     if (MarkedCheckEntrySchema.safeParse(entry).success) return entry;
     const { attempt: _attempt, startedAt: _started, completedAt: _completed, url: _url, ...rest } = entry;
     void _attempt; void _started; void _completed; void _url;
@@ -275,4 +286,109 @@ export async function ciEvidencePass(input: {
       await recordCheckTimes(input.store, { orgId: input.task.orgId, project: input.task.project, repositoryId: input.pullRequest.repositoryId, times, finished, keep: input.settings.markedChecks }, input.log);
     },
   };
+}
+
+// ---- per-test reports (TE-E0 option B)
+
+/** One run's per-test outcomes, as the report parser read them; `none` or `unreadable` when there is no report to read whole. */
+export type RunReport = { kind: "read"; commit: string; tests: Map<string, PipelineTestOutcome>; failed: Array<{ id: string; text?: string }> } | { kind: "none" } | { kind: "unreadable" };
+
+/**
+ * The per-test report of one workflow run: every report file the runner hands out, read through the host's parser. A file the parser does not read as a report (a coverage file, say) is not a report and
+ * is left out; with no report read at all it is `none`. More tests than the cap, in total, is `unreadable` (never cut). The same test in two files: a failure wins.
+ */
+export async function readRunReport(input: { runner: CheckRunner; parser: PipelineReportParser; repository: { url: string }; workflowRunId: string; commit: string; scope: HostScope; budget?: ReadBudget | undefined }): Promise<RunReport> {
+  const files = await input.runner.reportFiles!(input.repository, input.workflowRunId, input.scope, input.budget);
+  if (files.kind !== "read") return files;
+  const tests = new Map<string, PipelineTestOutcome>();
+  const failed = new Map<string, string | undefined>();
+  let read = 0;
+  for (const file of files.files) {
+    let report: PipelineReport | undefined;
+    try {
+      report = input.parser(file.text);
+    } catch {
+      return { kind: "unreadable" };
+    }
+    const parsed = report === undefined ? undefined : PipelineReportSchema.safeParse(report);
+    if (parsed === undefined) continue;
+    if (!parsed.success) return { kind: "unreadable" };
+    read += 1;
+    for (const test of parsed.data.tests) {
+      const before = tests.get(test.id);
+      tests.set(test.id, before === "failed" || test.outcome === "failed" ? "failed" : test.outcome === "passed" || before === "passed" ? "passed" : "skipped");
+      if (test.outcome === "failed" && !failed.has(test.id)) failed.set(test.id, test.failureText);
+      if (tests.size > PIPELINE_REPORT_TESTS_MAX) return { kind: "unreadable" };
+    }
+  }
+  if (read === 0) return { kind: "none" };
+  return { kind: "read", commit: input.commit, tests, failed: [...failed].slice(0, PIPELINE_FAILURE_TEXTS_MAX).map(([id, text]) => ({ id: Array.from(id).slice(0, 300).join(""), ...(text === undefined ? {} : { text }) })) };
+}
+
+/** What a run's report adds to its entry: the counts, the failed tests, the proof against the base run, and the tests that failed on an earlier run of this head and pass now. */
+export function reportFields(input: { report: RunReport; base: RunReport | undefined; baseCommit: string | undefined; headCommit: string; earlierFailed: readonly string[] }): Partial<MarkedEntry> {
+  const { report } = input;
+  if (report.kind !== "read") return { report: report.kind };
+  const counts = { passed: 0, failed: 0, skipped: 0 };
+  for (const outcome of report.tests.values()) counts[outcome] += 1;
+  const proof = input.baseCommit === undefined ? undefined : pipelineProof({
+    head: { commit: report.commit, tests: report.tests }, headCommit: input.headCommit,
+    base: input.base?.kind === "read" ? { commit: input.base.commit, tests: input.base.tests } : undefined, baseCommit: input.baseCommit,
+    // A test the base run did not have cannot have run on the old code there: it was added by the change, and keeps its sandbox proof.
+    addedTests: input.base?.kind === "read" ? new Set([...report.tests.keys()].filter((id) => !(input.base as Extract<RunReport, { kind: "read" }>).tests.has(id))) : new Set(),
+  });
+  const flaky = input.earlierFailed.filter((id) => report.tests.get(id) === "passed").slice(0, 20).map((id) => Array.from(id).slice(0, 300).join(""));
+  return {
+    report: "read", counts,
+    ...(report.failed.length === 0 ? {} : { failedTests: report.failed }),
+    ...(proof === undefined || proof.noBase !== undefined ? {} : { proven: proof.proven.length, added: proof.addedByChange.length }),
+    ...(flaky.length === 0 ? {} : { flaky }),
+  };
+}
+
+const REPORT_FIELDS = ["report", "counts", "proven", "added", "flaky", "failedTests"] as const;
+
+/**
+ * The entries with what their runs' per-test reports say, read once per run: an entry whose run was read before on this head keeps what was read; a run that finished now is read (only when the customer
+ * left per-test reports on and the host gave a parser). Any failure but a pass limit is `unreadable` for that run, never a guess.
+ */
+async function withReports(input: Parameters<typeof ciEvidencePass>[0], entries: readonly MarkedEntry[]): Promise<MarkedEntry[]> {
+  const head = input.status.headRevision;
+  const priorEntries = input.prior?.headSha === head ? input.prior.ciMarked ?? [] : [];
+  const out: MarkedEntry[] = [];
+  for (const entry of entries) {
+    if (entry.state !== "passed" && entry.state !== "failed") { out.push(entry); continue; }
+    const prior = priorEntries.find((other) => other.name === entry.name && other.source === entry.source);
+    if (prior !== undefined && prior.runId === entry.runId && prior.report !== undefined) {
+      const kept: Partial<MarkedEntry> = {};
+      for (const field of REPORT_FIELDS) if (prior[field] !== undefined) (kept as Record<string, unknown>)[field] = prior[field];
+      out.push({ ...entry, ...kept });
+      continue;
+    }
+    const runner = input.runner;
+    if (!input.settings.perTestReports || input.reportParser === undefined || runner?.reportFiles === undefined || entry.workflowRunId === undefined) { out.push(entry); continue; }
+    try {
+      const report = await readRunReport({ runner, parser: input.reportParser, repository: input.repository, workflowRunId: entry.workflowRunId, commit: head, scope: input.scope, budget: input.budget });
+      const base = report.kind === "read" && input.baseCommit !== undefined && [...report.tests.values()].includes("passed")
+        ? await baseReport({ ...input, runner, parser: input.reportParser, baseCommit: input.baseCommit, check: { name: entry.name, ...(entry.source === undefined ? {} : { source: entry.source }) } })
+        : undefined;
+      const earlierFailed = prior !== undefined && prior.runId !== entry.runId ? (prior.failedTests ?? []).map((test) => test.id) : [];
+      out.push({ ...entry, ...reportFields({ report, base, baseCommit: input.baseCommit, headCommit: head, earlierFailed }) });
+    } catch (error) {
+      if (isPassLimit(error)) throw error;
+      input.log?.("ci_evidence.report_unreadable", { error: error instanceof Error ? error.name : "unknown" });
+      out.push({ ...entry, report: "unreadable" });
+    }
+  }
+  return out;
+}
+
+/** The base commit's latest run of the same check, and its report (read for free from what GitHub holds; Rovara never runs old code in the customer's environment). Undefined when there is none. */
+async function baseReport(input: { runner: CheckRunner; parser: PipelineReportParser; repository: { url: string }; baseCommit: string; check: { name: string; source?: string }; scope: HostScope; budget?: ReadBudget | undefined }): Promise<RunReport | undefined> {
+  if (input.runner.latestCheck === undefined || input.runner.runFacts === undefined) return undefined;
+  const latest = await input.runner.latestCheck(input.repository, { revision: input.baseCommit }, input.check, input.scope, input.budget);
+  if (latest === undefined || latest.revision !== input.baseCommit || latest.check.state !== "completed") return undefined;
+  const facts = await input.runner.runFacts({ kind: "revision", repository: input.repository, revision: input.baseCommit }, latest.check, input.scope, input.budget);
+  if (facts?.workflowRunId === undefined) return undefined;
+  return readRunReport({ runner: input.runner, parser: input.parser, repository: input.repository, workflowRunId: facts.workflowRunId, commit: input.baseCommit, scope: input.scope, budget: input.budget });
 }
