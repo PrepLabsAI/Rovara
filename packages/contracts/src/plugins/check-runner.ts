@@ -1,8 +1,8 @@
 // The CheckRunner port: external build and check results (GitHub Actions, CodeBuild, a customer's build system). Only this layer is new.
 // The in-sandbox checks the worker runs itself (setup and test commands, measured before and after) are not part of it.
 import { z } from "zod";
-import { ChangeRequestRefSchema, type Check } from "./code-host.js";
-import { ExternalIdSchema, PluginKindSchema, RepositoryRefSchema, RevisionSchema, type HostScope, type PluginKind, type ReadBudget, type UntrustedText } from "./common.js";
+import { ChangeRequestRefSchema, CheckSchema, type Check } from "./code-host.js";
+import { BranchNameSchema, ExternalIdSchema, ISO_TIME, PluginKindSchema, RepositoryRefSchema, RevisionSchema, type HostScope, type PluginKind, type ReadBudget, type RepositoryRef, type UntrustedText } from "./common.js";
 
 export const CheckRunnerCapabilitiesSchema = z.object({
   /** `listChecks` answers for a change request. */
@@ -41,6 +41,30 @@ export const CheckStartRequestSchema = z.object({
 }).strict();
 export type CheckStartRequest = z.infer<typeof CheckStartRequestSchema>;
 
+/**
+ * TE-E0 option A: what a runner knows about one run beyond its result: when it started and finished, which attempt it was (1 for the first run, 2 for a re-run: the evidence says "passed on run 2",
+ * never a plain pass, and says nothing when the attempt is not known), and the run it belongs to (where its reports are). Every field is present only when the runner read it.
+ */
+export const CheckRunFactsSchema = z.object({
+  startedAt: ISO_TIME.optional(),
+  completedAt: ISO_TIME.optional(),
+  attempt: z.number().int().min(1).max(1_000).optional(),
+  workflowRunId: ExternalIdSchema.optional(),
+}).strict();
+export type CheckRunFacts = z.infer<typeof CheckRunFactsSchema>;
+
+/** Where to look for a check's latest run: a commit (the base commit) or a branch's head (the main branch's latest run). */
+export const CheckLookupSchema = z.union([z.object({ revision: RevisionSchema }).strict(), z.object({ branch: BranchNameSchema }).strict()]);
+export type CheckLookup = z.infer<typeof CheckLookupSchema>;
+
+/** The latest run of a named check, with the commit it ran on. */
+export const LatestCheckSchema = z.object({ revision: RevisionSchema, check: CheckSchema }).strict();
+export type LatestCheck = z.infer<typeof LatestCheckSchema>;
+
+/** A check name a runner has seen reported, with the reporting app when there is one: what the setup screen lists for a customer to mark. */
+export const SeenCheckSchema = z.object({ name: z.string().min(1).max(200), source: z.string().min(1).max(200).optional() }).strict();
+export type SeenCheck = z.infer<typeof SeenCheckSchema>;
+
 export interface CheckRunner {
   readonly kind: PluginKind;
   readonly capabilities: CheckRunnerCapabilities;
@@ -52,4 +76,10 @@ export interface CheckRunner {
   /** Reads one started run again. */
   getRun?(target: Extract<CheckTarget, { kind: "run" }>, scope: HostScope): Promise<Check>;
   rerun?(target: CheckTarget, check: Check, scope: HostScope): Promise<void>;
+  /** TE-E0 option A: the facts of one listed run (times, attempt). Undefined when the runner has none for it. */
+  runFacts?(target: CheckTarget, check: Check, scope: HostScope, budget?: ReadBudget): Promise<CheckRunFacts | undefined>;
+  /** TE-E0 option A: the latest run of a named check (and app, when `source` is given) at a commit or a branch's head. Undefined when there is none; a read that fails throws. */
+  latestCheck?(repository: RepositoryRef, at: CheckLookup, check: { name: string; source?: string | undefined }, scope: HostScope, budget?: ReadBudget): Promise<LatestCheck | undefined>;
+  /** TE-E0 option A, setup: the check names seen on recent change requests, for a customer to mark. */
+  seenChecks?(repository: RepositoryRef, scope: HostScope, budget?: ReadBudget): Promise<SeenCheck[]>;
 }

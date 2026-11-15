@@ -8,6 +8,7 @@
 // (same names, same fields); when a lane brings that client in, replace them with `export type { ... } from "../../../github-app.js"`.
 import type { HostScope, ReadBudget } from "@agentx/contracts";
 import type { PullRequestStatus } from "../../../github-pull-status.js";
+import type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
 import type { CommitFilesRequest } from "./commit-files.js";
 
 export type { PullRequestCheck, PullRequestStatus } from "../../../github-pull-status.js";
@@ -176,10 +177,16 @@ export interface GitHubCodeHostProvider {
   mergePullRequest(repositoryUrl: string, number: number, input: { sha: string; method: "squash" | "merge" }, scope: GitHubTokenScope): Promise<MergePullRequestResult>;
   /** The tail of a GitHub Actions job's log (untrusted text). Used by the GitHub Actions check runner. */
   getJobLogTail(repositoryUrl: string, jobId: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<string | undefined>;
+  /** TE-E0 option A: one check run's times and, for an Actions job, its run attempt. Optional: a client without it gives no run number, and the evidence says so. */
+  getCheckRunFacts?(repositoryUrl: string, checkRunId: string, scope: GitHubTokenScope, budget?: ReadBudget, options?: { actionsJob?: boolean }): Promise<CheckRunFacts | undefined>;
+  /** TE-E0 option A: the latest run of a named check on a commit or a branch's head. */
+  getLatestCheckRun?(repositoryUrl: string, at: { revision: string } | { branch: string }, check: { name: string; appId?: number | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<LatestCheckRun | undefined>;
+  /** TE-E0 option A, setup: the check names seen on recent pull requests. */
+  listSeenCheckNames?(repositoryUrl: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<SeenCheckName[]>;
 }
 
-/** What the GitHub Actions check runner needs of the client. */
-export type GitHubActionsProvider = Pick<GitHubCodeHostProvider, "getPullRequestStatus" | "getJobLogTail">;
+/** What the GitHub Actions check runner needs of the client (the TE-E0 reads are optional). */
+export type GitHubActionsProvider = Pick<GitHubCodeHostProvider, "getPullRequestStatus" | "getJobLogTail"> & Partial<Pick<GitHubCodeHostProvider, "getCheckRunFacts" | "getLatestCheckRun" | "listSeenCheckNames">>;
 
 /** The methods a client must have before an adapter is built over it: a client built from an older tree is refused at start-up, not at its first call. */
 export const GITHUB_CODE_HOST_PROVIDER_METHODS = [

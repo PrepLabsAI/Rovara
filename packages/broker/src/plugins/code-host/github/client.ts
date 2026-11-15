@@ -12,6 +12,11 @@ import {
 } from "../../../github-pull-status.js";
 
 export type { PullRequestCheck, PullRequestReview, PullRequestStatus } from "../../../github-pull-status.js";
+import { addSeenCheckNames, latestCheckRunOf, latestStatusOf, parseCheckRunFacts, recentPullRequestHeads, type CheckRunFacts, type LatestCheckRun, type SeenCheckName } from "../../../github-check-facts.js";
+export type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
+
+/** TE-E0 option A, setup: how many recently updated pull requests' heads the check-name listing reads. */
+const SEEN_PULL_REQUESTS = 5;
 
 const GITHUB_APP_ID = /^[1-9][0-9]*$/;
 /** A GitHub user or organization login: letters, digits and single hyphens inside, at most 39 characters. */
@@ -1331,6 +1336,85 @@ export class GitHubAppCredentialProvider {
     }
     if (located.status === 200) return logTail(await readLogEnd(located, signal));
     throw agentXError("RUNTIME_UNAVAILABLE", `GitHub log lookup failed with HTTP ${located.status}`);
+  }
+
+  /**
+   * TE-E0 option A: one check run's times (`GET check-runs/{id}`, `checks: read`) and, for a GitHub Actions job, its run attempt and workflow run (`GET actions/jobs/{id}`, `actions: read`). Both permissions are
+   * ones the App already asks. Absent when GitHub has no such run (or the App may not see it); a job that cannot be read leaves the attempt out, never guessed. With a `budget` every request counts.
+   */
+  async getCheckRunFacts(repositoryUrl: string, checkRunId: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget, options: { actionsJob?: boolean } = {}): Promise<CheckRunFacts | undefined> {
+    if (!/^[1-9][0-9]{0,19}$/u.test(checkRunId)) throw agentXError("CONFIG_INVALID", "GitHub check run id is invalid");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const token = await provider.createInstallationToken(repository, STATUS_TOKEN_PERMISSIONS, scope);
+    const run = await provider.trackingJson(`${root}/check-runs/${checkRunId}`, token, { rateLimit: true });
+    if (run.status === 404 || run.status === 403 || run.status === 410) return undefined;
+    if (run.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run lookup failed with HTTP ${run.status}`);
+    let job: unknown;
+    if (options.actionsJob === true) {
+      let actionsToken: string | undefined;
+      try {
+        actionsToken = await provider.createInstallationToken(repository, { actions: "read" }, scope);
+      } catch (error) {
+        // An installation that has not accepted the Actions permission: no attempt is read, and none is said.
+        if (!isAgentXError(error) || (error.code !== "GITHUB_NOT_CONNECTED" && error.code !== "RUNTIME_UNAVAILABLE")) throw error;
+      }
+      if (actionsToken !== undefined) {
+        const read = await provider.trackingJson(`${root}/actions/jobs/${checkRunId}`, actionsToken, { rateLimit: true });
+        if (read.status === 200) job = read.body;
+        else if (read.status !== 404 && read.status !== 403 && read.status !== 410) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub job lookup failed with HTTP ${read.status}`);
+      }
+    }
+    return parseCheckRunFacts(run.body, job, checkRunId);
+  }
+
+  /**
+   * TE-E0 option A: the latest run of a named check on a commit (`revision`, a full sha: the base commit's run) or on a branch's head (`branch`: the main branch's latest run), from its check runs and then its
+   * commit statuses (`checks` and `statuses` at read). Undefined when there is none, or no such commit or branch; an answer that does not parse throws (not known, never "passed").
+   */
+  async getLatestCheckRun(repositoryUrl: string, at: { revision: string } | { branch: string }, check: { name: string; appId?: number | undefined }, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<LatestCheckRun | undefined> {
+    const revision = "revision" in at ? at.revision : undefined;
+    if (revision !== undefined && !/^[a-f0-9]{40}$/u.test(revision)) throw agentXError("CONFIG_INVALID", "commit sha is invalid");
+    if (!("revision" in at) && !GitBranchNameSchema.safeParse(at.branch).success) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (check.name.length === 0 || check.name.length > 200 || /[\p{Cc}\p{Cf}]/u.test(check.name)) throw agentXError("CONFIG_INVALID", "check name is invalid");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const ref = revision ?? ("branch" in at ? at.branch.split("/").map(encodeURIComponent).join("/") : "");
+    const token = await provider.createInstallationToken(repository, STATUS_TOKEN_PERMISSIONS, scope);
+    const wanted = { name: check.name, ...(check.appId === undefined ? {} : { appId: check.appId }), ...(revision === undefined ? {} : { expectedSha: revision }) };
+    const runs = await provider.trackingJson(`${root}/commits/${ref}/check-runs?check_name=${encodeURIComponent(check.name)}&filter=latest&per_page=100`, token, { rateLimit: true });
+    if (runs.status === 404 || runs.status === 422) return undefined;
+    if (runs.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check runs lookup failed with HTTP ${runs.status}`);
+    const unreadable = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned check runs Rovara cannot read"); };
+    let found: LatestCheckRun | undefined;
+    try { found = latestCheckRunOf(runs.body, wanted); } catch { unreadable(); }
+    if (found !== undefined || check.appId !== undefined) return found;
+    const statuses = await provider.trackingJson(`${root}/commits/${ref}/status?per_page=100`, token, { rateLimit: true });
+    if (statuses.status === 404 || statuses.status === 422) return undefined;
+    if (statuses.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub commit status lookup failed with HTTP ${statuses.status}`);
+    try { return latestStatusOf(statuses.body, wanted); } catch { return unreadable(); }
+  }
+
+  /**
+   * TE-E0 option A, setup: the check names seen on the five most recently updated pull requests' heads (their check runs and commit statuses), at most `SEEN_CHECKS_MAX`, sorted. Read-only, eleven requests at
+   * most. A head whose checks cannot be read is skipped: this is a list a person ticks, never a decision.
+   */
+  async listSeenCheckNames(repositoryUrl: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<SeenCheckName[]> {
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const token = await provider.createInstallationToken(repository, STATUS_TOKEN_PERMISSIONS, scope);
+    const pulls = await provider.trackingJson(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=${String(SEEN_PULL_REQUESTS)}`, token, { rateLimit: true });
+    if (pulls.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request list failed with HTTP ${pulls.status}`);
+    const seen = new Map<string, SeenCheckName>();
+    for (const head of recentPullRequestHeads(pulls.body, SEEN_PULL_REQUESTS)) {
+      const runs = await provider.trackingJson(`${root}/commits/${head}/check-runs?per_page=100`, token, { rateLimit: true });
+      const statuses = await provider.trackingJson(`${root}/commits/${head}/status?per_page=100`, token, { rateLimit: true });
+      addSeenCheckNames(seen, runs.status === 200 ? runs.body : undefined, statuses.status === 200 ? statuses.body : undefined);
+    }
+    return [...seen.values()].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : (left.source ?? "").localeCompare(right.source ?? "")));
   }
 
   /** Reads a bounded PR diff summary for a code-aware, owner-approved feedback proposal. */
