@@ -256,9 +256,9 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   }
 
   async function noteSentBack(taskId: string): Promise<void> {
-    // Behind the switch: with it off nothing is read or queued.
-    if (!enabled()) return;
     try {
+      // Behind the switch: with it off nothing is read or queued. Inside the try: a switch that cannot be read is one log line, never a fault in the send-back.
+      if (!enabled()) return;
       // The task is read now and must be this company's: the message's company is the task's own, never a caller's claim.
       const task = await ownTask(taskId);
       if (task === undefined || task.workflow === undefined || task.closedAt !== undefined) return;

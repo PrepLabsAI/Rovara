@@ -287,14 +287,16 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
       }
       const key = { workspaceId: input.workspaceId, project: base.facts.project };
       const signal = currentLearningAttempt()?.signal;
+      // Whether every draft reached the curator: a draft cut at the deadline or one that failed leaves the send-back unmarked, so the task's end can still learn it.
+      let everyDraft = true;
       for (const draft of result.drafts) {
         // At the deadline no new draft is started (the store's writes are refused too, `deadline-guard.ts`). The model has been paid for; what is cut is lost, not repeated.
-        if (signal?.aborted === true) { deps.log?.("learning.drafts_cut_at_deadline", { task: logRef(input.workspaceId, input.taskId) }); break; }
-        try { await processDraftRetrying(processDeps, key, draft, { ...(deps.log === undefined ? {} : { log: (event, fields) => deps.log!(event, { task: logRef(input.workspaceId, input.taskId), ...fields }) }) }); } catch { deps.log?.("learning.draft_failed", { task: logRef(input.workspaceId, input.taskId) }); }
+        if (signal?.aborted === true) { everyDraft = false; deps.log?.("learning.drafts_cut_at_deadline", { task: logRef(input.workspaceId, input.taskId) }); break; }
+        try { await processDraftRetrying(processDeps, key, draft, { ...(deps.log === undefined ? {} : { log: (event, fields) => deps.log!(event, { task: logRef(input.workspaceId, input.taskId), ...fields }) }) }); } catch { everyDraft = false; deps.log?.("learning.draft_failed", { task: logRef(input.workspaceId, input.taskId) }); }
       }
-      // A send-back's reflection was made: the send-backs it read are learned, and later reflections of the task leave them out. Best effort: a key not written means a later reflection may read them again
-      // (the curator's copy check then meets the same advice), never that a correction is lost.
-      if (toReflect.outcome === "sent_back") {
+      // A send-back's reflection was made and EVERY draft of it reached the curator: the send-backs it read are learned, and later reflections of the task leave them out. Best effort: a key not written means a
+      // later reflection may read them again (the curator's copy check then meets the same advice), never that a correction is lost.
+      if (toReflect.outcome === "sent_back" && everyDraft) {
         for (const span of toReflect.spans.filter(ownSendBack)) {
           try { await deps.process.store.markOnce(key, sendBackReflectedKey(span.eventId!)); } catch { deps.log?.("learning.send_back_mark_failed", { task: logRef(input.workspaceId, input.taskId) }); }
         }

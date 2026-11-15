@@ -96,6 +96,16 @@ describe("the message of a send-back", () => {
     expect(ReflectMessageSchema.safeParse({ orgId: A, taskId: "task-1", outcome: "merged", requestId: "r-1" }).success).toBe(true);
     expect(ReflectMessageSchema.safeParse({ ...sent, text: "a person's words" }).success).toBe(false);
   });
+  it("keeps its request id within the message's 200 characters: a task id too long for it is hashed, the same task giving the same id", () => {
+    const long = "t".repeat(200);
+    const id = sendBackRequestId(long, 3);
+    expect(id.length).toBeLessThanOrEqual(200);
+    expect(id).toBe(sendBackRequestId(long, 3));
+    expect(id).not.toBe(sendBackRequestId(long, 2));
+    expect(ReflectMessageSchema.safeParse({ orgId: A, taskId: "task-1", outcome: "sent_back", round: 3, requestId: id }).success).toBe(true);
+    expect(sendBackRequestId("task-1", 1)).toBe("task-1:sent_back:1");
+  });
+
   it("takes its lease per round: the same round is one reflection, the next round is another, and other outcomes keep their old lease word", () => {
     expect(reflectLeaseOutcome({ outcome: "sent_back", round: 1 })).toBe("sent_back-1");
     expect(reflectLeaseOutcome({ outcome: "sent_back", round: 2 })).toBe("sent_back-2");
@@ -184,6 +194,15 @@ describe("queueing: a person's send-back, behind the switch and the mode, for th
     await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "Use the shared helper." }]);
     lessonsSwitch.mode = "off";
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect(await queued(fake)).toEqual([]);
+  });
+
+  it("a switch that cannot be read is no fault in the send-back: nothing is queued and nothing is thrown", async () => {
+    const { world: fake, companies, lessonsSwitch } = await world({ [CORE_LESSONS_VARIABLE]: "on" });
+    const a = companies.get(A)!;
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "Use the shared helper." }]);
+    Object.defineProperty(lessonsSwitch, "mode", { get() { throw new Error("unreadable"); } });
+    await expect(a.runtime.flow.deps.lessonsSentBack!(a.taskId)).resolves.toBeUndefined();
     expect(await queued(fake)).toEqual([]);
   });
 
@@ -290,6 +309,15 @@ describe("the reflection of a send-back", () => {
     (w.deps.reflect.spend as Spend).admitted = false;
     expect((await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "sent_back" })).status).toBe("not_reflected");
     expect((w.deps.reflect.model as ScriptedModel).calls).toEqual([]);
+    expect(await w.store.seenOnce({ workspaceId: WS, project: PROJECT }, sendBackReflectedKey("task:task-1:sendback:req-1"))).toBe(false);
+  });
+
+  it("a reflection whose drafts did not all reach the curator (one failed, or the deadline cut them) marks nothing: the task's end can still learn the send-back", async () => {
+    const w = reflection(new ScriptedModel([reply(candidateJson({ evidenceSpanIds: ["S1"] }), candidateJson({ title: "Log through the sink", evidenceSpanIds: ["S1"] }))]), ["req-1"]);
+    w.rows.sendBacks.set("req-1", human("req-1", "Use withRetry for HTTP retries."));
+    w.store.commit = async () => { throw new Error("store down"); };
+    expect((await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "sent_back" })).status).toBe("reflected");
+    expect((w.deps.reflect.model as ScriptedModel).calls).toHaveLength(1);
     expect(await w.store.seenOnce({ workspaceId: WS, project: PROJECT }, sendBackReflectedKey("task:task-1:sendback:req-1"))).toBe(false);
   });
 

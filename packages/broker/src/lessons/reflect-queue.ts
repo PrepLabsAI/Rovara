@@ -2,6 +2,7 @@
 // the task ended and the request that asked. A worker (`reflect-worker.ts`) reads everything else fresh, so what it reflects on is what is true when it runs (an erased person, a deleted place and a changed
 // project setting are all seen).
 import { LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_QUEUE, LESSONS_REFLECT_VISIBILITY_SECONDS, OrgIdSchema, type JsonValue, type Queue, type QueueService } from "@agentx/contracts";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { HumanEditJob } from "./capture-types.js";
 
@@ -23,8 +24,14 @@ export type ReflectMessage = z.infer<typeof ReflectMessageSchema>;
 
 /** The word the reflection's lease is taken on: the outcome, and for a send-back its round (`sent_back-2`). */
 export const reflectLeaseOutcome = (message: Pick<ReflectMessage, "outcome" | "round">): string => (message.outcome === "sent_back" ? `sent_back-${String(message.round)}` : message.outcome);
-/** The queue's dedupe id of a send-back's reflection: the same task and round is the same message (a second notice of the same send-back is stored once). */
-export const sendBackRequestId = (taskId: string, round: number): string => `${taskId}:sent_back:${String(round)}`;
+/**
+ * The queue's dedupe id of a send-back's reflection: the same task and round is the same message (a second notice of the same send-back is stored once). Within the message's 200-character id: a task id too long for it
+ * is replaced by its SHA-256 (the same task still gives the same id).
+ */
+export function sendBackRequestId(taskId: string, round: number): string {
+  const plain = `${taskId}:sent_back:${String(round)}`;
+  return plain.length <= 200 ? plain : `${createHash("sha256").update(taskId, "utf8").digest("hex")}:sent_back:${String(round)}`;
+}
 
 /**
  * Lessons capture: a human fix-up commit on a merged Rovara pull request, to be read from the code host and learned from (the code host capture). A sibling message type on the same queue (the same
