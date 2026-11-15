@@ -144,7 +144,7 @@ export interface MergeTrackingDependencies {
    * TE-E0 option A: the checks the customer marked at setup as running in their test environment (Cloud stores them; read per pass). Absent, undefined, or settings that do not parse: nothing is marked and
    * the pass is today's, byte for byte.
    */
-  ciEvidence?(task: TrackedTask): Promise<unknown> | unknown;
+  ciEvidence?(task: TrackedTask): unknown;
   /** The project's real-check mode (TE-B2): what "No CI" and unreadable CI mean for marking ready. `DEFAULT_CI_MODE` when not given. */
   ciMode?(task: TrackedTask): Promise<ProjectCiMode> | ProjectCiMode;
   /**
