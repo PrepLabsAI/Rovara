@@ -1,3 +1,6 @@
+import { SlackWorkspaceScopeSchema } from "@agentx/contracts";
+import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
+import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
 // packages/broker/src/aws/developer-identity.ts
 // The DeveloperIdentity Lambda (spec 025 phase 25a): wires the sign-in server to AWS. The only
 // new role that reads the Slack secret (R2); it never logs a secret, and never repeats a secret's
@@ -186,7 +189,7 @@ export function taskPublicKeysFromEnvironment(env: NodeJS.ProcessEnv, kms: Param
 
 let built: ReturnType<typeof createDeveloperIdentityHandler> | undefined;
 
-function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentityHandler> {
+export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, workspaces?: SlackCallerWorkspaces): ReturnType<typeof createDeveloperIdentityHandler> {
   const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
   const config = developerIdentityConfigFromEnvironment(env);
   const secrets = new SecretsManagerClient(region);
@@ -209,6 +212,8 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
   const company = env.COMPANY_SIGNIN === "enabled" ? new CompanySignInStore({ documentClient, tableName, now }) : undefined;
   const readCompanySecret = companySecretReader(secrets);
   const companyJwksFor = remoteJwksCache(undefined, 50);
+  const directory = slackDirectory({ teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now, ...directoryCall(secrets),
+    report: (problem) => log({ event: "signin.slack_problem", ...problem }) });
   return createDeveloperIdentityHandler({
     config,
     store: new DeveloperSignInStore({
@@ -223,12 +228,8 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
       slack: slackSignInProvider({ teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
       ...(oidc === undefined ? {} : { oidc }),
     },
-    directory: slackDirectory({
-      teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now,
-      // Spec 062 Phase 7c1b: through the Slack adapter when Slack goes through the channel API.
-      ...directoryCall(secrets),
-      report: (problem) => log({ event: "signin.slack_problem", ...problem }),
-    }),
+    directory,
+    ...(workspaces === undefined ? {} : { directoryForWorkspace: createWorkspaceSlackDirectory({ legacy: directory, workspaces, fetch, now }) }),
     now,
     log,
   });
@@ -241,6 +242,32 @@ function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Para
 
 export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
   | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest) => {
-  built ??= build(process.env);
+  built ??= createAwsDeveloperIdentityHandler(process.env);
   return built(event);
 };
+
+/** One directory per company/team, with a TOTAL bound across all workspaces in this process. */
+export function createWorkspaceSlackDirectory(options: {
+  legacy: ReturnType<typeof slackDirectory>;
+  workspaces?: SlackCallerWorkspaces;
+  fetch: typeof fetch;
+  now(): number;
+}) {
+  const cache = new Map<string, ReturnType<typeof slackDirectory>>();
+  return async (value: unknown): Promise<ReturnType<typeof slackDirectory>> => {
+    if (options.workspaces === undefined) return options.legacy;
+    const workspaces = options.workspaces;
+    try {
+      const parsed = SlackWorkspaceScopeSchema.safeParse(value);
+      if (!parsed.success || await workspaces.requireCompany(parsed.data.teamId) !== parsed.data.companyId) throw new SlackWorkspaceRefused();
+      const scope = parsed.data;
+      const key = `${scope.companyId}/${scope.teamId}`;
+      const cached = cache.get(key);
+      if (cached !== undefined) return cached;
+      const directory = slackDirectory({ teamId: scope.teamId, botToken: () => slackCallerToken(workspaces, scope), fetch: options.fetch, now: () => options.now() });
+      if (cache.size >= 50) cache.delete(cache.keys().next().value!);
+      cache.set(key, directory);
+      return directory;
+    } catch { throw new SlackWorkspaceRefused(); }
+  };
+}

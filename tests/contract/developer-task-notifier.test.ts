@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId, planQualityFinding } from "@agentx/contracts";
 import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
-import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { cachedSlackClient, cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { noticesOf, type Notice } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createSingleAnswerPlanBroker, recordStream } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
@@ -151,6 +151,7 @@ function checkedWorkflowCandidate(h: { db: FakeDynamoDb; taskId: string; workspa
 
 async function notifierHarness(body: Record<string, unknown> = { shareToChannel: true }, options: {
   post?: Post;
+  workspaces?: NotifierDependencies["workspaces"];
   documentClient?: (db: FakeDynamoDb) => Client;
   readArtifact?: (key: string) => Promise<string>;
   update?: (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => Promise<void>;
@@ -174,6 +175,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const retryLater = vi.fn<NotifierDependencies["retryLater"]>(async () => undefined);
   const handle = createNotifierHandler({
     documentClient: options.documentClient?.(harness.db) ?? harness.db, tableName: "state",
+    ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
     enqueue: async (notices) => { for (const notice of notices) queue.push({ notice, attempt: 0 }); },
     retryLater,
     post: postOverride ?? (async (input) => {
@@ -2522,4 +2524,25 @@ describe("a task-state card is not dropped after the hour (LIVEFIX-1 item 5)", (
     expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "start", reason: "channel_not_found" }));
   });
+});
+
+it("notifier derives company/workspace from the task and never shares the install token", async () => {
+  const legacy = vi.fn(async () => ["xoxb", "legacy"].join("-")); const used: string[] = [];
+  const workspaces = { requireCompany: async (team: string) => team === "T0AAAAAAA" ? "org_aaaaaaaaaaaaaaaaaaaa" : "org_bbbbbbbbbbbbbbbbbbbb",
+    tokenForCompany: async (company: string) => ["xoxb", company === "org_aaaaaaaaaaaaaaaaaaaa" ? "a" : "b"].join("-") };
+  const slack = cachedSlackClient(legacy, Date.now, async (_url, init) => {
+    used.push(new Headers(init?.headers).get("authorization") === `Bearer ${["xoxb", "a"].join("-")}` ? "a" : "b");
+    return new Response(JSON.stringify({ ok: true, ts: "1695500000.000001" }));
+  }, workspaces);
+  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]]) {
+    const h = await notifierHarness({ shareToChannel: true }, { workspaces, post: slack.post });
+    const task = h.db.get(`DEVTASK#${h.taskId}`, "META")!;
+    task.companyId = companyId; (task.share as { teamId: string }).teamId = teamId!;
+    await h.pump();
+    expect(h.queue).toHaveLength(0);
+  }
+  expect(used).toEqual(["a", "b"]); expect(legacy).not.toHaveBeenCalled();
+  await expect(slack.post({ channel: SLACK_CHANNEL, text: "private" })).rejects.toThrow("This Slack workspace is not available.");
+  await expect(slack.post({ channel: SLACK_CHANNEL, text: "private", workspace: { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0BBBBBBB" } })).rejects.toThrow("This Slack workspace is not available.");
+  expect(used).toHaveLength(2); expect(legacy).not.toHaveBeenCalled();
 });

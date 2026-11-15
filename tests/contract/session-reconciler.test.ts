@@ -5,6 +5,7 @@ import { failActiveOperation } from "../../packages/broker/src/aws/outbox-failur
 import { SessionManager } from "../../packages/broker/src/aws/sessions.js";
 import {
   createReconcilerHandler,
+  createSlackThreadPoster,
   type ExecutionStatus,
   type InstanceView,
   type ReconcilerDependencies,
@@ -617,4 +618,19 @@ describe("reconciler: unwaited Slack tasks (#173)", () => {
     expect(report).not.toHaveProperty("unwaitedTasks");
     expect(Object.keys(emit.mock.calls[0]![0]).filter((name) => name.includes("Unwaited"))).toEqual([]);
   });
+});
+
+it("posts concurrent identical thread addresses with their company tokens, never the install token", async () => {
+  const legacy = vi.fn(async () => ["xoxb", "legacy"].join("-"));
+  const calls: boolean[] = [];
+  const post = createSlackThreadPoster({ legacyToken: legacy, workspaces: {
+    requireCompany: async (team) => team === "T0AAAAAAA" ? "org_aaaaaaaaaaaaaaaaaaaa" : "org_bbbbbbbbbbbbbbbbbbbb",
+    tokenForCompany: async (company) => ["xoxb", company === "org_aaaaaaaaaaaaaaaaaaaa" ? "a" : "b"].join("-"),
+  }, fetch: async (_url, init) => { calls.push((init?.headers as Record<string, string>).authorization === `Bearer ${["xoxb", "a"].join("-")}`); return new Response(JSON.stringify({ ok: true, ts: "1695500000.000001" })); } });
+  const place = { channelId: "C0SHARED", threadTs: "1695500000.000001" };
+  await Promise.all([post({ ...place, workspace: { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0AAAAAAA" } }, "a"), post({ ...place, workspace: { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0BBBBBBB" } }, "b")]);
+  expect(calls).toEqual([true, false]); expect(legacy).not.toHaveBeenCalled();
+  await expect(post(place, "private")).rejects.toThrow("This Slack workspace is not available.");
+  await expect(post({ ...place, workspace: { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0BBBBBBB" } }, "private")).rejects.toThrow("This Slack workspace is not available.");
+  expect(calls).toHaveLength(2); expect(legacy).not.toHaveBeenCalled();
 });

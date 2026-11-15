@@ -70,8 +70,8 @@ export interface EvalBatchWatchApi {
 
 export interface EvalBatchSlack {
   /** Posts in the thread, or with no thread a new message in the channel; answers the message's timestamp. */
-  post(channelId: string, threadTs: string | undefined, text: string): Promise<string>;
-  delete(channelId: string, ts: string): Promise<void>;
+  post(thread: EvalBatchWatched["thread"], threadTs: string | undefined, text: string): Promise<string>;
+  delete(thread: EvalBatchWatched["thread"], ts: string): Promise<void>;
 }
 
 type Log = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
@@ -194,7 +194,6 @@ async function openThread(
   batch: EvalBatchWatched,
   now: number,
 ): Promise<{ thread: EvalBatchWatched["thread"]; watch: EvalBatchWatched["watch"] } | undefined> {
-  const { channelId } = batch.thread;
   let { watch } = batch;
   let threadTs = watch.openerTs ?? state.openers.get(batch.batchId);
   if (threadTs === undefined) {
@@ -202,7 +201,7 @@ async function openThread(
     const claimed = await dependencies.api.updateWatch(batch, watch.revision, { openerClaimedAt: new Date(now).toISOString() });
     if (!claimed.updated) return undefined;
     watch = claimed.watch;
-    threadTs = await dependencies.slack.post(channelId, undefined, batchStartMessage(batch, "cli"));
+    threadTs = await dependencies.slack.post(batch.thread, undefined, batchStartMessage(batch, "cli"));
     state.openers.set(batch.batchId, threadTs);
     try {
       const stored = await dependencies.api.updateWatch(batch, watch.revision, { openerTs: threadTs });
@@ -222,7 +221,7 @@ async function openThread(
   // Another watcher opened the batch's thread first: this opener is removed, so the channel shows one.
   dependencies.log?.("eval_batch_watch.thread_lost_race", { batchId: batch.batchId, threadTs, recorded: result.thread.threadTs });
   try {
-    await dependencies.slack.delete(channelId, threadTs);
+    await dependencies.slack.delete(batch.thread, threadTs);
   } catch (error) {
     dependencies.logError("eval_batch_watch.opener_delete_failed", { batchId: batch.batchId, threadTs, error: errorMessage(error) });
   }
@@ -276,7 +275,7 @@ async function postSummary(dependencies: EvalBatchWatcherDependencies, state: Ev
 /** Never with a placeholder: a CLI batch's thread is opened and recorded first. */
 async function inThread(dependencies: EvalBatchWatcherDependencies, batch: EvalBatchWatched, text: string): Promise<string> {
   if (isPlaceholderThreadTs(batch.thread.threadTs)) throw new Error(`batch ${batch.batchId} has no Slack thread yet`);
-  return dependencies.slack.post(batch.thread.channelId, batch.thread.threadTs, text);
+  return dependencies.slack.post(batch.thread, batch.thread.threadTs, text);
 }
 
 /** "12/72 done, 7 resolved, $41.20 spent", and a line for each model that has just finished. */

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, SlackTeamIdSchema } from "@agentx/contracts";
 import { createSlackWorkspaceBindings, SlackWorkspaceRefused } from "../../packages/broker/src/aws/slack-workspace-binding.js";
 import { tenantIsCompanys } from "../../packages/broker/src/core/channel/company.js";
@@ -131,4 +131,55 @@ it("refuses malformed configured legacy teams instead of completing a partial ba
 it("treats malformed channel-company queries as unavailable", async () => {
   const { bindings } = world();
   expect(await bindings.channelCompanyOf(null as never)).toBeUndefined();
+});
+
+it("enumerates only explicit company bindings with one total scan budget", async () => {
+  const { listSlackWorkspaceScopes } = await import("../../packages/broker/src/aws/slack-workspace-binding.js");
+  const { db, bindings } = world("");
+  const client = { send: async () => ({ Items: [...db.items.values()] }) };
+  expect(await listSlackWorkspaceScopes({ client, tableName: "state" }, A)).toEqual([]);
+  await bindings.backfill(); await bindings.bind(A, TEAM, "operator"); await bindings.bind(B, OTHER, "operator");
+  expect(await listSlackWorkspaceScopes({ client, tableName: "state" }, A)).toEqual([{ companyId: A, teamId: TEAM }]);
+  expect(await listSlackWorkspaceScopes({ client, tableName: "state" }, B)).toEqual([{ companyId: B, teamId: OTHER }]);
+  let calls = 0;
+  await expect(listSlackWorkspaceScopes({ client: { send: async () => { calls++; return { Items: Array.from({ length: 100 }, () => ({ ignored: true })), LastEvaluatedKey: { pk: "again" } }; } }, tableName: "state" }, A)).rejects.toThrow("This Slack workspace is not available.");
+  expect(calls).toBe(10);
+});
+
+it("workspace enumeration hides storage causes", async () => {
+  const { listSlackWorkspaceScopes } = await import("../../packages/broker/src/aws/slack-workspace-binding.js");
+  await expect(listSlackWorkspaceScopes({ client: { send: async () => { throw new Error("private enumeration cause"); } }, tableName: "state" }, A)).rejects.toThrow(/^This Slack workspace is not available\.$/);
+});
+
+
+it("workspace enumeration accepts its full item and returned-scope limits", async () => {
+  const { listSlackWorkspaceScopes } = await import("../../packages/broker/src/aws/slack-workspace-binding.js");
+  const rows = Array.from({ length: 32 }, (_, index) => {
+    const teamId = `T${String(index).padStart(8, "0")}`;
+    return { pk: `SLACK_TEAM#${teamId}`, sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId, companyId: A, boundAt: new Date(NOW).toISOString(), boundBy: "operator" };
+  });
+  let page = 0;
+  const client = { send: async () => ({ Items: page++ === 0 ? [...rows, ...Array.from({ length: 68 }, () => ({ ignored: true }))] : Array.from({ length: 100 }, () => ({ ignored: true })), ...(page === 10 ? {} : { LastEvaluatedKey: { pk: "next" } }) }) };
+  expect(await listSlackWorkspaceScopes({ client, tableName: "state" }, A)).toEqual(rows.map(({ companyId, teamId }) => ({ companyId, teamId })));
+  expect(page).toBe(10);
+});
+
+it.each(["items", "bytes", "scopes", "late", "malformed"])("workspace enumeration rejects %s without a partial result", async (kind) => {
+  const { listSlackWorkspaceScopes } = await import("../../packages/broker/src/aws/slack-workspace-binding.js");
+  const row = (index: number) => {
+    const teamId = `T${String(index).padStart(8, "0")}`;
+    return { pk: `SLACK_TEAM#${teamId}`, sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId, companyId: A, boundAt: new Date(NOW).toISOString(), boundBy: "operator" };
+  };
+  let time = 0;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => time);
+  try {
+    const client = { send: async () => {
+      if (kind === "late") time = 3001;
+      return { Items: kind === "items" ? Array.from({ length: 1001 }, () => ({ ignored: true }))
+        : kind === "scopes" ? Array.from({ length: 33 }, (_, index) => row(index))
+        : kind === "malformed" ? [row(0), { ...row(1), pk: "private marker" }] : [row(0)],
+      ...(kind === "bytes" ? { metadata: "x".repeat(1_048_577) } : {}) };
+    } };
+    await expect(listSlackWorkspaceScopes({ client, tableName: "state" }, A)).rejects.toThrow(/^This Slack workspace is not available\.$/);
+  } finally { clock.mockRestore(); }
 });

@@ -1,3 +1,4 @@
+import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
@@ -434,7 +435,7 @@ function taskPersonRuntimePorts(input: {
     taskPersonProof: (request, admission) => taskPersonProofThroughLambda({
       admission,
       now: () => Date.now(),
-      expectedTeamId: input.slackTeamId,
+      expectedTeamId: request.workspace?.teamId ?? input.slackTeamId,
       async invoke(payload, options) {
         const response = await taskPersonProofLambdaClient.send(taskPersonProofInvokeCommand(input.proofArn, payload), { abortSignal: options.abortSignal });
         return { ...(response.FunctionError === undefined ? {} : { FunctionError: response.FunctionError }), ...(response.Payload === undefined ? {} : { Payload: response.Payload }) };
@@ -443,12 +444,13 @@ function taskPersonRuntimePorts(input: {
   };
 }
 
-const taskDispatchGuard = (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
+export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">) => (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
   const stateTableName = tableName ?? requiredEnvironment("STATE_TABLE_NAME");
   const admission = createTaskAuthorityAdmission({ now: () => Date.now(), lambdaRemainingMs: context?.remainingTimeMs() ?? 60_000 });
   const proofArn = process.env.TASK_PERSON_PROOF_FUNCTION_ARN;
   const slackTeamId = process.env.SLACK_TEAM_ID ?? "";
-  const personRuntime = proofArn === undefined || proofArn.trim() === "" || !SlackTeamIdSchema.safeParse(slackTeamId).success ? undefined : createTaskPersonRuntime({
+  const personRuntime = proofArn === undefined || proofArn.trim() === "" || (workspaces === undefined && !SlackTeamIdSchema.safeParse(slackTeamId).success) ? undefined : createTaskPersonRuntime({
+    ...(workspaces === undefined ? {} : { workspaces }),
     admission,
     ports: taskPersonRuntimePorts({
       admission,
@@ -472,6 +474,8 @@ const taskDispatchGuard = (record: DurableOutboxRecord, context?: { remainingTim
     ...(personRuntime === undefined ? {} : { stateAuthorityWitnessForOwnerActor: (task, ownerActorId) => personRuntime.stateAuthorityWitnessForOwnerActor(task, ownerActorId) }),
   }, record);
 };
+const taskDispatchGuard = createTaskDispatchGuard();
+
 
 const setupDomainRow = (item: Record<string, unknown> | undefined, key: { pk: string; sk: string }, entityType: string): Record<string, unknown> | undefined => {
   if (!item || item.pk !== key.pk || item.sk !== key.sk || item.entityType !== entityType) return undefined;

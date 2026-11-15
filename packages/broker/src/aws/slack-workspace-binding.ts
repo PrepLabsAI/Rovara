@@ -1,6 +1,6 @@
 // Operator-only workspace directory. No token or identity claim can choose a company.
-import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, SlackTeamIdSchema } from "@agentx/contracts";
+import { GetCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, SlackTeamIdSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 import { z } from "zod";
 import type { ChannelCompanyOf } from "../core/channel/company.js";
 
@@ -121,4 +121,30 @@ export function isSlackWorkspaceOperatorEvent(event: unknown): event is SlackWor
   const source = (event as { source?: unknown }).source;
   // Recognise malformed payloads too so they receive the same fixed refusal, not HTTP parsing.
   return source === "agentx.slack-workspace-bind" || source === "agentx.slack-workspace-backfill";
+}
+
+/** Health enumerates explicit bindings only; old implicit fallback is not an installation list. */
+export async function listSlackWorkspaceScopes(deps: SlackBindingDependencies, companyId: string): Promise<SlackWorkspaceScope[]> {
+  try {
+    if (!OrgIdSchema.safeParse(companyId).success) throw new SlackWorkspaceRefused();
+    const started = Date.now(); let items = 0; let bytes = 0; let pages = 0;
+    let cursor: Record<string, unknown> | undefined;
+    const found: SlackWorkspaceScope[] = [];
+    do {
+      if (++pages > 10 || Date.now() - started > 3000) throw new SlackWorkspaceRefused();
+      const response = await deps.client.send(new ScanCommand({ TableName: deps.tableName, ConsistentRead: true, Limit: 100,
+        ...(cursor === undefined ? {} : { ExclusiveStartKey: cursor }) })) as { Items?: Record<string, unknown>[]; LastEvaluatedKey?: Record<string, unknown> };
+      items += response.Items?.length ?? 0; bytes += Buffer.byteLength(JSON.stringify(response));
+      if (items > 1000 || bytes > 1_048_576 || Date.now() - started > 3000) throw new SlackWorkspaceRefused();
+      for (const row of response.Items ?? []) {
+        if (row.entityType !== "SLACK_WORKSPACE_BINDING") continue;
+        const parsed = bindingRow.safeParse(row);
+        if (!parsed.success || parsed.data.pk !== teamKey(parsed.data.teamId).pk || !slackWorkspaceTeam(parsed.data.teamId)) throw new SlackWorkspaceRefused();
+        if (parsed.data.companyId === companyId) found.push({ companyId, teamId: parsed.data.teamId });
+        if (found.length > 32) throw new SlackWorkspaceRefused();
+      }
+      cursor = response.LastEvaluatedKey;
+    } while (cursor !== undefined);
+    return found;
+  } catch { throw new SlackWorkspaceRefused(); }
 }

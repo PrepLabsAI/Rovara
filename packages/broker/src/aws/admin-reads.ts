@@ -1,3 +1,6 @@
+import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
+import { resolveCompany, boundedCompanyReads, type CompanyMembershipReader } from "./company-check.js";
+import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 // Spec 025 phase 25d, FR-038: the admin read routes. Each checks the admin claim only, as today's
 // list routes do (A2), and reads by key or by index: no route scans the table, and no route writes.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
@@ -49,6 +52,9 @@ import { taskKey, taskPointerKey } from "../developer/task-records.js";
 import { listLimitParam, validTime, workspaceProjectReader, type TurnRecordSource } from "./turns.js";
 
 export interface AdminReadDependencies {
+  companies?: CompanyMembershipReader;
+  workspace?: SlackWorkspaceScope;
+  slackWorkspaces?: { requireCompany(teamId: string): Promise<string>; scopesForCompany(companyId: string): Promise<SlackWorkspaceScope[]> };
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   turnRecordsTableName?: string;
@@ -156,6 +162,28 @@ async function listProjects(deps: AdminReadDependencies, identity: Authenticated
   return { projects };
 }
 
+/** Resolve from authenticated company and explicit workspace records, never the installation team. */
+export async function adminSlackScope(deps: AdminReadDependencies, identity: AuthenticatedIdentity, team?: string): Promise<SlackWorkspaceScope | undefined> {
+  if (deps.slackWorkspaces === undefined && deps.companies === undefined) return undefined;
+  try {
+    const companyId = await resolveCompany(deps.companies, identity.developer?.developerId ?? identity.ownerKey);
+    if (companyId === undefined || deps.slackWorkspaces === undefined) throw new SlackWorkspaceRefused();
+    const scopes = await deps.slackWorkspaces.scopesForCompany(companyId);
+    if (!Array.isArray(scopes) || scopes.length > 32 || Buffer.byteLength(JSON.stringify(scopes)) > 8192) throw new SlackWorkspaceRefused();
+    if (scopes.some((scope) => !SlackWorkspaceScopeSchema.safeParse(scope).success || scope.companyId !== companyId)) throw new SlackWorkspaceRefused();
+    const selected = team === undefined ? scopes : scopes.filter((scope) => scope.teamId === team);
+    if (selected.length !== 1 || await deps.slackWorkspaces.requireCompany(selected[0]!.teamId) !== companyId) throw new SlackWorkspaceRefused();
+    return selected[0]!;
+  } catch { throw new SlackWorkspaceRefused(); }
+}
+
+async function validAdminScope(deps: Pick<AdminReadDependencies, "workspace" | "slackWorkspaces" | "companies">): Promise<boolean> {
+  if (deps.slackWorkspaces === undefined && deps.companies === undefined) return true;
+  const parsed = SlackWorkspaceScopeSchema.safeParse(deps.workspace);
+  try { return parsed.success && await deps.slackWorkspaces?.requireCompany(parsed.data.teamId) === parsed.data.companyId; }
+  catch { return false; }
+}
+
 /** Slack caps a channel name at 80 characters; the cap leaves room for a redaction marker. */
 const CHANNEL_NAME_MAX = 200;
 
@@ -166,14 +194,17 @@ const CHANNEL_NAME_MAX = 200;
  */
 export async function channelLabels(deps: AdminReadDependencies, channelIds: readonly string[], options: { reveal?: (privateIds: string[]) => Promise<ReadonlySet<string>> } = {}): Promise<{ labels: Map<string, { name?: string; private: boolean }>; available: boolean }> {
   const labels = new Map<string, { name?: string; private: boolean }>();
+  if (!await validAdminScope(deps) || (deps.workspace !== undefined && channelIds.length > 2000)) return { labels, available: false };
   const unique = [...new Set(channelIds)].sort();
   if (deps.channelInfo === undefined) return { labels, available: unique.length === 0 };
   // Slack's answers first, then names: a private channel's name is only ever held in this call.
   const found = new Map<string, { name: string; isPrivate: boolean }>();
   let available = true;
+  const budget = deps.workspace === undefined ? undefined : boundedCompanyReads(deps.documentClient);
   try {
     for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
-      const answer = await deps.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+      const read = () => deps.channelInfo!({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), ...(deps.workspace === undefined ? {} : { workspace: deps.workspace }) });
+      const answer = budget === undefined ? await read() : await budget.read(read);
       if (!answer.ok) {
         available = false;
         break;
@@ -186,6 +217,7 @@ export async function channelLabels(deps: AdminReadDependencies, channelIds: rea
     deps.log({ event: "admin.channel_info_failed", error: error instanceof Error ? error.name : "unknown" });
     available = false;
   }
+  if (!available && deps.workspace !== undefined) return { labels, available: false };
   const privateIds = [...found].filter(([, channel]) => channel.isPrivate).map(([channelId]) => channelId);
   // Q7 as answered: a private channel's name only for an admin who is a member; any failure keeps the ID only.
   const revealed: ReadonlySet<string> = privateIds.length === 0 || options.reveal === undefined
@@ -206,6 +238,15 @@ export async function channelLabels(deps: AdminReadDependencies, channelIds: rea
 const readers = new WeakMap<AdminMeDependencies, ReturnType<typeof adminIdentityReader>>();
 export function adminReader(deps: AdminReadDependencies): ReturnType<typeof adminIdentityReader> | undefined {
   if (deps.me === undefined) return undefined;
+  if (deps.companies !== undefined || deps.slackWorkspaces !== undefined) {
+    const lookup = deps.me.slackUserByEmail;
+    return adminIdentityReader({ ...deps.me, now: () => deps.now(), log: (entry) => deps.log(entry),
+      ...(lookup === undefined ? {} : { slackUserByEmail: async (request) => {
+        if (!SlackWorkspaceScopeSchema.safeParse(request.workspace).success || !await validAdminScope({ ...deps, ...(request.workspace === undefined ? {} : { workspace: request.workspace }) })) return { ok: false as const, error: "slack_unavailable" as const };
+        return lookup(request);
+      } }),
+    });
+  }
   let reader = readers.get(deps.me);
   if (reader === undefined) {
     reader = adminIdentityReader({ ...deps.me, now: () => deps.now(), log: (entry) => deps.log(entry) });
@@ -218,13 +259,17 @@ export function adminReader(deps: AdminReadDependencies): ReturnType<typeof admi
  * A11 (Q7): which of the private channels a Slack user is a member of. Any failed answer names
  * none, so a private channel stays ID only. 25e's change plans ask it for the planning admin.
  */
-export async function privateChannelsFor(deps: Pick<AdminReadDependencies, "channelMembers">, slackUserId: string, privateIds: readonly string[]): Promise<ReadonlySet<string>> {
+export async function privateChannelsFor(deps: Pick<AdminReadDependencies, "channelMembers" | "workspace" | "slackWorkspaces" | "companies">, slackUserId: string, privateIds: readonly string[]): Promise<ReadonlySet<string>> {
   const members = deps.channelMembers;
+  if (!await validAdminScope(deps) || (deps.workspace !== undefined && privateIds.length > 2000)) return new Set();
   if (members === undefined) return new Set();
   const memberOf = new Set<string>();
+  const started = Date.now(); let bytes = 0;
   for (let start = 0; start < privateIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
-    const answer = await members({ kind: "channel-members", slackUserId, channelIds: privateIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
-    if (!answer.ok) return new Set();
+    if (deps.workspace !== undefined && Date.now() - started > 10_000) return new Set();
+    const answer = await members({ kind: "channel-members", slackUserId, channelIds: privateIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), ...(deps.workspace === undefined ? {} : { workspace: deps.workspace }) });
+    bytes += JSON.stringify(answer).length;
+    if (!answer.ok || (deps.workspace !== undefined && (bytes > 1_000_000 || Date.now() - started > 10_000))) return new Set();
     for (const channelId of answer.memberOf) memberOf.add(channelId);
   }
   return memberOf;
@@ -236,7 +281,7 @@ function memberReveal(deps: AdminReadDependencies, identity: AuthenticatedIdenti
   if (reader === undefined || deps.channelMembers === undefined) return undefined;
   // Asked only when a private channel is bound, so a list of public channels needs no userinfo call.
   return async (privateIds) => {
-    const slackUserId = (await reader.me(identity, authorization)).slack.userId;
+    const slackUserId = (await reader.me(identity, authorization, deps.workspace)).slack.userId;
     if (slackUserId === undefined) return new Set();
     return privateChannelsFor(deps, slackUserId, privateIds);
   };
@@ -244,8 +289,10 @@ function memberReveal(deps: AdminReadDependencies, identity: AuthenticatedIdenti
 
 async function listBindings(deps: AdminReadDependencies, identity: AuthenticatedIdentity, url: URL, authorization: string | undefined): Promise<AdminBindingsResponse> {
   const asked = url.searchParams.get("team");
+  const workspace = await adminSlackScope(deps, identity, asked ?? undefined);
+  if (workspace !== undefined) deps = { ...deps, documentClient: boundedCompanyReads(deps.documentClient).client, workspace, slackTeamId: workspace.teamId };
   // R24 (A11): an environment that records its Slack team lists that team's bindings only.
-  if (asked !== null && deps.slackTeamId !== undefined) throw agentXError("CONFIG_INVALID", "this environment records its Slack team; leave out team");
+  if (workspace === undefined && asked !== null && deps.slackTeamId !== undefined) throw agentXError("CONFIG_INVALID", "this environment records its Slack team; leave out team");
   const team = asked === null ? deps.slackTeamId : SlackTeamIdSchema.safeParse(asked).success ? asked : null;
   if (team === null) throw agentXError("CONFIG_INVALID", "team must be a Slack team ID, such as T0123456789");
   if (team === undefined) throw agentXError("CONFIG_INVALID", "this environment records no Slack team; send team=<team ID>, such as team=T0123456789");
