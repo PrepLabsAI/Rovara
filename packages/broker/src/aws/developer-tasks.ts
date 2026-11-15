@@ -194,6 +194,7 @@ import {
   taskOwnerLabel,
   taskPointerKey,
   taskShare,
+  taskSpent,
   type DeveloperTaskIndexRecord,
   type DeveloperTaskPointerRecord,
   type DeveloperTaskRecord,
@@ -1362,6 +1363,7 @@ export async function taskView(
     try { e2ePresentation = await deps.workflowE2EPresentation({ task, operations, actor: options.actor ?? "owner" }); }
     catch (error) { log(deps, { event: "developer.task_e2e_view_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
+  const spent = taskSpent(task);
   return {
     taskId: task.taskId,
     title: task.title,
@@ -1382,6 +1384,7 @@ export async function taskView(
     ...details,
     ...(channelTurns === undefined ? {} : { channelTurns }),
     ...(unpublished === undefined ? {} : { unpublished }),
+    ...(spent === undefined ? {} : { spent }),
   };
 }
 

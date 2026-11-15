@@ -18,7 +18,7 @@ import {
   type FailureIndexRecord,
   type UsageIndexRecord,
 } from "@agentx/contracts";
-import { failureCategory, taskKey, taskPointerKey } from "../developer/task-records.js";
+import { failureCategory, taskKey, taskPointerKey, type TaskRunSpend } from "../developer/task-records.js";
 import type { StreamRecord } from "../developer/notifications.js";
 
 /** A4: aborted at the index's deadline; a store passes it to each request it sends. */
@@ -28,6 +28,11 @@ export interface IndexStore {
   get(key: { pk: string; sk: string }, options?: IndexStoreOptions): Promise<Record<string, unknown> | undefined>;
   /** Conditioned attribute_not_exists(pk): a replayed record writes nothing twice. */
   put(item: Record<string, unknown>, options?: IndexStoreOptions): Promise<void>;
+  /**
+   * #651: counts one usage record on its developer task, once, by the record's own id (`<at in ms>_<operationId>`: an operation such as a review records
+   * several), so a replay counts nothing again. Does nothing when the task is gone. Optional: a store without it indexes usage only.
+   */
+  addTaskUsage?(taskId: string, usageId: string, usage: TaskRunSpend, options?: IndexStoreOptions): Promise<void>;
 }
 
 /** Settles by `deadline` (epoch milliseconds): rejects with a TimeoutError when `run` has not answered by then. */
@@ -57,6 +62,9 @@ function bounded(store: IndexStore, signal: AbortSignal): IndexStore {
   return {
     get: (key) => untilAborted(signal, (callSignal) => store.get(key, { signal: callSignal })),
     put: (item) => untilAborted(signal, (callSignal) => store.put(item, { signal: callSignal })),
+    ...(store.addTaskUsage === undefined ? {} : {
+      addTaskUsage: (taskId, usageId, usage) => untilAborted(signal, (callSignal) => store.addTaskUsage!(taskId, usageId, usage, { signal: callSignal })),
+    }),
   };
 }
 
@@ -190,6 +198,14 @@ export async function indexActivity(
         continue;
       }
       await store.put(item);
+      // #651: the run's usage also goes on its task, so the task view can say what the task has cost.
+      if (!failure && typeof item.taskId === "string" && store.addTaskUsage !== undefined) {
+        // One entry per usage record (an operation such as a review makes several): its time in milliseconds and its operation, plain characters only.
+        await store.addTaskUsage(item.taskId, `${String(Date.parse(String(item.at)))}_${operationId}`, {
+          at: String(item.at), usd: typeof item.costUsd === "number" ? item.costUsd : null,
+          inputTokens: Number(item.inputTokens) || 0, outputTokens: Number(item.outputTokens) || 0,
+        });
+      }
       if (failure) result.failures += 1;
       else result.usage += 1;
     } catch (error) {
