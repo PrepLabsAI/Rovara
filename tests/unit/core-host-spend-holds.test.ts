@@ -234,6 +234,9 @@ describe("what the admission holds for other actions", () => {
     expect((await startTask(w, TASK)).applied).toBe(true);
     expect(await w.day()).toMatchObject({ loadMicros: 5_000_000 });
     expect(await w.admission.admit({ companyId: ORG, idempotencyKey: `machine.start:${TASK}:1`, action: "machine.start", subject: { type: "workspace", id: "w" } })).toEqual({ allowed: true });
+    // The same gate staged into a transaction commits too.
+    const gate = await w.admission.stage({ companyId: ORG, idempotencyKey: "m-staged", action: "machine.start" });
+    expect((await w.store.transact([...gate.items as TransactItem[], { kind: "put", item: { pk: "X", sk: "Y" } }])).applied).toBe(true);
   });
 
   it("a staged start does not commit once the day has usage with no dollar figure", async () => {
@@ -343,8 +346,10 @@ describe("races and edges (lane L8 review)", () => {
   it("two bookings at once draw the hold once: the day counts both usages exactly", async () => {
     const w = setup();
     const { staged } = await startTask(w, TASK);
+    // The first booking fixes the task's currency, so the two below race on the hold alone.
+    await w.book("first", 1);
     await Promise.all([w.book("a", 3_000_000), w.book("b", 3_000_000)]);
-    expect(await w.day()).toMatchObject({ usdMicros: 6_000_000, reservedMicros: 0, loadMicros: 6_000_000 });
+    expect(await w.day()).toMatchObject({ usdMicros: 6_000_001, reservedMicros: 0, loadMicros: 6_000_001 });
     expect(await w.store.get(holdKey(ORG, reservationOf(staged)!))).toMatchObject({ drawnMicros: 5_000_000 });
   });
 
