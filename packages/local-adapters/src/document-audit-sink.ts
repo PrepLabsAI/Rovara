@@ -8,6 +8,7 @@
 // `startAuditCopy` feeds the append-only, hash-chained copy (`SqliteAuditLog`, audit.db) from COMMITTED rows only, through the store's change feed. The copy is never the primary.
 import {
   companyScoped,
+  companyChangeFeed,
   queryAll,
   type AuditEvent,
   type AuditSink,
@@ -127,13 +128,13 @@ export interface AuditCopyOptions {
 export async function startAuditCopy(options: AuditCopyOptions): Promise<{ stop(): Promise<void> } | undefined> {
   const feed = options.store.changes;
   if (feed === undefined) return undefined;
-  return feed.subscribe(
+  return companyChangeFeed(feed, options.companyId, (event) => options.onError?.(new Error(event))).subscribe(
     AUDIT_COPY_CONSUMER,
     async (changes: readonly DocumentChange[]) => {
       let appended = false;
       for (const change of changes) {
         const event = auditEventOfRow(change.after);
-        if (event === undefined) continue;
+        if (event === undefined || event.companyId !== options.companyId) continue;
         options.log.append(event);
         appended = true;
       }
@@ -163,7 +164,7 @@ export async function startAuditCopyFromPrimary(options: Pick<AuditCopyOptions, 
   const have = options.log.eventIds();
   const missing = (await queryAll(options.store, { pk: companyScoped(options.companyId, "AUDIT") }))
     .map((row) => auditEventOfRow(row))
-    .filter((event): event is AuditEvent => event !== undefined && !have.has(event.eventId))
+    .filter((event): event is AuditEvent => event !== undefined && event.companyId === options.companyId && !have.has(event.eventId))
     .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.eventId < b.eventId ? -1 : 1));
   for (const event of missing) options.log.append(event);
   if (missing.length > 0 || verification.anchor === "behind") {

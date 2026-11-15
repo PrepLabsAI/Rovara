@@ -246,6 +246,22 @@ describe("strict contracts", () => {
     expect(() => WorkspaceInstanceSchema.parse({ ...workspace, endpointQualifier: "DEFAULT" })).toThrow(/must not have/);
   });
 
+  // SETUP-CHECK-CLOSEDFROM-UNREADABLE: the setup check closes a workspace and keeps the status it had as `closedFrom` (core/setup-agent/check.ts). The strict schema refused the key, so the
+  // developer listing left every checked workspace out ("Unrecognized key: closedFrom").
+  it("reads a workspace the setup check closed, which keeps the status it had as closedFrom", () => {
+    const now = new Date().toISOString();
+    const workspace = {
+      id: crypto.randomUUID(), ownerKey: "a".repeat(64), projectName: "payments", projectRevision: 1,
+      deploymentMode: "ec2-ebs" as const, rootPath: "/mnt/workspace", status: "CLOSED", closedAt: now, fence: 1, createdAt: now, updatedAt: now,
+    };
+    for (const closedFrom of ["READY", "PREPARATION_FAILED", "UNHEALTHY", "STOPPED"]) expect(WorkspaceInstanceSchema.parse({ ...workspace, closedFrom })).toHaveProperty("closedFrom", closedFrom);
+    // Golden: a closed workspace without it reads exactly as before.
+    expect(WorkspaceInstanceSchema.parse(workspace)).not.toHaveProperty("closedFrom");
+    // Only a status, never CLOSED itself, and only on a closed workspace.
+    for (const closedFrom of ["CLOSED", "closed", "", 1, null]) expect(() => WorkspaceInstanceSchema.parse({ ...workspace, closedFrom }), String(closedFrom)).toThrow();
+    expect(() => WorkspaceInstanceSchema.parse({ ...workspace, status: "READY", closedAt: undefined, closedFrom: "READY" })).toThrow(/closedFrom/);
+  });
+
   it("limits prompts by UTF-8 bytes and rejects unknown operation fields", () => {
     const base = {
       requestId: crypto.randomUUID(),

@@ -18,7 +18,7 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(admin, "turns")).toEqual(["export"]);
     expect(subcommands(admin, "task")).toEqual(["share-mode", "e2e-replay"]);
     expect(subcommands(admin, "runtime-installation")).toEqual(["challenge", "register"]);
-    expect(subcommands(admin, "sign-in-client")).toEqual(["add", "list", "remove"]);
+    expect(subcommands(admin, "sign-in-client")).toEqual(["add", "update", "list", "remove"]);
 
     expect(subcommands(program, "signin")).toEqual(["show", "enable", "disable", "check"]);
     expect(subcommands(program, "loop")).toEqual(["init", "add", "enroll", "remove", "start", "stop", "status", "run", "do", "quick", "full", "review", "contribute", "check", "mcp"]);

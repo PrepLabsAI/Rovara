@@ -10,7 +10,7 @@ const paths = [`/v1/dev/tasks/${TASK}`, "/v1/dev/tasks", "/v1/dev/projects"];
 const member = (companyId: unknown = COMPANY_A.orgId) => ({ pk: `COMPANY_MEMBER#${PERSON}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId, role: "member", joinedAt: TIME });
 
 describe("membership checked developer reads", () => {
-  it("exports exactly the three protected routes", () => expect(COMPANY_CHECKED_ROUTES).toHaveLength(3));
+  it("retains the original three protected routes", () => expect(COMPANY_CHECKED_ROUTES.slice(0, 3)).toEqual(["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects"]));
   it("reads membership once per route after authentication, ignores all company hints", async () => {
     const h = companyRouteHarness();
     h.task(TASK, COMPANY_A.orgId, COMPANY_A.canary); h.project(COMPANY_A.orgId);

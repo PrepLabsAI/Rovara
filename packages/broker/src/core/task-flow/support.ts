@@ -1,11 +1,11 @@
 // Lane L6a, task flow core: small shared helpers (clock, ids, log, hashing; the default prompts are in step-prompts.ts).
 import { createHash, randomUUID } from "node:crypto";
-import { PLAN_WHY_REQUEST_MAX_CHARS, canonicalJson, redactText, taskTitle } from "@agentx/contracts";
+import { PLAN_WHY_REQUEST_MAX_CHARS, companyLog, canonicalJson, redactText, taskTitle } from "@agentx/contracts";
 import { DEFAULT_DISPATCH_QUEUE, DEFAULT_LIMITS, type TaskFlowDeps } from "./deps.js";
 
 export const iso = (deps: Pick<TaskFlowDeps, "now">): string => (deps.now?.() ?? new Date()).toISOString();
 export const newId = (deps: Pick<TaskFlowDeps, "newId">): string => (deps.newId ?? randomUUID)();
-export const log = (deps: Pick<TaskFlowDeps, "log">, entry: Record<string, unknown>): void => (deps.log ?? (() => undefined))({ component: "task-flow", ...entry });
+export const log = (deps: Pick<TaskFlowDeps, "log" | "companyId">, entry: Record<string, unknown>): void => companyLog(deps.companyId, deps.log ?? (() => undefined))({ component: "task-flow", ...entry });
 export const dispatchQueueName = (deps: Pick<TaskFlowDeps, "dispatchQueue">): string => deps.dispatchQueue ?? DEFAULT_DISPATCH_QUEUE;
 export const limitsOf = (deps: Pick<TaskFlowDeps, "limits">): { member: number; organization: number } => deps.limits ?? DEFAULT_LIMITS;
 
