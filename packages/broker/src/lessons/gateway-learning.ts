@@ -76,6 +76,8 @@ export function createGatewayLearningModel(options: GatewayLearningOptions): Pip
           headers: { "content-type": "application/json", "x-api-key": issued.token, "anthropic-version": "2023-06-01" },
           body: JSON.stringify({ model: issued.model, max_tokens: call.maxOutputTokens, system: call.system, messages: [{ role: "user", content: call.user }] }),
           signal: controller.signal,
+          // The token goes to the gateway only: a redirect is never followed (it would resend the key elsewhere), and is a failed call.
+          redirect: "manual",
         });
         text = await boundedText(response);
       } catch {
@@ -84,6 +86,7 @@ export function createGatewayLearningModel(options: GatewayLearningOptions): Pip
         clearTimeout(timer);
       }
       const body = parse(text) as { error?: { type?: unknown }; content?: unknown; model?: unknown } | undefined;
+      if (response.status >= 300 && response.status < 400) throw new Error(LEARNING_CALL_FAILED);
       if (!response.ok) {
         if (body?.error?.type === "lessons_paused") {
           const code = LessonsPauseCodeSchema.safeParse(response.headers.get(LEARNING_PAUSE_HEADER));
@@ -94,9 +97,13 @@ export function createGatewayLearningModel(options: GatewayLearningOptions): Pip
       const blocks = Array.isArray(body?.content) ? body.content as Array<{ type?: unknown; text?: unknown }> : undefined;
       if (blocks === undefined || blocks.some((block) => block === null || typeof block !== "object")) throw new Error(LEARNING_CALL_FAILED);
       const answer = blocks.filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text as string).join("");
-      // The gateway's figure, when it gives a readable one; else the cost is not known here (the gateway holds and counts the money).
-      const reported = Number(response.headers.get(LEARNING_COST_HEADER));
-      return { text: answer, costUsd: Number.isFinite(reported) && reported >= 0 ? reported : 0, model: typeof body?.model === "string" && body.model.length <= 128 ? body.model : issued.model };
+      // The gateway's figure, when it gives a readable one, never above the call's own budget; without one, the budget the call was given (the most it could have cost), else 0
+      // (the gateway holds and counts the money either way).
+      const raw = response.headers.get(LEARNING_COST_HEADER);
+      const reported = raw === null ? Number.NaN : Number(raw);
+      const budget = typeof call.budgetUsd === "number" && Number.isFinite(call.budgetUsd) && call.budgetUsd >= 0 ? call.budgetUsd : undefined;
+      const costUsd = Number.isFinite(reported) && reported >= 0 ? (budget === undefined ? reported : Math.min(reported, budget)) : (budget ?? 0);
+      return { text: answer, costUsd, model: typeof body?.model === "string" && body.model.length <= 128 ? body.model : issued.model };
     },
   };
 }

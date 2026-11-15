@@ -65,6 +65,20 @@ describe("the learning call through the gateway", () => {
     expect(() => createGatewayLearningModel({ gatewayUrl: "http://127.0.0.1:8787", token: async () => undefined })).not.toThrow();
   });
 
+  it("never follows a redirect (the token would go elsewhere): any 3xx is a failed call, and the request says so", async () => {
+    const { fetch, model: learning } = model(() => new Response(null, { status: 307, headers: { location: "https://elsewhere.example/" } }));
+    expect(((await learning.complete(CALL).catch((error: unknown) => error)) as Error).message).toBe(LEARNING_CALL_FAILED);
+    expect(fetch.mock.calls[0]![1]?.redirect).toBe("manual");
+  });
+
+  it("reports the call's budget when the gateway gives no cost, and never more than the budget", async () => {
+    const withBudget = { ...CALL, budgetUsd: 0.05 };
+    expect((await model(() => answer(200, { content: [] })).model.complete(withBudget)).costUsd).toBe(0.05);
+    expect((await model(() => answer(200, { content: [] }, { "x-rovara-cost-usd": "9" })).model.complete(withBudget)).costUsd).toBe(0.05);
+    expect((await model(() => answer(200, { content: [] }, { "x-rovara-cost-usd": "0.01" })).model.complete(withBudget)).costUsd).toBe(0.01);
+    expect((await model(() => answer(200, { content: [] })).model.complete(CALL)).costUsd).toBe(0);
+  });
+
   it("leaves the learning limit to the gateway: the core's own look always answers ok", async () => {
     const spend = gatewayLearningSpend();
     expect(await spend.admit("org_staging0000000000001", 5)).toBe(true);
