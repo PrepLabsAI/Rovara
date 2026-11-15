@@ -42,8 +42,11 @@ describe("whether a follow-up is needed", () => {
       expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 412, total: 412, fallbackReason: "map_missing" }, testChecks: [{ after }] }), after).toBe(true);
     }
   });
-  it("the full suite by choice that did not finish: not a follow-up (it is the round's own result)", () => {
-    expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 412, total: 412 }, testChecks: [{ after: "timed_out" }] })).toBe(false);
+  it("the full suite by choice that did not fit the round: needed (the spec's 'the suite does not fit the round')", () => {
+    expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 412, total: 412 }, testChecks: [{ after: "timed_out" }] })).toBe(true);
+  });
+  it("a full selection that ran fewer tests than the suite holds: needed", () => {
+    expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 400, total: 412 }, testChecks: done })).toBe(true);
   });
   it("no selection, or a selection that does not add up: not needed (never a guess)", () => {
     expect(needsFullSuiteFollowup({ selection: undefined, testChecks: done })).toBe(false);
@@ -66,6 +69,44 @@ describe("queueing", () => {
     for (let index = 0; index < FOLLOWUP_DAILY_CAP; index += 1) expect((await queueFullSuiteFollowup(d, at(ORG, `task-${String(index)}`))).queued).toBe(true);
     expect(await queueFullSuiteFollowup(d, at(ORG, "task-over"))).toEqual({ queued: false, reason: "daily_cap" });
     expect(await readFollowup(d, at(ORG, "task-over"))).toBeUndefined();
+  });
+  it("past the cap the budget is never charged", async () => {
+    const { d, admitted } = deps();
+    for (let index = 0; index < FOLLOWUP_DAILY_CAP; index += 1) await queueFullSuiteFollowup(d, at(ORG, `task-${String(index)}`));
+    await queueFullSuiteFollowup(d, at(ORG, "task-over"));
+    expect(admitted).toHaveLength(FOLLOWUP_DAILY_CAP);
+  });
+  it("a replay of an older commit never takes the pointer back from a newer one", async () => {
+    const { d } = deps();
+    await queueFullSuiteFollowup(d, at());
+    await queueFullSuiteFollowup(d, at(ORG, "task-1", D2, H2));
+    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: true });
+    expect((await readFollowup(d, at(ORG, "task-1", D2, H2)))?.state).toBe("queued");
+    expect(await recordFollowupResult(d, { ...at(ORG, "task-1", D2, H2), result: FAILED })).toBe(true);
+    expect((await readFollowup(d, at()))?.state).toBe("superseded");
+  });
+  it("a follow-up Rovara could not finish is queued again by a replay (charged again, counted again)", async () => {
+    const { d, admitted, now } = deps();
+    await queueFullSuiteFollowup(d, at());
+    await recordFollowupResult(d, { ...at(), result: { outcome: "rovara_problem", finishedAt: "2026-11-15T10:40:00.000Z" } });
+    now.value += 1_000;
+    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: false });
+    expect((await readFollowup(d, at()))?.state).toBe("queued");
+    expect(admitted).toEqual(["task-1", "task-1"]);
+  });
+  it("one past the longest run is queued again by a replay, and nothing late is taken for the old run", async () => {
+    const { d, now } = deps();
+    await queueFullSuiteFollowup(d, at());
+    now.value += FOLLOWUP_MAX_RUN_MS + 1;
+    expect(await markFollowupRunning(d, at())).toBe(false);
+    expect(await recordFollowupResult(d, { ...at(), result: PASSED })).toBe(false);
+    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: false });
+    expect(await recordFollowupResult(d, { ...at(), result: PASSED })).toBe(true);
+  });
+  it("two commits whose digests share the stored prefix are refused, never mixed up", async () => {
+    const { d } = deps();
+    await queueFullSuiteFollowup(d, at());
+    await expect(queueFullSuiteFollowup(d, at(ORG, "task-1", "1".repeat(16) + "f".repeat(48), H2))).rejects.toThrow(/^CONFIG_INVALID: the follow-up names a commit another/u);
   });
   it("the cap is per company: another company's runs do not count", async () => {
     const { d } = deps();
@@ -162,13 +203,16 @@ describe("what the pull request, the Check and the merge card read", () => {
     expect(checkFullSuiteOf(view("running"), true)).toBe("pending");
     expect(checkFullSuiteOf(view("passed"), true)).toBe("passed");
     expect(checkFullSuiteOf(view("failed"), true)).toBe("failed");
-    expect(checkFullSuiteOf(view("superseded"), true)).toBe("not_needed");
+    expect(checkFullSuiteOf(view("superseded"), true)).toBe("not_run");
+    expect(checkFullSuiteOf(view("errored"), true)).toBe("not_run");
+    expect(checkFullSuiteOf(view("expired"), true)).toBe("not_run");
   });
   it("the pull request's testing row state", () => {
     expect(fullSuiteStateOf(undefined, false)).toBe("not_needed");
     expect(fullSuiteStateOf(view("queued"), true)).toBe("pending");
     expect(fullSuiteStateOf(view("passed"), true)).toBe("not_needed");
-    expect(fullSuiteStateOf(view("failed"), true)).toBe("not_run");
+    expect(fullSuiteStateOf(view("failed"), true)).toBeUndefined();
+    expect(fullSuiteStateOf(view("superseded"), true)).toBe("not_run");
     expect(fullSuiteStateOf(undefined, true)).toBe("not_run");
   });
   it("the line: counts and fixed words only", () => {
@@ -176,7 +220,8 @@ describe("what the pull request, the Check and the merge card read", () => {
     expect(followupLine(view("passed"), undefined)).toBe("Full suite: passed on this commit (412 of 412).");
     expect(followupLine(view("failed"), undefined)).toContain("2 of 412 failing");
     expect(followupLine(view("errored"), undefined)).toContain("Rovara could not finish");
-    expect(followupLine(undefined, { queued: false, reason: "daily_cap" })).toContain("daily limit");
+    expect(followupLine(undefined, { queued: false, reason: "daily_cap" })).toBe("Full suite: not run today (project cap 20 reached).");
+    expect(followupLine(undefined, { queued: false, reason: "unavailable" })).toContain("a Rovara problem");
     expect(followupLine(undefined, { queued: false, reason: "budget" })).toContain("budget");
     expect(followupLine(undefined, undefined)).toBeUndefined();
   });
@@ -185,7 +230,13 @@ describe("what the pull request, the Check and the merge card read", () => {
     expect(gate("queued")).toEqual({ allowed: true, risk: "medium", reason: "pending" });
     expect(gate("queued", "block_until_passed").allowed).toBe(false);
     expect(gate("failed")).toEqual({ allowed: false, risk: "high", reason: "failed" });
-    expect(gate("errored")).toEqual({ allowed: true, risk: "medium", reason: "not_run" });
+    for (const state of ["errored", "expired", "superseded", undefined]) {
+      for (const policy of ["allow_pending", "block_until_passed"] as const) expect(gate(state, policy), `${String(state)} ${policy}`).toEqual({ allowed: true, risk: "medium", reason: "rovara_problem" });
+    }
+    const limited = (reason: "daily_cap" | "budget" | "unavailable", policy: "allow_pending" | "block_until_passed") => fullSuiteMergeGate({ policy, followup: undefined, needed: true, baseRisk: "low", notQueued: { queued: false, reason } });
+    expect(limited("daily_cap", "block_until_passed")).toEqual({ allowed: false, risk: "medium", reason: "not_run" });
+    expect(limited("budget", "allow_pending")).toEqual({ allowed: true, risk: "medium", reason: "not_run" });
+    expect(limited("unavailable", "block_until_passed")).toEqual({ allowed: true, risk: "medium", reason: "rovara_problem" });
     expect(gate("passed")).toEqual({ allowed: true, risk: "low", reason: "passed" });
     expect(fullSuiteMergeGate({ policy: "allow_pending", followup: undefined, needed: false, baseRisk: "high" })).toEqual({ allowed: true, risk: "high", reason: "none_needed" });
   });
@@ -210,7 +261,14 @@ describe("the seams part B calls", () => {
     for (let index = 0; index < FOLLOWUP_DAILY_CAP; index += 1) await queueFullSuiteFollowup(d, at(ORG, `task-${String(index)}`));
     const out = await followupAtPublication(d, { ...at(ORG, "task-over"), selection: affected, testChecks: [] });
     expect(out).toMatchObject({ needed: true, queued: { queued: false, reason: "daily_cap" }, fullSuite: "not_run" });
-    expect(out.line).toContain("daily limit");
+    expect(out.line).toContain("project cap 20 reached");
+  });
+  it("at publication a store fault is 'not queued: a Rovara problem', never pending and never thrown", async () => {
+    const { d } = deps();
+    const broken = { ...d, store: { ...d.store, get: d.store.get.bind(d.store), update: d.store.update.bind(d.store), transact: async () => { throw new Error("down"); } } } as FollowupDeps;
+    const out = await followupAtPublication(broken, { ...at(), selection: affected, testChecks: [] });
+    expect(out).toMatchObject({ needed: true, queued: { queued: false, reason: "unavailable" }, fullSuite: "not_run" });
+    expect(out.line).toContain("a Rovara problem");
   });
   it("the Check's fact: a read that fails is not run (neutral), never passed", async () => {
     const { d } = deps();
