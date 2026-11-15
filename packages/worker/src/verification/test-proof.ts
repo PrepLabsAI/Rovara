@@ -17,12 +17,13 @@
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
 import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofNotComparedReason, type TestProofWeakening } from "@agentx/contracts";
+import { TestProofWriteSchema, isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofNotComparedReason, type TestProofWeakening } from "@agentx/contracts";
+import type { ScriptedReplyFacts } from "../model-helper-round.js";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { testIdResolver, withTestIds, type TestIdContext } from "./test-ids.js";
 import { absentOnNew, displayLine, originalRunLooksCut, parseTestReport, skipRise } from "./test-report.js";
-import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
+import { isUnconfirmedStop, isWorkspaceUnsafe, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
 export const TEST_PROOF_CAP_MS = 10 * 60_000;
@@ -146,7 +147,7 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   const reports = new Map<number, ReportFile>();
   for (const index of runIndexes) {
     const spec = reportSpecOf(commands[index]!);
-    const path = spec === undefined ? undefined : await safeReportPath(options.rootPath, commands[index]!, spec);
+    const path = spec === undefined ? undefined : await safeReportPath(options.runners.reportRoot?.() ?? options.rootPath, commands[index]!, spec);
     if (spec === undefined || path === undefined) continue;
     const before = await readBytes(path);
     if (before.state !== "unreadable") reports.set(index, { spec, path, before });
@@ -154,25 +155,33 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
 
   const subPlan: CheckPlan = { source: "project", readiness: runIndexes.map((index) => commands[index]!), projectBefore: runIndexes.map(() => "unknown" as const) };
   // Every repository shows its original tree (an empty overlay when it has no changed test), so old and new code are never mixed across repositories.
-  const originalCode = (options.originalCode ?? gitOriginalCode)(perRepository
+  const originalCode = (options.originalCode ?? options.runners.originalCode ?? gitOriginalCode)(perRepository
     .map(({ repository, changed }) => ({ directory: repository.directory, commit: repository.startCommit, overlay: changed.paths })));
   const budgetMs = Math.max(0, Math.min(options.capMs ?? TEST_PROOF_CAP_MS, options.budgetMs));
   let ran: { entries: CheckEntry[]; oldReports: Map<number, ReadResult> };
+  // A stop that could not be confirmed: the report files are not put back either, because a command that may still be running would write over them.
+  let unconfirmedStop = false;
   try {
     ran = await originalCode.run(async () => {
-      for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
+      if (options.runners.reportRoot === undefined) for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
       const round = await runChecks(subPlan, options.runners, { budgetMs, signal: options.signal });
       // Read while the original code is shown, before the files are put back.
       const oldReports = new Map<number, ReadResult>();
-      for (const [index, report] of reports) oldReports.set(index, await readBytes(report.path));
+      for (const [index, report] of reports) {
+        const path = options.runners.reportRoot === undefined ? report.path : await safeReportPath(options.runners.reportRoot(), commands[index]!, report.spec);
+        oldReports.set(index, path === undefined ? { state: "missing" } : await readBytes(path));
+      }
       return { entries: round.entries, oldReports };
     });
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) {
+      unconfirmedStop = isUnconfirmedStop(error);
+      throw error;
+    }
     return result("not_checked", options.signal.aborted ? "stopped" : "original_code_unavailable", changedTests, items);
   } finally {
-    for (const report of reports.values()) await restoreFile(report);
+    if (!unconfirmedStop && options.runners.reportRoot === undefined) for (const report of reports.values()) await restoreFile(report);
   }
 
   const perCheck: TestProofItem[] = [];
@@ -234,6 +243,21 @@ async function weakeningOf(checkId: string, oldEntry: CheckEntry, report: Report
   return { checkId, skippedBefore: rise.before, skippedAfter: rise.after, absentOnNew: absent.ids, absentOnNewCount: absent.count };
 }
 
+/** Attach only the candidate's project-check facts; absent input preserves the legacy bytes exactly. */
+export function withScriptedReplyFacts(proof: TestProof, source: CheckPlan["source"], facts: ScriptedReplyFacts | undefined): TestProof {
+  if (source !== "project" || proof.status !== "checked" || facts === undefined) return proof;
+  const parsed = TestProofWriteSchema.shape.scriptedReplies.safeParse(facts);
+  const ids = new Set(proof.items.map((item) => item.checkId));
+  // 1 means "at least one, unknown", not a measured count. An unreadable part never becomes an absent marker.
+  const scriptedReplies = facts === "unknown" || !parsed.success
+    ? [...ids].map((checkId) => ({ checkId, taskMade: 1, counted: 0 }))
+    : (parsed.data ?? []).filter((entry) => ids.has(entry.checkId));
+  if (scriptedReplies.length === 0) return proof;
+  const written = { ...proof, scriptedReplies };
+  if (!TestProofWriteSchema.safeParse(written).success) throw new Error("unsupported scripted reply facts");
+  return written;
+}
+
 /**
  * test-proof.json as the worker saves it: always under PROOF_MAX_BYTES, so the broker's loader (256 KiB) reads all of it. Labels and test names are cut
  * (nothing else is lost) when the full text is too long, and items are dropped from the end only as a last resort.
@@ -246,7 +270,11 @@ export function serializeTestProof(proof: TestProof): string {
   if (proof.weakening !== undefined) current = { ...proof, weakening: proof.weakening.map((item) => ({ ...item, absentOnNew: item.absentOnNew.slice(0, 10).map((id) => id.slice(0, 120)) })) };
   if (fits()) return JSON.stringify(current);
   current = { ...current, items: proof.items.map((item) => ({ ...item, label: item.label.slice(0, 120) || "check", ...(item.test === undefined ? {} : { test: item.test.slice(0, 80) }) })) };
-  while (!fits() && current.items.length > 0) current = { ...current, items: current.items.slice(0, Math.floor(current.items.length / 2)) };
+  while (!fits() && current.items.length > 0) {
+    const items = current.items.slice(0, Math.floor(current.items.length / 2));
+    const ids = new Set(items.map((item) => item.checkId));
+    current = { ...current, items, ...(current.scriptedReplies === undefined ? {} : { scriptedReplies: current.scriptedReplies.filter((entry) => ids.has(entry.checkId)) }) };
+  }
   return JSON.stringify(current);
 }
 

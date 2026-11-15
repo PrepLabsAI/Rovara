@@ -1,9 +1,10 @@
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_DRIVING_TEST_MARKER, E2E_MODEL_ROUTE_NOT_TESTED, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider, projectPk, type E2EModelRouteDefinition, type ModelProvider, type OrgId,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_DRIVING_TEST_MARKER, E2E_MODEL_ROUTE_NOT_TESTED, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider, type E2EModelRouteDefinition, type ModelProvider, type OrgId,
 } from "@agentx/contracts";
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
 import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/model-runtime";
+import { LEGACY_KEY_SCOPE, legacyScopeOf, scopedProjectPk, type KeyScope } from "./legacy-key-scope.js";
 
 // The route derivation moved to model-runtime (`./e2e-route-derive`), so the worker derives the very same route; the broker keeps its names for it.
 export { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRoute };
@@ -43,9 +44,20 @@ export const e2eModelCheckKey = (checkId: string) => ({ pk: E2E_MODEL_ROUTE_PART
 export const e2eModelCheckLatestKey = () => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: "E2E_MODEL_CHECK_LATEST" });
 export const e2eModelCheckRunnerKey = (profileId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_CHECK_RUNNER#${profileId}` });
 export const e2eModelRouteShapeKey = (routeId: string, modelId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_SHAPE#${routeId}#${modelId}` });
-export const e2eModelBudgetKey = (orgId: OrgId, projectName: string, day: string) => ({ pk: projectPk(orgId, projectName), sk: `E2E_MODEL_BUDGET#${day}` });
+export const e2eModelBudgetKey = (orgId: KeyScope, projectName: string, day: string) => ({ pk: scopedProjectPk(orgId, projectName), sk: `E2E_MODEL_BUDGET#${day}` });
 /** One reservation of a call's tokens against the project's day (`model-budget-endpoint.ts`): written with the day's increment, settled or released once. */
-export const e2eModelBudgetReservationKey = (orgId: OrgId, projectName: string, reservationId: string) => ({ pk: projectPk(orgId, projectName), sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
+export const e2eModelBudgetReservationKey = (orgId: KeyScope, projectName: string, reservationId: string) => ({ pk: scopedProjectPk(orgId, projectName), sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
+
+/**
+ * What a day's row under the old unscoped key (before the move to the company's partition) already holds, for the implicit company only: another company has no such row and
+ * the key is not read for it. That row only shrinks now (an open reservation settling or releasing under it), so the day's room is what the caps leave after it and the company's row.
+ */
+export async function legacyDayUsage(store: { documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string }, orgId: OrgId, projectName: string, day: string): Promise<{ inputTokens: number; calls: number }> {
+  if (legacyScopeOf(orgId) === undefined) return { inputTokens: 0, calls: 0 };
+  const response = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: e2eModelBudgetKey(LEGACY_KEY_SCOPE, projectName, day), ConsistentRead: true }));
+  const item = response.Item as { inputTokens?: unknown; calls?: unknown } | undefined;
+  return { inputTokens: typeof item?.inputTokens === "number" ? item.inputTokens : 0, calls: typeof item?.calls === "number" ? item.calls : 0 };
+}
 
 export interface E2EModelRouteStore {
   documentClient: DynamoDBDocumentClient;
@@ -319,13 +331,16 @@ export function createBrokerE2EDayBudget(options: BrokerE2EDayBudgetOptions): E2
       if (inputTokens > limits.maxInputTokens) return null;
       const day = utcDay(options.now());
       const key = e2eModelBudgetKey(options.orgId, options.projectName, day);
+      // Spending recorded under the old key before the move still counts against the day (the implicit company only).
+      const earlier = await legacyDayUsage(options, options.orgId, options.projectName, day);
+      if (earlier.inputTokens + inputTokens > limits.maxInputTokens || earlier.calls + 1 > limits.maxCalls) return null;
       try {
         await options.documentClient.send(new UpdateCommand({
           TableName: options.tableName, Key: key,
           UpdateExpression: "ADD #tokens :reserved, #calls :one SET entityType = :entityType, #expires = :expires",
           ConditionExpression: "(attribute_not_exists(#tokens) OR #tokens <= :tokenRoom) AND (attribute_not_exists(#calls) OR #calls <= :callRoom)",
           ExpressionAttributeNames: { "#tokens": "inputTokens", "#calls": "calls", "#expires": INDEX_EXPIRY_ATTRIBUTE },
-          ExpressionAttributeValues: { ":reserved": inputTokens, ":one": 1, ":entityType": "E2E_MODEL_BUDGET", ":tokenRoom": limits.maxInputTokens - inputTokens, ":callRoom": limits.maxCalls - 1,
+          ExpressionAttributeValues: { ":reserved": inputTokens, ":one": 1, ":entityType": "E2E_MODEL_BUDGET", ":tokenRoom": limits.maxInputTokens - earlier.inputTokens - inputTokens, ":callRoom": limits.maxCalls - earlier.calls - 1,
             ":expires": indexExpiresAt(`${day}T23:59:59.000Z`) },
         }));
       } catch (error) {
@@ -373,9 +388,11 @@ export async function e2eDayBudgetRoom(
   need: { inputTokens: number; calls: number },
   limits: E2EDayLimits,
 ): Promise<boolean> {
-  const response = await options.documentClient.send(new GetCommand({ TableName: options.tableName, Key: e2eModelBudgetKey(options.orgId, options.projectName, utcDay(options.now)), ConsistentRead: true }));
+  const day = utcDay(options.now);
+  const response = await options.documentClient.send(new GetCommand({ TableName: options.tableName, Key: e2eModelBudgetKey(options.orgId, options.projectName, day), ConsistentRead: true }));
   const item = response.Item as { inputTokens?: unknown; calls?: unknown } | undefined;
-  const usedTokens = typeof item?.inputTokens === "number" ? item.inputTokens : 0;
-  const usedCalls = typeof item?.calls === "number" ? item.calls : 0;
+  const earlier = await legacyDayUsage(options, options.orgId, options.projectName, day);
+  const usedTokens = (typeof item?.inputTokens === "number" ? item.inputTokens : 0) + earlier.inputTokens;
+  const usedCalls = (typeof item?.calls === "number" ? item.calls : 0) + earlier.calls;
   return usedTokens + need.inputTokens <= limits.maxInputTokens && usedCalls + need.calls <= limits.maxCalls;
 }

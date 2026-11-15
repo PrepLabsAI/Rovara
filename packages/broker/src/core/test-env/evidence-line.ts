@@ -29,6 +29,8 @@ export function pinnedFakeOf(backing: Extract<TestEnvDependency["backing"], { ki
     ...(set === undefined ? {} : { revision: set.revision }),
     ...(set?.origin === "recorded" && !madeByRovara && set.recordedAt !== undefined ? { recordedAt: set.recordedAt } : {}),
     ...(madeByRovara ? { madeByRovara: true } : {}),
+    // A fake that may make up answers: its row is Made by Rovara unless its ledger counted none (`evidenceDependencyTrustClass`, review 2 M2).
+    ...(backing.unmatched === "schema_synth" ? { makesUpAnswers: true } : {}),
   };
 }
 

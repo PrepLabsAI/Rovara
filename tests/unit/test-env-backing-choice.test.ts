@@ -7,7 +7,7 @@ import { TestEnvDependenciesSchema, readTestEnvDependencies, testEnvDependencyAp
 import { TestEnvServiceSchema } from "../../packages/contracts/src/test-environment.js";
 import { testAccountApprovalDigest, testAccountExternalId, testAccountSecretRef, TestAccountSchema, type TestAccount } from "../../packages/contracts/src/test-account.js";
 import {
-  BACKING_ORDER, BACKING_PLACES, BACKING_REASONS, BACKING_REASON_WORDS, DEFAULT_ALLOWED_BACKINGS, LEGACY_ALLOWED_BACKINGS, SKIP_REASONS, SKIP_REASON_WORDS, chooseBacking, effectiveAllowedBackings,
+  BACKING_ORDER, BACKING_PLACES, BACKING_REASONS, BACKING_REASON_WORDS, DEFAULT_ALLOWED_BACKINGS, SKIP_REASONS, SKIP_REASON_WORDS, chooseBacking, effectiveAllowedBackings,
   type AllowedBackings, type BackingChoiceInput, type FixtureFact,
 } from "../../packages/broker/src/core/test-env/backing-choice.js";
 
@@ -231,26 +231,25 @@ describe("effectiveAllowedBackings: a lock can only be stricter", () => {
     expect(effectiveAllowedBackings(undefined)).toEqual({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: true });
     expect(DEFAULT_ALLOWED_BACKINGS.fakeMakesUpAnswers).toBe(true);
   });
-  it("keeps the answer a company's stored setting already gave: a stored false stays false, and a stored setting that predates the change and says nothing about made-up answers reads as before (off)", () => {
+  it("keeps the answer a company's stored setting gave: a stored false stays false, and a stored setting that says nothing about made-up answers gets the default, ON (DECISIONS 169)", () => {
     expect(effectiveAllowedBackings({ fakeMakesUpAnswers: false }).fakeMakesUpAnswers).toBe(false);
-    expect(effectiveAllowedBackings({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true }).fakeMakesUpAnswers).toBe(false);
-    expect(effectiveAllowedBackings({}).fakeMakesUpAnswers).toBe(false);
+    expect(effectiveAllowedBackings({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true }).fakeMakesUpAnswers).toBe(true);
+    expect(effectiveAllowedBackings({}).fakeMakesUpAnswers).toBe(true);
     expect(effectiveAllowedBackings({ fakeMakesUpAnswers: true }).fakeMakesUpAnswers).toBe(true);
     expect(effectiveAllowedBackings(undefined).fakeMakesUpAnswers).toBe(true);
     // A project or a lock can still turn it off, never on.
     expect(effectiveAllowedBackings(undefined, { fakeMakesUpAnswers: false }).fakeMakesUpAnswers).toBe(false);
     expect(effectiveAllowedBackings({ fakeMakesUpAnswers: false }, { fakeMakesUpAnswers: true }).fakeMakesUpAnswers).toBe(false);
   });
-  it("tells an empty stored setting from no setting at all: {} is a saved setting that says nothing, so it keeps the old answer, and undefined gets the default (review Low)", () => {
-    expect(effectiveAllowedBackings({})).toEqual(LEGACY_ALLOWED_BACKINGS);
-    expect(effectiveAllowedBackings(undefined)).toEqual(DEFAULT_ALLOWED_BACKINGS);
-    expect(effectiveAllowedBackings({})).not.toEqual(effectiveAllowedBackings(undefined));
-    // null is not a setting a caller can hold, but it must never read as the wider default.
-    expect(effectiveAllowedBackings(null as unknown as undefined).fakeMakesUpAnswers).toBe(false);
+  it("reads an empty stored setting as no setting: no company is stored as 'off' for made-up answers (DECISIONS 169; review L3)", () => {
+    expect(effectiveAllowedBackings({})).toEqual(DEFAULT_ALLOWED_BACKINGS);
+    expect(effectiveAllowedBackings({})).toEqual(effectiveAllowedBackings(undefined));
   });
-  it("changes nothing else a setting says", () => {
-    expect(LEGACY_ALLOWED_BACKINGS).toEqual({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false });
-    expect({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false }).toEqual({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false });
+  it("reads a stored setting that is not an object as off for made-up answers, never as the wider default (a mistake errs on the safe side)", () => {
+    for (const bad of [null, "on", 1, ["fakeMakesUpAnswers"]]) {
+      expect(effectiveAllowedBackings(bad as unknown as undefined).fakeMakesUpAnswers, JSON.stringify(bad)).toBe(false);
+      expect(effectiveAllowedBackings(bad as unknown as undefined), JSON.stringify(bad)).toEqual({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false });
+    }
   });
   it("the company layer sets any box (own images need a second admin elsewhere)", () => {
     expect(effectiveAllowedBackings({ projectImages: true, testAccounts: false })).toMatchObject({ projectImages: true, testAccounts: false, real: true });
@@ -422,6 +421,31 @@ describe("test accounts: available only when active, approved, for this project 
     // An AWS account whose role is on the list.
     expect(steps(chooseBacking(dynamo({ accounts: [dynamoAccount()], allowed: allow({ emulated: false }), prodDeny: { accountIds: ["222222222222"], hosts: [], arnPrefixes: [] } })))).toContain("test_account:account_names_production");
   });
+  // FIX-0518: a stored account may hold a model host (it did not come through today's schema, or the catalog grew). The backing choice never picks it, and says why in fixed words.
+  const modelHostAccount = (hosts: string[], over: Record<string, unknown> = {}): TestAccount => {
+    // Approvals cover the exact record, so they are stamped again for the changed hosts: the account is still approved, active and unexpired, and only its hosts are wrong.
+    const record = { ...account({ id: "model-test", secretRef: testAccountSecretRef("staging", ORG, "model-test", "apiKey") }), hosts, ...over };
+    const digest = testAccountApprovalDigest(record);
+    return { ...record, approvals: record.approvals.map((each) => ({ ...each, approvedDigest: digest })) };
+  };
+  it("is not an AI model service, whatever the stored record says", () => {
+    for (const hosts of [["api.openai.com"], ["API.OPENAI.COM."], ["my-resource.openai.azure.com"], ["api.example-pay.com", "generativelanguage.googleapis.com"]]) {
+      const choice = pick([modelHostAccount(hosts)]);
+      expect(choice.backing.kind, hosts.join()).toBe("none");
+      expect(steps(choice), hosts.join()).toContain("test_account:account_is_model_service");
+      expect(choice.skipped.find((each) => each.reason === "account_is_model_service")?.words).toBe(SKIP_REASON_WORDS.account_is_model_service);
+    }
+    // Even with the production list empty, the model reason is the one named.
+    expect(steps(pick([modelHostAccount(["api.openai.com"])], { prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] } }))).toContain("test_account:account_is_model_service");
+    // The company's own gateway host, when the caller has it.
+    expect(pick([modelHostAccount(["llm.corp-gateway.example.com"])]).backing.kind).toBe("test_account");
+    expect(steps(pick([modelHostAccount(["llm.corp-gateway.example.com"])], { modelGatewayHosts: ["llm.corp-gateway.example.com"] }))).toContain("test_account:account_is_model_service");
+  });
+  it("skips a model-host account for a clean one", () => {
+    const clean = account({ id: "zzz-test", secretRef: testAccountSecretRef("staging", ORG, "zzz-test", "apiKey") });
+    const choice = pick([modelHostAccount(["api.openai.com"], { id: "aaa-test" }), clean]);
+    expect(choice.backing).toEqual({ kind: "test_account", accountId: "zzz-test" });
+  });
   it("skips an unclean account for a clean one, and takes the lowest id", () => {
     const first = account({ id: "aaa-test", secretRef: testAccountSecretRef("staging", ORG, "aaa-test", "apiKey") });
     const second = account({ id: "bbb-test", secretRef: testAccountSecretRef("staging", ORG, "bbb-test", "apiKey") });
@@ -585,12 +609,11 @@ describe("audit: the made-up-answers default changes new approvals only", () => 
     expect(testEnvDependencyLessSafeChanges(undefined, dependencies)).toEqual(["test_account", "schema_synth"]);
     expect(testEnvDependencyApprovalRisk(dependencies)).toBe("high");
   });
-  it("a stored company setting keeps 'off' for the company that never turned it on, whatever it says about other boxes", () => {
-    const old = { real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false };
+  it("a stored company setting that says 'off' keeps it off; one that says nothing about made-up answers gets the default (DECISIONS 169)", () => {
+    const off = { real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false };
     const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];
-    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(old) })).backing.kind).toBe("none");
-    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings({ fakes: true }) })).backing.kind).toBe("none");
-    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(LEGACY_ALLOWED_BACKINGS) })).backing.kind).toBe("none");
+    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(off) })).backing.kind).toBe("none");
+    expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings({ fakes: true }) })).backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
   });
   it("a new proposal for a company with no stored setting gets the made-up answers fake", () => {
     const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];

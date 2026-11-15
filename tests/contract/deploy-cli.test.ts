@@ -222,7 +222,7 @@ function scriptedOutputs(): Record<string, StackOutputs> {
       DispatcherSecurityGroupId: "sg-0fedcba9876543210",
       WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k",
       Ec2WorkerInstanceRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/worker",
-      Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
+      Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c",
     },
     [stackName("identity")]: {
       Issuer: `https://cognito-idp.${REGION}.amazonaws.com/${REGION}_abc`,

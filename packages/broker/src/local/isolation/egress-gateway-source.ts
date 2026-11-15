@@ -19,11 +19,18 @@ const os = require("os");
 const config = JSON.parse(process.env.ROVARA_GW_CONFIG || "{}");
 const LIMITS = Object.assign({ maxConnections: 1024, idleMs: 600000, connectMs: 15000, helloMs: 10000, maxBodyBytes: 16777216 }, config.limits || {});
 const ALLOWED = (config.allowed || []).map(function (entry) { return String(entry).toLowerCase(); });
+// Names the SANDBOX network may not reach even when they are on the list (the model hosts: a product's model call goes through the model bridge with the user's own key, never straight out). The worker's network ignores it.
+const SANDBOX_DENIED = (config.sandboxDenied || []).map(function (entry) { return String(entry).toLowerCase(); });
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const stats = { dnsAllowed: 0, dnsRefused: 0, webAllowed: 0, webRefused: 0 };
 
 // ---- logging: refusals only, at most 40 lines a minute, names cleaned (a name is repository-controlled text)
 const QUIET = process.env.ROVARA_GW_LIBRARY === "1"; // loaded as a library by the tests: say nothing
+// Library mode only: the tests open the 443 and 80 forwarders on a port of their own (0 for any free one). A running gateway always uses 443 and 80.
+const TLS_PORT = QUIET && process.env.ROVARA_GW_TLS_PORT !== undefined ? Number(process.env.ROVARA_GW_TLS_PORT) : 443;
+const PLAIN_PORT = QUIET && process.env.ROVARA_GW_PLAIN_PORT !== undefined ? Number(process.env.ROVARA_GW_PLAIN_PORT) : 80;
+const TEST_ADDRESSES = QUIET ? process.env.ROVARA_GW_TEST_ADDRESSES : undefined;
+const DNS_PORT = QUIET && process.env.ROVARA_GW_DNS_PORT !== undefined ? Number(process.env.ROVARA_GW_DNS_PORT) : 53;
 let logged = 0;
 let logWindow = Date.now();
 function log(event, fields) {
@@ -45,8 +52,20 @@ function validName(host) {
   // A real top-level name has a letter, so 127.1, 0x7f.1 and 2130706433 are never names.
   return /[a-z]/.test(labels[labels.length - 1]);
 }
-function hostAllowed(host) {
+function listCovers(list, host) {
+  for (let i = 0; i < list.length; i++) {
+    const entry = list[i];
+    if (entry.charAt(0) === "*" && entry.charAt(1) === ".") {
+      const suffix = entry.slice(1);
+      if (host.length > suffix.length && host.endsWith(suffix)) return true;
+    } else if (host === entry) return true;
+  }
+  return false;
+}
+function hostAllowed(host, role) {
   if (!validName(host)) return false;
+  // Fail closed: only a caller that says exactly "worker" is exempt from the sandbox deny, so a missing or odd role is a sandbox.
+  if (role !== "worker" && listCovers(SANDBOX_DENIED, host)) return false;
   for (let i = 0; i < ALLOWED.length; i++) {
     const entry = ALLOWED[i];
     if (entry.charAt(0) === "*" && entry.charAt(1) === ".") {
@@ -95,6 +114,8 @@ function peerIn(address, cidr) {
 
 // Where the interfaces are: a role per network, by the subnet the broker read from Docker.
 function localAddresses() {
+  // Library mode only: a test names the addresses (the loopback is an "internal" interface and is skipped below).
+  if (TEST_ADDRESSES) return JSON.parse(TEST_ADDRESSES);
   const found = { worker: [], sandbox: [], external: [] };
   const interfaces = os.networkInterfaces();
   Object.keys(interfaces).forEach(function (name) {
@@ -128,7 +149,7 @@ function parseQuestion(message) {
   if (offset + 4 > message.length) return undefined;
   return { name: labels.join("."), type: message.readUInt16BE(offset), end: offset + 4, opcode: (flags >> 11) & 0xf, recursion: (flags & 0x0100) !== 0 };
 }
-function answerFor(message, localIp) {
+function answerFor(message, localIp, role) {
   const question = parseQuestion(message);
   if (question === undefined) return undefined;
   const header = Buffer.from(message.subarray(0, 12));
@@ -137,7 +158,7 @@ function answerFor(message, localIp) {
   let answers = 0;
   let body = Buffer.alloc(0);
   if (question.opcode !== 0) rcode = 4;
-  else if (!hostAllowed(question.name)) { rcode = 3; stats.dnsRefused += 1; }
+  else if (!hostAllowed(question.name, role)) { rcode = 3; stats.dnsRefused += 1; }
   else {
     stats.dnsAllowed += 1;
     if (question.type === 1) {
@@ -154,15 +175,15 @@ function answerFor(message, localIp) {
   header.writeUInt16BE(0, 10);
   return Buffer.concat([header, echoed, body]);
 }
-function startNameServer(ip, cidr) {
+function startNameServer(ip, cidr, role) {
   const udp = dgram.createSocket("udp4");
   udp.on("message", function (message, remote) {
     if (!peerIn(remote.address, cidr)) return;
-    const reply = answerFor(message, ip);
+    const reply = answerFor(message, ip, role);
     if (reply !== undefined) udp.send(reply, remote.port, remote.address);
   });
   udp.on("error", function (error) { log("dns_error", { reason: error.code }); });
-  udp.bind(53, ip);
+  udp.bind(DNS_PORT, ip);
   const tcp = net.createServer(function (socket) {
     if (!peerIn(socket.remoteAddress, cidr)) return socket.destroy();
     let held = Buffer.alloc(0);
@@ -173,7 +194,7 @@ function startNameServer(ip, cidr) {
       if (held.length > 4096) return socket.destroy();
       while (held.length >= 2 && held.length >= 2 + held.readUInt16BE(0)) {
         const size = held.readUInt16BE(0);
-        const reply = answerFor(held.subarray(2, 2 + size), ip);
+        const reply = answerFor(held.subarray(2, 2 + size), ip, role);
         held = held.subarray(2 + size);
         if (reply === undefined) return socket.destroy();
         const framed = Buffer.alloc(2);
@@ -183,7 +204,8 @@ function startNameServer(ip, cidr) {
     });
   });
   tcp.on("error", function (error) { log("dns_error", { reason: error.code }); });
-  tcp.listen(53, ip);
+  tcp.listen(DNS_PORT, ip);
+  return { udp: udp, tcp: tcp };
 }
 
 // ---- the way out
@@ -270,7 +292,7 @@ function serverNameOf(buffer) {
   return { error: "no_name" };
 }
 
-function startTlsForwarder(ip, cidr) {
+function startTlsForwarder(ip, cidr, role) {
   const server = net.createServer(function (client) {
     if (!peerIn(client.remoteAddress, cidr)) return client.destroy();
     if (open >= LIMITS.maxConnections) return client.destroy();
@@ -293,7 +315,7 @@ function startTlsForwarder(ip, cidr) {
       const parsed = serverNameOf(held);
       if (parsed.more) return held.length > 16389 ? refuse("bad_record") : undefined;
       if (parsed.error) return refuse(parsed.error);
-      if (!hostAllowed(parsed.name)) return refuse("not_allowed", parsed.name);
+      if (!hostAllowed(parsed.name, role)) return refuse("not_allowed", parsed.name);
       decided = true;
       clearTimeout(timer);
       client.pause();
@@ -311,11 +333,12 @@ function startTlsForwarder(ip, cidr) {
     });
   });
   server.on("error", function (error) { log("listen_error", { port: 443, reason: error.code }); });
-  server.listen(443, ip);
+  server.listen(TLS_PORT, ip);
+  return server;
 }
 
 // Port 80: every request is read and judged on its own, so a connection kept open cannot change its Host after the first.
-function startPlainForwarder(ip, cidr) {
+function startPlainForwarder(ip, cidr, role) {
   const server = http.createServer({ maxHeaderSize: 16384 }, function (request, response) {
     const refuse = function (status, reason, host) {
       stats.webRefused += 1;
@@ -327,7 +350,7 @@ function startPlainForwarder(ip, cidr) {
     const hosts = request.headersDistinct && request.headersDistinct.host;
     if (!hosts || hosts.length !== 1) return refuse(400, "bad_host");
     const host = hosts[0].toLowerCase().replace(/:80$/, "").replace(/\.$/, "");
-    if (!hostAllowed(host)) return refuse(403, "not_allowed", host);
+    if (!hostAllowed(host, role)) return refuse(403, "not_allowed", host);
     if (typeof request.url !== "string" || request.url.charAt(0) !== "/") return refuse(400, "bad_target", host);
     if (request.headers.upgrade !== undefined) return refuse(400, "upgrade", host);
     resolvePublic(host).then(function (addresses) {
@@ -352,7 +375,8 @@ function startPlainForwarder(ip, cidr) {
   server.maxConnections = LIMITS.maxConnections;
   server.on("clientError", function (error, socket) { socket.destroy(); });
   server.on("error", function (error) { log("listen_error", { port: 80, reason: error.code }); });
-  server.listen(80, ip);
+  server.listen(PLAIN_PORT, ip);
+  return server;
 }
 
 // ---- the callback relay: the worker's calls to the broker, and only those
@@ -460,22 +484,29 @@ function startIngress(ip) {
   server.listen(config.ingress.port, ip);
 }
 
+// What one network's role gets: its name server and its TLS and plain forwarders, all judged for that role.
+function startNetwork(role, ip, cidr) {
+  return { role: role, dns: startNameServer(ip, cidr, role), tls: startTlsForwarder(ip, cidr, role), plain: startPlainForwarder(ip, cidr, role) };
+}
 function main() {
   const addresses = localAddresses();
   if (addresses.worker.length === 0 || addresses.sandbox.length === 0 || addresses.external.length === 0) {
     process.stderr.write("egress gateway: the three networks are not all attached\n");
     process.exit(2);
   }
-  addresses.worker.forEach(function (ip) { startNameServer(ip, config.nets.worker); startTlsForwarder(ip, config.nets.worker); startPlainForwarder(ip, config.nets.worker); startCallbackRelay(ip); });
-  addresses.sandbox.forEach(function (ip) { startNameServer(ip, config.nets.sandbox); startTlsForwarder(ip, config.nets.sandbox); startPlainForwarder(ip, config.nets.sandbox); });
+  const started = [];
+  addresses.worker.forEach(function (ip) { started.push(startNetwork("worker", ip, config.nets.worker)); startCallbackRelay(ip); });
+  addresses.sandbox.forEach(function (ip) { started.push(startNetwork("sandbox", ip, config.nets.sandbox)); });
   addresses.external.forEach(function (ip) { startIngress(ip); });
+  if (QUIET) return started;
   process.on("uncaughtException", function (error) { log("error", { reason: String(error && error.code) }); });
   process.on("SIGTERM", function () { process.exit(0); });
   process.stdout.write(JSON.stringify({ component: "egress-gateway", event: "ready", worker: addresses.worker, sandbox: addresses.sandbox }) + "\n");
+  return started;
 }
 
 if (process.env.ROVARA_GW_LIBRARY === "1") {
-  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
+  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, startTlsForwarder: startTlsForwarder, startPlainForwarder: startPlainForwarder, main: main, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
 } else {
   main();
 }

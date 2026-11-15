@@ -2,8 +2,8 @@
 import { describe, expect, it } from "vitest";
 import {
   CI_USES_FAKES_WORDS, EVIDENCE_BACKING_KINDS, EVIDENCE_DEPENDENCY_LABELS, EVIDENCE_DEPENDENCY_LABEL_BACKING, EVIDENCE_DEPENDENCY_LABEL_TRUST, EVIDENCE_TRUST_CLASSES, EvidenceDependencySchema, readEvidencePack, renderEvidence, EvidencePackV2Schema,
-  SCRIPTED_REPLY_SOURCES, SCRIPTED_REPLY_SOURCE_WORDS, TEST_ENV_BACKING_KINDS, TEST_RESULT_STATES, TEST_RESULT_STATE_WORDS, TestAnswerRecordSchema, TestEnvDependencySchema, TestEnvWorkingBackingSchema, TestEnvFallbackSchema,
-  CHANGE_PROOF_LABELS, CHANGE_PROOF_LABEL_WORDS, EVAL_NOT_QUALIFIED_REASONS, EVAL_NOT_QUALIFIED_REASON_WORDS, changeProofLabelCountsAsProven, changeProofLabelQualified, evalProofLabel, checkCountsTowardProof, checkKindInfo, evidenceDependencyLabelFor, evidenceDependencyLabelWords, evidenceDependencyV1ToV2, scriptedRepliesCountTowardProof, testAnswerCountsTowardProof, testAnswerSummaryLines, testAnswerTrustClass,
+  REPLY_PROVENANCES, REPLY_PROVENANCE_LABELS, AGENT_REPLIES_UNCONFIRMED_WORDS, TEST_ENV_BACKING_KINDS, TEST_RESULT_STATES, TEST_RESULT_STATE_WORDS, TestAnswerRecordSchema, TestEnvDependencySchema, TestEnvWorkingBackingSchema, TestEnvFallbackSchema,
+  CHANGE_PROOF_LABELS, CHANGE_PROOF_LABEL_WORDS, EVAL_NOT_QUALIFIED_REASONS, EVAL_NOT_QUALIFIED_REASON_WORDS, changeProofLabelCountsAsProven, changeProofLabelFailsCheck, changeProofLabelQualified, evalProofLabel, evidenceDependencyTrustClass, checkCountsTowardProof, checkKindInfo, evidenceDependencyLabelFor, evidenceDependencyLabelWords, evidenceDependencyV1ToV2, scriptedRepliesCountTowardProof, testAnswerCountsTowardProof, testAnswerSummaryLines, testAnswerTrustClass,
   testCountsTowardProof, testEnvBackingTrustClass, testEnvDependencyApprovalRisk, testEnvDependencyLessSafeChanges, testEnvStartedCount, testResultState, testTrustClasses, trustClassCountsTowardProof, trustClassOf,
   type EvidenceDependency, type TestAnswerRecord,
 } from "../../packages/contracts/src/index.js";
@@ -94,7 +94,18 @@ describe("a v2 pack's dependency trust is the one its label earns (the writer's 
     expect(accepted(dep({ label: "faked_by_tests", backing: "none", trust: "no_outside_calls" })).success).toBe(false);
   });
   it("refuses a label that does not belong to its backing", () => {
-    expect(accepted(dep({ label: "real", backing: "fake", trust: "real" })).success).toBe(false);
+    // recordedOn left out, so only the label-belongs-to-backing rule can refuse these (review 2 M3)
+    expect(accepted(dep({ label: "real", backing: "fake", trust: "real", recordedOn: undefined })).success).toBe(false);
+    expect(accepted(dep({ label: "vendor_test", backing: "fake", trust: "real", recordedOn: undefined })).success).toBe(false);
+    expect(accepted(dep({ label: "real", backing: "local", trust: "real", recordedOn: undefined })).success).toBe(true);
+  });
+  it("lets a fake that made up answers be written as Made by Rovara (a weaker class, never a better one)", () => {
+    expect(accepted(dep({ trust: "made_by_rovara", recordedOn: undefined })).success).toBe(true);
+    expect(accepted(dep({ label: "hand_written_fake", trust: "made_by_rovara", recordedOn: undefined })).success).toBe(true);
+    // only a fake makes up answers: real software, an emulator or nothing never takes the class this way
+    expect(accepted(dep({ label: "real", backing: "local", trust: "made_by_rovara", recordedOn: undefined })).success).toBe(false);
+    expect(accepted(dep({ label: "rovara_local_aws", backing: "emulated", trust: "made_by_rovara", recordedOn: undefined })).success).toBe(false);
+    expect(accepted(dep({ label: "hand_written_fake", trust: "recorded" })).success).toBe(false);
   });
   const mock = { setId: "payments-mocks", version: 2, branch: "main", madeIn: "this_task", store: "rovara" };
   const made = (over: Record<string, unknown> = {}) => dep({ label: "rovara_made_fake", trust: "made_by_rovara", recordedOn: undefined, mock, ...over });
@@ -135,6 +146,41 @@ describe("old v1 dependency rows read with the new words", () => {
   });
   it("is Real for the old word 'real' only when real software ran", () => {
     expect(evidenceDependencyV1ToV2(v1({ backing: "fake", label: "recorded_fake" })).trust).not.toBe("real");
+  });
+  it("makes a fake row with any made-up answers Made by Rovara, whatever else it was, with no recording day (DECISIONS 169, rework b)", () => {
+    for (const label of ["recorded_fake", "hand_written_fake", "rovara_made_fake"] as const) {
+      const row = evidenceDependencyV1ToV2(v1({ backing: "fake", label, recordedAt: "2026-11-12T10:00:00.000Z", madeUpAnswers: 1 }));
+      expect(row.trust, label).toBe("made_by_rovara");
+      expect(row.recordedOn, label).toBeUndefined();
+      expect(trustClassCountsTowardProof(row.trust), label).toBe(false);
+    }
+    // no made-up answers: the class its label earns, exactly as before
+    expect(evidenceDependencyV1ToV2(v1({ backing: "fake", label: "recorded_fake", recordedAt: "2026-11-12T10:00:00.000Z", madeUpAnswers: 0 })).trust).toBe("recorded");
+    expect(evidenceDependencyV1ToV2(v1({ backing: "fake", label: "hand_written_fake" })).trust).toBe("simulated");
+  });
+  it("reads a made-up count that is not a whole number as unknown, so Made by Rovara, never a better class (review 2 L6)", () => {
+    expect(evidenceDependencyTrustClass({ label: "recorded_fake", madeUpAnswers: 3 })).toBe("made_by_rovara");
+    expect(evidenceDependencyTrustClass({ label: "recorded_fake" })).toBe("recorded");
+    for (const odd of ["3", "0", -1, 1.5, Number.NaN, null]) expect(evidenceDependencyTrustClass({ label: "recorded_fake", madeUpAnswers: odd as never }), String(odd)).toBe("made_by_rovara");
+    expect(evidenceDependencyTrustClass({ label: "a_newer_label", madeUpAnswers: 0 })).toBe("simulated");
+    expect(evidenceDependencyTrustClass({ label: "a_newer_label", madeUpAnswers: 2 })).toBe("made_by_rovara");
+  });
+  it("treats a fake that may make up answers, whose count was not read, as Made by Rovara (review 2 M2)", () => {
+    // no ledger read: no usage, so the made-up count is unknown
+    expect(evidenceDependencyTrustClass({ label: "recorded_fake" }, { makesUpAnswers: true })).toBe("made_by_rovara");
+    expect(evidenceDependencyTrustClass({ label: "hand_written_fake" }, { makesUpAnswers: true })).toBe("made_by_rovara");
+    // the ledger was read and counted none made up: the label's own class
+    expect(evidenceDependencyTrustClass({ label: "recorded_fake", usage: { requests: 4, unmatched: 0, faults: 0 } }, { makesUpAnswers: true })).toBe("recorded");
+    expect(evidenceDependencyTrustClass({ label: "recorded_fake", usage: { requests: 4, unmatched: 0, faults: 0 }, madeUpAnswers: 1 }, { makesUpAnswers: true })).toBe("made_by_rovara");
+    // a fake that never makes up answers, or one whose setting is not known (old callers): as before
+    expect(evidenceDependencyTrustClass({ label: "recorded_fake" }, { makesUpAnswers: false })).toBe("recorded");
+    expect(evidenceDependencyTrustClass({ label: "recorded_fake" })).toBe("recorded");
+    // only a fake: other labels are unaffected
+    expect(evidenceDependencyTrustClass({ label: "real" }, { makesUpAnswers: true })).toBe("real");
+    const row = evidenceDependencyV1ToV2({ name: "Payments", backing: "fake", label: "recorded_fake", recordedAt: "2026-11-12T10:00:00.000Z" }, "http_api", { makesUpAnswers: true });
+    expect(row).toMatchObject({ trust: "made_by_rovara" });
+    expect(row.recordedOn).toBeUndefined();
+    expect(EvidencePackV2Schema.safeParse(v2Pack({ dependencies: [row] })).success).toBe(true);
   });
 });
 
@@ -209,8 +255,18 @@ describe("the trust class of a backing", () => {
     expect(testEnvBackingTrustClass({ kind: "local", catalogId: "postgres@16", config: {} })).toBe("real");
     expect(testEnvBackingTrustClass({ kind: "project_image", imageId: "app-image" } as never)).toBe("real");
   });
-  it("is Recorded only for a fake that says it is a recording, and never Real", () => {
-    expect(testEnvBackingTrustClass(fake({ origin: "recorded", recordedOn: "2026-11-12" }))).toBe("recorded");
+  const recordedSet = { origin: "recorded", recordedAt: "2026-11-12T10:00:00.000Z" } as const;
+  it("is Recorded only when the fixture store says the set is a recording with its day, and never Real (review L1)", () => {
+    expect(testEnvBackingTrustClass(fake(), recordedSet)).toBe("recorded");
+    expect(testEnvBackingTrustClass(fake({ origin: "customer" }), recordedSet)).toBe("recorded");
+    expect(testEnvBackingTrustClass(fake({ origin: "recorded", recordedOn: "2026-11-12" }), recordedSet)).toBe("recorded");
+  });
+  it("never takes 'recorded' from the plan's own word: the store decides, and the plan can only make it weaker (review L1)", () => {
+    expect(testEnvBackingTrustClass(fake({ origin: "recorded", recordedOn: "2026-11-12" }))).toBe("simulated");
+    expect(testEnvBackingTrustClass(fake({ origin: "recorded", recordedOn: "2026-11-12" }), { origin: "hand_written" })).toBe("simulated");
+    expect(testEnvBackingTrustClass(fake(), { origin: "recorded" })).toBe("simulated");
+    expect(testEnvBackingTrustClass(fake(), { origin: "Recorded", recordedAt: "2026-11-12T10:00:00.000Z" })).toBe("simulated");
+    expect(testEnvBackingTrustClass(fake({ origin: "rovara_task", mockSet }), recordedSet)).toBe("made_by_rovara");
   });
   it("is Simulated for a customer's fake, an unlabelled fake, an emulator and a test that fakes it itself", () => {
     expect(testEnvBackingTrustClass(fake({ origin: "customer" }))).toBe("simulated");
@@ -225,10 +281,11 @@ describe("the trust class of a backing", () => {
   it("is the same class the evidence label of the backing earns", () => {
     for (const [backing, label] of [
       [{ kind: "vendor_test", accountId: "payments-test" }, evidenceDependencyLabelFor({ backing: "vendor_test" })],
-      [{ kind: "fake", fixtureSetRef: sha("a"), unmatched: "fail", provenance: { origin: "recorded", recordedOn: "2026-11-12" } }, evidenceDependencyLabelFor({ backing: "fake", recorded: true })],
       [{ kind: "fake", fixtureSetRef: sha("a"), unmatched: "fail", provenance: { origin: "rovara_task", mockSet } }, evidenceDependencyLabelFor({ backing: "fake", recorded: false, madeByRovara: true })],
       [{ kind: "fake", fixtureSetRef: sha("a"), unmatched: "fail", provenance: { origin: "customer" } }, evidenceDependencyLabelFor({ backing: "fake", recorded: false })],
     ] as const) expect(cls(backing), label).toBe(trustClassOf(label));
+    // a recorded set: the store says so, as the evidence's own label does (the broker test checks pinnedFakeOf against this for every combination)
+    expect(testEnvBackingTrustClass(fake(), recordedSet)).toBe(trustClassOf(evidenceDependencyLabelFor({ backing: "fake", recorded: true })));
   });
 });
 
@@ -239,40 +296,48 @@ describe("what counts toward the proof that a change works", () => {
     expect(trustClassCountsTowardProof(undefined)).toBe(false);
     expect(trustClassCountsTowardProof("newer")).toBe(false);
   });
-  it("counts scripted replies only from the project's set from before the task or from an independent agent (DECISIONS 161)", () => {
-    expect([...SCRIPTED_REPLY_SOURCES]).toEqual(["project_set", "independent_agent", "coding_agent"]);
-    expect(scriptedRepliesCountTowardProof("project_set")).toBe(true);
-    expect(scriptedRepliesCountTowardProof("independent_agent")).toBe(true);
-    expect(scriptedRepliesCountTowardProof("coding_agent")).toBe(false);
-    expect(scriptedRepliesCountTowardProof(undefined)).toBe(false);
-    expect(scriptedRepliesCountTowardProof("the_coding_agent_says_so")).toBe(false);
+  it("counts scripted replies by the Proof table's one rule (DECISIONS 192a): before the task and independent count, replies written in this task only when the real model agreed", () => {
+    expect([...REPLY_PROVENANCES]).toEqual(["before_task", "independent", "task_made"]);
+    expect(scriptedRepliesCountTowardProof("before_task")).toBe(true);
+    expect(scriptedRepliesCountTowardProof("independent")).toBe(true);
+    expect(scriptedRepliesCountTowardProof("task_made")).toBe(false);
+    expect(scriptedRepliesCountTowardProof("task_made", "confirmed")).toBe(true);
+    expect(scriptedRepliesCountTowardProof("task_made", "unconfirmed")).toBe(false);
+    expect(scriptedRepliesCountTowardProof("task_made", "disagreed")).toBe(false);
+    expect(scriptedRepliesCountTowardProof("task_made", "Confirmed")).toBe(false);
+    // a value this build does not know never counts, even with a confirmed real-model run
+    for (const value of [undefined, "project_set", "independent_agent", "coding_agent", "failure_pack", "unmatched", "not_served", "__proto__", 1]) expect(scriptedRepliesCountTowardProof(value, "confirmed"), String(value)).toBe(false);
   });
-  it("words each source, and the coding agent's replies say they are not counted", () => {
-    expect(SCRIPTED_REPLY_SOURCE_WORDS.independent_agent).toBe("scripted replies written independently in this task");
-    expect(SCRIPTED_REPLY_SOURCE_WORDS.coding_agent).toBe("scripted replies added in this task (not counted)");
-    expect(SCRIPTED_REPLY_SOURCE_WORDS.project_set).toBe("scripted replies from before this task");
+  it("uses one vocabulary: the reply-set provenance words, and none of the superseded ones", () => {
+    expect(REPLY_PROVENANCE_LABELS.task_made).toBe("scripted replies written in this task");
+    for (const words of Object.values(REPLY_PROVENANCE_LABELS).filter((_, index) => index < 3)) expect(words).not.toContain("not counted");
+    expect(AGENT_REPLIES_UNCONFIRMED_WORDS).toBe("proven with scripted replies written in this task: check them");
   });
   it("counts a check only when its kind proves, its class counts and (for scripted replies) the replies count", () => {
     expect(checkCountsTowardProof({ kind: "test" })).toBe(true);
     expect(checkCountsTowardProof({ kind: "test", trust: "real" })).toBe(true);
     expect(checkCountsTowardProof({ kind: "lint", trust: "real" })).toBe(false);
     expect(checkCountsTowardProof({ kind: "test", trust: "made_by_rovara" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "independent_agent" })).toBe(true);
-    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "project_set" })).toBe(true);
-    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "coding_agent" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "independent" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "before_task" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "task_made" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "task_made", realModel: "confirmed" })).toBe(true);
+    // a proof with scripted replies and no stated provenance reads as the Proof table reads it today: proven with scripted AI replies
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies" })).toBe(true);
   });
-  it("never counts scripted replies from a source that does not count, even when the proof basis is not stated (review M1)", () => {
-    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", scriptedReplies: "coding_agent" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "test", scriptedReplies: "coding_agent" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "test", scriptedReplies: "somebody_else" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "test", scriptedReplies: "independent_agent" })).toBe(true);
-    expect(checkCountsTowardProof({ kind: "test", proofBasis: "something_newer", scriptedReplies: "independent_agent" })).toBe(false);
+  it("gives a reply case the same answer as the Proof table: task_made counts only when confirmed, whatever the proof basis says (review M1)", () => {
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", replies: "task_made" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", replies: "task_made", realModel: "unconfirmed" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", replies: "task_made", realModel: "disagreed" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", replies: "task_made", realModel: "confirmed" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", replies: "somebody_else", realModel: "confirmed" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", replies: "independent" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", proofBasis: "something_newer", replies: "independent" })).toBe(false);
   });
   it("never counts an eval as 'Proven': it has its own labels (DECISIONS 170)", () => {
     expect(checkKindInfo("eval")?.countsTowardProof).toBe(false);
     expect(checkCountsTowardProof({ kind: "eval" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "eval", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "independent_agent" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "eval", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "independent" })).toBe(false);
     expect(checkCountsTowardProof({ kind: "eval", trust: "real" })).toBe(false);
   });
   it("fails closed on a kind it does not know", () => {
@@ -293,65 +358,101 @@ describe("per-test answers from every source", () => {
   const recorded = { source: "recorded", dependency: "payments", recordedOn: "2026-11-12" } as const;
   const emulated = { source: "emulated", dependency: "s3" } as const;
   const rovara = { source: "made_by_rovara", dependency: "payments" } as const;
-  const scripted = (repliesBy: "project_set" | "independent_agent" | "coding_agent") => ({ source: "scripted", dependency: "model", repliesBy }) as const;
+  const scripted = (provenance: "before_task" | "independent" | "task_made") => ({ source: "scripted", dependency: "model", provenance }) as const;
 
   it("still reads every record a shipped worker writes", () => {
     for (const record of [passed("a", []), passed("a", [faked]), passed("a", [recorded]), { testId: "a", status: "not_run", uses: [], notRun: { dependency: "x", reason: "no_recording" } }]) expect(TestAnswerRecordSchema.safeParse(record).success).toBe(true);
   });
   it("accepts the new sources and refuses a scripted source with no author or an unknown one", () => {
-    for (const use of [emulated, rovara, scripted("independent_agent")]) expect(TestAnswerRecordSchema.safeParse(passed("a", [use])).success).toBe(true);
+    for (const use of [emulated, rovara, scripted("independent")]) expect(TestAnswerRecordSchema.safeParse(passed("a", [use])).success).toBe(true);
     expect(TestAnswerRecordSchema.safeParse(passed("a", [{ source: "scripted", dependency: "model" } as never])).success).toBe(false);
-    expect(TestAnswerRecordSchema.safeParse(passed("a", [{ source: "scripted", dependency: "model", repliesBy: "somebody" } as never])).success).toBe(false);
+    expect(TestAnswerRecordSchema.safeParse(passed("a", [{ source: "scripted", dependency: "model", provenance: "somebody" } as never])).success).toBe(false);
+    // the superseded words are refused, not read as a provenance
+    expect(TestAnswerRecordSchema.safeParse(passed("a", [{ source: "scripted", dependency: "model", repliesBy: "independent_agent" } as never])).success).toBe(false);
+    expect(TestAnswerRecordSchema.safeParse(passed("a", [{ source: "scripted", dependency: "model", provenance: "independent_agent" } as never])).success).toBe(false);
     expect(TestAnswerRecordSchema.safeParse(passed("a", [{ source: "real", dependency: "x" } as never])).success).toBe(false);
   });
   it("gives each source its own state, apart from 'passed'", () => {
     expect(testResultState(passed("a", [emulated]))).toBe("passed_emulated");
     expect(testResultState(passed("a", [rovara]))).toBe("passed_made_by_rovara");
-    expect(testResultState(passed("a", [scripted("independent_agent")]))).toBe("passed_scripted");
+    expect(testResultState(passed("a", [scripted("independent")]))).toBe("passed_scripted");
     expect(testResultState(passed("a", []))).toBe("passed");
     for (const state of TEST_RESULT_STATES) expect(TEST_RESULT_STATE_WORDS[state].length).toBeGreaterThan(0);
     expect(new Set(Object.values(TEST_RESULT_STATE_WORDS)).size).toBe(TEST_RESULT_STATES.length);
   });
   it("names the least trusted answer: Made by Rovara, then scripted, then faked, then an emulator, then a recording", () => {
-    expect(testResultState(passed("a", [recorded, emulated, faked, scripted("project_set"), rovara]))).toBe("passed_made_by_rovara");
-    expect(testResultState(passed("a", [recorded, emulated, faked, scripted("project_set")]))).toBe("passed_scripted");
+    expect(testResultState(passed("a", [recorded, emulated, faked, scripted("before_task"), rovara]))).toBe("passed_made_by_rovara");
+    expect(testResultState(passed("a", [recorded, emulated, faked, scripted("before_task")]))).toBe("passed_scripted");
     expect(testResultState(passed("a", [recorded, emulated, faked]))).toBe("passed_faked");
     expect(testResultState(passed("a", [recorded, emulated]))).toBe("passed_emulated");
     expect(testResultState(passed("a", [recorded]))).toBe("passed_recorded");
   });
   it("maps each use to one trust class, and a recording to Recorded, never Real", () => {
-    expect(testAnswerTrustClass(faked)).toBe("simulated");
+    // a faked answer may have been made up, so its class is Made by Rovara (review 2 M1)
+    expect(testAnswerTrustClass(faked)).toBe("made_by_rovara");
     expect(testAnswerTrustClass(recorded)).toBe("recorded");
     expect(testAnswerTrustClass(emulated)).toBe("simulated");
     expect(testAnswerTrustClass(rovara)).toBe("made_by_rovara");
-    expect(testAnswerTrustClass(scripted("independent_agent"))).toBe("simulated");
+    expect(testAnswerTrustClass(scripted("independent"))).toBe("simulated");
     expect(testAnswerTrustClass({ source: "real", dependency: "x" } as never)).toBe("simulated");
-    expect(testTrustClasses(passed("a", [recorded, faked, recorded]))).toEqual(["recorded", "simulated"]);
+    expect(testTrustClasses(passed("a", [recorded, faked, recorded]))).toEqual(["recorded", "made_by_rovara"]);
+    expect(testTrustClasses(passed("a", [recorded, emulated, recorded]))).toEqual(["recorded", "simulated"]);
     expect(testTrustClasses(passed("a", []))).toEqual([]);
   });
   it("counts a passing test toward the proof only when every answer behind it counts", () => {
-    expect(testAnswerCountsTowardProof(faked)).toBe(true);
     expect(testAnswerCountsTowardProof(recorded)).toBe(true);
+    expect(testAnswerCountsTowardProof(emulated)).toBe(true);
     expect(testAnswerCountsTowardProof(rovara)).toBe(false);
-    expect(testAnswerCountsTowardProof(scripted("independent_agent"))).toBe(true);
-    expect(testAnswerCountsTowardProof(scripted("coding_agent"))).toBe(false);
+    expect(testAnswerCountsTowardProof(scripted("independent"))).toBe(true);
+    expect(testAnswerCountsTowardProof(scripted("before_task"))).toBe(true);
+    expect(testAnswerCountsTowardProof(scripted("task_made"))).toBe(false);
+    expect(testAnswerCountsTowardProof(scripted("task_made"), "confirmed")).toBe(true);
+    expect(testAnswerCountsTowardProof(scripted("task_made"), "disagreed")).toBe(false);
     expect(testAnswerCountsTowardProof({ source: "real", dependency: "x" } as never)).toBe(false);
     expect(testCountsTowardProof(passed("a", []))).toBe(true);
-    expect(testCountsTowardProof(passed("a", [faked, recorded]))).toBe(true);
-    expect(testCountsTowardProof(passed("a", [faked, rovara]))).toBe(false);
-    expect(testCountsTowardProof(passed("a", [scripted("independent_agent"), scripted("coding_agent")]))).toBe(false);
+    expect(testCountsTowardProof(passed("a", [recorded, emulated]))).toBe(true);
+    expect(testCountsTowardProof(passed("a", [recorded, rovara]))).toBe(false);
+    expect(testCountsTowardProof(passed("a", [scripted("independent"), scripted("task_made")]))).toBe(false);
+    expect(testCountsTowardProof(passed("a", [scripted("independent"), scripted("task_made")]), "confirmed")).toBe(true);
     expect(testCountsTowardProof({ testId: "a", status: "failed", uses: [] })).toBe(false);
     expect(testCountsTowardProof({ testId: "a", status: "not_run", uses: [], notRun: { dependency: "x", reason: "no_recording" } })).toBe(false);
   });
+  it("gives every source a class whose counting agrees with the answer's own counting (review 2 M1)", () => {
+    const uses: TestAnswerRecord["uses"] = [faked, recorded, emulated, rovara, scripted("before_task"), scripted("independent"), scripted("task_made")];
+    for (const use of uses) {
+      const classCounts = trustClassCountsTowardProof(testAnswerTrustClass(use));
+      // an answer that counts always has a counting class
+      for (const realModel of [undefined, "confirmed", "unconfirmed", "disagreed"]) if (testAnswerCountsTowardProof(use, realModel)) expect(classCounts, JSON.stringify(use)).toBe(true);
+      // and for every source but scripted replies (whose counting also needs the real-model result), the two are equal
+      if (use.source !== "scripted") expect(classCounts, JSON.stringify(use)).toBe(testAnswerCountsTowardProof(use));
+    }
+    // and every scripted provenance a class can stand for counts once the real model agreed
+    for (const provenance of REPLY_PROVENANCES) expect(testAnswerCountsTowardProof(scripted(provenance), "confirmed"), provenance).toBe(trustClassCountsTowardProof(testAnswerTrustClass(scripted(provenance))));
+  });
+  it("never counts a faked answer: the record cannot tell a hand-written answer from one the fake made up (DECISIONS 169, rework b)", () => {
+    expect(testAnswerCountsTowardProof(faked)).toBe(false);
+    expect(testCountsTowardProof(passed("a", [faked]))).toBe(false);
+    expect(testCountsTowardProof(passed("a", [recorded, faked]))).toBe(false);
+    // one made-up answer (written as made_by_rovara) keeps a test out of the proof whatever else answered it
+    expect(testCountsTowardProof(passed("a", [recorded, emulated, rovara]))).toBe(false);
+  });
   it("writes the pull request lines with fixed words, one per state, and never calls a scripted or made-up answer real", () => {
-    const lines = testAnswerSummaryLines([passed("t1", [rovara]), passed("t2", [scripted("independent_agent")]), passed("t3", [scripted("coding_agent")]), passed("t4", [emulated]), passed("t5", [faked])], { service: "the payments API", realThing: "answer" });
+    const lines = testAnswerSummaryLines([passed("t1", [rovara]), passed("t2", [scripted("independent")]), passed("t3", [scripted("task_made")]), passed("t4", [emulated]), passed("t5", [faked])], { service: "the payments API", realThing: "answer" });
     expect(lines).toEqual([
       "1 test passed against faked the payments API answers (not real answer): t5",
       "1 test passed against the payments API answers from Rovara local AWS (not real answer): t4",
-      "1 test passed against scripted the payments API replies (scripted replies written independently in this task; not real answer): t2",
-      "1 test passed against scripted the payments API replies (scripted replies added in this task (not counted); not real answer): t3",
+      "1 test passed against scripted replies written in this task for the payments API (not real answer): t3",
+      "1 test passed against scripted replies written independently in this task for the payments API (not real answer): t2",
       "1 test passed against answers Rovara made for the payments API (Made by Rovara, not counted toward the proof; not real answer): t1",
     ]);
+  });
+  it("names each scripted group with the reply-set provenance words, the one that counts least first, and never says '(not counted)'", () => {
+    const lines = testAnswerSummaryLines([passed("a", [scripted("before_task")]), passed("b", [scripted("before_task"), scripted("task_made")])], { service: "Gemini", realThing: "model output" });
+    expect(lines).toEqual([
+      "1 test passed against scripted replies written in this task for Gemini (not real model output): b",
+      "1 test passed against scripted replies from the project's reply set (written before the task) for Gemini (not real model output): a",
+    ]);
+    expect(lines.join("\n")).not.toContain("not counted");
   });
   it("keeps the shipped lines for faked and recorded answers word for word", () => {
     expect(testAnswerSummaryLines([passed("a", [faked]), passed("b", [recorded])], { service: "SageMaker", realThing: "model output" })).toEqual([
@@ -378,7 +479,8 @@ describe("a dependency that nothing answered, in the pack's text (review Low)", 
 
 describe("the three proof labels of DECISIONS 170 and the eval states (contract only; TE-F3 gates)", () => {
   it("has Proven, No regression measured (eval) and Improved on eval as separate labels with the owner's words", () => {
-    expect([...CHANGE_PROOF_LABELS]).toEqual(["proven", "no_regression_eval", "improved_eval", "eval_not_qualified"]);
+    expect([...CHANGE_PROOF_LABELS]).toEqual(["proven", "no_regression_eval", "improved_eval", "worse_eval", "eval_not_qualified"]);
+    expect(CHANGE_PROOF_LABEL_WORDS.worse_eval).toBe("Worse on eval");
     expect(CHANGE_PROOF_LABEL_WORDS.proven).toBe("Proven");
     expect(CHANGE_PROOF_LABEL_WORDS.no_regression_eval).toBe("No regression measured (eval)");
     expect(CHANGE_PROOF_LABEL_WORDS.improved_eval).toBe("Improved on eval");
@@ -386,7 +488,7 @@ describe("the three proof labels of DECISIONS 170 and the eval states (contract 
   });
   it("counts only Proven as proof that the change works; an eval label never does", () => {
     expect(changeProofLabelCountsAsProven("proven")).toBe(true);
-    for (const label of ["no_regression_eval", "improved_eval", "eval_not_qualified"]) expect(changeProofLabelCountsAsProven(label), label).toBe(false);
+    for (const label of ["no_regression_eval", "improved_eval", "worse_eval", "eval_not_qualified"]) expect(changeProofLabelCountsAsProven(label), label).toBe(false);
     expect(changeProofLabelCountsAsProven("proven_by_magic")).toBe(false);
     expect(changeProofLabelCountsAsProven(undefined)).toBe(false);
   });
@@ -395,11 +497,21 @@ describe("the three proof labels of DECISIONS 170 and the eval states (contract 
     expect(changeProofLabelQualified("no_regression_eval")).toBe(true);
     expect(changeProofLabelQualified("improved_eval")).toBe(true);
     expect(changeProofLabelQualified("eval_not_qualified")).toBe(false);
+    expect(changeProofLabelQualified("worse_eval")).toBe(false);
     expect(changeProofLabelQualified("something_newer")).toBe(false);
   });
   it("reads a gated eval result as its own label, never as Proven", () => {
     expect(evalProofLabel({ outcome: "no_regression_eval" })).toEqual({ label: "no_regression_eval", words: "No regression measured (eval)" });
     expect(evalProofLabel({ outcome: "improved_eval" })).toEqual({ label: "improved_eval", words: "Improved on eval" });
+  });
+  it("reads a gated measured regression as 'Worse on eval', a failing check, never 'not qualified' (DECISIONS 192b, rework c)", () => {
+    expect(evalProofLabel({ outcome: "worse_eval" })).toEqual({ label: "worse_eval", words: "Worse on eval" });
+    expect(evalProofLabel({ outcome: "worse_eval", reason: "not_gated" })).toEqual({ label: "worse_eval", words: "Worse on eval" });
+    expect(evalProofLabel({ outcome: "worse_eval" }).words).not.toContain("not qualified");
+    expect(changeProofLabelFailsCheck("worse_eval")).toBe(true);
+    for (const label of ["proven", "no_regression_eval", "improved_eval", "eval_not_qualified", "Worse on eval", undefined]) expect(changeProofLabelFailsCheck(label), String(label)).toBe(false);
+    // the words are the shipped AI evidence label's own
+    expect(CHANGE_PROOF_LABEL_WORDS.worse_eval).toBe("Worse on eval");
   });
   it("reads an eval result that is not gated, not known or says 'proven' as 'not qualified', with a fixed reason and never a pass", () => {
     expect(evalProofLabel({})).toEqual({ label: "eval_not_qualified", words: "not qualified: the result was not gated" });

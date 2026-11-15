@@ -41,25 +41,21 @@ export interface AllowedBackings {
 }
 
 /**
- * The setting as it ships for a company that has none stored: own images are off until a second admin turns them on (9.5). Fakes that make up answers are ON since TE-A3 (owner O11, DECISIONS 155(b)): Rovara-made mocks are
- * used at once, labelled "Made by Rovara" and never counted toward the proof that a change works, so a project is no longer left with "not run" for want of a recording. Before TE-A3 this was off (`LEGACY_ALLOWED_BACKINGS`).
+ * The setting as it ships: own images are off until a second admin turns them on (9.5). Fakes that make up answers are ON since TE-A3 (owner O11, DECISIONS 155(b)): made-up answers are used at once, labelled
+ * "Made by Rovara" and never counted toward the proof that a change works, so a project is no longer left with "not run" for want of a recording (a fake that makes up answers still needs a second person's approval).
+ * DECISIONS 169: every company gets this default, including companies from before 0.5.18a, and none is stored as "off" for made-up answers; only a person's own saved choice turns it off.
  */
 export const DEFAULT_ALLOWED_BACKINGS: AllowedBackings = { real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: true };
-/**
- * The setting as it shipped before TE-A3, for a stored setting that never said anything about made-up answers. The default is ON for every company (owner decision 169): nothing stores a company's setting yet, and every
- * caller passes `undefined`, which is a company with no setting. A setting that IS stored (an object, even an empty `{}`) is a company's own saved choice, and a box it leaves out is what that box was when it was saved,
- * which for made-up answers was off: only a person turns it on, so `{}` is not the same as no setting. A migration that stores today's settings writes this.
- */
-export const LEGACY_ALLOWED_BACKINGS: AllowedBackings = { ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false };
 const ALLOWED_KEYS = Object.keys(DEFAULT_ALLOWED_BACKINGS) as Array<keyof AllowedBackings>;
 
 /**
- * The backings allowed after a company's setting and every narrower layer (a project's own setting, a lock). The company's layer sets each box (a company with no setting gets the defaults; a box a stored setting leaves out is `LEGACY_ALLOWED_BACKINGS`'s); every later layer can only
- * turn a box OFF: a box it leaves out, or turns on, changes nothing. A value that is not exactly `false` or `true` is read as off (a mistake errs on the safe side). The order of the narrower layers does not matter.
+ * The backings allowed after a company's setting and every narrower layer (a project's own setting, a lock). The company's layer sets each box; a box it leaves out (or no setting at all, or an empty `{}`) is the
+ * default (DECISIONS 169). Every later layer can only turn a box OFF: a box it leaves out, or turns on, changes nothing. A value that is not exactly `false` or `true` is read as off (a mistake errs on the safe side), and
+ * so is made-up answers for a company setting that is not an object at all. The order of the narrower layers does not matter.
  */
 export function effectiveAllowedBackings(company: Partial<AllowedBackings> | undefined, ...narrower: ReadonlyArray<Partial<AllowedBackings> | undefined>): AllowedBackings {
-  // No setting at all (`undefined`) gets the shipped defaults. A stored setting, even an empty `{}`, keeps what it stored, and a box it never stored is what that box was before TE-A3 (`LEGACY_ALLOWED_BACKINGS`).
-  const result = { ...(company === undefined ? DEFAULT_ALLOWED_BACKINGS : LEGACY_ALLOWED_BACKINGS) };
+  const malformed = company !== undefined && (typeof company !== "object" || company === null || Array.isArray(company));
+  const result = { ...DEFAULT_ALLOWED_BACKINGS, ...(malformed ? { fakeMakesUpAnswers: false } : {}) };
   for (const key of ALLOWED_KEYS) {
     const set = company?.[key];
     if (set !== undefined) result[key] = set === true;
@@ -124,6 +120,8 @@ export interface BackingChoiceInput {
   alsoDeny?: TestEnvProdDeny;
   /** Rovara's own AWS account ids: an account whose role is in one of them is refused. */
   rovaraAccountIds?: readonly string[];
+  /** The company's own model gateway hosts: a test account for one is refused like any AI model host (FIX-0518). */
+  modelGatewayHosts?: readonly string[];
   fixtures: readonly FixtureFact[];
   /** The agent can record or write a fixture set for this family. */
   canMakeFake: boolean;
@@ -156,7 +154,7 @@ export const BACKING_REASON_WORDS: Record<BackingReason, string> = {
 
 export const SKIP_REASONS = [
   "not_allowed", "not_in_catalog", "not_in_edition", "retired", "no_such_version", "not_pinned", "not_aws", "emulator_does_not_cover", "no_project_image",
-  "only_in_sealed_checks", "nightly_only", "no_test_account", "account_not_for_project", "account_not_usable", "account_names_production", "production_list_missing",
+  "only_in_sealed_checks", "nightly_only", "no_test_account", "account_not_for_project", "account_not_usable", "account_names_production", "account_is_model_service", "production_list_missing",
   "fake_not_for_this_kind", "fake_makes_up_answers_not_allowed", "no_fixture_set", "maintainer_choice_unavailable",
 ] as const;
 export type SkipReason = (typeof SKIP_REASONS)[number];
@@ -176,6 +174,7 @@ export const SKIP_REASON_WORDS: Record<SkipReason, string> = {
   account_not_for_project: "The test account is not approved for this project.",
   account_not_usable: "The test account is not active and approved, or it has expired.",
   account_names_production: "The test account names something on the production list.",
+  account_is_model_service: "The test account is for an AI model service. AI calls go through Rovara's model helper, not a test account.",
   production_list_missing: "The production list is empty, so no test account can be used.",
   fake_not_for_this_kind: "A fake cannot stand in for this kind of dependency.",
   fake_makes_up_answers_not_allowed: "Only a fake that makes up answers exists, and the company does not allow that.",
@@ -263,8 +262,11 @@ function emulatedStep(input: BackingChoiceInput): Step<ChosenBacking> {
 }
 
 /** The optional parts of the production check, passed only when given. */
-function prodOptions(input: BackingChoiceInput): { alsoDeny?: TestEnvProdDeny; rovaraAccountIds?: readonly string[] } {
-  return { ...(input.alsoDeny === undefined ? {} : { alsoDeny: input.alsoDeny }), ...(input.rovaraAccountIds === undefined ? {} : { rovaraAccountIds: input.rovaraAccountIds }) };
+function prodOptions(input: BackingChoiceInput): { alsoDeny?: TestEnvProdDeny; rovaraAccountIds?: readonly string[]; modelGatewayHosts?: readonly string[] } {
+  return {
+    ...(input.alsoDeny === undefined ? {} : { alsoDeny: input.alsoDeny }), ...(input.rovaraAccountIds === undefined ? {} : { rovaraAccountIds: input.rovaraAccountIds }),
+    ...(input.modelGatewayHosts === undefined ? {} : { modelGatewayHosts: input.modelGatewayHosts }),
+  };
 }
 
 /** The test account step, as if the place were sealed; the caller applies the place and the nightly-only rules. */
@@ -280,6 +282,8 @@ function testAccountStep(input: BackingChoiceInput): Step<ChosenBacking> {
   const clean = problems.filter((entry) => entry.problems.length === 0).map((entry) => entry.account.id).sort();
   const first = clean[0];
   if (first !== undefined) return { pick: { kind: "test_account", accountId: first } };
+  // An account for an AI model service is named first, whatever else is true of the others: its words say why, and it is never "production".
+  if (problems.some((entry) => entry.problems.some((problem) => problem.kind === "model_host"))) return { skip: "account_is_model_service" };
   return { skip: problems.some((entry) => entry.problems.some((problem) => problem.kind === "prod_deny_missing")) ? "production_list_missing" : "account_names_production" };
 }
 

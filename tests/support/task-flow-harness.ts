@@ -24,7 +24,7 @@ import { createAllowAllAdmission, createNoopAuditSink, localOwnerPrincipal } fro
 import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import type { TaskCaller, TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
+import type { TaskStartCaller, TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 
 export const COMPANY: OrgId = IMPLICIT_COMPANY_ID;
@@ -46,8 +46,8 @@ export interface Harness {
   queues: QueueService;
   machines: FakeWorkerMachines;
   clock: { now: number; advance(seconds: number): void };
-  owner: TaskCaller;
-  guest: TaskCaller;
+  owner: TaskStartCaller;
+  guest: TaskStartCaller;
   audit: AuditEvent[];
   grants: Array<{ operationId: string }>;
   registerProject(project?: ProjectDefinition): Promise<void>;
@@ -101,10 +101,10 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   };
   // The project source is the store reader a deployment wires.
   deps.projects = createStoreProjectSource(store, COMPANY);
-  const owner: TaskCaller = { principal: localOwnerPrincipal({ companyId: COMPANY }), client: "test" };
+  const owner: TaskStartCaller = { principal: localOwnerPrincipal({ companyId: COMPANY }), client: "test", origin: "app" };
   const guestPrincipal: Principal = { companyId: COMPANY, personId: "guest", displayName: "Guest", roles: [], provider: "local-owner" };
   return {
-    flow: createTaskFlow(deps), deps, store, queues, machines, clock, owner, guest: { principal: guestPrincipal }, audit, grants,
+    flow: createTaskFlow(deps), deps, store, queues, machines, clock, owner, guest: { principal: guestPrincipal, origin: "app" }, audit, grants,
     async registerProject(project = definition) {
       await store.put({ item: { ...projectRevisionKey(COMPANY, project.name, project.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(project)) as JsonValue } });
       await store.put({ item: { ...orgProjectCatalogKey(COMPANY, project.name), entityType: "PROJECT_CATALOG", latestRevision: project.revision } });

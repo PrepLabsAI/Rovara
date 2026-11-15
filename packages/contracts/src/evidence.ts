@@ -3,6 +3,7 @@
 // text and checks every count against the files, so a worker's own summary is never taken as truth. Every list and string is bounded, every text is one plain line
 // (no control or format characters) that readers escape for their own markup, and a pack for any other candidate digest is ignored by the broker.
 import { z } from "zod";
+import { EvidenceAiSchema, readEvidenceAi } from "./evidence-ai.js";
 import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES, isRegisteredCheckKind, partsOutsideKind, type EvidenceTrustClass } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
@@ -241,6 +242,21 @@ export const EVIDENCE_DEPENDENCY_LABEL_TRUST: Record<EvidenceDependencyLabel, Ev
 /** The trust class of a label. A label this build does not know is the weakest class (Simulated), never Real: a newer writer's better word is not trusted by an older reader. */
 export function trustClassOf(label: string): EvidenceTrustClass {
   return Object.hasOwn(EVIDENCE_DEPENDENCY_LABEL_TRUST, label) ? EVIDENCE_DEPENDENCY_LABEL_TRUST[label as EvidenceDependencyLabel] : "simulated";
+}
+/**
+ * The trust class of a dependency row: the class its label earns, except that a row whose fake made up ANY answer is Made by Rovara, whatever else answered (DECISIONS 169 and 155(b): made-up answers are labelled
+ * "Made by Rovara" and never count toward the proof). Fail closed on an unknown count: a count that is not a whole number is read as some, and so is a fake that may make up answers (`pinned.makesUpAnswers`, the
+ * pinned backing's `schema_synth`) whose ledger was not read (no `usage`), unless the count was read as 0. A caller that does not know the pinned fake gets today's reading. The row's words are unchanged.
+ */
+export function evidenceDependencyTrustClass(
+  row: { label: string; madeUpAnswers?: number | undefined; usage?: unknown },
+  pinned?: { makesUpAnswers?: boolean | undefined },
+): EvidenceTrustClass {
+  const count = row.madeUpAnswers;
+  if (count !== undefined && !(Number.isInteger(count) && count >= 0)) return "made_by_rovara";
+  if (count !== undefined && count > 0) return "made_by_rovara";
+  if (pinned?.makesUpAnswers === true && FAKE_LABELS.includes(row.label as EvidenceDependencyLabel) && row.usage === undefined) return "made_by_rovara";
+  return trustClassOf(row.label);
 }
 /** The fixed words of each label. `company_approved` is completed with the service by `evidenceDependencyLabelWords`; a fake that made up answers adds "(+N made-up answers)" there too. */
 export const EVIDENCE_DEPENDENCY_LABEL_WORDS: Record<EvidenceDependencyLabel, string> = {
@@ -509,6 +525,7 @@ export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
  */
 export const EVIDENCE_RAW_ARTIFACT = "evidence-raw.json";
 /** The worker feature that reads `evidenceCapture` (a CHECKS run writes `evidence-raw.json`). The broker sends the field only when the proof switch is on, and never to a worker that does not list this. */
+export const EVAL_ROUND_FEATURE = "task.evalRound.v1" as const;
 export const EVIDENCE_CAPTURE_FEATURE = "task.evidenceCapture.v1" as const;
 export const EVIDENCE_RAW_MAX_BYTES = 2 * 1_048_576;
 export const EvidenceRawCheckSchema = z
@@ -523,6 +540,26 @@ export const EvidenceRawCheckSchema = z
   })
   .strict()
   .superRefine((entry, context) => checkPartsProblems(entry, (path, message) => context.addIssue({ code: "custom", path, message })));
+/** Repository facts only. MR3/MR2b must NEVER use absence from the candidate to skip or narrow tests. */
+const RepositoryEdgesSchema = z.object({
+  edges: z.array(z.object({
+    consumer: line(200), provider: line(200),
+    language: z.enum(["node", "go", "python", "maven", "gradle"]),
+    source: z.enum(["base", "candidate", "both"]),
+  }).strict()).max(64),
+  notes: z.array(z.enum([
+    "ambiguous", "dependency manifest unreadable", "too many repositories or dependencies; tested separately",
+    "tested separately: no cross-repo wiring for maven", "tested separately: no cross-repo wiring for gradle",
+    "tested separately: multi-repository checks run only on the local runner for now",
+  ])).max(8),
+}).strict().superRefine((record, context) => {
+  const keys = new Set<string>();
+  for (const edge of record.edges) {
+    const key = JSON.stringify([edge.consumer, edge.provider, edge.language]);
+    if (edge.consumer === edge.provider || keys.has(key)) context.addIssue({ code: "custom", message: "repository edges must be distinct and connect different repositories" });
+    keys.add(key);
+  }
+});
 export const EvidenceRawSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -533,6 +570,7 @@ export const EvidenceRawSchema = z
     browser: EvidencePackSchema.shape.browser.optional(),
     /** Test services: what the worker saw of the dependencies it started for the round, and the names the sealed tests asked for that no dependency answers. FACTS only: the broker decides every label from the pinned plan. */
     testServices: TestServicesUsageRecordSchema.optional(),
+    repositoryEdges: RepositoryEdgesSchema.optional(),
   })
   .strict()
   .superRefine((raw, context) => {
@@ -636,16 +674,19 @@ const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "a date");
 const MeasureNumberSchema = z.number().min(-1e12).max(1e12);
 const MoneySchema = z.number().min(0).max(1e9);
 
+/** Shared evidence measure: file adapters reuse these fields instead of defining another numeric or label shape. */
+export const EvidenceMeasureSchema = z.object({
+  name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
+  direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: z.object({ low: MeasureNumberSchema, high: MeasureNumberSchema }).strict().optional(),
+}).strict();
+
 /** The schemas of a v2 pack. The writer's (`strict`) refuses an unregistered kind and runs every cross-check; the reader's (`reader`, walked by `tolerantRead`) takes any kind id and runs none (the caller makes the few it needs). */
 function evidencePackV2Schemas(mode: Mode) {
   const obj = <S extends z.ZodRawShape>(shape: S) => z.object(shape).strict();
   const artifact = ArtifactRefSchema;
   const kind = mode === "strict" ? z.string().regex(CHECK_KIND_ID_PATTERN).refine(isRegisteredCheckKind, "a registered check kind") : line(64);
 
-  const measure = obj({
-    name: line(80), unit: line(20), base: MeasureNumberSchema, head: MeasureNumberSchema, spread: z.number().min(0).max(1e12).optional(),
-    direction: z.enum(EVIDENCE_MEASURE_DIRECTIONS), band: obj({ low: MeasureNumberSchema, high: MeasureNumberSchema }).optional(),
-  });
+  const measure = EvidenceMeasureSchema;
   const pair = obj({ id: line(80), before: artifact.optional(), after: artifact.optional(), diff: artifact.optional() });
 
   const checkObject = obj({
@@ -697,7 +738,9 @@ function evidencePackV2Schemas(mode: Mode) {
     ? dependency.superRefine((entry, context) => {
       // TE-A3 (O11, O51): the class is the one the label earns, and the label belongs to the backing that ran, so a recording can never be written as Real and a fake never as real software.
       if (EVIDENCE_DEPENDENCY_LABEL_BACKING[entry.label] !== entry.backing) context.addIssue({ code: "custom", path: ["label"], message: "the label belongs to the backing that ran" });
-      if (entry.trust !== trustClassOf(entry.label)) context.addIssue({ code: "custom", path: ["trust"], message: "the trust class is the one the label earns" });
+      // A fake that made up answers is written as Made by Rovara (`evidenceDependencyTrustClass`): the one weaker class a fake's row may take instead of its label's, never a better one.
+      const madeUp = entry.trust === "made_by_rovara" && FAKE_LABELS.includes(entry.label);
+      if (entry.trust !== trustClassOf(entry.label) && !madeUp) context.addIssue({ code: "custom", path: ["trust"], message: "the trust class is the one the label earns" });
       // Where an answer's facts may be stated: a mock set only for a fake Rovara made (and one is required), a recording and its day only for a recorded answer.
       if (entry.label === "rovara_made_fake" && entry.mock === undefined) context.addIssue({ code: "custom", path: ["mock"], message: "a fake made by Rovara names its stored mock set" });
       if (entry.label !== "rovara_made_fake" && entry.mock !== undefined) context.addIssue({ code: "custom", path: ["mock"], message: "only a fake made by Rovara has a mock set" });
@@ -708,6 +751,7 @@ function evidencePackV2Schemas(mode: Mode) {
     : dependency;
 
   const sections = {
+    ai: EvidenceAiSchema.optional(),
     proof: obj({
       verdicts: z.array(obj({ checkId: line(64).optional(), testId: line(TEST_ID_MAX).optional(), verdict: TestProofVerdictSchema, reason: TestProofReasonSchema.optional() })).max(EVIDENCE_PROOF_VERDICTS_MAX),
       provenCount: CountSchema,
@@ -878,6 +922,12 @@ export function readEvidencePack(input: unknown): EvidencePackRead {
       if (key === "notTested") setOwnProperty(out, key, []);
       continue;
     }
+    if (key === "ai") {
+      const ai = readEvidenceAi(raw);
+      setOwnProperty(out, key, ai ?? {});
+      if (ai === undefined) notePath(key);
+      continue;
+    }
     const read = tolerantRead((V2_READER.sections as Record<string, z.ZodType>)[key]!, raw, key, report);
     if (read.ok && read.value !== undefined) setOwnProperty(out, key, read.value);
     else {
@@ -936,10 +986,14 @@ export interface EvidenceV2Context {
   repositories?: EvidencePackV2["candidate"]["repositories"];
 }
 
-/** A v1 environment's dependency row as a v2 pack's row, with the trust class its label earns (a recording is Recorded, never Real). A v1 row has no kind, so the caller may name one (`other` by default). */
-export function evidenceDependencyV1ToV2(row: EvidenceDependency, kind = "other"): NonNullable<EvidencePackV2["dependencies"]>[number] {
+/**
+ * A v1 environment's dependency row as a v2 pack's row, with its trust class (`evidenceDependencyTrustClass`: a recording is Recorded, never Real; a fake that made up answers is Made by Rovara and states no recording
+ * day). A v1 row has no kind, so the caller may name one (`other` by default).
+ */
+export function evidenceDependencyV1ToV2(row: EvidenceDependency, kind = "other", pinned?: { makesUpAnswers?: boolean | undefined }): NonNullable<EvidencePackV2["dependencies"]>[number] {
   const recordedOn = row.recordedAt?.slice(0, 10);
-  return { name: row.name, kind, backing: row.backing, label: row.label, trust: trustClassOf(row.label), ...(recordedOn === undefined || row.label !== "recorded_fake" ? {} : { recordedOn }) };
+  const trust = evidenceDependencyTrustClass(row, pinned);
+  return { name: row.name, kind, backing: row.backing, label: row.label, trust, ...(recordedOn === undefined || row.label !== "recorded_fake" || trust !== "recorded" ? {} : { recordedOn }) };
 }
 
 /** A v1 pack as a v2 pack, with everything v1 held kept (`evidencePackV2ToV1` gives the same v1 pack back). Validate the result with `EvidencePackV2Schema` before storing it. */

@@ -17,7 +17,7 @@ export interface PinnedDependency {
   /** `emulated` only: the AWS services the plan asked Rovara local AWS for (the broker's own; the worker's ledger is judged against them). */
   awsServices?: readonly string[];
   /** `fake` only: what the broker's fixture store says about the set the plan pinned (never the worker's words). `recordedAt` is the set's own, and only a recorded set has one. */
-  fake?: { origin: "recorded" | "hand_written"; revision?: number; recordedAt?: string; madeByRovara?: boolean };
+  fake?: { origin: "recorded" | "hand_written"; revision?: number; recordedAt?: string; madeByRovara?: boolean; makesUpAnswers?: boolean };
 }
 
 export const BLOCKED_CALLS_ITEM_ID = "blocked-calls";

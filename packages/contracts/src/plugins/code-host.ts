@@ -293,6 +293,10 @@ export const ChangeRequestStatusSchema = z.object({
 }).strict();
 export type ChangeRequestStatus = z.infer<typeof ChangeRequestStatusSchema>;
 
+export const FILE_ENTRY_TYPES = ["file", "executable", "symlink", "submodule"] as const;
+export const FileEntryTypeSchema = z.enum(FILE_ENTRY_TYPES);
+export type FileEntryType = z.infer<typeof FileEntryTypeSchema>;
+
 export const ChangeRequestFileSchema = z.object({
   path: z.string().min(1).max(4_096),
   status: z.string().min(1).max(40),
@@ -300,10 +304,18 @@ export const ChangeRequestFileSchema = z.object({
   deletions: z.number().int().nonnegative(),
   patch: z.string().optional(),
   previousPath: z.string().min(1).max(4_096).optional(),
+  /** Absent means "the host could not tell", never "an ordinary file". Both sides are known or the whole entry is absent. Base is the merge base, under previousPath for a rename. */
+  entry: z.object({ head: z.union([FileEntryTypeSchema, z.literal("none")]), base: z.union([FileEntryTypeSchema, z.literal("none")]) }).strict().optional(),
 }).strict();
 export type ChangeRequestFile = z.infer<typeof ChangeRequestFileSchema>;
 export const ChangeRequestFilesPageSchema = z.object({ files: z.array(ChangeRequestFileSchema).max(1_000), nextPage: z.number().int().positive().optional() }).strict();
 export type ChangeRequestFilesPage = z.infer<typeof ChangeRequestFilesPageSchema>;
+/** One commit's own changes (`CodeHost.commitChanges`, DEC 213). */
+export interface CommitChanges { files: ChangeRequestFile[]; complete: boolean; parents: string[] }
+/** One revision's changes against an earlier revision it builds on (`CodeHost.compareChanges`, DEC 213): a merge against its second parent. */
+export interface CompareChanges { files: ChangeRequestFile[]; complete: boolean }
+/** DEC 213: the hook a multi-page read calls before EACH page it asks the host for (it throws when the pass's read allowance or time is used up; the read then stops and throws it on). */
+export interface PageBudget { beforeRequest: () => void }
 
 export const FeedbackCommentSchema = z.object({
   id: ExternalIdSchema,
@@ -517,6 +529,18 @@ export interface CodeHost {
   baseBranchHead(repository: RepositoryRef, branch: string, scope: HostScope): Promise<string>;
   /** P6: the revisions a revision builds on (its parents): one for an ordinary commit, two for a merge, none for a root. Throws when the revision does not exist. */
   commitParents(repository: RepositoryRef, revision: string, scope: HostScope): Promise<string[]>;
+  /**
+   * DEC 213: one commit's OWN changes (against its first parent, as the host lists a commit), with the patch text in the change request's file shape, whether the list is whole, and the commit's parents. `complete` is
+   * false whenever the host cut anything (a file limit, or a changed file whose patch it did not give): what was cut is not known. Optional: a host without it leaves every commit pushed between two checks unscanned
+   * (the change is then risky). A host that cannot answer THROWS. `budget`, when given, is called before every page the host is asked for.
+   */
+  commitChanges?(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<CommitChanges>;
+  /**
+   * DEC 213: the changes of `head` against `base`, a revision `head` builds on (a merge against its SECOND parent, so a merge is judged by what it adds over both parents, as `git show --cc` does), in the change
+   * request's file shape, and whether the list is whole (`complete` false whenever the host cut anything, as for `commitChanges`). Optional: without it a merge pushed between two checks is not scanned (the change is
+   * then risky). A host THROWS when it cannot answer, or when `base` is not a revision `head` builds on. `budget`, when given, is called before every page.
+   */
+  compareChanges?(repository: RepositoryRef, base: string, head: string, scope: HostScope, budget?: PageBudget): Promise<CompareChanges>;
   listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage>;
   /**
    * The code owners of a branch, read and understood by the host itself (the owners file's syntax and its matching rules are the host's, never the core's), or undefined when the branch has none.
@@ -548,7 +572,10 @@ export interface CodeHost {
   mergeObservation?(ref: ChangeRequestRef, scope: HostScope, budget: ReadBudget): Promise<MergeObservation>;
   /** Reviews, approvals, checks and mergeability. `budget` bounds the reads one tracking pass may spend. A host's rate limit is signalled with `HostRateLimitError`. */
   changeRequestStatus(ref: ChangeRequestRef, scope: HostScope, budget?: ReadBudget): Promise<ChangeRequestStatus>;
-  changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope): Promise<ChangeRequestFilesPage>;
+  /** With expectedHead, omit entry metadata if the current head differs from the revision the caller classified. Use the same head across pages; this does not pin the file list itself. */
+  changedFiles(ref: ChangeRequestRef, page: number, scope: HostScope, options?: { expectedHead?: string }): Promise<ChangeRequestFilesPage>;
+  /** Optional. Every path at `revision` (a full commit id) that isAiInstructionPath() matches, at any depth, with its type. complete=false when the host could not list the whole tree (cut short or over `max`, default 500). A host that cannot answer THROWS. */
+  instructionFiles?(repository: RepositoryRef, revision: string, scope: HostScope, options?: { max?: number; timeoutMs?: number }): Promise<{ files: Array<{ path: string; type: FileEntryType }>; complete: boolean }>;
   /** Comments and threads. Untrusted text. */
   feedback(ref: ChangeRequestRef, scope: HostScope): Promise<ChangeRequestFeedback>;
   reply(ref: ChangeRequestRef, commentId: string, body: UntrustedText, scope: HostScope, budget?: ReadBudget): Promise<"replied" | "gone">;

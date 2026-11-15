@@ -4,6 +4,7 @@ import {
   OUTBOX_PENDING_INDEX,
   change,
   companyScoped,
+  companyOfChange,
   when,
   type DocumentStore,
   type OutboxMessage,
@@ -45,6 +46,8 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
 
   return {
     stage(message: OutboxMessage) {
+      const attributes = message.attributes ?? {};
+      if (typeof attributes !== "object" || Array.isArray(attributes) || Object.hasOwn(attributes, "companyId") || Object.hasOwn(attributes, "outboxId") || Object.keys(attributes).length > 7 || Object.values(attributes).some((value) => typeof value !== "string")) throw new Error("invalid outbox attributes");
       const stagedAt = now().toISOString();
       return {
         kind: "put",
@@ -79,13 +82,14 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
       }
       for (const item of pending.slice(0, limit)) {
         const key = { pk: item.pk, sk: item.sk };
+        if (companyOfChange({ key, after: item, kind: "insert", cause: "write", sequence: "" }) !== options.companyId) { report.failed += 1; continue; }
         let handedOver = false;
         try {
           const queue = await queues.queue(text(item.queue));
           await queue.enqueue({
             body: item.body!,
             // The outbox id travels with the message: a queue without duplicate suppression may deliver twice, and the consumer drops the repeat by it.
-            attributes: { ...(item.attributes as Record<string, string>), outboxId: text(item.id) },
+            attributes: { ...(item.attributes as Record<string, string>), outboxId: text(item.id), companyId: options.companyId },
             // Scoped by company: two companies may stage the same id.
             dedupeId: companyScoped(options.companyId, `OUTBOX#${text(item.id)}`),
             ...(typeof item.groupId === "string" ? { groupId: item.groupId } : {}),

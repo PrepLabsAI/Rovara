@@ -558,11 +558,13 @@ export function readTestEnvDependencies(environment: { services: readonly TestEn
 // ---- trust classes (TE-A3, O11 and O51)
 
 /**
- * The trust class a backing earns, under the owner's words. Real: software, an image, a test account or a vendor's test mode answered. Recorded: a fake that says it is a recording. Simulated: Rovara local AWS, the customer's
- * fake, a fake with no stated origin, and a test that fakes the dependency itself. Made by Rovara: a fake Rovara made at setup or during a task. Nothing behind a dependency says no more than Simulated. A recording is never Real.
- * It matches `trustClassOf(evidenceDependencyLabelFor(...))` for the same backing (a test keeps the two together).
+ * The trust class a backing earns, under the owner's words. Real: software, an image, a test account or a vendor's test mode answered. Recorded: a fake whose set the broker's FIXTURE STORE says is a recording with its
+ * day (`set`, the same facts `pinnedFakeOf` puts in the evidence). Simulated: Rovara local AWS, the customer's fake, a fake whose set the store does not vouch for, and a test that fakes the dependency itself. Made by
+ * Rovara: a fake Rovara made at setup or during a task. Nothing behind a dependency says no more than Simulated. A recording is never Real.
+ * The plan's own `provenance` can only make a fake weaker (Made by Rovara), never Recorded: "recorded" comes from the store alone, so the plan and the evidence always agree (review L1; a broker test checks every
+ * combination against `pinnedFakeOf` and `evidenceDependencyLabelFor`).
  */
-export function testEnvBackingTrustClass(backing: TestEnvBacking): EvidenceTrustClass {
+export function testEnvBackingTrustClass(backing: TestEnvBacking, set?: { origin?: unknown; recordedAt?: unknown }): EvidenceTrustClass {
   switch (backing.kind) {
     case "local":
     case "project_image":
@@ -571,7 +573,8 @@ export function testEnvBackingTrustClass(backing: TestEnvBacking): EvidenceTrust
       return "real";
     case "fake": {
       const origin = backing.provenance?.origin;
-      return origin === "recorded" ? "recorded" : origin === "rovara_setup" || origin === "rovara_task" ? "made_by_rovara" : "simulated";
+      if (origin === "rovara_setup" || origin === "rovara_task") return "made_by_rovara";
+      return set?.origin === "recorded" && typeof set.recordedAt === "string" ? "recorded" : "simulated";
     }
     case "emulated":
     case "none":

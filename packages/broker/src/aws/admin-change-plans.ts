@@ -18,6 +18,8 @@ import {
 import { adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
 import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { resolveCompany } from "./company-check.js";
 
 export interface AdminChangeHandlers {
   requireAdministrator(identity: AuthenticatedIdentity, project: string): Promise<void>;
@@ -350,7 +352,7 @@ const planGrant: Planner = async (deps, identity, input) => {
   if (input.kind !== "grant_project_access") throw new Error("wrong planner");
   await projectMustExist(deps, identity, input.project);
   await deps.handlers.requireAdministrator(identity, input.project);
-  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveCompany(deps.actions.companies, identity.ownerKey));
   const current = await projectGrant(deps.actions, input.project, resolved.developerId);
   if (current?.role === "developer") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already has a grant for ${input.project}; there is nothing to change`);
   if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already administers ${input.project}; there is nothing to change`);
@@ -372,7 +374,7 @@ const planRevoke: Planner = async (deps, identity, input) => {
   if (input.kind !== "revoke_project_access") throw new Error("wrong planner");
   const latest = await projectMustExist(deps, identity, input.project);
   await deps.handlers.requireAdministrator(identity, input.project);
-  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveCompany(deps.actions.companies, identity.ownerKey));
   const current = await projectGrant(deps.actions, input.project, resolved.developerId);
   // An administrator row is never a grant: revoking never removes an administrator.
   if (current?.role !== "developer") throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has no grant for ${input.project}, so there is nothing to revoke`);
@@ -393,7 +395,7 @@ const planRevoke: Planner = async (deps, identity, input) => {
 const planEndSessions: Planner = async (deps, identity, input) => {
   if (input.kind !== "revoke_signin") throw new Error("wrong planner");
   requireAdminClaim(identity);
-  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveCompany(deps.actions.companies, identity.ownerKey));
   if (resolved.profile === undefined) throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has never signed in to AgentX, so there is no sign-in to end`);
   return {
     effect: `End every AgentX sign-in session of ${describeDeveloper(resolved)}. Their AI tools stop reaching AgentX at once; they may sign in again with agentx login. Their running tasks keep running.`,
@@ -414,24 +416,45 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   if (input.kind !== "register_sign_in_client") throw new Error("wrong planner");
   requireAdminClaim(identity);
   const registry = signInClientRegistry(deps);
-  const clients = await registry.list();
+  const companyId = await resolveCompany(deps.actions.companies, identity.ownerKey);
+  const clients = await registry.list(companyId);
   const current = clients.find((client) => client.clientId === input.clientId);
   const { registration } = input;
   const clash = clients.find((client) => client.clientId !== input.clientId && client.audience === registration.audience);
+  // An update that keeps the secret carries the stored hash over; the CLI never sees it.
+  if (registration.keepSecret === true && current?.confidential !== true) {
+    if (companyId !== undefined) throw agentXError("NOT_FOUND", "sign-in client not found");
+    throw agentXError("CONFIG_INVALID", `sign-in client ${input.clientId} has no secret to keep; give it a new one with --rotate-secret`);
+  }
+  const { keepSecret, ...settings } = registration;
+  const confidential = keepSecret === true || settings.secretHash !== undefined;
+  if (clash !== undefined && companyId !== undefined) throw agentXError("NOT_FOUND", "sign-in client not found");
   if (clash !== undefined) throw agentXError("CONFIG_INVALID", `sign-in client ${clash.clientId} already uses the audience ${registration.audience}; give each client its own`);
   const where = [
     ...(registration.redirectUris.length === 0 ? [] : [`a browser returning to ${registration.redirectUris.join(", ")}`]),
     ...(registration.loopback ? ["a terminal (a loopback redirect, as agentx login uses)"] : []),
   ].join(" and ");
-  const secret = registration.secretHash === undefined ? "" : " It is confidential: it signs in with its own secret, which AgentX keeps only as a hash.";
+  const secret = !confidential ? "" : keepSecret === true
+    ? " It is confidential, and keeps its current secret."
+    : " It is confidential: it signs in with its own secret, which AgentX keeps only as a hash.";
   const replaced = current === undefined ? "" : " Its people stay signed in until they next refresh, which then follows these settings.";
+  // Spec 065: what it may then do as the signed-in person, beyond reading who they are.
+  const scopes = registration.scopes ?? [];
+  const actions = scopes.length === 0 ? "" : ` As the signed-in person, and within their own rights, it may: ${scopes.join(", ")}.`;
+  // Spec 066: full access, or what a client's tokens reach.
+  const fullAccess = registration.fullAccess === true;
+  const reach = fullAccess
+    ? ", which AgentX's developer API accepts as the signed-in person, with all their rights, as it does the AgentX CLI's (full access)"
+    : scopes.length === 0 ? ", which AgentX's own API never accepts"
+      // Plan v3.2 lane ID: its scopes open the developer API routes that name them, and no others.
+      : ", which AgentX's developer API accepts only on the routes its scopes open";
   return {
-    effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}, which AgentX's own API never accepts.${secret}${replaced}`,
-    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential: registration.secretHash !== undefined },
+    effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}${reach}.${secret}${replaced}${fullAccess ? "" : actions}`,
+    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential, keepsSecret: keepSecret === true, scopes, fullAccess },
     snapshot: { client: current ?? null },
     apply: async (applier) => {
       const at = new Date(deps.actions.now()).toISOString();
-      await registry.put({ clientId: input.clientId, ...registration, createdAt: current?.createdAt ?? at, updatedAt: at, updatedBy: applier.ownerKey });
+      await registry.put({ clientId: input.clientId, ...settings, ...(companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? {} : { companyId }), createdAt: current?.createdAt ?? at, updatedAt: at, updatedBy: applier.ownerKey }, { ...(keepSecret === true ? { keepSecret } : {}), ...(companyId === undefined ? {} : { companyId }) });
       return { clientId: input.clientId, registered: true };
     },
   };
@@ -441,13 +464,14 @@ const planRemoveSignInClient: Planner = async (deps, identity, input) => {
   if (input.kind !== "remove_sign_in_client") throw new Error("wrong planner");
   requireAdminClaim(identity);
   const registry = signInClientRegistry(deps);
-  const current = (await registry.list()).find((client) => client.clientId === input.clientId);
-  if (current === undefined) throw agentXError("NOT_FOUND", `there is no sign-in client ${input.clientId}`);
+  const companyId = await resolveCompany(deps.actions.companies, identity.ownerKey);
+  const current = (await registry.list(companyId)).find((client) => client.clientId === input.clientId);
+  if (current === undefined) throw agentXError("NOT_FOUND", companyId === undefined ? `there is no sign-in client ${input.clientId}` : "sign-in client not found");
   return {
     effect: `Remove sign-in client ${input.clientId} (${current.name}): nobody can sign in to it, its refresh tokens stop working at once, and its access tokens stop working at the access check.`,
     details: { clientId: input.clientId },
     snapshot: { client: current },
-    apply: async () => ({ clientId: input.clientId, removed: await registry.remove(input.clientId) }),
+    apply: async () => ({ clientId: input.clientId, removed: await registry.remove(input.clientId, companyId) }),
   };
 };
 

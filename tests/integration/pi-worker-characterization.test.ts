@@ -26,8 +26,11 @@ import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 const keys = (value: unknown): string[] => Object.keys(value as object).sort();
 // An assistant message ended by an abort carries durationMs only when the abort lands after the message started (timing-dependent): allowed, not required. Every other key stays exact.
 const keysExceptOptionalDuration = (value: unknown): string[] => keys(value).filter((key) => key !== "durationMs");
-// A model-call note for a call cut off by the abort records durationMs 0 or, when the abort lands first, none at all (timing-dependent): allowed, not required.
-const withoutZeroDuration = (notes: readonly unknown[]): Array<Record<string, unknown>> => notes.map((note) => { const { durationMs, ...rest } = note as Record<string, unknown>; return { durationMs, rest }; }).map(({ durationMs, rest }) => { expect(durationMs === undefined || durationMs === 0).toBe(true); return rest; });
+// A model-call note for a call cut off by the abort records a duration Pi rounds from a sub-millisecond window (pi-ai event-stream: round(performance.now() - start)), or none at all when the abort lands first:
+// 0 on a quiet machine, a few ms on a busy CI runner (code/next run 43519737307). Allowed up to ABORTED_CALL_DURATION_MAX_MS, so a call that really hung before the abort still fails.
+const ABORTED_CALL_DURATION_MAX_MS = 50;
+const abortedCallDurationOk = (durationMs: unknown): boolean => durationMs === undefined || (typeof durationMs === "number" && Number.isInteger(durationMs) && durationMs >= 0 && durationMs <= ABORTED_CALL_DURATION_MAX_MS);
+const withoutShortDuration = (notes: readonly unknown[]): Array<Record<string, unknown>> => notes.map((note) => { const { durationMs, ...rest } = note as Record<string, unknown>; expect(abortedCallDurationOk(durationMs), `durationMs ${String(durationMs)}`).toBe(true); return rest; });
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 // structuredClone keeps a key whose value is undefined, so the key pins below see every key Pi sets.
 const snapshot = <T>(value: T): T => structuredClone(value);
@@ -797,6 +800,15 @@ function modelCallNotes(run: Awaited<ReturnType<typeof cancelDuringTool>>) {
   });
 }
 
+describe("the duration allowed on a model call cut off by an abort", () => {
+  it("is none, 0 or a few ms (Pi's rounding of a sub-millisecond window on a busy machine), never a call that hung", () => {
+    for (const ok of [undefined, 0, 1, 7, ABORTED_CALL_DURATION_MAX_MS]) expect(abortedCallDurationOk(ok), String(ok)).toBe(true);
+    for (const bad of [ABORTED_CALL_DURATION_MAX_MS + 1, 5_000, -1, 1.5, "0", null]) expect(abortedCallDurationOk(bad), String(bad)).toBe(false);
+    expect(() => withoutShortDuration([{ outcome: "stopped", attempt: 1, durationMs: 5_000 }])).toThrow();
+    expect(withoutShortDuration([{ outcome: "stopped", attempt: 1, durationMs: 3 }])).toEqual([{ outcome: "stopped", attempt: 1 }]);
+  });
+});
+
 describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", () => {
   // Guards finishTurn (0.99): a cancel during a tool must abort the tool, end the task CANCELLED with no
   // result, and never call the model again. F3 (the loop calling the model after an aborted tool) is refuted on 0.85.1.
@@ -816,7 +828,7 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
     // Pi 1.5 ends the model call an abort cuts short as "aborted", not "error": the task's note says "stopped", not "failed".
-    expect(withoutZeroDuration(modelCallNotes(run))).toEqual([{ outcome: "stopped", attempt: 1 }]);
+    expect(withoutShortDuration(modelCallNotes(run))).toEqual([{ outcome: "stopped", attempt: 1 }]);
     expect(run.factoryCalls).toBe(1);
     // The 5 s sleep was killed, not waited out.
     expect(run.elapsed).toBeLessThan(3_000);
@@ -835,7 +847,7 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
     // Pi 1.5 ends the model call an abort cuts short as "aborted", not "error": the task's note says "stopped", not "failed".
-    expect(withoutZeroDuration(modelCallNotes(run))).toEqual([{ outcome: "stopped", attempt: 1 }]);
+    expect(withoutShortDuration(modelCallNotes(run))).toEqual([{ outcome: "stopped", attempt: 1 }]);
     expect(run.factoryCalls).toBe(1);
   });
 });
