@@ -500,10 +500,22 @@ export class DeveloperSignInStore {
   }
 
   /**
-   * ID-STEPUP-FOLLOWUPS (b): removes every passkey row of a person, readable or not, and answers how many. Reads at most PASSKEY_ROWS_REMOVE_MAX rows; a person with more throws after
-   * removing those (never a silent partial answer), and the caller says it could not finish.
+   * ID-STEPUP-FOLLOWUPS (b): removes every passkey row of a person, readable or not, and answers how many. A person with more than PASSKEY_ROWS_REMOVE_MAX rows throws before anything is
+   * removed (never a partial removal), and the caller says it could not finish.
    */
   async removeAllPasskeys(developerId: string): Promise<number> {
+    // Counted first: more rows than one removal reads is refused before anything is deleted.
+    let counted = 0;
+    let start: Record<string, unknown> | undefined;
+    do {
+      const page = await this.input.documentClient.send(new QueryCommand({
+        TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: 25,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: unknown[]; LastEvaluatedKey?: Record<string, unknown> };
+      counted += (page.Items ?? []).length;
+      if (counted > PASSKEY_ROWS_REMOVE_MAX) throw new Error("more passkey rows than one removal reads");
+      start = page.LastEvaluatedKey;
+    } while (start !== undefined);
     let removed = 0;
     for (;;) {
       const response = await this.input.documentClient.send(new QueryCommand({

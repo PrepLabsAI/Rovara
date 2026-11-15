@@ -371,6 +371,36 @@ describe("passkeys: the person's own list and removal, and an admin's removal", 
     expect(await h.deps.store.listPasskeys(idOf(MAYA))).toHaveLength(1);
   });
 
+  it("refuses an admin removal without the install's admin rule, or when it fails, and answers unavailable (fixed words) when the store fails", async () => {
+    for (const rule of ["none", "throws"] as const) {
+      const { h, mail } = harness({ passkeys: true, rule });
+      await withPasskey(h, mail, MAYA);
+      const admin = await freshSession(h, mail, ADMIN);
+      expect(await invoke(h, { kind: "remove-person-passkeys", developerId: idOf(ADMIN), sessionId: admin, personDeveloperId: idOf(MAYA) })).toMatchObject({ ok: false, error: rule === "none" ? "not_set_up" : "unavailable" });
+      expect(await h.deps.store.listPasskeys(idOf(MAYA))).toHaveLength(1);
+    }
+    const { h, mail } = harness({ passkeys: true });
+    await withPasskey(h, mail, MAYA);
+    const admin = await freshSession(h, mail, ADMIN);
+    mail.sent.length = 0;
+    const real = h.deps.store.removeAllPasskeys.bind(h.deps.store);
+    h.deps.store.removeAllPasskeys = async () => { throw Object.assign(new Error("table arn:aws:dynamodb:secret"), { name: "InternalServerError" }); };
+    const failed = await invoke(h, { kind: "remove-person-passkeys", developerId: idOf(ADMIN), sessionId: admin, personDeveloperId: idOf(MAYA) });
+    expect(failed).toEqual({ ok: false, error: "unavailable", message: FACTOR_ADMIN_TEXT.unavailable });
+    h.deps.store.removeAllPasskeys = real;
+    h.deps.store.getSession = async () => { throw Object.assign(new Error("arn:aws:secret"), { name: "ThrottlingException" }); };
+    expect(await invoke(h, { kind: "list-passkeys", developerId: idOf(MAYA), sessionId: admin })).toEqual({ ok: false, error: "unavailable", message: FACTOR_ADMIN_TEXT.unavailable });
+    expect(mail.sent).toEqual([]);
+    expect(JSON.stringify(h.logs)).not.toContain("arn:aws");
+  });
+
+  it("refuses a session whose sign-in method was turned off since it started", async () => {
+    const { h, mail } = harness({ passkeys: true });
+    const { sessionId } = await withPasskey(h, mail, MAYA);
+    h.deps.config.slack.since = Math.floor(h.now() / 1000) + 1;
+    expect(await invoke(h, { kind: "list-passkeys", developerId: idOf(MAYA), sessionId })).toMatchObject({ ok: false, error: "signed_out" });
+  });
+
   it("keeps a person's passkeys when an admin ends their sessions", async () => {
     const { h, mail } = harness({ passkeys: true });
     await withPasskey(h, mail, MAYA);
@@ -384,6 +414,9 @@ describe("passkeys: the person's own list and removal, and an admin's removal", 
     await plainSignIn(h, MAYA);
     for (let index = 0; index < 101; index += 1) await h.deps.store.addPasskey(idOf(MAYA), { credentialId: `k${String(index)}`, publicKey: "AA", counter: 0, createdAt: "2026-01-01T00:00:00.000Z" });
     await expect(h.deps.store.removeAllPasskeys(idOf(MAYA))).rejects.toThrow();
+    // Refused before anything was removed.
+    expect(await h.deps.store.listPasskeys(idOf(MAYA))).toHaveLength(10);
+    expect([...h.db.items.values()].filter((item) => item.pk === `PASSKEYS#${idOf(MAYA)}`)).toHaveLength(101);
     for (let index = 0; index < 30; index += 1) await h.deps.store.addPasskey(idOf(OTHER), { credentialId: `o${String(index)}`, publicKey: "AA", counter: 0, createdAt: "2026-01-01T00:00:00.000Z" });
     expect(await h.deps.store.removeAllPasskeys(idOf(OTHER))).toBe(30);
   });

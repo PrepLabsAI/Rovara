@@ -211,7 +211,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience, scopes: (session.scopes ?? []).filter((scope) => client.scopes?.includes(scope as ClientScope) === true) } }),
       ...(session.stepUpAt === undefined || session.stepUpMethod === undefined ? {} : { stepUp: { at: session.stepUpAt, method: session.stepUpMethod } }),
     });
-  const factorAdmin = createFactorAdmin({ env: config.env, store, email: deps.stepUp?.email, companyAdmin: deps.stepUp?.companyAdmin, now: deps.now, log: deps.log });
+  const factorAdmin = createFactorAdmin({
+    env: config.env, store, email: deps.stepUp?.email, companyAdmin: deps.stepUp?.companyAdmin, now: deps.now, log: deps.log,
+    // As a refresh checks: the session's method is still on, and was on when it started.
+    methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, session.amr === "slack" ? config.slack.since : config.oidc?.since),
+  });
   const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */

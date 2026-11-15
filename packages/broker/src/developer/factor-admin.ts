@@ -33,6 +33,8 @@ export interface FactorAdminOptions {
   companyAdmin: CompanyAdminRule | undefined;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
+  /** Whether the session's sign-in method is still on (and was on when it started), as a refresh checks. Absent: not checked. */
+  methodLive?: (session: SessionRecord) => boolean;
 }
 
 /** A step-up time this far ahead of the clock is still believed (never more than the window). */
@@ -78,6 +80,7 @@ export function createFactorAdmin(options: FactorAdminOptions) {
     if (session === undefined || session.developerId !== developerId || session.revokedAt !== undefined || !(session.endsAt > seconds())) return refusal("signed_out", FACTOR_ADMIN_TEXT.signedOut);
     const developer = await options.store.getDeveloper(developerId);
     if (developer === undefined || developer.revoked || endedByAdmin(session.startedAt, developer.sessionsEndedAt)) return refusal("signed_out", FACTOR_ADMIN_TEXT.signedOut);
+    if (options.methodLive !== undefined && !options.methodLive(session)) return refusal("signed_out", FACTOR_ADMIN_TEXT.signedOut);
     return { session, developer };
   }
 
@@ -118,7 +121,17 @@ export function createFactorAdmin(options: FactorAdminOptions) {
     return undefined;
   }
 
-  return {
+  /** A store or sender failure answers `unavailable` with fixed words; only the error's name is logged. */
+  async function guarded<T>(operation: string, work: () => Promise<T>): Promise<T | DeveloperFactorRefusal> {
+    try {
+      return await work();
+    } catch (error) {
+      options.log({ event: "signin.factor_operation_failed", operation, error: errorName(error) });
+      return refusal("unavailable", FACTOR_ADMIN_TEXT.unavailable);
+    }
+  }
+
+  const operations = {
     async listPasskeys(event: unknown): Promise<ListPasskeysResponse> {
       const parsed = ListPasskeysRequestSchema.safeParse(event);
       if (!parsed.success) return refusal("invalid_request", FACTOR_ADMIN_TEXT.invalid);
@@ -203,5 +216,11 @@ export function createFactorAdmin(options: FactorAdminOptions) {
       options.log({ event: "signin.factor_email_set_by_admin", developerId, personDeveloperId, replaced: old !== undefined });
       return { ok: true, changed: true };
     },
+  };
+  return {
+    listPasskeys: (event: unknown): Promise<ListPasskeysResponse> => guarded("list-passkeys", () => operations.listPasskeys(event)),
+    removePasskey: (event: unknown): Promise<RemovePasskeyResponse> => guarded("remove-passkey", () => operations.removePasskey(event)),
+    removePersonPasskeys: (event: unknown): Promise<RemovePersonPasskeysResponse> => guarded("remove-person-passkeys", () => operations.removePersonPasskeys(event)),
+    setFactorEmail: (event: unknown): Promise<SetFactorEmailResponse> => guarded("set-factor-email", () => operations.setFactorEmail(event)),
   };
 }
