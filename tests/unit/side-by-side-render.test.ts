@@ -1,7 +1,7 @@
 // TE-F10: the two renderings (public: counts and verdict words only; full: at most three inert examples), the pairs seam for the evidence writer, and old evidence left alone.
 import { describe, expect, it } from "vitest";
 import {
-  CHECK_KINDS, EvidencePackV2Schema, partsOutsideKind, renderSideBySide, runSideBySide, sideBySidePairsPart, SIDE_BY_SIDE_EXAMPLES_MAX, type ArtifactRef, type SideBySideCaseOutcome, type SideBySideSummary,
+  CHECK_KINDS, EvidencePackV2Schema, partsOutsideKind, renderSideBySide, runSideBySide, sideBySidePairsPart, SIDE_BY_SIDE_EXAMPLES_MAX, SIDE_BY_SIDE_UNREADABLE_SENTENCE, type ArtifactRef, type SideBySideCaseOutcome, type SideBySideSummary,
 } from "../../packages/contracts/src/index.js";
 import { v2Pack } from "../support/evidence-v2-fixtures.js";
 import { PIN, RUN_DEFAULTS, canary, COMPANY_A, recordingJudge, reportNeeded, sbsWorld, source, verdictText } from "../support/side-by-side-world.js";
@@ -156,5 +156,44 @@ describe("the evidence seam", () => {
   it("leaves old evidence alone: v1's kind list is unchanged and does not hold the new kind", () => {
     expect([...CHECK_KINDS]).toEqual(["test", "lint", "typecheck", "security", "migration", "build", "smoke", "other"]);
     expect([...CHECK_KINDS]).not.toContain("prompt_side_by_side");
+  });
+});
+
+describe("a summary that is not the right shape (fix round 1, M4)", () => {
+  const FIXED = "This side-by-side summary could not be read.";
+  const missingCounts = (): SideBySideSummary => ({ ...five(), counts: undefined } as never);
+  it("says one fixed sentence, in both modes, for a summary that is empty, missing its counts or not an object", () => {
+    expect(SIDE_BY_SIDE_UNREADABLE_SENTENCE).toBe(FIXED);
+    for (const bad of [{}, missingCounts(), null, undefined, "text", 7, []]) {
+      for (const mode of ["public", "full"] as const) expect(renderSideBySide(bad as never, { mode }), `${JSON.stringify(bad)} ${mode}`).toBe(FIXED);
+    }
+  });
+  it("does not throw in the full rendering for a case that is null, not an object, or has texts that are not strings", () => {
+    const odd = { ...five(), cases: [null, 7, "x", { caseId: "c", status: "judged", verdict: "same", oldText: 5, newText: { a: 1 } }, { caseId: "d", status: "not_run", side: "old", sentence: 9 }, judged("c-1", "worse", "old ok", "new ok")] } as never;
+    const text = renderSideBySide(odd, { mode: "full" });
+    expect(text).toContain("old ok");
+    expect(() => sideBySidePairsPart(odd, { mode: "full" }, () => undefined)).not.toThrow();
+    expect(() => sideBySidePairsPart({} as never, { mode: "full" }, () => undefined)).not.toThrow();
+    expect(() => sideBySidePairsPart({ ...five(), cases: null } as never, { mode: "full" }, () => undefined)).not.toThrow();
+  });
+});
+
+describe("the verdict and the side come only from the closed word lists (fix round 1, M5)", () => {
+  const LINK = "[click](http://evil.example) @bob";
+  it("never prints a verdict that is not one of the four words: a link or a mention becomes a fixed word", () => {
+    const hostile = summaryOf([{ caseId: "c-1", status: "judged", verdict: LINK as never, oldText: "o", newText: "n" }, { caseId: "c-2", status: "judged", verdict: "__proto__" as never, oldText: "o2", newText: "n2" }]);
+    const text = renderSideBySide(hostile, { mode: "full" });
+    expect(text).not.toContain("evil.example");
+    expect(text).not.toContain("@bob");
+    expect(text).not.toContain("__proto__");
+    expect(text).toContain("(judge: unclear)");
+  });
+  it("never prints a side that is not old or new", () => {
+    const hostile = summaryOf([{ caseId: "c-1", status: "not_run", side: "[x](http://e.example) @bob" as never, sentence: "not run: provider rate limit" }, { caseId: "c-2", status: "call_failed", side: "new", sentence: "the new prompt's call failed" }]);
+    const text = renderSideBySide(hostile, { mode: "full" });
+    expect(text).not.toContain("e.example");
+    expect(text).not.toContain("@bob");
+    expect(text).toContain("(new prompt)");
+    expect(text).toContain("(unknown prompt)");
   });
 });

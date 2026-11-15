@@ -1,3 +1,4 @@
+import { companyChangeFeed } from "../../ports/company-change-feed.js";
 // Second review: the service the surfaces (the local pages, the owner routes, the MCP tools and the CLI) and the task flow call. It is the settings and state of the second review, and the glue its
 // call sites carry (the review dispatch, the review end, the merge gate, the pull request body, the task view), written once over the document store and the policy seams.
 //
@@ -316,7 +317,7 @@ export function createSecondReview(deps: SecondReviewDeps): SecondReview {
     async startTrackIndexer(options = {}) {
       const feed = (deps.store as { changes?: { subscribe: (consumer: string, handler: (changes: readonly DocumentChange[]) => Promise<void>) => Promise<{ stop(): Promise<void> }> } }).changes;
       if (feed === undefined) return undefined;
-      return feed.subscribe(SECOND_REVIEW_TRACK_CONSUMER, async (changes) => {
+      return companyChangeFeed(feed, deps.companyId).subscribe(SECOND_REVIEW_TRACK_CONSUMER, async (changes) => {
         if (!isSecondReviewEnabled(deps)) return;
         await indexSecondReviewTrack(changes, deps.store, log, deps.companyId, options.changedFiles);
       });

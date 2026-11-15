@@ -30,7 +30,7 @@ function codeHostWorld(): CodeHostWorld & { api: GitHubFixtureApi } {
   const api = new GitHubFixtureApi(model);
   const host = githubCodeHost(providerOver(api), { credentialRef: "github", now: () => GITHUB_NOW, webhookSecret: webhookSecretReader() });
   return {
-    host, model, api, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, now: () => GITHUB_NOW, branch: WORKING_BRANCH,
+    fileEntries: true, host, model, api, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, now: () => GITHUB_NOW, branch: WORKING_BRANCH,
     signedDelivery: (event) => event.kind === "change_request.opened"
       ? githubDelivery("pull_request", githubPayloads.pullRequest("opened", Number(event.id)))
       : githubDelivery("push", githubPayloads.push(`refs/heads/${event.branch}`, event.revision)),
@@ -60,6 +60,114 @@ runContract("GitHub Actions CheckRunner over the real GitHub client passes the C
 describe("the real GitHub client under the adapters", () => {
   it("has every method the adapters need", () => {
     expect(missingGitHubProviderMethods(providerOver(new GitHubFixtureApi(githubModel())))).toEqual([]);
+  });
+
+  it("DEC 213: reads one commit's changes over every page with a contents-read token, and says the list is cut when GitHub cut anything", async () => {
+    const world = codeHostWorld();
+    const changes: Record<string, string> = {};
+    for (let index = 0; index < 5; index += 1) changes[`src/f${String(index)}.ts`] = `export const f = ${String(index)};\n`;
+    const commit = world.model.commit("feature/x", changes);
+    // Two files a page: three pages, read in full.
+    world.api.commitReads.pageSize = 2;
+    const whole = await world.host.commitChanges!(world.repository, commit, world.scope);
+    expect(whole.complete).toBe(true);
+    expect(whole.files.map((file) => file.path).sort()).toEqual(Object.keys(changes).sort());
+    expect(whole.files.every((file) => file.patch !== undefined)).toBe(true);
+    expect(whole.parents).toEqual([world.model.headOf("main")]);
+    expect(world.api.requests.filter((request) => request.path.endsWith(`/commits/${commit}`))).toHaveLength(3);
+    expect(world.api.tokens.at(-1)?.permissions).toEqual({ contents: "read" });
+    // One a page: more pages than the read takes.
+    world.api.commitReads.pageSize = 1;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    world.api.commitReads.pageSize = 100;
+    // A changed file without its patch (too large for GitHub to show).
+    world.api.commitReads.withoutPatch = "src/f2.ts";
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    delete world.api.commitReads.withoutPatch;
+    // Totals that the listed files do not add up to (GitHub's 3,000-file limit).
+    world.api.commitReads.extraAdditions = 7;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    delete world.api.commitReads.extraAdditions;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(true);
+    await expect(world.host.commitChanges!(world.repository, "not-a-sha", world.scope)).rejects.toThrow();
+  });
+
+  it("DEC 213 (review of #608): the commit read's own guards: exactly three pages, the answer must be the commit asked for, parents may not change between pages, one budget unit a page", async () => {
+    const world = codeHostWorld();
+    const three = world.model.commit("feature/three", { "src/a.ts": "a\n", "src/b.ts": "b\n", "src/c.ts": "c\n" });
+    const four = world.model.commit("feature/four", { "src/a.ts": "a\n", "src/b.ts": "b\n", "src/c.ts": "c\n", "src/d.ts": "d\n" });
+    world.api.commitReads.pageSize = 1;
+    let pages = 0;
+    const budget = { beforeRequest: () => { pages += 1; } };
+    // Three pages: whole, three requests, three units.
+    expect((await world.host.commitChanges!(world.repository, three, world.scope, budget)).complete).toBe(true);
+    expect(world.api.requests.filter((request) => request.path.endsWith(`/commits/${three}`))).toHaveLength(3);
+    expect(pages).toBe(3);
+    // Four pages: the fourth is never asked for, and the list is cut.
+    pages = 0;
+    expect((await world.host.commitChanges!(world.repository, four, world.scope, budget)).complete).toBe(false);
+    expect(world.api.requests.filter((request) => request.path.endsWith(`/commits/${four}`))).toHaveLength(3);
+    expect(pages).toBe(3);
+    // A pass that is used up before a page: that page is not asked for, and the read stops with the pass's error.
+    const asked = world.api.requests.length;
+    let left = 1;
+    await expect(world.host.commitChanges!(world.repository, three, world.scope, { beforeRequest: () => { if (left === 0) throw new Error("used up"); left -= 1; } })).rejects.toThrow("used up");
+    expect(world.api.requests.slice(asked).filter((request) => request.path.endsWith(`/commits/${three}`))).toHaveLength(1);
+    world.api.commitReads.pageSize = 100;
+    // An answer for another commit.
+    world.api.commitReads.answerSha = four;
+    await expect(world.host.commitChanges!(world.repository, three, world.scope)).rejects.toThrow();
+    delete world.api.commitReads.answerSha;
+    // Parents that change between pages.
+    world.api.commitReads.pageSize = 1;
+    world.api.commitReads.parentsAfterFirstPage = [four];
+    await expect(world.host.commitChanges!(world.repository, three, world.scope)).rejects.toThrow();
+    delete world.api.commitReads.parentsAfterFirstPage;
+    expect((await world.host.commitChanges!(world.repository, three, world.scope)).parents).toEqual([world.model.headOf("main")]);
+  });
+
+  it("DEC 213 (review of #608): a merge's changes against its second parent (GitHub's compare), with a contents-read token, one page, and a cut list said to be cut", async () => {
+    const world = codeHostWorld();
+    const mine = world.model.commit("feature/mine", { "src/mine.ts": "export const mine = 1;\n" });
+    const main = world.model.commit("main", { "docs/main.md": "Main.\n" });
+    const files = new Map(world.model.revision(mine).files);
+    files.set("docs/main.md", "Main.\n");
+    files.set("src/merge.ts", "export const merged = 1;\n");
+    const merge = world.model.makeRevision([mine, main], files).sha;
+    let pages = 0;
+    const read = await world.host.compareChanges!(world.repository, main, merge, world.scope, { beforeRequest: () => { pages += 1; } });
+    expect(read.complete).toBe(true);
+    expect(read.files.map((file) => file.path).sort()).toEqual(["src/merge.ts", "src/mine.ts"]);
+    expect(read.files.every((file) => file.patch !== undefined)).toBe(true);
+    expect(pages).toBe(1);
+    expect(world.api.requests.filter((request) => request.path.includes(`/compare/${main}...${merge}`))).toHaveLength(1);
+    expect(world.api.tokens.at(-1)?.permissions).toEqual({ contents: "read" });
+    // A file without its patch: cut.
+    world.api.compareReads.withoutPatch = "src/merge.ts";
+    expect((await world.host.compareChanges!(world.repository, main, merge, world.scope)).complete).toBe(false);
+    delete world.api.compareReads.withoutPatch;
+    // Another page after a short list (more commits, not files): whole. A base that is not the merge base: refused.
+    world.api.compareReads.nextLink = true;
+    expect((await world.host.compareChanges!(world.repository, main, merge, world.scope)).complete).toBe(true);
+    world.api.compareReads.nextLink = false;
+    world.api.compareReads.mergeBase = mine;
+    await expect(world.host.compareChanges!(world.repository, main, merge, world.scope)).rejects.toThrow();
+    delete world.api.compareReads.mergeBase;
+    // A base the head does not build on: refused.
+    const other = world.model.commit("feature/other", { "src/other.ts": "export const other = 1;\n" });
+    await expect(world.host.compareChanges!(world.repository, other, merge, world.scope)).rejects.toThrow();
+    await expect(world.host.compareChanges!(world.repository, "not-a-sha", merge, world.scope)).rejects.toThrow();
+    // GitHub's 300-file limit on a comparison: a list that long may be cut, and so may a full page with another after it.
+    const many: Record<string, string> = {};
+    for (let index = 0; index < 300; index += 1) many[`gen/f${String(index)}.ts`] = `export const f = ${String(index)};\n`;
+    const big = world.model.commit("feature/big", many);
+    const bigBase = world.model.revision(big).parents[0]!;
+    expect((await world.host.compareChanges!(world.repository, bigBase, big, world.scope)).complete).toBe(false);
+    world.api.compareReads.filesMax = 100;
+    world.api.compareReads.nextLink = true;
+    expect((await world.host.compareChanges!(world.repository, bigBase, big, world.scope)).complete).toBe(false);
+    world.api.compareReads.nextLink = false;
+    world.api.compareReads.filesMax = 300;
   });
 
   it("mints a clone credential with read access to contents and a push credential with write, for this repository only", async () => {

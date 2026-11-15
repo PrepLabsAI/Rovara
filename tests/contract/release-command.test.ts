@@ -1,4 +1,6 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
   AGENTX_PRODUCTION_WORKER_REPOSITORY,
@@ -6,9 +8,13 @@ import {
 } from "../../infra/lib/release-pipeline.js";
 import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "../../infra/lib/slack-orchestrator.js";
 import {
+  RELEASE_TEST_ACCOUNT,
+  Runner as ReleaseRunner,
   assertDigestImage,
+  testEnvironment,
   parseReleaseArgs,
   releaseTag,
+  runTests,
   type Runner,
 } from "../../scripts/release-common.js";
 import {
@@ -304,5 +310,102 @@ describe("release pipeline trigger", () => {
       "docs/package.json",
     ];
     expect(ignored.filter(triggered)).toEqual([]);
+  });
+});
+
+describe("the release's test suite as root (CodeBuild)", () => {
+  function recorder(options: { testsFail?: boolean } = {}) {
+    const calls: unknown[][] = [];
+    const runner = {
+      run(command: string, args: readonly string[]) {
+        calls.push([command, ...args]);
+        return "";
+      },
+      runAs(account: { uid: number; gid: number; env: NodeJS.ProcessEnv }, command: string, args: readonly string[]) {
+        calls.push(["as", account, command, ...args]);
+        if (options.testsFail === true) throw new Error("npm exited with status 1");
+      },
+    };
+    return { runner: runner as unknown as Runner, calls };
+  }
+  const { uid, gid, home } = RELEASE_TEST_ACCOUNT;
+
+  it("runs the tests directly when the release is not root", () => {
+    const { runner, calls } = recorder();
+    runTests(runner, 501);
+    expect(calls).toEqual([["npm", "test"]]);
+  });
+
+  it("runs them as nobody when it is root, and gives the checkout back to root", () => {
+    const { runner, calls } = recorder();
+    runTests(runner, 0);
+    expect(calls.map((call) => (call[0] === "as" ? ["as", ...call.slice(2)] : call))).toEqual([
+      ["mkdir", "-p", home],
+      ["chown", "-R", `${String(uid)}:${String(gid)}`, process.cwd(), home],
+      ["as", "npm", "test"],
+      ["chown", "-R", "0:0", process.cwd()],
+    ]);
+    const account = calls[2]![1] as { uid: number; gid: number; env: NodeJS.ProcessEnv };
+    expect([account.uid, account.gid, account.env.HOME, calls[2]!.slice(2)]).toEqual([uid, gid, home, ["npm", "test"]]);
+  });
+
+  it("still gives the checkout back to root when the tests fail", () => {
+    const { runner, calls } = recorder({ testsFail: true });
+    expect(() => runTests(runner, 0)).toThrow("npm exited with status 1");
+    expect(calls.at(-1)).toEqual(["chown", "-R", "0:0", process.cwd()]);
+  });
+});
+
+describe("the test account's environment (CodeBuild's, as an ordinary runner would have it)", () => {
+  const environment = {
+    PATH: "/root/.goenv/bin:/opt/node/bin:/usr/bin", HOME: "/root", LANG: "C.UTF-8", CODEBUILD_BUILD_ID: "b",
+    npm_config_cache: "/root/.npm", npm_lifecycle_event: "release:prod", NPM_CONFIG_USERCONFIG: "/root/.npmrc",
+    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x", AWS_REGION: "us-east-1", AWS_DEFAULT_REGION: "us-east-1",
+  };
+  const enterable = (directory: string) => !directory.startsWith("/root");
+
+  it("leaves out npm's variables, which name root's cache and config, and every AWS variable", () => {
+    const result = testEnvironment(environment, "/tmp/home", enterable);
+    expect(Object.keys(result).filter((name) => /^(npm|aws)_/i.test(name))).toEqual([]);
+    expect(result).toMatchObject({ LANG: "C.UTF-8", CODEBUILD_BUILD_ID: "b", HOME: "/tmp/home" });
+  });
+
+  it("keeps only the PATH directories the account can enter, in order", () => {
+    expect(testEnvironment(environment, "/tmp/home", enterable).PATH).toBe("/opt/node/bin:/usr/bin");
+  });
+
+  it("by default keeps a directory only when it and every directory above it let others in", () => {
+    // /tmp, which every account can enter (the per-user temporary directory may not be: macOS's sits under a 0700 one).
+    const directory = mkdtempSync("/tmp/release-path-");
+    try {
+      const open = join(directory, "open"); const shut = join(directory, "shut");
+      mkdirSync(open); mkdirSync(shut);
+      chmodSync(directory, 0o755); chmodSync(open, 0o755); chmodSync(shut, 0o700);
+      const path = testEnvironment({ PATH: `${open}:${shut}:${join(directory, "missing")}:relative` }, "/tmp/home").PATH;
+      expect(path).toBe(open);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a command run as another account", () => {
+  it("gets exactly the environment it is given", () => {
+    const directory = mkdtempSync(join(tmpdir(), "release-run-as-"));
+    const file = join(directory, "env");
+    const previous = process.env.npm_config_cache;
+    process.env.npm_config_cache = "/root/.npm";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      // The current account: changing to one's own uid and gid needs no privilege.
+      new ReleaseRunner({} as never).runAs({ uid: process.getuid!(), gid: process.getgid!(), env: { HOME: directory, PATH: process.env.PATH } }, "sh", ["-c", `env > ${file}`]);
+      const seen = readFileSync(file, "utf8");
+      expect(seen).not.toMatch(/^npm_/im);
+      expect(seen).toContain(`HOME=${directory}`);
+    } finally {
+      write.mockRestore();
+      if (previous === undefined) delete process.env.npm_config_cache; else process.env.npm_config_cache = previous;
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

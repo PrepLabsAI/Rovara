@@ -1,7 +1,7 @@
 // TE-F10: the run: old and new calls through the model-egress port (fake adapter), the not-run classes per side, the overrun stop, the caps, the two meters, no socket, and two companies kept apart.
 import { describe, expect, it } from "vitest";
 import {
-  capSentence, modelOutputText, MODEL_EGRESS_OVERRUN_SENTENCE, NOT_RUN_SENTENCES, runSideBySide, SIDE_BY_SIDE_DEFAULT_CALL_CAP, type ModelEgress, type ModelEgressEvent, type ModelEgressSettle, type SideBySideRunInput, type SideBySideRunResult, type SideBySideSummary,
+  capSentence, modelOutputText, MODEL_EGRESS_OVERRUN_SENTENCE, NOT_RUN_SENTENCES, runSideBySide, SIDE_BY_SIDE_DEFAULT_CALL_CAP, SIDE_BY_SIDE_OFFER_MAX_ITEMS, type ModelEgress, type ModelEgressEvent, type ModelEgressSettle, type SideBySideRunInput, type SideBySideRunResult, type SideBySideSummary,
 } from "../../packages/contracts/src/index.js";
 import { withNetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 import { twoCompanyChecks, type IsolationSurface, type TwoCompanyIsolation } from "../../packages/testing/src/isolation/two-company.js";
@@ -287,5 +287,178 @@ describe("two companies", () => {
       if (check.needs?.({ isolation }) === false) continue;
       await check.run({ isolation });
     }
+  });
+});
+
+describe("the family of a case, before any call (fix round 1, M1)", () => {
+  it("makes no product call and no judge call for cases whose family cannot be read, and counts them as refused", async () => {
+    const world = sbsWorld();
+    const egress = counting(world.egress);
+    const judge = okJudge();
+    const good = await source(COMPANY_A, 3).cases();
+    const bad = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => good.map((item, index) => ({ ...item, family: (index === 0 ? "bogus" : index === 1 ? undefined : "bedrock") as never })) };
+    const summary = ran(await runSideBySide(input(world, { source: bad, judge }, egress)));
+    expect([egress.calls, judge.received.length]).toEqual([0, 0]);
+    expect(summary.counts).toMatchObject({ planned: 0, refused: 3, judged: 0, callFailed: 0 });
+  });
+});
+
+describe("a total limit on what a source offers (fix round 1, M3)", () => {
+  it("refuses a source that offers more cases than the limit with a fixed word, before parsing or hashing any of them and with no call", async () => {
+    const world = sbsWorld();
+    const egress = counting(world.egress);
+    const [one] = await source(COMPANY_A, 1).cases();
+    const huge = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => Array.from({ length: 100_000 }, (_, index) => ({ ...one!, caseId: `many-${String(index)}` })) };
+    const started = Date.now();
+    const result = await runSideBySide(input(world, { source: huge }, egress));
+    expect(result).toEqual({ status: "refused", reason: "source_too_large" });
+    expect(egress.calls).toBe(0);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+  it("accepts exactly the limit, and refuses one more", async () => {
+    const world = sbsWorld();
+    const [one] = await source(COMPANY_A, 1).cases();
+    const make = (count: number) => ({ company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => Array.from({ length: count }, (_, index) => ({ ...one!, caseId: `n-${String(index)}` })) });
+    world.answers(...Array.from({ length: 10 }, (_, index) => `answer ${String(index)}`));
+    expect((await runSideBySide(input(world, { source: make(SIDE_BY_SIDE_OFFER_MAX_ITEMS) }))).status).toBe("ran");
+    expect(await runSideBySide(input(world, { source: make(SIDE_BY_SIDE_OFFER_MAX_ITEMS + 1) }))).toEqual({ status: "refused", reason: "source_too_large" });
+  });
+  it("refuses a source whose frames add up to more bytes than the limit, however few the cases", async () => {
+    const world = sbsWorld();
+    const egress = counting(world.egress);
+    const [one] = await source(COMPANY_A, 1).cases();
+    const body = new Uint8Array(4 * 1_048_576);
+    const fat = { ...one!, old: { ...one!.old, body }, new: { ...one!.new, body } };
+    const heavy = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => Array.from({ length: 5 }, (_, index) => ({ ...fat, caseId: `fat-${String(index)}` })) };
+    expect(await runSideBySide(input(world, { source: heavy }, egress))).toEqual({ status: "refused", reason: "source_too_large" });
+    expect(egress.calls).toBe(0);
+  });
+  it("is source_unreadable, not a throw, when the source hands back something that is not a list", async () => {
+    const world = sbsWorld();
+    for (const value of [undefined, null, 7, "text", { length: 3 }]) {
+      const odd = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => value as never };
+      expect(await runSideBySide(input(world, { source: odd }))).toEqual({ status: "refused", reason: "source_unreadable" });
+    }
+  });
+});
+
+describe("the read bound and the time limit (fix round 1, M2)", () => {
+  /** An adapter that yields `chunks` chunks of 1 MiB and counts how many it produced. */
+  function endless(chunks: number): ModelEgress & { yielded: number } {
+    const piece = new Uint8Array(1_048_576);
+    const held = {
+      yielded: 0,
+      capabilities: { schemes: ["bearer"] as const },
+      async *forward(): AsyncGenerator<ModelEgressEvent> {
+        yield { kind: "head", status: 200, headers: [["content-type", "application/json"]] };
+        for (let index = 0; index < chunks; index += 1) {
+          held.yielded += 1;
+          yield { kind: "chunk", bytes: piece };
+        }
+        yield { kind: "settle", status: 200, class: "ok", costMicros: 1, estimated: false };
+      },
+    };
+    return held;
+  }
+  it("stops reading an answer at the 4 MB limit, instead of draining the stream, and says the answer could not be read", async () => {
+    const world = sbsWorld();
+    const egress = endless(1_000);
+    const summary = ran(await runSideBySide(input(world, { source: source(COMPANY_A, 1) }, egress)));
+    expect(egress.yielded).toBeLessThanOrEqual(6);
+    expect(summary.cases[0]).toEqual({ caseId: "case-1", status: "call_failed", side: "old", sentence: "the old prompt's answer could not be read" });
+  });
+  /** A promise that never settles. */
+  const never = <T,>(): Promise<T> => new Promise<T>(() => undefined);
+  const hangingEgress = (): ModelEgress & { signals: Array<AbortSignal | undefined> } => {
+    const held = {
+      signals: [] as Array<AbortSignal | undefined>,
+      capabilities: { schemes: ["bearer"] as const },
+      forward(_scope: unknown, _frame: unknown, options?: { signal?: AbortSignal }): AsyncIterable<ModelEgressEvent> {
+        held.signals.push(options?.signal);
+        return { [Symbol.asyncIterator]: () => ({ next: () => never<IteratorResult<ModelEgressEvent>>(), return: () => never<IteratorResult<ModelEgressEvent>>() }) };
+      },
+    };
+    return held;
+  };
+  it("is bounded in time when the product call never answers: the case and the rest are 'not run' with a fixed sentence, and the call was handed an abort signal", async () => {
+    const world = sbsWorld();
+    const egress = hangingEgress();
+    const started = Date.now();
+    const summary = ran(await runSideBySide(input(world, { deadlineMs: 50 }, egress)));
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(summary.stoppedBy).toBe("time_limit");
+    expect(summary.counts).toMatchObject({ planned: 5, notRun: 5, judged: 0 });
+    expect(summary.cases.every((item) => item.status === "not_run" && /time limit/iu.test(item.sentence))).toBe(true);
+    expect(egress.signals).toHaveLength(1);
+    expect(egress.signals[0]?.aborted).toBe(true);
+  });
+  it("hands the product call a signal even when the caller gives none", async () => {
+    const world = sbsWorld();
+    const egress = hangingEgress();
+    await runSideBySide(input(world, { deadlineMs: 20, maxCases: 1 }, egress));
+    expect(egress.signals[0]).toBeInstanceOf(AbortSignal);
+  });
+  it("is bounded in time when the judge never answers: 'judge not run', and the judge was handed the abort signal", async () => {
+    const world = sbsWorld();
+    world.answers("old out", "new out");
+    const seen: unknown[] = [];
+    const judge = { ...recordingJudge(COMPANY_A, () => ""), judge: (_call: unknown, options?: { signal?: AbortSignal }) => { seen.push(options?.signal); return never<{ text: string; costMicros: number }>(); } } as unknown as ReturnType<typeof okJudge>;
+    const started = Date.now();
+    const summary = ran(await runSideBySide(input(world, { source: source(COMPANY_A, 1), judge, deadlineMs: 100 })));
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(summary.cases[0]).toMatchObject({ status: "judge_not_run", oldText: "old out", newText: "new out" });
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+  });
+  it("is bounded in time when the source never answers: refused with a fixed word and no call", async () => {
+    const world = sbsWorld();
+    const egress = counting(world.egress);
+    const stuck = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => never<never>() };
+    const started = Date.now();
+    expect(await runSideBySide(input(world, { source: stuck, deadlineMs: 50 }, egress))).toEqual({ status: "refused", reason: "time_limit" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(egress.calls).toBe(0);
+  });
+  it("stops starting cases once the caller's own signal has aborted, and refuses at once when it was aborted before the run", async () => {
+    const world = sbsWorld();
+    const early = new AbortController();
+    early.abort();
+    expect(await runSideBySide(input(world, { signal: early.signal }))).toEqual({ status: "refused", reason: "time_limit" });
+    const controller = new AbortController();
+    const egress = counting(world.egress);
+    world.answers(...Array.from({ length: 10 }, (_, index) => `answer ${String(index)}`));
+    const judge = recordingJudge(COMPANY_A, (call) => { controller.abort(); return verdictText(call, "same"); });
+    const summary = ran(await runSideBySide(input(world, { signal: controller.signal, judge }, egress)));
+    expect(egress.calls).toBe(2);
+    expect(summary.stoppedBy).toBe("time_limit");
+    expect(summary.counts).toMatchObject({ planned: 5, judgeNotRun: 1, notRun: 4 });
+  });
+});
+
+describe("input that is not the right shape (fix round 1, M4)", () => {
+  const refused = { status: "refused", reason: "bad_input" };
+  const shapes: Array<[string, (world: ReturnType<typeof sbsWorld>) => Partial<SideBySideRunInput>]> = [
+    ["policy undefined", () => ({ policy: undefined as never })],
+    ["policy null", () => ({ policy: null as never })],
+    ["source undefined", () => ({ source: undefined as never })],
+    ["source without cases", () => ({ source: { company: COMPANY_A.orgId, kind: "eval_set" } as never })],
+    ["judge undefined", () => ({ judge: undefined as never })],
+    ["judge without judge()", () => ({ judge: { company: COMPANY_A.orgId, pin: okJudge().pin } as never })],
+    ["judge without pin", () => ({ judge: { company: COMPANY_A.orgId, judge: async () => ({ text: "", costMicros: 0 }) } as never })],
+    ["report undefined", () => ({ report: undefined as never })],
+    ["report empty object", () => ({ report: {} as never })],
+    ["report with counts missing", () => ({ report: { ...reportNeeded(), counts: undefined } as never })],
+    ["egress undefined", () => ({ egress: undefined as never })],
+    ["egress without forward", () => ({ egress: {} as never })],
+  ];
+  for (const [name, over] of shapes) {
+    it(`is a fixed refusal, not a TypeError, for ${name}, with no call`, async () => {
+      const world = sbsWorld();
+      const result = await runSideBySide({ ...input(world), ...over(world) });
+      expect(result).toEqual(refused);
+    });
+  }
+  it("is a fixed refusal for an input that is not an object", async () => {
+    expect(await runSideBySide(undefined as never)).toEqual(refused);
+    expect(await runSideBySide(null as never)).toEqual(refused);
   });
 });

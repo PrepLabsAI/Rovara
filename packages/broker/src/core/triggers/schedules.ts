@@ -2,7 +2,7 @@
 // says WHEN: at each fire it tells the ONE handler below, and the core decides, from what is stored now, whether anything starts, in the same order and with the same gates as an event (the switch, the
 // requirements read live, the one-start-per-slot identity, the trigger's allowance for the hour and the company's for the day, `Admission`). A scheduler that fires twice, late or after a restart does no harm.
 //
-import { OrgIdSchema, type DueSchedule, type OrgId } from "@agentx/contracts";
+import { companyLog, OrgIdSchema, type DueSchedule, type OrgId } from "@agentx/contracts";
 import { automationIsOn } from "../automation/switch.js";
 import { errorName, iso } from "../automation/kit.js";
 import { readChainRun } from "../chains/runner.js";
@@ -48,7 +48,9 @@ export async function handleScheduleFire(deps: TriggerDispatchDeps, due: DueSche
   if (!(await automationIsOn(deps.automation))) return undefined;
   // Another feature's schedule on the same scheduler (the nightly run): not ours, and not a fault.
   if (due.target.kind !== TRIGGER_SCHEDULE_KIND) return undefined;
-  const log = logOf(deps);
+  const sink = logOf(deps);
+  if (!OrgIdSchema.safeParse(deps.companyId).success) return undefined;
+  const log = (event: string, fields: Record<string, unknown>): void => companyLog(deps.companyId, (line) => { const { event: name, ...rest } = line; sink(name as string, rest); })({ event, ...fields });
   const org = OrgIdSchema.safeParse(due.target.ref["orgId"]);
   const triggerId = due.target.ref["triggerId"];
   if (!org.success || typeof triggerId !== "string" || !TRIGGER_ID.test(triggerId) || due.scheduleId !== triggerScheduleId(triggerId)) {
@@ -56,7 +58,7 @@ export async function handleScheduleFire(deps: TriggerDispatchDeps, due: DueSche
     return undefined;
   }
   const orgId: OrgId = org.data;
-  if (orgId !== deps.companyId) { log("trigger_schedule.fire_other_company", {}); return undefined; }
+  if (orgId !== deps.companyId || due.companyId !== orgId) { log("trigger_schedule.fire_other_company", {}); return undefined; }
   const trigger = await deps.triggers.get(orgId, triggerId);
   if (trigger === undefined || trigger.spec.kind !== "schedule") {
     await deps.scheduler?.remove(orgId, due.scheduleId).catch(() => undefined);

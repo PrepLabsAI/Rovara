@@ -38,6 +38,7 @@ const KILLERS: Array<[ModelEgressMutation, RegExp]> = [
   ["no_settle_on_refusal", /streams one head, then chunks, then exactly one settle/u],
   ["reservation_released_on_cut", /cut-off stream keeps its reservation/u],
   ["unfiltered_headers", /only allow-listed response headers/u],
+  ["unscanned_headers", /never gives a planted key back/u],
   ["pass_redirect", /never follows or passes on a provider redirect/u],
   ["default_company_on_broken_scope", /fails closed when the company cannot be resolved/u],
   ["no_overrun_block", /past the cap the task takes no further call/u],

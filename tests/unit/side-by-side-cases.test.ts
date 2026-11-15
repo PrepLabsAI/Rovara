@@ -111,3 +111,14 @@ describe("the check kind", () => {
     expect(ids(await source(COMPANY_A, 9).cases())).toEqual(evalCases(9).map((item) => item.caseId));
   });
 });
+
+describe("the family of a case (fix round 1, M1)", () => {
+  it("refuses a case whose family the runner cannot read an answer for, as bad_frame, and keeps the readable families", async () => {
+    const [good] = await source(COMPANY_A, 1).cases();
+    const withFamily = (caseId: string, family: unknown): SideBySideCase => ({ ...good!, caseId, family: family as SideBySideCase["family"] });
+    const cases = [withFamily("bogus", "bogus"), withFamily("undef", undefined), withFamily("bedrock", "bedrock"), withFamily("number", 7), withFamily("proto", "__proto__"), ...(["gemini", "vertex", "anthropic_messages", "openai_compatible", "cohere"] as const).map((family) => withFamily(`ok-${family}`, family))];
+    const outcome = pairSideBySideCases(cases, { modelChange: true });
+    expect(outcome.refused.map((item) => [item.caseId, item.reason])).toEqual([["bogus", "bad_frame"], ["undef", "bad_frame"], ["bedrock", "bad_frame"], ["number", "bad_frame"], ["proto", "bad_frame"]]);
+    expect(ids(outcome.paired)).toEqual(["ok-gemini", "ok-vertex", "ok-anthropic_messages", "ok-openai_compatible", "ok-cohere"]);
+  });
+});

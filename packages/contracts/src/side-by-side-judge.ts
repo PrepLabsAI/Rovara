@@ -32,7 +32,8 @@ export interface SideBySideJudge {
   readonly company: string;
   /** What is fixed about this judge (side-by-side-judge-pin.ts). It is checked before any call and is never part of what the judge is handed. */
   readonly pin: SideBySideJudgePin;
-  judge(call: SideBySideJudgeCall): Promise<SideBySideJudgeAnswer>;
+  /** `options.signal` aborts at the run's total time limit: an adapter should stop its call when it does (the runner stops waiting either way). */
+  judge(call: SideBySideJudgeCall, options?: { readonly signal?: AbortSignal }): Promise<SideBySideJudgeAnswer>;
 }
 
 /** The input for one or more cases, with the old and new answers put in the seeded order. Frozen, so a judge cannot change what the next one is given. */

@@ -13,11 +13,11 @@
 // released so the adapter's retry is not taken as a repeat.
 import {
   ChannelDecisionSchema, InboundMessageSchema, INDEX_EXPIRY_ATTRIBUTE, LINK_REQUIRED_INTERVAL_SECONDS, channelEventId, orgScoped, when,
-  type ActorRef, type ChannelAdapter, type ChannelDecision, type ChannelEvent, type ChannelInboundSink, type ConversationRef, type DocumentKey, type DocumentStore, type InboundMessage, type OrgId,
+  type ActorRef, type ChannelAdapter, type ChannelDecision, type ChannelEvent, type ChannelInboundSink, type ConversationRef, type DocumentKey, type DocumentStore, type InboundMessage, type OrgId, type TransactItem,
 } from "@agentx/contracts";
 import { readChannelBinding } from "./bindings.js";
 import { cardMayBeDecidedInChat, readApprovalCard, type ApprovalCard } from "./cards.js";
-import { issueChannelLinkCode, linkedPerson } from "./links.js";
+import { channelLinkFence, issueChannelLinkCode, linkedPerson } from "./links.js";
 import { personIsServed, type ChannelCompanyOf, type ChannelMemberRule } from "./company.js";
 
 type Log = (entry: Record<string, unknown>) => void;
@@ -29,10 +29,16 @@ const EVENT_DEDUPE_SECONDS = 24 * 3_600;
 export type ChannelDecisionAnswer = { status: "decided" } | { status: "refused"; reason: string };
 
 export interface ChannelWork {
-  /** A message that passed every check. */
-  message(item: { orgId: OrgId; message: InboundMessage; projectName: string; personId: string }): Promise<void>;
-  /** A decision that passed every check and matches an open card. The seam asks the approval gate with a credential of this adapter's own method; the gate's Approvers decide whether that method is offered. */
-  decide(item: { orgId: OrgId; card: ApprovalCard; decision: ChannelDecision; personId: string; projectName: string }): Promise<ChannelDecisionAnswer>;
+  /**
+   * A message that passed every check. `fence`: the checks the seam must put in the transaction of whatever it writes for `personId` (a start: `withStartFence`), so an unlink that commits after the
+   * sink's read and before that write wins.
+   */
+  message(item: { orgId: OrgId; message: InboundMessage; projectName: string; personId: string; fence: readonly TransactItem[] }): Promise<void>;
+  /**
+   * A decision that passed every check and matches an open card. The seam asks the approval gate with a credential of this adapter's own method; the gate's Approvers decide whether that method is offered.
+   * `fence` goes to the gate (`DecisionAttempt.fence`), which commits the decision only while it holds.
+   */
+  decide(item: { orgId: OrgId; card: ApprovalCard; decision: ChannelDecision; personId: string; projectName: string; fence: readonly TransactItem[] }): Promise<ChannelDecisionAnswer>;
 }
 
 export interface ChannelSinkDeps {
@@ -46,6 +52,11 @@ export interface ChannelSinkDeps {
   companyOf?: ChannelCompanyOf | undefined;
   /** Which person a chat account is, in a company; undefined: nobody (the account is told how to link). Default: the link the owner made (`linkedPerson`). */
   personOf?: ((orgId: OrgId, actor: ActorRef) => Promise<string | undefined>) | undefined;
+  /**
+   * The fence for a person `personOf` named: the checks that still hold only while that account is that person (its link row in the host's identity data). Used only with `personOf`; with the
+   * default person rule the fence is the link row's (`channelLinkFence`). Absent with `personOf`: no fence, so such a host's writes carry no link check (the host's own rule must close that race).
+   */
+  fenceOf?: ((orgId: OrgId, actor: ActorRef, personId: string) => readonly TransactItem[]) | undefined;
   /**
    * Owner decision 131: the host's explicit-member rule. A linked person is served only when this says they are a member of the company now; false (or a failure)
    * runs nothing and says nothing, and no event claim is written. Absent: every linked person is served (Code's one company).
@@ -65,6 +76,7 @@ export const DECISION_REFUSAL_WORDS: Readonly<Record<string, string>> = {
   method_not_allowed: "A reply here is not enough to decide this. Open the task page and decide there.",
   not_approved: "A reply here is not enough to decide this. Open the task page and decide there.",
   not_waiting: "That is no longer waiting for an answer.",
+  link_gone: "This chat account is no longer linked to that Rovara account, so nothing was done. Link it again, or decide on the task page.",
   expired: "That request has expired. Look at the task page.",
   empty_reason: "Say what should change: press Request changes again and type it in the box.",
 };
@@ -125,7 +137,7 @@ export function createChannelSink(deps: ChannelSinkDeps): ChannelInboundSink {
   }
 
   /** The checks both kinds share. Answers the company, the person and the project, or undefined when the item must run nothing. */
-  async function admit(kind: "message" | "decision", item: { channel: string; eventId: string; conversation: ConversationRef; actor: ActorRef }, scope: DocumentKey[]): Promise<{ orgId: OrgId; personId: string; projectName: string } | undefined> {
+  async function admit(kind: "message" | "decision", item: { channel: string; eventId: string; conversation: ConversationRef; actor: ActorRef }, scope: DocumentKey[]): Promise<{ orgId: OrgId; personId: string; projectName: string; fence: readonly TransactItem[] } | undefined> {
     if (item.channel !== deps.channel || item.conversation.channel !== deps.channel || item.actor.channel !== deps.channel) { log({ event: "channel.refused", reason: "channel_mismatch" }); return undefined; }
     // An account of another workspace than the conversation's (a guest from a shared channel) is told nothing and given no code.
     if (item.actor.tenant !== item.conversation.tenant) { log({ event: "channel.refused", reason: "actor_tenant_mismatch" }); return undefined; }
@@ -148,7 +160,9 @@ export function createChannelSink(deps: ChannelSinkDeps): ChannelInboundSink {
     }
     if (!(await personIsServed(deps.isMember, orgId, personId, item.actor))) { log({ event: "channel.refused", reason: "not_member", kind }); return undefined; }
     if (!(await claim(orgId, `EVENT#${kind}/${item.eventId}`, EVENT_DEDUPE_SECONDS, scope))) { log({ event: "channel.duplicate", kind }); return undefined; }
-    return { orgId, personId, projectName: binding.projectName };
+    // The person was read once, here: whatever is written for them carries this check, so an unlink that commits before the write wins.
+    const fence = deps.personOf === undefined ? [channelLinkFence(orgId, item.actor, personId)] : [...(deps.fenceOf?.(orgId, item.actor, personId) ?? [])];
+    return { orgId, personId, projectName: binding.projectName, fence };
   }
 
   const release = async (scope: DocumentKey[]): Promise<void> => {

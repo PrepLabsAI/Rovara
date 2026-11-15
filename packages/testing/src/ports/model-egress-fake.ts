@@ -24,6 +24,7 @@ export type ModelEgressMutation =
   | "no_settle_on_refusal" // forgets the settle after a refusal
   | "reservation_released_on_cut" // charges only what a cut-off stream showed
   | "unfiltered_headers" // sends every provider header back
+  | "unscanned_headers" // keeps allow-listed headers without looking in their values for the key
   | "two_credentials" // adds a second credential
   | "pass_redirect" // hands a provider 3xx back to the client instead of refusing it
   | "overrun_on_any_excess" // blocks the task after ANY call that costs more than its estimate
@@ -95,7 +96,7 @@ export function createFakeProvider(rows: readonly ModelEgressRow[]): FakeProvide
       const credential = request.headers.map(([, value]) => value).join(" ") + request.query;
       const body = behaviour.echoCredential === true ? JSON.stringify({ error: { message: `Incorrect API key provided: ${credential}` }, echoed: credential }) : (behaviour.body ?? defaultBody(family, request));
       const headers: Array<[string, string]> = (behaviour.headers ?? [["content-type", "application/json"]]).map(([name, value]) => [name, value] as [string, string]);
-      if (behaviour.echoCredential === true) headers.push(["set-cookie", `session=${credential}`], ["x-echo", credential]);
+      if (behaviour.echoCredential === true) headers.push(["set-cookie", `session=${credential}`], ["x-echo", credential], ["x-request-id", `echo-${credential}`], ["request-id", credential]);
       const pieces = behaviour.chunks ?? [body];
       return {
         status: behaviour.status ?? 200,
@@ -293,7 +294,7 @@ export function createFakeEgress(options: FakeEgressOptions): FakeEgress {
         yield* refuse(family, "ssrf");
         return;
       }
-      const headers = mutation === "unfiltered_headers" ? response.headers : sanitizeResponseHeaders(response.headers);
+      const headers = mutation === "unfiltered_headers" ? response.headers : sanitizeResponseHeaders(response.headers, mutation === "unscanned_headers" ? {} : { key: secret });
       const contentType = response.headers.find(([name]) => name.toLowerCase() === "content-type")?.[1] ?? "";
       const streaming = response.status < 400 && (built.route.streaming === "always" || /event-stream/iu.test(contentType));
       const finish = (args: { status: number; usageBody: ReturnType<typeof usageFromBody>; cls: ModelEgressSettle["class"]; complete: boolean }): ModelEgressSettle => {

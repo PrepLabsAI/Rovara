@@ -9,7 +9,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
 
-interface Statement { Action: string | string[]; Resource: unknown }
+interface Statement { Action: string | string[]; Resource: unknown; Condition?: unknown }
 
 function statementsForRole(template: Template, prefix: string): Statement[] {
   return (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
@@ -49,10 +49,15 @@ describe("turn record and alarm infrastructure", () => {
     expect(entries[0]!.DeletionPolicy).toBe("Retain");
   });
 
-  it("lets the Slack service only put turn records and the broker only read them", () => {
+  it("lets the Slack service only put turn records, and the broker read them and write only admin change audit and task records, each by its key", () => {
     expect(actions(statementsForRole(template, "SlackOrchestratorTaskRole"))).toEqual(["dynamodb:PutItem"]);
     const broker = actions(statementsForRole(template, "BrokerServiceRole"));
-    expect(broker).toEqual(["dynamodb:Query"]);
+    expect([...new Set(broker)].sort()).toEqual(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:UpdateItem"]);
+    const writes = statementsForRole(template, "BrokerServiceRole").filter((statement) => JSON.stringify(statement.Action).includes("PutItem") && JSON.stringify(statement.Resource).includes("TurnRecords"));
+    // Every write is held to its own key prefix: admin change audit records (CHANGE#) and AI-tool task turn records (TASK#).
+    expect(writes.length).toBeGreaterThan(0);
+    for (const statement of writes) expect(JSON.stringify(statement.Condition)).toMatch(/"dynamodb:LeadingKeys":\["(CHANGE|TASK)#/);
+    expect(JSON.stringify(writes)).toContain("CHANGE#*");
     expect(JSON.stringify(template.toJSON())).toContain("TURN_RECORDS_TABLE_NAME");
   });
 

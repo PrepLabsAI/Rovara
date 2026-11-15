@@ -10,7 +10,7 @@ import { E2ESharedViewSchema } from "./e2e-view.js";
 import { RunEstimateSchema } from "./run-estimate.js";
 import { SessionIdSchema } from "./agent-sessions.js";
 import { TestingViewSchema } from "./verification-result.js";
-import { EvidenceViewSchema } from "./evidence.js";
+import { EvidenceViewReadSchema } from "./evidence.js";
 import { PlanOneScreenSchema } from "./plan-one-screen.js";
 import { MergeTrackingItemSchema, MergeViewSchema, ProofTableViewSchema, VerificationReportSchema } from "./rovara-code.js";
 import { readsAsUnknown } from "./forward-reader-unknown.js";
@@ -160,6 +160,15 @@ export const DeveloperTaskViewSchema = z.object({
   /** Plan 3, Task 34: what the coding plan under review is expected to cost and the run limit approving it accepts. */
   runEstimate: RunEstimateSchema.optional(),
   /**
+   * #651: what the task's runs have cost so far, from their usage records: dollars (of the records the provider priced), tokens, and how many model runs
+   * (usage records: one operation, such as a review, can make several). `unpricedRuns` counts records with no cost, so `usd` is then a lower bound. Absent
+   * before the first is recorded.
+   */
+  spent: z.object({
+    usd: z.number().nonnegative(), inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),
+    runs: z.number().int().nonnegative(), unpricedRuns: z.number().int().nonnegative(), updatedAt: z.string(),
+  }).strict().optional(),
+  /**
    * 0.5.11 (QA6-12b): while the coding plan waits for approval, what approving does to the run limit: the limit now, the one approving sets and whether that raises it. A raise is approved only with `proposedUsd`
    * acknowledged (the tool's `acknowledged_run_limit_usd`, the API's `acknowledgedRunLimitUsd`). Absent unless the coding plan waits and the task carries an estimate.
    */
@@ -187,7 +196,7 @@ export const DeveloperTaskViewSchema = z.object({
   /** Playbook P3 (version 2 only, full reads only, like `verificationReport`): the proof table of the approved plan's requirements, as the pull request's Proof section has it. Absent when there is no approved plan with claims. */
   proofTable: ProofTableViewSchema.optional(),
   /** Proof and evidence P1 (version 2 only, full reads only, like `proofTable`): the evidence of the code now on the task, with every artifact as a link behind sign-in. Absent until the broker has built one for the current candidate. */
-  evidence: EvidenceViewSchema.optional(),
+  evidence: EvidenceViewReadSchema.optional(),
   /** Setup and test health SH19 (version 2 only, full reads only, only while the four-results switch is on): one of Verified, Code failed, Partially verified or Blocked by environment for the code now on the task, with one row per check. Absent while the switch is off or the result is not decided yet. */
   testing: TestingViewSchema.optional(),
   /** Design review (DR11, version 2 only): the Design first and Skip buttons for the person reading, decided by the broker. Absent when design review is not offered for the task. */

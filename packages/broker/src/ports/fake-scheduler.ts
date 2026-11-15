@@ -4,7 +4,7 @@
 // and a handler that throws is told the same fire again with `attempt` counted, up to `maxAttempts` (then the fire is dropped, as a real scheduler's retry limit does).
 import { createHash } from "node:crypto";
 import {
-  SchedulerError, isScheduleId,
+  SchedulerError, isScheduleId, OrgIdSchema, checkScheduleCompany,
   type DueSchedule, type ScheduleEntry, type ScheduleSubscription, type Scheduler, type SchedulerCapabilities,
 } from "@agentx/contracts";
 
@@ -17,6 +17,7 @@ export function scheduleSlotId(companyId: string, scheduleId: string, scheduledA
 
 /** Refuses a spec an adapter with these capabilities could not run: the id, the rule, the zone and the interval. Shared by the adapters so each refuses the same way. */
 export function checkScheduleEntry(spec: ScheduleEntry, capabilities: SchedulerCapabilities): void {
+  checkScheduleCompany(spec);
   if (!isScheduleId(spec.scheduleId)) throw new SchedulerError("refused", "not a schedule id");
   if (spec.when.kind === "cron") {
     if (!FIVE_FIELD_CRON.test(spec.when.cron)) throw new SchedulerError("refused", "the time is not a five-field cron");
@@ -45,8 +46,9 @@ export function createFakeScheduler(options: { capabilities?: Partial<SchedulerC
       checkScheduleEntry(spec, capabilities);
       held.set(keyOf(spec.companyId, spec.scheduleId), structuredClone(spec));
     },
-    async remove(companyId, scheduleId) { return held.delete(keyOf(companyId, scheduleId)); },
+    async remove(companyId, scheduleId) { if (!OrgIdSchema.safeParse(companyId).success) return false; return held.delete(keyOf(companyId, scheduleId)); },
     async get(companyId, scheduleId) {
+      if (!OrgIdSchema.safeParse(companyId).success) return undefined;
       const found = held.get(keyOf(companyId, scheduleId));
       return found === undefined ? undefined : structuredClone(found);
     },

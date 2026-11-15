@@ -3,6 +3,7 @@
 // Order (it matters, and `docs/local.md` says why): the state folder is checked; the plug-in config is read from there; Code's
 // defaults and the built-in adapters are registered; the config's adapters are loaded (a configured storage or queue replaces the
 // in-memory default); the registry is sealed; then the server starts. Nothing in the registry changes after that except channels.
+import type { TierReviewCall } from "../core/build-step/tier-review-calls.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
@@ -47,6 +48,7 @@ import type { AutomationSwitch } from "../core/automation/switch.js";
 import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp } from "./app/app.js";
 import { localAllowedDomains } from "./isolation/allow-list.js";
+import { laptopSandboxDenyList, sandboxModelHostsAllowed } from "./isolation/sandbox-model-deny.js";
 import { devcontainerRegistriesForInstall } from "./isolation/stack.js";
 import type { LocalComments } from "./app/comments.js";
 import { configurationAnswer } from "./app/routes.js";
@@ -89,6 +91,7 @@ import { prepareLocalTestServices } from "./test-services-install.js";
 import { createOwnerImageService, createOwnerImageStore } from "./test-services-owner-list.js";
 import { createDockerImageRegistry } from "./docker-image-registry.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { PolicyHookSetupError, applyPolicyHook, type PolicyHookInstall } from "../core/policy-hook/index.js";
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
@@ -187,6 +190,11 @@ export const INJECTED_ADAPTER_NAME = "injected";
 
 export interface LocalRuntimeOptions {
   stateDirectory: string;
+  /**
+   * The lighter flow (small changes skip their planning steps). Code's laptop leaves it out: off, with no reviewer call. `on` needs `tierReviewCall` (the start is refused without it). A reviewer call may be given
+   * with the switch off, so a task that skipped steps before the switch went off can still be asked its questions.
+   */
+  lighterFlow?: { on: boolean; tierReviewCall?: TierReviewCall | undefined } | undefined;
   /** A config path the owner typed; absent: `<stateDirectory>/config.json`, made on first run. */
   configPath?: string | undefined;
   /** The folder the owner is standing in. A config inside it is refused. */
@@ -241,6 +249,13 @@ export interface LocalRuntimeOptions {
   modelGrants?: ModelGrantSource | undefined;
   /** Where the model proxy calls each provider (tests point these at a fake). Absent: the providers' own addresses. */
   modelProviderEndpoints?: Partial<ProviderEndpoints> | undefined;
+  /**
+   * Lane H: the install's issuer and signing key, which the policy hook signs its questions with. Needed only when the config sets `policyHook`; an install
+   * that sets it without a key does not start. Absent with no `policyHook`: nothing changes.
+   */
+  policyHookInstall?: PolicyHookInstall | undefined;
+  /** The fetch the policy hook asks with (tests give a recorder). Absent: the global fetch. */
+  policyHookFetch?: typeof fetch | undefined;
 }
 
 export interface LocalRuntime {
@@ -470,6 +485,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const callbackServer: { current?: CallbackServer } = {};
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
   const approvedHosts: { current?: (project: string | undefined) => Promise<string[]> } = {};
+  const sandboxDeny = laptopSandboxDenyList();
   const docker = new DockerWorkerMachines({
     image: options.workerImage,
     stateDirectory,
@@ -478,6 +494,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       return { tcpPort: callbackServer.current.tcpPort, socketDirectory: callbackServer.current.socketDirectory };
     },
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
+    // FIX-0518 (security): the sandboxes' network may not reach a model host, unless the owner's config says so for that project. The worker's own network keeps them: the agent's model loop runs there, through the key proxy.
+    modelHostsDeniedInSandbox: sandboxDeny,
+    sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
     extraAllowedDomains: async (project) => (await approvedHosts.current?.(project)) ?? [],
     // The registries a project's dev container may pull from: the owner's `ROVARA_DEVCONTAINER_REGISTRIES` (`0` turns dev containers off); with none said, the default list on a Docker that runs in a virtual machine and none on a host where root in a container is root.
     devcontainerRegistries: await devcontainerRegistriesForInstall(options.environment, options.docker ?? createDockerRunner(options.environment)),
@@ -564,6 +583,18 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // The monitoring adapters Code ships (Sentry, Datadog, Grafana, PagerDuty, Vercel); a plug-in's own adapter for a kind, loaded above, is left in place. CloudWatch needs AWS access: it is
   // registered by whoever gives this install that access (`cloudwatchMonitoringAdapter`).
   registerNativeMonitoring(registry);
+  // Lane H: the policy hook goes in front of the admission and approvers adapters, whichever they are, last before the seal. No `policyHook` setting: nothing changes.
+  if (config.policyHook !== undefined) {
+    try {
+      applyPolicyHook(registry, config.policyHook, options.policyHookInstall, {
+        audit: registry.require("audit-sink"),
+        ...(options.policyHookFetch === undefined ? {} : { fetch: options.policyHookFetch }),
+        log: (event) => { console.error(JSON.stringify(event)); },
+      });
+    } catch (error) {
+      throw error instanceof PolicyHookSetupError ? new LocalStateError(error.message) : error;
+    }
+  }
   registry.seal();
   // Port lane P6 (item L2): an append-only, hash-chained copy of the committed audit rows (audit.db), fed through the store's change feed. It is never the primary record. Its chain and anchor are checked now.
   if (options.storage !== "memory" && !configured("audit-sink")) {
@@ -586,6 +617,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const modelProxyHolder: { current?: LocalModelProxy } = {};
   const app = await createLocalApp({
     origin: () => serverUrl.current,
+    ...(options.lighterFlow === undefined ? {} : { lighterFlow: options.lighterFlow }),
     ...(options.openBrowser === undefined ? {} : { openBrowser: options.openBrowser }),
     // The model proxy is made after the servers (it is served on the callback listener); the app asks it, late, to forget an operation that ended.
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
@@ -627,6 +659,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // The setup agent (`ROVARA_SETUP_AGENT=0` turns it off): a run that sets a project up by running its commands in a sandbox.
     setupAgent: options.environment["ROVARA_SETUP_AGENT"] !== "0",
     installDomains: () => localAllowedDomains(options.allowedDomains),
+    sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
+    sandboxModelHostsOf: (machineId) => docker.sandboxModelHostsOf(machineId),
+    sandboxDenied: (project) => (sandboxModelHostsAllowed(config, project) ? [] : sandboxDeny),
   });
   approvedHosts.current = (project) => app.setupAgent.approvedHosts(project);
 

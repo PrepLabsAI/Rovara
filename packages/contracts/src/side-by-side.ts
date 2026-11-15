@@ -1,7 +1,7 @@
 // TE-F10 (M2, 0.5.20): old vs new prompt outputs on the same inputs, side by side, judged by an independent judge. This file holds the types, the choice of cases (seeded, deterministic), the pairing rules, the table of when the layer is
 // on, and the eval-set case source. The runner is `side-by-side-run.ts`, the judge's input and answer rules are `side-by-side-judge.ts`, the two renderings are `side-by-side-render.ts`.
 //
-// A side-by-side result is NEVER proof that a change works: it shows what two prompts said and what an independent reader made of them. It carries no trust class and no proof basis, and its check kind (`side_by_side`) does not count toward the
+// A side-by-side result is NEVER proof that a change works: it shows what two prompts said and what an independent reader made of them. It carries no trust class and no proof basis, and its check kind (`prompt_side_by_side`) does not count toward the
 // proof (check-kinds.ts). Pure and browser-safe apart from the hash: no clock, no randomness, no file, no network. No callers yet.
 import { createHash } from "node:crypto";
 import { modelOfBody } from "./model-egress/cost.js";
@@ -22,6 +22,12 @@ export const SIDE_BY_SIDE_OUTPUT_MAX_CHARS = 8_000;
 /** The most examples a full rendering shows. */
 export const SIDE_BY_SIDE_EXAMPLES_MAX = 3;
 const CASE_ID_MAX = 200;
+/** The most cases a source may OFFER in one run (not the five compared): over it the run is refused, never silently cut. */
+export const SIDE_BY_SIDE_OFFER_MAX_ITEMS = 1_000;
+/** The most bytes of frames (bodies, paths, queries, headers) a source may offer in one run, before any of them is parsed. */
+export const SIDE_BY_SIDE_OFFER_MAX_BYTES = 16 * 1_048_576;
+/** The families whose answers the runner can read (`modelOutputText`): a case of any other family is refused before any call. */
+export const SIDE_BY_SIDE_FAMILIES = ["gemini", "vertex", "anthropic_messages", "openai_compatible", "cohere"] as const satisfies readonly ModelEgressFamily[];
 
 /** What the judge concluded, from the NEW prompt's point of view. */
 export const SIDE_BY_SIDE_VERDICTS = ["same", "better", "worse", "unclear"] as const;
@@ -62,6 +68,31 @@ export function selectSideBySideCases(cases: readonly SideBySideCase[], options:
   return ranked.slice(0, limit).map((entry) => entry.item);
 }
 
+/** Bytes a frame of unknown shape holds, counted cheaply and without parsing it (strings by length, the body by byte length); more than `limit` stops the count early. */
+function frameBytes(frame: unknown, limit: number): number {
+  if (typeof frame !== "object" || frame === null) return 0;
+  const held = frame as { body?: unknown; path?: unknown; query?: unknown; headers?: unknown };
+  let total = held.body instanceof Uint8Array ? held.body.byteLength : 0;
+  total += (typeof held.path === "string" ? held.path.length : 0) + (typeof held.query === "string" ? held.query.length : 0);
+  if (Array.isArray(held.headers)) {
+    for (const header of held.headers as unknown[]) {
+      total += 1 + (Array.isArray(header) ? header.reduce<number>((sum, part) => sum + (typeof part === "string" ? part.length : 0), 0) : 0);
+      if (total > limit) break;
+    }
+  }
+  return total;
+}
+/** Whether what a source offered is within the total limits (number of cases and bytes of frames). Checked BEFORE any frame is parsed or any case id is hashed. */
+export function sideBySideOfferWithinLimits(cases: readonly SideBySideCase[]): boolean {
+  if (cases.length > SIDE_BY_SIDE_OFFER_MAX_ITEMS) return false;
+  let total = 0;
+  for (const item of cases) {
+    total += frameBytes(item?.old, SIDE_BY_SIDE_OFFER_MAX_BYTES) + frameBytes(item?.new, SIDE_BY_SIDE_OFFER_MAX_BYTES);
+    if (total > SIDE_BY_SIDE_OFFER_MAX_BYTES) return false;
+  }
+  return true;
+}
+
 export type SideBySideOrder = "old_first" | "new_first";
 /** Which answer the judge sees as A: decided by the seed and the case id alone, so it is repeatable and the mapping back is by code. */
 export function sideBySideOrder(seed: string, caseId: string): SideBySideOrder {
@@ -89,12 +120,13 @@ export function pairSideBySideCases(cases: readonly SideBySideCase[], options: {
   for (const item of cases) {
     const caseId = typeof item?.caseId === "string" ? item.caseId : "";
     const idOk = caseId.length > 0 && caseId.length <= CASE_ID_MAX;
+    const family = (SIDE_BY_SIDE_FAMILIES as readonly unknown[]).includes(item?.family) ? item.family : undefined;
     const oldFrame = ModelEgressFrameSchema.safeParse(item?.old);
     const newFrame = ModelEgressFrameSchema.safeParse(item?.new);
-    if (!idOk || !oldFrame.success || !newFrame.success) refused.push({ caseId: idOk ? caseId : "", reason: "bad_frame" });
+    if (!idOk || family === undefined || !oldFrame.success || !newFrame.success) refused.push({ caseId: idOk ? caseId : "", reason: "bad_frame" });
     else if (oldFrame.data.row !== newFrame.data.row) refused.push({ caseId, reason: "different_row" });
-    else if (!options.modelChange && modelOfFrame(oldFrame.data, item.family) !== modelOfFrame(newFrame.data, item.family)) refused.push({ caseId, reason: "different_model" });
-    else paired.push({ caseId, family: item.family, old: oldFrame.data, new: newFrame.data });
+    else if (!options.modelChange && modelOfFrame(oldFrame.data, family) !== modelOfFrame(newFrame.data, family)) refused.push({ caseId, reason: "different_model" });
+    else paired.push({ caseId, family, old: oldFrame.data, new: newFrame.data });
   }
   return { paired, refused };
 }
@@ -157,7 +189,7 @@ export interface SideBySideSummary {
   readonly counts: SideBySideCounts;
   readonly cases: readonly SideBySideCaseOutcome[];
   readonly meters: { readonly product: SideBySideMeter; readonly rovara: SideBySideMeter };
-  readonly stoppedBy?: "overrun" | "cap" | "call_limit";
+  readonly stoppedBy?: "overrun" | "cap" | "call_limit" | "time_limit";
 }
 
 // ---- the eval-set source ----

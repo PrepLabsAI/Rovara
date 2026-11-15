@@ -1,22 +1,25 @@
 // TE-F10: the run. For each chosen case, ONE attempt per side through the `model-egress` port (the product key's calls, F1-a), then ONE judge call per case through the judge seam (Rovara's own model access: a separate meter, never
 // mixed with the product key's). Each case is judged alone, so an answer that tries to talk to the judge can reach no other case's verdict. A call that did not run says why in F1-a's own sentence ("not run", never "failed");
 // after a call that settled over the cap no further call is made (DECISIONS 165/165a: over by at most one call); a per-task call limit is the defence in depth. No real call is made here: the port is whatever the caller hands in.
-// Pure apart from the calls it is given: no clock, no randomness, no file, no socket of its own. No callers yet.
+// Pure apart from the calls it is given: no randomness (but the order seed), no file, no socket of its own; one total time limit (a timer that only aborts a signal) bounds the whole run. No callers yet.
 import { randomBytes } from "node:crypto";
-import type { ModelEgress, ModelEgressScope, ModelEgressSettle } from "./ports/model-egress.js";
+import type { ModelEgress, ModelEgressEvent, ModelEgressScope, ModelEgressSettle } from "./ports/model-egress.js";
 import { capSentence, NOT_RUN_CLASSES, NOT_RUN_SENTENCES, type ModelEgressNotRunClass } from "./model-egress/classify.js";
 import { MODEL_EGRESS_OVERRUN_SENTENCE } from "./model-egress/cost.js";
 import type { ModelEgressFamily } from "./model-egress/schemes.js";
-import type { PromptChangeReport } from "./prompt-change.js";
+import { PromptChangeReportSchema, type PromptChangeReport } from "./prompt-change.js";
 import { checkSideBySideJudgePin, type SideBySideHumanCheck, type SideBySideJudgePinRefusal } from "./side-by-side-judge-pin.js";
 import { buildSideBySideJudgeCall, newPromptVerdict, parseSideBySideVerdicts, type SideBySideJudge } from "./side-by-side-judge.js";
 import {
-  pairSideBySideCases, selectSideBySideCases, sideBySideIsOn, sideBySideOrder, SIDE_BY_SIDE_CHECK_KIND, SIDE_BY_SIDE_DEFAULT_CALL_CAP, SIDE_BY_SIDE_OUTPUT_MAX_CHARS, SIDE_BY_SIDE_SCHEMA_VERSION,
+  pairSideBySideCases, selectSideBySideCases, sideBySideIsOn, sideBySideOfferWithinLimits, sideBySideOrder, SIDE_BY_SIDE_CHECK_KIND, SIDE_BY_SIDE_DEFAULT_CALL_CAP, SIDE_BY_SIDE_OUTPUT_MAX_CHARS, SIDE_BY_SIDE_SCHEMA_VERSION,
   type SideBySideCase, type SideBySideCaseOutcome, type SideBySideCaseSource, type SideBySideCounts, type SideBySideMeter, type SideBySideOnDecision, type SideBySidePolicy, type SideBySideSummary,
 } from "./side-by-side.js";
 
 /** The most bytes of one answer the runner reads; more is "cannot be read". */
 const ANSWER_READ_MAX_BYTES = 4 * 1_048_576;
+/** The default TOTAL time for one run (source, every product call and every judge call together). */
+export const SIDE_BY_SIDE_DEFAULT_DEADLINE_MS = 10 * 60_000;
+const DEADLINE_MAX_MS = 2_147_483_647;
 
 const rec = (value: unknown): Record<string, unknown> | undefined => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined);
 const own = (object: Record<string, unknown> | undefined, key: string): unknown => (object !== undefined && Object.hasOwn(object, key) ? object[key] : undefined);
@@ -101,11 +104,13 @@ export interface SideBySideRunInput {
   /** Per-task limit on judge calls (the Rovara source's own limit). Default 10. */
   readonly maxJudgeCalls?: number;
   readonly signal?: AbortSignal;
+  /** The TOTAL time the run may take, in milliseconds (source, product calls and judge calls together). Default ten minutes. When it passes, what has not run is "not run" and the run ends. */
+  readonly deadlineMs?: number;
 }
 
 export type SideBySideRunResult =
   | { readonly status: "off"; readonly reason: Extract<SideBySideOnDecision, { on: false }>["reason"] }
-  | { readonly status: "refused"; readonly reason: "company_mismatch" | "source_unreadable" | SideBySideJudgePinRefusal }
+  | { readonly status: "refused"; readonly reason: "company_mismatch" | "source_unreadable" | "source_too_large" | "time_limit" | "bad_input" | SideBySideJudgePinRefusal }
   | { readonly status: "ran"; readonly summary: SideBySideSummary };
 
 const wholeNumber = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -113,14 +118,46 @@ const limitOf = (value: number | undefined, fallback: number): number => (typeof
 const NOT_RUN_BY_CLASS: ReadonlySet<string> = new Set<string>(NOT_RUN_CLASSES);
 const sentenceOfClass = (cls: ModelEgressNotRunClass): string => (cls === "cap" ? capSentence() : NOT_RUN_SENTENCES[cls]);
 const JUDGE_NOT_RUN = "judge not run";
+const TIME_LIMIT_SENTENCE = "not run: side-by-side time limit reached (or the run was cancelled)";
 /** Words that could steer the judge. Linear: no nesting, and the answers it reads are cut to 8,000 characters. */
 const STEERING = /a_better|b_better|different_unclear|verdict|judge|case-\d/iu;
 
-type Stop = "overrun" | "cap" | "call_limit";
+type Stop = "overrun" | "cap" | "call_limit" | "time_limit";
 type Side = "old" | "new";
 type SideResult = { readonly ok: true; readonly text: string } | { readonly ok: false; readonly outcome: "not_run" | "call_failed"; readonly sentence: string };
 
+/** Whether the input has the shapes the run reads. A caller error (or a value read back from storage) is a fixed refusal, never a TypeError. */
+function inputShapeOk(input: unknown): input is SideBySideRunInput {
+  const held = rec(input);
+  if (held === undefined) return false;
+  const source = rec(held.source);
+  const judge = rec(held.judge);
+  const egress = rec(held.egress);
+  return rec(held.policy) !== undefined && PromptChangeReportSchema.safeParse(held.report).success
+    && source !== undefined && typeof source.cases === "function" && typeof source.company === "string"
+    && judge !== undefined && typeof judge.judge === "function" && typeof judge.company === "string" && rec(judge.pin) !== undefined
+    && egress !== undefined && typeof egress.forward === "function";
+}
+
+type Waited<T> = { readonly ok: true; readonly value: T } | { readonly ok: false };
+/** Waits for `work`, or for the signal to abort, whichever comes first. A rejection of `work` is passed on; one that comes after the abort is swallowed. */
+function waitFor<T>(work: Promise<T>, signal: AbortSignal): Promise<Waited<T>> {
+  if (signal.aborted) {
+    work.catch(() => undefined);
+    return Promise.resolve({ ok: false });
+  }
+  return new Promise<Waited<T>>((resolve, reject) => {
+    const onAbort = (): void => resolve({ ok: false });
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve({ ok: true, value }); },
+      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error instanceof Error ? error : new Error("failed")); },
+    );
+  });
+}
+
 export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySideRunResult> {
+  if (!inputShapeOk(input)) return { status: "refused", reason: "bad_input" };
   const on = sideBySideIsOn(input.report, input.policy);
   if (!on.on) return { status: "off", reason: on.reason };
   if (typeof input.company !== "string" || input.company === "" || input.source.company !== input.company || input.judge.company !== input.company) return { status: "refused", reason: "company_mismatch" };
@@ -136,12 +173,21 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
   const checked = checkSideBySideJudgePin({ pin: input.judge.pin, taskStartedAt: input.taskStartedAt, productModelFamily: input.productModelFamily, codingModelFamily: input.codingModelFamily, humanCheck: input.humanCheck });
   if (!checked.ok) return { status: "refused", reason: checked.reason };
 
+  // ONE total time limit for the whole run, joined with the caller's own signal.
+  const deadlineMs = typeof input.deadlineMs === "number" && Number.isFinite(input.deadlineMs) && input.deadlineMs > 0 ? Math.min(DEADLINE_MAX_MS, input.deadlineMs) : SIDE_BY_SIDE_DEFAULT_DEADLINE_MS;
+  const signal = AbortSignal.any([AbortSignal.timeout(deadlineMs), ...(input.signal instanceof AbortSignal ? [input.signal] : [])]);
+
   let offered: readonly SideBySideCase[];
   try {
-    offered = await input.source.cases();
+    const waited = await waitFor((async () => input.source.cases())(), signal);
+    if (!waited.ok) return { status: "refused", reason: "time_limit" };
+    if (!Array.isArray(waited.value)) return { status: "refused", reason: "source_unreadable" };
+    offered = waited.value;
   } catch {
     return { status: "refused", reason: "source_unreadable" };
   }
+  // A total limit on what is offered, checked before anything is parsed or hashed: over it, a fixed refusal, never a silent cut.
+  if (!sideBySideOfferWithinLimits(offered)) return { status: "refused", reason: "source_too_large" };
   const pairing = pairSideBySideCases(offered, { modelChange: input.report.counts.model_name > 0 });
   const chosen = selectSideBySideCases(pairing.paired, { seed: input.seed, max: input.maxCases });
 
@@ -155,20 +201,42 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
 
   /** One attempt through the port: the answer text, or the plain reason there is none. Never throws, never keeps a provider's or an adapter's words. */
   async function callSide(item: SideBySideCase, side: Side): Promise<SideResult> {
+    if (signal.aborted) {
+      state.stop ??= "time_limit";
+      return { ok: false, outcome: "not_run", sentence: stopSentence("time_limit") };
+    }
     product.calls += 1;
     let settle: ModelEgressSettle | undefined;
     const chunks: Uint8Array[] = [];
     let size = 0;
-    let tooLong = false;
+    let iterator: AsyncIterator<ModelEgressEvent> | undefined;
+    const close = (): void => {
+      // Not awaited: an adapter that is stuck must not hold the run. The call is told to stop; a failure to stop is not ours to report.
+      try { void Promise.resolve(iterator?.return?.()).catch(() => undefined); } catch { /* nothing to do */ }
+    };
     try {
-      for await (const event of input.egress.forward(input.scope, side === "old" ? item.old : item.new, input.signal === undefined ? undefined : { signal: input.signal })) {
+      iterator = input.egress.forward(input.scope, side === "old" ? item.old : item.new, { signal })[Symbol.asyncIterator]();
+      for (;;) {
+        const step = await waitFor(iterator.next(), signal);
+        if (!step.ok) {
+          close();
+          state.stop ??= "time_limit";
+          return { ok: false, outcome: "not_run", sentence: stopSentence("time_limit") };
+        }
+        if (step.value.done === true) break;
+        const event = step.value.value;
         if (event.kind === "chunk") {
           size += event.bytes.byteLength;
-          if (size > ANSWER_READ_MAX_BYTES) tooLong = true;
-          else chunks.push(event.bytes);
+          // Past the read limit the rest is not read: the stream is closed and the answer cannot be read.
+          if (size > ANSWER_READ_MAX_BYTES) {
+            close();
+            return { ok: false, outcome: "call_failed", sentence: `the ${side} prompt's answer could not be read` };
+          }
+          chunks.push(event.bytes);
         } else if (event.kind === "settle") settle = event;
       }
     } catch {
+      close();
       return { ok: false, outcome: "call_failed", sentence: `the ${side} prompt's call failed` };
     }
     if (settle === undefined) return { ok: false, outcome: "call_failed", sentence: `the ${side} prompt's call did not finish` };
@@ -179,21 +247,22 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
       return { ok: false, outcome: "not_run", sentence: sentenceOfClass(settle.class as ModelEgressNotRunClass) };
     }
     if (settle.class !== "ok") return { ok: false, outcome: "call_failed", sentence: `the ${side} prompt's call failed (${settle.class === "refused" ? "refused by the model gateway" : "provider error"})` };
-    const whole = new Uint8Array(size > ANSWER_READ_MAX_BYTES ? 0 : size);
+    const whole = new Uint8Array(size);
     let at = 0;
     for (const chunk of chunks) {
       whole.set(chunk, at);
       at += chunk.byteLength;
     }
-    const text = tooLong ? undefined : modelOutputText(item.family, whole);
+    const text = modelOutputText(item.family, whole);
     return text === undefined ? { ok: false, outcome: "call_failed", sentence: `the ${side} prompt's answer could not be read` } : { ok: true, text: keep(text) };
   }
 
-  const stopSentence = (why: Stop): string => (why === "overrun" ? MODEL_EGRESS_OVERRUN_SENTENCE : why === "cap" ? capSentence() : `not run: side-by-side call limit reached (${String(callLimit)} calls)`);
+  const stopSentence = (why: Stop): string => (why === "overrun" ? MODEL_EGRESS_OVERRUN_SENTENCE : why === "cap" ? capSentence() : why === "time_limit" ? TIME_LIMIT_SENTENCE : `not run: side-by-side call limit reached (${String(callLimit)} calls)`);
   const outcomes: SideBySideCaseOutcome[] = [];
   let judgeIndex = 0;
 
   for (const item of chosen) {
+    if (signal.aborted) state.stop ??= "time_limit";
     if (state.stop === undefined && product.calls + 2 > callLimit) state.stop = "call_limit";
     if (state.stop !== undefined) {
       outcomes.push({ caseId: item.caseId, status: "not_run", side: "old", sentence: stopSentence(state.stop) });
@@ -227,7 +296,13 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
     rovara.calls += 1;
     let answer: Awaited<ReturnType<SideBySideJudge["judge"]>> | undefined;
     try {
-      answer = await input.judge.judge(buildSideBySideJudgeCall([{ id, oldText: before.text, newText: after.text, order }]));
+      const waited = await waitFor(Promise.resolve().then(() => input.judge.judge(buildSideBySideJudgeCall([{ id, oldText: before.text, newText: after.text, order }]), { signal })), signal);
+      if (!waited.ok) {
+        state.stop ??= "time_limit";
+        outcomes.push({ ...base, status: "judge_not_run", reason: `${JUDGE_NOT_RUN}: time limit reached` });
+        continue;
+      }
+      answer = waited.value;
     } catch {
       answer = undefined;
     }
