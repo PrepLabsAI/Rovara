@@ -18,7 +18,7 @@ const fields = (schema: z.ZodObject) => Object.entries(schema.shape).map(([name,
 
 describe("contract H-1", () => {
   it("pins the shared bytes (the same literal is pinned in the answering service's repo)", () => {
-    expect(sha256(text)).toBe("ad60a0f8ae7dd9a6b10959c06e4a6b600d9b388557ad066214a2ad1ea2ca2664");
+    expect(sha256(text)).toBe("0253a35628b1441d37dcd5fce2553fc4b4d0913a498a58f7cda484d22de27493");
     expect(text.endsWith("}\n")).toBe(true);
     expect(text.includes("\r")).toBe(false);
     expect(text).toBe(`${JSON.stringify(shared, null, 2)}\n`);

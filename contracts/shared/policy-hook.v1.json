@@ -28,7 +28,7 @@
       },
       {
         "name": "iss",
-        "type": "string",
+        "type": "Issuer",
         "required": true
       },
       {
@@ -255,7 +255,8 @@
     "TaskId": "^[A-Za-z0-9_.:-]{1,128}$",
     "DecisionKind": "^[a-z][a-z0-9_.-]{0,63}$",
     "Code": "^[a-z][a-z0-9_]{0,63}$",
-    "Kid": "^[A-Za-z0-9_-]{1,64}$"
+    "Kid": "^[A-Za-z0-9_-]{1,64}$",
+    "Issuer": "^https:\\/\\/[^\\s]{1,504}$"
   },
   "words": {
     "startNoAnswer": "the company rules service did not answer; nothing has started",

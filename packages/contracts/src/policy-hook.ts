@@ -30,6 +30,7 @@ export const POLICY_HOOK_PATTERNS = Object.freeze({
   DecisionKind: /^[a-z][a-z0-9_.-]{0,63}$/u,
   Code: /^[a-z][a-z0-9_]{0,63}$/u,
   Kid: /^[A-Za-z0-9_-]{1,64}$/u,
+  Issuer: /^https:\/\/[^\s]{1,504}$/u,
 });
 
 /** Fixed words a person sees. Never the service's text, never a cause. */
@@ -82,7 +83,7 @@ const questionOf = { start: PolicyHookStartQuestionSchema, decide: PolicyHookDec
 const answerOf = { start: PolicyHookStartAnswerSchema, decide: PolicyHookDecideAnswerSchema, values: PolicyHookValuesAnswerSchema } as const;
 
 export const PolicyHookQuestionClaimsSchema = z.object({
-  v: z.literal(POLICY_HOOK_VERSION), iss: z.string().min(1).max(512).regex(/^https:\/\/[^\s]+$/u), rid: uuid, iat: int, exp: int, kind: z.enum(POLICY_HOOK_KINDS), q: z.record(z.string(), z.unknown()),
+  v: z.literal(POLICY_HOOK_VERSION), iss: z.string().regex(P.Issuer), rid: uuid, iat: int, exp: int, kind: z.enum(POLICY_HOOK_KINDS), q: z.record(z.string(), z.unknown()),
 }).strict().superRefine((claims, context) => {
   if (claims.exp - claims.iat !== POLICY_HOOK_QUESTION_SECONDS) context.addIssue({ code: "custom", message: "lifetime" });
   if (!questionOf[claims.kind].safeParse(claims.q).success) context.addIssue({ code: "custom", message: "question" });

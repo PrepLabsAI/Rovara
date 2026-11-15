@@ -97,6 +97,13 @@ describe("policy hook: may this task start", () => {
     expect((await world(() => ({ allow: true }), staging).admission.stage(request("task_1"))).items).toEqual([charge]);
   });
 
+  it("a refusal at stage gives back the install's staged reservation", async () => {
+    const released: string[] = [];
+    const staging: Admission = { ...createAllowAllAdmission(), async stage() { return { decision: { allowed: true, reservationId: "res-3" }, items: [] }; }, async release(id) { released.push(id); } };
+    expect((await world(() => ({ allow: false }), staging).admission.stage(request("task_1"))).decision.allowed).toBe(false);
+    expect(released).toEqual(["res-3"]);
+  });
+
   it("a start the contract cannot carry (no project) is refused, not asked", async () => {
     const w = world(() => ({ allow: true }));
     const noProject: AdmissionRequest = { ...request("task_1") };

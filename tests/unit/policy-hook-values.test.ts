@@ -54,6 +54,10 @@ describe("policy hook: company values", () => {
     await expect(w.source.resolve(scope, {})).rejects.toThrow("policy_unavailable");
   });
 
+  it("a preset lock is not readable here: the strictest default", async () => {
+    await expect(world(() => ({ locks: { preset_level: "careful" } })).source.resolve(scope, {})).rejects.toThrow("policy_unavailable");
+  });
+
   it("no answer and nothing cached, an unreadable lock, or an unknown scope: the strictest default", async () => {
     await expect(world(() => new Response("down", { status: 503 })).source.resolve(scope, {})).rejects.toThrow("policy_unavailable");
     await expect(world(() => ({ locks: { not_a_field: true } })).source.resolve(scope, {})).rejects.toThrow("policy_unavailable");

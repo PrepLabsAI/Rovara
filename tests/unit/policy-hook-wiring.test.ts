@@ -54,6 +54,8 @@ describe("policy hook wiring", () => {
     const decision = await r.require("admission").admit({ companyId: COMPANY, idempotencyKey: "k", action: "task.start", projectName: "web", subject: { type: "task", id: "task_1" } });
     expect(decision).toMatchObject({ allowed: false, code: "company_rules_refused" });
     expect(service.asked).toHaveLength(1);
+    const approvers = r.require("approvers");
+    await expect(approvers.requirement({ companyId: COMPANY, requestId: "r", kind: "plan", subject: { type: "task", id: "task_1" }, revision: 1, artifactDigest: "d" })).rejects.toThrow("the company rules service did not answer");
     r.seal();
   });
 });

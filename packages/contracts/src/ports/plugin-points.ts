@@ -334,14 +334,14 @@ export const PluginConfigSchema = z.object({
     id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@~-]{0,199}$/u, "a model id is plain characters, as the provider lists it (for OpenRouter, vendor/model)"),
   }).strict().optional(),
   /**
-   * FIX-0518 (laptop only, owner-set): per-project settings, by project name, for example `{ "my-app": { "sandboxModelHosts": "allow" } }` for a project whose tests really call a model with the repository's own key. Absent: every project's sandbox is denied the model hosts.
-   * A cloud install ignores it.
-   */
-  /**
    * Lane H (plan v3.2 section 7.5, owner-set): the company rules service this install asks before a task starts, on approvals and for company values, and the public key(s) its answers are signed with
    * (two while one is rotated). The hook can only make things stricter, and no answer is a refusal. Absent: no hook, and the install behaves exactly as before.
    */
   policyHook: PolicyHookSettingsSchema.optional(),
+  /**
+   * FIX-0518 (laptop only, owner-set): per-project settings, by project name, for example `{ "my-app": { "sandboxModelHosts": "allow" } }` for a project whose tests really call a model with the repository's own key. Absent: every project's sandbox is denied the model hosts.
+   * A cloud install ignores it.
+   */
   projectSettings: z.record(z.string().regex(AGENTX_NAME_PATTERN, "a project name is lower-case letters, digits and hyphens"), LocalProjectSettingsSchema).optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {

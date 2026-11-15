@@ -71,7 +71,8 @@ export function withPolicyHookAdmission(base: Admission, hook: PolicyHookClient,
       if (request.action !== "task.start" || !staged.decision.allowed) return staged;
       const refusal = await ask(request);
       if (refusal === undefined) return staged;
-      // A refused decision has no steps: nothing the install's own admission staged is committed.
+      // A refused decision has no steps: nothing the install's own admission staged is committed, and its reservation is given back.
+      if (staged.decision.reservationId !== undefined) await base.release(staged.decision.reservationId).catch(() => undefined);
       return { decision: refusal, items: [] };
     },
     settle: (reservationId, actual) => base.settle(reservationId, actual),

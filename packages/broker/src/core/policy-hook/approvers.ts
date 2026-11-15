@@ -12,6 +12,9 @@ import {
 } from "@agentx/contracts";
 import type { PolicyHookClient } from "./client.js";
 
+/** A sign-in time this far ahead of the clock is not believed. */
+const SIGN_IN_SKEW_MS = 30_000;
+
 export interface PolicyHookApproversOptions {
   now?: () => number;
 }
@@ -48,7 +51,8 @@ export function stricterRequirement(base: ApprovalRequirement, answer: PolicyHoo
     minApprovers: Math.max(base.minApprovers, answer.minApprovers, floor),
     selfApprovalAllowed: base.selfApprovalAllowed && answer.selfApproval && !answer.secondPerson,
     ...(nextSignIn === undefined ? {} : { signIn: nextSignIn }),
-    ...(soleApproverAllowed === undefined || answer.secondPerson ? {} : { soleApproverAllowed }),
+    // The sole-approver exception skips the count and the self check, so any answer that asks for more than the install keeps it off.
+    ...(soleApproverAllowed === undefined || answer.secondPerson || !answer.selfApproval || answer.minApprovers > base.minApprovers ? {} : { soleApproverAllowed }),
   };
 }
 
@@ -81,10 +85,10 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
       if (answer === "unaskable" || !answer.allow) return refuse(verdict, "company_rules_refused");
       if (answer.signInMaxAgeSeconds !== undefined) {
         const auth = verdict.approver.authTime === undefined ? Number.NaN : Date.parse(verdict.approver.authTime);
-        if (!Number.isFinite(auth) || now() - auth > answer.signInMaxAgeSeconds * 1000) return refuse(verdict, "sign_in_not_fresh");
+        if (!Number.isFinite(auth) || now() - auth > answer.signInMaxAgeSeconds * 1000 || auth - now() > SIGN_IN_SKEW_MS) return refuse(verdict, "sign_in_not_fresh");
       }
-      if (answer.secondPerson) {
-        if (request.requestedBy !== undefined && verdict.approver.provider === request.requestedBy.provider && verdict.approver.personId === request.requestedBy.personId) return refuse(verdict, "self_approval_not_allowed");
+      if (answer.secondPerson || !answer.selfApproval || answer.minApprovers > 1) {
+        if ((answer.secondPerson || !answer.selfApproval) && request.requestedBy !== undefined && verdict.approver.provider === request.requestedBy.provider && verdict.approver.personId === request.requestedBy.personId) return refuse(verdict, "self_approval_not_allowed");
         const rest: Extract<ApprovalVerdict, { approved: true }> = { ...verdict };
         delete rest.soleApprover;
         return rest;

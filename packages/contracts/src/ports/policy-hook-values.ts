@@ -32,7 +32,8 @@ export function withPolicyHookValues(base: PolicySource, ask: PolicyHookValuesAs
   async function fetchLocks(companyId: string, projectName: string | undefined): Promise<Entry | undefined> {
     const answer = await ask(companyId, projectName).catch(() => undefined);
     // The answer's locks must be readable as company locks by Code's own field list; anything else is no answer.
-    if (answer === undefined || !PolicyRowsSchema.safeParse({ companyLocks: answer.locks }).success) return undefined;
+    // A preset lock would stand for several fields at once; the hook names fields one by one, so a preset lock is not readable here.
+    if (answer === undefined || Object.hasOwn(answer.locks, "preset_level") || !PolicyRowsSchema.safeParse({ companyLocks: answer.locks }).success) return undefined;
     return { locks: Object.freeze({ ...answer.locks }) as Locks, expiresAt: answer.expiresAt };
   }
 
@@ -69,8 +70,8 @@ export function withPolicyHookValues(base: PolicySource, ask: PolicyHookValuesAs
       for (const row of POLICY_FIELDS) {
         const next = locks[row.id];
         const current = values[row.id];
-        if (next === undefined || current === undefined) continue;
-        if (stricterPolicyValue(row.id, next, current.value)) values[row.id] = { value: next, origin: "company_lock", clampedBy: "company_lock" };
+        if (next === undefined) continue;
+        if (current === undefined || stricterPolicyValue(row.id, next, current.value)) values[row.id] = { value: next, origin: "company_lock", clampedBy: "company_lock" };
       }
       return { status: resolved.status, values, issues: [...resolved.issues] };
     },

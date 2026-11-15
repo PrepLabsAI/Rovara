@@ -88,6 +88,20 @@ describe("policy hook: decisions", () => {
     expect(await world(answer, baseApprovers({ approved: true, approver: person("admin-b"), method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
   });
 
+  it("a stricter count or no self-approval turns the install's sole-approver exception off", async () => {
+    expect(stricterRequirement(baseRequirement, { ...loose, minApprovers: 2 }, request()).soleApproverAllowed).toBeUndefined();
+    expect(stricterRequirement(baseRequirement, { ...loose, selfApproval: false }, request()).soleApproverAllowed).toBeUndefined();
+    expect(stricterRequirement(baseRequirement, loose, request()).soleApproverAllowed).toBe(true);
+    const sole = { approved: true as const, approver: asker, method: "local-session", proofId: "p1", soleApprover: true as const };
+    expect(await world(() => ({ ...loose, selfApproval: false }), baseApprovers(sole)).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "self_approval_not_allowed" });
+    expect(await world(() => ({ ...loose, minApprovers: 2 }), baseApprovers(sole)).approvers.verify(request(), proof)).toEqual({ approved: true, approver: asker, method: "local-session", proofId: "p1" });
+  });
+
+  it("a sign-in time in the future is not believed", async () => {
+    const ahead = person("admin-b", new Date(T0 + 120_000).toISOString());
+    expect(await world(() => ({ ...loose, signInMaxAgeSeconds: 600 }), baseApprovers({ approved: true, approver: ahead, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
+  });
+
   it("stricter only: the install's own refusal stands and the service is not asked", async () => {
     const w = world(() => loose, baseApprovers({ approved: false, reason: "proof_mismatch" }));
     expect(await w.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "proof_mismatch" });

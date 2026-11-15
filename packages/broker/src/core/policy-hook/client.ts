@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import {
   POLICY_HOOK_ALG, POLICY_HOOK_CONTENT_TYPE, POLICY_HOOK_MAX_BODY_BYTES, POLICY_HOOK_QUESTION_SECONDS, POLICY_HOOK_QUESTION_TYP, POLICY_HOOK_TIMEOUT_SECONDS, POLICY_HOOK_VERSION,
-  checkPolicyHookAnswer, parsePolicyHookQuestion, policyHookSigningInput,
+  PolicyHookQuestionClaimsSchema, checkPolicyHookAnswer, parsePolicyHookQuestion, policyHookSigningInput,
   type AuditSink, type PolicyHookAnswers, type PolicyHookKind, type PolicyHookQuestions, type PolicyHookSettings,
 } from "@agentx/contracts";
 import type { TokenSigner } from "../../developer/tokens.js";
@@ -81,6 +81,7 @@ export function createPolicyHookClient(options: PolicyHookClientOptions): Policy
         const { kid } = await options.install.signer.publicJwk();
         const iat = Math.floor(now() / 1000);
         const claims = { v: POLICY_HOOK_VERSION, iss: options.install.issuer, rid: randomId(), iat, exp: iat + POLICY_HOOK_QUESTION_SECONDS, kind, q: checked };
+        if (!PolicyHookQuestionClaimsSchema.safeParse(claims).success) return undefined;
         const signingInput = policyHookSigningInput({ alg: POLICY_HOOK_ALG, typ: POLICY_HOOK_QUESTION_TYP, kid }, claims);
         const signature = await options.install.signer.sign(Buffer.from(signingInput, "utf8"));
         return { kind, requestId: claims.rid, companyId: checked.cid, text: `${signingInput}.${signature.toString("base64url")}` };

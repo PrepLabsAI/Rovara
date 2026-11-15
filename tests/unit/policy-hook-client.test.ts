@@ -132,6 +132,13 @@ describe("policy hook sender", () => {
     expect(called).toBe(false);
   });
 
+  it("an install issuer that is not https is never sent", async () => {
+    let called = false;
+    const c = createPolicyHookClient({ settings: settingsFor(hookKey), install: { issuer: "http://install-a.example/v1/auth", signer: signerOf(install) }, fetch: async () => { called = true; return new Response("", { status: 500 }); }, now: () => T0 });
+    expect(await c.prepare("start", start("task_1"))).toBeUndefined();
+    expect(called).toBe(false);
+  });
+
   it("writes one audit line with ids and fixed words, never the question or answer text", async () => {
     const service = fakeService({ key: hookKey, now: () => T0, answer: () => ({ allow: false, code: "over_budget" }) });
     const { c, audit, logs } = client(service.fetch);
