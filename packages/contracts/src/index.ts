@@ -392,4 +392,6 @@ export * from "./machine-size.js";
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
 
+export * from "./model-gateway-token.js";
+export * from "./payer.js";
 export * from "./ports/company-log.js";
