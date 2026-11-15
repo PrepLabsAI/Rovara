@@ -6,6 +6,7 @@ import { FakeDynamoDb } from "./fake-dynamodb.js";
 
 export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects",
   "GET /v1/dev/client/projects/{id}", "POST /v1/dev/access",
+  "GET /v1/dev/tasks/{taskId}/events", "GET /v1/dev/tasks/{taskId}/readers",
   "GET /v1/dev/tasks/{taskId}/messages", "GET /v1/dev/tasks/{taskId}/comments", "GET /v1/dev/tasks/{taskId}/diff",
 ] as const;
 export const PERSON = "d".repeat(64);

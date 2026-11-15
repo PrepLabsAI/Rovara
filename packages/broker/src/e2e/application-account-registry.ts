@@ -1,9 +1,10 @@
 import {
   E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS, E2EApplicationAccountDefinitionSchema, E2EApplicationAccountLatestSchema, E2EApplicationProjectContractSchema,
   createE2ESyntheticAccountDefinition, deriveE2EApplicationRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eSyntheticAccountContractDigest,
-  projectPk, resolveE2ELatestAccountRef, validateE2EApplicationAccountBinding,
-  type E2EApplicationAccountDefinition, type E2EApplicationAccountLatest, type E2EApplicationProjectContract, type E2ERuntimeAccountRef, type OrgId,
+  resolveE2ELatestAccountRef, validateE2EApplicationAccountBinding,
+  type E2EApplicationAccountDefinition, type E2EApplicationAccountLatest, type E2EApplicationProjectContract, type E2ERuntimeAccountRef,
 } from "@agentx/contracts";
+import { scopedProjectPk, type KeyScope } from "./legacy-key-scope.js";
 
 /**
  * The versioned registry of an application's test accounts (Task 3.1, owner decision D5), in the broker's one table under the project's partition in its org (`projectPk(orgId, project)`, so two orgs' same-named projects keep separate accounts):
@@ -23,6 +24,8 @@ export type E2EAccountRegistryEntry = {
   setupApprovedAt?: string;
   /** Older revisions of the account, newest first: what a task pinned to an older project revision (an older contract) is still held to. */
   earlier?: readonly E2EApplicationAccountDefinition[];
+  /** Read from the unscoped partition the account was first stored in (nothing is under the company's partition yet); every write for it goes under the company's. */
+  legacy?: true;
 };
 
 /**
@@ -43,21 +46,21 @@ const keyPart = (value: string, label: string): string => {
   return value;
 };
 const accountSuffix = (applicationId: string, profileId: string) => `${keyPart(applicationId, "application id")}#${keyPart(profileId, "account profile id")}`;
-export function e2eAccountDefinitionKey(orgId: OrgId, projectId: string, applicationId: string, profileId: string, revision: number): { pk: string; sk: string } {
-  return { pk: projectPk(orgId, projectId), sk: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#${revision}` };
+export function e2eAccountDefinitionKey(orgId: KeyScope, projectId: string, applicationId: string, profileId: string, revision: number): { pk: string; sk: string } {
+  return { pk: scopedProjectPk(orgId, projectId), sk: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#${revision}` };
 }
-export function e2eAccountLatestKey(orgId: OrgId, projectId: string, applicationId: string, profileId: string): { pk: string; sk: string } {
-  return { pk: projectPk(orgId, projectId), sk: `E2E_ACCOUNT_LATEST#${accountSuffix(applicationId, profileId)}` };
+export function e2eAccountLatestKey(orgId: KeyScope, projectId: string, applicationId: string, profileId: string): { pk: string; sk: string } {
+  return { pk: scopedProjectPk(orgId, projectId), sk: `E2E_ACCOUNT_LATEST#${accountSuffix(applicationId, profileId)}` };
 }
 /** The sort-key prefix shared by every revision of one account. */
-export function e2eAccountRevisionPrefix(orgId: OrgId, projectId: string, applicationId: string, profileId: string): { pk: string; prefix: string } {
-  return { pk: projectPk(orgId, projectId), prefix: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#` };
+export function e2eAccountRevisionPrefix(orgId: KeyScope, projectId: string, applicationId: string, profileId: string): { pk: string; prefix: string } {
+  return { pk: scopedProjectPk(orgId, projectId), prefix: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#` };
 }
 
-export function accountDefinitionRow(orgId: OrgId, projectId: string, definition: E2EApplicationAccountDefinition): Record<string, unknown> {
+export function accountDefinitionRow(orgId: KeyScope, projectId: string, definition: E2EApplicationAccountDefinition): Record<string, unknown> {
   return { ...e2eAccountDefinitionKey(orgId, projectId, definition.applicationId, definition.profileId, definition.revision), entityType: "E2E_ACCOUNT", ...definition };
 }
-export function accountLatestRow(orgId: OrgId, projectId: string, applicationId: string, profileId: string, latest: E2EApplicationAccountLatest,
+export function accountLatestRow(orgId: KeyScope, projectId: string, applicationId: string, profileId: string, latest: E2EApplicationAccountLatest,
   setup?: { approvedAt: string; proposalSha256: string }): Record<string, unknown> {
   return { ...e2eAccountLatestKey(orgId, projectId, applicationId, profileId), entityType: "E2E_ACCOUNT_LATEST", ...latest,
     ...(setup === undefined ? {} : { setupApprovedAt: setup.approvedAt, setupProposalSha256: setup.proposalSha256 }) };
@@ -71,7 +74,7 @@ const unreadable = (applicationId: string, profileId: string) => new E2EAccountR
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
 /** One revision's definition row, parsed and held to its key; undefined when it is missing or is not that account's row. */
-export function parseAccountDefinitionRow(orgId: OrgId, projectId: string, applicationId: string, profileId: string, revision: number, row: unknown): E2EApplicationAccountDefinition | undefined {
+export function parseAccountDefinitionRow(orgId: KeyScope, projectId: string, applicationId: string, profileId: string, revision: number, row: unknown): E2EApplicationAccountDefinition | undefined {
   if (!isRecord(row)) return undefined;
   const { pk, sk, entityType, ...body } = row;
   const definition = E2EApplicationAccountDefinitionSchema.safeParse(body);
@@ -84,7 +87,7 @@ export function parseAccountDefinitionRow(orgId: OrgId, projectId: string, appli
  * An account's two rows, parsed and held to their keys: a row is only the account it is keyed as. `definitionRow` is the row at the revision the pointer names.
  * A row that cannot be read throws an `accounts-changed-reapprove` error that names the account.
  */
-export function parseAccountEntry(orgId: OrgId, projectId: string, applicationId: string, profileId: string, latestRow: unknown, definitionRow: unknown): E2EAccountRegistryEntry {
+export function parseAccountEntry(orgId: KeyScope, projectId: string, applicationId: string, profileId: string, latestRow: unknown, definitionRow: unknown): E2EAccountRegistryEntry {
   if (!isRecord(latestRow)) throw unreadable(applicationId, profileId);
   const { pk: latestPk, sk: latestSk, entityType: latestType, setupApprovedAt, setupProposalSha256, ...latestBody } = latestRow;
   const latest = E2EApplicationAccountLatestSchema.safeParse(latestBody);
@@ -98,10 +101,10 @@ export function parseAccountEntry(orgId: OrgId, projectId: string, applicationId
 }
 
 /** Every account of a project in the rows read from its partition (a test's view of the table; the broker reads the accounts a plan names, by key). */
-export function accountRegistryEntriesFromRows(orgId: OrgId, projectId: string, rows: readonly Record<string, unknown>[]): E2EAccountRegistryEntry[] {
+export function accountRegistryEntriesFromRows(orgId: KeyScope, projectId: string, rows: readonly Record<string, unknown>[]): E2EAccountRegistryEntry[] {
   const prefix = "E2E_ACCOUNT_LATEST#";
   return rows.flatMap((row) => {
-    if (row.pk !== projectPk(orgId, projectId) || typeof row.sk !== "string" || !row.sk.startsWith(prefix)) return [];
+    if (row.pk !== scopedProjectPk(orgId, projectId) || typeof row.sk !== "string" || !row.sk.startsWith(prefix)) return [];
     const [applicationId, profileId] = row.sk.slice(prefix.length).split("#");
     if (applicationId === undefined || profileId === undefined) return [];
     const definition = rows.find((item) => item.pk === row.pk && item.sk === e2eAccountDefinitionKey(orgId, projectId, applicationId, profileId, Number(row.revision)).sk);
