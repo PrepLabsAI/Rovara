@@ -414,7 +414,7 @@ and asks the point; it does not write its own reader.
 - **AWS Secrets Manager (convergence lane A3, owner decision 72 O2).** Opt-in: `{ "point": "secrets", "name": "aws-secrets-manager", "module": "@agentx/broker/plugins/secrets-aws", "settings": { "region",
   one AWS identity, "namePrefix": "rovara/", "companyPaths"? } }` (`createSecretsManagerSecretStore` in `@rovara/aws-adapters/secrets-manager`; the module is `packages/broker/src/plugins/secrets/aws-secrets-manager/`, which shows the adapter's fixed sentences as `LocalSecretError`). Its reference kind is `{ "awsSecret": "<name under the prefix>" }`:
   the secret read is `namePrefix` + the value (the hosted product's names, such as `agentx/<env>/org-connectors/<company>/<id>`, read as they are), and the value is checked first (plain parts, no `.` or `..`),
-  so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. A hosted (many-company) setup MUST set `namePrefix` to its environment's path and `companyPaths` (`org-connectors`, `org-hooks`); without `companyPaths` any name under the prefix is read for any company. `clientFor(companyId)`
+  so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. A hosted (many-company) setup sets `namePrefix` to its environment's path and `hosted: true`, which selects `COMPANY_SECRET_PATHS` (`org-connectors`, `org-hooks`, `org-test-accounts`) and assigns old unscoped names to `IMPLICIT_COMPANY_ID`. Explicit `companyPaths` remains available; without `hosted: true` the plug-in refuses all unscoped reads, including the implicit company. Direct adapter callers may explicitly set `unscopedNamesBelongTo`; otherwise `companyPaths` also refuses unscoped names. Both options absent preserve the original single-owner behavior. A valid other-company name answers `undefined` before any AWS call, exactly like missing; malformed references retain fixed refusals. `clientFor(companyId)`
   lets a deployment sign each company's reads with a session that reaches only that company's secrets (IAM is the second fence). Missing, scheduled for deletion or empty is `undefined`; a refusal, a KMS
   decryption failure, a binary secret or an outage is a fixed sentence that quotes neither the name nor the value. Read on every call. It knows no `{ env }` or `{ key }`, so with it
   configured the model keys and the GitHub token must be named as `{ "awsSecret" }` sources where they are read. Suite: `tests/unit/aws-secrets-manager.test.ts`.
@@ -444,6 +444,22 @@ A connection's key or token is not in its record. The record keeps whether a sec
 at most 16 KiB) and **reads them back through the `secrets` socket** as `{ "file": "<absolute path>" }`, so that socket's file rules apply (no link in the path, a plain file that is yours, not readable by others, small).
 A save writes its version first, and the record's commit decides which save won: a version no record names is never read. The newest two versions are kept; older ones are removed; removing a connection removes all.
 A `secrets` plug-in that does not know `{ "file" }` makes saved connections read as "no key" until it does (a configured plug-in is the source of truth for reads).
+
+T6 adds `createMemberSecretReader` and `memberBoundConnectionSecrets`. Each operation asks `CompanyMembershipReader.companyOf(personId)` once, validates the company, and uses it as authority. Missing, malformed or failed membership refuses in fixed words, without an implicit-company fallback. Local and fake connection reads of a valid other-company name answer `undefined`; writes and deletes still refuse. Both helpers use R4's `CompanyMembershipReader` from `aws/company-check.ts`, the same surface as the developer route checks. See the [company inventory](architecture/company-inventory.md#t6-secret-records-and-entry-points) for record and route coverage and remaining wiring.
+
+`createCompanyClientFactory` injects AssumeRole and client construction: one single-flight session per company, `rovara:org` set from the validated company, 900-second duration, refreshed 60 seconds before expiry; failures are not cached. Each AssumeRole session name includes the company and a fresh 16-hex request id (56 characters total). `createSecretsManagerConnectionSecrets` creates with `rovara:org` and `rovara:use=connector` for connectors or `rovara:use=hook` for hooks, updates existing secrets, reads named versions, and schedules deletion with seven days of recovery. No STS dependency is added. The fake proves session/tag construction, not deployed IAM. IAM is a second fence that can answer AccessDenied; the code's same-answer check prevents cross-company reads from reaching it.
+
+| Secret name family / read site | Class | Owner / remaining work |
+|---|---|---|
+| `agentx/<env>/org-connectors/<company>/<id>` (connectors and registered MCP servers) | company-scoped | T6; hosted wiring R2 |
+| `agentx/<env>/org-hooks/<company>/<id>` | company-scoped | T6; hosted wiring R2 |
+| `agentx/<env>/org-test-accounts/<company>/<account>` | company-scoped | T6 reader; worker dynamic-reference reads T7 |
+| Old names without a company segment | company-scoped (implicit company in hosted mode; refused with companyPaths alone) | IAM preview/backfill and cutover remain |
+| GitHub App private key, webhook and Slack install secrets | install-wide | T4/T5, outside T6 |
+| Model keys: `createSecretModelKeyStore`, `createLocalModelKeyStore`, `credentialOf`, model-runtime environment ARNs | install-wide today | lane G; no model-key family added here |
+
+Paths are unchanged. `companyScoped()` remains the DynamoDB key grammar check, not a Secrets Manager name: its `#` is illegal in a secret name. All nine company-separation parts must pass before the pilot. Real IAM, role split, tag backfill, hosted wiring and staging proof are still owed.
+
 
 ## Object storage (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
 
