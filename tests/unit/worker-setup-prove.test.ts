@@ -413,6 +413,26 @@ it("external cancellation is joined before disposal", async () => {
   expect(events).toEqual(["stopped", "disposed"]);
 });
 
+it.each(["callbackCapability", "repositoryGrant"] as const)("the rider scrubs JSON-escaped, lowercase-percent and uppercase-hex %s", async field => {
+  const b = jobBench();
+  const secret = [field, 'quote"back\\slash/+ value', "x".repeat(32)].join("-");
+  if (field === "callbackCapability") b.deps.invocation.callbackCapability = secret;
+  else b.deps.invocation.payload.repositoryGrant = secret;
+  const lowerPercent = (value: string) => value.replace(/%[0-9A-F]{2}/gu, escape => escape.toLowerCase());
+  const json = JSON.stringify(secret).slice(1, -1);
+  const variants = [json, JSON.stringify(json).slice(1, -1), lowerPercent(encodeURIComponent(secret)), lowerPercent(encodeURIComponent(encodeURIComponent(secret))), Buffer.from(secret).toString("hex").toUpperCase()];
+  for (const variant of variants) {
+    b.fresh.ports.runCommand = async () => ({ exitCode: 1, timedOut: false, stdout: variant, stderr: variant });
+    const result = await runSetupProveJob(b.deps);
+    if (!result?.ok) throw new Error("report expected");
+    expect(result.report.steps.some(step => step.outputTail?.includes("redacted"))).toBe(true);
+    for (const output of [JSON.stringify(result), bodyText(b.fetchImplementation.mock.calls.at(-1)?.[1]?.body), JSON.stringify(b.log.mock.calls)]) {
+      expect(output).not.toContain(variant);
+      expect(output).not.toContain(JSON.stringify(variant).slice(1, -1));
+    }
+  }
+});
+
 it.each(["callbackCapability", "repositoryGrant"] as const)("the rider scrubs raw and encoded %s from stdout, stderr, posted reports and logs", async field => {
   const b = jobBench();
   const secret = [field, "private/+value", "x".repeat(32)].join("-");

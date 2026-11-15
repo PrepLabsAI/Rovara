@@ -89,8 +89,9 @@ async function runSetupProveWithSecrets(input: SetupProveInput, ports: SetupProv
       let outputBytes = 0;
       // Transport credentials are not project input, but cannot survive even if a command prints them.
       const lease = job.leaseToken;
-      const variants = [...transportSecrets, ...(lease === undefined ? [] : [lease])].flatMap(secret => [secret, encodeURIComponent(secret), encodeURIComponent(encodeURIComponent(secret)), Buffer.from(secret).toString("base64"), Buffer.from(secret).toString("base64url"), Buffer.from(secret).toString("hex")]);
-      const pattern = variants.length === 0 ? undefined : new RegExp([...new Set(variants)].map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|"), "gu");
+      const variants = [...transportSecrets, ...(lease === undefined ? [] : [lease])].flatMap(secret => [secret, encodeURIComponent(secret), encodeURIComponent(encodeURIComponent(secret)), Buffer.from(secret).toString("base64"), Buffer.from(secret).toString("base64url"), Buffer.from(secret).toString("hex"), JSON.stringify(secret).slice(1, -1), JSON.stringify(JSON.stringify(secret).slice(1, -1)).slice(1, -1)]);
+      // Case-insensitive, so lowercase percent escapes and uppercase hex are caught too; redacting a little more than needed is the safe direction.
+      const pattern = variants.length === 0 ? undefined : new RegExp([...new Set(variants)].map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|"), "giu");
       const scrub = (text: string) => pattern === undefined ? text : text.replace(pattern, "[redacted]");
       const commandPorts = fresh.ports;
       const report = await proveWithMachineMeasurement({
