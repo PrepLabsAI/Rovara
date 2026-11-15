@@ -251,6 +251,8 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     const stale = [
       { at: minutesAgo(world, 11), method: "email_code" }, { at: minutesAgo(world, -5), method: "passkey" }, { at: "yesterday", method: "email_code" },
       { at: minutesAgo(world, 1), method: "" }, { at: 12345 as never, method: "email_code" }, null as never,
+      // A federated round trip is not a factor Code owns, and a looser time form is not read.
+      { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, 1), method: "oidc" }, { at: "2026-11-15", method: "email_code" }, { at: new Date(world.clock.now - 60_000).toUTCString(), method: "email_code" },
     ];
     for (const stepUp of stale) {
       const caller: DeployedCaller = { ...base, stepUp };
@@ -278,6 +280,14 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     const old: DeployedCaller = { ...caller, stepUp: { at: minutesAgo(world, 11), method: "email_code" } };
     expect(errorOf(await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), old)).code).toBe("REAUTH_REQUIRED");
     expect((await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
+    // Positive short windows: a 30 s window takes a 20 s-old step-up, a 120 s window a 60 s-old one; and the future-skew allowance never exceeds the window.
+    expect((await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 20 / 60), method: "email_code" } }))?.statusCode).toBe(201);
+    expect((await (await routesWith(async () => 120)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci2" }), { ...caller, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }))?.statusCode).toBe(201);
+    expect(errorOf(await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, -1), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
+    // No step-up: refused without asking the hook.
+    const asked = vi.fn(async () => 600);
+    expect(errorOf(await (await routesWith(asked)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY))).code).toBe("REAUTH_REQUIRED");
+    expect(asked).not.toHaveBeenCalled();
     for (const answer of [async () => { throw new Error("hook down"); }, async () => "600", async () => -1, async () => 1.5, async () => undefined, async () => 90_000]) {
       const refused = await (await routesWith(answer)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
       expect(refused?.statusCode).toBe(503);
@@ -317,5 +327,9 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     // A malformed body is a fixed refusal, never an echo.
     const bad = await routes.route({ ...post(`/v1/app/decisions/plan/${randomUUID()}/approve`), body: "{not json <script>" }, caller);
     expect(errorOf(bad)).toEqual({ code: "CONFIG_INVALID", message: "the request body is not JSON" });
+    // An unknown key in the body is refused in fixed words, never named back.
+    const unknown = await routes.route(post(`/v1/app/decisions/approve_plan/${randomUUID()}/reject`, { requestId: randomUUID(), reason: "not_now", "<img src=x>": 1 }), caller);
+    expect(errorOf(unknown).message).not.toContain("<img");
+    expect(errorOf(unknown).code).toBe("CONFIG_INVALID");
   });
 });

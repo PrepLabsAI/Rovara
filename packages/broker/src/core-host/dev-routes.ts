@@ -21,7 +21,7 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
+import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
 import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies } from "../core/decisions/routes.js";
@@ -131,11 +131,19 @@ function bodyOf(request: BrokerRequest): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** The factors Code owns (the sign-in server's DEVELOPER_STEP_UP_METHODS). A Slack, Google or GitHub round trip is none of them, whatever a wiring maps into the caller. */
+const STEP_UP_FACTORS: ReadonlySet<unknown> = new Set(["email_code", "passkey", "company_reauth"]);
+/** The one time form the broker's sign-in writes (`toISOString`); a looser string that Date.parse would still read is refused. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
 /**
  * Lane ID part 2: the caller's step-up, if it is fresh enough for this company now; otherwise the refusal. The window is the company's (through the hook) and may only be shorter than
  * the default; a missing, unreadable, too-old or future step-up time is refused (`checkApprovalSignIn`'s window rule, with its clock-skew allowance).
  */
 async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs: number, refusal: string): Promise<{ at: string; method: string }> {
+  // The step-up is read first: a caller without one is refused without asking the company rules service.
+  const stepUp = caller.stepUp;
+  if (stepUp === undefined || stepUp === null || typeof stepUp !== "object" || typeof stepUp.at !== "string" || !ISO_INSTANT.test(stepUp.at) || !STEP_UP_FACTORS.has(stepUp.method)) throw agentXError("REAUTH_REQUIRED", refusal);
   let seconds = FRESH_SIGN_IN_SECONDS;
   if (wiring.stepUpWindowSeconds !== undefined) {
     let answer: unknown;
@@ -143,14 +151,13 @@ async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs:
     if (typeof answer !== "number" || !Number.isInteger(answer) || answer < 0 || answer > 86_400) throw agentXError("RUNTIME_UNAVAILABLE", COMPANY_RULES_NO_ANSWER);
     seconds = Math.min(seconds, answer);
   }
-  const stepUp = caller.stepUp;
-  if (stepUp === undefined || stepUp === null || typeof stepUp !== "object" || typeof stepUp.at !== "string" || typeof stepUp.method !== "string" || stepUp.method === "") throw agentXError("REAUTH_REQUIRED", refusal);
   // A zero window refuses every step-up; checkApprovalSignIn's window needs at least a minute, so it is decided here.
   if (seconds === 0) throw agentXError("REAUTH_REQUIRED", refusal);
   const verdict = checkApprovalSignIn({ mode: "window", seconds: Math.max(seconds, 60) }, { authTime: stepUp.at }, nowMs, { companySignIn: false });
   if (!verdict.ok) throw agentXError("REAUTH_REQUIRED", refusal);
-  // Below a minute, checkApprovalSignIn's floor would be looser than the company asked: the exact age is checked too.
-  if (nowMs - Date.parse(stepUp.at) > seconds * 1000) throw agentXError("REAUTH_REQUIRED", refusal);
+  // Below a minute, checkApprovalSignIn's floor would be looser than the company asked: the exact age is checked too, and the clock-skew allowance never exceeds the window.
+  const age = nowMs - Date.parse(stepUp.at);
+  if (age > seconds * 1000 || -age > Math.min(APPROVAL_SIGN_IN_SKEW_SECONDS, seconds) * 1000) throw agentXError("REAUTH_REQUIRED", refusal);
   return { at: stepUp.at, method: stepUp.method };
 }
 
