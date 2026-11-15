@@ -120,6 +120,9 @@ describe("masking", () => {
   });
   it("is bounded: very long text is masked whole, and a hostile text finishes fast", () => {
     expect(scrubVisibleText("a".repeat(200_001))).toBe("•••");
+    // Text no pattern would touch is still masked whole once it is too long to scan.
+    expect(scrubVisibleText("ab ".repeat(66_667))).toBe("•••");
+    expect(scrubVisibleText("ab ".repeat(66_666))).toBe("ab ".repeat(66_666));
     const started = performance.now();
     scrubVisibleText(`${"a.".repeat(40_000)}@${"1 ".repeat(20_000)}`);
     expect(performance.now() - started).toBeLessThan(2_000);

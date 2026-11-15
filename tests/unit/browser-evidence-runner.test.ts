@@ -102,6 +102,23 @@ describe("runBrowserEvidence", () => {
     expect(calls.filter((c) => c.op === "stop").length).toBe(calls.filter((c) => c.op === "start").length);
   });
 
+  it("checks the time before every page: a page reached after the limit is never opened", async () => {
+    let clock = 0;
+    const { driver, calls } = fakeDriver({ capture: () => { clock += 60_000; return undefined; } });
+    const got = await runBrowserEvidence({ ...base, routes: ["/a", "/b", "/c"], driver, now: () => clock, limits: { runMs: 100_000 } });
+    expect(calls.filter((c) => c.op === "capture").map((c) => `${c.side}${c.route ?? ""}`)).toEqual(["before/a", "before/b"]);
+    expect(got.routes.map((r) => (r.status === "shown" ? "shown" : r.reason))).toEqual(["time_limit", "time_limit", "time_limit"]);
+  });
+
+  it("a caller can lower the built-in limits but never raise them", async () => {
+    const big = (side: BrowserEvidenceSide, route: string) => ({ ok: true, bytes: jpegOf(`${side}${route}`, BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES), consoleErrors: 0 });
+    const { driver, calls } = fakeDriver({ capture: big });
+    const got = await runBrowserEvidence({ ...base, routes: ["/1", "/2", "/3", "/4", "/5"], driver, limits: { totalBytes: 1_000 * BROWSER_EVIDENCE_TOTAL_MAX_BYTES, pageMs: 10_000_000, runMs: 10_000_000 } });
+    expect(got.routes.at(-1)).toEqual({ route: "/5", status: "not_run", reason: "over_size_cap" });
+    for (const call of calls.filter((c) => c.op === "capture")) expect(call.timeoutMs).toBeLessThanOrEqual(15_000);
+    for (const call of calls.filter((c) => c.op === "start")) expect(call.timeoutMs).toBeLessThanOrEqual(120_000);
+  });
+
   it("a driver that throws or answers nonsense is capture_failed, with no echo of its error, and the app is still stopped", async () => {
     for (const answer of [() => { throw new Error("net::ERR at https://user:pw@host/"); }, () => ({ ok: true, bytes: "not bytes" }), () => null, () => ({ ok: false, reason: "my own words" }), () => ({ ok: true, bytes: jpegOf("z"), consoleErrors: -1 })]) {
       const { driver, calls } = fakeDriver({ capture: (side) => (side === "after" ? answer() : undefined) });
