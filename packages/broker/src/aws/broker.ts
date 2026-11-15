@@ -374,7 +374,7 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { companyPreapprovalsThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
+import { companyPreapprovalsThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -680,6 +680,8 @@ interface SlackServiceConfiguration {
 /** A "." or ".." path segment, also percent-encoded (%2e in any case). */
 const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
 const DEVELOPER_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
+/** Lane L12: the core's /v1/app/* routes (named environments only), with no API Gateway authorizer: the broker verifies the developer token itself, as on /v1/dev/*. */
+const CORE_APP_ROUTE_KEY = "ANY /v1/app/{proxy+}";
 const FEEDBACK_REVIEW_ROUTE_KEY = "ANY /review/{proxy+}";
 
 /** The handler's dependencies from what callers supply (see AwsBrokerInput). */
@@ -1173,6 +1175,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
+      // Lane L12: the same for the core's /v1/app/* route: what it carries goes to the core's routes or nowhere.
+      if (event.routeKey === CORE_APP_ROUTE_KEY && !url.pathname.startsWith("/v1/app/")) throw agentXError("NOT_FOUND", "route not found");
       if (url.pathname === "/v1/github/webhooks") {
         if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
         if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
@@ -1339,6 +1343,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
       }
 
+      // Lane L12: the core's own /v1/app/* routes, only while the core switch serves (the developer configuration then has `coreApp`). Off, a request on the core's route is refused
+      // before anything is read, and one that reached the broker another way goes on exactly as before.
+      if (url.pathname.startsWith("/v1/app/") && (event.routeKey === CORE_APP_ROUTE_KEY || dependencies.developer?.coreApp !== undefined)) {
+        if (dependencies.developer?.coreApp === undefined) throw agentXError("NOT_FOUND", "route not found");
+        return await routeAppRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now }, request, url);
+      }
       // Spec 025: the developer API. /v1/dev/* has no API Gateway authorizer (D17): the broker
       // verifies the developer token, then checks the method and session (FR-009).
       if (url.pathname.startsWith("/v1/dev/")) {
@@ -15201,7 +15211,9 @@ const coreRoot = createBrokerCoreRoot({
   origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
   log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
 });
-const developer = linkingOnly || signIn === undefined ? undefined : coreRoot.coreTasks === undefined ? signIn : { ...signIn, coreTasks: coreRoot.coreTasks };
+// Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
+const developer = linkingOnly || signIn === undefined ? undefined : coreRoot.coreTasks === undefined ? signIn
+  : { ...signIn, coreTasks: coreRoot.coreTasks, ...(coreRoot.coreApp === undefined ? {} : { coreApp: coreRoot.coreApp }) };
 
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;

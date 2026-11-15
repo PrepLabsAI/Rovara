@@ -8,7 +8,7 @@ import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
-import { devRouteOf, type DevRoute } from "./dev-route-scopes.js";
+import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
 import {
   AgentXNameSchema, AgentXError,
@@ -105,6 +105,8 @@ import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from 
 import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 import type { CoreTaskEntry } from "./engine-boundary.js";
+import type { CoreAppEntry } from "./core-app-routes.js";
+import type { BrokerResponse } from "../handler.js";
 
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
@@ -114,6 +116,8 @@ export interface DeveloperApiConfiguration {
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
   /** Lane E2: the core's own handlers for a task stamped `core` (engine-boundary.ts), as the deployment composes them. Absent: a core task reads exactly like a missing one. */
   coreTasks?: CoreTaskEntry;
+  /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only while the core switch serves. Absent: every /v1/app/* path answers "route not found", reading nothing. */
+  coreApp?: CoreAppEntry;
   /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */
   taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
   taskChannelPeople?: (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse>;
@@ -1518,6 +1522,28 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     return routeOwnChannelLinks(deps, caller, request, url);
   }
   throw agentXError("NOT_FOUND", "route not found");
+}
+
+/**
+ * Lane L12: the core engine's own /v1/app/* routes. Like /v1/dev/*, no API Gateway authorizer runs on them: a method and path with no row in the route table (APP_ROUTES), or any
+ * /v1/app/* path while the core switch is off (no `coreApp`), is refused before anyone is authenticated; otherwise the broker verifies the developer token, checks the row's scope and
+ * hands the signed-in caller (with the verified step-up) to the core, which takes the company from live membership. The core's answer is returned as it is (its status and body), never cached.
+ */
+export async function routeAppRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<BrokerResponse> {
+  const core = deps.developer.coreApp;
+  if (core === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // The core matches the raw path; a path the URL parser would read differently (a backslash, say) is refused rather than matched two ways.
+  if ((request.path.split("?")[0] ?? "") !== url.pathname) throw agentXError("NOT_FOUND", "route not found");
+  const route = appRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  // The core gets the request without its credentials: the caller is already the verified one.
+  const { authorization: _credential, ...headers } = request.headers;
+  void _credential;
+  const answer = await core.route({ method: request.method, path: request.path, headers, ...(request.body === undefined ? {} : { body: request.body }), requestId: request.requestId }, caller);
+  if (answer === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // Never cached: a made script token is in its body.
+  return { ...answer, headers: { ...answer.headers, "cache-control": "no-store" } };
 }
 
 /**

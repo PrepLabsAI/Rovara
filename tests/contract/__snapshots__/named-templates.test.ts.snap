@@ -5275,6 +5275,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
     "DefaultStage": {
       "DependsOn": [
         "DeveloperSignInAuthRoute98555360",
+        "DeveloperSignInCoreAppRoute6D4AEEF7",
         "DeveloperSignInDevRoute4BB932E2",
         "DeveloperSignInFeedbackReviewRoute881C7CFE",
       ],
@@ -5285,6 +5286,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "AutoDeploy": true,
         "RouteSettings": {
           "ANY /review/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
+          "ANY /v1/app/{proxy+}": {
             "ThrottlingBurstLimit": 50,
             "ThrottlingRateLimit": 20,
           },
@@ -5318,6 +5323,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "integrations/",
               {
                 "Ref": "DeveloperSignInIntegration50CD0372",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "DeveloperSignInCoreAppRoute6D4AEEF7": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /v1/app/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
               },
             ],
           ],

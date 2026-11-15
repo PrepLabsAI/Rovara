@@ -53,6 +53,10 @@ async function script(withCore: boolean): Promise<{ answers: string[]; rows: str
     [MAYA, "GET", `/v1/dev/tasks/${randomUUID()}`], [OMAR, "POST", "/v1/dev/tasks"], [MAYA, "POST", `/v1/dev/tasks/${taskId}/close`]] as const) {
     keep(await harness.dev(who, method, path, method === "POST" && path === "/v1/dev/tasks" ? { requestId: randomUUID(), project: "payments", instructions: "Another", client: "claude-code" } : undefined));
   }
+  // Lane L12: the core's /v1/app/* paths, which the broker answers only while the switch serves: off, exactly as without the root.
+  for (const [method, path] of [["GET", "/v1/app/script-tokens"], ["POST", "/v1/app/script-tokens"], ["GET", "/v1/app/sessions"], ["GET", "/v1/app/decisions"], ["POST", `/v1/app/people/${OMAR.developerId}/erase`], ["GET", "/v1/app/projects/payments/how-we-work"]] as const) {
+    keep(await harness.dev(MAYA, method, path, method === "POST" ? { requestId: randomUUID() } : undefined));
+  }
   // Each row on its own (its ids renamed within the row), then sorted: the table's rows as a set, every byte but the ids and times compared.
   const rows = harness.db.find(() => true).map((item) => normalise(JSON.stringify(item))).sort();
   return { answers, rows, coreReads };
