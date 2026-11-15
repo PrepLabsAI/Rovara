@@ -33,6 +33,10 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     // on a pull request the base branch's copy of the guard judges, and a second strict run flags edits to the guard itself
     expect(run).toContain("git show origin/code/next:scripts/port-guard.ts");
     expect(run).toContain('node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD');
+    // the strict run skips private-name findings only on commits already public on mainline (plan v3.2), and names no other public base
+    const strict = job.steps.find((step) => /^Edits to the guard/.test(step.name ?? ""))?.run ?? "";
+    expect(strict.trim()).toBe('node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD --public-base origin/mainline');
+    expect([...run.matchAll(/--public-base (\S+)/g)].map((match) => match[1])).toEqual(["origin/mainline"]);
     // the guard reads its boundary data from beside itself, so the base branch's copy of that file travels with it
     expect(run).toContain('git show origin/code/next:scripts/boundary-allowlist.json > "$RUNNER_TEMP/boundary-allowlist.json"');
     // and it fails closed: no `|| cp` falls back to the checkout's own copy of the data

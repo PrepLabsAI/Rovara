@@ -298,9 +298,10 @@ jobs:
           else
             npm run port:guard -- --range origin/mainline..HEAD --allow-guard-edits
           fi
+      # Commits already on mainline are public, so their own private-name findings are skipped here (--public-base); the net diff and every other rule still count.
       - name: Edits to the guard need the controller's review (pull requests only)
         if: github.event_name == 'pull_request'
-        run: node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD
+        run: node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD --public-base origin/mainline
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:

@@ -3,10 +3,13 @@
 //
 //   cloud-path      a Cloud-only path (decision 41): org/, spend/, audit/, team-record/, devices/, the Cloud web app and audit verifier
 //                   packages, the Cloud upgrade command, the Cloud CDK stacks, the Cloud-only contracts files
-//   cloud-aws       the AWS line (decision 72, O2): only four generic adapters (DynamoDB, SQS, S3, Secrets Manager) may be public, and they live in one
-//                   package. Refused: a NEW file under an aws/ directory, a NEW file under infra/ (Cloud's CDK), a private adapter inside the adapters
-//                   package, and an AWS SDK client or CDK import outside that list in the adapters package or in a new file.
-//                   The list is data (scripts/boundary-allowlist.json), read by this guard and by Cloud's boundary check
+//   cloud-aws       the AWS line (decision 72, O2, as changed by migration plan v3.2, DEC 214): Code owns its own AWS deployment, so a new file under
+//                   an aws/ directory or under infra/ is Code's and is allowed, and Code's deployment code (aws/, infra/) and tests may import the AWS
+//                   SDK and the CDK. Still refused: a private adapter inside the public adapters package (only four generic adapters, DynamoDB, SQS, S3
+//                   and Secrets Manager, live there), and an AWS SDK client or CDK import off that list in the adapters package or in a NEW file
+//                   anywhere else. The list is data (scripts/boundary-allowlist.json), read by this guard and by Cloud's boundary check
+//   cloud-path (deployment)  a NEW file under aws/ or infra/ whose path names Cloud-only work: the Cloud model gateway, billing, the company admin
+//                   backend, the team record, the audit ledger, the Cloud web app or anything called cloud (DEC 214: those stay in Cloud)
 //   cloud-import    a TypeScript/JavaScript file (any name that carries a .ts/.js/... extension, or text that reads as such code) that imports one of those (also a vendor/ folder, a `cloud-*` package or an AWS client off the list), or a package/CI file that names one of those packages
 //   stray-file      an editor, merge or sed backup/scratch file (`*-E`, `*.orig`, `*.rej`, `*.bak`, `*~`, `*.swp`, `*.tmp`, `.DS_Store` and kin): a stray
 //                   copy can hold raw Cloud source under a name no other rule reads (a lane once committed 27 `*.ts-E` files from `sed -i -E`)
@@ -20,6 +23,11 @@
 //   secret          anything gitleaks finds in the range
 //   accepted-stale  an entry of the accepted-findings list whose file the range itself changes or removes (the list must not rot where the range works)
 //
+// Already-public history (--public-base <rev>, CI passes origin/mainline on the strict pull request run): a commit of the range that is reachable from
+// that revision is already public, so its own private-name findings (its patch and its message) are skipped. Only private-name, and only for those
+// commits: the net diff is still read in full, so a private name the range leaves at its tip fails whichever commit brought it, and every other rule
+// still reads every commit.
+//
 // Accepted findings (scripts/port-guard-accepted.json, read from beside this script like the boundary data, never from the checkout): a finding of
 // rule cloud-aws or secret is skipped only when its path and rule match an entry AND the file's blob at the range tip is the entry's exact blob. No
 // wildcard and no directory: any edit to the file brings every finding about it back, and a new file is never covered. No other rule can be accepted
@@ -32,7 +40,7 @@
 // pattern, never the text it matched. Exit status: 0 clean, 1 findings, 2 the guard could not run (bad range, git or gitleaks missing).
 //
 // Node runs this file directly, so only erasable syntax and only Node's own modules. Usage, from inside the lane's worktree:
-//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
+//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <rev>] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
 // The controller's extended name list (one regular expression per line) is read from the file named by PORT_GUARD_PRIVATE_NAMES, if set.
 //
 // No name is written in this file or in its tests: the protected words are salted hashes (see NameSource), and the tests use invented names.
@@ -234,8 +242,9 @@ export function cloudPathRule(path: string, names: NameSource = DEFAULT_NAMES): 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// Rule: cloud-aws (decision 72, O2). Only the four generic adapters (DynamoDB storage, SQS queue, S3 objects, Secrets Manager secrets) are public,
-// in one package; every other AWS piece (the handlers, the CDK, the EC2, Cognito, Slack and model-gateway adapters) stays in Cloud.
+// Rule: cloud-aws (decision 72, O2, changed by migration plan v3.2, DEC 214). Only the four generic adapters (DynamoDB storage, SQS queue, S3 objects,
+// Secrets Manager secrets) live in the public adapters package. Code's own AWS deployment (its aws/ handlers and its infra/ CDK) is Code's and public;
+// Cloud-only work (the model gateway, billing, the company admin backend, the team record, the audit ledger, the Cloud web app) stays in Cloud.
 
 /** Why a path inside the public adapters package is not allowed there (a private adapter among the four), or null. */
 export function adaptersPackageRule(path: string): string | null {
@@ -249,32 +258,62 @@ export function adaptersPackageRule(path: string): string | null {
   return "a private adapter inside the public AWS adapters package (only the DynamoDB, SQS, S3 and Secrets Manager adapters may be public, decision 72)";
 }
 
+/** A path in Code's own AWS deployment: under an aws/ directory or under infra/ (DEC 214: Code owns its AWS deployment). */
+const DEPLOYMENT_PATH = /(^|\/)aws\/|^infra\//i;
+
+/** True when a path is a test (under tests/, or a *.test.* file). */
+const isTestPath = (lower: string): boolean => /^tests\//.test(lower) || /\.test\.[cm]?[jt]sx?$/.test(lower);
+
 /**
- * Rules for a file that a range or commit ADDS (existing public files that Cloud's history shares are not judged by their names): a new file under
- * an aws/ directory is a Cloud handler, and a new file under infra/ is Cloud's CDK. The four public adapters live in the adapters package, whose
- * directory is not called aws.
+ * Words (alone, or two adjacent words of the path joined) that name Cloud-only work in a deployment path (DEC 214: the model gateway, billing,
+ * the company admin backend and the other Cloud-only parts stay in Cloud). A word that starts with "cloud" is Cloud's too, unless it is an AWS
+ * service name (cloudwatch, cloudformation, ...).
  */
-export function addedFileRule(path: string): { rule: "cloud-aws"; detail: string } | null {
-  const normal = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "");
-  if (/(^|\/)aws\//i.test(normal)) {
-    return { rule: "cloud-aws", detail: "a new file under an aws/ directory is a Cloud AWS handler; the four generic adapters live in the adapters package, everything else AWS stays private" };
-  }
-  if (/^infra\//i.test(normal)) {
-    return { rule: "cloud-aws", detail: "a new file under infra/ is Cloud's CDK; Code adds none (Cloud's infrastructure stays private)" };
+const CLOUD_DEPLOYMENT_WORDS = new Set([
+  "modelproxy", "modelgateway", "llmgateway", "aigateway",
+  "billing", "invoice", "invoices", "stripe", "pricing", "metering", "spend",
+  "companyadmin", "orgadmin", "organizationadmin", "adminconsole",
+  "teamrecord", "auditledger", "embedder", "edition", "webapp", "customdomain",
+]);
+const AWS_CLOUD_WORDS = /^cloud(?:watch|formation|front|trail|map|search|hsm|shell|9)/;
+
+/** Why a deployment path names Cloud-only work, or null (also null for a path outside aws/ and infra/). */
+export function cloudDeploymentPathRule(path: string): string | null {
+  const normal = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "").toLowerCase();
+  if (!DEPLOYMENT_PATH.test(normal)) return null;
+  const words = normal.match(/[a-z0-9]+/g) ?? [];
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i]!;
+    const pair = i + 1 < words.length ? word + words[i + 1]! : "";
+    if ((word.startsWith("cloud") && !AWS_CLOUD_WORDS.test(word)) || CLOUD_DEPLOYMENT_WORDS.has(word) || CLOUD_DEPLOYMENT_WORDS.has(pair)) {
+      return "a Cloud-only part in Code's deployment (the model gateway, billing, the company admin backend, the team record, the audit ledger, the Cloud web app or anything called cloud stays in Cloud, DEC 214)";
+    }
   }
   return null;
 }
 
 /**
+ * Rules for a file that a range or commit ADDS (existing public files that Cloud's history shares are not judged by their names). Under plan v3.2
+ * (DEC 214) Code owns its AWS deployment, so a new file under an aws/ directory or under infra/ is allowed, unless its path names Cloud-only work.
+ * This is a cloud-path finding, which the accepted list cannot excuse.
+ */
+export function addedFileRule(path: string): { rule: "cloud-path"; detail: string } | null {
+  const detail = cloudDeploymentPathRule(path);
+  return detail === null ? null : { rule: "cloud-path", detail };
+}
+
+/**
  * Why importing `specifier` from `file` crosses the AWS line, or null. An AWS SDK service client or library off the adapters' list, or the CDK, is
  * refused in the adapters package always and in a NEW file elsewhere (a file Code already had keeps what it imports; the install flow under
- * awsSdkPublicPaths may use any client, since it talks to the customer's own account).
+ * awsSdkPublicPaths may use any client, since it talks to the customer's own account). Code's own deployment code (aws/ and infra/) and its tests
+ * may import any of them (DEC 214).
  */
 export function awsImportReason(file: string, specifier: string, isNewFile: boolean): string | null {
   const data = boundary();
   const lower = file.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
   const inAdapters = lower.startsWith(adaptersDir(data));
   if (!inAdapters && !isNewFile) return null;
+  if (!inAdapters && (DEPLOYMENT_PATH.test(lower) || isTestPath(lower))) return null;
   if (!inAdapters && data.awsSdkPublicPaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
   if (!inAdapters && data.awsImportFixturePaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
   const base = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : (specifier.split("/")[0] ?? "");
@@ -1009,6 +1048,8 @@ export interface ScanInput {
   base?: string;
   tip: string;
   allowGuardEdits: boolean;
+  /** The commit is reachable from the public base (--public-base): already public, so its own private-name findings are skipped. */
+  alreadyPublic?: boolean;
 }
 
 function scanChange(collector: Collector, input: ScanInput): void {
@@ -1016,7 +1057,9 @@ function scanChange(collector: Collector, input: ScanInput): void {
   const label = input.commit === undefined ? undefined : input.commit.slice(0, 8);
   // A finding on a commit that is already public and cannot be rewritten is excused only by name: this commit, this rule, this file (the boundary data).
   const known = (finding: Finding): boolean =>
-    input.commit !== undefined && boundary().knownHistory.some((e) => e.commit === input.commit && e.rule === finding.rule && e.file === finding.file);
+    input.commit !== undefined &&
+    ((input.alreadyPublic === true && finding.rule === "private-name") ||
+      boundary().knownHistory.some((e) => e.commit === input.commit && e.rule === finding.rule && e.file === finding.file));
   const add = (finding: Finding): void => {
     if (!known(finding)) collector.add(label === undefined ? finding : { ...finding, commit: label });
   };
@@ -1162,6 +1205,8 @@ export interface GuardOptions {
   gitleaksBin?: string;
   /** The accepted findings; the command line reads them with `loadAccepted`. Absent: none. */
   accepted?: readonly AcceptedFinding[];
+  /** A revision whose history is already public (CI: origin/mainline): commits of the range reachable from it have their private-name findings skipped. */
+  publicBase?: string;
 }
 
 export interface GuardResult { findings: Finding[]; commits: number; range: Range; notes?: string[]; warnings?: string[] }
@@ -1348,13 +1393,21 @@ export function runGuard(options: GuardOptions): GuardResult {
   const mergeBase = git(options.cwd, ["merge-base", range.base, range.tip], true).trim();
   if (mergeBase === "") throw new GuardError(`"${range.text}" has no common ancestor; the guard needs the lane's base`);
   const allowGuardEdits = options.allowGuardEdits === true;
+  // The net diff is always read in full, whatever is public: what the range leaves at its tip is judged on its own.
   scanChange(collector, { cwd: options.cwd, base: mergeBase, tip: range.tip, allowGuardEdits });
+  // The commits of the range that are NOT reachable from the public base; every other commit of the range is already public.
+  let notPublic: Set<string> | null = null;
+  if (options.publicBase !== undefined) {
+    const publicTip = git(options.cwd, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${options.publicBase}^{commit}`], true).trim();
+    if (options.publicBase.startsWith("-") || /\s/.test(options.publicBase) || publicTip === "") throw new GuardError(`"${options.publicBase}" (--public-base) is not a commit in this repository (did you fetch?)`);
+    notPublic = new Set(git(options.cwd, ["rev-list", `${range.base}..${range.tip}`, "--not", publicTip]).split("\n").filter((row) => row !== ""));
+  }
   const commits = git(options.cwd, ["rev-list", "--reverse", "--parents", `${range.base}..${range.tip}`])
     .split("\n")
     .filter((row) => row !== "")
     .map((row) => row.split(" "));
   for (const [commit, ...parents] of commits) {
-    scanChange(collector, { cwd: options.cwd, commit: commit!, merge: parents.length > 1, tip: range.tip, allowGuardEdits });
+    scanChange(collector, { cwd: options.cwd, commit: commit!, merge: parents.length > 1, tip: range.tip, allowGuardEdits, alreadyPublic: notPublic !== null && !notPublic.has(commit!) });
   }
   if (options.gitleaks !== "off") runGitleaks(options, range, collector);
   // Every path the range changes: in its net diff or in any of its commits (a file changed and changed back was still touched).
@@ -1380,6 +1433,7 @@ export const DEFAULT_RANGE = "origin/code/next..HEAD";
 export function main(argv: readonly string[]): number {
   let range = DEFAULT_RANGE;
   let allowGuardEdits = false;
+  let publicBase: string | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === "--range") {
@@ -1392,6 +1446,15 @@ export function main(argv: readonly string[]): number {
       i += 1;
     } else if (arg.startsWith("--range=")) range = arg.slice("--range=".length);
     else if (arg === "--allow-guard-edits") allowGuardEdits = true;
+    else if (arg === "--public-base") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("-")) {
+        console.error("port-guard: --public-base needs a revision such as origin/mainline");
+        return 2;
+      }
+      publicBase = value;
+      i += 1;
+    }
     else if (arg === "--boundary") {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("--")) {
@@ -1411,7 +1474,7 @@ export function main(argv: readonly string[]): number {
       i += 1;
     }
     else if (arg === "--help" || arg === "-h") {
-      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
+      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <rev>] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
       return 0;
     } else {
       console.error(`port-guard: unknown argument ${arg}`);
@@ -1429,7 +1492,7 @@ export function main(argv: readonly string[]): number {
     } else {
       names = { ...DEFAULT_NAMES, patterns: loadPrivatePatterns(privateList) };
     }
-    const result = runGuard({ cwd: root.stdout.trim(), range, allowGuardEdits, names, accepted: loadAccepted() });
+    const result = runGuard({ cwd: root.stdout.trim(), range, allowGuardEdits, names, accepted: loadAccepted(), ...(publicBase === undefined ? {} : { publicBase }) });
     for (const note of result.notes ?? []) console.log(`port-guard: note: ${note}`);
     for (const warning of result.warnings ?? []) console.log(`port-guard: warning: ${warning}`);
     if (result.findings.length === 0) {
