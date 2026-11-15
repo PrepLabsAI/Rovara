@@ -34,6 +34,7 @@ import { removeLeftoverMaskVolumes } from "./devcontainer.js";
 import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.js";
 import { removeLeftoverSetupRuns, setupWorkspaceKey } from "./setup-network.js";
 import { createSavedEnvFallbackReporter, createSavedEnvLoginProvider } from "./saved-env/login.js";
+import { runSetupProveJob } from "./setup-prove.js";
 import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js";
 import { savedEnvOptionsOf } from "./saved-env/use.js";
 import { createDockerCli } from "./swebench/containers.js";
@@ -149,6 +150,16 @@ const state = createWorkerServerState(
             otherOperations: async () => (anotherOperationActive(state, invocation.operationId) ? [{ id: "another-operation", rootPath }] : []),
             cloneCredentialValues: () => cloneCredentials.values(),
           });
+        }
+        if (invocation.payload.setupProve !== undefined) {
+          const stop = new AbortController();
+          const unregister = cancellationController.register(invocation.operationId, { abort: async () => { stop.abort(); } });
+          try {
+            await runSetupProveJob({
+              rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(), signal: stop.signal,
+              otherOperations: async () => (anotherOperationActive(state, invocation.operationId) ? [{ id: "another-operation", rootPath }] : []),
+            });
+          } finally { unregister(); }
         }
         return {
           manifestPath: ".agentx/preparation-manifest.json",
