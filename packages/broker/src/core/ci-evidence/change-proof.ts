@@ -24,22 +24,26 @@ export interface PipelineProof {
   /** Failed on the head. */
   failed: string[];
   /** Why no test of this check can be proof at all, when that is so (no base run, or the base run is for another commit). */
-  noBase?: "no_base_run" | "base_commit_differs" | undefined;
+  noBase?: "no_base_run" | "base_commit_differs" | "head_commit_differs" | "report_too_large" | undefined;
 }
 
 /** The most tests one run's comparison looks at (the report adapters' own cap). */
 export const PIPELINE_PROOF_TESTS_MAX = 50_000;
 
 /**
- * Compares the head's per-test outcomes with the base commit's latest main-branch run of the same check. `base` is undefined when that run could not be found or read; it counts only when it is on
+ * `noBase` says why no test can be proof: no base run, a base run for another commit, a head report for another commit than `headCommit` (nothing listed), or a report over the cap (nothing listed when it is
+ * the head's). Compares the head's per-test outcomes with the base commit's latest main-branch run of the same check. `base` is undefined when that run could not be found or read; it counts only when it is on
  * `baseCommit` (a shared environment's newer main run is not this base). More than `PIPELINE_PROOF_TESTS_MAX` tests in either run proves nothing (refused whole, never cut).
  */
-export function pipelineProof(input: { head: PipelineTestRun; base: PipelineTestRun | undefined; baseCommit: string; addedTests: ReadonlySet<string> }): PipelineProof {
+export function pipelineProof(input: { head: PipelineTestRun; headCommit: string; base: PipelineTestRun | undefined; baseCommit: string; addedTests: ReadonlySet<string> }): PipelineProof {
   const proof: PipelineProof = { proven: [], addedByChange: [], passedNotProof: [], failed: [] };
-  const tooMany = input.head.tests.size > PIPELINE_PROOF_TESTS_MAX || (input.base?.tests.size ?? 0) > PIPELINE_PROOF_TESTS_MAX;
-  const noBase = input.base === undefined || tooMany ? "no_base_run" as const : input.base.commit !== input.baseCommit ? "base_commit_differs" as const : undefined;
+  // A head report for another commit (an earlier push) says nothing about this head, and a report too large to read whole is not read: both are refused whole, with their own reason.
+  if (input.head.commit !== input.headCommit) return { ...proof, noBase: "head_commit_differs" };
+  if (input.head.tests.size > PIPELINE_PROOF_TESTS_MAX) return { ...proof, noBase: "report_too_large" };
+  const noBase = input.base === undefined ? "no_base_run" as const
+    : input.base.tests.size > PIPELINE_PROOF_TESTS_MAX ? "report_too_large" as const
+      : input.base.commit !== input.baseCommit ? "base_commit_differs" as const : undefined;
   if (noBase !== undefined) proof.noBase = noBase;
-  if (input.head.tests.size > PIPELINE_PROOF_TESTS_MAX) return proof;
   for (const [test, outcome] of input.head.tests) {
     if (outcome === "failed") { proof.failed.push(test); continue; }
     if (outcome !== "passed") continue;

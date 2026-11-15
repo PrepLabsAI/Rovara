@@ -17,8 +17,26 @@ export type DraftSkip =
 const PR_EVENTS = ["pull_request", "pull_request_target"] as const;
 /** The pull request activity types a draft's push or opening raises. A `types` list with none of them runs only when something else happens (marked ready, labelled). */
 const DRAFT_TYPES: ReadonlySet<string> = new Set(["opened", "synchronize", "reopened"]);
-/** A condition that reads the draft flag (`github.event.pull_request.draft`, in any spacing or quoting). */
-const DRAFT_CONDITION = /pull_request\s*\.\s*draft|pull_request\s*\[\s*['"]draft['"]\s*\]/u;
+/** Anything that reads the draft flag, in any spelling (`pull_request.draft`, `['draft']`, `.draft` after a bracket). */
+const MENTIONS_DRAFT = /draft/iu;
+/** The conditions that mean "not a draft", exactly (after `${{ }}` and spaces are taken away): anything else that mentions the flag is not read. */
+const NOT_DRAFT: ReadonlySet<string> = new Set([
+  "github.event.pull_request.draft==false", "!github.event.pull_request.draft", "github.event.pull_request.draft!=true", "github.event.pull_request.draft=='false'", "github.event.pull_request.draft!='true'",
+  "!(github.event.pull_request.draft)", "(github.event.pull_request.draft==false)", "(!github.event.pull_request.draft)",
+]);
+
+/** One job's answer from its `if`: runs on drafts (no condition, or one that does not mention drafts), skips drafts (a "not a draft" condition, alone or joined with `&&`), or not known. */
+function jobVerdict(condition: unknown): "skips" | "runs" | "unknown" {
+  if (condition === undefined || condition === null) return "runs";
+  if (typeof condition === "boolean") return condition ? "runs" : "unknown";
+  if (typeof condition !== "string") return "unknown";
+  if (!MENTIONS_DRAFT.test(condition)) return "runs";
+  const plain = condition.trim().replace(/^\$\{\{([\s\S]*)\}\}$/u, "$1").replace(/\s+/gu, "");
+  if (plain.includes("||") || plain.includes("${{")) return "unknown";
+  const parts = plain.split("&&");
+  const draftParts = parts.filter((part) => MENTIONS_DRAFT.test(part));
+  return draftParts.length === 1 && NOT_DRAFT.has(draftParts[0]!) ? "skips" : "unknown";
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -28,7 +46,7 @@ type FileVerdict = "skips" | "runs" | "not_pull_request" | "unknown";
 export function draftVerdictOf(text: string): FileVerdict {
   let workflow: unknown;
   try {
-    workflow = parse(text, { maxAliasCount: 50 });
+    workflow = parse(text, { maxAliasCount: 50, logLevel: "error" });
   } catch {
     return "unknown";
   }
@@ -52,13 +70,20 @@ export function draftVerdictOf(text: string): FileVerdict {
     const types = config["types"];
     if (types === undefined) { anyDraftTrigger = true; continue; }
     const list = typeof types === "string" ? [types] : types;
-    if (!Array.isArray(list) || !list.every((type) => typeof type === "string")) return "unknown";
+    if (!Array.isArray(list) || list.length === 0 || !list.every((type) => typeof type === "string")) return "unknown";
     if (list.some((type) => DRAFT_TYPES.has(type))) anyDraftTrigger = true;
   }
   if (!anyDraftTrigger) return "skips";
-  // A condition anywhere in the file that reads the draft flag (on a job, a step, or the workflow's concurrency) is taken as "skips drafts": it is there to tell drafts apart.
-  if (!isRecord(workflow["jobs"])) return "unknown";
-  return DRAFT_CONDITION.test(text) ? "skips" : "runs";
+  // Each job's own `if`, read from the parsed file (a comment never counts). Every job skipping drafts is "skips"; none is "runs"; a mix, or a condition this reader does not know, is "can't tell".
+  const jobs = workflow["jobs"];
+  if (!isRecord(jobs) || Object.keys(jobs).length === 0) return "unknown";
+  const verdicts = new Set<string>();
+  for (const job of Object.values(jobs)) {
+    if (!isRecord(job)) return "unknown";
+    verdicts.add(jobVerdict(job["if"]));
+  }
+  if (verdicts.has("unknown") || verdicts.size !== 1) return "unknown";
+  return verdicts.has("skips") ? "skips" : "runs";
 }
 
 /** The repository's answer, from the default branch's workflow files read through a read-only reader. */
@@ -74,7 +99,7 @@ export async function detectDraftSkip(reader: CiDefinitionReader): Promise<Draft
     for (const path of paths) {
       const file = await reader.read(path, DRAFT_SCAN_FILE_BYTES_MAX);
       if (file === undefined || file.tooLarge === true) return { verdict: "unknown" };
-      total += file.text.length;
+      total += Buffer.byteLength(file.text, "utf8");
       if (total > DRAFT_SCAN_TOTAL_BYTES_MAX) return { verdict: "unknown" };
       const verdict = draftVerdictOf(file.text);
       if (verdict === "unknown") return { verdict: "unknown" };
