@@ -1,0 +1,70 @@
+[
+  {
+    "kind": "own",
+    "value": "value",
+    "calls": [
+      {
+        "SecretId": "agentx/local/shared-secret"
+      }
+    ]
+  },
+  {
+    "kind": "missing",
+    "value": null,
+    "calls": [
+      {
+        "SecretId": "agentx/local/shared-secret"
+      }
+    ]
+  },
+  {
+    "kind": "denied",
+    "error": "the secrets service refused to read this secret",
+    "calls": [
+      {
+        "SecretId": "agentx/local/shared-secret"
+      }
+    ]
+  },
+  {
+    "kind": "deleted",
+    "value": null,
+    "calls": [
+      {
+        "SecretId": "agentx/local/shared-secret"
+      }
+    ]
+  },
+  {
+    "kind": "empty",
+    "value": null,
+    "calls": [
+      {
+        "SecretId": "agentx/local/shared-secret"
+      }
+    ]
+  },
+  {
+    "kind": "binary",
+    "error": "the secret is not text",
+    "calls": [
+      {
+        "SecretId": "agentx/local/shared-secret"
+      }
+    ]
+  },
+  {
+    "kind": "bad-name",
+    "error": "the secret reference is not valid",
+    "calls": []
+  },
+  {
+    "kind": "other-company-looking",
+    "value": "value",
+    "calls": [
+      {
+        "SecretId": "agentx/local/org-connectors/org_bbbbbbbbbbbbbbbbbbbb/shared-secret"
+      }
+    ]
+  }
+]
