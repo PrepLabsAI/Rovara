@@ -114,7 +114,7 @@ describe.skipIf(!haveChromium)("browser evidence in a real Chromium", () => {
       const env = await take("/env-line");
       expect(env.length).toBe(64);
       expect(env).toBe(await take("/env-line-b"));
-      for (const route of ["/shadow-split", "/split-label", "/dl-label", "/dl-copy", "/div-show", "/slot-label", "/link-label", "/copy-button", "/dd-link", "/ctrl-before", "/chip-copy", "/link-badge", "/label-link", "/label-link-dt"]) expect(await take(route), route).toBe("masked_content");
+      for (const route of ["/shadow-split", "/split-label", "/dl-label", "/dl-copy", "/div-show", "/slot-label", "/link-label", "/copy-button", "/dd-link", "/ctrl-before", "/chip-copy", "/link-badge", "/label-link", "/label-link-dt", "/env-split"]) expect(await take(route), route).toBe("masked_content");
     } finally { await driver.stopApp("after"); }
   }, 180_000);
 

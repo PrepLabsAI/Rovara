@@ -244,7 +244,7 @@ function maskPage(arg: PageArg): PageVerdict {
     else { if (edge) labels += "\n"; if (block || tag === "LABEL") inline += "\n"; }
     const slotted = tag === "SLOT" && typeof node.assignedNodes === "function" ? Array.from(node.assignedNodes({ flatten: true })) : [];
     const children = node.shadowRoot ? Array.from(node.shadowRoot.childNodes) : slotted.length > 0 ? slotted : Array.from(node.childNodes ?? []);
-    for (const child of children) walk(child as El, seen, keep);
+    for (const child of children) walk(child, seen, keep);
     if (block) shown += "\n";
     if (edge || field) labels += "\n";
     if (block || tag === "LABEL" || field) inline += "\n";

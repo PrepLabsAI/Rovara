@@ -51,6 +51,7 @@ const routes = {
   "/label-link-dt": shell(`<h1>Settings</h1><dl><dt><a href="/docs">Token</a>:</dt><dd>abcd1234</dd></dl>`),
   "/env-line": shell(`<h1>Config</h1><pre>DB_HOST=db\nDB_PASSWORD=hunter2x</pre>`),
   "/env-line-b": shell(`<h1>Config</h1><pre>DB_HOST=db\nDB_PASSWORD=swordfish9</pre>`),
+  "/env-split": shell(`<h1>Config</h1><pre><span>GITHUB_TOKEN</span>=<span>ghx1234567</span></pre>`),
   "/pre-years": shell(`<h1>History</h1><pre>2019\n2020\n2021\n2022\n2023</pre>`),
   "/slot-label": shell(`<h1>Settings</h1><x-field>abcd1234</x-field><script>customElements.define("x-field", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = "<dl><dt>API key:</dt><dd><slot></slot></dd></dl>"; } });</script>`),
   // Sign-in forms laid out on one line: they must be shown.
