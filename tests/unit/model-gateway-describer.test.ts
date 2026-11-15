@@ -27,7 +27,7 @@ it("uses the stored model choice and omits a non-developer person", async () => 
   w.h.deps.modelAccess = { route: async () => { throw new Error("fallback must not be read"); } };
   const answer = await w.describe.describe(w.scope); expect(answer?.models).toEqual(["chosen-model"]); expect(answer).not.toHaveProperty("person");
 });
-it.each([undefined, "linear", "chain", "offer", "unrecognized"])("refuses unavailable payer facts for %s without a guessed payer", async origin => {
+it.each([null, 0, {}, "linear", "chain", "offer", "unrecognized"])("refuses unavailable payer facts for %s without a guessed payer", async origin => {
   const w = await world(); const task = (await w.h.store.get(w.tk))!;
   const copy = { ...task }; delete copy["origin"];
   await w.h.store.put({ item: { ...copy, ...(origin === undefined ? {} : { origin }), client: "nightly" } });
@@ -56,4 +56,23 @@ it.each(payerCases)("resolves %s with no project payer setting to its exact paye
   const w = await world(); const task = (await w.h.store.get(w.tk))!;
   await w.h.store.put({ item: { ...task, origin, client: "untrusted-payer-marker" } });
   expect(await w.describe.describe(w.scope)).toMatchObject({ origin, payer });
+});
+
+it("resolves an old record from the checked requester without inferring or persisting an origin", async () => {
+  const w = await world(); const task = { ...(await w.h.store.get(w.tk))! };
+  delete task["origin"];
+  await w.h.store.put({ item: { ...task, client: "nightly", payer: { kind: "project", project: "payments" } } });
+  const before = await w.h.store.get(w.tk);
+  const answer = await w.describe.describe(w.scope);
+  expect(answer).toMatchObject({ person: "a".repeat(64), payer: { kind: "member", developerId: "a".repeat(64) } });
+  expect(answer).not.toHaveProperty("origin");
+  expect(await w.h.store.get(w.tk)).toEqual(before);
+});
+it.each([undefined, null, {}, { personId: 123 }, { personId: "local-owner" }, { personId: "A".repeat(64) }, { personId: "a".repeat(63) }, { personId: "a".repeat(65) }])("refuses an old record without a checked member requester (%j)", async requester => {
+  const w = await world(); const task = { ...(await w.h.store.get(w.tk))! };
+  delete task["origin"];
+  await w.h.store.put({ item: task });
+  const op = { ...(await w.h.store.get(w.key))! }; delete op["requester"];
+  await w.h.store.put({ item: { ...op, ...(requester === undefined ? {} : { requester }) } });
+  await expect(w.describe.describe(w.scope)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN", message: "CALLBACK_FORBIDDEN: could not work out who pays for this task" });
 });

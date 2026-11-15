@@ -4,7 +4,7 @@ import { createCallbackHandler, type CallbackDeps } from "../../packages/broker/
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { operationKey, workspaceKey, taskPointerKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { createHarness } from "../support/task-flow-harness.js";
+import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { agentXError, ROVARA_CODE_AGENT_ID } from "@agentx/contracts";
 import { modelAccessSource } from "../../packages/worker/src/model-access.js";
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
@@ -244,13 +244,16 @@ it.each(["nightly", "app", "cli", "mcp", "slack", "tracker", "jira", "github_iss
   const get = w.h.store.get.bind(w.h.store); let reads = 0;
   w.h.deps.store.get = async key => { reads += 1; return get(key); };
   const answer = await w.call(); expect(reads).toBe(4);
-  if (origin !== undefined && !["chain", "linear", "offer"].includes(origin)) {
+  if (origin === undefined || !["chain", "linear", "offer"].includes(origin)) {
     expect(answer.statusCode).toBe(200);
     const body = JSON.parse(answer.body) as { apiKey: string };
-    const payer = ["nightly", "automatic", "test_run"].includes(origin) ? { kind: "project", project: v.pid }
-      : ["event", "schedule"].includes(origin) ? { kind: "agent", agentId: ROVARA_CODE_AGENT_ID }
+    const payer = ["nightly", "automatic", "test_run"].includes(origin ?? "") ? { kind: "project", project: v.pid }
+      : ["event", "schedule"].includes(origin ?? "") ? { kind: "agent", agentId: ROVARA_CODE_AGENT_ID }
       : { kind: "member", developerId: v.per };
-    expect(w.w.reference(body.apiKey, Math.floor(w.h.clock.now / 1000))).toMatchObject({ pay: payer, src: origin });
+    const claims = w.w.reference(body.apiKey, Math.floor(w.h.clock.now / 1000));
+    expect(claims).toMatchObject({ pay: payer });
+    if (origin === undefined) expect(claims).not.toHaveProperty("src");
+    else expect(claims).toMatchObject({ src: origin });
   }
   else { expect(answer).toMatchObject({ statusCode: 409, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"could not work out who pays for this task"}}' }); expect(w.w.signs()).toBe(0); }
 });
@@ -262,4 +265,44 @@ it("refuses a developer-purpose signer with the fixed HTTP error and no leaked m
   expect(answer).toMatchObject({ statusCode: 401, body: '{"error":{"type":"authentication_error","message":"invalid or expired model access"}}' });
   expect(w.w.signs()).toBe(0); expect(w.logs).toEqual([]);
   expect(JSON.stringify([answer, w.logs, w.h.audit])).not.toContain(w.w.published.n);
+});
+
+it.each(["current", "old member", "old no identity"] as const)("real task-start callback compatibility (%s)", async shape => {
+  const origin = shape === "current" ? "app" : undefined;
+  const h = createHarness(); await h.registerProject();
+  const member = shape === "old no identity" ? "local-owner-marker" : "a".repeat(64);
+  const caller = { ...h.owner, principal: { ...h.owner.principal, personId: member } };
+  const started = await h.flow.start(caller, { project: "payments", instructions: "Build it", requestId: newRequestId() });
+  const workspace = (await h.store.get(workspaceKey(started.task.workspaceId)))!;
+  const scope = { workspaceId: started.task.workspaceId, operationId: workspace["activeOperationId"] as string, fence: 1 };
+  const key = operationKey(scope.workspaceId, scope.operationId);
+  const op = (await h.store.get(key))!;
+  await h.store.put({ item: { ...op, kind: "task", status: "RUNNING", programStepId: "build", dispatch: { kind: "task", payload: {} } } });
+  const tk = taskKey(started.task.taskId); const task = { ...(await h.store.get(tk))! };
+  expect(task["developerId"]).toBe(member);
+  expect(op["requester"]).toMatchObject({ personId: member });
+  expect(task["origin"]).toBe("app");
+  if (origin === undefined) delete task["origin"];
+  await h.store.put({ item: task });
+  h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
+  const signer = signingWorld(); const logs: unknown[] = [];
+  h.deps.log = entry => logs.push(entry);
+  const capability = new CallbackCapabilities(Buffer.from(h.deps.callbackSigningKey));
+  const token = capability.issue({ ...scope, actions: ["model-access"], expiresInSeconds: 900 });
+  const handler = createCallbackHandler({ flow: h.deps, blobs: createDocumentObjectStorage(h.store, { companyId: h.deps.companyId }), grants: { exchange: async () => ({ token: "unused" }) }, modelGateway: { gatewayUrl: "https://gateway.example", issuer: "https://install-a.example/v1/auth", signer: signer.signer, describer: createTaskTokenDescriber(h.deps) } });
+  const response = await handler({ method: "GET", path: "/v1/internal/model-access", headers: { "x-agentx-callback-capability": token } });
+  expect(await h.store.get(tk)).toEqual(task);
+  if (shape === "old no identity") {
+    expect(response).toMatchObject({ statusCode: 409, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"could not work out who pays for this task"}}' });
+    expect(signer.signs()).toBe(0); expect(logs).toEqual([]);
+    expect(JSON.stringify([response, logs])).not.toContain(member);
+    expect(JSON.stringify([response, logs])).not.toContain(token);
+    return;
+  }
+  expect(response.statusCode, response.body).toBe(200);
+  const body = JSON.parse(response.body) as { apiKey: string };
+  const claims = signer.reference(body.apiKey, Math.floor(h.clock.now / 1000));
+  expect(claims).toMatchObject({ pay: { kind: "member", developerId: member } });
+  if (origin === undefined) expect(claims).not.toHaveProperty("src");
+  else expect(claims).toMatchObject({ src: origin });
 });

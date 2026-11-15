@@ -16,15 +16,23 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps): TaskTokenDescriber
       const step = operation.programStepId ?? operation.workflowMode?.toLowerCase() ?? "task";
       if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(step)) return undefined;
       const person = typeof operation.requester?.personId === "string" && /^[a-f0-9]{64}$/u.test(operation.requester.personId) ? operation.requester.personId : undefined;
-      const origin = WorkOriginSchema.safeParse(task.origin);
+      const origin = WorkOriginSchema.optional().safeParse(task.origin);
       if (!origin.success || origin.data === "linear") throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED);
       // No project AI setting means projectPays=false. This core runs only Rovara Code
       // (createTaskFlowRunStarter rejects other agents). Chain payer and Linear
       // assigner facts remain unavailable; never infer them from the session.
       let payer;
-      try { payer = resolvePayer({ origin: origin.data, project: workspace.projectName, projectPays: false, agentId: ROVARA_CODE_AGENT_ID, ...(person === undefined ? {} : { startedBy: { developerId: person } }) }); }
+      try {
+        if (origin.data === undefined) {
+          // Old records have no origin. The checked starter pays; do not infer or persist a start surface.
+          if (person === undefined) throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED);
+          payer = { kind: "member" as const, developerId: person };
+        } else {
+          payer = resolvePayer({ origin: origin.data, project: workspace.projectName, projectPays: false, agentId: ROVARA_CODE_AGENT_ID, ...(person === undefined ? {} : { startedBy: { developerId: person } }) });
+        }
+      }
       catch { throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED); }
-      return { companyId: operation.companyId, project: workspace.projectName, ...(person === undefined ? {} : { person }), payer, taskId: task.taskId, step, origin: origin.data, models: [model.data.alias] };
+      return { companyId: operation.companyId, project: workspace.projectName, ...(person === undefined ? {} : { person }), payer, taskId: task.taskId, step, ...(origin.data === undefined ? {} : { origin: origin.data }), models: [model.data.alias] };
     },
   };
 }
