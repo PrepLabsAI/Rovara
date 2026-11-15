@@ -204,6 +204,9 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
       // stopped (an overrun settle, an unknown cost), its held count is used, or its known spend reached the held cost.
       if (released || stopped || unknown || forwarded >= heldCalls || known >= heldCost) { yield* ownRefusal("cap"); return; }
       forwarded++; open++;
+      // Set when the settle is handed over. A caller that stops reading before it (the meter's own answer limit) leaves the
+      // call's cost unknown here too, and its body is cancelled at once.
+      let delivered = false; let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
         let response: Response;
         try {
@@ -214,10 +217,11 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
           });
         } catch { throw lost(); }
         if (response.status !== 200 || !(response.headers.get("content-type") ?? "").toLowerCase().startsWith("application/x-ndjson")) { await discard(response); throw lost(); }
-        const reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
+        reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
         if (reader === undefined) throw lost();
         const decoder = new TextDecoder("utf-8", { fatal: true });
-        let state: "start" | "body" | "settled" = "start"; let buffered = ""; let total = 0; let settle: ModelEgressSettle | undefined;
+        const body = reader;
+        let state: "start" | "body" | "settled" = "start"; let buffered = ""; let scanned = 0; let total = 0; let settle: ModelEgressSettle | undefined;
         const take = (line: string): ModelEgressEvent | undefined => {
           if (line.trim() === "") return undefined;
           if (state === "settled") throw lost();
@@ -233,25 +237,27 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
         };
         try {
           for (;;) {
-            let chunk: Awaited<ReturnType<typeof reader.read>>;
-            try { chunk = await reader.read(); } catch { throw lost(); }
+            let chunk: Awaited<ReturnType<typeof body.read>>;
+            try { chunk = await body.read(); } catch { throw lost(); }
             if (chunk.done) break;
             total += chunk.value.byteLength;
             if (total > streamLimit) throw lost();
             try { buffered += decoder.decode(chunk.value, { stream: true }); } catch { throw lost(); }
-            let newline = buffered.indexOf("\n");
+            // Scanned from where the last scan stopped, so one long line is not read again for every chunk.
+            let newline = buffered.indexOf("\n", scanned);
             while (newline >= 0) {
               const line = buffered.slice(0, newline); buffered = buffered.slice(newline + 1);
               const event = take(line);
               if (event !== undefined) yield event;
               newline = buffered.indexOf("\n");
             }
+            scanned = buffered.length;
           }
           try { buffered += decoder.decode(); } catch { throw lost(); }
           const last = take(buffered);
           if (last !== undefined) yield last;
         } catch (error) {
-          await reader.cancel().catch(() => undefined);
+          await body.cancel().catch(() => undefined);
           throw error instanceof EvalGatewayUnknownCost ? error : lost();
         }
         if (settle === undefined) throw lost();
@@ -260,8 +266,12 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
         if (!Number.isSafeInteger(known)) throw lost();
         const over = settle.overrun === true || known > heldCost;
         if (over) stopped = true;
+        delivered = true;
         yield over ? { ...settle, overrun: true } : settle;
-      } finally { open--; }
+      } finally {
+        open--;
+        if (!delivered) { unknown = true; void reader?.cancel().catch(() => undefined); }
+      }
     }
 
     return {

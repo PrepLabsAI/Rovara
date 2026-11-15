@@ -258,6 +258,38 @@ describe("an unreadable answer is an unknown cost", () => {
     await hold.release({ calls: 1, costMicros: 0, unknown: false });
     expect(parsed(g.releases()[0]!.body)).toEqual({ scope: SCOPE, calls: 1, costMicros: 0, unknown: true });
   });
+  it("a caller that stops reading before the settle leaves the cost unknown and cancels the body", async () => {
+    let cancelled = false;
+    const g = gateway({
+      call: () => new Response(new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(new TextEncoder().encode(`${JSON.stringify(head())}\n${JSON.stringify(chunk())}\n`)); },
+        cancel() { cancelled = true; },
+      }), { status: 200, headers: { "content-type": "application/x-ndjson" } }),
+    });
+    const hold = await holdOf(g);
+    for await (const e of hold.egress.forward(hold.scope, frame())) { if (e.kind === "head") break; }
+    expect(cancelled).toBe(true);
+    expect(lastSettle(await events(hold))).toMatchObject({ class: "cap", costMicros: 0 });
+    await hold.release({ calls: 1, costMicros: 0, unknown: false });
+    expect(parsed(g.releases()[0]!.body)).toEqual({ scope: SCOPE, calls: 1, costMicros: 0, unknown: true });
+  });
+  it("a long line split over many chunks is read whole", async () => {
+    const text = JSON.stringify(chunk("y".repeat(3000)));
+    const enc = new TextEncoder();
+    const g = gateway({
+      call: () => new Response(new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(enc.encode(`${JSON.stringify(head())}\n`));
+          for (let i = 0; i < text.length; i += 7) c.enqueue(enc.encode(text.slice(i, i + 7)));
+          c.enqueue(enc.encode(`\n${JSON.stringify(settleLine())}\n`)); c.close();
+        },
+      }), { status: 200, headers: { "content-type": "application/x-ndjson" } }),
+    });
+    const hold = await holdOf(g);
+    const out = await events(hold);
+    expect(out[1]).toEqual({ kind: "chunk", bytes: enc.encode("y".repeat(3000)) });
+    expect(lastSettle(out)).toMatchObject({ class: "ok", costMicros: 10 });
+  });
   it("an answer past the stream limit is an unknown cost", async () => {
     const g = gateway({ call: () => ndjson([head(), chunk("x".repeat(4096)), settleLine()]) });
     const hold = (await createEvalGatewayAccess(GATEWAY, async () => TOKEN, { fetch: g.fetchImpl, streamBytes: 1024 }).hold({ grant, calls: 3, costMicros: 100 }))!;
