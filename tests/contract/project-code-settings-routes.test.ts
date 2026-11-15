@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentXError, CODE_SETTINGS_STALE_MESSAGE, DEFAULT_CODE_SETTINGS, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
-import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { CODE_SETTINGS_CLIENT_REFUSED, routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { CODE_SETTINGS_BODY, LOOSEN_ON_A_PAGE, NOT_A_PROJECT_ADMIN, codeSettingsKey, codeSettingsReader, loosens } from "../../packages/broker/src/aws/project-code-settings.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -16,10 +16,10 @@ const REQUEST = "0b9f1c3e-7a51-4c1e-9d55-0f3a4b6c7d8e";
 const CANARY = "leak-canary-31";
 const PATH = (project = "alpha") => `/v1/dev/client/projects/${project}/code-settings`;
 
-function harness(options: { companies?: boolean } = {}) {
+function harness(options: { companies?: boolean; fullAccess?: boolean } = {}) {
   const db = new FakeDynamoDb({ seed: 3 });
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: ADA, sid: "s-ada", amr: "oidc" };
-  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), ...(options.fullAccess === false ? {} : { fullAccess: true }), createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
   for (const [id, name, sid] of [[ADA, "Ada", "s-ada"], [BEN, "Ben", "s-ben"]] as const) {
     db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, provider: "oidc", displayName: name, revoked: false });
     db.set({ pk: `SESSION#${sid}`, sk: "META", sessionId: sid, developerId: id, amr: "oidc", clientId: "web-app", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
@@ -75,6 +75,20 @@ describe("reading a project's merge rules", () => {
     expect(await h.call("GET", PATH())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", "the project's merge rules could not be read") });
     await expect(codeSettingsReader({ documentClient: h.db, tableName: "State" }).read(COMPANY_A.orgId as never, "alpha")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(await codeSettingsReader({ documentClient: h.db, tableName: "State" }).read(COMPANY_B.orgId as never, "alpha")).toMatchObject({ allowSelfApproval: true, revision: 7 });
+  });
+});
+
+describe("who may reach a project's merge rules", () => {
+  it("refuses a sign-in client without full access", async () => {
+    const h = harness({ fullAccess: false }); h.join(ADA, COMPANY_A.orgId, "admin"); h.project("alpha", COMPANY_A.orgId); h.grant(ADA, "alpha", "administrator");
+    expect(await h.call("GET", PATH())).toEqual({ status: 403, body: error("FORBIDDEN", CODE_SETTINGS_CLIENT_REFUSED) });
+    expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 0, mergeMethod: "merge" })).toEqual({ status: 403, body: error("FORBIDDEN", CODE_SETTINGS_CLIENT_REFUSED) });
+  });
+
+  it("reads the company's projects under one bounded budget: past it, the whole answer is refused", async () => {
+    const h = harness(); h.join(ADA, COMPANY_A.orgId, "member");
+    for (let i = 0; i < 600; i++) { h.project(`p${i}`, COMPANY_A.orgId); h.grant(ADA, `p${i}`, "developer"); }
+    expect(await h.call("GET", PATH("p1"))).toEqual({ status: 400, body: error("CONFIG_INVALID", "company read limit exceeded") });
   });
 });
 
