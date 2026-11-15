@@ -715,11 +715,12 @@ async function trackOne(
   // request for changes (about the candidate whose head the review is on), and a round of fixes started from people's comments. A close is not scored here (it may be reopened), and a merge is scored
   // where it is recorded (the webhook path), which also has the merge commit.
   const observeOutcomes = async (): Promise<void> => {
-    if (deps.hooks?.observe === undefined) return;
-    try {
-      await deps.hooks.observe({ task, pullRequest, fields, prior, now, permissionOf: permission, status, ci: ci.ci });
-    } catch (error) {
-      deps.log?.("outcomes.observe_failed", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    if (deps.hooks?.observe !== undefined) {
+      try {
+        await deps.hooks.observe({ task, pullRequest, fields, prior, now, permissionOf: permission, status, ci: ci.ci });
+      } catch (error) {
+        deps.log?.("outcomes.observe_failed", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+      }
     }
     // TE-B4: the head's "Rovara" Check, after the item is written (best effort: it never fails the pass).
     if (deps.summaryCheck === undefined) return;

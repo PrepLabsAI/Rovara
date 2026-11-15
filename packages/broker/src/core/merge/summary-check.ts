@@ -5,12 +5,12 @@
 // `no_permission`, and the pull request body stays the only summary (asked again after an hour). When Rovara stops following a task, `stopSummaryChecks` sets any run still in progress to
 // neutral once, so a required Check never hangs. Everything here is best effort: a failure is logged and never fails the pass.
 //
-// One small record per pull request, not part of the tracking item (its digest and stored shape are untouched):
-//   DEVTASK#<task> / ROVARA_CHECK#<repo>#<n>   the head, the run id, the digest of what was last written, when the head was first seen, its status
+// One small record per pull request, not part of the tracking item (its digest and stored shape are untouched), in the company's own partition:
+//   ORG#<co>#ROVARA_CHECK / <task>#<repo>#<n>   the head, the run id, the digest of what was last written, when the head was first seen, its status
 // Without a `SummaryCheckSource` (the `summaryCheck` gate off) nothing here runs.
 import { createHash } from "node:crypto";
 import {
-  rovaraCheckOf, type ChangeRequestStatus, type CodeHost, type DocumentStore, type HostScope, type OrgId, type ReadBudget, type RovaraCheckFullSuite, type RovaraCheckInput, type RovaraCheckPayload, type RovaraCheckProblem,
+  companyScoped, rovaraCheckOf, type ChangeRequestStatus, type CodeHost, type DocumentStore, type HostScope, type OrgId, type ReadBudget, type RovaraCheckFullSuite, type RovaraCheckInput, type RovaraCheckPayload, type RovaraCheckProblem,
 } from "@agentx/contracts";
 import { plain } from "./store.js";
 import { readProofHold } from "./proof-hold.js";
@@ -38,8 +38,8 @@ const part = (value: string, what: string): string => {
   if (value.length === 0 || value.length > 200 || /[#\p{Cc}]/u.test(value)) throw new Error(`${what} is not a usable key part`);
   return value;
 };
-export const summaryCheckKey = (taskId: string, repositoryId: string, number: number): { pk: string; sk: string } =>
-  ({ pk: `DEVTASK#${part(taskId, "a task id")}`, sk: `${SUMMARY_CHECK_ENTITY}#${part(repositoryId, "a repository id")}#${String(number)}` });
+export const summaryCheckKey = (orgId: OrgId, taskId: string, repositoryId: string, number: number): { pk: string; sk: string } =>
+  ({ pk: companyScoped(orgId, SUMMARY_CHECK_ENTITY), sk: `${part(taskId, "a task id")}#${part(repositoryId, "a repository id")}#${String(number)}` });
 
 export interface SummaryCheckRecord {
   orgId: OrgId;
@@ -143,7 +143,7 @@ export async function syncSummaryCheck(deps: SummaryCheckDependencies, pass: Sum
     const now = deps.now();
     const head = pass.status.headRevision;
     if (!SHA.test(head)) return "failed";
-    const key = summaryCheckKey(pass.task.taskId, pass.pullRequest.repositoryId, pass.pullRequest.number);
+    const key = summaryCheckKey(pass.task.orgId, pass.task.taskId, pass.pullRequest.repositoryId, pass.pullRequest.number);
     const stored = summaryCheckRecordOf(await deps.store.get(key), pass.task.orgId, pass.task.taskId);
     const same = stored !== undefined && stored.headSha === head ? stored : undefined;
     if (same?.noPermissionAtMs !== undefined && now - same.noPermissionAtMs < SUMMARY_CHECK_PERMISSION_RETRY_MS) return "no_permission";
@@ -185,7 +185,7 @@ export interface StopDependencies extends SummaryCheckDependencies {
 export async function stopSummaryChecks(deps: StopDependencies, task: MergeTask & { orgId: OrgId }): Promise<number> {
   let finished = 0;
   try {
-    const page = await deps.store.query({ pk: `DEVTASK#${part(task.taskId, "a task id")}`, sk: { op: "beginsWith", prefix: `${SUMMARY_CHECK_ENTITY}#` }, limit: STOP_MAX });
+    const page = await deps.store.query({ pk: companyScoped(task.orgId, SUMMARY_CHECK_ENTITY), sk: { op: "beginsWith", prefix: `${part(task.taskId, "a task id")}#` }, limit: STOP_MAX });
     for (const item of page.items) {
       const record = summaryCheckRecordOf(item, task.orgId, task.taskId);
       if (record === undefined || record.status !== "in_progress" || record.runId === undefined) continue;
@@ -195,7 +195,7 @@ export async function stopSummaryChecks(deps: StopDependencies, task: MergeTask 
         const payload = rovaraCheckOf({ proof: { kind: "not_judged" }, ci: "pending", ciMode: "their_ci_fix", fullSuite: "not_needed", firstSeenAtMs: record.firstSeenAtMs, nowMs: deps.now(), stopped: true });
         const written = await home.codeHost.upsertSummaryCheck({ url: home.url }, { headRevision: record.headSha, payload, runId: record.runId }, deps.scope(task.orgId));
         if (written === "no_permission") continue;
-        await deps.store.put({ item: plain({ ...summaryCheckKey(task.taskId, record.repositoryId, record.number), entityType: SUMMARY_CHECK_ENTITY, ...record, digest: digestOf(payload, undefined), status: payload.status }) });
+        await deps.store.put({ item: plain({ ...summaryCheckKey(task.orgId, task.taskId, record.repositoryId, record.number), entityType: SUMMARY_CHECK_ENTITY, ...record, digest: digestOf(payload, undefined), status: payload.status }) });
         finished += 1;
       } catch (error) {
         deps.log?.("summary_check.stop_failed", { taskId: task.taskId, number: record.number, error: errorName(error) });
