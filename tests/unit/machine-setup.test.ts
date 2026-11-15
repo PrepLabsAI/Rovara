@@ -93,6 +93,10 @@ describe("the card never guesses a size", () => {
     expect(a.row).toBeUndefined();
     expect(a.headline).toBe("Machine size: not measured");
   });
+  it.each([NaN, Infinity, -1, MAX_PEAK_MEMORY_MIB + 1])("a peak out of range (%s) is not measured, with the ARM word kept", (peak) => {
+    const facts = { ...machineFactsOf(report({ fullSuite: undefined }, failedWith("exec format error")))!, peakMemoryMiB: peak };
+    expect(advice(facts)).toMatchObject({ status: "not_measured", row: undefined, reasons: ["ARM incompatible; x86 required", "peak memory not measured"] });
+  });
   it("no available size is not a suggestion", () => {
     const a = advice(machineFactsOf(report())!, ["x86_64-8-32"]);
     expect(a.status).toBe("not_measured");
