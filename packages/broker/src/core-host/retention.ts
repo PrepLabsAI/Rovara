@@ -41,9 +41,11 @@ export const KEPT_FOR_GOOD_ON_AWS: ReadonlySet<string> = new Set([
   "APPROVAL_DECISION", "APPROVAL_PROOF_USED", "APPROVAL_PROOF_SPENT",
   // Decisions (core/decisions/store.ts).
   "DECISION_RECORD",
+  // The per-run cost history (core/cost/estimate.ts), part of the cost ledger by owner decision DEC 222a. The estimate reads only the newest ESTIMATE_HISTORY_SIZE rows, so this
+  // changes an answer only for an agent that rarely runs: its year-old costs still count instead of the estimate falling back to the default.
+  "RUN_COST",
 ]);
-// Left out on purpose, pending the owner: RUN_COST (core/cost/estimate.ts), the per-run cost history the estimate reads its newest rows from, keeps its 365-day expiry. On AWS the
-// approval gate's `policy.proofKeepSeconds` (unset today) is overridden for the kinds above: they are kept for good.
+// On AWS the approval gate's `policy.proofKeepSeconds` (unset today) is overridden for the kinds above: they are kept for good.
 
 /** The `keep` collisions whose core items never share a key with the deployed broker's (checked by hand; the scan cannot see key families). */
 export const KEPT_ON_SEPARATE_KEYS: ReadonlySet<string> = new Set(["CHANNEL_THREAD", "TASK_RATE"]);

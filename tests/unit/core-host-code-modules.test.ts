@@ -240,6 +240,8 @@ describe("Code's retention for core writes", () => {
       expect(retentionFor(kind), kind).toBe("strip");
       expect(withCodeRetention({ pk: "p", sk: "s", entityType: kind, indexExpiresAt: 5, other: 1 })).toEqual({ pk: "p", sk: "s", entityType: kind, other: 1 });
     }
+    // DEC 222a: the per-run cost history is part of the cost ledger.
+    expect(KEPT_FOR_GOOD_ON_AWS.has("RUN_COST")).toBe(true);
     // Session summaries and operation and activity events expire as on a laptop.
     for (const kind of ["LIVE_SESSION", "OPERATION_EVENT", "WORK_EVENT", "DECISION_EVIDENCE_OPENED"]) {
       expect(core.expiring.has(kind), kind).toBe(true);
