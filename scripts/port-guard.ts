@@ -4,12 +4,13 @@
 //   cloud-path      a Cloud-only path (decision 41): org/, spend/, audit/, team-record/, devices/, the Cloud web app and audit verifier
 //                   packages, the Cloud upgrade command, the Cloud CDK stacks, the Cloud-only contracts files
 //   cloud-aws       the AWS line (decision 72, O2, as changed by migration plan v3.2, DEC 214): Code owns its own AWS deployment, so a new file under
-//                   an aws/ directory or under infra/ is Code's and is allowed, and Code's deployment code (aws/, infra/) and tests may import the AWS
+//                   an aws/ directory or under infra/ is Code's and is allowed, and Code's deployment code (aws/, infra/) and test files may import the AWS
 //                   SDK and the CDK. Still refused: a private adapter inside the public adapters package (only four generic adapters, DynamoDB, SQS, S3
 //                   and Secrets Manager, live there), and an AWS SDK client or CDK import off that list in the adapters package or in a NEW file
 //                   anywhere else. The list is data (scripts/boundary-allowlist.json), read by this guard and by Cloud's boundary check
-//   cloud-path (deployment)  a NEW file under aws/ or infra/ whose path names Cloud-only work: the Cloud model gateway, billing, the company admin
-//                   backend, the team record, the audit ledger, the Cloud web app or anything called cloud (DEC 214: those stay in Cloud)
+//   cloud-path (deployment)  a NEW file under aws/ or infra/ (a merge that adds one included) whose path names Cloud-only work: a gateway, billing,
+//                   budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud
+//                   (DEC 214: those stay in Cloud), or holds a letter outside ASCII
 //   cloud-import    a TypeScript/JavaScript file (any name that carries a .ts/.js/... extension, or text that reads as such code) that imports one of those (also a vendor/ folder, a `cloud-*` package or an AWS client off the list), or a package/CI file that names one of those packages
 //   stray-file      an editor, merge or sed backup/scratch file (`*-E`, `*.orig`, `*.rej`, `*.bak`, `*~`, `*.swp`, `*.tmp`, `.DS_Store` and kin): a stray
 //                   copy can hold raw Cloud source under a name no other rule reads (a lane once committed 27 `*.ts-E` files from `sed -i -E`)
@@ -23,7 +24,7 @@
 //   secret          anything gitleaks finds in the range
 //   accepted-stale  an entry of the accepted-findings list whose file the range itself changes or removes (the list must not rot where the range works)
 //
-// Already-public history (--public-base <rev>, CI passes origin/mainline on the strict pull request run): a commit of the range that is reachable from
+// Already-public history (--public-base <full branch ref>, CI passes refs/remotes/origin/mainline on the strict pull request run; a short name is refused, as it could resolve to a tag): a commit of the range that is reachable from
 // that revision is already public, so its own private-name findings (its patch and its message) are skipped. Only private-name, and only for those
 // commits: the net diff is still read in full, so a private name the range leaves at its tip fails whichever commit brought it, and every other rule
 // still reads every commit.
@@ -261,32 +262,43 @@ export function adaptersPackageRule(path: string): string | null {
 /** A path in Code's own AWS deployment: under an aws/ directory or under infra/ (DEC 214: Code owns its AWS deployment). */
 const DEPLOYMENT_PATH = /(^|\/)aws\/|^infra\//i;
 
-/** True when a path is a test (under tests/, or a *.test.* file). */
-const isTestPath = (lower: string): boolean => /^tests\//.test(lower) || /\.test\.[cm]?[jt]sx?$/.test(lower);
+/** True when a path is a test file (*.test.*): helpers and fixtures under tests/ are not, so they cannot park AWS code there. */
+const isTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/.test(lower);
 
 /**
- * Words (alone, or two adjacent words of the path joined) that name Cloud-only work in a deployment path (DEC 214: the model gateway, billing,
- * the company admin backend and the other Cloud-only parts stay in Cloud). A word that starts with "cloud" is Cloud's too, unless it is an AWS
- * service name (cloudwatch, cloudformation, ...).
+ * Word stems that name Cloud-only work in a deployment path (DEC 214: the model gateway, billing, the company admin backend and the other
+ * Cloud-only parts stay in Cloud; also the Cloud-only directories of decision 41). A path word, or two or three adjacent path words joined,
+ * that STARTS with a stem is refused, so plurals and other forms count too (gateways, invoicing, teamrecords). A word that starts with or ends
+ * in "cloud" is Cloud's as well, unless it is an AWS service name (cloudwatch, cloudformation, ...). Any letter outside ASCII in a deployment
+ * path is refused outright, so a look-alike letter cannot split a word.
  */
-const CLOUD_DEPLOYMENT_WORDS = new Set([
-  "modelproxy", "modelgateway", "llmgateway", "aigateway",
-  "billing", "invoice", "invoices", "stripe", "pricing", "metering", "spend",
-  "companyadmin", "orgadmin", "organizationadmin", "adminconsole",
-  "teamrecord", "auditledger", "embedder", "edition", "webapp", "customdomain",
-]);
+const CLOUD_DEPLOYMENT_STEMS = [
+  "gateway", "modelproxy", "modelsproxy", "modelgateway", "modelsgateway",
+  "billing", "invoic", "stripe", "pricing", "price", "meter", "spend", "budget",
+  "org", "organization", "companyadmin", "admincon", "teamrecord", "auditledger", "devices",
+  "embedder", "edition", "webapp", "customdomain",
+];
+/** Stems that are refused only as a whole word (a longer word that merely starts with them is ordinary: "orgs" is refused, "organic" is not). */
+const CLOUD_DEPLOYMENT_WHOLE = new Set(["org", "orgs", "price", "prices", "meter", "meters", "devices"]);
+const CLOUD_DEPLOYMENT_PREFIX = CLOUD_DEPLOYMENT_STEMS.filter((stem) => !CLOUD_DEPLOYMENT_WHOLE.has(stem));
 const AWS_CLOUD_WORDS = /^cloud(?:watch|formation|front|trail|map|search|hsm|shell|9)/;
+
+const DEPLOYMENT_DETAIL =
+  "a Cloud-only part in Code's deployment (the model gateway, billing, budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud stays in Cloud, DEC 214)";
 
 /** Why a deployment path names Cloud-only work, or null (also null for a path outside aws/ and infra/). */
 export function cloudDeploymentPathRule(path: string): string | null {
-  const normal = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "").toLowerCase();
-  if (!DEPLOYMENT_PATH.test(normal)) return null;
+  const unified = path.replaceAll("\\", "/");
+  if (!DEPLOYMENT_PATH.test(posix.normalize(unified.normalize("NFKC")).replace(/^\.\//, "").toLowerCase())) return null;
+  if (/[^\x20-\x7e]/.test(unified)) return "a letter outside ASCII in a path under aws/ or infra/ (a look-alike letter could hide a Cloud-only name)";
+  const normal = posix.normalize(unified).replace(/^\.\//, "").toLowerCase();
   const words = normal.match(/[a-z0-9]+/g) ?? [];
+  const cloudy = (word: string): boolean => (word.startsWith("cloud") && !AWS_CLOUD_WORDS.test(word)) || (word.length > 5 && word.endsWith("cloud"));
   for (let i = 0; i < words.length; i += 1) {
-    const word = words[i]!;
-    const pair = i + 1 < words.length ? word + words[i + 1]! : "";
-    if ((word.startsWith("cloud") && !AWS_CLOUD_WORDS.test(word)) || CLOUD_DEPLOYMENT_WORDS.has(word) || CLOUD_DEPLOYMENT_WORDS.has(pair)) {
-      return "a Cloud-only part in Code's deployment (the model gateway, billing, the company admin backend, the team record, the audit ledger, the Cloud web app or anything called cloud stays in Cloud, DEC 214)";
+    for (let n = 1; n <= 3 && i + n <= words.length; n += 1) {
+      const candidate = words.slice(i, i + n).join("");
+      if (n === 1 && (cloudy(candidate) || CLOUD_DEPLOYMENT_WHOLE.has(candidate))) return DEPLOYMENT_DETAIL;
+      if (CLOUD_DEPLOYMENT_PREFIX.some((stem) => candidate.startsWith(stem))) return DEPLOYMENT_DETAIL;
     }
   }
   return null;
@@ -998,7 +1010,9 @@ function combinedEntries(cwd: string, commit: string): RawEntry[] {
     const fields = meta.slice(parents).split(/\s+/);
     const newMode = fields[parents] ?? "";
     if (path === "" || newMode === "000000") continue;
-    entries.push({ path, newMode, newSha: fields[2 * parents + 1] ?? "", status: "" });
+    // No parent had the file: the merge itself adds it, so it is judged as an added file (its name too).
+    const added = parents > 0 && fields.slice(0, parents).every((mode) => mode === "000000");
+    entries.push({ path, newMode, newSha: fields[2 * parents + 1] ?? "", status: added ? "A" : "" });
   }
   return entries;
 }
@@ -1400,6 +1414,10 @@ export function runGuard(options: GuardOptions): GuardResult {
   if (options.publicBase !== undefined) {
     const publicTip = git(options.cwd, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${options.publicBase}^{commit}`], true).trim();
     if (options.publicBase.startsWith("-") || /\s/.test(options.publicBase) || publicTip === "") throw new GuardError(`"${options.publicBase}" (--public-base) is not a commit in this repository (did you fetch?)`);
+    // A full branch name only: a short name such as origin/mainline is looked up among tags first, so a pushed tag of that name could pass a lane's own tip as public.
+    if (!/^refs\/(?:remotes|heads)\/\S+$/.test(options.publicBase) || git(options.cwd, ["show-ref", "--verify", options.publicBase], true).trim() === "") {
+      throw new GuardError(`"${options.publicBase}" (--public-base) must be a full branch name, such as refs/remotes/origin/mainline (a short name can resolve to a tag)`);
+    }
     notPublic = new Set(git(options.cwd, ["rev-list", `${range.base}..${range.tip}`, "--not", publicTip]).split("\n").filter((row) => row !== ""));
   }
   const commits = git(options.cwd, ["rev-list", "--reverse", "--parents", `${range.base}..${range.tip}`])

@@ -372,10 +372,10 @@ describe("a sanctioned AWS adapter and text fixtures (A-H1)", () => {
     expect(awsImportFindings("packages/worker/src/x.ts", asText, true)).toHaveLength(1);
   });
 
-  it("opens no path for a real AWS client outside Code's deployment and tests: the shipped data has no fixture paths", () => {
+  it("opens no path for a real AWS client outside Code's deployment and test files: the shipped data has no fixture paths, and a helper or fixture under tests/ is not a test file", () => {
     expect(boundary().awsImportFixturePaths).toEqual([]);
     const real = `export { EC2Client } from "${SDK("ec2")}";\n`;
-    for (const path of ["packages/worker/src/fixtures/ec2.ts", "packages/worker/src/env-detect/evil.ts", "scripts/x.ts"]) {
+    for (const path of ["tests/fixtures/ec2.ts", "tests/unit/worker-env-detect-evil.ts", "tests/support/gateway-handler.ts", "packages/worker/src/fixtures/ec2.ts", "packages/worker/src/env-detect/evil.ts", "scripts/x.ts"]) {
       expect(awsImportFindings(path, real, true), path).toHaveLength(1);
     }
     expect(awsImportFindings("packages/worker/src/fixtures/stack.ts", imp("Queue", j(CDK, "/aws-sqs")), true)).toHaveLength(1);
@@ -667,6 +667,20 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/web-app.ts`,
     `${INFRA}/lib/embedder-function.ts`,
     `${INFRA.toUpperCase()}/LIB/BILLING.ts`,
+    `${INFRA}/lib/gateway.ts`,
+    `${INFRA}/lib/gateways-stack.ts`,
+    `packages/broker/src/${AWS}/invoicing.ts`,
+    `packages/broker/src/${AWS}/team-records.ts`,
+    `packages/broker/src/${AWS}/org-routes.ts`,
+    `packages/broker/src/${AWS}/orgs/list.ts`,
+    `packages/broker/src/${AWS}/organization-settings.ts`,
+    `${INFRA}/lib/devices-stack.ts`,
+    `${INFRA}/lib/audit-ledgers.ts`,
+    `${INFRA}/lib/web-apps.ts`,
+    `${INFRA}/lib/models-gateway.ts`,
+    `${INFRA}/lib/my${CLD}.ts`,
+    `${INFRA}/lib/b\u0456lling.ts`,
+    `packages/broker/src/${AWS}/tool-budget.ts`,
   ])("refuses a NEW Cloud-only deployment path, as cloud-path: %s", (path) => {
     expect(addedFileRule(path)?.rule).toBe("cloud-path");
   });
@@ -678,6 +692,9 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `packages/broker/src/${AWS}/admin-reads.ts`,
     `packages/broker/src/${AWS}/worker-machines/core-dispatch-host.ts`,
     `packages/broker/src/${AWS}/developer-routes.ts`,
+    `packages/broker/src/${AWS}/connector-ledger.ts`,
+    `packages/broker/src/${AWS}/storage-organic.ts`,
+    `${INFRA}/lib/${CLD}front-cache.ts`,
     `docs/billing.md`,
     `packages/broker/src/billing-notes.ts`,
   ])("lets an ordinary Code path through: %s", (path) => {
@@ -728,7 +745,7 @@ describe("plan v3.2: commits already public on mainline are not judged again for
     const lane = sync([{ "docs/a.md": NAME_IN }, { "docs/a.md": "from a branch\n" }]);
     git(lane.dir, "commit", "-q", "--allow-empty", "-m", "noop");
     expect(rules(lane.guard())).toContain("private-name");
-    expect(lane.guard({ publicBase: "mainline" })).toEqual([]);
+    expect(lane.guard({ publicBase: "refs/heads/mainline" })).toEqual([]);
   });
 
   it("still fails a private name in a NEW commit (not on mainline), with the same text as a skipped one", () => {
@@ -738,24 +755,49 @@ describe("plan v3.2: commits already public on mainline are not judged again for
     const sha = git(lane.dir, "rev-parse", "--short=8", "HEAD").trim();
     lane.write("docs/b.md", "gone\n");
     lane.commit(`again ${INTEG}/0519`);
-    const findings = lane.guard({ publicBase: "mainline" });
+    const findings = lane.guard({ publicBase: "refs/heads/mainline" });
     expect(findings.map((f) => `${f.rule}:${f.file}:${f.commit ?? ""}`)).toEqual([`private-name:docs/b.md:${sha}`, `private-name:(commit message or author):${git(lane.dir, "rev-parse", "--short=8", "HEAD").trim()}`]);
   });
 
   it("still fails a private name that a mainline commit brought and the tip still holds: the net diff is read in full", () => {
     const lane = sync([{ "docs/a.md": NAME_IN }]);
-    const findings = lane.guard({ publicBase: "mainline" });
+    const findings = lane.guard({ publicBase: "refs/heads/mainline" });
     expect(findings.map((f) => `${f.rule}:${f.file}:${f.commit ?? "net"}`)).toEqual(["private-name:docs/a.md:net"]);
   });
 
   it("skips only private-name: every other rule still reads the mainline commits", () => {
     const lane = sync([{ "docs/a.md.orig": "x\n", ".github/workflows/ci.yml": "on: push\n" }, { "docs/a.md.orig": null, ".github/workflows/ci.yml": null }]);
-    expect(lane.guard({ publicBase: "mainline" }).map((f) => `${f.rule}:${f.file}`).sort()).toEqual(["guard-files:.github/workflows/ci.yml", "stray-file:docs/a.md.orig"]);
+    expect(lane.guard({ publicBase: "refs/heads/mainline" }).map((f) => `${f.rule}:${f.file}`).sort()).toEqual(["guard-files:.github/workflows/ci.yml", "stray-file:docs/a.md.orig"]);
   });
 
   it("refuses a public base that is not a commit, loudly", () => {
     const lane = sync([{ "docs/a.md": "x\n" }]);
-    expect(() => lane.guard({ publicBase: "no-such-branch" })).toThrow(GuardError);
+    expect(() => lane.guard({ publicBase: "refs/heads/no-such-branch" })).toThrow(GuardError);
     expect(() => lane.guard({ publicBase: "--all" })).toThrow(GuardError);
+  });
+
+  it("takes only a full branch name: a short name could resolve to a tag a lane pushed at its own tip", () => {
+    const lane = sync([{ "docs/a.md": "x\n" }]);
+    lane.write("docs/b.md", NAME_IN);
+    lane.commit("new");
+    // A tag that shadows the short name, planted at the lane's tip: as a short name it would pass every commit of the lane as public.
+    git(lane.dir, "tag", "mainline", "lane");
+    expect(() => lane.guard({ publicBase: "mainline" })).toThrow(GuardError);
+    expect(() => lane.guard({ publicBase: "refs/tags/mainline" })).toThrow(GuardError);
+    git(lane.dir, "rm", "-q", "docs/b.md");
+    lane.commit("gone");
+    expect(rules(lane.guard({ publicBase: "refs/heads/mainline" }))).toEqual(["private-name"]);
+  });
+
+  it("judges a file that a merge commit itself adds (no parent had it) as an added file", () => {
+    const lane = sync([{ "docs/a.md": "x\n" }]);
+    git(lane.dir, "reset", "-q", "--hard", "HEAD~1");
+    git(lane.dir, "merge", "-q", "--no-ff", "--no-commit", "mainline");
+    lane.write(`${INFRA}/lib/billing.ts`, "export const b = 1;\n");
+    git(lane.dir, "add", "-A");
+    git(lane.dir, "commit", "-q", "-m", "Merge mainline with a file of its own");
+    git(lane.dir, "rm", "-q", `${INFRA}/lib/billing.ts`);
+    lane.commit("gone");
+    expect(lane.guard({ publicBase: "refs/heads/mainline" }).map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-path:${INFRA}/lib/billing.ts`]);
   });
 });
