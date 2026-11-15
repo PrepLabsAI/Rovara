@@ -189,37 +189,35 @@ describe("the named TEST proof-only installation gate", () => {
       const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
       expect(variables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
     }
-    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy has no workflow gate parameter").toBeUndefined();
+    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
     expect(legacyBrokers, "legacy has its Broker Lambda").toHaveLength(1);
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy has no workflow flag").toBeUndefined();
+    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "242846cb5016daf21cfb436cd37fc047a9d528662c4345ff82006cba134d598f",
-        withoutRoute: "009ceb886e74022827ae8954be5096b64831554b49ae5f51f9528b9bf1e1bfc7",
+        withRoute: "60e8b2df37dab9ed3b388c49abb12816f35734dd81870dfc786b4e83f545dc35",
+        withoutRoute: "21a1143c05a22277fad18e43f25a806516dac532e3a4b16a36aafa74bb4ee984",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "dcf588142a9bac3e3675d60c1643632fd64ef67bd698926551501eb251504b33",
-        withoutRoute: "2604b6713cd7103c77615754f17fe391085305778f3c83cd968e0ee9646dae27",
+        withRoute: "321e8ef63aa32b6ee83dc58560eb85e735661527eda95c140fff8206d17ff5fd",
+        withoutRoute: "eb13cafddc56fff296134bce4afc040d1bd922b018f78d723e1e2a8663621286",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "e0ec4d2d7acd8e4776b8f2ec3e1dc408aada6f7cb8eca067837dded962b531e9",
-        withoutRoute: "976b5e91de5a9e2e767057f9cd6e00f1bd61f0ef6db1ab973f7d0b8f44f5e9e5",
+        withRoute: "c9cd4a7890c9d0502fa0df7e5e06a28f87c0dba8de4fa439db39c7099874c201",
+        withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
       },
     ] as const;
     for (const { label, template, withRoute, withoutRoute } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
-      if (label === "legacy") {
-        expect(creatorChecks, "legacy has no new sign-in creator identity fence").toHaveLength(0);
-      } else {
+      {
         expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);
         expect(creatorChecks[0]!.statement, `${label} checks only the exact sign-in table key namespace`).toEqual({
           Action: "dynamodb:ConditionCheckItem",
