@@ -147,6 +147,22 @@ describe("runBrowserEvidence", () => {
     expect(calls.at(-1)).toBe("stopped");
   }, 30_000);
 
+  it("an app whose start answers only after the run gave up on it is still stopped once it answers", async () => {
+    const calls: string[] = [];
+    let finishStart: (value: "ready") => void = () => undefined;
+    const driver: BrowserEvidenceDriver = {
+      startApp(side) { calls.push(`start:${side}`); return new Promise((resolve) => { finishStart = resolve; }); },
+      async capture() { calls.push("capture"); return { ok: false, reason: "page_did_not_load" }; },
+      async stopApp(side) { calls.push(`stop:${side}`); },
+    };
+    const got = await runBrowserEvidence({ ...base, routes: ["/a"], driver, limits: { runMs: 50 } });
+    expect(got.notRun).toBe("app_did_not_start");
+    expect(calls).toEqual(["start:before", "stop:before"]);
+    finishStart("ready");
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(calls).toEqual(["start:before", "stop:before", "stop:before"]);
+  });
+
   it("refuses input it was not built for instead of trimming it", async () => {
     const { driver } = fakeDriver();
     await expect(runBrowserEvidence({ ...base, routes: ["/1", "/2", "/3", "/4", "/5", "/6"], driver })).rejects.toThrow("browser evidence input is not valid");

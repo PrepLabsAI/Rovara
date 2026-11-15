@@ -111,7 +111,11 @@ export async function runBrowserEvidence(input: BrowserEvidenceRunInput): Promis
     if (deadline - now() <= 0) { for (const route of pending) fail(route, "time_limit"); break; }
     try {
       const left = deadline - now();
-      const ready = (await within(() => driver.startApp(side, { timeoutMs: left }), left)) === "ready";
+      let starting: Promise<unknown> | undefined;
+      const answer = await within(() => { starting = driver.startApp(side, { timeoutMs: left }); return starting; }, left);
+      // A start that answers after the run gave up on it has started an app nobody would stop: it is stopped as soon as that start settles (bounded like every stop).
+      if (answer === TIMED_OUT && starting !== undefined) void starting.then(() => within(() => driver.stopApp(side), BROWSER_EVIDENCE_STOP_MS), () => undefined);
+      const ready = answer === "ready";
       if (!ready) return { ...base, durationMs: Math.max(0, now() - started), routes: [], notRun: "app_did_not_start" };
       for (const route of pending) {
         const left = deadline - now();

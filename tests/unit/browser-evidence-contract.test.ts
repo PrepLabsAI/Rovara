@@ -95,7 +95,7 @@ describe("which changed pages are picked", () => {
 
 describe("masking", () => {
   it("paints over passwords, card and code fields, email and phone inputs and marked elements by default, plus the recipe's own selectors", () => {
-    for (const selector of ['input[type="password"]', 'input[name*="password" i]', 'input[autocomplete$="password"]', 'input[autocomplete^="cc-"]', 'input[autocomplete="one-time-code"]', 'input[type="email"]', 'input[type="tel"]', "[data-rovara-mask]", "[data-private]"]) {
+    for (const selector of ['input[type="password"]', 'input[name*="password" i]', 'input[autocomplete$="password"]', 'input[autocomplete^="cc-"]', 'input[autocomplete="one-time-code"]', 'input[type="email"]', 'input[type="tel"]', "[data-rovara-mask]", "[data-private]", "canvas"]) {
       expect(BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, selector).toContain(selector);
     }
     expect(browserEvidenceMaskSelectors(undefined)).toEqual([...BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS]);

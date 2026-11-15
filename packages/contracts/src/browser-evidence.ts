@@ -201,6 +201,8 @@ export const BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS: readonly string[] = Object
   'input[type="tel"]',
   'input[autocomplete^="cc-"]',
   'input[autocomplete="one-time-code"]',
+  // A canvas can draw any text and no text scrub reaches it.
+  "canvas",
   "[data-rovara-mask]",
   "[data-private]",
 ]);
@@ -222,7 +224,8 @@ export function browserEvidenceMaskSelectors(recipe: unknown): string[] {
  * Text masks, applied to the page's visible text and form values before every screenshot (and by `scrubVisibleText`). Each is a bounded pattern: emails, JWTs, prefixed API keys,
  * long hex or base64 runs, card-like digit runs and phone numbers. Kept as sources so the page and Node apply the same list.
  */
-export const BROWSER_EVIDENCE_TEXT_MASKS: ReadonlyArray<Readonly<{ source: string; flags: string }>> = Object.freeze([
+type TextMask = { source: string; flags: string; nodeOnly?: true };
+export const BROWSER_EVIDENCE_TEXT_MASKS: ReadonlyArray<Readonly<TextMask>> = Object.freeze(([
   { source: "[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\\.[A-Za-z0-9-]{1,63}){0,8}\\.[A-Za-z]{2,24}", flags: "gu" },
   { source: "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}", flags: "gu" },
   { source: "\\b(?:(?:sk|pk|rk)[-_]|gh[pousr]_|github_pat_|xox[abprs]-|AKIA|ASIA|AIza)[A-Za-z0-9_-]{12,}", flags: "gu" },
@@ -237,8 +240,9 @@ export const BROWSER_EVIDENCE_TEXT_MASKS: ReadonlyArray<Readonly<{ source: strin
   { source: "glpat-[A-Za-z0-9_-]{20,}", flags: "gu" },
   { source: "\\bSK[a-f0-9]{32}\\b", flags: "gu" },
   { source: "\\bbearer\\s+[A-Za-z0-9._~+/-]{8,}=*", flags: "giu" },
-  { source: "\\b(?:password|passwd|secret|token|api[_-]?key)\\s*[:=]\\s*\\S{4,}", flags: "giu" },
-].map((mask) => Object.freeze(mask)));
+  // Single text nodes only (`nodeOnly`): over a page's joined text a "Password:" label runs into the next word ("Forgot ...") and would withhold every sign-in page.
+  { source: "\\b(?:password|passwd|secret|token|api[_-]?key)\\s*[:=]\\s*\\S{4,}", flags: "giu", nodeOnly: true },
+] satisfies TextMask[]).map((mask) => Object.freeze(mask)));
 export const BROWSER_EVIDENCE_TEXT_MASK = "•••";
 const TEXT_MASKS = BROWSER_EVIDENCE_TEXT_MASKS.map((mask) => new RegExp(mask.source, mask.flags));
 /** `text` with every text mask applied. Text longer than `BROWSER_EVIDENCE_TEXT_SCAN_MAX` is masked whole. */

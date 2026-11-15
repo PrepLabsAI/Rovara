@@ -1,5 +1,6 @@
 // TE-H1 slice 1 in a real Chromium (skipped where none is installed; the CI linux-runtime job runs the same path inside the executor image, tests/linux/browser-evidence.test.ts).
 // The project's own start command starts the fixture app for the base code and for the candidate; the runner opens the changed pages and keeps masked JPEGs within the e2e cap.
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -83,6 +84,27 @@ describe.skipIf(!haveChromium)("browser evidence in a real Chromium", () => {
     expect(shaOf(got, "/shadow-a")).toBe(shaOf(got, "/shadow-b"));
     expect(shaOf(frames, "/frame-a")).toBe(shaOf(frames, "/frame-b"));
   }, 120_000);
+
+  it("never keeps the raw text of data that arrives after load, at any delay, masks the alt text of an image that did not load, and still shows a sign-in page", async () => {
+    const port = await freePort();
+    const driver = driverFor(port);
+    expect(await driver.startApp("after", { timeoutMs: 20_000 })).toBe("ready");
+    const take = async (route: string) => {
+      const got = await driver.capture("after", route, { maskSelectors: [...BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS], timeoutMs: 10_000 });
+      return got.ok ? createHash("sha256").update(got.bytes).digest("hex") : got.reason;
+    };
+    try {
+      // Two pages with two different emails: at every delay, either no picture or the same picture, so the email is never in it.
+      for (const d of [0, 10, 20, 30, 40, 60, 80, 120, 200, 300]) {
+        const a = await take(`/late-fetch/${String(d)}/a`);
+        const b = await take(`/late-fetch/${String(d)}/b`);
+        if (a.length === 64 && b.length === 64) expect(a, `delay ${String(d)}`).toBe(b);
+        else for (const one of [a, b]) if (one.length !== 64) expect(one, `delay ${String(d)}`).toBe("masked_content");
+      }
+      expect(await take("/alt-a")).toBe(await take("/alt-b"));
+      expect((await take("/signin")).length).toBe(64);
+    } finally { await driver.stopApp("after"); }
+  }, 180_000);
 
   it("keeps no picture of a secret split over several elements, and a page whose script never yields ends at its time and the app is stopped", async () => {
     const port = await freePort();

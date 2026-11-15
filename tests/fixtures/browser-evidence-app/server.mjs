@@ -23,11 +23,22 @@ const routes = {
   "/frame-b": shell(`<h1>Profile</h1><iframe srcdoc="<p>Signed in as grace@example.org</p>" style="width:600px;height:80px;border:0"></iframe>`),
   // A key split over two elements: no single text node matches, the joined text does, so no picture is kept.
   "/split": shell(`<h1>Keys</h1><p>Your key <span>sk_live_</span><span>abcdefghijklmnopqrstuv</span></p>`),
+  // An avatar from another origin (aborted by the driver) whose alt text is an email: the browser paints the alt text in its place.
+  "/alt-a": shell(`<h1>Profile</h1><img src="https://cdn.example.com/a.png" alt="ada@example.com" width="300" height="40">`),
+  "/alt-b": shell(`<h1>Profile</h1><img src="https://cdn.example.com/a.png" alt="grace@example.org" width="300" height="40">`),
+  // A sign-in page: a "Password:" label, its field and a "Forgot password?" link must not withhold the picture.
+  "/signin": shell(`<h1>Sign in</h1><form><label>Email: <input type="email" value="ada@example.com"></label><br><label>Password: <input type="password" value="hunter2-x"></label><br><a href="/forgot">Forgot password?</a> <button>Sign in</button></form>`),
   // A page whose own script never yields after load.
   "/busy": shell(`<h1>Busy</h1><script>setTimeout(() => { for (;;) {} }, 0);</script>`),
 };
+// Data that arrives after load (a normal app fetch), D ms late, written by the fetch's continuation: /late-fetch/<ms>/<a|b>.
+const lateFetch = (d, who) => shell(`<h1>Profile</h1><p id="w">Signed in as •••</p><script>addEventListener("load", () => fetch("/slow?ms=${d}").then(() => { document.getElementById("w").textContent = "Signed in as ${who === "a" ? "ada@example.com" : "grace@example.org"}"; }));</script>`);
 createServer((request, response) => {
-  const body = routes[new URL(request.url ?? "/", "http://localhost").pathname];
+  const url = new URL(request.url ?? "/", "http://localhost");
+  if (url.pathname === "/slow") { setTimeout(() => { response.writeHead(200, { "content-type": "text/plain" }); response.end("ok"); }, Math.min(5_000, Number(url.searchParams.get("ms")) || 0)); return; }
+  const late = /^\/late-fetch\/(\d{1,4})\/(a|b)$/.exec(url.pathname);
+  if (late !== null) { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(lateFetch(Number(late[1]), late[2])); return; }
+  const body = routes[url.pathname];
   if (body === undefined) { response.writeHead(404, { "content-type": "text/plain" }); response.end("not found"); return; }
   response.writeHead(200, { "content-type": body === "ok" ? "text/plain" : "text/html; charset=utf-8" });
   response.end(body);

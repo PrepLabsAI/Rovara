@@ -2,11 +2,13 @@
 // daemonizes out of the group is left to the sandbox's own teardown), and a headless Chromium (the executor's `launchLocalChromium`, its own sandbox on) opens each route on the app's
 // origin only (`http://127.0.0.1:<port>`; any other origin is aborted before and during the load; WebSockets are not routed, which the sandbox's network walls cover).
 //
-// Masking, in this order, before the one JPEG is taken: every frame's text, open shadow roots, form values, placeholders and title are scrubbed (contracts' text masks); the page's own
-// scripts are then stopped (CDP `Emulation.setScriptExecutionDisabled`), so nothing can re-render the raw text; everything is scrubbed again; a verify pass re-reads it all (each text node,
-// each field, and the joined visible text of the page and of each shadow root, which catches a secret split over several nodes) and any match left means no picture
-// ("withheld"); finally the masked elements are painted over by Playwright. Not reachable by any text scrub, and so left to the recipe's mask selectors: canvas, images, CSS generated
-// content and closed shadow roots. Every step is bounded by the page's time; the context is closed after each page, which also ends a renderer that is still busy.
+// Masking, in this order, around the one JPEG: every frame's text, open shadow roots, form values, placeholders, image alt text and title are scrubbed (contracts' text masks); the
+// network is cut (the context goes offline), so no late answer can bring new data; the page's own scripts are stopped (CDP `Emulation.setScriptExecutionDisabled`; this stops timers,
+// frames and event handlers but not a promise continuation already queued); everything is scrubbed again; a verify pass re-reads it all (each text node, field and alt, and the joined
+// visible text of the page and of each shadow root, which catches a secret split over several nodes); the masked elements are painted over and the picture taken; and the verify pass
+// runs AGAIN after the picture: raw text that reached the paint is still in the page then (nothing rewrites it back to masked), so any match means the picture is dropped ("withheld").
+// Not reachable by any text scrub, and so left to mask selectors: canvas (masked by default), images' own pixels, CSS generated content, closed shadow roots, and out-of-process frames
+// (another origin's frames are aborted). Every step is bounded by the page's time; the context is closed after each page, which also ends a renderer that is still busy.
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
@@ -99,7 +101,7 @@ export async function startProjectApp(input: { command: string; cwd: string; por
 
 // ---- the page
 
-type PageArg = { masks: ReadonlyArray<{ source: string; flags: string }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
+type PageArg = { masks: ReadonlyArray<{ source: string; flags: string; nodeOnly?: boolean }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
 type PageVerdict = "clean" | "dirty" | "too_large";
 
 /**
@@ -109,13 +111,23 @@ type PageVerdict = "clean" | "dirty" | "too_large";
  * types, so the document is described by the little this function touches (1 and 4 are ELEMENT_NODE and SHOW_ELEMENT|SHOW_TEXT's text bit).
  */
 function maskPage(arg: PageArg): PageVerdict {
-  type Field = { value?: unknown; placeholder?: unknown; type?: unknown; closest?(selector: string): unknown };
+  type Field = { value?: unknown; placeholder?: unknown; type?: unknown; closest?(selector: string): unknown; getAttribute?(name: string): string | null; setAttribute?(name: string, value: string): void; complete?: unknown; naturalWidth?: unknown };
   type Root = { querySelectorAll(selector: string): ArrayLike<Field> };
   type Node = { nodeType: number; nodeValue: string | null; shadowRoot?: Root | null; parentNode?: { nodeName?: string } | null };
   type Doc = Root & { documentElement: unknown; title: string; body: { innerText?: unknown } | null; createTreeWalker(root: unknown, show: number): { nextNode(): Node | null } };
   const doc = (globalThis as unknown as { document: Doc }).document;
   const patterns = arg.masks.map((item) => new RegExp(item.source, item.flags));
+  const joinedPatterns = arg.masks.filter((item) => item.nodeOnly !== true).map((item) => new RegExp(item.source, item.flags));
   const hits = (text: string): boolean => text.length > arg.maxText || patterns.some((pattern) => text.search(pattern) !== -1);
+  // Joined text may be long: it is read in overlapping windows (the character budget already bounds it), so a long page is not withheld for its length alone.
+  const joinedHits = (text: string): boolean => {
+    for (let start = 0; start < text.length; start += arg.maxText - 1_000) {
+      const window = text.slice(start, start + arg.maxText);
+      if (joinedPatterns.some((pattern) => window.search(pattern) !== -1)) return true;
+      if (start + arg.maxText >= text.length) break;
+    }
+    return false;
+  };
   const scrub = (text: string): string => {
     if (text.length > arg.maxText) return arg.mask;
     let out = text;
@@ -165,11 +177,26 @@ function maskPage(arg: PageArg): PageVerdict {
       }
     }
   }
+  // Alt text is painted in place of an image that does not load (and another origin's images are aborted): scrubbed, verified, and blanked for a broken image.
+  for (const { root } of roots) {
+    for (const image of Array.from(root.querySelectorAll("img[alt], input[alt], area[alt]"))) {
+      nodes += 1;
+      if (nodes > arg.maxNodes) return "too_large";
+      const alt = image.getAttribute?.("alt") ?? "";
+      chars += alt.length;
+      if (chars > arg.maxChars) return "too_large";
+      if (alt === "") continue;
+      if (arg.verify) { if (!masked(image) && hits(alt)) return "dirty"; continue; }
+      const broken = image.complete === true && image.naturalWidth === 0;
+      image.setAttribute?.("alt", broken ? "" : scrub(alt));
+    }
+  }
   if (!arg.verify) { doc.title = scrub(doc.title); return "clean"; }
   if (hits(doc.title)) return "dirty";
   const visible = doc.body?.innerText;
-  if (typeof visible === "string" && hits(visible)) return "dirty";
-  for (const joined of shadows) if (hits(joined.join(""))) return "dirty";
+  if (typeof visible === "string" && joinedHits(visible)) return "dirty";
+  // Text nodes joined with a line break: digits in neighbouring cells must not read as one card number.
+  for (const joined of shadows) if (joinedHits(joined.join("\n"))) return "dirty";
   return "clean";
 }
 
@@ -226,12 +253,10 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
         // Every frame the page has: the app's own (and about:/srcdoc ones) are read; a frame of another origin was aborted, so it shows only the browser's error page.
         const everyFrame = async (verify: boolean): Promise<PageVerdict> => {
           for (const frame of page.frames()) {
-            const frameOrigin = originOf(frame.url());
-            const ours = frame === page.mainFrame() || frameOrigin === origin || frame.url().startsWith("about:");
+            // Every frame is read, whatever its address (an aborted frame shows the browser's error page, which reads fine); a frame that cannot be read means no picture.
             let verdict: PageVerdict;
             try { verdict = await bounded(frame.evaluate(maskPage, arg(verify)), left()); } catch (error) {
               if (timedOut(error)) throw error;
-              if (!ours) continue;
               return "too_large";
             }
             if (verdict !== "clean") return verdict;
@@ -240,7 +265,8 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
         };
         try {
           if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
-          // Freeze: the page's own scripts stop, so no re-render can bring the raw text back; then scrub what changed since, and verify.
+          // Cut the network, then freeze: no late answer brings new data, and the page's own scripts stop, so no re-render can bring the raw text back; then scrub what changed since, and verify.
+          await bounded(context.setOffline(true), left());
           const session = await bounded(context.newCDPSession(page), left());
           await bounded(session.send("Emulation.setScriptExecutionDisabled", { value: true }), left());
           if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
@@ -251,6 +277,10 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
             type: "jpeg", quality: SCREENSHOT_QUALITY, timeout: Math.min(SCREENSHOT_TIMEOUT_MS, left()), animations: "disabled", caret: "hide",
             mask: options.maskSelectors.map((selector) => page.locator(selector)), maskColor: "#5c5c5c",
           }), left());
+          // Again after the picture: a continuation that ran between the verify pass and the paint left its raw text in the page.
+          const after = await everyFrame(true);
+          if (after === "dirty") return { ok: false, reason: "masked_content" };
+          if (after !== "clean") return { ok: false, reason: "capture_failed" };
           return { ok: true, bytes: Uint8Array.from(bytes), consoleErrors };
         } catch (error) {
           return { ok: false, reason: timedOut(error) ? "time_limit" : "capture_failed" };
