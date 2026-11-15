@@ -16,12 +16,13 @@ import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { TEST_ENVIRONMENT_KIND, createTestEnvironmentSubject, proposeTestEnvironment, testEnvironmentSubjectId } from "../../core/test-env/environment.js";
 import { testEnvironmentView, type TestEnvironmentView } from "../../core/test-env/local-view.js";
 import { createTaskTestEnvironment, type TaskTestEnvironment } from "../../core/test-env/seam.js";
+import { machineCard, machineSizeEnabled, setMachineChoice } from "../../core/test-env/machine-size.js";
 import { testEnvironmentEnabled } from "../../core/test-env/switch.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { listProjects } from "./projects.js";
 
 export const APPROVE_TEST_ENVIRONMENT_ON_THE_PAGE = "A test environment is approved on its local page, by you. Run `rovara test-env open <project>` to open it; an assistant cannot approve for you.";
-const PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment(?:\/(propose|open))?$/u;
+const PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment(?:\/(propose|open|machine))?$/u;
 const IMAGES_PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment\/service-images(?:\/(approve|remove))?$/u;
 /** The API token (which an assistant may hold) and the MCP tools never approve an image: that is the owner's act, on the page. */
 export const APPROVE_SERVICE_IMAGE_ON_THE_PAGE = "A service image is approved on the test environment page, by you, in a page you opened a few minutes ago. Run `rovara test-env open <project>` to open it; an assistant cannot approve for you.";
@@ -104,8 +105,11 @@ export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions)
     const view = await testEnvironmentView(deps, options.companyId, project);
     const extra = await options.extraLines?.(project).catch(() => []);
     const serviceImages = await imagesFor(project).catch(() => undefined);
+    // The machine size card (switch `ROVARA_MACHINE_SIZE`): absent while the switch is off, so the page is what it was.
+    const machine = await machineCard(deps, options.companyId, project, view.proposal?.digest ?? view.approved?.digest).catch(() => undefined);
     return {
       project,
+      ...(machine === undefined ? {} : { machine: machine.lines }),
       ...(serviceImages === undefined ? {} : { serviceImages }),
       ...(view.approved === undefined ? {} : { approved: { revision: view.approved.revision, approvedAt: view.approved.approvedAt, ...(view.approved.approvedBy === undefined ? {} : { approvedBy: view.approved.approvedBy }), lines: view.approved.lines, checks: view.approved.checks } }),
       ...(view.proposal === undefined ? {} : { proposal: { digest: view.proposal.digest, proposedAt: view.proposal.proposedAt, risk: view.proposal.risk, lessSafe: view.proposal.lessSafe, changes: view.proposal.changes, proved: view.proposal.proved, ...(view.proposal.expiresAt === undefined ? {} : { expiresAt: view.proposal.expiresAt }) } }),
@@ -180,10 +184,23 @@ export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions)
       if (match === null) return undefined;
       const project = match[1] ?? "";
       const action = match[2];
+      // The choice route exists only while the machine switch is on; off, it is as unknown as it was before the switch.
+      if (action === "machine" && !machineSizeEnabled(env)) return undefined;
       try {
         if (!enabled()) throw agentXError("NOT_AVAILABLE_HERE", "The test environment is switched off on this install.");
         if (!(await knownProject(project))) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
-        if (action === undefined && request.method === "GET") return json(200, await testEnvironmentView(deps, options.companyId, project) satisfies TestEnvironmentView);
+        if (action === undefined && request.method === "GET") {
+          const view = await testEnvironmentView(deps, options.companyId, project) satisfies TestEnvironmentView;
+          const machine = await machineCard(deps, options.companyId, project, view.proposal?.digest ?? view.approved?.digest).catch(() => undefined);
+          return json(200, machine === undefined ? view : { ...view, machine });
+        }
+        if (action === "machine" && request.method === "POST") {
+          const body = bodyOf(request) as { rowId?: unknown };
+          if (typeof body !== "object" || body === null) throw agentXError("CONFIG_INVALID", "rowId: send one of the listed machine sizes");
+          await setMachineChoice(deps, { orgId: options.companyId, project, rowId: body.rowId });
+          const view = await testEnvironmentView(deps, options.companyId, project);
+          return json(200, { machine: await machineCard(deps, options.companyId, project, view.proposal?.digest ?? view.approved?.digest) });
+        }
         if (action === "propose" && request.method === "POST") {
           const body = bodyOf(request) as { environment?: unknown; valueSources?: unknown };
           if (typeof body !== "object" || body === null || body.environment === undefined) throw agentXError("CONFIG_INVALID", "environment: send the test environment to propose");

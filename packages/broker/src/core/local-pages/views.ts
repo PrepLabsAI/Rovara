@@ -238,6 +238,8 @@ export interface TestEnvironmentPageView {
   approval?: ApprovalOffer;
   /** More facts a feature adds (the nightly run's last night, the saved image), one plain line each. */
   extra?: string[];
+  /** The machine size card (switch `ROVARA_MACHINE_SIZE`, see `core/test-env/machine-size.ts`), one plain line each. Absent while the switch is off. */
+  machine?: string[];
   /** Test services on a laptop (Code): the images that may run, and the ones this project asks for. Absent when the install uses a signed catalog or test services are off. */
   serviceImages?: ServiceImagesPageView;
 }

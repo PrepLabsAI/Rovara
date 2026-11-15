@@ -1,4 +1,4 @@
-389 record kinds: 38 company-scoped, 10 install-wide, 341 needs-company. 174 routes: 11 company-scoped, 2 install-wide, 161 needs-company.
+391 record kinds: 40 company-scoped, 10 install-wide, 341 needs-company. 174 routes: 11 company-scoped, 2 install-wide, 161 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -377,6 +377,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:TEST_ENV_DRAFT_REFUSED | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_EDITED | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_LOOK_LOCK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:TEST_ENV_MACHINE_CHOICE | company-scoped | State table | no | - | Machine size at setup (TE-C5 part B): key is projectPk(company, project); every read re-checks the row's company, project and digest, and tests/unit/test-env-machine-size.test.ts proves a second company reads nothing. |
+| record | entity:TEST_ENV_MACHINE_MEASURE | company-scoped | State table | no | - | Machine size at setup (TE-C5 part B): key is projectPk(company, project); every read re-checks the row's company, project and digest, and tests/unit/test-env-machine-size.test.ts proves a second company reads nothing. |
 | record | entity:TEST_ENV_NIGHT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_NIGHTLY_ACTIVE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_NIGHTLY_DAY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
