@@ -195,19 +195,20 @@ describe("the named TEST proof-only installation gate", () => {
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
     expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
-    // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged.
+    // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged. Named/foreign re-pinned for lane E2 (the core engine construct, #663,
+    // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "937f39e337701ecc8fa3fe612d801307303ced6bd589cec07f3c7833b4b584eb",
-        withoutRoute: "75541acd8c1e0e584837fc76df3d3e0dd14b1c0bdb6590e88baf4dfa1d66c23d",
+        withRoute: "887f2aacf4ad6cf43657db990897e8ad36b463ef27b793cf95bf126c0ba2cdcd",
+        withoutRoute: "e048dcb490f16a22ee56b811e63ab2231f223fe5ecd15fa5bb9868e27a1ad1c6",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "9ad290085328a9a8f8450e579b26caa1247b62383253217cb9fed95e41c5ee11",
-        withoutRoute: "c223ec7c2fca6cf7f3d9ead8cd5b76f958229bab4957a808fe5c752b2d6258dd",
+        withRoute: "bf41389629e90c7cf187f5428647a74289366b3e89ae85b4510dd07ee7ea1b2e",
+        withoutRoute: "be6db0b8a994c3398a9ef917c1ee65ca128d54b0b1efeaa4fe99acec07bdf892",
       },
       {
         label: "legacy",

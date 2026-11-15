@@ -31,7 +31,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine } from "./core-engine.js";
@@ -347,6 +347,16 @@ export class ControlPlaneStack extends Stack {
       sortKey: { name: "webhookRecoverySk", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+    // Lane E2 step 4: the core's outbox relay reads its pending messages through this sparse index (only a core outbox row carries `outboxState`). Named environments only.
+    if (naming.env !== undefined) {
+      if (OUTBOX_PENDING_INDEX.sortAttribute === undefined) throw new Error("the outbox pending index has a sort key");
+      state.addGlobalSecondaryIndex({
+        indexName: OUTBOX_PENDING_INDEX.name,
+        partitionKey: { name: OUTBOX_PENDING_INDEX.partitionAttribute, type: dynamodb.AttributeType.STRING },
+        sortKey: { name: OUTBOX_PENDING_INDEX.sortAttribute, type: dynamodb.AttributeType.STRING },
+        projectionType: dynamodb.ProjectionType.ALL,
+      });
+    }
     // Gap 6: sparse due-time index over workflow dispatch rows, so the recovery sweep reads due rows first.
     state.addGlobalSecondaryIndex({
       indexName: WORKFLOW_DISPATCH_DUE_INDEX.name,
@@ -1148,6 +1158,14 @@ export class ControlPlaneStack extends Stack {
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
+    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (named environments only: the core engine construct exists only there, so the legacy template is unchanged).
+    const coreEngine = this.node.tryFindChild("CoreEngineJobs");
+    if (naming.env !== undefined && coreEngine instanceof CoreEngine) {
+      coreEngine.connectDispatcher(dispatcher, {
+        deleterArn: sessions.deleter.stateMachineArn, callbackSigningKey: callbackSigningKey.valueAsString,
+        workerSubnets: foundationParameter("Ec2WorkerSubnets"), workerLaunchTemplateId: foundationParameter("Ec2WorkerLaunchTemplateId"),
+      });
+    }
 
     // Spec 052 FR-006, FR-011: the eval batch tick. Every 2 minutes it records run ends the broker
     // missed, reconciles the eval slot counter, fills free slots through the broker's own run path

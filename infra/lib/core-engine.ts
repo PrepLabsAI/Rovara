@@ -8,15 +8,21 @@
 //     by the queues' own resource policies;
 //   - a schedule per scheduled row of the core's job table (CORE_JOB_SCHEDULES), in a group of their own, that invokes the broker with `{ source: "agentx.core-job", job: <name> }` through a role
 //     of its own. The role trusts only the scheduler for THIS group and may invoke the broker function and nothing else. The schedules always exist and are ENABLED only while `CoreEngine` is not
-//     `off`: switching on or off changes a state, never creates or deletes a resource;
+//     `off`: switching the schedules on or off changes a state, never creates or deletes one. (Step 4's dispatcher policy under `CoreEngineIsOn` IS added on switch-on and removed on
+//     switch-off: a switch-on change set shows that one IAM policy Add, the dispatcher's environment Modify and the mapping's Enabled flag. Its grant may take a few seconds to apply
+//     after the mapping is enabled; a first core batch that meets AccessDenied on the deleter comes back and is retried.)
 //   - an alarm on the dead-letter queue.
 //
-// Not here yet (a later R2 step, with the broker wiring after the second mainline sync): the dispatcher's event source mapping on the core queue and its grants. Until then nothing consumes the
-// queue and nothing sends to it, and the broker has no branch for a scheduled core job event yet, so the CLI accepts only `off` (CORE_ENGINE_BROKER_WIRED); the schedules stay DISABLED.
-import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, type aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
+//   - (step 4, `connectDispatcher`) the dispatcher as the queue's consumer: an event source mapping of its own, ENABLED only while `CoreEngine` is not `off`, so a core message never reaches
+//     the spec 056 dispatch code; its reads of this queue; and, only while the switch is not off, the deleter start (the core ends an orphan machine) and the
+//     callback signing key (the core issues a worker's capability and repository grant on the dispatcher, so they are the ones the broker verifies).
+//
+// Still not here (lane E2 step 6, the broker wiring): the broker's branch for a scheduled core job event and its start through the core. Until then the CLI accepts only `off`
+// (CORE_ENGINE_BROKER_WIRED); the schedules and the mapping stay DISABLED.
+import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
-  CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES,
+  CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES,
   coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -26,6 +32,9 @@ export const CORE_ENGINE_PARAMETER = "CoreEngine";
 
 /** The broker's actions on the core dispatch queue and its dead letters. */
 export const CORE_BROKER_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
+
+/** The dispatcher's actions on the core dispatch queue: the event source mapping's reads, and the core's own visibility change of a message it will try again. Not send, and not the dead letters. */
+export const CORE_DISPATCHER_QUEUE_ACTIONS = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
 
 /** The queue's visibility timeout, as the DispatchQueue's; the core extends it per message while a step starts. */
 export const CORE_DISPATCH_VISIBILITY_TIMEOUT = Duration.minutes(2);
@@ -121,5 +130,43 @@ export class CoreEngine extends Construct {
         retryPolicy: { maximumRetryAttempts: 1, maximumEventAgeInSeconds: 120 },
       },
     });
+  }
+
+  /**
+   * Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (packages/broker/src/aws/worker-machines/dispatcher-core.ts routes the queue's records to the core).
+   *   - an event source mapping of its own on this queue (apart from the DispatchQueue's), one record per invocation, reporting batch item failures, ENABLED only while the switch is not off;
+   *   - its reads of this queue, on its role (one statement): Lambda checks the function role's own permissions when it creates the mapping, even a disabled one, so the reads are
+   *     there whatever the switch says. Exactly this queue, never send and never the dead letters. The dispatcher's role is not the broker's (which is at IAM's size limit);
+   *   - only while the switch is not off (a policy of its own under `CoreEngineIsOn`): the deleter's start (the core ends a machine it started for a workspace that closed meanwhile).
+   *     No ec2:TerminateInstances: the core's dispatch never stops a machine, and a stop claimed elsewhere is finished by the idle reaper;
+   *   - the switch, the queue's names and the workers' placement (subnets, launch template) as plain variables, and the callback signing key only while the switch is not off (an empty value otherwise), so an off dispatcher holds no
+   *     key it does not use.
+   */
+  connectDispatcher(dispatcher: lambda.Function, props: { deleterArn: string; callbackSigningKey: string; workerSubnets: string; workerLaunchTemplateId: string }): lambda.CfnEventSourceMapping {
+    dispatcher.addEnvironment(CORE_DISPATCH_QUEUE_ARN_VARIABLE, this.queue.queueArn);
+    dispatcher.addEnvironment(CORE_DISPATCH_QUEUE_URL_VARIABLE, this.queue.queueUrl);
+    dispatcher.addEnvironment(CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, this.deadLetters.queueUrl);
+    dispatcher.addEnvironment(CORE_ENGINE_VARIABLE, this.parameter.valueAsString);
+    // Where a core workspace's worker runs: the install's own workers, as the broker places a sign-in client's project (never a binding a company writes).
+    dispatcher.addEnvironment("EC2_WORKER_SUBNETS", props.workerSubnets);
+    dispatcher.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", props.workerLaunchTemplateId);
+    dispatcher.addEnvironment("CALLBACK_SIGNING_KEY", Token.asString(Fn.conditionIf(this.isOn.logicalId, props.callbackSigningKey, "")));
+    dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: "ConsumeCoreDispatchQueue", actions: [...CORE_DISPATCHER_QUEUE_ACTIONS], resources: [this.queue.queueArn] }));
+    const corePolicy = new iam.Policy(this, "DispatcherCorePolicy", {
+      roles: [dispatcher.role!],
+      statements: [new iam.PolicyStatement({ sid: "CoreStartSessionDeleter", actions: ["states:StartExecution"], resources: [props.deleterArn] })],
+    });
+    (corePolicy.node.defaultChild as iam.CfnPolicy).cfnOptions.condition = this.isOn;
+    const mapping = new lambda.CfnEventSourceMapping(this, "DispatcherMapping", {
+      functionName: dispatcher.functionName,
+      eventSourceArn: this.queue.queueArn,
+      batchSize: CORE_DISPATCH_BATCH_SIZE,
+      functionResponseTypes: ["ReportBatchItemFailures"],
+      enabled: Fn.conditionIf(this.isOn.logicalId, true, false),
+    });
+    // The mapping is created after the grant that lets the role read the queue.
+    const policy = dispatcher.role?.node.tryFindChild("DefaultPolicy");
+    if (policy !== undefined) mapping.node.addDependency(policy);
+    return mapping;
   }
 }
