@@ -387,3 +387,5 @@ export * from "./machine-size.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
+
+export * from "./ports/company-log.js";
