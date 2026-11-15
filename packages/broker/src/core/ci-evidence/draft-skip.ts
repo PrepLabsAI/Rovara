@@ -25,6 +25,29 @@ const NOT_DRAFT: ReadonlySet<string> = new Set([
   "!(github.event.pull_request.draft)", "(github.event.pull_request.draft==false)", "(!github.event.pull_request.draft)",
 ]);
 
+/**
+ * The parts of a condition joined by `&&` outside any parentheses or quotes. Undefined when the condition has an `||` outside parentheses (it can be true on a draft whatever the draft part says),
+ * unbalanced parentheses or an open quote: then nothing is read from it.
+ */
+function topLevelConjuncts(condition: string): string[] | undefined {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | undefined;
+  let start = 0;
+  for (let index = 0; index < condition.length; index += 1) {
+    const char = condition[index]!;
+    if (quote !== undefined) { if (char === quote) quote = undefined; continue; }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === "(") depth += 1;
+    else if (char === ")") { depth -= 1; if (depth < 0) return undefined; }
+    else if (depth === 0 && condition.startsWith("||", index)) return undefined;
+    else if (depth === 0 && condition.startsWith("&&", index)) { parts.push(condition.slice(start, index)); start = index + 2; index += 1; }
+  }
+  if (depth !== 0 || quote !== undefined) return undefined;
+  parts.push(condition.slice(start));
+  return parts;
+}
+
 /** One job's answer from its `if`: runs on drafts (no condition, or one that does not mention drafts), skips drafts (a "not a draft" condition, alone or joined with `&&`), or not known. */
 function jobVerdict(condition: unknown): "skips" | "runs" | "unknown" {
   if (condition === undefined || condition === null) return "runs";
@@ -32,7 +55,8 @@ function jobVerdict(condition: unknown): "skips" | "runs" | "unknown" {
   if (typeof condition !== "string") return "unknown";
   if (!MENTIONS_DRAFT.test(condition)) return "runs";
   const plain = condition.trim().replace(/^\$\{\{([\s\S]*)\}\}$/u, "$1").replace(/\s+/gu, "");
-  const parts = plain.split("&&");
+  const parts = topLevelConjuncts(plain);
+  if (parts === undefined) return "unknown";
   const draftParts = parts.filter((part) => MENTIONS_DRAFT.test(part));
   return draftParts.length === 1 && NOT_DRAFT.has(draftParts[0]!) ? "skips" : "unknown";
 }

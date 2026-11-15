@@ -236,6 +236,7 @@ describe("environment, ask or fix", () => {
   it("asks when the report has tests but none failed (a coverage gate, a step after the tests)", () => {
     expect(decideMarkedCheck({ ...base, testsFailed: 0 })).toEqual({ kind: "ask", reason: "no_detail" });
     expect(decideMarkedCheck({ ...base, testsFailed: 0, logShared: true })).toMatchObject({ kind: "fix" });
+    expect(decideMarkedCheck({ ...base, testsFailed: undefined })).toEqual({ kind: "ask", reason: "no_detail" });
   });
   it.each([[Number.NaN, 3], [-1, 3], [1.5, 3], [0, Number.NaN], [0, 0], [0, Number.POSITIVE_INFINITY]])("never opens an uncapped round on counts that are not counts (%s used of %s)", (roundsUsed, roundsMax) => {
     expect(decideMarkedCheck({ ...base, roundsUsed, roundsMax })).toEqual({ kind: "ask", reason: "cap_reached" });
@@ -290,6 +291,11 @@ describe("does the customer's CI skip drafts", () => {
     expect(draftVerdictOf(`${head}${jobWith("t", "github.repository == 'a/b' && !github.event.pull_request.draft")}`)).toBe("skips");
     expect(draftVerdictOf(`${head}${jobWith("a", "${{ github.event.pull_request.draft != true }}")}${jobWith("b", "'!github.event.pull_request.draft'")}`)).toBe("skips");
     expect(draftVerdictOf(`${head}${jobWith("t", "github.repository == 'a/b'")}`)).toBe("runs");
+    for (const condition of ["github.actor == 'bot' || github.repository == 'a/b' && !github.event.pull_request.draft", "!github.event.pull_request.draft && github.ref != '' || always()",
+      "github.event.pull_request.draft == false && !cancelled() || failure()", "(!github.event.pull_request.draft", "github.event.pull_request.draft == false && github.ref == 'x"]) {
+      expect(draftVerdictOf(`${head}${jobWith("t", JSON.stringify(condition))}`)).toBe("unknown");
+    }
+    expect(draftVerdictOf(`${head}${jobWith("t", JSON.stringify("github.ref == 'a&&b||c' && !github.event.pull_request.draft"))}`)).toBe("skips");
     expect(draftVerdictOf(`${head}${jobWith("t", "\"!github.event.pull_request.draft && (github.actor == 'a' || github.actor == 'b')\"")}`)).toBe("skips");
     expect(draftVerdictOf(`${head}${jobWith("t", "${{ github.event.pull_request.draft == false }} && ${{ true }}")}`)).toBe("unknown");
     expect(draftVerdictOf(`on:\n  pull_request:\n    types: []\n${head.slice(17)}${jobWith("t")}`)).toBe("unknown");
