@@ -27,7 +27,7 @@ export const COMPANY_GATEWAY_FAMILIES = ["openai_compatible", "anthropic_message
 export const NONE_REDIRECT_SENTENCE = "not run: client cannot be redirected";
 
 const MODEL_ROWS_MAX = 64;
-const HOSTS_MAX = 128;
+const HOSTS_MAX = 256; // Vertex includes exact locational, REP and mTLS names.
 const NOTES_MAX = 20;
 const NOTE_MAX_CHARS = 300;
 export const MODEL_HOST_MAX_CHARS = 253;
@@ -149,8 +149,8 @@ export const ModelCatalogRowSchema = z
     hosts: z.array(ModelHostSchema).max(HOSTS_MAX),
     /** Domains whose every subdomain is this provider's (Azure OpenAI: a customer's own `<resource>.openai.azure.com`). A hosts file cannot hold a pattern, so these are for the DNS-level block and for the finder; at least two labels. */
     hostSuffixes: z.array(ModelHostSchema).max(8).default([]),
-    /** Hosts the client's own auth library calls (Google's token hosts): blocked with the rest, never served. */
-    authHosts: z.array(ModelHostSchema).max(8),
+    /** Only DEC 174's exact Google token hosts: reserved against gateway claims, never blocked or served as model hosts. No model endpoint may be hidden here. */
+    authHosts: z.array(ModelHostSchema.refine((host) => ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"].includes(host), "auth_host_not_allowed")).max(8),
     family: z.enum(MODEL_FAMILIES),
     /** The fixed path before the API's own path, for a row that shares a host with another (`/v1beta/openai`). */
     pathPrefix: PathPrefix.optional(),

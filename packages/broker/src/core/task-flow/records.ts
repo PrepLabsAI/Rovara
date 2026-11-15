@@ -1,3 +1,4 @@
+import type { WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: the records the flow keeps in the document store, and the plain-JSON conversion that goes with them.
 import type {
   DesignReviewBinding,
@@ -19,6 +20,8 @@ import type { OperationModelChoice } from "./step-model.js";
 
 /** The task record: Cloud's `DEVTASK#<id>/META` item. `provider` is the identity adapter's name (a string), not Cloud's closed sign-in list. */
 export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
+  /** Server-written on new tasks; absent on records made before task-token support. */
+  origin?: WorkOrigin;
   provider: string;
   charge: WorkspaceCharge;
   companyId: string;

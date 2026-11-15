@@ -106,9 +106,11 @@ describe("the lint shards: which files they lint", () => {
   });
 
   it("respect the ignores of eslint.config.js: an ignored fixture is in no shard", () => {
-    const ignoredFixture = "tests/fixtures/e2e-web-api-app/server.mjs";
-    expect(wholeRepository).not.toContain(ignoredFixture);
-    for (const files of perShard.values()) expect(files).not.toContain(ignoredFixture);
+    // a fixture .mjs sits outside every tsconfig, so the typed rules cannot parse it: it must be ignored, not linted (the model-helper ones broke the "rest" shard on CI)
+    for (const ignoredFixture of ["tests/fixtures/e2e-web-api-app/server.mjs", "tests/fixtures/model-helper/scripted-run/honours-redirect.mjs", "tests/fixtures/model-helper/scripted-run/ignores-redirect.mjs"]) {
+      expect(wholeRepository).not.toContain(ignoredFixture);
+      for (const files of perShard.values()) expect(files).not.toContain(ignoredFixture);
+    }
     for (const files of perShard.values()) expect(files.filter((file) => file.includes("/dist/") || file.includes("node_modules/"))).toEqual([]);
   });
 });

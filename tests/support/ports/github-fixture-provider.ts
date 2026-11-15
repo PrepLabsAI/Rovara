@@ -88,8 +88,13 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
     const files = found.files;
     if (found.symlinks.has(path)) return "symlink";
     for (const link of found.symlinks) if (path.startsWith(`${link}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub reports a symbolic link as a parent of this path");
+    for (const [name, type] of found.entries) {
+      if (type !== "submodule") continue;
+      if (name === path) return "dir";
+      if (path.startsWith(`${name}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "a submodule is the parent of this path");
+    }
     if (files.has(path)) return "file";
-    for (const name of files.keys()) if (name.startsWith(`${path}/`)) return "dir";
+    for (const name of found.entries.keys()) if (name.startsWith(`${path}/`)) return "dir";
     return "none";
   }
   async commitFilesToBranch(repositoryUrl: string, request: CommitFilesRequest, scope: HostScope): Promise<{ revision: string; changed: boolean }> {
@@ -180,11 +185,22 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
       })),
     };
   }
+  async listTreeAtCommit(repositoryUrl: string, revision: string, scope: HostScope): Promise<{ truncated: boolean; entries: Array<{ path: string; mode: string; type: string; sha: string }> }> {
+    this.serve("listTreeAtCommit", repositoryUrl, scope);
+    const at = this.model.revision(revision);
+    const modes = { file: "100644", executable: "100755", symlink: "120000", submodule: "160000" } as const;
+    return { truncated: this.model.incompleteTrees.has(revision), entries: [...at.entries].map(([path, type]) => ({ path, mode: modes[type], type: type === "submodule" ? "commit" : "blob", sha: revision })) };
+  }
+  async getPullRequestFileRevisions(repositoryUrl: string, number: number, scope: HostScope) {
+    this.serve("getPullRequestFileRevisions", repositoryUrl, scope);
+    const cr = this.cr(number), head = this.model.headRevisionOf(cr);
+    return { head, base: this.model.mergeBase(head, this.model.headOf(cr.targetBranch)) };
+  }
   async listPullRequestFiles(repositoryUrl: string, number: number, options: { page: number }, scope: HostScope): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; nextPage?: number }> {
     this.serve("listPullRequestFiles", repositoryUrl, scope);
     if (!Number.isSafeInteger(options.page) || options.page < 1) throw agentXError("CONFIG_INVALID", "the page is invalid");
     const all = this.model.changedFiles(this.cr(number).id);
-    const files = all.slice((options.page - 1) * 100, options.page * 100).map((file) => ({ filename: file.path, status: file.status, additions: file.additions, deletions: file.deletions }));
+    const files = all.slice((options.page - 1) * 100, options.page * 100).map((file) => ({ filename: file.path, status: file.status, additions: file.additions, deletions: file.deletions, ...(file.previousPath === undefined ? {} : { previous_filename: file.previousPath }) }));
     return { files, ...(all.length > options.page * 100 ? { nextPage: options.page + 1 } : {}) };
   }
   async getPullRequestFeedback(repositoryUrl: string, number: number, scope: HostScope): Promise<GitHubPullRequestFeedback> {

@@ -1,8 +1,8 @@
 // Release helpers shared by the production release and its tests.
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
-import { executorSmokeDockerArgs, explainExecutorSmokeFailure } from "./executor-smoke.js";
+import { statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const DEFAULT_REGION = "us-east-1";
 const DEFAULT_REPOSITORY = "agentx-worker-production";
@@ -124,6 +124,21 @@ export class Runner {
       throw new Error(`${command} exited with status ${execution.status ?? "unknown"}`);
     }
     return execution.stdout ?? "";
+  }
+
+  /** {@link run}, as another account: the given uid and gid, with exactly `env` as its environment. */
+  runAs(account: { uid: number; gid: number; env: NodeJS.ProcessEnv }, command: string, args: readonly string[]): void {
+    process.stdout.write(`\n+ (uid ${String(account.uid)}) ${formatCommand(command, args)}\n`);
+    const execution = spawnSync(command, [...args], {
+      cwd: process.cwd(),
+      env: account.env,
+      uid: account.uid,
+      gid: account.gid,
+      encoding: "utf8",
+      stdio: ["inherit", "inherit", "inherit"],
+    } satisfies SpawnSyncOptionsWithStringEncoding);
+    if (execution.error) throw execution.error;
+    if ((execution.status ?? 1) !== 0) throw new Error(`${command} exited with status ${execution.status ?? "unknown"}`);
   }
 
   capture(command: string, args: readonly string[], allowFailure = false): CommandResult {
@@ -316,12 +331,74 @@ export async function buildAndPushImage(
   return pushed;
 }
 
+/** The unprivileged account (nobody) a release run as root, as CodeBuild's is, runs the test suite as. */
+export const RELEASE_TEST_ACCOUNT = { uid: 65534, gid: 65534, home: "/tmp/rovara-release-tests" } as const;
+
+/**
+ * The environment the test suite runs in as {@link RELEASE_TEST_ACCOUNT}: the release's own, as an ordinary CI runner
+ * would have it.
+ * - No `npm_*` variables: npm sets them for the script it runs (`npm run release:prod`), and they name root's cache and
+ *   config (`npm_config_cache=/root/.npm`), so the tests' own npm commands would fail with EACCES.
+ * - No `AWS_*` variables: the tests need no AWS credentials, and CodeBuild's (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`)
+ *   would trip the worker's guard against an environment that can redirect model calls.
+ * - `PATH` keeps only the directories the account can enter. CodeBuild's names some under /root, and a missing command
+ *   looked up through one fails with EACCES instead of ENOENT.
+ */
+export function testEnvironment(environment: NodeJS.ProcessEnv, home: string, canEnter: (directory: string) => boolean = enterableByOthers): NodeJS.ProcessEnv {
+  const kept = Object.fromEntries(Object.entries(environment).filter(([name]) => !/^(npm|aws)_/i.test(name)));
+  const path = (environment.PATH ?? "").split(":").filter((directory) => directory !== "" && canEnter(directory)).join(":");
+  return { ...kept, HOME: home, PATH: path };
+}
+
+/** Whether an account that owns nothing (its "others" bits) can enter `directory`: it and every directory above it. */
+function enterableByOthers(directory: string): boolean {
+  if (!directory.startsWith("/")) return false;
+  for (let at = directory; ; at = dirname(at)) {
+    try {
+      const stat = statSync(at);
+      if (!stat.isDirectory() || (stat.mode & 0o001) === 0) return false;
+    } catch {
+      return false;
+    }
+    if (at === "/") return true;
+  }
+}
+
+/**
+ * Runs the test suite, as {@link RELEASE_TEST_ACCOUNT} when the release itself runs as root, as it does in CodeBuild.
+ * Root can write to any file, so the tests that prove a read-only git directory is refused as writable (the trusted
+ * base reads) cannot pass as root; CI runs them as an ordinary user. Node drops the privileges itself, so the image
+ * needs no user tools. The checkout is handed to that account for the run and back to root afterwards, pass or fail,
+ * because later steps run git as root and git refuses a repository another user owns.
+ */
+export function runTests(runner: Runner, uid: number | undefined = typeof process.getuid === "function" ? process.getuid() : undefined): void {
+  const args = ["test"];
+  if (uid !== 0) {
+    runner.run("npm", args);
+    return;
+  }
+  const { uid: testUid, gid, home } = RELEASE_TEST_ACCOUNT;
+  const owner = `${String(testUid)}:${String(gid)}`;
+  const directory = process.cwd();
+  runner.run("mkdir", ["-p", home]);
+  runner.run("chown", ["-R", owner, directory, home]);
+  try {
+    runner.runAs({ uid: testUid, gid, env: testEnvironment(process.env, home) }, "npm", args);
+  } finally {
+    runner.run("chown", ["-R", "0:0", directory]);
+  }
+}
+
+// Loaded on use, not at the top: it reads the built @agentx/contracts, and the production release loads this file before it builds.
+const executorSmoke = () => import("./executor-smoke.js");
+
 /**
  * The executor image's own smoke check (the one CI runs, through the same definition in scripts/executor-smoke.ts): its smoke module, run as the worker's
  * Docker host runs the executor (pinned seccomp profile, no capability, read-only, no network). Chromium's sandbox is never skipped; when it cannot start the
  * error says how to fix the Docker VM.
  */
 export async function smokeTestExecutor(runner: Runner, image: string): Promise<void> {
+  const { executorSmokeDockerArgs, explainExecutorSmokeFailure } = await executorSmoke();
   const result = runner.capture("docker", executorSmokeDockerArgs(image), true);
   if (result.status !== 0) {
     process.stderr.write(result.stderr);

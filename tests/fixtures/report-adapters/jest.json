@@ -1,0 +1,1 @@
+{"testResults":[{"name":"cart.test.ts","status":"failed","assertionResults":[{"fullName":"same","status":"passed","duration":12.4},{"fullName":"same","status":"failed"},{"title":"skip","status":"pending"}]},{"name":"load.test.ts","status":"failed","assertionResults":[]}]}
