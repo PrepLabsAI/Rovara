@@ -12,7 +12,7 @@ import { startImplementation } from "../../packages/broker/src/core/build-step/s
 import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
-import { acceptedByOf } from "../../packages/broker/src/core/task-flow/finding-accept.js";
+import { acceptedByOf, findingAcceptItem } from "../../packages/broker/src/core/task-flow/finding-accept.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
@@ -218,7 +218,7 @@ describe("who accepted, and by what way (DECISIONS 201)", () => {
     expect(record).toMatchObject({ personId: "local-owner", method: "api-token", fingerprints: [parserId, tokenId] });
     expect(h.audit[0]!.details).toMatchObject({ method: "api-token", securityAccepted: 1 });
     expect(h.audit[0]!.actor).toMatchObject({ id: "local-owner" });
-    const by = await acceptedByOf(h.store, TASK_ID);
+    const by = await acceptedByOf(h.store, TASK_ID, code.digest);
     expect(by).toEqual({ [parserId]: expect.stringContaining("via the API token") as string, [tokenId]: expect.stringContaining("via the API token") as string });
     const workflow = (await taskOf(h)).workflow!;
     const body = workflowPullRequestBody({ title: "Add a retry flag" }, workflow, "# Plan\n\n1. Add the retry flag.\n", undefined, { acceptedBy: by! });
@@ -235,7 +235,19 @@ describe("who accepted, and by what way (DECISIONS 201)", () => {
     const { h, caller } = await seed({ workflow: both() });
     await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed(), "page");
     expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ method: "page", fingerprints: [tokenId] });
-    expect(await acceptedByOf(h.store, TASK_ID)).toEqual({ [tokenId]: expect.stringContaining("via the task page") as string });
+    expect(await acceptedByOf(h.store, TASK_ID, code.digest)).toEqual({ [tokenId]: expect.stringContaining("via the task page") as string });
+  });
+
+  it("names who accepted a finding for THIS code only: the same finding accepted in an earlier round, by someone else on the page, is never shown as this code's accept", async () => {
+    const { h, caller } = await seed({ workflow: both() });
+    // An earlier round: the same security finding (same fingerprint) accepted on the page by another person, for other code.
+    const earlier = findingAcceptItem({ taskId: TASK_ID, requestId: REQUEST_B, candidateDigest: "f".repeat(64), person: { personId: "alice", displayName: "Alice" }, method: "page", fingerprints: [tokenId], at: "2026-11-09T10:00:00.000Z", now: new Date("2026-11-09T10:00:00.000Z") });
+    await h.store.put({ item: (earlier as { item: Parameters<typeof h.store.put>[0]["item"] }).item });
+    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, acceptAll());
+    const by = await acceptedByOf(h.store, TASK_ID, code.digest);
+    expect(by?.[tokenId]).toContain("via the API token");
+    expect(by?.[tokenId]).not.toContain("Alice");
+    expect(await acceptedByOf(h.store, TASK_ID, "f".repeat(64))).toEqual({ [tokenId]: "Alice via the task page" });
   });
 
   it("an AI tool holding the API token may accept a finding (a security one too) with a reason, over the laptop's route, as the person", async () => {

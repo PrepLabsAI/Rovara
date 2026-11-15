@@ -118,13 +118,16 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   const requestId = workflowRequestId("agentx-implement", task.taskId, workflow.revision);
   const next: WorkflowSnapshot = { ...workflow, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   const found2 = sendBackProblems(workflow);
+  // A round the owner started (a send-back or findings decision just made) always carries the owner's words, even when no check or review problem was recorded (a change ready to
+  // publish, coding that stopped): the coder is never handed only the plan or a CI/conflict fix prompt while the owner's instructions sit unread.
+  const ownerRound = ownerStartedRound(workflow);
   let prompt: string;
   let approvedPlan: WorkflowApprovedPlan | undefined;
-  if (workflow.fixSource === "ci" && found2.length === 0) {
+  if (workflow.fixSource === "ci" && found2.length === 0 && !ownerRound) {
     // The first run of a fix for failing CI is told what CI said, kept when the round started; the coder has the plan in its conversation.
     const block = await readCiEvidence(deps.store, task.taskId, deps.companyId, workflow.revision);
     prompt = block === undefined ? ciFixPromptWithoutOutput({ names: workflow.fixProblems ?? [], notes: NO_PUBLISH_NOTE }) : ciFixPrompt({ block, notes: NO_PUBLISH_NOTE });
-  } else if (workflow.fixSource === "conflict" && found2.length === 0) {
+  } else if (workflow.fixSource === "conflict" && found2.length === 0 && !ownerRound) {
     // The workspace is in the state the conflicting merge left; the run is told which files.
     prompt = conflictFixPrompt({ paths: workflow.fixProblems ?? [], notes: NO_PUBLISH_NOTE });
   } else {
@@ -133,7 +136,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     approvedPlan = { markdown: shortenMarkdown(plan.text, WORKFLOW_PLAN_MAX_BYTES), sha256: plan.sha256, ownerInstructions: ownerPlanInstructions(workflow) };
     // A plan nobody approved (the lighter flow skipped the approval of a small change) is never called approved.
     const approved = !planApprovalSkipped(workflow, plan.sha256);
-    prompt = found2.length === 0
+    prompt = found2.length === 0 && !ownerRound
       ? implementPrompt(plan, approved)
       : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: await lastOwnerWords(deps, task, workflow), approved });
   }
@@ -186,6 +189,12 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),
   });
   return settled(deps, row, accepted.result);
+}
+
+/** Whether this coding round is the one an owner's send-back or findings decision just started: the newest decision is theirs (not Rovara's own autofix). */
+function ownerStartedRound(workflow: WorkflowSnapshot): boolean {
+  const last = workflow.decisions.at(-1);
+  return last !== undefined && last.decision === "REQUEST_CHANGES" && last.actorRole !== "AGENTX" && (last.source === "SEND_BACK" || last.source === "FINDINGS");
 }
 
 /**
