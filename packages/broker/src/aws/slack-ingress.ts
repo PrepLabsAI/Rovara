@@ -1334,7 +1334,8 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
       async stopTask(thread: SlackThread, userId: string) {
         return stopTaskThroughBroker(invokeBroker, thread, userId);
       },
-      // Decision 147: the Slack service's record of whom AgentX answered in each thread, on the Slack threads table.
+      // Decision 147: the Slack service's record of whom AgentX answered in each thread, on the Slack threads table. Outside the
+      // task-only hooks: a chat thread continues the same way where Slack tasks are off (the legacy deployment).
       async threadContinuation(thread: SlackThread, userId: string, nowSeconds: number) {
         return threadContinuationOf(async (key) => ((await documentClient.send(new GetCommand({ TableName: threadsTableName, Key: key }))) as { Item?: Record<string, unknown> }).Item,
           thread, userId, nowSeconds);

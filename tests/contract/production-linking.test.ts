@@ -64,12 +64,17 @@ describe("the legacy deployment's developer API (spec 064 FR-001, FR-005)", () =
     expect(answer.status).toBe(401);
   });
 
-  it("has no developer tasks, projects, workspaces or ChatGPT connection, even for a signed-in person", async () => {
+  it("has no developer tasks or ChatGPT connection, even for a signed-in person", async () => {
     const authorization = await token();
-    for (const [method, path] of [["GET", "/v1/dev/projects"], ["GET", "/v1/dev/workspaces"], ["GET", "/v1/dev/tasks"], ["POST", "/v1/dev/tasks"], ["GET", "/v1/dev/chatgpt-connection"]] as const) {
+    for (const [method, path] of [["GET", "/v1/dev/tasks"], ["POST", "/v1/dev/tasks"], ["GET", "/v1/dev/chatgpt-connection"]] as const) {
       const answer = await call(method, path, { authorization, ...(method === "POST" ? { body: {} } : {}) });
       expect(answer.status, `${method} ${path}`).toBe(404);
     }
+  });
+
+  it("lists a signed-in person's projects and workspaces (spec 066 FR-005)", async () => {
+    const authorization = await token();
+    for (const path of ["/v1/dev/projects", "/v1/dev/workspaces"]) expect((await call("GET", path, { authorization })).status, path).toBe(200);
   });
 
   it("serves the link page on the review route, and nothing else there", async () => {

@@ -14,6 +14,9 @@
 import { createHash } from "node:crypto";
 import {
   CoverageMapSchema,
+  OrgIdSchema,
+  companyLog,
+  isScheduleId,
   NIGHTLY_FAILED_MAX,
   NIGHTLY_FLAKY_MAX,
   NIGHTLY_SOURCE,
@@ -175,6 +178,17 @@ export function nightlyFireOf(due: DueSchedule): ReturnType<typeof NightlyFireSc
  * Idempotent per slot: the slot is the one the fire's own time makes (`nightlySlotId`), claimed with a conditional write before anything starts.
  */
 export async function handleNightlyFire(deps: NightlyDeps, due: DueSchedule): Promise<NightlyFireOutcome> {
+  if (deps.projectCompany !== undefined || deps.projectCompanyRequired === true) {
+    let resolved: string | undefined;
+    const project = due?.target?.ref?.["project"];
+    try { if (typeof project === "string") resolved = await deps.projectCompany?.(project); } catch { /* fixed refusal, no retry */ }
+    if (!OrgIdSchema.safeParse(resolved).success || resolved !== due?.companyId) {
+      const entry = { event: "test_env.nightly_company_refused", ...(typeof due?.scheduleId === "string" && isScheduleId(due.scheduleId) ? { scheduleId: due.scheduleId } : {}), count: 1 };
+      if (OrgIdSchema.safeParse(resolved).success) companyLog(resolved!, deps.companyLog ?? (() => undefined))(entry);
+      else deps.companyLog?.(entry);
+      return skip("environment_missing");
+    }
+  }
   const { orgId, project, scheduledAt } = nightlyFireOf(due);
   const now = deps.now();
   const at = Date.parse(scheduledAt);

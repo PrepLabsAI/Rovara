@@ -119,6 +119,17 @@ export class DeveloperSignIn extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // Named environments publish a stable task kid before a gateway is enabled. The legacy deployment (production) runs tasks too but has no such key: its template stays as deployed.
+    const taskTokenKeyAlias = tasks === undefined ? undefined : props.naming.taskTokenKeyAlias;
+    const taskTokenKey = taskTokenKeyAlias === undefined ? undefined : new kms.Key(this, "TaskTokenKey", {
+      alias: taskTokenKeyAlias,
+      description: `Signs AgentX ${props.naming.environmentTagValue} task tokens`,
+      keySpec: kms.KeySpec.RSA_2048,
+      keyUsage: kms.KeyUsage.SIGN_VERIFY,
+      pendingWindow: Duration.days(7),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     const oidcSecretName = `agentx/${props.env}/developer-oidc`;
     const fn = this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-identity.ts", {
       AGENTX_ENV: props.env,
@@ -159,6 +170,34 @@ export class DeveloperSignIn extends Construct {
       resources: ["*"],
       conditions: { ArnNotEquals: { "aws:PrincipalArn": fn.role!.roleArn } },
     }));
+    if (taskTokenKey !== undefined) {
+      // Direct key-policy grant: the broker inline policy is near CDK's split threshold.
+      taskTokenKey.addToResourcePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ArnPrincipal(props.broker.role!.roleArn)],
+        actions: ["kms:Sign", "kms:GetPublicKey"],
+        resources: ["*"],
+      }));
+      taskTokenKey.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "SignOnlyAsBroker",
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["kms:Sign"],
+        resources: ["*"],
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": props.broker.role!.roleArn } },
+      }));
+      taskTokenKey.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity",
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["kms:GetPublicKey"],
+        resources: ["*"],
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": [props.broker.role!.roleArn, fn.role!.roleArn] } },
+      }));
+      taskTokenKey.grant(fn, "kms:GetPublicKey");
+      fn.addEnvironment("TASK_TOKEN_KEY_ARN", taskTokenKey.keyArn);
+      props.broker.addEnvironment("TASK_TOKEN_KEY_ARN", taskTokenKey.keyArn);
+    }
     props.slackSecret.grantRead(fn);
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
@@ -214,7 +253,7 @@ export class DeveloperSignIn extends Construct {
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [table.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", ...(taskTokenKeyAlias === undefined ? [] : ["COMPANY_MEMBER#*"])] } },
     }));
     // The output first: the rest is for developer tasks and admin changes. Spec 064: the legacy deployment takes the
     // sign-in client changes, so it gets their audit records (below) and none of the task grants.
