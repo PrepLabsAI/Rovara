@@ -423,6 +423,7 @@ export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engi
  * inputs are complete (aws/worker-machines/dispatcher-core.ts); the broker's land with the infrastructure step that passes the queue URLs and the code host bridge.
  */
 export function brokerCoreModuleDeps(env: NodeJS.ProcessEnv): CodeModuleDeps {
+  // L6 composes the per-lane builders: queue, code host and brokerCoreWorkerMachines.
   void env;
   throw Object.assign(new Error(BROKER_CORE_NOT_CONFIGURED), { name: "BrokerCoreNotConfigured" });
 }
