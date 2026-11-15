@@ -16,7 +16,6 @@ export const SignInRedirectUriSchema = z.string().max(2_048).superRefine((value,
   if (problem !== undefined) context.addIssue({ code: "custom", message: problem });
 });
 
-/** What an administrator registers. `secretHash` (SHA-256, hex) makes it confidential; the secret itself is never sent. */
 /**
  * Spec 065: what a sign-in client may do on Rovara as the signed-in person, beyond the access check. An administrator
  * names them when registering the client; the client asks for them at sign-in and its tokens carry the allowed ones.
@@ -32,6 +31,7 @@ export function scopesOf(claim: unknown): ClientScope[] {
   return claim.split(" ").filter((scope): scope is ClientScope => ClientScopeSchema.safeParse(scope).success);
 }
 
+/** What an administrator registers. `secretHash` (SHA-256, hex) makes it confidential; the secret itself is never sent. */
 export const SignInClientRegistrationSchema = z.object({
   name: z.string().trim().min(1).max(80),
   audience: SignInClientAudienceSchema,
