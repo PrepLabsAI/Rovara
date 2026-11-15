@@ -5,6 +5,7 @@
 //
 // Per-company isolation: each company runs in its own try/catch, so one company's failure never skips the others, and the order rotates by run so a time budget never defers the same tail
 // companies every time.
+import { CORE_JOB_EVENT_SOURCE } from "@agentx/contracts";
 import type { CoreRuntime, CoreServiceName } from "./core-runtime.js";
 import type { CoreArea } from "./flags.js";
 
@@ -44,7 +45,7 @@ export const CORE_JOBS: readonly CoreJob[] = [
 ];
 
 /** The `source` of the event a core job schedule sends to the broker: `{ source: "agentx.core-job", job: <name> }`. */
-export const CORE_SCHEDULE_SOURCE = "agentx.core-job";
+export const CORE_SCHEDULE_SOURCE: typeof CORE_JOB_EVENT_SOURCE = CORE_JOB_EVENT_SOURCE;
 
 export function scheduleEventOf(job: CoreJob): { source: typeof CORE_SCHEDULE_SOURCE; job: string } {
   return { source: CORE_SCHEDULE_SOURCE, job: job.name };

@@ -9,7 +9,7 @@ import { readdir, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { agentXError, type SecretStore } from "@agentx/contracts";
 import { ensurePrivateDirectory, writeOwnerFile } from "../local/state-directory.js";
-import { admitSecretName, type ConnectionSecrets } from "./org-secrets.js";
+import { secretNameBelongsTo, admitSecretName, type ConnectionSecrets } from "./org-secrets.js";
 
 const VERSION = /^\d{13}-[0-9a-f]{8}$/;
 /** The most bytes of one secret: a token or a small JSON of a few keys. */
@@ -50,6 +50,7 @@ export function createLocalConnectionSecrets(options: LocalConnectionSecretsOpti
   };
   return {
     async read(orgId, name, versionId) {
+      if (!secretNameBelongsTo(options.env, orgId, name)) return undefined;
       const { directory, stem } = await folderOf(orgId, name);
       const version = versionId ?? (await versionsOf(directory, stem)).at(-1);
       if (version === undefined || !VERSION.test(version)) return undefined;
