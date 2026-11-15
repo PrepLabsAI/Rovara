@@ -107,7 +107,7 @@ describe("the client's artifact read", () => {
         asked.push(`${url.hostname}${url.pathname}`);
         const route = Object.entries(routes).find(([path]) => `${url.hostname}${url.pathname}` === path);
         return route === undefined ? new Response("{}", { status: 404 }) : route[1](url);
-      }) as typeof fetch,
+      }),
     });
     return { provider, asked };
   }
