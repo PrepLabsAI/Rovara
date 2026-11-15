@@ -29,6 +29,8 @@ export interface CoreHostAppOptions {
   runtime: (registry: AdapterRegistry, companyId: OrgId, flags: CoreEngineFlags) => Omit<CoreRuntimeOptions, "registry" | "companyId" | "flags">;
   /** Wraps the registry's store (a deployment's retention rule). */
   wrapStorage?: (store: DocumentStore) => DocumentStore;
+  /** Called on the complete registry just before its seal (the deployment's policy hook). */
+  beforeSeal?: (registry: AdapterRegistry) => void;
   /** The jobs this root runs. Default: CORE_JOBS. */
   jobs?: readonly CoreJob[];
   /** The time budget of one scheduled run. Default 50 s. Never more than the function's own time left (`handleScheduledJob`'s `remainingMs`) less `JOB_EXIT_MARGIN_MS`. */
@@ -88,7 +90,7 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
   const registry = (): Promise<AdapterRegistry> => {
     if (!serving) return Promise.reject(new CoreEngineOffError("no registry is built"));
     // Every area's points: a serving root may hold tasks of any area (a drained or narrowed company's earlier tasks), so a half-wired registry is refused whatever is switched on now.
-    registryPromise ??= Promise.resolve().then(() => modulesOf()).then((modules) => buildCoreRegistry({ modules, context: contextOnce(), areas: [...CORE_AREAS], ...(options.wrapStorage === undefined ? {} : { wrapStorage: options.wrapStorage }) })).catch((error: unknown) => {
+    registryPromise ??= Promise.resolve().then(() => modulesOf()).then((modules) => buildCoreRegistry({ modules, context: contextOnce(), areas: [...CORE_AREAS], ...(options.wrapStorage === undefined ? {} : { wrapStorage: options.wrapStorage }), ...(options.beforeSeal === undefined ? {} : { beforeSeal: options.beforeSeal }) })).catch((error: unknown) => {
       // A failed build is not cached: the next container use tries again (a transient client error), and the switch stays effectively off meanwhile.
       registryPromise = undefined;
       throw error;

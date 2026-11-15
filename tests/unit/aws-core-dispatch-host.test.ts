@@ -19,7 +19,7 @@ import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
 import { LambdaBatchQueue, coreDispatchMessage, createCoreDispatchHost, type CoreDispatchHostDependencies } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
 import {
-  DISPATCHER_CORE_NOT_CONFIGURED, DISPATCHER_FLOW_DECLARATIONS, DISPATCHER_FLOW_NOT_DECLARED, NO_CODE_HOST_HERE, NO_PEOPLE_HERE, createDispatcherCoreHost, dispatcherStopInstance, refusingCodeHost, refusingTaskAccess, repositoryGrantKeyOf, withCoreDispatch,
+  DISPATCHER_CORE_NOT_CONFIGURED, DISPATCHER_FLOW_DECLARATIONS, DISPATCHER_FLOW_NOT_DECLARED, NO_CODE_HOST_HERE, NO_PEOPLE_HERE, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, refusingCodeHost, refusingTaskAccess, repositoryGrantKeyOf, withCoreDispatch,
 } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.js";
@@ -314,7 +314,8 @@ describe("the core on the dispatcher", () => {
       return { ...made, built: createDispatcherCoreHost({ ...made.inputs, extraModules, ...(flow === undefined ? {} : { flow: flow as never }) }) };
     };
     // Not declared, or one input missing: refused in fixed words; nothing built for the company.
-    for (const flow of [undefined, { standingInstructions: null, modelAccess: null }, { modelAccess: null, learned: null }]) {
+    // A key that is there with `undefined` in it is not a declaration either (step 4 recheck Low), nor is a null wiring.
+    for (const flow of [undefined, null, { standingInstructions: null, modelAccess: null }, { modelAccess: null, learned: null }, { standingInstructions: null, modelAccess: undefined, learned: null }]) {
       await expect(withFlow(flow).built.app.runtimeFor(COMPANY_A)).rejects.toThrow(DISPATCHER_FLOW_NOT_DECLARED);
     }
     // Declared (here each as an explicit none): the company's flow deps carry exactly what was declared.
@@ -372,5 +373,13 @@ describe("the core on the dispatcher", () => {
     // The grant key is the broker's derivation: a grant the dispatcher issues is one the broker verifies.
     expect(repositoryGrantKeyOf("k".repeat(48))).toEqual(repositoryGrantKeyOf("k".repeat(48)));
     expect(repositoryGrantKeyOf("k".repeat(48)).byteLength).toBe(32);
+  });
+});
+
+describe("the flow inputs the deployment declares on the dispatcher (lane E2 step 6)", () => {
+  it("declares each as an explicit none for the first staging run, and nothing at all while lessons are switched on anywhere", () => {
+    expect(hostedDispatcherFlow({})).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" })).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    for (const value of ["on", `on:${COMPANY_A}`]) expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: value }), value).toBeUndefined();
   });
 });

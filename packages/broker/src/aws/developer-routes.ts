@@ -79,6 +79,7 @@ import {
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import { stepUpOf } from "../developer/verify-token.js";
 import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
@@ -187,7 +188,11 @@ export interface DeveloperRouteDependencies {
   companyReads?: CompanyReadsConfiguration;
 }
 /** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
-export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string }
+/**
+ * `stepUp` (lane ID part 2, hosted wiring (g)): the person's last step-up as the VERIFIED access token states it (`stepUpOf`); set only by the token sign-in (`authenticateDeveloper`), never
+ * from a header, a query or a body. Only the core's routes read it, and they check its age themselves.
+ */
+export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string; stepUp?: { at: string; method: string } }
 
 /** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
 export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
@@ -554,7 +559,11 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
   // Delay only OIDC's install-wide switch until the authenticated session can select its policy.
   const config = deps.companies === undefined ? deps.developer : { ...deps.developer, methods: { ...deps.developer.methods, oidc: true } };
   const token = developerClaims(claims, config);
-  try { return await authenticateSession(deps, token, undefined, true); }
+  const stepUp = claims === undefined ? undefined : stepUpOf(claims);
+  try {
+    const caller = await authenticateSession(deps, token, undefined, true);
+    return stepUp === undefined ? caller : { ...caller, stepUp };
+  }
   catch (error) {
     if (deps.companies !== undefined && token.amr === "oidc" && !(error instanceof AgentXError)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
     throw error;

@@ -27,6 +27,7 @@ import type { GitHubActionsProvider } from "../../plugins/check-runner/github-ac
 import { createCoreHostApp, type CoreHostApp } from "../../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../../core-host/code-modules.js";
 import { coreEngineServes, readCoreEngineFlags } from "../../core-host/flags.js";
+import { readCoreLessonsSwitch } from "../../core-host/lessons.js";
 import type { CoreAdapterModule } from "../../core-host/registry.js";
 import type { SessionManager } from "../sessions.js";
 import { createCoreDispatchHost, type CoreDispatchHost, type CoreDispatchRecord } from "./core-dispatch-host.js";
@@ -115,6 +116,16 @@ export const DISPATCHER_FLOW_DECLARATIONS = ["standingInstructions", "modelAcces
 export type DispatcherFlowWiring = { [K in (typeof DISPATCHER_FLOW_DECLARATIONS)[number]]: RegistryTaskFlowOptions[K] | null };
 /** The words a company's runtime on the dispatcher refuses with while a flow input is not declared. Fixed. */
 export const DISPATCHER_FLOW_NOT_DECLARED = "the dispatcher's flow inputs are not declared (standing instructions, model route, lessons): no worker job is built without them";
+/**
+ * The flow inputs the deployment declares on the dispatcher for the first staging run: no standing instructions (no company rules seam on AWS yet), no model route (a worker uses the
+ * model keys it is given), and no lessons. Lessons cannot be carried on the dispatcher yet, so while ROVARA_CORE_LESSONS covers any company nothing is declared: every company's runtime
+ * is refused and its records come back, rather than a worker job going out without the lessons its company has switched on.
+ */
+export function hostedDispatcherFlow(env: NodeJS.ProcessEnv): DispatcherFlowWiring | undefined {
+  if (readCoreLessonsSwitch(env).value.mode !== "off") return undefined;
+  return { standingInstructions: null, modelAccess: null, learned: null };
+}
+
 /** The words a code host call says on the dispatcher. */
 export const NO_CODE_HOST_HERE = "the code host is not reached from the dispatcher";
 /** The words a repository credential exchange says on the dispatcher. */
@@ -229,7 +240,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     runtime: () => {
       const flow = inputs.flow;
-      if (flow === undefined || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name))) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
+      // Declared means present AND `null` (an explicit none) or a value: a key that is there with `undefined` in it is not a declaration.
+      if (flow === undefined || flow === null || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name) || flow[name] === undefined)) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
       const { standingInstructions, modelAccess, learned } = flow;
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),

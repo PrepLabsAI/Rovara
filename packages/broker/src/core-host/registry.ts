@@ -63,6 +63,8 @@ export interface BuildRegistryOptions {
   areas: readonly CoreArea[];
   /** Wraps the `storage` adapter before anything else sees it (a deployment's retention rule). Absent: the store as built. */
   wrapStorage?: (store: DocumentStore) => DocumentStore;
+  /** Called last, after the registry is found complete and before it is sealed (the policy hook goes in front of admission and approvers here). A throw refuses the registry. */
+  beforeSeal?: (registry: AdapterRegistry) => void;
 }
 
 /** What is missing for these areas, as a report (an empty report means the registry can serve them). */
@@ -90,6 +92,7 @@ export async function buildCoreRegistry(options: BuildRegistryOptions): Promise<
   }
   const gaps = registryGaps(registry, defaults, options.areas);
   if (gaps.missing.length > 0 || gaps.defaulted.length > 0) throw new CoreRegistryError(gaps.missing, gaps.defaulted);
+  options.beforeSeal?.(registry);
   registry.seal();
   return registry;
 }
