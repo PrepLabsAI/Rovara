@@ -15,3 +15,4 @@ export * from "./defaults.js";
 export * from "./resolver.js";
 export * from "./linked.js";
 export * from "./proof-hold.js";
+export * from "./summary-check.js";
