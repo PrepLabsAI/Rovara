@@ -1,13 +1,12 @@
 // Lane H: "may this person decide this? is the sign-in fresh enough? is a second person needed?" over the `approvers` point (approvals, Keep, sensitive
-// settings: every caller of the point). Stricter only, and never cached. No answer refuses at once:
-// - `requirement` asks first (stage `requirement`) and can only raise what is needed: more approvers, no self-approval, no sole approver, a fresher sign-in.
-//   No answer, or a "no", throws a fixed error, so nothing is decided.
-// - `verify` asks for each approved verdict of the install's own approvers (stage `verdict`, with the approver). A "no", no answer, or a sign-in older than the
-//   answer allows turns it into a refusal. A claim the verdict holds is given back.
+// settings: every caller of the point). Stricter only. Only a real decision asks (controller, 2026-11-15): `verify`, once per approved verdict of the install's
+// own approvers. `requirement` is also read by pages and probes, so it never asks: it answers the last requirement the service gave for this company, project,
+// kind and risk, or, when none is known, the stricter default (a second person needed). `verify` then checks that the requirement handed out for this request
+// was at least as strict as the fresh answer; when it was looser (rules got stricter), the verdict is refused and the next `requirement` carries the new rule.
+// No answer, a "no", or a sign-in older than the answer allows refuses at once; a claim the verdict holds is given back.
 // A "second person needed" answer (owner row 11.5: loosening a setting needs a second admin) means: the person who asked may not approve, no sole-approver
 // exception, and at least two approvers when the request names no one who asked.
 import {
-  POLICY_HOOK_WORDS, agentXError,
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalSignInRule, type ApprovalVerdict, type Approvers, type PolicyHookDecideAnswer, type PolicyHookDecideQuestion, type Principal,
 } from "@agentx/contracts";
 import type { PolicyHookClient } from "./client.js";
@@ -17,6 +16,26 @@ const SIGN_IN_SKEW_MS = 30_000;
 
 export interface PolicyHookApproversOptions {
   now?: () => number;
+  /** At most this many known requirements and handed-out requirements are remembered. */
+  maxEntries?: number;
+}
+
+/** The stricter default, used for a requirement before the service has answered for its kind: a second person needed. */
+export const STRICTER_DEFAULT_ANSWER: PolicyHookDecideAnswer = Object.freeze({ allow: true, minApprovers: 1, secondPerson: true, selfApproval: false });
+
+/** Whether the requirement a caller counted with (`used`) is at least as strict as `fresh` in everything the hook can raise. */
+export function requirementCovers(used: ApprovalRequirement, fresh: ApprovalRequirement): boolean {
+  if (used.minApprovers < fresh.minApprovers) return false;
+  if (used.selfApprovalAllowed && !fresh.selfApprovalAllowed) return false;
+  if (used.soleApproverAllowed === true && fresh.soleApproverAllowed !== true) return false;
+  if (fresh.signIn?.mode === "window" && (used.signIn?.mode !== "window" || used.signIn.seconds > fresh.signIn.seconds)) return false;
+  return true;
+}
+
+function remember<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value!);
 }
 
 function decideQuestion(request: ApprovalRequest, stage: "requirement" | "verdict", approver?: Principal): PolicyHookDecideQuestion {
@@ -58,6 +77,13 @@ export function stricterRequirement(base: ApprovalRequirement, answer: PolicyHoo
 
 export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient, options: PolicyHookApproversOptions = {}): Approvers {
   const now = options.now ?? Date.now;
+  const maxEntries = options.maxEntries ?? 1000;
+  /** The last answer the service gave, by company, project, kind, subject type and risk. */
+  const known = new Map<string, PolicyHookDecideAnswer>();
+  /** The requirement handed out for each request id, so `verify` knows what the caller counts with. */
+  const handedOut = new Map<string, ApprovalRequirement>();
+  const kindKey = (request: ApprovalRequest): string => JSON.stringify([request.companyId, request.projectName ?? "", request.kind, request.subject.type, request.risk ?? ""]);
+  const requestKey = (request: ApprovalRequest): string => JSON.stringify([request.companyId, request.requestId]);
   async function ask(request: ApprovalRequest, stage: "requirement" | "verdict", approver?: Principal): Promise<PolicyHookDecideAnswer | "unaskable" | undefined> {
     const prepared = await hook.prepare("decide", decideQuestion(request, stage, approver));
     if (prepared === undefined) return "unaskable";
@@ -71,24 +97,31 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
   };
   const wrapped: Approvers = {
     async requirement(request) {
-      const requirement = await base.requirement(request);
-      const answer = await ask(request, "requirement");
-      if (answer === undefined) throw agentXError("RUNTIME_UNAVAILABLE", POLICY_HOOK_WORDS.decideNoAnswer);
-      if (answer === "unaskable" || !answer.allow) throw agentXError("FORBIDDEN", POLICY_HOOK_WORDS.decideRefused);
-      return stricterRequirement(requirement, answer, request);
+      // Never asks: pages and probes read this. The last known answer, or the stricter default.
+      const requirement = stricterRequirement(await base.requirement(request), known.get(kindKey(request)) ?? STRICTER_DEFAULT_ANSWER, request);
+      remember(handedOut, requestKey(request), requirement, maxEntries);
+      return requirement;
     },
     async verify(request: ApprovalRequest, proof: ApprovalProof) {
       const verdict = await base.verify(request, proof);
       if (!verdict.approved) return verdict;
       const answer = await ask(request, "verdict", verdict.approver);
       if (answer === undefined) return refuse(verdict, "company_rules_no_answer");
-      if (answer === "unaskable" || !answer.allow) return refuse(verdict, "company_rules_refused");
+      if (answer === "unaskable") return refuse(verdict, "company_rules_refused");
+      // Every signed answer is the last known one for this kind, which the next `requirement` reads.
+      remember(known, kindKey(request), answer, maxEntries);
+      if (!answer.allow) return refuse(verdict, "company_rules_refused");
       if (answer.signInMaxAgeSeconds !== undefined) {
         const auth = verdict.approver.authTime === undefined ? Number.NaN : Date.parse(verdict.approver.authTime);
         if (!Number.isFinite(auth) || now() - auth > answer.signInMaxAgeSeconds * 1000 || auth - now() > SIGN_IN_SKEW_MS) return refuse(verdict, "sign_in_not_fresh");
       }
+      const isRequester = request.requestedBy !== undefined && verdict.approver.provider === request.requestedBy.provider && verdict.approver.personId === request.requestedBy.personId;
+      if ((answer.secondPerson || !answer.selfApproval) && isRequester) return refuse(verdict, "self_approval_not_allowed");
+      // The caller counts this verdict with the requirement it was handed; it must be at least as strict as the fresh answer.
+      const baseRequirement = await base.requirement(request);
+      const used = handedOut.get(requestKey(request)) ?? stricterRequirement(baseRequirement, STRICTER_DEFAULT_ANSWER, request);
+      if (!requirementCovers(used, stricterRequirement(baseRequirement, answer, request))) return refuse(verdict, "company_rules_changed");
       if (answer.secondPerson || !answer.selfApproval || answer.minApprovers > 1) {
-        if ((answer.secondPerson || !answer.selfApproval) && request.requestedBy !== undefined && verdict.approver.provider === request.requestedBy.provider && verdict.approver.personId === request.requestedBy.personId) return refuse(verdict, "self_approval_not_allowed");
         const rest: Extract<ApprovalVerdict, { approved: true }> = { ...verdict };
         delete rest.soleApprover;
         return rest;

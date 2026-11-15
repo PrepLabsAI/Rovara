@@ -6,8 +6,8 @@ import { withPolicyHookAdmission, type PolicyHookAdmissionOptions } from "./admi
 import { withPolicyHookApprovers } from "./approvers.js";
 import { createPolicyHookClient, type PolicyHookClient, type PolicyHookInstall } from "./client.js";
 
-export { POLICY_HOOK_RETRY_DELAYS_MS, withPolicyHookAdmission, type PolicyHookAdmissionOptions } from "./admission.js";
-export { stricterRequirement, withPolicyHookApprovers, type PolicyHookApproversOptions } from "./approvers.js";
+export { POLICY_HOOK_RETRY_DELAYS_MS, POLICY_HOOK_START_HOLD_CAP_MS, withPolicyHookAdmission, type PolicyHookAdmissionOptions } from "./admission.js";
+export { STRICTER_DEFAULT_ANSWER, requirementCovers, stricterRequirement, withPolicyHookApprovers, type PolicyHookApproversOptions } from "./approvers.js";
 export { createPolicyHookClient, type PolicyHookClient, type PolicyHookClientOptions, type PolicyHookInstall, type PolicyHookResult, type PreparedPolicyQuestion } from "./client.js";
 export { policyHookValuesAsker } from "./values.js";
 

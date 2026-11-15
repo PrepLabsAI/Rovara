@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { createPolicyHookClient } from "../../packages/broker/src/core/policy-hook/client.js";
 import { stricterRequirement, withPolicyHookApprovers } from "../../packages/broker/src/core/policy-hook/approvers.js";
-import { POLICY_HOOK_WORDS, checkApproverCount, type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type Principal } from "../../packages/contracts/src/index.js";
+import { checkApproverCount, type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type Principal } from "../../packages/contracts/src/index.js";
 import { COMPANY, ISSUER, fakeService, makeKey, memoryAudit, settingsFor, signerOf } from "./policy-hook-fixture.js";
 
 const install = makeKey("install-key-1");
@@ -33,8 +33,8 @@ describe("policy hook: decisions", () => {
     const w = world(() => ({ ...loose, secondPerson: true }), baseApprovers({ approved: true, approver: asker, method: "local-session", proofId: "p1", soleApprover: true }));
     const requirement = await w.approvers.requirement(request());
     expect(requirement).toEqual({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: false });
-    expect(w.service.asked[0]!.q).toEqual({ cid: COMPANY, pid: "web", stage: "requirement", what: "setting.loosen", styp: "setting", sid: "review_mode", risk: "high", by: "admin-a" });
     expect(await w.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "self_approval_not_allowed" });
+    expect(w.service.asked.map((asked) => asked.q)).toEqual([{ cid: COMPANY, pid: "web", stage: "verdict", what: "setting.loosen", styp: "setting", sid: "review_mode", risk: "high", by: "admin-a", per: "admin-a" }]);
     const verdict = { approved: true as const, approver: asker, method: "local-session", proofId: "p1", soleApprover: true as const };
     expect(checkApproverCount(requirement, asker, [verdict])).toEqual({ ok: false, reason: "self_approval_not_allowed" });
   });
@@ -58,14 +58,36 @@ describe("policy hook: decisions", () => {
     expect(stricterRequirement(strict, { allow: true, minApprovers: 5, secondPerson: false, selfApproval: true, signInMaxAgeSeconds: 60 }, request())).toEqual({ ...strict, minApprovers: 5, signIn: { mode: "window", seconds: 60 } });
     expect(stricterRequirement({ ...baseRequirement, signIn: { mode: "any-active" } }, { ...loose, signInMaxAgeSeconds: 600 }, request()).signIn).toEqual({ mode: "window", seconds: 600 });
     expect(stricterRequirement(baseRequirement, loose, request())).toEqual(baseRequirement);
+    // A second person needed rules out self-approval even if the same answer says self-approval is fine.
+    expect(stricterRequirement(baseRequirement, { ...loose, secondPerson: true, selfApproval: true }, request()).selfApprovalAllowed).toBe(false);
   });
 
-  it("no answer at the requirement refuses at once with fixed words; a no refuses too", async () => {
-    const down = world(() => new Response("down", { status: 503 }), baseApprovers({ approved: false, reason: "x" }));
-    await expect(down.approvers.requirement(request())).rejects.toThrow(POLICY_HOOK_WORDS.decideNoAnswer);
-    expect(down.service.asked).toHaveLength(1);
-    const no = world(() => ({ ...loose, allow: false }), baseApprovers({ approved: false, reason: "x" }));
-    await expect(no.approvers.requirement(request())).rejects.toThrow(POLICY_HOOK_WORDS.decideRefused);
+  it("reading the requirement (pages, probes) never asks: the stricter default first, then the last known answer", async () => {
+    const other = person("admin-b");
+    const w = world(() => loose, baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
+    expect(await w.approvers.requirement(request())).toEqual({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: false });
+    expect(await w.approvers.requirement(request({ requestId: "probe" }))).toEqual({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: false });
+    expect(w.service.asked).toHaveLength(0);
+    expect((await w.approvers.verify(request(), proof)).approved).toBe(true);
+    expect(w.service.asked).toHaveLength(1);
+    expect(await w.approvers.requirement(request({ requestId: "req-2" }))).toEqual(baseRequirement);
+    expect(w.service.asked).toHaveLength(1);
+    // With the service down, reading still answers (the last known requirement), and a real decision refuses at once.
+    const down = world(() => new Response("down", { status: 503 }), baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
+    expect((await down.approvers.requirement(request())).selfApprovalAllowed).toBe(false);
+    expect(await down.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_no_answer" });
+  });
+
+  it("rules got stricter since the requirement was handed out: the verdict is refused, and the next requirement carries the new rule", async () => {
+    const other = person("admin-b");
+    let answer = loose;
+    const w = world(() => answer, baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
+    await w.approvers.verify(request(), proof);
+    expect(await w.approvers.requirement(request({ requestId: "req-2" }))).toEqual(baseRequirement);
+    answer = { ...loose, minApprovers: 3 };
+    expect(await w.approvers.verify(request({ requestId: "req-2" }), { ...proof, requestId: "req-2" })).toEqual({ approved: false, reason: "company_rules_changed" });
+    expect((await w.approvers.requirement(request({ requestId: "req-2" }))).minApprovers).toBe(3);
+    expect((await w.approvers.verify(request({ requestId: "req-2" }), { ...proof, requestId: "req-2" })).approved).toBe(true);
   });
 
   it("no answer or a no at the verdict refuses at once and gives back the verdict's claim", async () => {
@@ -83,7 +105,10 @@ describe("policy hook: decisions", () => {
     const fresh = person("admin-b", new Date(T0 - 60_000).toISOString());
     const stale = person("admin-b", new Date(T0 - 3_600_000).toISOString());
     const answer = () => ({ ...loose, signInMaxAgeSeconds: 600 });
-    expect((await world(answer, baseApprovers({ approved: true, approver: fresh, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).approved).toBe(true);
+    const freshWorld = world(answer, baseApprovers({ approved: true, approver: fresh, method: "m", proofId: "p1" }));
+    expect(await freshWorld.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_changed" });
+    expect((await freshWorld.approvers.requirement(request())).signIn).toEqual({ mode: "window", seconds: 600 });
+    expect((await freshWorld.approvers.verify(request(), proof)).approved).toBe(true);
     expect(await world(answer, baseApprovers({ approved: true, approver: stale, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
     expect(await world(answer, baseApprovers({ approved: true, approver: person("admin-b"), method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
   });
@@ -94,7 +119,10 @@ describe("policy hook: decisions", () => {
     expect(stricterRequirement(baseRequirement, loose, request()).soleApproverAllowed).toBe(true);
     const sole = { approved: true as const, approver: asker, method: "local-session", proofId: "p1", soleApprover: true as const };
     expect(await world(() => ({ ...loose, selfApproval: false }), baseApprovers(sole)).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "self_approval_not_allowed" });
-    expect(await world(() => ({ ...loose, minApprovers: 2 }), baseApprovers(sole)).approvers.verify(request(), proof)).toEqual({ approved: true, approver: asker, method: "local-session", proofId: "p1" });
+    const two = world(() => ({ ...loose, minApprovers: 2 }), baseApprovers(sole));
+    expect(await two.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_changed" });
+    expect(await two.approvers.requirement(request())).toEqual({ methods: ["local-session"], minApprovers: 2, selfApprovalAllowed: true });
+    expect(await two.approvers.verify(request(), proof)).toEqual({ approved: true, approver: asker, method: "local-session", proofId: "p1" });
   });
 
   it("a sign-in time in the future is not believed", async () => {

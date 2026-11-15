@@ -1,5 +1,5 @@
-// Lane H: "may this task start?". Stricter only; never cached; with no answer the start is held and the same signed question is sent again for up to five
-// minutes, then refused with fixed words. Every other admission action is the install's own, untouched.
+// Lane H: "may this task start?". Stricter only; never cached; with no answer the start is held and the same signed question is sent again for up to
+// 240 s in all, then refused with fixed words. Every other admission action is the install's own, untouched.
 import { describe, expect, it } from "vitest";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createPolicyHookClient } from "../../packages/broker/src/core/policy-hook/client.js";
@@ -55,16 +55,27 @@ describe("policy hook: may this task start", () => {
     expect(w.service.asked).toHaveLength(2);
   });
 
-  it("service down: holds and retries the same signed question for up to five minutes, then refuses plainly; nothing has started", async () => {
+  it("service down: holds and retries the same signed question for up to 240 s in all, then refuses plainly; nothing has started", async () => {
     const w = world(() => new Response("down", { status: 503 }));
     const staged = await w.admission.stage(request("task_1"));
     expect(staged).toEqual({ decision: { allowed: false, code: "company_rules_no_answer", message: "the company rules service did not answer; nothing has started", retryAfterSeconds: 60 }, items: [] });
-    expect(w.elapsed()).toBeLessThanOrEqual(300_000);
-    expect(w.elapsed()).toBeGreaterThan(240_000);
+    // 240 s in all, last attempt included (an attempt may take its 5 s timeout), under Node's 300 s request timeout.
+    expect(w.elapsed() + 5_000).toBeLessThanOrEqual(240_000);
+    expect(w.elapsed()).toBeGreaterThan(180_000);
     expect(w.service.asked.length).toBeGreaterThan(5);
     expect(new Set(w.service.asked.map((asked) => asked.text)).size).toBe(1);
     expect(w.audit.events).toHaveLength(1);
     expect(w.audit.events[0]).toMatchObject({ action: "policy_hook.no_answer", details: { attempts: w.service.asked.length } });
+  });
+
+  it("the hold never passes 240 s, even when each attempt takes its full timeout or a longer hold is asked for", async () => {
+    let clock = T0;
+    const audit = memoryAudit();
+    const slow: typeof fetch = async () => { clock += 5_000; return new Response("down", { status: 503 }); };
+    const client = createPolicyHookClient({ settings: settingsFor(hookKey), install: { issuer: ISSUER, signer: signerOf(install) }, fetch: slow, now: () => clock, audit: audit.sink });
+    const admission = withPolicyHookAdmission(createAllowAllAdmission(), client, { holdMs: 600_000, now: () => clock, sleep: async (ms) => { clock += ms; } });
+    expect((await admission.stage(request("task_1"))).decision).toMatchObject({ allowed: false, message: POLICY_HOOK_WORDS.startNoAnswer });
+    expect(clock - T0).toBeLessThanOrEqual(240_000);
   });
 
   it("service back within the hold: the start goes ahead on the late answer", async () => {
