@@ -436,9 +436,14 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   // Spec 065: what it may then do as the signed-in person, beyond reading who they are.
   const scopes = registration.scopes ?? [];
   const actions = scopes.length === 0 ? "" : ` As the signed-in person, and within their own rights, it may: ${scopes.join(", ")}.`;
+  // Spec 066: full access, or what a client's tokens reach.
+  const fullAccess = registration.fullAccess === true;
+  const reach = fullAccess
+    ? ", which AgentX's developer API accepts as the signed-in person, with all their rights, as it does the AgentX CLI's (full access)"
+    : ", which AgentX's own API never accepts";
   return {
-    effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}, which AgentX's own API never accepts.${secret}${replaced}${actions}`,
-    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential, keepsSecret: keepSecret === true, scopes },
+    effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}${reach}.${secret}${replaced}${fullAccess ? "" : actions}`,
+    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential, keepsSecret: keepSecret === true, scopes, fullAccess },
     snapshot: { client: current ?? null },
     apply: async (applier) => {
       const at = new Date(deps.actions.now()).toISOString();

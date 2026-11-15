@@ -7,6 +7,8 @@
 // operation id. The consumer therefore only moves an operation forward and never undoes a state a result has set.
 import {
   AGENTX_PROTOCOL_VERSION,
+  IMPLICIT_COMPANY_ID,
+  OrgIdSchema,
   EVAL_ROUND_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
@@ -49,6 +51,8 @@ const BASE_ACCESS_ACTIONS = ["artifacts", "events", "result"] as const;
 
 export interface DispatchReport {
   received: number;
+  /** Foreign messages released without any record read, acknowledgement or dead-letter. */
+  foreign: number;
   delivered: number;
   /** Put back on the queue to try again after a delay (the machine is starting, busy, or not reachable yet). */
   retried: number;
@@ -60,15 +64,15 @@ export interface DispatchReport {
 
 const retryDelay = (receiveCount: number): number => Math.min(60, 2 ** Math.min(receiveCount, 6));
 
-function parseMessage(body: unknown): DispatchMessage | undefined {
+function parseMessage(body: unknown): (Omit<DispatchMessage, "companyId"> & { companyId: unknown }) | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const value = body as Record<string, unknown>;
-  return value.v === 1 && typeof value.workspaceId === "string" && typeof value.operationId === "string" ? { v: 1, workspaceId: value.workspaceId, operationId: value.operationId } : undefined;
+  return value.v === 1 && typeof value.workspaceId === "string" && typeof value.operationId === "string" ? { v: 1, workspaceId: value.workspaceId, operationId: value.operationId, companyId: Object.hasOwn(value, "companyId") ? value.companyId : IMPLICIT_COMPANY_ID } : undefined;
 }
 
 /** Receives up to `maxMessages` dispatch messages and handles each. */
 export async function runDispatchOnce(deps: TaskFlowDeps, options: { maxMessages?: number; waitSeconds?: number } = {}): Promise<DispatchReport> {
-  const report: DispatchReport = { received: 0, delivered: 0, retried: 0, failed: 0, dropped: 0 };
+  const report: DispatchReport = { received: 0, foreign: 0, delivered: 0, retried: 0, failed: 0, dropped: 0 };
   const queue = await deps.queues.queue(dispatchQueueName(deps));
   const messages = await queue.receive({ maxMessages: options.maxMessages ?? 5, ...(options.waitSeconds === undefined ? {} : { waitSeconds: options.waitSeconds }) });
   for (const message of messages) {
@@ -76,9 +80,9 @@ export async function runDispatchOnce(deps: TaskFlowDeps, options: { maxMessages
     let outcome: keyof Omit<DispatchReport, "received">;
     try {
       outcome = await handleDispatch(deps, queue, message);
-    } catch (error) {
+    } catch {
       // A fault we did not model (the store is unreachable): the message comes back after its visibility timeout.
-      log(deps, { event: "task_flow.dispatch_fault", error: error instanceof Error ? error.name : "unknown" });
+      if (OrgIdSchema.safeParse(deps.companyId).success) log(deps, { event: "task_flow.dispatch_fault", error: "dispatch_failed" });
       outcome = "retried";
     }
     report[outcome] += 1;
@@ -89,10 +93,16 @@ export async function runDispatchOnce(deps: TaskFlowDeps, options: { maxMessages
 type Outcome = keyof Omit<DispatchReport, "received">;
 
 async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage): Promise<Outcome> {
+  if (!OrgIdSchema.safeParse(deps.companyId).success) { await queue.changeVisibility(message.receiptHandle, 30); return "foreign"; }
   const body = parseMessage(message.body);
   if (body === undefined) {
     await queue.deadLetter(message.receiptHandle, "malformed");
     return "dropped";
+  }
+  if (!OrgIdSchema.safeParse(body.companyId).success || body.companyId !== deps.companyId || (Object.hasOwn(message.attributes, "companyId") && message.attributes.companyId !== body.companyId)) {
+    await queue.changeVisibility(message.receiptHandle, 30);
+    log(deps, { event: "task_flow.dispatch_foreign" });
+    return "foreign";
   }
   const operation = await readOperation(deps, body.workspaceId, body.operationId);
   if (operation === undefined || operation.companyId !== deps.companyId) {
