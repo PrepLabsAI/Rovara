@@ -2,6 +2,7 @@ import { App, CfnResource, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import * as iam from "aws-cdk-lib/aws-iam";
 import { describe, expect, it } from "vitest";
+import { defaultBoundaryStatements, serviceRoleStatements, SERVICE_ROLE_SERVICES } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { applyPermissionsBoundaryParameter } from "../../infra/lib/permissions-boundary.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -12,6 +13,21 @@ const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack
 const EXISTING_BOUNDARY = "arn:aws:iam::123456789012:policy/existing-boundary";
 
 describe("permission boundary", () => {
+  it("allows every moved broker action and policy installation without a boundary exception", () => {
+    const scope = { env: "staging", partition: "aws", region: "us-east-1", account: "111122223333", artifactBucketArn: "arn:aws:s3:::agentx-artifacts", pullThroughPrefix: "agentx", cloudFormationRoleName: "agentx-staging-cloudformation" };
+    const boundary = defaultBoundaryStatements(scope);
+    const deploy = serviceRoleStatements(scope);
+    const matches = (pattern: string, action: string) => new RegExp(`^${pattern.replaceAll("*", ".*")}$`, "i").test(action);
+    const moved = ["s3:GetObject*", "s3:GetBucket*", "s3:List*", "s3:DeleteObject*", "s3:PutObject", "s3:PutObjectLegalHold", "s3:PutObjectRetention", "s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:Abort*", "sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl", "kms:Encrypt", "kms:Decrypt"];
+    for (const [policy, actions] of [[boundary, moved], [deploy, ["s3:PutBucketPolicy", "sqs:SetQueueAttributes", "kms:PutKeyPolicy"]]] as const) {
+      for (const action of actions) {
+        const applicable = policy.filter((s) => [s.Action].flat().some((pattern) => matches(pattern, action)));
+        expect(applicable.some((s) => s.Effect === "Allow" && s.Resource === "*" && s.Condition === undefined), action).toBe(true);
+        expect(applicable.filter((s) => s.Effect === "Deny"), action).toEqual([]);
+      }
+    }
+    for (const service of ["s3", "sqs", "kms"]) expect(SERVICE_ROLE_SERVICES).toContain(service);
+  });
   it("is a parameter on every environment stack, and every role gets the given boundary or the default", () => {
     const defaultArn = { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":iam::", { Ref: "AWS::AccountId" }, ":policy/agentx/staging/agentx-staging-boundary"]] };
     const stacks = stacksOf(buildAgentXApp({ agentxEnv: "staging" }));
