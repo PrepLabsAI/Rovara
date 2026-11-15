@@ -68,6 +68,11 @@ export interface TaskLearningDeps {
    */
   counters?: CounterDeps;
   log?: (event: string, fields: Record<string, string | number>) => void;
+  /**
+   * Logs the task's member corrections for the "same mistake twice" measure (`correction-log.ts`: no text, once per correction). Called on every reflection of a task the mode lets learning reflect on; a fault
+   * is one fixed log line. Absent: nothing is logged.
+   */
+  correctionLog?: (input: { workspaceId: string; project: string; taskId: string; corrections: readonly TaskCorrection[] }) => Promise<void>;
   /** The checks a human-edit read makes on its authors now (the same readers the subject source uses). Absent: human edits are not learned from. */
   humanEdit?: { standing: (orgId: string, developerId: string, project: string) => Promise<"member" | "outsider">; isErased: (orgId: string, developerId: string, project: string) => Promise<boolean> };
 }
@@ -160,6 +165,17 @@ function correctionsOf(base: TaskSubjectBase, subject: ReflectSubject, at: numbe
   return corrections;
 }
 
+/** The task's member corrections into the correction log: only a member's own words (a revert's only correction is code's words, so it logs nothing). Never throws. */
+async function logCorrections(deps: TaskLearningDeps, base: TaskSubjectBase, subject: ReflectSubject, taskId: string): Promise<void> {
+  if (deps.correctionLog === undefined) return;
+  try {
+    const corrections = correctionsOf(base, subject, deps.reflect.now()).filter((c) => c.fixed !== true && c.authorId !== undefined);
+    if (corrections.length > 0) await deps.correctionLog({ workspaceId: subject.workspaceId, project: subject.project, taskId, corrections });
+  } catch {
+    deps.log?.("learning.corrections_not_logged", { task: logRef(subject.workspaceId, taskId) });
+  }
+}
+
 /**
  * Lessons connect and lessons outcomes: counts the finished task for the lessons it loaded. Never throws: a fault is one fixed log line and the reflection's result stands.
  * It runs in two places around the reflection, which always comes first for anything that costs a model call:
@@ -238,6 +254,7 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     // a model that failed, an attempt that will be retried, a deadline that cut it); a revert's re-reflection takes the merge's queued helpful mark back here. What needs the judge is counted AFTER the reflection.
     // This task's failed model calls (the outcome judge, the reflection and each draft's judge) count toward `model_failed` once per kind, not once per call.
     const tally = newTaskFailureTally();
+    await logCorrections(deps, base, subject, input.taskId);
     await countOutcome(deps, base, subject, input, tally, "before");
     // Review: Public's per-task cap is one total across this run and the human-edit job, in either order: a merged task starts from what the job already held.
     const taskCap = learningCaps(deps.reflect.edition, deps.reflect.capsOverride).perTaskUsd;
