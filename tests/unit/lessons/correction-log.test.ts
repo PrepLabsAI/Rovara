@@ -1,10 +1,11 @@
 // The correction log the "same mistake twice" measure reads on Code (lessons/correction-log.ts): a member's own corrections, once each, no text, a keyed signature, in the company's own partition; the
 // signature matcher (no model); and the person erase's part.
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { companyScoped, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
 import {
-  correctionLogPk, correctionLogSource, eraseLoggedCorrections, logTaskCorrections, readSignatureKey, signatureMatcher, signatureOf, NEGATED_MARK,
+  correctionLogPk, correctionLogSource, correctionRowId, eraseLoggedCorrections, logTaskCorrections, readSignatureKey, signatureMatcher, signatureOf, NEGATED_MARK,
 } from "../../../packages/broker/src/lessons/correction-log.js";
 import { sameMistakeTwice } from "../../../packages/broker/src/lessons/metric.js";
 import type { TaskCorrection } from "../../../packages/broker/src/lessons/counters.js";
@@ -64,6 +65,21 @@ describe("logging a task's corrections", () => {
   });
 });
 
+describe("row ids", () => {
+  it("a row's id is keyed with the project's key: a guessed correction's plain hash does not match it, and another key gives another id", async () => {
+    const store = new MemoryDocumentStore();
+    const text = "Always wrap network calls in withRetry before calling the payments API";
+    await logTaskCorrections(store, { companyId: A, project: "payments", taskId: "t1", corrections: [correction(text)], now: T0 });
+    const key = (await readSignatureKey(store, A, "payments"))!;
+    const plain = createHash("sha256").update(`review_comment\u0000ann\u0000${text}`, "utf8").digest("hex").slice(0, 24);
+    const sks = (await rowsOf(store, A)).map((row) => row.sk);
+    expect(sks.some((sk) => sk.includes(plain))).toBe(false);
+    const keyed = correctionRowId(key, { kind: "review_comment", authorId: "ann", text });
+    expect(sks.filter((sk) => sk.endsWith(keyed))).toHaveLength(2);
+    expect(correctionRowId("b".repeat(64), { kind: "review_comment", authorId: "ann", text })).not.toBe(keyed);
+  });
+});
+
 describe("the source and the matcher", () => {
   it("reads the range asked (since inclusive, until exclusive), stops at the limit and says it was cut", async () => {
     const store = new MemoryDocumentStore();
@@ -115,5 +131,12 @@ describe("the person erase", () => {
     expect(await eraseLoggedCorrections(store, A, "payments", "ann")).toBe(2);
     expect((await rowsOf(store, A)).map((row) => row["authorId"])).toEqual(["bob", "bob"]);
     expect(await rowsOf(store, B)).toHaveLength(2);
+  });
+
+  it("matches the person's id as lessons do (case and Unicode form)", async () => {
+    const store = new MemoryDocumentStore();
+    await logTaskCorrections(store, { companyId: A, project: "payments", taskId: "t1", corrections: [correction("Use withRetry for every client call in payments", { authorId: "Ann" })], now: T0 });
+    expect(await eraseLoggedCorrections(store, A, "payments", " ann ")).toBe(2);
+    expect(await rowsOf(store, A)).toEqual([]);
   });
 });

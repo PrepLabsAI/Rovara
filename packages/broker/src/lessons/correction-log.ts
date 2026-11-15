@@ -7,13 +7,14 @@
 //   - Rows live 180 days (the store's time-to-live), the measure's longest reach (a 90-day lookback before a month).
 // The matcher (`signatureMatcher`) needs no model and spends nothing: two corrections, or a correction and a lesson, are the same advice when their signatures are alike enough and neither says
 // "never" where the other does not. A row without a signature cannot be judged: the matcher throws and the measure counts it as unjudged.
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { companyScoped, type DocumentStore } from "@agentx/contracts";
 import type { TaskCorrection } from "./counters.js";
 import { cleanForLearning, polarity } from "./guards.js";
 import type { CorrectionMatcher, CorrectionRecord, CorrectionSource } from "./metric.js";
 import type { CorrectionKind } from "./ports.js";
 import { lessonTextOf, tokenSetOf } from "./similarity.js";
+import { sameId } from "./types.js";
 
 export const CORRECTION_LOG_KEEP_SECONDS = 180 * 86_400;
 /** The marker a signature carries when its words say "never" (or do not, avoid, ...). */
@@ -56,6 +57,11 @@ async function signatureKey(store: LogStore, companyId: string, project: string)
   return again;
 }
 
+/** A logged correction's id: an HMAC of its kind, author and words under the project's key (never a plain hash of the words). */
+export function correctionRowId(key: string, correction: Pick<TaskCorrection, "kind" | "authorId" | "text">): string {
+  return createHmac("sha256", key).update(`${correction.kind}\u0000${correction.authorId ?? ""}\u0000${correction.text}`, "utf8").digest("hex").slice(0, 24);
+}
+
 /** The signature of a text: each distinct word (as `tokenSetOf` reads them) as a keyed hash, sorted, at most 400; and the "never" mark when the text says so. Empty for a text with no words. */
 export function signatureOf(text: string, key: string): string[] {
   const clean = cleanForLearning(text, SIGNATURE_TEXT_MAX);
@@ -76,8 +82,9 @@ export async function logTaskCorrections(store: LogStore, input: { companyId: st
   const expires = store.ttlAttribute === undefined ? {} : { [store.ttlAttribute]: Math.floor(input.now / 1000) + CORRECTION_LOG_KEEP_SECONDS };
   let logged = 0;
   for (const correction of own) {
-    // The correction's id: its kind, author and words, so the same correction met again (another reflection of the task) is the same row.
-    const id = createHash("sha256").update(`${correction.kind}\u0000${correction.authorId ?? ""}\u0000${correction.text}`, "utf8").digest("hex").slice(0, 24);
+    // The correction's id: its kind, author and words, keyed with the project's key (so a guessed correction cannot be confirmed from a row's id without the key). The same correction met again
+    // (another reflection of the task) is the same row.
+    const id = correctionRowId(key, correction);
     try {
       const claimed = await store.put({ item: { pk, sk: claimSk(input.taskId, id), entityType: "LESSON_CORRECTION_CLAIM", authorId: correction.authorId!, ...expires }, condition: { op: "notExists", path: ["pk"] } });
       if (!claimed.applied) continue;
@@ -162,7 +169,9 @@ export async function eraseLoggedCorrections(store: Pick<DocumentStore, "query" 
   do {
     const page = await store.query({ pk, limit: PAGE, ...(cursor === undefined ? {} : { cursor }) });
     for (const item of page.items) {
-      if (item["authorId"] !== personId) continue;
+      // The person's ids compared as the rest of lessons compares them (case and Unicode form do not hide a row from the erase).
+      const author = item["authorId"];
+      if (typeof author !== "string" || !sameId(author, personId)) continue;
       await store.delete({ key: { pk: item.pk, sk: item.sk } });
       removed += 1;
     }
