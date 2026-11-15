@@ -19,6 +19,7 @@ import {
   GetItemCommand,
   PutItemCommand,
   QueryCommand,
+  ScanCommand,
   TransactWriteItemsCommand,
   UpdateItemCommand,
   type BatchGetItemCommandOutput,
@@ -60,7 +61,7 @@ import { UnrepresentableValueError, assertCloudReadableNumbers, assertWellFormed
 import { ExpressionBuilder } from "./expressions.js";
 
 /** The commands this adapter sends. */
-export type DynamoDbCommand = GetItemCommand | BatchGetItemCommand | PutItemCommand | UpdateItemCommand | DeleteItemCommand | QueryCommand | TransactWriteItemsCommand;
+export type DynamoDbCommand = GetItemCommand | BatchGetItemCommand | PutItemCommand | UpdateItemCommand | DeleteItemCommand | QueryCommand | ScanCommand | TransactWriteItemsCommand;
 
 /** What the adapter needs of a client: a `DynamoDBClient` fits, and so does a test double. */
 export interface DynamoDbSender {
@@ -342,6 +343,24 @@ export class DynamoDocumentStore implements DocumentStore {
       ...(request.cursor === undefined ? {} : { ExclusiveStartKey: decodeCursor(request.cursor, `table:${request.pk}`, ["pk", "sk"]) }),
     }), "query");
     return this.#page(output, `table:${request.pk}`);
+  }
+
+  /**
+   * One page of a walk over every item of the table (a strongly consistent `Scan`), resumable from its cursor. Not part of the port: the company purge's `StoreScan` alone uses it, and the role that
+   * runs the purge needs `dynamodb:Scan` on the table. Items the port cannot represent are left out and reported, as a query page does, and counted in `skipped`.
+   */
+  async scanPage(request: { limit?: number; cursor?: string } = {}): Promise<QueryPage & { skipped?: number }> {
+    const limit = assertLimit(request.limit);
+    const output = await this.#send<QueryOutputShape>(new ScanCommand({
+      TableName: this.#table,
+      ConsistentRead: true,
+      Limit: limit,
+      ...(request.cursor === undefined ? {} : { ExclusiveStartKey: decodeCursor(request.cursor, "scan", ["pk", "sk"]) }),
+    }), "scan");
+    const page = this.#page(output, "scan");
+    // The purge must know a row was left out (it never ends while it meets one); a query page does not say.
+    const skipped = (output.Items ?? []).length - page.items.length;
+    return skipped > 0 ? { ...page, skipped } : page;
   }
 
   async queryIndex(request: IndexQueryRequest): Promise<QueryPage> {

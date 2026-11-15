@@ -1,7 +1,7 @@
 // The model a task step is handed to a worker with: chosen once per operation, kept on it, and the same on a repeat delivery; a step with no model of its own, a design-review round and a step that is not a task
 // step are left to the install's one model; a step no model fits ends with the reason in words.
-import { describe, expect, it, vi } from "vitest";
-import type { ModelIdentifier } from "@agentx/contracts";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, type ModelIdentifier } from "@agentx/contracts";
 import { chooseStepModel } from "../../packages/broker/src/core/task-flow/step-model.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -10,6 +10,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { CRITIC_MODEL_ATTEMPTS_MAX, PLAN_CHECK_NO_MODEL_LEFT, planCheckFailures, retriesPlanCheck } from "../../packages/broker/src/core/plan/check-retry.js";
 import { criticModelUnusable } from "../../packages/broker/src/rovara-code/critic.js";
 
+const COMPANY = OrgIdSchema.parse(IMPLICIT_COMPANY_ID);
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const m = (provider: string, modelId: string): ModelIdentifier => ({ provider, modelId });
 const SONNET = m("anthropic", "claude-sonnet-4-5");
@@ -20,7 +21,7 @@ let counter = 0;
 function operation(extra: Partial<OperationRecord> = {}): OperationRecord {
   counter += 1;
   return {
-    pk: `WORKSPACE#${WORKSPACE}`, sk: `OPERATION#${String(counter)}`, entityType: "OPERATION", companyId: "c", eventSequence: 0, id: `00000000-0000-4000-8000-${String(counter).padStart(12, "0")}`, workspaceId: WORKSPACE, kind: "task",
+    pk: `WORKSPACE#${WORKSPACE}`, sk: `OPERATION#${String(counter)}`, entityType: "OPERATION", companyId: COMPANY, eventSequence: 0, id: `00000000-0000-4000-8000-${String(counter).padStart(12, "0")}`, workspaceId: WORKSPACE, kind: "task",
     requestId: "r", payloadHash: "h", status: "ACCEPTED", fence: counter, createdAt: new Date(Date.UTC(2026, 10, 10, 10, 0, counter)).toISOString(), updatedAt: "2026-11-10T10:00:00.000Z",
     dispatch: { kind: "task", payload: {} }, workflowMode: "PLAN", ...extra,
   } as unknown as OperationRecord;
@@ -28,7 +29,7 @@ function operation(extra: Partial<OperationRecord> = {}): OperationRecord {
 const world = (answer: StepChoice) => {
   const store = new MemoryDocumentStore();
   const choose = vi.fn<(input: { stage: string; reference?: ModelIdentifier | undefined }) => Promise<StepChoice>>(async () => answer);
-  return { store, choose, deps: { store, stepModels: { choose } } };
+  return { store, choose, deps: { store, companyId: COMPANY, stepModels: { choose } } };
 };
 
 describe("the model a step is handed to a worker with", () => {
@@ -70,7 +71,7 @@ describe("the model a step is handed to a worker with", () => {
     expect(await chooseStepModel(w.deps as never, operation({ dispatch: { kind: "publish", payload: {} } as never }))).toBeUndefined();
     expect(await chooseStepModel(w.deps as never, operation({ workflowMode: undefined }))).toBeUndefined();
     expect(w.choose).not.toHaveBeenCalled();
-    expect(await chooseStepModel({ store: w.store }, operation())).toBeUndefined();
+    expect(await chooseStepModel({ store: w.store, companyId: COMPANY }, operation())).toBeUndefined();
   });
 
   it("a checking step is told the model of the newest earlier operation of the step it checks, and none that never recorded one", async () => {
@@ -144,4 +145,15 @@ describe("the model a step is handed to a worker with", () => {
     expect(await chooseStepModel(world({ ok: false, code: "NO_MODEL", words: "No model can be called." }).deps as never, operation())).toBeUndefined();
     expect(await chooseStepModel(world({ ok: false, code: "MODEL_NOT_VERIFIED", words: "gw/m has no price, and a run limit is held." }).deps as never, operation())).toEqual({ ok: false, sentence: "gw/m has no price, and a run limit is held." });
   });
+});
+
+// Compile-time regression: all four entry points require the flow's company.
+import type { workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
+import type { checkingModelOf } from "../../packages/broker/src/core/build-step/tier-review-calls.js";
+import type { reportedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
+it("requires company context at every operation-reading entry point", () => {
+  expectTypeOf<Parameters<typeof workspaceOperations>[0]>().toExtend<{ companyId: typeof COMPANY }>();
+  expectTypeOf<Parameters<typeof chooseStepModel>[0]>().toExtend<{ companyId: typeof COMPANY }>();
+  expectTypeOf<Parameters<typeof checkingModelOf>[0]>().toExtend<{ companyId: typeof COMPANY }>();
+  expectTypeOf<Parameters<typeof reportedChangedFiles>[0]>().toExtend<{ companyId: typeof COMPANY }>();
 });
