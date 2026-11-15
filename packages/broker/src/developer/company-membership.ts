@@ -2,10 +2,11 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped } from "@agentx/contracts";
-import { Membership, membershipKey } from "../aws/company-check.js";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, companyScoped } from "@agentx/contracts";
+import { membershipKey } from "../aws/company-check.js";
 import { ownerKeyForSubject } from "../aws/lambda.js";
 import { emailIndexKey } from "./store.js";
+import { CompanyMember, CompanyMemberRefusal, MemberListInput, MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, memberCursor, memberCursorPerson } from "./company-member-contract.js";
 import { CompanyIssuerRecord, CompanyIssuerSettings, companyIssuerKey } from "./company-issuer.js";
 
 export const CompanyPersonId = z.string().regex(/^[a-f0-9]{64}$/);
@@ -20,7 +21,8 @@ export const CompanyPreapproval = z.object({
 export const companyKey = (companyId: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "COMPANY"), sk: "META" });
 export const preapprovalKey = (companyId: string, email: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "PREAPPROVAL"), sk: emailIndexKey(CompanyEmail.parse(email)).pk });
 export const preapprovalHashKey = (companyId: string, hash: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "PREAPPROVAL"), sk: `EMAIL#${z.string().regex(/^[a-f0-9]{64}$/).parse(hash)}` });
-type Member = z.infer<typeof Membership>;
+type Member = z.infer<typeof CompanyMember>;
+export const companyMemberKey = (companyId: string, personId: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "MEMBERS"), sk: `MEMBER#${CompanyPersonId.parse(personId)}` });
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 export type CompanyJoin = { ok: true; membership: Member } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
@@ -47,7 +49,7 @@ export class CompanySignInStore {
     if (!CompanyPersonId.safeParse(personId).success) throw unavailable();
     const row = await this.read(membershipKey(personId));
     if (row === undefined) return undefined;
-    const found = Membership.safeParse(row);
+    const found = CompanyMember.safeParse(row);
     if (!found.success || found.data.personId !== personId) throw unavailable();
     return found.data;
   }
@@ -72,7 +74,7 @@ export class CompanySignInStore {
       const approval = !legacy && key !== undefined ? CompanyPreapproval.safeParse(await this.read(key)) : undefined;
       if (!legacy && (!approval?.success || approval.data.status !== "live" || approval.data.expiresAt <= this.seconds())) return refused();
       const member: Member = { entityType: "COMPANY_MEMBERSHIP", personId: input.personId, companyId: input.companyId, role: legacy ? "member" : approval!.data!.role, joinedAt: this.iso(), joinedVia: legacy ? "legacy" : "preapproval" };
-      const writes: Write[] = [{ Put: { TableName: this.input.tableName, Item: { ...membershipKey(input.personId), ...member }, ConditionExpression: "attribute_not_exists(pk)" } }];
+      const writes: Write[] = [{ Put: { TableName: this.input.tableName, Item: { ...membershipKey(input.personId), ...member }, ConditionExpression: "attribute_not_exists(pk)" } }, this.memberMirror(member)];
       if (!legacy) writes.push({ Update: { TableName: this.input.tableName, Key: key!,
         UpdateExpression: "SET #status = :used, usedBy = :person, usedAt = :at",
         ConditionExpression: "#status = :live AND expiresAt > :now AND expiresAt = :expires AND #role = :role AND createdAt = :created",
@@ -89,10 +91,10 @@ export class CompanySignInStore {
     } catch { return refused(); }
   }
   /** Every mutation and its durable log commit together. Logs contain only fixed events and opaque ids. */
-  async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string): Promise<void> {
-    if (!OrgIdSchema.safeParse(companyId).success || !/^company-[a-z-]+$/.test(event) || writes.length > 3) throw unavailable();
+  async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string, memberAudit?: { createdBy: string; createdAt: string; fromRole: Member["role"]; toRole: Member["role"] }): Promise<void> {
+    if (!OrgIdSchema.safeParse(companyId).success || !/^company-[a-z-]+$/.test(event) || writes.length > 4) throw unavailable();
     await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: [...writes, { Put: {
-      TableName: this.input.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${this.iso()}#${randomUUID()}`, entityType: "COMPANY_LOG", event, companyId, ...(personId === undefined ? {} : { personId }) }, ConditionExpression: "attribute_not_exists(pk)",
+      TableName: this.input.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${this.iso()}#${randomUUID()}`, entityType: "COMPANY_LOG", event, companyId, ...(personId === undefined ? {} : { personId }), ...memberAudit }, ConditionExpression: "attribute_not_exists(pk)",
     } }] }));
   }
   async create(companyId: string, name: string, email: string, hours: number): Promise<void> {
@@ -142,16 +144,132 @@ export class CompanySignInStore {
     });
     return { preapprovals, more: answer.LastEvaluatedKey !== undefined };
   }
-  async setRevoked(companyId: string, personId: string, revoked: boolean): Promise<boolean> {
+  private memberMirror(member: Member): Write {
+    return { Put: { TableName: this.input.tableName, Item: { ...member, ...companyMemberKey(member.companyId, member.personId), entityType: "COMPANY_MEMBER_VIEW" } } };
+  }
+  /** Stable snapshot CAS protects role, revocation and mirror contents against concurrent writers. */
+  private memberSnapshot(member: Member) {
+    const names: Record<string, string> = {}, values: Record<string, unknown> = {};
+    const fields = ["entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy", "updatedAt", "updatedBy"] as const;
+    const conditions = fields.map((field, i) => {
+      const name = `#m${i}`, value = `:m${i}`;
+      names[name] = field;
+      if (member[field] === undefined) return `attribute_not_exists(${name})`;
+      values[value] = member[field]; return `${name} = ${value}`;
+    });
+    return { ConditionExpression: conditions.join(" AND "), ExpressionAttributeNames: names, ExpressionAttributeValues: values };
+  }
+  private liveMemberCheck(companyId: string, personId: string, owner: boolean): Write {
+    return { ConditionCheck: { TableName: this.input.tableName, Key: membershipKey(personId),
+      ConditionExpression: "#entity = :entity AND companyId = :company AND personId = :person AND attribute_not_exists(revokedAt) AND " + (owner ? "#role = :owner" : "(#role = :owner OR #role = :admin)"),
+      ExpressionAttributeNames: { "#entity": "entityType", "#role": "role" },
+      ExpressionAttributeValues: { ":entity": "COMPANY_MEMBERSHIP", ":company": companyId, ":person": personId, ":owner": "owner", ...(owner ? {} : { ":admin": "admin" }) },
+    } };
+  }
+  private async checkActor(companyId: string, createdBy: string | undefined): Promise<void> {
+    if (createdBy === undefined) return;
+    const actor = await this.membership(createdBy);
+    if (actor === undefined || actor.companyId !== companyId || actor.revokedAt !== undefined || (actor.role !== "admin" && actor.role !== "owner")) throw unavailable();
+  }
+  /** #660 plugs its fresh auth_time verification into this single fail-closed seam. */
+  private requireMemberStepUp(role: Member["role"]): void {
+    if (role === "admin" || role === "owner") throw new CompanyMemberRefusal({ ok: false, error: "step_up_required", message: MEMBER_STEP_UP });
+  }
+  private async writeMember(previous: Member, next: Member, event: string, createdBy?: string): Promise<void> {
+    // A self-actor's target snapshot must itself still be authorized. The earlier
+    // actor read alone can race with this read; the snapshot CAS then fences it.
+    if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
+    let witness: string | undefined;
+    if (previous.role === "owner" && previous.revokedAt === undefined && (next.role !== "owner" || next.revokedAt !== undefined)) {
+      // The mirror only locates a candidate; the transaction checks the authoritative row.
+      // Search the company mirror under one total read budget, including filter-short pages.
+      const page = await this.memberPage(previous.companyId, undefined, 100, previous.personId);
+      witness = page.members.find((member) => member.personId !== previous.personId && member.role === "owner" && member.revokedAt === undefined)?.personId;
+      if (witness === undefined && page.more) throw unavailable();
+      if (witness === undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
+    }
+    const writes: Write[] = [
+      { Put: { TableName: this.input.tableName, Item: { ...membershipKey(next.personId), ...next }, ...this.memberSnapshot(previous) } },
+      this.memberMirror(next),
+    ];
+    // DynamoDB forbids two actions on one item. A self-actor is checked by the target
+    // snapshot CAS; an actor who is also the owner witness uses the stronger owner check.
+    if (createdBy !== undefined && createdBy !== previous.personId && createdBy !== witness) writes.push(this.liveMemberCheck(previous.companyId, createdBy, false));
+    const witnessIndex = writes.length;
+    if (witness !== undefined) writes.push(this.liveMemberCheck(previous.companyId, witness, true));
+    try {
+      await this.operatorWrite(previous.companyId, event, writes, previous.personId, { createdBy: createdBy ?? "operator", createdAt: this.iso(), fromRole: previous.role, toRole: next.role });
+    } catch (error) {
+      const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | null)?.CancellationReasons;
+      if (witness !== undefined && conditional(error) && reasons?.[witnessIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
+      throw unavailable();
+    }
+  }
+  async setRevoked(companyId: string, personId: string, revoked: boolean, createdBy?: string): Promise<boolean> {
+    if (!OrgIdSchema.safeParse(companyId).success || typeof revoked !== "boolean") throw unavailable();
+    await this.checkActor(companyId, createdBy);
     const member = await this.membership(personId);
     if (member === undefined || member.companyId !== companyId) return false;
-    await this.operatorWrite(companyId, revoked ? "company-member-revoke" : "company-member-restore", [{ Update: {
-      TableName: this.input.tableName, Key: membershipKey(personId),
-      UpdateExpression: revoked ? "SET revokedAt = :at, revokedBy = :operator" : "REMOVE revokedAt, revokedBy",
-      ConditionExpression: "companyId = :company AND personId = :person",
-      ExpressionAttributeValues: { ":company": companyId, ":person": personId, ...(revoked ? { ":at": this.iso(), ":operator": "operator" } : {}) },
-    } }], personId);
+    const next = { ...member };
+    if (revoked) { next.revokedAt = this.iso(); next.revokedBy = createdBy ?? "operator"; }
+    else { delete next.revokedAt; delete next.revokedBy; }
+    await this.writeMember(member, next, revoked ? "company-member-revoke" : "company-member-restore", createdBy);
     return true;
+  }
+  async setRole(companyId: string, personId: string, role: Member["role"], createdBy?: string): Promise<"changed" | "unchanged" | "not_found"> {
+    if (!OrgIdSchema.safeParse(companyId).success || !OrgRoleSchema.safeParse(role).success) throw unavailable();
+    await this.checkActor(companyId, createdBy);
+    this.requireMemberStepUp(role);
+    const member = await this.membership(personId);
+    if (member === undefined || member.companyId !== companyId) return "not_found";
+    if (member.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_REVOKED });
+    if (member.role === role) return "unchanged";
+    await this.writeMember(member, { ...member, role, updatedAt: this.iso(), updatedBy: createdBy ?? "operator" }, "company-member-role-set", createdBy);
+    return "changed";
+  }
+  /** One total budget, strong reads, no filter assumptions. The host owns the SDK timeout. */
+  async listMembers(companyId: string, cursor?: string, limit?: number): Promise<{ members: Member[]; more: boolean; cursor?: string }> {
+    return this.memberPage(companyId, cursor, limit);
+  }
+  private async memberPage(companyId: string, cursor?: string, limit?: number, ownerExcept?: string): Promise<{ members: Member[]; more: boolean; cursor?: string }> {
+    const parsed = MemberListInput.safeParse({ companyId, ...(cursor === undefined ? {} : { cursor }), ...(limit === undefined ? {} : { limit }) });
+    if (!parsed.success) throw new CompanyMemberRefusal({ ok: false, error: "invalid_request" });
+    const size = parsed.data.limit ?? 100, started = this.input.now();
+    let after = cursor === undefined ? undefined : memberCursorPerson(companyId, cursor);
+    let bytes = 0, evaluated = 0;
+    const members: Member[] = [];
+    const pk = companyScoped(companyId, "MEMBERS");
+    const Row = CompanyMember.extend({ entityType: z.literal("COMPANY_MEMBER_VIEW"), pk: z.literal(pk), sk: z.string().regex(/^MEMBER#[a-f0-9]{64}$/) });
+    const Key = z.object({ pk: z.literal(pk), sk: z.string().regex(/^MEMBER#[a-f0-9]{64}$/) }).strict();
+    for (let queries = 0; queries < 32; queries++) {
+      if (this.input.now() - started > 10_000) throw unavailable();
+      const remaining = Math.min(size - members.length, 1_000 - evaluated);
+      const answer = await this.input.documentClient.send(new QueryCommand({ TableName: this.input.tableName,
+        KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": pk, ...(ownerExcept === undefined ? {} : { ":owner": "owner", ":except": ownerExcept }) }, ConsistentRead: true, Limit: remaining,
+        ...(ownerExcept === undefined ? {} : { FilterExpression: "#role = :owner AND attribute_not_exists(revokedAt) AND personId <> :except", ExpressionAttributeNames: { "#role": "role" } }),
+        ...(after === undefined ? {} : { ExclusiveStartKey: companyMemberKey(companyId, after) }),
+      })) as { Items?: unknown[]; LastEvaluatedKey?: unknown; ScannedCount?: number };
+      bytes += Buffer.byteLength(JSON.stringify(answer));
+      if (!Array.isArray(answer.Items) || answer.Items.length > remaining || bytes > 1_100_000 || this.input.now() - started > 10_000) throw unavailable();
+      const scanned = answer.ScannedCount ?? remaining;
+      if (!Number.isInteger(scanned) || scanned < answer.Items.length || scanned > remaining || scanned < 0) throw unavailable();
+      evaluated += Math.max(1, scanned);
+      let last = after;
+      for (const item of answer.Items) {
+        const row = Row.safeParse(item);
+        if (!row.success || row.data.companyId !== companyId || row.data.sk !== `MEMBER#${row.data.personId}` || (last !== undefined && row.data.personId <= last)) throw unavailable();
+        members.push(CompanyMember.parse({ ...row.data, entityType: "COMPANY_MEMBERSHIP" }));
+        last = row.data.personId;
+      }
+      if (answer.LastEvaluatedKey === undefined) return { members, more: false };
+      const key = Key.safeParse(answer.LastEvaluatedKey);
+      if (!key.success) throw unavailable();
+      const next = key.data.sk.slice(7);
+      if ((after !== undefined && next <= after) || (last !== undefined && next < last)) throw unavailable();
+      after = next;
+      if (members.length === size || (ownerExcept !== undefined && members.length > 0) || evaluated >= 1_000 || queries === 31) return { members, more: true, cursor: memberCursor(companyId, after) };
+    }
+    throw unavailable();
   }
   async setIssuer(companyId: string, settings: unknown): Promise<void> {
     if (companyId === IMPLICIT_COMPANY_ID) throw unavailable();

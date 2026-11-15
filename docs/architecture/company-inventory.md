@@ -1,4 +1,4 @@
-386 record kinds: 37 company-scoped, 8 install-wide, 341 needs-company. 174 routes: 10 company-scoped, 2 install-wide, 162 needs-company.
+387 record kinds: 38 company-scoped, 8 install-wide, 341 needs-company. 174 routes: 10 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -568,6 +568,17 @@ The membership-absent path and the seven original golden pairs keep their respon
 | gateway | POST /v1/slack/events | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
 | gateway | POST /v1/slack/interactions | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
 
+## T3b member writes and company list (stacked on T3)
+
+| record | entity:COMPANY_MEMBER_VIEW | company-scoped | sign-in table | no | - | companyMemberKey validates company and person ids, then uses companyScoped(companyId, "MEMBERS") / MEMBER#personId. join (preapproval/invite and legacy), revoke, restore and role-set write this mirror in the SAME transaction as the authoritative membership. List validates every returned row's company, keys and member fields. |
+
+| forwarding | packages/broker/src/developer/company-membership.ts:242:86:pk | z.literal(pk) | Runtime validation of the exact requested company mirror partition. | companyMemberKey -> companyScoped(companyId, "MEMBERS") |
+| forwarding | packages/broker/src/developer/company-membership.ts:242:105:sk | z.string().regex(/^MEMBER#[a-f0-9]{64}$/) | Runtime validation of the member mirror sort key; compared with the validated personId. | companyMemberKey |
+| forwarding | packages/broker/src/developer/company-membership.ts:243:28:pk | z.literal(pk) | Runtime validation of a DynamoDB continuation in the same company partition. | companyMemberKey |
+| forwarding | packages/broker/src/developer/company-membership.ts:243:47:sk | z.string().regex(/^MEMBER#[a-f0-9]{64}$/) | Runtime validation of the advancing member continuation, encoded with its company. | companyMemberKey |
+
+The new member-request forwarding site is `packages/broker/src/aws/company-member-forwarding.ts:companyMembersThroughLambda` (company-scoped). Only revoke, role-set and list are admitted by a strict schema after web authentication. Lane W can select the fixed list/revoke/setRole methods from companyMemberActionsThroughLambda without constructing a kind outside this module. Company and actor come from a strongly read, live admin/owner membership; mismatched requested companies and extra claims refuse before invoke. Member writes transactionally recheck supplied actors. A self-actor uses the target snapshot condition, and an actor who is also the owner witness uses that stronger owner ConditionCheck (DynamoDB forbids duplicate item actions). This replaces the old operator-only revoke pin; restore and all other operator-only kinds remain forbidden in broker forwarding. No HTTP route or Gateway path is added. The member mirror only locates an owner candidate; last-owner protection checks that candidate's authoritative membership in the mutation transaction. Existing person-global authoritative membership stays the R4 pinned exception. IAM and complete mirror backfill are prerequisites to enabling this read path; no GSI or infrastructure edit is included.
+
 ## Generic forwarding coverage (not record kinds)
 
 Each row names its feeding constructor set. A generic DocumentStore/stream site can receive every constructor through the port; module-specific sites name the constructor helpers or record families they consume. Runtime sort-key components do not define another partition family. This table does not grant permission for a constructor to become unreadable.
@@ -951,9 +962,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core-host/lessons.ts:251:35:pk | row.pk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
 | forwarding | packages/broker/src/core-host/lessons.ts:251:47:sk | row.sk | Company-scoped forwarding: catalog partition or loaded keys from companyScoped lesson-use/retire partitions; no new record family (core-host-lessons erase tests). | orgProjectCatalogKey; companyScoped(LESSON_USE, LESSON_RETIRE_ASK) |
 | forwarding | packages/broker/src/developer/company-issuer.ts:37:49:pk | z.literal(key.pk) | Runtime validation pins the issuer record to the requested company key. | companyIssuerKey |
-| forwarding | packages/broker/src/developer/company-membership.ts:21:136:sk | emailIndexKey(CompanyEmail.parse(email)).pk | The existing normalized email hash becomes the preapproval sort key inside its company partition. | preapprovalKey -> companyScoped(companyId, "PREAPPROVAL") |
-| forwarding | packages/broker/src/developer/company-membership.ts:139:47:pk | z.literal(pk) | Runtime validation of the queried company partition, not a new key family. | preapprovalKey / preapprovalHashKey |
-| forwarding | packages/broker/src/developer/company-membership.ts:139:66:sk | z.string().regex(/^EMAIL#[a-f0-9]{64}$/) | Runtime validation of the normalized email hash sort key within its company partition. | preapprovalKey / preapprovalHashKey |
 | forwarding | packages/broker/src/developer/store.ts:98:116:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | emailIndexKey, signInClientKey |
 | forwarding | packages/broker/src/developer/task-person-identity.ts:82:100:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | DEVELOPER identity / MEMBER grant / PROJECT revision constructors |
 | forwarding | packages/broker/src/developer/task-person-identity.ts:82:104:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | DEVELOPER identity / MEMBER grant / PROJECT revision constructors |
@@ -1181,5 +1189,8 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 | record | builder:packages/broker/src/core/people/erase.ts:personErasePendingPartition; entity:PERSON_ERASE_PENDING | company-scoped | State table | no | - | ORG-prefixed key constructor (orgScoped); person-erase tests pin company scope. |
 | record | entity:PERSON_ERASED | company-scoped | State table | no | - | Receipt row under personErasedKey, an ORG-prefixed key (orgScoped); person-erase tests pin company scope. |
 | record | pk:TASKSPEND; entity:TASK_SPEND | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| forwarding | packages/broker/src/developer/company-membership.ts:22:136:sk | emailIndexKey(CompanyEmail.parse(email)).pk | The existing normalized email hash becomes the preapproval sort key inside its company partition. | preapprovalKey -> companyScoped(companyId, "PREAPPROVAL") |
+| forwarding | packages/broker/src/developer/company-membership.ts:141:47:pk | z.literal(pk) | Runtime validation of the queried company partition, not a new key family. | preapprovalKey / preapprovalHashKey |
+| forwarding | packages/broker/src/developer/company-membership.ts:141:66:sk | z.string().regex(/^EMAIL#[a-f0-9]{64}$/) | Runtime validation of the normalized email hash sort key within its company partition. | preapprovalKey / preapprovalHashKey |
 
 Forwarding rows were relocated by exact expression; the extracted host-glue rows and core-host erase/catalog forwarding are enumerated separately above. No scanner rule or limit changed.
