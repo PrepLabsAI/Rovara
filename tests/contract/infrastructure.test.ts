@@ -412,7 +412,7 @@ describe("production foundation and worker settings", () => {
       ...foundation,
       availabilityZoneIds: ["use1-az1", "use1-az1"],
     })).toThrow(/distinct/i);
-    expect(() => defaultProductionAvailabilityZoneIds("us-west-2")).toThrow(/no verified/i);
+    expect(() => defaultProductionAvailabilityZoneIds("eu-west-1")).toThrow(/no verified/i);
   });
 });
 

@@ -160,7 +160,9 @@ describe("environment naming", () => {
     // The EC2 worker log group has a fixed name the boot script writes to; retaining it would stop
     // the environment from being deployed again after a teardown.
     expect(logGroups.find(([id]) => id.startsWith("Ec2WorkersWorkerLogs"))?.[1].DeletionPolicy).toBe("Delete");
-    expect(logGroups).toHaveLength(2);
+    // The DNS firewall's query log (/agentx/<env>/dns-firewall) has a fixed name too, and is deleted with the stack for the same reason.
+    expect(logGroups.find(([id]) => id.startsWith("AgentDnsFirewallQueryLogs"))?.[1].DeletionPolicy).toBe("Delete");
+    expect(logGroups).toHaveLength(3);
   });
 
   it("scopes connector secrets to the environment, and grants nothing of retired runtime", () => {

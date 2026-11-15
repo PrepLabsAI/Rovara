@@ -71,9 +71,21 @@ describe("service role policy", () => {
     expect(serviceRoleStatements(scope).find((s) => s.Sid === "IamRoles")!.Action).toContain("iam:UpdateRoleDescription");
   });
 
-  it("creates only the ECS service-linked role", () => {
+  it("creates only the ECS and Route 53 Resolver service-linked roles", () => {
     const linked = serviceRoleStatements(scope).find((s) => s.Sid === "ServiceLinkedRoles")!;
-    expect(linked.Condition).toEqual({ StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com"] } });
+    expect(linked.Condition).toEqual({ StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "route53resolver.amazonaws.com"] } });
+  });
+
+  it("manages the DNS firewall only in this account and region, and only lists it on any resource", () => {
+    for (const statements of [serviceRoleStatements(scope), defaultBoundaryStatements(scope)]) {
+      const resolver = statements.filter((s) => s.Action.some((a) => a.startsWith("route53resolver:")));
+      expect(resolver).toEqual([
+        { Sid: "DnsFirewall", Effect: "Allow", Action: ["route53resolver:*"], Resource: "arn:aws:route53resolver:us-east-1:123456789012:*" },
+        { Sid: "DnsFirewallList", Effect: "Allow", Action: ["route53resolver:List*"], Resource: "*" },
+      ]);
+    }
+    expect(SERVICE_ROLE_SERVICES).not.toContain("route53resolver");
+    expect(BOUNDARY_SERVICES).not.toContain("route53resolver");
   });
 
   it("never grants iam:* or wildcard IAM user, group or policy management", () => {
@@ -274,7 +286,7 @@ describe("default permission boundary", () => {
     expect(byId.ServiceLinkedRoles).toEqual({
       Sid: "ServiceLinkedRoles", Effect: "Allow", Action: ["iam:CreateServiceLinkedRole"],
       Resource: "arn:aws:iam::123456789012:role/aws-service-role/*",
-      Condition: { StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com"] } },
+      Condition: { StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "route53resolver.amazonaws.com"] } },
     });
   });
 
