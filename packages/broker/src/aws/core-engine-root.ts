@@ -16,7 +16,7 @@
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
 //
-// What the registry still lacks (approvers, model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
+// What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
 // the admission hold sweep) refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -68,7 +68,7 @@ export interface BrokerCoreRootInputs {
   repositoryCredential: CoreRuntimeOptions["repositoryCredential"];
   /** Code's AWS adapter inputs, asked for only when the registry is first built. */
   codeModules: () => CodeModuleDeps;
-  /** More modules after Code's and the step 5 ones (approvers and model keys when their lanes land). */
+  /** More modules after Code's and the step 5 ones (model keys when lane L2b lands). */
   extraModules?: () => readonly CoreAdapterModule[];
   /** The policy hook's asker (`policyHookInstallFromEnvironment`). Absent: an install with hook settings refuses its registry. */
   policyHookInstall?: () => PolicyHookInstall | undefined;
@@ -240,7 +240,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity }), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey }), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {

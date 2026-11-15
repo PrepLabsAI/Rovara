@@ -197,12 +197,14 @@ describe("the step 5 modules", () => {
   const storage = coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => new MemoryDocumentStore() });
   const context = { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined };
 
-  it("fill metering, admission, identity and the audit sink, none as Code's laptop default", async () => {
+  it("fill metering, admission, identity, approvers (lane L2a) and the audit sink, none as Code's laptop default", async () => {
     const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: ORG }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } });
-    expect(modules.map((module) => module.point)).toEqual(["metering", "admission", "identity", "audit-sink"]);
+    expect(modules.map((module) => module.point)).toEqual(["metering", "admission", "identity", "approvers", "audit-sink"]);
     expect(modules.some((module) => module.isDefault === true)).toBe(false);
-    // The merge area needs storage, code host, approvers and audit: approvers stays owed, so it is named.
-    await expect(buildCoreRegistry({ modules: [storage, ...modules], context, areas: ["merge"] })).rejects.toThrow(/approvers/u);
+    // The merge area needs storage, code host, approvers and audit: the code host is the broker's own lane (L1b), so it is named, and approvers no longer is.
+    const refused = await buildCoreRegistry({ modules: [storage, ...modules], context, areas: ["merge"] }).then(() => undefined, (error: unknown) => error as Error);
+    expect(refused?.message).toMatch(/code-host/u);
+    expect(refused?.message).not.toMatch(/approvers/u);
   });
 
   it("refuse the registry when no company is allowed, rather than let every company in", async () => {
