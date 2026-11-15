@@ -360,7 +360,11 @@ describe("callers", () => {
       "packages/broker/src/core/proof/evidence-v2-lines.ts",
     ];
     expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText"))).toEqual(writerFiles);
-    for (const name of proofOnly) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
+    // The v1 loader (test-proof-lines.ts) also uses the unconfirmed words.
+    for (const name of proofOnly) expect(callers([name])).toEqual([
+      "packages/broker/src/core/proof/proof-table.ts",
+      ...(name === "AGENT_REPLIES_UNCONFIRMED_WORDS" ? ["packages/broker/src/developer/test-proof-lines.ts"] : []),
+    ]);
     // setup-prove.ts (DEC 185 / TE-C5 part A) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
     expect(callers(["inertEvidenceText"])).toEqual([
       "packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/setup-prove.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
@@ -425,6 +429,8 @@ describe("no callers", () => {
       "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
       // setup-prove.ts (DEC 185 / #629) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
       "packages/worker/src/setup-prove.ts",
+      // The v1 test-proof description loader uses the unconfirmed-replies words (TE-192a B-0).
+      "packages/broker/src/developer/test-proof-lines.ts",
     ]);
     expect(hits.filter((file) => !file.startsWith("packages/contracts/") && !approved.has(file))).toEqual([]);
   });

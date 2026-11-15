@@ -436,6 +436,10 @@ export async function createWorkflowE2E(options: {
   const root = await createFixtureDirectory("agentx-e2e-");
   const repoDirectory = join(root, "repo", "demo");
   await mkdir(repoDirectory, { recursive: true });
+  // The worker's own temporary directory in the workspace, as the worker image lays it out (mode 0700): the verified base-rule read keeps its scratch directories here, so a read
+  // is never in a directory another test run shares. In the run's shared TMPDIR, a test whose fake clock is past the one-hour stale age (09-resilience, 08-merge-close, 10-page-auth)
+  // removed the live scratch directory of a read in another vitest worker, and that task stopped on "couldn't verify the base rule files" (the 2.9a and 2.11 flake).
+  await mkdir(join(root, ".agentx-runtime", "tmp"), { recursive: true, mode: 0o700 });
   const git = async (args: string[], env?: NodeJS.ProcessEnv): Promise<string> =>
     (await execFile("git", ["-C", repoDirectory, ...args], env === undefined ? {} : { env: { ...process.env, ...env } })).stdout.trim();
   await git(["init", "--quiet", "-b", "main"]);
