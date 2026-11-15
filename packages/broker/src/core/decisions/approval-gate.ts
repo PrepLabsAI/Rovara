@@ -89,12 +89,17 @@ export interface DecisionAttempt {
   reason?: string;
   /** Subject-specific input (a plan's answers and comments). Opaque to the gate. */
   details?: unknown;
+  /**
+   * Checks of what the caller read about who is deciding (a chat link that names the person: core/channel/links.ts `channelLinkFence`), committed in the decision's own transaction. If one no longer
+   * holds (the account was unlinked or linked to someone else meanwhile), nothing is recorded and the answer is `link_gone`. Absent: none.
+   */
+  fence?: readonly TransactItem[];
 }
 
 export type GateRefusalReason =
   | "unsupported" | "invalid" | "not_found" | "not_waiting" | "stale" | "expired"
   | "method_not_allowed" | "not_approved" | "self_approval_not_allowed" | "needs_more_approvers"
-  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome" | "sign_in_not_fresh";
+  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome" | "sign_in_not_fresh" | "link_gone";
 
 export interface ApprovalRecord {
   requestId: string;
@@ -405,10 +410,14 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
           subject: request.subject, details: { kind: attempt.kind, risk, revision: attempt.seen.revision, method: proofs[0]!.method },
         }),
       ];
+      // The caller's fence goes LAST, so the indexes of the steps above do not move.
+      const fenceStart = items.length;
+      items.push(...(attempt.fence ?? []));
       const committed = await deps.store.transact(items);
       if (committed.applied) return { status: "decided", record, approver, result: applied.result ?? {} };
 
       // ---- a lost race: say which rule lost
+      if (committed.failed.some((index) => index >= fenceStart)) return refuse("link_gone", "The account that decided is no longer linked to that person.");
       const proofStart = 2;
       const onceCount = proofs.filter((proof) => !reusableMethods.includes(proof.method)).length;
       const proofEnd = proofStart + proofs.length + onceCount;
