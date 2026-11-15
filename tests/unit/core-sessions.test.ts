@@ -375,3 +375,10 @@ describe("reading sessions", () => {
     expect(await new SessionStore(w.store).getForTask(ORG, { taskId: TASK, orgId: "org_11111111111111111111", sessionId: SESSION })).toBeUndefined();
   });
 });
+
+it("T8 install-wide projector refuses contradictory or malformed companies", () => {
+  const a = `org_${"a".repeat(20)}`, b = `org_${"b".repeat(20)}`;
+  for (const fields of [{ companyId: a, orgId: b }, { companyId: "bad-canary" }]) {
+    expect(sessionTargetsOf([{ sequence: "1", kind: "insert", cause: "write", key: { pk: "DEVTASK#same", sk: "TASK" }, after: { pk: "DEVTASK#same", sk: "TASK", sessionId: "same", ...fields } }])).toEqual([]);
+  }
+});

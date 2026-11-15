@@ -2,7 +2,8 @@
 
 A service built on Rovara (a dashboard, or a scheduler that acts as a channel adapter) can let Rovara users sign in
 with Rovara rather than with an identity system of its own. An administrator registers it as a **sign-in client**.
-Its tokens carry its own audience, so Rovara's API refuses them.
+Its tokens carry its own audience, so Rovara's API refuses them, unless the service has
+[full access](#full-access).
 
 Developer sign-in must be set up (`agentx signin enable`). Every change is an admin change: the CLI shows what it will
 do and asks before applying it, and `agentx admin changes` records it.
@@ -28,6 +29,8 @@ agentx admin sign-in-client add scheduler \
 
 - `--scope`: what the service may do on Rovara as the signed-in person, comma-separated (see
   [Act as the signed-in person](#act-as-the-signed-in-person)). None by default.
+- `--full-access`: with `--confidential`, Rovara's developer API accepts the service's tokens as the signed-in person
+  (see [Full access](#full-access)).
 
 Running `add` again for the same ID replaces the whole client, and `--confidential` makes a new secret. To change a
 registered client, use `update`.
@@ -105,6 +108,9 @@ A service registered with `--scope` asks for those scopes when it starts a sign-
 `scope`. A scope it may not use is dropped, not refused. Removing a scope from the registration ends it at the next
 token refresh.
 
+These routes are off unless the broker runs with `SIGN_IN_CLIENT_ROUTES=enabled` (nothing in `infra` sets it); while off,
+every `/v1/dev/client/*` route answers 404, and a registered scope does nothing yet.
+
 With such a token, the `/v1/dev/client/*` routes act as the signed-in person, within their own rights:
 
 | Scope | Route | Does |
@@ -122,3 +128,20 @@ The member list shows grants made once this release is in. A grant made before i
 
 See the specs: [sign-in clients](../specs/063-sign-in-clients/spec.md) and
 [scoped actions](../specs/065-client-scopes/spec.md).
+
+## Full access
+
+A service you trust as much as the Rovara CLI, such as a web app, can act as the signed-in person on Rovara's whole
+developer API (`/v1/dev/*`): their projects, workspaces, links and, where the deployment runs them, tasks. Its people
+then use Rovara through it with exactly their own rights.
+
+```sh
+agentx admin sign-in-client update web-app --full-access
+```
+
+- Only a confidential client can have it, so its tokens are only ever issued to the service itself.
+- Its tokens still carry its own audience, so Rovara can tell its calls from the CLI's.
+- A full-access client may also use every scope on its own routes.
+- The admin API (`/v1/admin/*`) still needs an administrator's own sign-in.
+- `update --no-full-access` (or removing the client) turns it off. Rovara checks the setting on every call, so its
+  tokens stop working on the developer API at once, and nobody's CLI sign-in is touched.

@@ -99,11 +99,12 @@ describe("GET /v1/dev/projects (FR-016, FR-013)", () => {
     expect(body.notices).toEqual(["slack_unavailable"]);
   });
 
-  it("does not count an administrator membership as a developer grant (FR-013)", async () => {
+  it("counts an administrator membership as a grant, and no other role (FR-013.1, #630)", async () => {
     db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#ledger", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "ledger", role: "administrator" });
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#payments-api", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "payments-api", role: "viewer" });
     channelMembers.mockResolvedValueOnce({ ok: true, memberOf: [] });
-    const body = JSON.parse((await call("/v1/dev/projects", claims())).body) as { projects: Array<{ name: string }> };
-    expect(body.projects.map((project) => project.name)).toEqual(["solo"]);
+    const body = JSON.parse((await call("/v1/dev/projects", claims())).body) as { projects: Array<{ name: string; access: string }> };
+    expect(body.projects.map((project) => [project.name, project.access])).toEqual([["ledger", "granted"], ["solo", "granted"]]);
   });
 
   it("reads the session and developer from the sign-in table, and grants and bindings from the state table", async () => {
@@ -169,6 +170,49 @@ describe("GET /v1/dev/projects (FR-016, FR-013)", () => {
     db.items.delete("PROJECT#payments-api\u0000REV#000000000007");
     const body = JSON.parse((await call("/v1/dev/projects", claims())).body) as { projects: Array<{ name: string }> };
     expect(body.projects.map((project) => project.name)).toEqual(["solo"]);
+  });
+});
+
+describe("PUT /v1/dev/me/name (#634)", () => {
+  const put = async (body: string, broker: AdminHandler, jwt = claims()) => broker({
+    rawPath: "/v1/dev/me/name", headers: { authorization: await bearer(jwt), "content-type": "application/json" }, body,
+    requestContext: { requestId: "r", http: { method: "PUT" } },
+  });
+  async function withSetName(answer: Awaited<ReturnType<NonNullable<DeveloperApiConfiguration["setDisplayName"]>>>) {
+    const setDisplayName = vi.fn(async () => answer);
+    const built = await createAdminBroker({ developer: { ...config, setDisplayName } });
+    built.db.set({ pk: "SESSION#s-1", sk: "META", sessionId: "s-1", developerId, amr: "slack", slackUserId: "U0MAYA001", startedAt: new Date(T0).toISOString(), endsAt: T0 / 1000 + 604_800 });
+    built.db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "slack", issuer: "https://slack.com", subject: "U0MAYA001", displayName: "Maya Chen", slackUserId: "U0MAYA001", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+    return { setDisplayName, handler: built.handler };
+  }
+
+  it("stores the caller's own name through the sign-in Lambda, normalised, and answers it chosen", async () => {
+    const logs = captureLogs();
+    const { setDisplayName, handler: broker } = await withSetName({ ok: true, name: "Maya C" });
+    const response = await put(JSON.stringify({ name: "  Maya   C " }), broker);
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ name: "Maya C", nameChosen: true });
+    expect(setDisplayName).toHaveBeenCalledWith({ kind: "set-display-name", developerId, name: "Maya C" });
+    expect(logs()).toContainEqual({ component: "broker", event: "developer.display_name_chosen", developerId });
+  });
+
+  it("refuses a body that is not just a valid name, before it reaches the sign-in Lambda", async () => {
+    const { setDisplayName, handler: broker } = await withSetName({ ok: true, name: "x" });
+    for (const body of [JSON.stringify({ name: "maya@example.com" }), JSON.stringify({ name: "Maya", developerId: "e".repeat(64) }), JSON.stringify({}), "not json"]) {
+      const response = await put(body, broker);
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body)).toMatchObject({ error: { code: "CONFIG_INVALID" } });
+    }
+    expect(setDisplayName).not.toHaveBeenCalled();
+  });
+
+  it("asks to sign in again when the sign-in record is gone, and says unavailable when the Lambda is", async () => {
+    expect((await put(JSON.stringify({ name: "Maya" }), (await withSetName({ ok: false, error: "not_found" })).handler)).statusCode).toBe(401);
+    expect(JSON.parse((await put(JSON.stringify({ name: "Maya" }), (await withSetName({ ok: false, error: "unavailable" })).handler)).body)).toMatchObject({ error: { code: "RUNTIME_UNAVAILABLE" } });
+  });
+
+  it("is not found where the deployment cannot store names", async () => {
+    expect((await put(JSON.stringify({ name: "Maya" }), handler)).statusCode).toBe(404);
   });
 });
 
