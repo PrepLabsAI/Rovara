@@ -171,7 +171,7 @@ export interface DeveloperRouteDependencies {
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
   createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
-  clientRepositories?: () => Promise<ClientRepositoriesResponse["installations"]>;
+  clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -1047,7 +1047,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
     if (!creating) {
       if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-      return { installations: await deps.clientRepositories() } satisfies ClientRepositoriesResponse;
+      return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
     }
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
     const parsed = CreateClientProjectRequestSchema.safeParse(jsonBody(request));

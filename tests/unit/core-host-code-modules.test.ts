@@ -145,7 +145,8 @@ describe("Code's AWS adapter modules", () => {
     const registry = await buildCoreRegistry({ modules: modulesWithOwed(aws), context: context(), areas: ["flow", "build", "merge"] });
     const secrets = registry.require("secrets");
     expect((await secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${FAKE_COMPANY}/linear` }))?.reveal()).toBe("own");
-    await expect(secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${OTHER}/linear` })).rejects.toThrow("the secret reference names a secret of another company");
+    // T6 (#655): another company's secret answers exactly like a missing one, and is never read.
+    expect(await secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${OTHER}/linear` })).toBeUndefined();
     expect(aws.secrets.reads).toEqual([`agentx/staging/org-connectors/${FAKE_COMPANY}/linear`]);
     expect(COMPANY_SECRET_PATHS).toContain("org-connectors");
   });
