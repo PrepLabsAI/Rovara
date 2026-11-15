@@ -140,6 +140,25 @@ describe("the account registry across the key move", () => {
     expect(read.entries).toHaveLength(4);
   });
 
+  it("still reads an account's older revisions from the old key once its newest revision is under the new key (a task pinned to an older project revision keeps its definition)", async () => {
+    const db = new FakeDynamoDb();
+    const written = seedLegacy(db);
+    const viewer1 = written.find((write) => write.definition.profileId === "orders-viewer")!;
+    const plan = await planSetupAccountWrites({ documentClient: { send: db.send } as never, tableName: TABLE }, { orgId: TEST_ORG, projectId: "payments", snapshot: snapshotOfContract(withViewerRole("auditor")), setup: { approvedAt: T2, proposalSha256: SHA }, now: T0 + 86_400_000 });
+    await transact(db, plan.items);
+    const read = await readAccountRegistryEntries({ documentClient: { send: db.send } as never, tableName: TABLE }, TEST_ORG, "payments", [{ applicationId: ORDERS_APPLICATION_ID, profileId: "orders-viewer" }], { earlierFor: () => true });
+    expect(read.entries[0]!.definition.revision).toBe(2);
+    expect(read.entries[0]!.earlier).toEqual([viewer1.definition]);
+    // Company B, with its own revision 2 of the same-named account, gets none of company A's old revision 1 as an earlier definition.
+    const bPk = `ORG#${OTHER_ORG}#PROJECT#payments`;
+    const viewer2 = read.entries[0]!;
+    db.set({ pk: bPk, sk: `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#orders-viewer`, entityType: "E2E_ACCOUNT_LATEST", ...viewer2.latest, setupApprovedAt: T2, setupProposalSha256: SHA });
+    db.set({ pk: bPk, sk: `E2E_ACCOUNT#${ORDERS_APPLICATION_ID}#orders-viewer#REV#2`, entityType: "E2E_ACCOUNT", ...viewer2.definition });
+    const other = await readAccountRegistryEntries({ documentClient: { send: db.send } as never, tableName: TABLE }, OTHER_ORG, "payments", [{ applicationId: ORDERS_APPLICATION_ID, profileId: "orders-viewer" }], { earlierFor: () => true });
+    expect(other.entries[0]!.definition.revision).toBe(2);
+    expect(other.entries[0]!.earlier).toEqual([]);
+  });
+
   it("fences an account read from the old key: the transaction fails once the account has a row under the new key,", async () => {
     const db = new FakeDynamoDb();
     seedLegacy(db);

@@ -45,8 +45,13 @@ export async function readAccountRegistryEntries(dependencies: StateTable, orgId
       if (options.earlierFor?.(entry.definition) !== true) { entries.push(entry); continue; }
       const earlier: E2EApplicationAccountDefinition[] = [];
       for (let revision = entry.definition.revision - 1; revision >= 1 && revision >= entry.definition.revision - EARLIER_REVISIONS_READ; revision -= 1) {
-        const definition = parseAccountDefinitionRow(scope, projectId, applicationId, profileId, revision,
+        let definition = parseAccountDefinitionRow(scope, projectId, applicationId, profileId, revision,
           await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(scope, projectId, applicationId, profileId, revision)));
+        // An older revision is written once and never moved: after the account's newest revision went under the company's key, the older ones are still under the old key.
+        if (definition === undefined && scope !== LEGACY_KEY_SCOPE && legacyScopeOf(orgId) !== undefined) {
+          definition = parseAccountDefinitionRow(LEGACY_KEY_SCOPE, projectId, applicationId, profileId, revision,
+            await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(LEGACY_KEY_SCOPE, projectId, applicationId, profileId, revision)));
+        }
         if (definition !== undefined) earlier.push(definition);
       }
       entries.push({ ...entry, earlier });
