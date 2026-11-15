@@ -440,7 +440,9 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   const fullAccess = registration.fullAccess === true;
   const reach = fullAccess
     ? ", which AgentX's developer API accepts as the signed-in person, with all their rights, as it does the AgentX CLI's (full access)"
-    : ", which AgentX's own API never accepts";
+    : scopes.length === 0 ? ", which AgentX's own API never accepts"
+      // Plan v3.2 lane ID: its scopes open the developer API routes that name them, and no others.
+      : ", which AgentX's developer API accepts only on the routes its scopes open";
   return {
     effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}${reach}.${secret}${replaced}${fullAccess ? "" : actions}`,
     details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential, keepsSecret: keepSecret === true, scopes, fullAccess },
