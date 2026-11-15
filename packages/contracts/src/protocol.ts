@@ -372,6 +372,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
       const commits = new Map(Object.entries(payload.setupProve.commits));
       if (payload.readOnly !== true || payload.pins === undefined || payload.pins.length !== commits.size
         || payload.pins.some(pin => commits.get(pin.repository) !== pin.commit)
+        || payload.meta !== undefined || payload.registries !== undefined
         || payload.checkout !== undefined || payload.savedEnvBuild !== undefined || payload.savedEnv !== undefined || payload.testServices !== undefined) {
         context.addIssue({ code: "custom", path: ["setupProve"], message: "setup prove requires its own read-only pinned preparation" });
       }

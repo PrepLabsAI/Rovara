@@ -51,3 +51,18 @@ it("unreadable JSON is refused without invoking accessors or toJSON", () => {
   const cycle: Record<string, unknown> = {}; cycle.self = cycle;
   expect(PrepareSetupProveSchema.safeParse(cycle).success).toBe(false);
 });
+
+it.each([
+  { registries: [{ name: "packages", kind: "npm", format: "npm", url: "https://packages.example.test" }] },
+  { meta: { repository: { name: "meta", url: "https://github.com/acme/meta.git", path: "meta", defaultBranch: "main", credentialRef: "r" }, paths: ["docs"], commit: "d".repeat(40) } },
+])("setup Prove refuses otherwise valid preparation extras %j", extra => {
+  const value = invocation();
+  const ordinary = { ...value.payload, setupProve: undefined };
+  expect(WorkerInvocationSchema.safeParse({ ...value, payload: { ...ordinary, ...extra } }).success).toBe(true);
+  expect(WorkerInvocationSchema.safeParse({ ...value, payload: { ...value.payload, ...extra } }).success).toBe(false);
+});
+it("setup Prove explicitly refuses duplicate pins even when count and each commit match", () => {
+  const value = invocation();
+  const payload = { ...value.payload, setupProve: { ...job, commits: { svc: "d".repeat(40), other: "d".repeat(40) } }, pins: [value.payload.pins[0], value.payload.pins[0]] };
+  expect(WorkerInvocationSchema.safeParse({ ...value, payload }).success).toBe(false);
+});

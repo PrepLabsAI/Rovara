@@ -40,6 +40,10 @@ const fail = (reason: Extract<SetupProveResult, { ok: false }>["reason"]): Setup
 
 /** One Prove of the proposal, using its separate read-only preparation. No size selection or feature advertisement. */
 export async function runSetupProve(input: SetupProveInput, ports: SetupProvePorts): Promise<SetupProveResult> {
+  return runSetupProveWithSecrets(input, ports, []);
+}
+
+async function runSetupProveWithSecrets(input: SetupProveInput, ports: SetupProvePorts, transportSecrets: readonly string[]): Promise<SetupProveResult> {
   if (input === null || typeof input !== "object" || !(input.signal instanceof AbortSignal)) return fail("invalid_job");
   const parsed = PrepareSetupProveSchema.safeParse(input.job);
   if (!parsed.success || !Number.isSafeInteger(input.deadlineMs) || input.deadlineMs <= 0 || input.deadlineMs > PROVE_MS) return fail("invalid_job");
@@ -83,9 +87,9 @@ export async function runSetupProve(input: SetupProveInput, ports: SetupProvePor
       let cgroupDirectory: string | undefined;
       try { cgroupDirectory = ports.cgroupDirectoryOf?.(fresh); } catch { /* No measurement, never a guessed directory. */ }
       let outputBytes = 0;
-      // The lease is not project input, but even a command that prints it cannot put it in a report.
+      // Transport credentials are not project input, but cannot survive even if a command prints them.
       const lease = job.leaseToken;
-      const variants = lease === undefined ? [] : [lease, encodeURIComponent(lease), encodeURIComponent(encodeURIComponent(lease)), Buffer.from(lease).toString("base64"), Buffer.from(lease).toString("base64url"), Buffer.from(lease).toString("hex")];
+      const variants = [...transportSecrets, ...(lease === undefined ? [] : [lease])].flatMap(secret => [secret, encodeURIComponent(secret), encodeURIComponent(encodeURIComponent(secret)), Buffer.from(secret).toString("base64"), Buffer.from(secret).toString("base64url"), Buffer.from(secret).toString("hex")]);
       const pattern = variants.length === 0 ? undefined : new RegExp([...new Set(variants)].map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|"), "gu");
       const scrub = (text: string) => pattern === undefined ? text : text.replace(pattern, "[redacted]");
       const commandPorts = fresh.ports;
@@ -160,7 +164,7 @@ export async function runSetupProveJob(deps: SetupProveJobDependencies): Promise
           } };
         },
       };
-      result = await runSetupProve({ job, manifest: deps.manifest, notFrom: others, signal: controller.signal, deadlineMs: Math.max(1, PROVE_MS - (Date.now() - startedAt)) }, ports);
+      result = await runSetupProveWithSecrets({ job, manifest: deps.manifest, notFrom: others, signal: controller.signal, deadlineMs: Math.max(1, PROVE_MS - (Date.now() - startedAt)) }, ports, [invocation.callbackCapability, invocation.payload.repositoryGrant]);
     } catch { result = fail("fresh_sandbox_failed"); }
     const body = JSON.stringify({ jobId: job.jobId, leaseToken: job.leaseToken, result });
     // The schema bounds the report to seven 4-KiB tails and bounded metadata; no response body is read.

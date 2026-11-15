@@ -412,3 +412,19 @@ it("external cancellation is joined before disposal", async () => {
   expect(settled).toBe(true); await pending;
   expect(events).toEqual(["stopped", "disposed"]);
 });
+
+it.each(["callbackCapability", "repositoryGrant"] as const)("the rider scrubs raw and encoded %s from stdout, stderr, posted reports and logs", async field => {
+  const b = jobBench();
+  const secret = [field, "private/+value", "x".repeat(32)].join("-");
+  if (field === "callbackCapability") b.deps.invocation.callbackCapability = secret;
+  else b.deps.invocation.payload.repositoryGrant = secret;
+  const variants = [secret, encodeURIComponent(secret), encodeURIComponent(encodeURIComponent(secret)), Buffer.from(secret).toString("base64"), Buffer.from(secret).toString("base64url"), Buffer.from(secret).toString("hex")];
+  for (const variant of variants) {
+    b.fresh.ports.runCommand = async () => ({ exitCode: 1, timedOut: false, stdout: variant, stderr: variant });
+    const result = await runSetupProveJob(b.deps);
+    expect(result?.ok).toBe(true);
+    if (!result?.ok) throw new Error("report expected");
+    expect(result.report.steps.some(step => step.outputTail?.includes("redacted"))).toBe(true);
+    for (const output of [JSON.stringify(result), bodyText(b.fetchImplementation.mock.calls.at(-1)?.[1]?.body), JSON.stringify(b.log.mock.calls)]) expect(output).not.toContain(variant);
+  }
+});

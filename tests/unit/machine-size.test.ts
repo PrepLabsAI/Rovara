@@ -66,3 +66,7 @@ it("successful output tails and skipped steps cannot claim ARM incompatibility",
  const passed = report(); passed.steps[0]!.outputTail = "exec format error";
  expect(armCompatibilityOf(passed)).toEqual({ verdict: "arm_ok" });
 });
+
+it("ARM incompatible golden omits the redundant compatibility caveat", () => {
+  expect(suggest(1024, { suiteMs: 60_000, armVerdict: "arm_incompatible" }).reasons).toEqual(["peak memory 1024 MiB", "memory headroom 1.5x", "peak memory includes file cache", "suite 1 min", "ARM incompatible; x86 required"]);
+});
