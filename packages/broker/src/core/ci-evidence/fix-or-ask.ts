@@ -44,7 +44,7 @@ export function decideMarkedCheck(input: {
   if (input.testsRan === 0) return { kind: "environment", reason: "failed_before_tests" };
   if (input.mainRun === "failed") return { kind: "environment", reason: "red_on_main" };
   if (input.testsRan === undefined && !input.logShared) return { kind: "ask", reason: "no_detail" };
-  if (input.testsRan !== undefined && input.testsFailed === 0 && !input.logShared) return { kind: "ask", reason: "no_detail" };
+  if (input.testsRan !== undefined && (input.testsFailed === undefined || input.testsFailed === 0) && !input.logShared) return { kind: "ask", reason: "no_detail" };
   // Counts that are not counts never open an uncapped round.
   const counted = (value: number, min: number): boolean => Number.isSafeInteger(value) && value >= min;
   if (!counted(input.roundsUsed, 0) || !counted(input.roundsMax, 1)) return { kind: "ask", reason: "cap_reached" };
