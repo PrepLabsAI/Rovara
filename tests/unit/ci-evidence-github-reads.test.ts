@@ -101,7 +101,7 @@ function fakeClient(routes: Record<string, (url: URL) => Response>, options: { r
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       if (/^\/repos\/[^/]+\/[^/]+\/installation$/u.test(url.pathname)) return new Response(JSON.stringify({ id: 1, account: { login: "acme" } }), { status: 200 });
       if (url.pathname.endsWith("/access_tokens")) {
-        const permissions = (JSON.parse(String(init?.body ?? "{}")) as { permissions?: Record<string, string> }).permissions ?? {};
+        const permissions = (JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { permissions?: Record<string, string> }).permissions ?? {};
         mints.push(permissions);
         if (options.refuseActionsToken === true && permissions["actions"] !== undefined) return new Response(JSON.stringify({ message: "denied" }), { status: 422 });
         return new Response(JSON.stringify({ token: "fake-token", expires_at: "2026-11-15T11:00:00Z" }), { status: 201 });
@@ -109,7 +109,7 @@ function fakeClient(routes: Record<string, (url: URL) => Response>, options: { r
       requests.push({ path: url.pathname, search: url.search, redirect: init?.redirect, signal: init?.signal !== undefined });
       const route = Object.entries(routes).find(([path]) => url.pathname === path);
       return route === undefined ? new Response("{}", { status: 404 }) : route[1](url);
-    }) as typeof fetch,
+    }),
   });
   return { client, requests, mints };
 }
@@ -195,7 +195,7 @@ describe("the GitHub Actions check runner's reads", () => {
   const base = { getPullRequestStatus: async () => { throw new Error("unused"); }, getJobLogTail: async () => undefined };
   it("offers each read only when the client has it", () => {
     const runner = githubActionsCheckRunner(base);
-    expect([runner.runFacts, runner.latestCheck, runner.seenChecks]).toEqual([undefined, undefined, undefined]);
+    expect(Object.keys(runner).filter((key) => ["runFacts", "latestCheck", "seenChecks"].includes(key))).toEqual([]);
   });
   it("asks for the attempt only for an Actions job, and drops facts that do not fit the port", async () => {
     const asked: Array<boolean | undefined> = [];
@@ -215,7 +215,7 @@ describe("the GitHub Actions check runner's reads", () => {
     expect(await runner.latestCheck!({ url: REPO }, { branch: "main" }, { name: "e2e-real", source: String(GITHUB_ACTIONS_APP_ID) }, ORG))
       .toEqual({ revision: SHA_A, check: { name: "e2e-real", state: "completed", conclusion: "failure", required: false, url: "", runId: "9", source: String(GITHUB_ACTIONS_APP_ID), logReadable: true } });
     expect(calls).toEqual([{ at: { branch: "main" }, wanted: { name: "e2e-real", appId: GITHUB_ACTIONS_APP_ID } }]);
-    await expect(runner.latestCheck!({ url: REPO }, { revision: SHA_A, branch: "main" } as never, { name: "e2e-real" }, ORG)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(runner.latestCheck!({ url: REPO }, { revision: SHA_A, branch: "main" }, { name: "e2e-real" }, ORG)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
   it("refuses a call with no valid scope", async () => {
     const runner = githubActionsCheckRunner({ ...base, listSeenCheckNames: async () => [{ name: "e2e-real" }] });
