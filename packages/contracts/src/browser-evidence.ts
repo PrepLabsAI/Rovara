@@ -224,7 +224,7 @@ export function browserEvidenceMaskSelectors(recipe: unknown): string[] {
  * Text masks, applied to the page's visible text and form values before every screenshot (and by `scrubVisibleText`). Each is a bounded pattern: emails, JWTs, prefixed API keys,
  * long hex or base64 runs, card-like digit runs and phone numbers. Kept as sources so the page and Node apply the same list.
  */
-type TextMask = { source: string; flags: string; nodeOnly?: true };
+type TextMask = { source: string; flags: string };
 export const BROWSER_EVIDENCE_TEXT_MASKS: ReadonlyArray<Readonly<TextMask>> = Object.freeze(([
   { source: "[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\\.[A-Za-z0-9-]{1,63}){0,8}\\.[A-Za-z]{2,24}", flags: "gu" },
   { source: "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}", flags: "gu" },
@@ -240,8 +240,10 @@ export const BROWSER_EVIDENCE_TEXT_MASKS: ReadonlyArray<Readonly<TextMask>> = Ob
   { source: "glpat-[A-Za-z0-9_-]{20,}", flags: "gu" },
   { source: "\\bSK[a-f0-9]{32}\\b", flags: "gu" },
   { source: "\\bbearer\\s+[A-Za-z0-9._~+/-]{8,}=*", flags: "giu" },
-  // Single text nodes only (`nodeOnly`): over a page's joined text a "Password:" label runs into the next word ("Forgot ...") and would withhold every sign-in page.
-  { source: "\\b(?:password|passwd|secret|token|api[_-]?key)\\s*[:=]\\s*\\S{4,}", flags: "giu", nodeOnly: true },
+  // A labelled value never crosses a line break on the same line ("Password: hunter2", also when label and value are separate inline elements), and on the next line only when the value
+  // stands alone on that line (a `<dt>`/`<dd>` pair). So a "Password:" label above a "Forgot password?" link, as on a sign-in page, does not match.
+  { source: "\\b(?:password|passwd|secret|token|api[ _-]?key)[ \\t]*[:=][ \\t]*[^\\s]{4,}", flags: "giu" },
+  { source: "\\b(?:password|passwd|secret|token|api[ _-]?key)[ \\t]*[:=][ \\t]*\\n[ \\t]*[^\\s]{4,}[ \\t]*(?=\\n|$)", flags: "giu" },
 ] satisfies TextMask[]).map((mask) => Object.freeze(mask)));
 export const BROWSER_EVIDENCE_TEXT_MASK = "•••";
 const TEXT_MASKS = BROWSER_EVIDENCE_TEXT_MASKS.map((mask) => new RegExp(mask.source, mask.flags));

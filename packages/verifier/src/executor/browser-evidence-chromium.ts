@@ -3,8 +3,8 @@
 // origin only (`http://127.0.0.1:<port>`; any other origin is aborted before and during the load; WebSockets are not routed, which the sandbox's network walls cover).
 //
 // Masking, in this order, around the one JPEG: every frame's text, open shadow roots, form values, placeholders, image alt text and title are scrubbed (contracts' text masks); the
-// network is cut (the context goes offline), so no late answer can bring new data; the page's own scripts are stopped (CDP `Emulation.setScriptExecutionDisabled`; this stops timers,
-// frames and event handlers but not a promise continuation already queued); everything is scrubbed again; a verify pass re-reads it all (each text node, field and alt, and the joined
+// page's own scripts are stopped (CDP `Emulation.setScriptExecutionDisabled`; this stops timers, frames and event handlers but not a promise continuation already queued); the
+// network is then cut (the context goes offline), so no late answer can bring new data; everything is scrubbed again; a verify pass re-reads it all (each text node, field and alt, and the joined
 // visible text of the page and of each shadow root, which catches a secret split over several nodes); the masked elements are painted over and the picture taken; and the verify pass
 // runs AGAIN after the picture: raw text that reached the paint is still in the page then (nothing rewrites it back to masked), so any match means the picture is dropped ("withheld").
 // Not reachable by any text scrub, and so left to mask selectors: canvas (masked by default), images' own pixels, CSS generated content, closed shadow roots, and out-of-process frames
@@ -101,7 +101,7 @@ export async function startProjectApp(input: { command: string; cwd: string; por
 
 // ---- the page
 
-type PageArg = { masks: ReadonlyArray<{ source: string; flags: string; nodeOnly?: boolean }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
+type PageArg = { masks: ReadonlyArray<{ source: string; flags: string }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string };
 type PageVerdict = "clean" | "dirty" | "too_large";
 
 /**
@@ -112,18 +112,18 @@ type PageVerdict = "clean" | "dirty" | "too_large";
  */
 function maskPage(arg: PageArg): PageVerdict {
   type Field = { value?: unknown; placeholder?: unknown; type?: unknown; closest?(selector: string): unknown; getAttribute?(name: string): string | null; setAttribute?(name: string, value: string): void; complete?: unknown; naturalWidth?: unknown };
-  type Root = { querySelectorAll(selector: string): ArrayLike<Field> };
+  type Child = { nodeType: number; nodeValue: string | null; innerText?: unknown };
+  type Root = { querySelectorAll(selector: string): ArrayLike<Field>; childNodes?: ArrayLike<Child> };
   type Node = { nodeType: number; nodeValue: string | null; shadowRoot?: Root | null; parentNode?: { nodeName?: string } | null };
   type Doc = Root & { documentElement: unknown; title: string; body: { innerText?: unknown } | null; createTreeWalker(root: unknown, show: number): { nextNode(): Node | null } };
   const doc = (globalThis as unknown as { document: Doc }).document;
   const patterns = arg.masks.map((item) => new RegExp(item.source, item.flags));
-  const joinedPatterns = arg.masks.filter((item) => item.nodeOnly !== true).map((item) => new RegExp(item.source, item.flags));
   const hits = (text: string): boolean => text.length > arg.maxText || patterns.some((pattern) => text.search(pattern) !== -1);
   // Joined text may be long: it is read in overlapping windows (the character budget already bounds it), so a long page is not withheld for its length alone.
   const joinedHits = (text: string): boolean => {
     for (let start = 0; start < text.length; start += arg.maxText - 1_000) {
       const window = text.slice(start, start + arg.maxText);
-      if (joinedPatterns.some((pattern) => window.search(pattern) !== -1)) return true;
+      if (patterns.some((pattern) => window.search(pattern) !== -1)) return true;
       if (start + arg.maxText >= text.length) break;
     }
     return false;
@@ -140,11 +140,8 @@ function maskPage(arg: PageArg): PageVerdict {
   let chars = 0;
   const pending: unknown[] = [doc.documentElement];
   const roots: Array<{ root: Root; joined: string[] }> = [{ root: doc, joined: [] }];
-  const shadows: string[][] = [];
   while (pending.length > 0) {
     const top = pending.pop();
-    const joined: string[] = [];
-    if (top !== doc.documentElement) shadows.push(joined);
     const walker = doc.createTreeWalker(top, 5);
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
       nodes += 1;
@@ -158,7 +155,7 @@ function maskPage(arg: PageArg): PageVerdict {
       const text = node.nodeValue ?? "";
       chars += text.length;
       if (chars > arg.maxChars) return "too_large";
-      if (arg.verify) { if (hits(text)) return "dirty"; joined.push(text); continue; }
+      if (arg.verify) { if (hits(text)) return "dirty"; continue; }
       const out = scrub(text);
       if (out !== text) node.nodeValue = out;
     }
@@ -195,8 +192,22 @@ function maskPage(arg: PageArg): PageVerdict {
   if (hits(doc.title)) return "dirty";
   const visible = doc.body?.innerText;
   if (typeof visible === "string" && joinedHits(visible)) return "dirty";
-  // Text nodes joined with a line break: digits in neighbouring cells must not read as one card number.
-  for (const joined of shadows) if (joinedHits(joined.join("\n"))) return "dirty";
+  // A shadow root's text as it is rendered (the page's innerText does not enter shadow roots): inline children run together, as on screen, so a secret split over inline elements is
+  // seen whole; a block child starts a new line, so digits in neighbouring cells do not read as one number. Nested roots are roots of their own in this list.
+  const view = globalThis as unknown as { getComputedStyle?(element: unknown): { display?: string } };
+  for (const { root } of roots.slice(1)) {
+    let text = "";
+    for (const child of Array.from(root.childNodes ?? [])) {
+      if (child.nodeType === 3) { text += child.nodeValue ?? ""; continue; }
+      if (child.nodeType !== 1) continue;
+      let display = "block";
+      try { display = view.getComputedStyle?.(child).display ?? "block"; } catch { /* unknown is a block */ }
+      const inner = typeof child.innerText === "string" ? child.innerText : "";
+      text += display.startsWith("inline") ? inner : `\n${inner}\n`;
+      if (text.length > arg.maxChars) return "too_large";
+    }
+    if (joinedHits(text)) return "dirty";
+  }
   return "clean";
 }
 
@@ -265,10 +276,11 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
         };
         try {
           if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
-          // Cut the network, then freeze: no late answer brings new data, and the page's own scripts stop, so no re-render can bring the raw text back; then scrub what changed since, and verify.
-          await bounded(context.setOffline(true), left());
+          // Freeze, then cut the network: the page's own scripts stop, so no re-render can bring the raw text back, and no late answer brings new data; then scrub what changed since, and verify.
           const session = await bounded(context.newCDPSession(page), left());
           await bounded(session.send("Emulation.setScriptExecutionDisabled", { value: true }), left());
+          // Offline only once frozen: the app's own "offline" handlers cannot run and paint a banner into the picture.
+          await bounded(context.setOffline(true), left());
           if ((await everyFrame(false)) !== "clean") return { ok: false, reason: "capture_failed" };
           const verdict = await everyFrame(true);
           if (verdict === "dirty") return { ok: false, reason: "masked_content" };

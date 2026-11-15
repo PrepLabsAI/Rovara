@@ -115,6 +115,9 @@ describe("masking", () => {
     const bearer = `${["Bear", "er"].join("")} abc.DEF-123_xyz~987`;
     const more = scrubVisibleText(`SSN 123-45-6789. IBAN GB82 WEST 1234 5698 7654 32. ${gitlab} ${twilio}. Authorization: ${bearer}. password: Hunter2! api_key=abc123.`);
     for (const secret of ["123-45-6789", "WEST 1234 5698 7654 32", gitlab, twilio, "abc.DEF-123_xyz~987", "Hunter2!", "abc123"]) expect(more, secret).not.toContain(secret);
+    // A labelled value on the next line is masked when it stands alone there (dt/dd), never a sign-in page's "Forgot password?" link.
+    expect(scrubVisibleText("API key:\nabcd1234\nmore")).not.toContain("abcd1234");
+    expect(scrubVisibleText("Password:\nForgot password? Sign in")).toBe("Password:\nForgot password? Sign in");
     expect(out).toContain("Signed in as");
     expect(scrubVisibleText("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.")).toBe("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.");
   });

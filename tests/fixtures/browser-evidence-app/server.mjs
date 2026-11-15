@@ -28,6 +28,10 @@ const routes = {
   "/alt-b": shell(`<h1>Profile</h1><img src="https://cdn.example.com/a.png" alt="grace@example.org" width="300" height="40">`),
   // A sign-in page: a "Password:" label, its field and a "Forgot password?" link must not withhold the picture.
   "/signin": shell(`<h1>Sign in</h1><form><label>Email: <input type="email" value="ada@example.com"></label><br><label>Password: <input type="password" value="hunter2-x"></label><br><a href="/forgot">Forgot password?</a> <button>Sign in</button></form>`),
+  // Secrets split over inline elements inside a shadow root, a labelled value in separate inline elements, and a dt/dd pair: each must be withheld.
+  "/shadow-split": shell(`<h1>Keys</h1><x-keys></x-keys><script>customElements.define("x-keys", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = "<p>Your key <span>sk_live_</span><span>abcdefghijklmnopqrstuv</span>, owner <mark>ada</mark>@example.com</p>"; } });</script>`),
+  "/split-label": shell(`<h1>Settings</h1><p><b>Password:</b> <code>hunter2x</code></p>`),
+  "/dl-label": shell(`<h1>Settings</h1><dl><dt>API key:</dt><dd>abcd1234</dd></dl>`),
   // A page whose own script never yields after load.
   "/busy": shell(`<h1>Busy</h1><script>setTimeout(() => { for (;;) {} }, 0);</script>`),
 };

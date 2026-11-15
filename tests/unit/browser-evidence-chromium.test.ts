@@ -101,8 +101,12 @@ describe.skipIf(!haveChromium)("browser evidence in a real Chromium", () => {
         if (a.length === 64 && b.length === 64) expect(a, `delay ${String(d)}`).toBe(b);
         else for (const one of [a, b]) if (one.length !== 64) expect(one, `delay ${String(d)}`).toBe("masked_content");
       }
-      expect(await take("/alt-a")).toBe(await take("/alt-b"));
+      // Shown (a picture, not withheld) and the same picture: the alt text was scrubbed, not merely caught.
+      const altA = await take("/alt-a");
+      expect(altA.length).toBe(64);
+      expect(altA).toBe(await take("/alt-b"));
       expect((await take("/signin")).length).toBe(64);
+      for (const route of ["/shadow-split", "/split-label", "/dl-label"]) expect(await take(route), route).toBe("masked_content");
     } finally { await driver.stopApp("after"); }
   }, 180_000);
 
