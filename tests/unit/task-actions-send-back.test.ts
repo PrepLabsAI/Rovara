@@ -87,6 +87,22 @@ describe("send back to coding", () => {
     expect(later).not.toContain("Owner note");
   });
 
+  it("gives the owner's words to a retry of their round after its run failed (same code, same step), and not to a round that comes after new code", async () => {
+    const decided = { requestId: REQUEST_B, workflowRevision: 6, decision: "REQUEST_CHANGES", actorId: OWNER_KEY, actorRole: "TASK_OWNER", reason: "Rename the flag.", source: "SEND_BACK", at: "2026-11-10T09:00:00.000Z" };
+    const clear = [report("CRITIC", "PASS", []), report("SECURITY", "PASS", [])];
+    const promptFor = async (noteDigest: string): Promise<string> => {
+      // A retry: BLOCKED -> READY at a later revision, no new decision.
+      const workflow = WorkflowSnapshotSchema.parse({ ...blockedReview({ decisions: [decided] }, clear), stage: "IMPLEMENT", state: "READY", blockReason: undefined, revision: 9 });
+      const { h } = await seed({ workflow });
+      await h.store.transact([ownerNoteItem({ taskId: TASK_ID, requestId: REQUEST_B, text: "SENTINEL-OWNER-WORDS", now: new Date("2026-11-10T09:00:00.000Z"), place: { candidateDigest: noteDigest, programStepId: workflow.programStepId ?? "" } })]);
+      expect(await startImplementation(h.deps, { taskId: TASK_ID, workflowRevision: 9 })).toBe("STARTED");
+      return promptOf((await codingOperations(h))[0]!);
+    };
+    expect(await promptFor(code.digest)).toContain("SENTINEL-OWNER-WORDS");
+    // The round the decision started left other code: this is a later round.
+    expect(await promptFor("f".repeat(64))).not.toContain("SENTINEL-OWNER-WORDS");
+  });
+
   it("is refused for anyone but the owner or a co-owner, and writes nothing", async () => {
     const guest = await seed();
     const before = await stateOf(guest.h);
