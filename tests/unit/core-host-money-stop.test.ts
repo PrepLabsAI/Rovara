@@ -236,7 +236,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
       bookUsage: async () => ({ booked: 1, unreadable: 0, spendStop: "company_day_cap" }),
     });
     const capability = new CallbackCapabilities(signingKey).issue({ workspaceId: a.workspaceId, operationId: a.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
-    const answer = await handler({ method: "POST", path: `/v1/internal/workspaces/${a.workspaceId}/operations/${a.id}/events`, headers: { [CAPABILITY_HEADER]: capability }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) } as never);
+    const answer = await handler({ method: "POST", path: `/v1/internal/workspaces/${a.workspaceId}/operations/${a.id}/events`, headers: { [CAPABILITY_HEADER]: capability }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) });
     expect(answer.statusCode).toBe(200);
     expect(await store.get(operationKey(a.workspaceId, a.id))).toMatchObject({ status: "CANCEL_REQUESTED", stopReason: "company_day_cap", stopRequestedAt: NOW.toISOString() });
     expect(delivered).toEqual([{ machineId: `m-${A}`, kind: "cancel", target: a.id }]);
@@ -244,7 +244,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     expect(await store.get(operationKey(b.workspaceId, b.id))).not.toHaveProperty("stopReason");
     // B's operation through A's callback layer: refused as not found, nothing stopped.
     const foreign = new CallbackCapabilities(signingKey).issue({ workspaceId: b.workspaceId, operationId: b.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
-    const refused = await handler({ method: "POST", path: `/v1/internal/workspaces/${b.workspaceId}/operations/${b.id}/events`, headers: { [CAPABILITY_HEADER]: foreign }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) } as never);
+    const refused = await handler({ method: "POST", path: `/v1/internal/workspaces/${b.workspaceId}/operations/${b.id}/events`, headers: { [CAPABILITY_HEADER]: foreign }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) });
     expect(refused.statusCode).toBe(404);
     expect(await store.get(operationKey(b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });
     expect(delivered).toHaveLength(1);

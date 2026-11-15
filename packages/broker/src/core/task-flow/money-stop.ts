@@ -98,7 +98,8 @@ export async function askWorkerToFlush(deps: TaskFlowDeps, workspace: Pick<Works
   if (!(await deliverCancel(deps, workspace, operation, waitMs))) return "not_flushed";
   for (;;) {
     const current = await deps.store.get(operationKey(operation.workspaceId, operation.id));
-    if (ENDED.has(String(current?.["status"]))) return "flushed";
+    const status = current?.["status"];
+    if (typeof status === "string" && ENDED.has(status)) return "flushed";
     const left = waitMs - elapsedSince(deps, started);
     if (left <= 0) return "not_flushed";
     await sleep(Math.min(stop.pollMs ?? FLUSH_POLL_MS, left));
