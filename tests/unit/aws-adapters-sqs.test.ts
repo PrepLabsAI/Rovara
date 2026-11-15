@@ -866,3 +866,14 @@ describe("what the outbox does not promise about order (so nothing may depend on
     expect(order).toEqual(["g1", "g2", "g3"]);
   });
 });
+
+it("T8 relay stamps companyId and refuses forged company attributes before commit", async () => {
+  const world = sqsWorld(); const queues = world.provisioning(false); const store = dynamoWorld().store;
+  const outbox = createTransactionalOutbox({ store, queues });
+  const companyId = `org_${"a".repeat(20)}`;
+  expect(() => outbox.stage({ companyId, id: "same", queue: "shared", body: {}, attributes: { companyId: `org_${"b".repeat(20)}` } })).toThrow("invalid outbox attributes");
+  await store.transact([outbox.stage({ companyId, id: "same", queue: "shared", body: {} })]);
+  expect(await outbox.relay({ companyId })).toMatchObject({ delivered: 1 });
+  const [message] = await (await queues.queue("shared")).receive();
+  expect(message?.attributes).toEqual({ outboxId: "same", companyId });
+});

@@ -21,6 +21,8 @@ import { temporaryIndexTree } from "../../packages/worker/src/publish.js";
 import { snapshotTree, withIsolatedGit } from "../../packages/worker/src/isolated-git.js";
 import * as isolatedCopies from "../../packages/worker/src/isolated-git.js";
 import * as partCopies from "../../packages/worker/src/parallel-parts-git.js";
+import { withModelHelperRound, type ModelHelperRoundResult } from "../../packages/worker/src/model-helper-round.js";
+import { UNTRUSTED_MODEL_SUMMARY } from "../../packages/worker/src/model-helper-ledger.js";
 import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -803,4 +805,35 @@ describe("candidate-bound multi-repository rounds", () => {
     await expect(f.run([command("console.log('no')")])).rejects.toEqual(new Error("multi-repository dependency manifest is unavailable"));
   });
 
+});
+
+
+it.each([0, 2])("attributes multi-repository setup separately when it serves %i replies", async (setupReplies) => {
+  const f = await fixture({ "go.mod": "module example.com/$NAME\n" });
+  const setup = command("setup");
+  const check = command("check");
+  let made = 0;
+  const commands: string[] = [];
+  const results: ModelHelperRoundResult[] = [];
+  const runners = withMultiRepoChecks({ ...f.input, dependencies: [{ consumer: "app", provider: "lib", language: "go" }], setup: [setup] }, withModelHelperRound({
+    blockList: [], onResult: (result) => { results.push(result); },
+    start: async () => ({ pinnedDigest: "a".repeat(64), commandEnvironment: {}, unsetEnvironment: [], stop: async () => undefined,
+      readSummary: async () => ({ ...UNTRUSTED_MODEL_SUMMARY, trusted: true, replySetDigest: "a".repeat(64), scripted: { before_task: 0, independent: 0, task_made: made } }),
+    }),
+  }, {
+    runProjectCommand: async (cmd) => {
+      const name = cmd.executable === "go" ? "wiring" : cmd.args[1]!;
+      commands.push(name);
+      made += name === "check" ? 3 : setupReplies;
+      return { exitCode: 0, timedOut: false, stdout: "", stderr: "" };
+    },
+    runAgentCommand: async () => { throw new Error("unused"); },
+  }));
+  const result = await runChecks({ source: "project", readiness: [check, check] }, runners, { signal: new AbortController().signal, budgetMs: 30_000 });
+  expect(commands).toEqual(["wiring", "setup", "check", "check"]);
+  expect(result.entries.map((entry) => entry.after)).toEqual(["passed", "passed"]);
+  expect(results[0]?.evidence.result).toBe("ran");
+  expect(results[0]?.scriptedReplies).toEqual(setupReplies === 0 ? [
+    { checkId: "readiness:0", taskMade: 3, counted: 0 }, { checkId: "readiness:1", taskMade: 3, counted: 0 },
+  ] : "unknown");
 });

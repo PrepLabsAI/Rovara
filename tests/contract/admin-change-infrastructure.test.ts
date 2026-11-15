@@ -52,10 +52,12 @@ describe("admin change infrastructure", () => {
     expect(JSON.stringify(named.toJSON())).toContain("MCP_CONFIRM_ELICITATION");
   });
 
-  it("changes nothing in the legacy template", () => {
+  it("gives the legacy template only the sign-in client changes' audit records (spec 064)", () => {
     expect(legacy.toJSON().Parameters).not.toHaveProperty("McpConfirmElicitation");
+    // No Slack confirm presses and no AI-tool pop-up: its changes are confirmed in the CLI.
     expect(JSON.stringify(legacy.toJSON())).not.toContain("ADMIN_CHANGE");
-    for (const absent of ["MCP_CONFIRM_ELICITATION", "CHANGE#*", "EMAIL#*"]) expect(JSON.stringify(legacy.toJSON())).not.toContain(absent);
+    expect(JSON.stringify(legacy.toJSON())).not.toContain("MCP_CONFIRM_ELICITATION");
+    expect(JSON.stringify(legacy.toJSON())).toContain("CHANGE#*");
   });
 
   // Task 10 additions: the exact shape of each new statement, and where each variable goes.
@@ -80,7 +82,7 @@ describe("admin change infrastructure", () => {
     const changes = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("CHANGE#"));
     expect(changes).toEqual([{ Effect: "Allow", Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"], Resource: tableRef(named, "TurnRecords"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } } }]);
     const emails = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("EMAIL#"));
-    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } } }]);
+    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", "COMPANY_MEMBER#*"] } } }]);
   });
 
   it("gives the ingress's ADMIN_CHANGE statement the State table only, with the projection pinned", () => {

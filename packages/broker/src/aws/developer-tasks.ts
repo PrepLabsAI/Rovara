@@ -1,4 +1,4 @@
-import { recordInCompany } from "./company-check.js";
+import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
@@ -220,6 +220,7 @@ import { readTaskPlanDocument, type TaskPlanDocumentView } from "./task-plan-doc
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
 import { loadPlanSelfCheck } from "../developer/plan-self-check.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
+import { createPlanComment, listPlanComments, listTaskMessages, readTaskDiff, sendTaskMessage } from "../developer/task-code-routes.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { getTaskPeoplePresentation, resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities, type TaskPersonCheck } from "../developer/task-people.js";
@@ -241,8 +242,6 @@ import type { TaskPeopleDisplayAdmission } from "../developer/task-people-displa
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
 
 export interface DeveloperTaskRouteDependencies {
-  /** Server-resolved membership, supplied only for the three R4 read routes. */
-  companyId?: string;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   slackTeamId?: string;
@@ -262,6 +261,10 @@ export interface DeveloperTaskRouteDependencies {
   actions: DeveloperTaskActions;
   /** Recollects every linked PR from GitHub; required before feedback decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
+  /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
+  companyId?: string;
+  /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
+  readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string };
   checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
@@ -1683,48 +1686,63 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
   let start: Record<string, unknown> | undefined = after === undefined ? undefined : { pk, sk: after };
   let scanned = 0;
   const scanMax = deps.companyId === undefined ? LIST_SCAN_MAX : limit;
-  do {
-    const response = await deps.documentClient.send(new QueryCommand({
-      TableName: deps.tableName,
-      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-      ExpressionAttributeValues: { ":pk": pk, ":prefix": "TASK#" },
-      ScanIndexForward: false,
-      Limit: 50,
-      ConsistentRead: true,
-      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
-    })) as { Items?: DeveloperTaskIndexRecord[]; LastEvaluatedKey?: Record<string, unknown> };
-    const rows = response.Items ?? [];
-    for (const [position, row] of rows.entries()) {
-      scanned += 1;
-      let current: DeveloperTaskStatus = row.status;
-      let updatedAt = row.updatedAt;
-      // With membership enabled, even closed index rows need the canonical task's company.
-      // At most the requested page size is loaded; a filtered page retains its continuation.
-      const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
-      const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
-      if ((row.status !== "CLOSED" || deps.companyId !== undefined) && visible) {
-        if (task !== undefined && task.developerId === caller.developerId) {
-          const view = await taskView(deps, task, { events: 0, details: false });
-          current = view.status;
-          if (deps.companyId !== undefined) updatedAt = view.updatedAt;
-          if (current !== row.status) {
-            updatedAt = view.updatedAt;
-            await syncIndex(deps, task, current, updatedAt);
+  let completed = after;
+  try {
+    do {
+      const response = await deps.documentClient.send(new QueryCommand({
+        TableName: deps.tableName,
+        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+        ExpressionAttributeValues: { ":pk": pk, ":prefix": "TASK#" },
+        ScanIndexForward: false,
+        Limit: 50,
+        ConsistentRead: true,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: DeveloperTaskIndexRecord[]; LastEvaluatedKey?: Record<string, unknown> };
+      const rows = response.Items ?? [];
+      for (const [position, row] of rows.entries()) {
+        scanned += 1;
+        let current: DeveloperTaskStatus = row.status;
+        let updatedAt = row.updatedAt;
+        // With membership enabled, even closed index rows need the canonical task's company.
+        // At most the requested page size is loaded; a filtered page retains its continuation.
+        const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
+        const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
+        if ((row.status !== "CLOSED" || deps.companyId !== undefined) && visible) {
+          if (task !== undefined && task.developerId === caller.developerId) {
+            // Checked lists finish each read before starting the next, so a budget
+            // continuation leaves no unfinished reads or partially rendered task.
+            const loaded = deps.companyId === undefined ? undefined : {
+              workspace: await deps.actions.workspace(task.workspaceId),
+              operations: await deps.actions.operations(task.workspaceId),
+            };
+            const view = await taskView(deps, task, { events: 0, details: false, ...(loaded === undefined ? {} : { loaded }) });
+            current = view.status;
+            if (deps.companyId !== undefined) updatedAt = view.updatedAt;
+            if (current !== row.status) {
+              updatedAt = view.updatedAt;
+              await syncIndex(deps, task, current, updatedAt);
+            }
           }
         }
+        completed = row.sk;
+        const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
+        const data = deps.companyId === undefined ? row : task;
+        const matches = visible && data !== undefined && (project === null || data.project === project) && (status === undefined || !status.success || current === status.data);
+        if (matches && data !== undefined) {
+          tasks.push({ taskId: data.taskId, title: data.title, project: data.project, status: current, shared: data.shared, createdAt: data.createdAt, updatedAt });
+          if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
+        }
+        // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.
+        if (scanned >= scanMax) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
       }
-      const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
-      const data = deps.companyId === undefined ? row : task;
-      const matches = visible && data !== undefined && (project === null || data.project === project) && (status === undefined || !status.success || current === status.data);
-      if (matches && data !== undefined) {
-        tasks.push({ taskId: data.taskId, title: data.title, project: data.project, status: current, shared: data.shared, createdAt: data.createdAt, updatedAt });
-        if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
-      }
-      // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.
-      if (scanned >= scanMax) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
-    }
-    start = response.LastEvaluatedKey;
-  } while (start !== undefined);
+      start = response.LastEvaluatedKey;
+    } while (start !== undefined);
+  } catch (error) {
+    // Exclusive-start cursor stays at the last fully examined row, including
+    // filtered rows. An individual oversized task still refuses with fixed words.
+    if (error instanceof CompanyReadItemLimit && completed !== after && completed !== undefined) return { tasks, nextCursor: encodeCursor(completed) };
+    throw error;
+  }
   return { tasks };
 }
 
@@ -6277,11 +6295,16 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
     const requestId = safeDecode(proposalRoute[2]!);
     return { change: await getTaskPeopleProposal(deps, caller, taskId, requestId) };
   }
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "plan") return getTaskPlan(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "messages") return listTaskMessages(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "messages") return sendTaskMessage(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "diff") return readTaskDiff(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "comments") return listPlanComments(deps, caller, taskId);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "comments") return createPlanComment(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return { view: await getTaskPeople(deps, caller, taskId) };
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
     const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");

@@ -1,10 +1,10 @@
 // The GitHub App credentials as the broker and the plan evidence job build them: one definition, from the same environment
 // (GITHUB_APP_CREDENTIAL_REF, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN) and the same secret.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema } from "@agentx/contracts";
+import { agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, type ClientRepositoriesResponse } from "@agentx/contracts";
 import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import type { boundedCompanyReads } from "./company-check.js";
+import { boundedCompanyReads } from "./company-check.js";
 import { isConditional } from "./broker-shared.js";
 import { appIdFromSecret, GitHubAppCredentialProvider, isWebhookSecretMissing, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
 import { requiredEnvironment } from "./lambda.js";
@@ -144,6 +144,21 @@ export class GithubInstallationBindings {
     });
   }
 
+  /** A list shares the backfill marker and the store's total command/byte/time budget. */
+  async ownersOf(installationIds: number[]): Promise<Array<string | undefined>> {
+    return this.run(async (send) => {
+      const ids = z.array(installationIdSchema).max(100).parse(installationIds);
+      let marker: Promise<boolean> | undefined;
+      const owners: Array<string | undefined> = [];
+      for (const id of ids) {
+        const row = await this.binding(send, id);
+        if (row !== undefined) owners.push(row.companyId);
+        else { marker ??= this.marker(send); owners.push(await marker ? undefined : IMPLICIT_COMPANY_ID); }
+      }
+      return owners;
+    });
+  }
+
   readonly requireBound = async (companyId: string, installationId: number, _repository?: { owner: string; name: string }): Promise<void> => {
     void _repository;
     if (!OrgIdSchema.safeParse(companyId).success || await this.ownerOf(installationId) !== companyId) throw githubBindingRefusal();
@@ -188,4 +203,29 @@ export class GithubInstallationBindings {
       return { more: false };
     });
   }
+}
+
+const listedInstallationsSchema = z.array(installationSchema.extend({
+  accountType: z.enum(["User", "Organization"]), repositorySelection: z.enum(["all", "selected"]),
+  status: z.enum(["active", "suspended"]),
+  repositories: z.array(z.object({ fullName: z.string().min(1).max(201), githubRepositoryId: installationIdSchema,
+    private: z.boolean(), defaultBranch: bindingText }).strict()).max(100),
+}).strict()).max(100);
+
+/** One whole validated page, one budget for every binding read; never return a partial list. */
+export async function filterInstallationsFor(companyId: string, listed: ClientRepositoriesResponse["installations"], bindings: GithubInstallationBindings,
+  budget = boundedCompanyReads({ send: async () => undefined })): Promise<ClientRepositoriesResponse["installations"]> {
+  try {
+    OrgIdSchema.parse(companyId);
+    if (Buffer.byteLength(JSON.stringify(listed) ?? "") > 4_000_000) throw githubBindingRefusal();
+    const rows = listedInstallationsSchema.parse(listed);
+    if (new Set(rows.map(row => row.installationId)).size !== rows.length) throw githubBindingRefusal();
+    const scoped = bindings.withBudget(budget);
+    const owners = await scoped.ownersOf(rows.map(row => row.installationId));
+    const visible: ClientRepositoriesResponse["installations"] = [];
+    for (let index = 0; index < rows.length; index++) {
+      if (owners[index] === companyId) visible.push(listed[index]!);
+    }
+    budget.check(); return visible;
+  } catch { throw githubBindingRefusal(); }
 }

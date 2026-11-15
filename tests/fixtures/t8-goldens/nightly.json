@@ -1,0 +1,28 @@
+{
+  "outcome": {
+    "outcome": "started",
+    "slotId": "a0d4d3743ff4e2072a82dfc62ce5e888f430a73cb1fdf9bc7e3b9cc72eb31d23"
+  },
+  "started": [
+    {
+      "orgId": "org_aaaaaaaaaaaaaaaaaaaa",
+      "project": "partner-service",
+      "branch": "main",
+      "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "envRevision": 1,
+      "slotId": "a0d4d3743ff4e2072a82dfc62ce5e888f430a73cb1fdf9bc7e3b9cc72eb31d23",
+      "payer": {
+        "kind": "project",
+        "project": "partner-service"
+      },
+      "source": "nightly_baseline"
+    }
+  ],
+  "admitted": [
+    {
+      "orgId": "org_aaaaaaaaaaaaaaaaaaaa",
+      "project": "partner-service",
+      "purpose": "nightly_baseline"
+    }
+  ]
+}

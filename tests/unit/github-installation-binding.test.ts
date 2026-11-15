@@ -156,3 +156,45 @@ it("bounds total bytes read, even when an otherwise valid binding has oversized 
   const client = { send: async () => ({ Item: { ...db.get("GITHUB_INSTALLATION#1", "BINDING")!, padding: "x".repeat(1_000_001) } }) };
   await expect(new GithubInstallationBindings(client, "state").ownerOf(1)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
 });
+
+it("filters whole runtime-validated lists within one total budget, preserving order", async () => {
+  const module = await import("../../packages/broker/src/aws/github-credentials.js");
+  const filter = (module as unknown as { filterInstallationsFor: (company: string, listed: unknown, bindings: unknown) => Promise<unknown> }).filterInstallationsFor;
+  expect(filter).toBeTypeOf("function");
+  const row = (id: number) => ({ installationId: id, accountLogin: "example", accountType: "Organization", repositorySelection: "all", status: "active", repositories: [{ fullName: "example/demo", githubRepositoryId: 42, private: true, defaultBranch: "main" }] });
+  const db = new FakeDynamoDb(); const bindings = new module.GithubInstallationBindings(db, "state");
+  const { IMPLICIT_COMPANY_ID } = await import("@agentx/contracts");
+  const list = Array.from({ length: 100 }, (_, i) => ({ ...row(i + 1), repositories: Array.from({ length: 100 }, () => row(1).repositories[0]) }));
+  expect(await filter(IMPLICIT_COMPANY_ID, list, bindings)).toEqual(list);
+  for (const bad of [null, {}, [row(1), { ...row(2), status: "private-canary" }], [row(1), { ...row(2), repositories: null }], [row(1), row(1)], [...list, row(101)], [{ ...row(1), repositories: Array.from({ length: 101 }, () => row(1).repositories[0]) }], [{ ...row(1), installationId: 0 }], [{ ...row(1), accountLogin: "x".repeat(8_000_001) }]]) {
+    await expect(filter(IMPLICIT_COMPANY_ID, bad, bindings)).rejects.toThrow(/^GITHUB_NOT_CONNECTED: the GitHub installation is not connected$/);
+  }
+  await expect(filter("private-canary", [row(1)], bindings)).rejects.toThrow(/^GITHUB_NOT_CONNECTED: the GitHub installation is not connected$/);
+  await bindings.backfill(async () => []);
+  expect(await filter(IMPLICIT_COMPANY_ID, [row(1)], bindings)).toEqual([]);
+});
+
+it("reads the shared marker once and applies a total deadline to list filtering", async () => {
+  const { filterInstallationsFor } = await import("../../packages/broker/src/aws/github-credentials.js");
+  const { boundedCompanyReads } = await import("../../packages/broker/src/aws/company-check.js");
+  const db = new FakeDynamoDb(); let markers = 0; let now = 0;
+  const bindings = new GithubInstallationBindings({ send: async (command: unknown) => {
+    const key = (command as { input: { Key?: { sk?: string } } }).input.Key;
+    if (key?.sk === "BACKFILL") markers++;
+    now += 200;
+    return db.send(command as never);
+  } }, "state");
+  const rows = Array.from({ length: 100 }, (_, index) => ({ installationId: index + 1, accountLogin: "example", accountType: "Organization" as const, repositorySelection: "all" as const, status: "active" as const, repositories: [] }));
+  expect(await filterInstallationsFor(IMPLICIT_COMPANY_ID, rows, bindings)).toHaveLength(100);
+  expect(markers).toBe(1);
+  const budget = boundedCompanyReads(db, () => now);
+  await expect(filterInstallationsFor(IMPLICIT_COMPANY_ID, rows, bindings, budget)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
+});
+
+it("bounds aggregate list bytes even when each installation and repository is individually valid", async () => {
+  const { filterInstallationsFor } = await import("../../packages/broker/src/aws/github-credentials.js");
+  const { store } = setup();
+  const rows = Array.from({ length: 100 }, (_, index) => ({ installationId: index + 1, accountLogin: "example", accountType: "Organization" as const, repositorySelection: "all" as const, status: "active" as const,
+    repositories: Array.from({ length: 100 }, () => ({ fullName: "r".repeat(201), githubRepositoryId: 42, private: true, defaultBranch: "b".repeat(256) })) }));
+  await expect(filterInstallationsFor(IMPLICIT_COMPANY_ID, rows, store)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
+});

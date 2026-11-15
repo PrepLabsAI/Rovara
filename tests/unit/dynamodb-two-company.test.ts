@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { companyScoped, IMPLICIT_COMPANY_ID, OrgIdSchema, projectRevisionKey, orgProjectCatalogKey, type JsonValue } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B, SHARED_RAW_IDS } from "../../packages/testing/src/isolation/two-company.js";
 import { createTaskFlow, TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
@@ -118,18 +118,18 @@ describe("workspace operation rows in the same read module", () => {
 
 
 describe("workspace operation total bound", () => {
-  it("refuses the whole read at 2,000 rows rather than silently giving partial operations", async () => {
+  it("refuses beyond ten pages and accepts 2,000 small rows when they fit those pages", async () => {
     const world = dynamoWorld({ indexes: TASK_FLOW_INDEXES });
     for (let i = 0; i < 2001; i++) await world.store.put({ item: { pk: "WORKSPACE#large", sk: `OPERATION#${String(i).padStart(4, "0")}`,
       companyId: COMPANY_A.orgId, createdAt: "2026-11-09T10:00:00.000Z", fence: i } });
     const deps = { store: world.store, companyId: OrgIdSchema.parse(COMPANY_A.orgId) };
-    await expect(workspaceOperations(deps, "large")).rejects.toThrow("workspace operation limit exceeded");
+    await expect(workspaceOperations(deps, "large")).rejects.toThrow("workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)");
     await world.store.delete({ key: { pk: "WORKSPACE#large", sk: "OPERATION#2000" } });
     expect(await workspaceOperations(deps, "large")).toHaveLength(2000);
   });
   it("refuses missing company context with fixed words", async () => {
     const world = dynamoWorld({ indexes: TASK_FLOW_INDEXES });
-    await expect(workspaceOperations({ store: world.store }, "private-canary")).rejects.toThrow("workspace company is invalid");
+    await expect(workspaceOperations({ store: world.store } as never, "private-canary")).rejects.toThrow("workspace company is invalid");
   });
 });
 
@@ -247,4 +247,11 @@ it.each([false, true])("membership kit probes through DynamoDocumentStore (fallb
   }];
   if (fallback) await expect(assertFailsClosed(probes)).rejects.toThrow();
   else await assertFailsClosed(probes);
+});
+
+it("counts short operation pages as reads, with fixed words and an eleven-read bound", async () => {
+  const query = vi.fn(async () => ({ items: [], cursor: "private-canary" }));
+  await expect(workspaceOperations({ store: { query } as never, companyId: OrgIdSchema.parse(COMPANY_A.orgId) }, "private-canary"))
+    .rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)" });
+  expect(query).toHaveBeenCalledTimes(11);
 });

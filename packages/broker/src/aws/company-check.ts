@@ -3,7 +3,7 @@
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type DocumentStore } from "@agentx/contracts";
+import { AgentXError, agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type DocumentStore } from "@agentx/contracts";
 
 export interface CompanyMembershipReader { companyOf(personId: string): Promise<string | undefined> }
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
@@ -55,22 +55,35 @@ export function recordInCompany(record: unknown, companyId: string | undefined):
 
 export const COMPANY_READ_LIMITS = { commands: 512, items: 2_000, bytes: 8_000_000, files: 64, milliseconds: 10_000 } as const;
 
+/** Internal pagination signal; other read routes retain the fixed refusal. */
+export class CompanyReadItemLimit extends AgentXError {
+  constructor() { super("CONFIG_INVALID", "company read limit exceeded", 400); }
+}
+
 /** One budget for checked SDK reads and task-action results. The host owns the I/O
  * timeout; elapsed time is checked before/after awaits, with no detached timeout race. */
 export function boundedCompanyReads(client: { send(command: unknown): Promise<unknown> }, clock: () => number = Date.now) {
   const started = clock();
   let commands = 0; let items = 0; let bytes = 0; let files = 0;
-  const check = () => {
+  let itemLimitReached = false;
+  const check = (itemContinuation = false) => {
+    if (itemLimitReached && !itemContinuation) throw new CompanyReadItemLimit();
     if (commands > COMPANY_READ_LIMITS.commands || items > COMPANY_READ_LIMITS.items || bytes > COMPANY_READ_LIMITS.bytes || files > COMPANY_READ_LIMITS.files || clock() - started > COMPANY_READ_LIMITS.milliseconds) {
       throw agentXError("CONFIG_INVALID", "company read limit exceeded");
     }
   };
   const run = async <T>(work: () => Promise<T>, count: (result: T) => number, readFiles = 0): Promise<T> => {
+    if (itemLimitReached) throw new CompanyReadItemLimit();
     commands++; files += readFiles; check();
     const result = await work();
-    items += count(result);
     bytes += Buffer.byteLength(JSON.stringify(result) ?? "", "utf8");
-    check(); return result;
+    check();
+    // Admit a whole result or none of it. Lists resume before the unfinished task;
+    // the rejected read still counts toward the command, byte and time bounds.
+    const nextItems = items + count(result);
+    if (nextItems > COMPANY_READ_LIMITS.items) { itemLimitReached = true; throw new CompanyReadItemLimit(); }
+    items = nextItems;
+    return result;
   };
   return { check,
     read: <T>(work: () => Promise<T>, readFiles = 0) => run(work, (result) => Array.isArray(result) ? result.length : result === undefined ? 0 : 1, readFiles),

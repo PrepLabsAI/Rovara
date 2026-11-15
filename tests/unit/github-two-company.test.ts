@@ -2,8 +2,8 @@ import { expect, it } from "vitest";
 import { GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { GetItemCommand, PutItemCommand, QueryCommand as WireQueryCommand } from "@aws-sdk/client-dynamodb";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
-import { companyScoped } from "@agentx/contracts";
-import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
+import { companyScoped, type ClientRepositoriesResponse } from "@agentx/contracts";
+import { filterInstallationsFor, GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { listDueGithubWebhookDeliveries, reserveGithubWebhookDelivery } from "../../packages/broker/src/aws/github-webhooks.js";
 import { assertSurfacesIsolated, COMPANY_A, COMPANY_B, type IsolationSurface } from "../../packages/testing/src/isolation/two-company.js";
 import { STATE_TABLE_INDEXES } from "../../packages/aws-adapters/src/dynamodb/state-table.js";
@@ -55,7 +55,17 @@ it("real adapters keep bindings and recovery partitions separate with shared raw
       return { rows, index };
     },
   };
-  await assertSurfacesIsolated([binding, recovery]);
+  const listed: ClientRepositoriesResponse["installations"] = [];
+  const repositories: IsolationSurface = {
+    name: "filtered repositories", kind: "list",
+    async plant(company) {
+      await w.bindings.claim(company.orgId, id(company), "shared-account", "operator");
+      listed.push({ installationId: id(company), accountLogin: "shared-account", accountType: "Organization", repositorySelection: "all", status: "active",
+        repositories: [{ fullName: "shared/repository", githubRepositoryId: 42, private: true, defaultBranch: company.canary }] });
+    },
+    observe: (company) => filterInstallationsFor(company.orgId, listed, w.bindings),
+  };
+  await assertSurfacesIsolated([binding, recovery, repositories]);
 });
 it("scoped recovery reports the wire-level page boundary", async () => {
   const w = world();

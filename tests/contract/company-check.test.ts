@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { agentXError, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, companyMembershipFromStore } from "../../packages/broker/src/aws/company-check.js";
 import { companyRouteHarness, COMPANY_CHECKED_ROUTES, PERSON, TASK, TIME } from "../support/company-route-harness.js";
 import { dynamoWorld } from "../support/ports/dynamodb-harness.js";
 
-const bodyOf = (text: string) => JSON.parse(text) as { tasks: Array<{ title: string }>; projects: unknown[]; nextCursor?: string; error: unknown };
+const bodyOf = (text: string) => JSON.parse(text) as { tasks: Array<{ title: string; taskId: string }>; projects: unknown[]; nextCursor?: string; error: unknown };
 const paths = [`/v1/dev/tasks/${TASK}`, "/v1/dev/tasks", "/v1/dev/projects"];
 const member = (companyId: unknown = COMPANY_A.orgId) => ({ pk: `COMPANY_MEMBER#${PERSON}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId, role: "member", joinedAt: TIME });
 
 describe("membership checked developer reads", () => {
-  it("exports exactly the three protected routes", () => expect(COMPANY_CHECKED_ROUTES).toHaveLength(3));
+  it("retains the original three protected routes", () => expect(COMPANY_CHECKED_ROUTES.slice(0, 3)).toEqual(["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects"]));
   it("reads membership once per route after authentication, ignores all company hints", async () => {
     const h = companyRouteHarness();
     h.task(TASK, COMPANY_A.orgId, COMPANY_A.canary); h.project(COMPANY_A.orgId);
@@ -205,14 +205,23 @@ it("refuses an over-time response after the awaited read without returning its p
   await expect(scope.client.send({})).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: company read limit exceeded" });
 });
 
-it("applies one total item budget to task action reads across the complete list", async () => {
+it.each([997, 998, 1_100])("paginates at the total item budget without skipping the unfinished task (%i operations)", async (count) => {
   const h = companyRouteHarness(); h.task();
   const other = h.task("22222222-2222-4222-8222-222222222222"); h.db.set({ ...other, workspaceId: "other-workspace" });
   h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
-  h.deps.tasks!.operations = async () => Array.from({ length: 1_100 }, (_, i) => ({ id: String(i), kind: "task", status: "SUCCEEDED", createdAt: TIME, fence: i }) as never);
+  h.deps.tasks!.operations = async () => Array.from({ length: count }, (_, i) => ({ id: String(i), kind: "task", status: "SUCCEEDED", createdAt: TIME, fence: i }) as never);
   const response = await h.read("/v1/dev/tasks");
-  expect(response.statusCode).toBe(400);
-  expect(bodyOf(response.body).error).toEqual({ code: "CONFIG_INVALID", message: "company read limit exceeded" });
+  expect(response.statusCode).toBe(200);
+  const first = bodyOf(response.body);
+  if (count === 997) { expect(first.tasks).toHaveLength(2); expect(first.nextCursor).toBeUndefined(); return; }
+  expect(first.tasks).toHaveLength(1);
+  expect(first.nextCursor).toEqual(expect.any(String));
+  const next = await h.read(`/v1/dev/tasks?cursor=${first.nextCursor!}`);
+  expect(next.statusCode).toBe(200);
+  const second = bodyOf(next.body);
+  expect(second.tasks).toHaveLength(1);
+  expect(second.nextCursor).toBeUndefined();
+  expect(new Set([...first.tasks, ...second.tasks].map((task) => task.taskId)).size).toBe(2);
 });
 
 it("reads shared task inputs once per checked list call", async () => {
@@ -227,4 +236,72 @@ it("shares a total file budget with other company reads and accepts the exact ma
   const scope = boundedCompanyReads({ send: async () => ({}) });
   for (let i = 0; i < COMPANY_READ_LIMITS.files; i++) await scope.read(async () => "", 1);
   await expect(scope.read(async () => COMPANY_A.canary, 1)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: company read limit exceeded" });
+});
+
+it("paginates an ordinary fifty-task list with forty operations each", async () => {
+  const h = companyRouteHarness();
+  const ids = Array.from({ length: 50 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
+  for (const id of ids) h.db.set({ ...h.task(id), workspaceId: `ws-${id}` });
+  h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
+  h.deps.tasks!.operations = async () => Array.from({ length: 40 }, (_, i) => ({ id: String(i), kind: "task", status: "SUCCEEDED", createdAt: TIME, fence: i }) as never);
+  const first = await h.read("/v1/dev/tasks?limit=50");
+  expect(first.statusCode).toBe(200);
+  const page = bodyOf(first.body);
+  expect(page.tasks.length).toBeGreaterThan(0); expect(page.tasks.length).toBeLessThan(50);
+  expect(page.nextCursor).toEqual(expect.any(String));
+  const second = await h.read(`/v1/dev/tasks?limit=50&cursor=${page.nextCursor!}`);
+  expect(second.statusCode).toBe(200);
+  const rest = bodyOf(second.body);
+  expect(rest.nextCursor).toBeUndefined();
+  expect([...page.tasks, ...rest.tasks].map((task) => task.taskId).sort()).toEqual(ids);
+});
+
+it("refuses an individually oversized task and hard byte failures with fixed words", async () => {
+  for (const mode of ["single", "bytes", "unrelated"] as const) {
+    const h = companyRouteHarness(); h.task();
+    const newer = h.task("22222222-2222-4222-8222-222222222222"); h.db.set({ ...newer, workspaceId: "newer" });
+    h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
+    h.deps.tasks!.operations = async (workspaceId) => {
+      if (mode !== "single" && workspaceId === "newer") return [];
+      if (mode === "unrelated") throw agentXError("CONFIG_INVALID", "company read limit exceeded");
+      return Array.from({ length: mode === "single" ? 2_001 : 1 }, () => ({ canary: mode === "bytes" ? "x".repeat(COMPANY_READ_LIMITS.bytes + 1) : COMPANY_A.canary })) as never;
+    };
+    const result = await h.read("/v1/dev/tasks");
+    expect(result.statusCode).toBe(400);
+    expect(bodyOf(result.body).error).toEqual({ code: "CONFIG_INVALID", message: "company read limit exceeded" });
+    expect(result.body).not.toContain(COMPANY_A.canary);
+  }
+});
+
+it("starts no further reads after the item budget and counts the crossing response bytes", async () => {
+  const send = vi.fn(async () => ({ Items: Array.from({ length: 2_001 }, () => ({})) }));
+  const scope = boundedCompanyReads({ send });
+  await expect(scope.client.send({})).rejects.toThrow("company read limit exceeded");
+  await expect(scope.client.send({})).rejects.toThrow("company read limit exceeded");
+  expect(send).toHaveBeenCalledTimes(1);
+  // A byte failure must not be mistaken for a pageable item-bound signal.
+  const oversized = boundedCompanyReads({ send: async () => ({ Items: Array.from({ length: 2_001 }, () => ({ text: "x".repeat(4_000) })) }) });
+  await expect(oversized.client.send({})).rejects.toThrow("company read limit exceeded");
+  expect(() => oversized.check()).toThrow("company read limit exceeded");
+});
+
+it("does not hide an item overflow swallowed by an optional detail reader", async () => {
+  const scope = boundedCompanyReads({ send: async () => ({}) });
+  await scope.read(async () => Array.from({ length: 2_001 }, () => COMPANY_A.canary)).catch(() => undefined);
+  expect(() => scope.check()).toThrow("company read limit exceeded");
+});
+
+it("refuses without repeating a cursor when the first remaining task cannot fit a fresh page", async () => {
+  const h = companyRouteHarness(); h.task();
+  const other = h.task("22222222-2222-4222-8222-222222222222"); h.db.set({ ...other, workspaceId: "other" });
+  h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
+  let count = 1_100;
+  h.deps.tasks!.operations = async () => Array.from({ length: count }, (_, i) => ({ id: String(i), kind: "task", status: "SUCCEEDED", createdAt: TIME, fence: i }) as never);
+  const first = bodyOf((await h.read("/v1/dev/tasks")).body);
+  expect(first.nextCursor).toEqual(expect.any(String));
+  count = 2_001;
+  const result = await h.read(`/v1/dev/tasks?cursor=${first.nextCursor!}`);
+  expect(result.statusCode).toBe(400);
+  expect(bodyOf(result.body).nextCursor).toBeUndefined();
+  expect(bodyOf(result.body).error).toEqual({ code: "CONFIG_INVALID", message: "company read limit exceeded" });
 });

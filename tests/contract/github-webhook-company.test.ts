@@ -278,3 +278,14 @@ it.each([false, true])("pins full broker sweep and successful retry compatibilit
   db.set({ ...db.get(`GITHUB_DELIVERY#${ID}`, "META")!, status: "DEAD" });
   golden("retry-success", await retryGithubWebhookAsAdministrator(brokerInput as never, { isAdministrator: true, subject: "operator" } as never, ID));
 });
+
+it("pins enabled missing and foreign retry NOT_FOUND bytes (ANSWER-2)", async () => {
+  const { retryGithubWebhookAsAdministrator } = await import("../../packages/broker/src/aws/broker.js");
+  const { db, brokerInput } = createBroker();
+  const deps = { ...brokerInput, companies: { companyOf: async () => "org_bbbbbbbbbbbbbbbbbbbb" } };
+  const read = (id: string) => retryGithubWebhookAsAdministrator(deps as never, { isAdministrator: true, subject: "operator" } as never, id)
+    .catch((error: { code: string; message: string; statusCode: number }) => ({ code: error.code, message: error.message, statusCode: error.statusCode }));
+  golden("retry-missing-enabled", await read(ID));
+  db.set({ pk: `GITHUB_DELIVERY#${ID}`, sk: "META", companyId: "org_aaaaaaaaaaaaaaaaaaaa" });
+  golden("retry-missing-enabled", await read(ID));
+});

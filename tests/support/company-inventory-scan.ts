@@ -3,7 +3,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, normalize, relative } from "node:path";
 import ts from "typescript";
 
-export const INVENTORY_LIMITS = { files: 4_000, bytes: 40_000_000, items: 100_000, milliseconds: 30_000 } as const;
+export const INVENTORY_LIMITS = { files: 4_000, bytes: 40_000_000, items: 100_000, nodes: 10_000_000 } as const;
 type Limits = { [K in keyof typeof INVENTORY_LIMITS]: number };
 export interface InventorySource { path: string; text: string }
 export interface ForwardingSite { site: string; expression: string; reason: string; constructors: string }
@@ -23,15 +23,15 @@ const dispatch = /\/(?:broker|developer-routes|developer-tasks|admin-reads|admin
 function budget(overrides: Partial<Limits> = {}) {
   const limits = { ...INVENTORY_LIMITS, ...overrides };
   if (Object.values(limits).some((value) => !Number.isSafeInteger(value) || value < 0)) fail("limit exceeded");
-  const started = performance.now();
-  const used = { files: 0, bytes: 0, items: 0 };
+  const used = { files: 0, bytes: 0, items: 0, nodes: 0 };
   return (kind?: keyof typeof used, count = 1): void => {
+    used.nodes++;
     if (kind !== undefined) used[kind] += count;
-    if (performance.now() - started >= limits.milliseconds || used.files > limits.files || used.bytes > limits.bytes || used.items > limits.items) fail("limit exceeded");
+    if (used.nodes > limits.nodes || used.files > limits.files || used.bytes > limits.bytes || used.items > limits.items) fail("limit exceeded");
   };
 }
 
-/** Read each source once, with ONE file/byte/time budget for the complete walk. */
+/** Read each source once, with ONE file/byte/item/node-visit budget for the complete walk. */
 export function loadCompanySources(root: string): InventorySource[] {
   const tick = budget();
   const sources: InventorySource[] = [];

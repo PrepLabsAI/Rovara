@@ -4,7 +4,11 @@ import type { DeveloperTaskActions } from "../../packages/broker/src/aws/develop
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 
-export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects"] as const;
+export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects",
+  "GET /v1/dev/client/repositories", "POST /v1/dev/client/projects",
+  "GET /v1/dev/client/projects/{id}", "POST /v1/dev/access",
+  "GET /v1/dev/tasks/{taskId}/messages", "GET /v1/dev/tasks/{taskId}/comments", "GET /v1/dev/tasks/{taskId}/diff",
+] as const;
 export const PERSON = "d".repeat(64);
 export const TASK = "11111111-1111-4111-8111-111111111111";
 export const TIME = "2026-11-14T12:00:00.000Z";
