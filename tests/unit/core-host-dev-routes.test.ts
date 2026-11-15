@@ -2,7 +2,10 @@
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
+import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { blockedReview, plain } from "../support/task-actions-world.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
@@ -16,12 +19,14 @@ const PROJECT: ProjectDefinition = {
   name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
+/** The deployment reports CI honestly (the honest-ci switch blocker, #680, stands otherwise). */
+const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 
 function appOver(world: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
   return createCoreHostApp({
     env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES }),
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
 
@@ -215,5 +220,106 @@ describe("the core's handlers on the deployed API", () => {
       expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
     }
     expect((await routes.route(get(`/v1/dev/tasks/${randomUUID()}`), caller))?.statusCode).toBe(404);
+  });
+});
+
+// DECISIONS 198 on the deployed API: the owner's moves on a task already running, on the old workflow routes' paths and shapes, so Cloud's Send back and Accept findings work for a core task.
+describe("the owner's moves on a core task (send back, review findings, continue)", () => {
+  /** The company's owner rule as a deployment wires it: only the person the task runs for acts as its owner here. */
+  const ownerRule = (): TaskFlowDeps["access"] => ({
+    ...createOwnerTaskAccess(),
+    ownerActing: async (principal, task) => (principal.personId === task.developerId || developerIdOf(principal) === task.developerId ? { actorId: task.ownerKey } : undefined),
+  });
+  function appWith(world: FakeWorld, access: TaskFlowDeps["access"]): CoreHostApp {
+    return createCoreHostApp({
+      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
+    });
+  }
+  async function started(access: TaskFlowDeps["access"] = ownerRule(), taskActions: CoreDevWiring["taskActions"] | null = { roundCap: async () => undefined }) {
+    const { world, companyOf, remember } = await world2();
+    const app = appWith(world, access);
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, ...(taskActions === null || taskActions === undefined ? {} : { taskActions }) }) });
+    const own = remember(FAKE_COMPANY);
+    const runtime = await app.runtimeFor(FAKE_COMPANY);
+    const { task } = await runtime.flow.start({ principal: own.principal, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    return { world, routes, own, remember, taskId: task.taskId, revision: task.workflow!.revision };
+  }
+  /** Puts the core task's workflow in a review the critic blocked, at the task's own id and owner. */
+  async function blockReview(world: FakeWorld, taskId: string): Promise<number> {
+    const record = (await world.store.get(taskKey(taskId))) as unknown as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const workflow = WorkflowSnapshotSchema.parse({ ...blockedReview(), taskId, ownerId: record.workflow.ownerId });
+    await world.store.put({ item: { ...record, workflow: plain(workflow) as unknown as JsonValue } as never });
+    return workflow.revision;
+  }
+  const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error?: { code: string; message: string } }).error;
+  const sendBackBody = (expectedRevision?: number) => ({ requestId: randomUUID(), instructions: "Fix the review findings.", ...(expectedRevision === undefined ? {} : { expectedRevision }) });
+
+  it("serves them only when the deployment wires the money cap AND the company's owner rule; otherwise they are not the core's here (the engine boundary then says so)", async () => {
+    const unwired = await started(ownerRule(), null);
+    for (const action of ["workflow/send-back", "workflow/review-findings", "continue"]) {
+      expect(await unwired.routes.route(post(`/v1/dev/tasks/${unwired.taskId}/${action}`, sendBackBody(unwired.revision)), unwired.own), action).toBeUndefined();
+    }
+    // Code's laptop rule (the install's owner role) is never used on a hosted company: without `ownerActing` the moves are not served.
+    const laptopRule = await started(createOwnerTaskAccess());
+    expect(await laptopRule.routes.route(post(`/v1/dev/tasks/${laptopRule.taskId}/workflow/send-back`, sendBackBody(laptopRule.revision)), laptopRule.own)).toBeUndefined();
+    // Only POST is the core's on these paths.
+    const wired = await started();
+    expect(await wired.routes.route(get(`/v1/dev/tasks/${wired.taskId}/workflow/send-back`), wired.own)).toBeUndefined();
+  });
+
+  it("reaches each core move with the old routes' request: a task that is not blocked, a missing revision, a stale findings answer and a workflow task's continue each get the move's own refusal", async () => {
+    const { routes, own, taskId, revision } = await started();
+    const early = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody(revision)), own);
+    expect(early?.statusCode).toBe(400);
+    expect(errorOf(early)?.code).toBe("CONFIG_INVALID");
+    expect(errorOf(early)?.message).toContain("no current failed check or review finding");
+    expect(errorOf(await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody()), own))?.message).toContain("current revision");
+    const digest = "a".repeat(64);
+    const findings = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/review-findings`, { requestId: randomUUID(), expectedRevision: revision, candidateDigest: digest, resolutions: [{ findingId: digest, action: "ACCEPT", note: "Fine." }] }), own);
+    expect(findings?.statusCode).toBe(409);
+    expect(errorOf(findings)).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const more = await routes.route(post(`/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "Also add a test." }), own);
+    expect(errorOf(more)?.message).toContain("approval steps");
+    // A body that is not one JSON object is refused before anything is read.
+    expect(errorOf(await routes.route({ ...post(`/v1/dev/tasks/${taskId}/workflow/send-back`), body: "[1]" }, own))).toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("sends a blocked core task back to coding and answers the task view as the old route does; a repeat answers the first", async () => {
+    const { world, routes, own, taskId } = await started();
+    const revision = await blockReview(world, taskId);
+    const body = sendBackBody(revision);
+    const sent = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, body), own);
+    expect(sent?.statusCode).toBe(200);
+    expect(JSON.parse(sent!.body)).toMatchObject({ task: { taskId, workflow: { stage: "IMPLEMENT" } } });
+    const again = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, body), own);
+    expect(again?.statusCode).toBe(200);
+    expect(JSON.parse(again!.body)).toMatchObject({ task: { taskId, workflow: { stage: "IMPLEMENT" } } });
+  });
+
+  it("holds the round to the deployment's money cap: a task over its cap, or whose spend cannot be told, starts no coding and writes nothing", async () => {
+    for (const roundCap of [async () => ({ limitUsd: 5, spentUsd: 6 }), async () => ({ limitUsd: 5, spentUsd: undefined }), async () => { throw new Error("ledger down"); }]) {
+      const { world, routes, own, taskId } = await started(ownerRule(), { roundCap });
+      const revision = await blockReview(world, taskId);
+      const before = JSON.stringify(await world.store.get(taskKey(taskId)));
+      const refused = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody(revision)), own);
+      expect(errorOf(refused)).toMatchObject({ code: "BUDGET_EXCEEDED" });
+      expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
+    }
+  });
+
+  it("refuses anyone the company's owner rule does not name, and another company's caller, as no such task, and a script token outright; nothing is written", async () => {
+    const { world, routes, remember, taskId } = await started();
+    const revision = await blockReview(world, taskId);
+    const before = JSON.stringify(await world.store.get(taskKey(taskId)));
+    // A member of the same company who may read the task but is not its owner.
+    const colleague = remember(FAKE_COMPANY, "member", "person-member-0000000002");
+    const notOwner = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody(revision)), colleague);
+    expect(notOwner?.statusCode).toBe(404);
+    const otherCompany = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody(revision)), remember(OTHER));
+    expect(otherCompany?.statusCode).toBe(404);
+    const token = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, sendBackBody(revision)), { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+    expect(errorOf(token)).toEqual({ code: "FORBIDDEN", message: NOT_FOR_SCRIPT_TOKENS });
+    expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 });
