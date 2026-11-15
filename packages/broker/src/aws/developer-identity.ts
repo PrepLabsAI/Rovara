@@ -162,6 +162,12 @@ function cachedSecret<T>(client: SecretsManagerClient, secretId: string, parse: 
   };
 }
 
+/** Optional task public key: reuse the signer's cached KMS read, never sign here. */
+export function taskPublicKeysFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameters<typeof kmsTokenSigner>[0]["kms"]): ReadonlyArray<Pick<ReturnType<typeof kmsTokenSigner>, "publicJwk">> {
+  const keyId = env.TASK_TOKEN_KEY_ARN;
+  return keyId === undefined || keyId === "" ? [] : [kmsTokenSigner({ kms, keyId })];
+}
+
 let built: ReturnType<typeof createDeveloperIdentityHandler> | undefined;
 
 function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentityHandler> {
@@ -190,6 +196,7 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
       now,
     }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
+    extraPublicKeys: taskPublicKeysFromEnvironment(env, new KMSClient(region)),
     providers: {
       slack: slackSignInProvider({ teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
       ...(oidc === undefined ? {} : { oidc }),
