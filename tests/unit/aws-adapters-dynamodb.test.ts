@@ -101,6 +101,17 @@ describe("the DynamoDB store keeps the hosted State table's stored form (no data
     expect(reported).toEqual(["LIMITS:string set", "LIMITS:string set"]);
   });
 
+  it("counts the rows a scan page leaves out as skipped, so the company purge never ends while one is left", async () => {
+    const world = dynamoWorld({ store: { onUnreadable: () => undefined } });
+    world.fake.seed({ pk: { S: PK }, sk: { S: "A" }, n: { N: "1" } });
+    world.fake.seed({ pk: { S: PK }, sk: { S: "LIMITS" }, tasks: { SS: ["t1"] } });
+    const page = await world.store.scanPage({});
+    expect(page.items.map((item) => item.sk)).toEqual(["A"]);
+    expect(page.skipped).toBe(1);
+    world.fake.seed({ pk: { S: `${PK}X` }, sk: { S: "B" }, n: { N: "1" } });
+    expect((await world.store.scanPage({ cursor: (await world.store.scanPage({ limit: 2 })).cursor! })).skipped).toBeUndefined();
+  });
+
   it("by default refuses to write a number the hosted broker's document client cannot read back (past 2^53 - 1)", async () => {
     const world = dynamoWorld();
     for (const n of [2 ** 53, -(2 ** 53), 1e21, 1e100, 1e125]) {

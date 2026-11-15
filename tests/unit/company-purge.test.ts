@@ -207,15 +207,51 @@ describe("company purge: who may ask, and when", () => {
     await expect(cancelCompanyPurge(w.deps, { companyId: A, by: OP })).rejects.toThrow(PURGE_NOT_CANCELLABLE);
   });
 
-  it("does not run while the company does not read as closed", async () => {
+  it("cancels a due purge whose company is open again (with its audit event), and a later close needs a new request and a new cooling-off", async () => {
     const w = world();
     await seed(w, A, "a");
     await scheduledAndDue(w);
     w.closed.delete(A);
+    const rowsBefore = (await all(w.store)).filter((item) => item.pk !== "COMPANY_PURGE" && item.pk !== `ORG#${A}#AUDIT`);
+    expect(await runCompanyPurge(w.deps, A)).toEqual({ companyId: A, outcome: "cancelled" });
+    expect((await all(w.store)).filter((item) => item.pk !== "COMPANY_PURGE" && item.pk !== `ORG#${A}#AUDIT`)).toEqual(rowsBefore);
+    expect(w.files.deleted).toEqual([]);
+    const cancelled = await w.store.get({ pk: `ORG#${A}#AUDIT`, sk: `EVENT#company-purge:${A}:${REQ}:cancelled` });
+    expect(cancelled).toMatchObject({ action: "company.purge_cancelled", details: { reason: "company_open" } });
+    // Closed again months later: nothing runs until a new request's cooling-off is over.
+    w.closed.add(A);
+    w.clock.now += 90 * DAY;
+    expect(await runCompanyPurge(w.deps, A)).toEqual({ companyId: A, outcome: "idle" });
+    expect((await resumeCompanyPurges(w.deps, 60_000))).toEqual([]);
+    const again = await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 });
+    expect(again.dueAt).toBe(new Date(w.clock.now + COMPANY_PURGE_COOLING_OFF_MS).toISOString());
+    expect((await runCompanyPurge(w.deps, A)).outcome).toBe("waiting");
+  });
+
+  it("holds a started purge while the company does not read as closed, touching nothing", async () => {
+    const w = world();
+    await seed(w, A, "a");
+    await scheduledAndDue(w);
+    expect((await runCompanyPurge(w.deps, A, 0)).outcome).toBe("working");
+    w.closed.delete(A);
     const before = await all(w.store);
+    const deletedBefore = [...w.files.deleted];
     expect(await runCompanyPurge(w.deps, A)).toEqual({ companyId: A, outcome: "not_closed" });
     expect(await all(w.store)).toEqual(before);
-    expect(w.files.deleted).toEqual([]);
+    expect(w.files.deleted).toEqual(deletedBefore);
+  });
+
+  it("schedules a new purge for a company closed again after an earlier purge was done", async () => {
+    const w = world();
+    await seed(w, A, "a");
+    await scheduledAndDue(w);
+    await purgeToEnd(w, A);
+    await w.store.put({ item: { pk: `ORG#${A}#SETTINGS`, sk: "MAIN", value: "new" } });
+    const again = await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 });
+    expect(again).toMatchObject({ status: "scheduled", alreadyRequested: false, requestId: REQ2 });
+    w.clock.now = Date.parse(again.dueAt);
+    await purgeToEnd(w, A);
+    expect(await w.store.get({ pk: `ORG#${A}#SETTINGS`, sk: "MAIN" })).toBeUndefined();
   });
 });
 
@@ -265,7 +301,7 @@ describe("company purge: what goes and what stays", () => {
     const tomb = after.find((item) => item.sk === "EVENT#task.started:task-a-1")!;
     expect(tomb).toMatchObject({ tombstone: true, eventId: "task.started:task-a-1", at: "2026-11-01T00:00:00.000Z", companyId: A, entityType: "AUDIT" });
     for (const gone of ["actor", "action", "subject", "details", "digest"]) expect(tomb[gone]).toBeUndefined();
-    expect(typeof tomb["contentDigest"]).toBe("string");
+    expect(tomb["contentDigest"]).toBeUndefined();
     // The purge's own record: counts only.
     const done = after.find((item) => item.sk === `EVENT#company-purge:${A}:${REQ}:done`)!;
     expect(done["action"]).toBe("company.purged");
@@ -295,7 +331,6 @@ describe("company purge: what goes and what stays", () => {
     const progress = await runCompanyPurge(w.deps, A);
     expect(progress.outcome).toBe("done");
     expect(await all(w.store)).toEqual(after);
-    expect((await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 })).alreadyRequested).toBe(true);
   });
 
   it("removes a row written late (after the first pass) before it says done", async () => {
@@ -433,12 +468,88 @@ describe("company purge: bounded, resumable, one run at a time", () => {
     expect((await all(w.store)).filter((item) => item.pk === `ORG#${B}#SETTINGS`)).toHaveLength(1);
   });
 
+  it("lets go of the purge when a call ends normally, so the next run need not wait", async () => {
+    const w = world();
+    await seed(w, A, "a");
+    await scheduledAndDue(w);
+    expect((await runCompanyPurge(w.deps, A, 0)).outcome).toBe("working");
+    w.clock.now += 1_000;
+    expect((await runCompanyPurge(w.deps, A, 0)).outcome).toBe("working");
+  });
+
+  it("removes a row written into a task or workspace partition after its META was deleted", async () => {
+    const w = world();
+    await seed(w, A, "a");
+    await seed(w, B, "b");
+    await scheduledAndDue(w);
+    let wrote = false;
+    for (let call = 0; call < 500; call += 1) {
+      const progress = await runCompanyPurge(w.deps, A, 0);
+      if (progress.outcome === "done") break;
+      if (!wrote && (await w.store.get({ pk: "DEVTASK#task-a-1", sk: "META" })) === undefined && (await w.store.get({ pk: "WORKSPACE#ws-a-1", sk: "META" })) === undefined) {
+        await w.store.put({ item: { pk: "DEVTASK#task-a-1", sk: "STATUS", status: "late" } });
+        await w.store.put({ item: { pk: "WORKSPACE#ws-a-1", sk: "OPERATION#late", status: "late" } });
+        await w.store.put({ item: { pk: "IDEMPOTENCY#owner-a#ws-a-1", sk: "REQUEST#late" } });
+        wrote = true;
+      }
+      w.clock.now += 1_000;
+    }
+    expect(wrote).toBe(true);
+    expect((await companyPurgeState(w.deps, A))!.status).toBe("done");
+    for (const pk of ["DEVTASK#task-a-1", "WORKSPACE#ws-a-1", "IDEMPOTENCY#owner-a#ws-a-1"]) expect((await w.store.query({ pk })).items).toEqual([]);
+    for (const pk of ["DEVTASK#task-b-1", "WORKSPACE#ws-b-1", "IDEMPOTENCY#owner-b#ws-b-1"]) expect((await w.store.query({ pk })).items.length).toBeGreaterThan(0);
+  });
+
+  it("never ends while a scan page reports rows it could not read", async () => {
+    const w = world();
+    await seed(w, A, "a");
+    let skip = true;
+    const s = w.store;
+    const deps: CompanyPurgeDeps = { ...w.deps, store: {
+      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), query: (request) => s.query(request), put: (request) => s.put(request), update: (request) => s.update(request),
+      delete: (request) => s.delete(request), transact: (items) => s.transact(items), scanPage: async (request) => ({ ...(await s.scanPage(request)), ...(skip ? { skipped: 2 } : {}) }),
+    } };
+    await requestCompanyPurge(deps, { companyId: A, by: OP, requestId: REQ });
+    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
+    for (let call = 0; call < 30; call += 1) {
+      expect((await runCompanyPurge(deps, A)).outcome).toBe("working");
+      w.clock.now += 1_000;
+    }
+    expect((await companyPurgeState(deps, A))!.counts.unreadable).toBe(2);
+    expect(w.logs.some((entry) => entry["event"] === "company_purge.unreadable_rows")).toBe(true);
+    skip = false;
+    for (let call = 0; call < 30 && (await runCompanyPurge(deps, A)).outcome !== "done"; call += 1) w.clock.now += 1_000;
+    expect((await companyPurgeState(deps, A))).toMatchObject({ status: "done", counts: { unreadable: 0 } });
+  });
+
+  it("follows a partition page that is empty but carries a cursor (rows the store left out), and still moves on", async () => {
+    const w = world();
+    await w.store.put({ item: { pk: "DEVTASK#task-e", sk: "META", companyId: A, ownerKey: "owner-e", workspaceId: "ws-e" } });
+    for (let i = 0; i < 5; i += 1) await w.store.put({ item: { pk: "DEVTASK#task-e", sk: `NOTE#${String(i)}` } });
+    const s = w.store;
+    let first = true;
+    const deps: CompanyPurgeDeps = { ...w.deps, store: {
+      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), put: (request) => s.put(request), update: (request) => s.update(request),
+      delete: (request) => s.delete(request), transact: (items) => s.transact(items), scanPage: (request) => s.scanPage(request),
+      query: async (request) => {
+        if (request.pk === "DEVTASK#task-e" && request.cursor === undefined && first) { first = false; return { items: [], cursor: (await s.query({ pk: request.pk, limit: 1 })).cursor! }; }
+        return await s.query(request);
+      },
+    } };
+    await requestCompanyPurge(deps, { companyId: A, by: OP, requestId: REQ });
+    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
+    for (let call = 0; call < 50 && (await runCompanyPurge(deps, A, 0)).outcome !== "done"; call += 1) w.clock.now += 1_000;
+    expect((await companyPurgeState(deps, A))!.status).toBe("done");
+    expect((await w.store.query({ pk: "DEVTASK#task-e" })).items).toEqual([]);
+  });
+
   it("lets only one run hold the purge; a stale hold is taken over", async () => {
     const w = world();
     await seed(w, A, "a");
     await scheduledAndDue(w);
     expect((await runCompanyPurge(w.deps, A, 0)).outcome).toBe("working");
-    // The hold lasts the run's budget plus a grace minute: a second run inside it waits.
+    // Another run holds it (as a run still working does: its budget plus a grace minute): a second run inside the hold waits.
+    await w.store.update({ key: companyPurgeKey(A), ops: [{ op: "set", path: ["runId"], value: "other-run" }, { op: "set", path: ["leaseUntil"], value: w.clock.now + 60_000 }] });
     w.clock.now += 1_000;
     const before = await all(w.store);
     expect(await runCompanyPurge(w.deps, A)).toEqual({ companyId: A, outcome: "waiting" });
