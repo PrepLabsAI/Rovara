@@ -24,7 +24,8 @@ import {
   type TransactItem,
 } from "@agentx/contracts";
 import { companyDayKey, createCostLedger, costPartition, utcDayOf, type CostLedger } from "../core/cost/ledger.js";
-import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, holdItems, holdStateOf, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
+import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, holdItems, holdStateOf, openHoldRoom, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
+import { RUN_START_ACTION, type MoneyStop, type SpendStopCode } from "../core/task-flow/money-stop.js";
 import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
@@ -100,6 +101,12 @@ export interface HostedAdmissionOptions {
   /** The task totals, from a ledger that keeps holds (`createHostedLedger`). */
   ledger: Pick<CostLedger, "taskCost">;
   now: () => Date;
+  /**
+   * The per-run dollar stop is wired on this install (the root books usage as runs report it and stops a run at a cap, the flow's `moneyStop`, and the dispatcher gates each model run).
+   * Only then does the adapter declare `enforcesCost: true`, so work with no one present starts only where a run is also stopped at its cap. Absent or false: `enforcesCost` is false and
+   * `automation.run` is refused.
+   */
+  runStopWired?: boolean;
 }
 
 /** What a model call of unknown cost holds (an Ask, a diagnosis): never nothing, so a full day refuses it. */
@@ -189,10 +196,21 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
     return held.state === "open" ? { allowed: true, reservationId } : refuse("reservation_closed", RESERVATION_CLOSED);
   };
 
+  const runStopWired = options.runStopWired === true;
   return {
-    // A held day cap with usage booking (see the file comment).
-    enforcesCost: true,
+    // A held day cap with usage booking (see the file comment), and a run stopped at its cap: only when the per-run stop is wired.
+    enforcesCost: runStopWired,
     async admit(request) {
+      // Work with no one present starts only where a run is also stopped at its cap (until then unattended triggers stay off).
+      if (request?.action === "automation.run" && !runStopWired) return refuse("run_stop_not_wired", RUN_STOP_NOT_WIRED);
+      // A model run about to be dispatched (the per-run stop's gate): holds nothing, refused where the stop would stop it at once.
+      if (request?.action === RUN_START_ACTION) {
+        if (typeof request.companyId !== "string" || !isAllowed(request.companyId)) return refuse("company_not_allowed", COMPANY_NOT_ALLOWED);
+        const taskId = request.subject?.type === "task" && typeof request.subject.id === "string" && request.subject.id !== "" ? request.subject.id : undefined;
+        if (taskId === undefined) return refuse("spend_unknown", SPEND_UNKNOWN);
+        const state = await runSpendState({ store, ledger, settings, now: options.now }, request.companyId, taskId);
+        return state === "within" ? { allowed: true } : runStopRefusal(state);
+      }
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const earlier = await heldBefore(request);
         if (earlier !== undefined) return earlier;
@@ -223,6 +241,48 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
 }
 
 export const RESERVATION_CLOSED = "This request's spending allowance was already used or given back. Ask again as a new request.";
+export const RUN_STOP_NOT_WIRED = "This install does not stop a run at its spending limit yet, so nothing is started on its own.";
+
+/** Where a task's run stands against the caps, for the per-run stop: `within`, or the cap it reached (or `spend_unknown` when its spend cannot be read as dollars). */
+export type RunSpendState = "within" | SpendStopCode;
+
+/**
+ * The per-run stop's reading (lane core-money-stop), after each booking of a run's usage and before each model run is dispatched:
+ *   - the task's booked spend at or past the task cap: `task_cap`;
+ *   - the company's day at or past its cap (booked dollars, what settles kept and the open holds of the day): `company_day_cap`, unless the task's own open hold still has room (what it
+ *     spends there was promised to it when it started, so another task's hold never stops it);
+ *   - spend that cannot be read as dollars (the task's or the day's), or a read that fails: `spend_unknown` (fails closed).
+ */
+export async function runSpendState(deps: { store: DocumentStore; ledger: Pick<CostLedger, "taskCost">; settings: HostedAdmissionSettings; now: () => Date }, companyId: string, taskId: string): Promise<RunSpendState> {
+  try {
+    const task = await deps.ledger.taskCost(companyId, taskId);
+    if (task.unpricedEntries > 0 || (task.currency !== undefined && task.currency !== "USD")) return "spend_unknown";
+    if (task.micros >= deps.settings.taskCapMicros) return "task_cap";
+    const load = await readDayLoad(deps.store, companyId, utcDayOf(deps.now()));
+    if (load === "unknown") return "spend_unknown";
+    if (load < deps.settings.companyDayCapMicros) return "within";
+    const total = await deps.store.get({ pk: costPartition(companyId, taskId), sk: "TOTAL" });
+    return (await openHoldRoom(deps.store, total?.["holdId"])) > 0 ? "within" : "company_day_cap";
+  } catch {
+    return "spend_unknown";
+  }
+}
+
+/** The refusal of a model run the per-run stop would stop at once. */
+const runStopRefusal = (state: SpendStopCode): AdmissionDecision =>
+  state === "task_cap" ? refuse("task_cap", TASK_CAP_REACHED) : state === "company_day_cap" ? refuse("company_day_cap", COMPANY_DAY_CAP_REACHED) : refuse("spend_unknown", SPEND_UNKNOWN);
+
+/**
+ * The flow's money stop on a deployed install: a run stopped before its usage arrived keeps its task's whole start hold as spent, marked estimated (core/cost/holds.ts `closeHold`).
+ */
+export function createHostedMoneyStop(deps: { store: DocumentStore; now: () => Date }, timing: Pick<MoneyStop, "flushWaitMs" | "pollMs" | "sleep"> = {}): MoneyStop {
+  return {
+    ...timing,
+    async keepWholeHold(reservationId, mark) {
+      await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
+    },
+  };
+}
 
 /** The most of a task's runs `runsOwed` reads the ledger for; a task with more unfinished or failed runs is taken as owing. */
 const OWED_RUNS_MAX = 50;
@@ -340,6 +400,8 @@ export interface HostedSecurityInputs {
   identity: HostedIdentityOptions;
   /** The meter's prices (tests). Absent: the catalog's. */
   prices?: ModelPrices;
+  /** The root wires the per-run stop (see `HostedAdmissionOptions.runStopWired`). */
+  runStopWired?: boolean;
 }
 
 /**
@@ -356,7 +418,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
         if ("problem" in read) throw new Error(`the core engine's admission cannot be built: ${read.problem}`);
         const store = registry.require("storage");
         const ledger = createHostedLedger({ store, metering: registry.require("metering"), now: context.now });
-        return createHostedAdmission({ settings: read.settings, store, ledger, now: context.now });
+        return createHostedAdmission({ settings: read.settings, store, ledger, now: context.now, ...(inputs.runStopWired === true ? { runStopWired: true } : {}) });
       },
     }),
     coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: OWNER, create: () => createHostedIdentity(inputs.identity) }),

@@ -34,7 +34,7 @@ function setup(settings: HostedAdmissionSettings = SETTINGS, clock = { at: NOW }
   const store = new MemoryDocumentStore();
   const now = () => clock.at;
   const ledger = createHostedLedger({ store, metering: exactMeter, now });
-  const admission = createHostedAdmission({ settings, store, ledger, now });
+  const admission = createHostedAdmission({ settings, store, ledger, now, runStopWired: true });
   const book = (entryId: string, micros: number, overrides: Partial<MeterEntry> = {}) =>
     ledger.recordUsage({ companyId: ORG, entryId, at: clock.at.toISOString(), taskId: TASK, usage: { provider: "anthropic", modelId: "m", tokens: { input: micros, output: 0, cacheRead: 0, cacheWrite: 0 } }, ...overrides });
   const day = async (companyId: string = ORG, d = DAY) => store.get(companyDayKey(companyId, d));

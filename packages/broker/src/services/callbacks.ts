@@ -23,6 +23,7 @@ import { recordWorkItemProgress } from "../core/work-breakdown/progress.js";
 import type { StepOutcome } from "../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../core/task-flow/results.js";
+import { isSpendStopCode, requestSpendStop } from "../core/task-flow/money-stop.js";
 import { iso } from "../core/task-flow/support.js";
 import { parseKnowledgeCommit } from "../core/meta-repo/prepare-meta.js";
 import { PLAN_RETENTION } from "../core/plan/store.js";
@@ -79,7 +80,8 @@ export interface CallbackDeps {
   contextSources?: ContextSourcesRuntime;
   /**
    * Books the model usage a batch of the worker's events reports (a deployed install: core-host/usage-booking.ts), BEFORE the batch is acknowledged. A booking that fails fails the batch, so
-   * the worker sends it again (booking counts each usage once). Absent: nothing is booked here (the laptop books each call at its model proxy).
+   * the worker sends it again (booking counts each usage once). Absent: nothing is booked here (the laptop books each call at its model proxy). An answer with `spendStop` (a cap the run reached,
+   * core/task-flow/money-stop.ts) asks the run to stop.
    */
   bookUsage?: ((operation: OperationRecord, events: ReadonlyArray<{ type: string; timestamp: string; payload: unknown }>) => Promise<unknown>) | undefined;
 }
@@ -184,7 +186,13 @@ async function bookTerminalUsage(deps: CallbackDeps, operation: OperationRecord,
 async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
   const parsed = parseEvents(body);
   // The usage the batch reports is booked first: an acknowledged batch is a booked one.
-  if (deps.bookUsage !== undefined) await deps.bookUsage(operation, parsed);
+  const booked = deps.bookUsage === undefined ? undefined : await deps.bookUsage(operation, parsed);
+  // The per-run stop (core/task-flow/money-stop.ts): the booking found the run's task or the company's day at its cap, so the run is asked to stop. Its worker then sends what it spent
+  // and ends. Never fails the batch (its usage is booked); a stop that could not be asked now is asked again at the run's next booking.
+  const spendStop = (booked as { spendStop?: unknown } | undefined)?.spendStop;
+  if (isSpendStopCode(spendStop)) {
+    try { await requestSpendStop(deps.flow, operation, spendStop); } catch (error) { deps.flow.log?.({ component: "callbacks", event: "spend_stop_not_asked", error: error instanceof Error ? error.name : "unknown" }); }
+  }
   // The work item checkpoints of an ordered run (spec 059) are judged against the approved run and written into the task's workflow BEFORE the batch is acknowledged: the worker goes on to the next item only
   // when this returns, so what a retry resumes from is what was durably recorded. A checkpoint that does not continue the approved run is refused (the worker then fails the operation).
   await recordWorkItemProgress(deps.flow, operation, parsed);

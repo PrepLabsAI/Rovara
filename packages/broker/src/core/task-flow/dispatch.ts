@@ -14,6 +14,7 @@ import {
   AgentXError,
   MachineError,
   STANDING_INSTRUCTIONS_FEATURE,
+  USAGE_CHECKPOINTS_FEATURE,
   WorkerInvocationSchema,
   change,
   when,
@@ -33,7 +34,8 @@ import { admit, releaseAdmission } from "./admission.js";
 import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, workspaceKey } from "./keys.js";
+import { operationKey, taskPointerKey, workspaceKey } from "./keys.js";
+import { RUN_START_ACTION, isSpendStopCode, spendStopReason } from "./money-stop.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { readWorkspace } from "./stage-machine.js";
 import { dispatchQueueName, iso, log } from "./support.js";
@@ -153,6 +155,15 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
   const stepModel = await chooseStepModel(deps, operation);
   if (stepModel?.ok === false) return endAndAck("FAILED", stepModel.sentence);
 
+  // A deployed install's per-run stop (money-stop.ts): a model run is not handed to a worker when its task or the company's day is at its cap; it ends with the fixed reason.
+  if (deps.moneyStop !== undefined && operation.dispatch.kind === "task") {
+    const taskId = (await deps.store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+    const gate = typeof taskId === "string" && taskId !== ""
+      ? await deps.admission.admit({ companyId: deps.companyId, idempotencyKey: `${RUN_START_ACTION}:${operation.id}`, action: RUN_START_ACTION, projectName: workspace.projectName, subject: { type: "task", id: taskId } })
+      : { allowed: false as const, code: "spend_unknown", message: "" };
+    if (!gate.allowed) return endAndAck("FAILED", isSpendStopCode(gate.code) ? spendStopReason(gate.code) : gate.message);
+  }
+
   let reservationId: string | undefined;
   // A machine that does not exist yet is new spend: ask admission once for it (each machine of the workspace has its own key), before it starts.
   if (workspace.machine === undefined) {
@@ -189,7 +200,9 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // A step whose tool boundary the worker cannot enforce is refused, never sent without it: a read-only step must stay read-only.
     // A model route is never dropped: a worker that cannot take one is refused the step rather than sent it without.
     const routed = operation.dispatch.kind === "task" && (stepModel?.ok === true || (await deps.modelAccess?.route()) !== undefined);
-    const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : [])].filter((feature) => !health.features.includes(feature));
+    // With the per-run stop, a model run goes only to a worker that reports its usage while it runs (never dropped: the stop would not see the run's spend until it ended).
+    const checkpoints = deps.moneyStop !== undefined && operation.dispatch.kind === "task";
+    const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : []), ...(checkpoints ? [USAGE_CHECKPOINTS_FEATURE] : [])].filter((feature) => !health.features.includes(feature));
     if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
@@ -269,7 +282,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
     actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
-  let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
+  let payload: Record<string, unknown> = { ...spec.payload, ...(spec.kind === "task" && deps.moneyStop !== undefined ? { usageCheckpoints: true } : {}), ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE)) {
     delete payload["evalRequest"];
     log(deps, { event: "eval_request_dropped_unsupported_worker" });

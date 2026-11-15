@@ -80,7 +80,7 @@ import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
-  usageForControlPlane, reviewUsageArtifactName, spentNothing, statsSince,
+  usageForControlPlane, reviewUsageArtifactName, spentNothing, statsSince, USAGE_CHECKPOINT_MS,
   type TaskUsageOutcome, type UsageStats,
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies, type ExecuteSerialWorkflowDependenciesInput, type ExecuteSerialWorkflowDependenciesResult } from "./workflow-dependencies.js";
@@ -192,7 +192,7 @@ export interface TaskInvocationDependencies {
    * PLANINC-3b: the limits on a model call; tests supply short ones. Defaults: the planning deadline (25 minutes, or AGENTX_PLAN_DEADLINE_MS), the stall limit (240 s),
    * the abort confirmation (30 s), the heartbeat (60 s) and the clock's tick (5 s). Only a PLAN run has a deadline and a stall limit.
    */
-  modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number };
+  modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number; usageCheckpointMs?: number };
   /** Where the worker's structured model-call lines go. Default: stdout, as the worker's other log lines. */
   log?: WorkerLogSink;
   /** PLANDRYRUN: how a coding plan's proposed checks are tried on the unchanged code; tests supply a fake. Default: `runPlanDryRun` (a sandbox container per check). */
@@ -974,6 +974,29 @@ async function runTask(
   const limits = dependencies.modelCallLimits ?? {};
   const stallLimitMs = limits.stallMs ?? PLANNING_STALL_MS;
   const abortConfirmMs = limits.abortConfirmMs ?? PLANNING_ABORT_CONFIRM_MS;
+  // Per-run dollar stop (core money stop): a run asked for checkpoints reports what it spent since its last report, after a model call ends, at most every `USAGE_CHECKPOINT_MS`; the broker
+  // books each one and stops the run at its cap. The end's usage event is then what is left since the last checkpoint. A run not asked (any other install) reports once, at its end, as before.
+  const checkpointsAsked = invocation.payload.usageCheckpoints === true;
+  const checkpointMs = limits.usageCheckpointMs ?? USAGE_CHECKPOINT_MS;
+  let usageReported: UsageStats | undefined = usageBaseline;
+  let checkpointed = false;
+  let lastCheckpointAt = Date.now();
+  const checkpointUsage = (): void => {
+    if (!checkpointsAsked || !usageBaselineKnown) return;
+    const at = Date.now();
+    if (at - lastCheckpointAt < checkpointMs) return;
+    try {
+      const running = session.getSessionStats();
+      const spent = statsSince(running, usageReported);
+      if (spentNothing(spent)) return;
+      const usage = redactCredentials(createTaskUsageTelemetry(spent, { ...session.getModel(), ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, "SUCCEEDED"));
+      usageReported = running;
+      checkpointed = true;
+      lastCheckpointAt = at;
+      // Sent at once; a batch the broker refuses stays pending and goes with the next send, so a checkpoint is never lost. `checkpoint` says the figure is the spend so far, not the run's end.
+      void emit("usage", { ...(usageForControlPlane(usage, dependencies.model) as object), checkpoint: true }, { urgent: true });
+    } catch { /* stats that cannot be read now are reported at the end */ }
+  };
   // A planning run has one wall-clock deadline (the first prompt and the format retry share it) and a no-activity limit; the other modes only get the heartbeat-free attempt counter.
   const monitor = new ModelCallMonitor({
     ...(planning || understanding ? { deadlineMs: limits.deadlineMs ?? (understanding ? UNDERSTAND_DEADLINE_MS : planningDeadlineMs()), stallMs: stallLimitMs } : {}),
@@ -1087,6 +1110,7 @@ async function runTask(
       lastModelNote = modelNote?.modelCall;
       finalText = assistantText((event as { message?: unknown }).message);
       activeFindings.concludeWith(finalText);
+      checkpointUsage();
     }
     if (loopStop !== undefined) return;
     const action = loopGuard.observe(event);
@@ -1933,18 +1957,24 @@ async function runTask(
     try {
       const running = session.getSessionStats();
       const spent = statsSince(running, usageBaseline);
-      const usage = createTaskUsageTelemetry(spent, {
+      const runModel = {
         ...session.getModel(),
         ...(dependencies.model.cacheRetention === undefined
           ? {}
           : { cacheRetention: dependencies.model.cacheRetention }),
-      }, outcome);
+      };
+      const usage = createTaskUsageTelemetry(spent, runModel, outcome);
       const redactedUsage = redactCredentials(usage);
+      // What the checkpoints have not reported yet (all of the run's spend when there were none).
+      const unreported = statsSince(running, usageReported);
       // A run that made no model call (a review run's own session is not used: its reviewers have sessions of their own) has nothing to report, on a fresh session and on a reopened one alike.
       // Without this a reopened run would send the whole conversation's running total again.
-      if (usageBaselineKnown && !spentNothing(spent)) {
-        await emit("usage", usageForControlPlane(redactedUsage, dependencies.model));
+      if (usageBaselineKnown && !spentNothing(unreported)) {
+        await emit("usage", usageForControlPlane(checkpointed ? redactCredentials(createTaskUsageTelemetry(unreported, runModel, outcome)) : redactedUsage, dependencies.model));
         // Kept once the control plane has the event (after the final flush below).
+        usageToKeep = running;
+      } else if (usageBaselineKnown && checkpointed) {
+        // The checkpoints reported all of it: the conversation's reported figure moves on with them.
         usageToKeep = running;
       } else if (!usageBaselineKnown) {
         // Nothing is sent for a run whose baseline could not be read, but the stats now are what the conversation has added up to. Kept, the next run (and a retry of it that dies before its event) starts

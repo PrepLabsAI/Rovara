@@ -48,3 +48,9 @@ export function statsSince<T extends UsageStats>(stats: T, baseline: UsageStats 
 
 /** Whether a session did nothing since its baseline: no tokens and no cost. A run that only read a reopened session's transcript spent nothing and sends no usage event. */
 export const spentNothing = (stats: UsageStats): boolean => stats.tokens.total === 0 && stats.tokens.input === 0 && stats.tokens.output === 0 && stats.tokens.cacheRead === 0 && stats.tokens.cacheWrite === 0 && stats.cost === 0;
+
+/**
+ * Per-run dollar stop (core money stop): a run asked for usage checkpoints reports what it spent since its last report at most this often, after a model call ends. A deployed install books
+ * each one and stops the run at its cap, so a run can spend past a cap by at most what it spends in this time plus the call that was going.
+ */
+export const USAGE_CHECKPOINT_MS = 15_000;

@@ -206,7 +206,7 @@ describe("the ledger without holds (the laptop) is unchanged", () => {
 describe("the broker root's money wiring (one company's runtime)", () => {
   it("books the usage under the runtime's own company (never the operation's word), over the registry's store and the hosted meter; and sweeps that company's holds", async () => {
     const store = new MemoryDocumentStore();
-    const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } });
+    const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: true });
     const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), ...modules], context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [] });
     const money = coreMoneyWiring(registry, COMPANY_A_ID, () => NOW);
     const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: COMPANY_B_ID } as unknown as OperationRecord;

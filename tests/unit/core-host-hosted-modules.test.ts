@@ -67,8 +67,10 @@ describe("the cost ledger's company day", () => {
 });
 
 describe("the staging admission", () => {
-  it("declares a held dollar cap (lane L8: the day is held and usage is booked; see core-host-spend-holds.test.ts)", () => {
-    expect(setup().admission.enforcesCost).toBe(true);
+  it("declares a held dollar cap only where the per-run stop is wired (lane L8 holds the day and books usage; core-money-stop stops a run at its cap)", () => {
+    expect(setup().admission.enforcesCost).toBe(false);
+    const store = new MemoryDocumentStore();
+    expect(createHostedAdmission({ settings: SETTINGS, store, ledger: createHostedLedger({ store, metering: createHostedMetering(), now: () => NOW }), now: () => NOW, runStopWired: true }).enforcesCost).toBe(true);
   });
 
   it("refuses any company not on the list, in fixed words, before reading any spend", async () => {

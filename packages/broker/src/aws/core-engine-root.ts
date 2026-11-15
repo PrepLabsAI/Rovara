@@ -29,13 +29,16 @@ import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modul
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
-import { HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
-import { createUsageBooking } from "../core-host/usage-booking.js";
+import {
+  HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, readHostedAdmissionSettings, runSpendState, type HostedAdmissionSettings, type HostedIdentityOptions,
+} from "../core-host/hosted-modules.js";
+import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
+import { taskPointerKey } from "../core/task-flow/keys.js";
 import { applyPolicyHook, type PolicyHookInstall } from "../core/policy-hook/index.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
@@ -224,11 +227,21 @@ export function outboxCompaniesOf(event: unknown): string[] | undefined {
  * One company's money wiring over the sealed registry: the callback layer's usage booking (the usage the company's workers report is booked into the task's cost ledger before the batch
  * is acknowledged, core-host/usage-booking.ts) and the admission's own hold sweep. The company is the runtime's own, never the operation's word (the callback layer has checked they agree).
  */
-export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date): { bookUsage: NonNullable<CallbackServiceOptions["bookUsage"]>; holdSweep: CoreService } {
+export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date, settings?: HostedAdmissionSettings): { bookUsage: NonNullable<CallbackServiceOptions["bookUsage"]>; holdSweep: CoreService } {
   const store = registry.require("storage");
-  const booking = createUsageBooking({ store, metering: registry.require("metering"), now });
+  const metering = registry.require("metering");
+  const booking = createUsageBooking({ store, metering, now });
+  const ledger = createHostedLedger({ store, metering, now });
   return {
-    bookUsage: (operation, events) => booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events),
+    // The per-run stop (core-money-stop): after a batch's usage is booked, the run's task and the company's day are read against the caps; a run past one is answered with the stop's code,
+    // and the callback layer asks its worker to stop (core/task-flow/money-stop.ts `requestSpendStop`). Without the caps (`settings`) nothing is read.
+    bookUsage: async (operation, events) => {
+      const booked = await booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events);
+      if (settings === undefined || !events.some((event) => event.type === USAGE_EVENT_TYPE)) return booked;
+      const taskId = (await store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+      const state = typeof taskId === "string" && taskId !== "" ? await runSpendState({ store, ledger, settings, now }, companyId, taskId) : "spend_unknown";
+      return state === "within" ? booked : { ...booked, spendStop: state };
+    },
     holdSweep: createHostedHoldSweep({ store, companyId, now }),
   };
 }
@@ -251,13 +264,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   };
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   const lessonsSwitch = readCoreLessonsSwitch(env);
+  // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
+  const readSettings = readHostedAdmissionSettings(env);
+  const admissionSettings = "settings" in readSettings ? readSettings.settings : undefined;
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity }), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, runStopWired: true }), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -267,6 +283,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
+      // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
+      flowOptions: { moneyStop: createHostedMoneyStop({ store: registry.require("storage"), now }) },
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
@@ -363,7 +381,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const runtime = await app.runtimeFor(companyId);
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
-        const money = coreMoneyWiring(registry, companyId, now);
+        const money = coreMoneyWiring(registry, companyId, now, admissionSettings);
         return createCallbackService({
           flow: runtime.flow.deps,
           blobs: registry.require("object-storage"),

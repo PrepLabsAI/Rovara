@@ -139,14 +139,28 @@ export async function holdStateOf(store: Pick<DocumentStore, "get">, reservation
   return { state: hold.state, companyId, ...(typeof taskId === "string" && taskId !== "" ? { taskId } : {}) };
 }
 
+/** What an open hold still holds (held less drawn), in micros; 0 for a hold that is closed, missing, unreadable or not ours. */
+export async function openHoldRoom(store: Pick<DocumentStore, "get">, reservationId: unknown): Promise<number> {
+  const companyId = companyOfReservation(reservationId);
+  if (companyId === undefined) return 0;
+  const hold = holdOf(await store.get(holdKey(companyId, reservationId as string)), companyId, reservationId as string);
+  return hold === undefined || hold.state !== "open" ? 0 : hold.heldMicros - hold.drawnMicros;
+}
+
 // ---- closing a hold
+
+/** How a hold is closed. `estimated` (a settle with the actual unknown only): the run it covered was stopped before its usage arrived, so what it keeps is an estimate, marked for reconciliation. */
+export type CloseHow = { kind: "release" } | { kind: "settle"; actualMicros: number | undefined; estimated?: { operationId: string } };
 
 /**
  * Closes an open hold: `release` gives back what it still holds; `settle` keeps what the work it covered actually cost and was not booked through the ledger (`actualMicros` less what usage
  * already drew), or, when the actual cost is not known in dollars, keeps everything the hold still holds (never $0 for unknown spend). A closed, missing or unreadable hold, or an id that is
  * not ours, is a no-op. A lost race with a booking that drew the hold is read again.
+ *
+ * An estimated settle (a stopped run whose usage never arrived) keeps the whole hold the same way (what usage drew is on the day already, the rest is kept now: never less than the hold) and
+ * marks it: the hold row names the operation, and the day row adds what was kept to `estimatedMicros`, so reconciliation can find what was counted without a report.
  */
-export async function closeHold(store: DocumentStore, reservationId: unknown, how: { kind: "release" } | { kind: "settle"; actualMicros: number | undefined }, now: () => Date): Promise<void> {
+export async function closeHold(store: DocumentStore, reservationId: unknown, how: CloseHow, now: () => Date): Promise<void> {
   const companyId = companyOfReservation(reservationId);
   if (companyId === undefined) return;
   const id = reservationId as string;
@@ -154,17 +168,25 @@ export async function closeHold(store: DocumentStore, reservationId: unknown, ho
     const hold = holdOf(await store.get(holdKey(companyId, id)), companyId, id);
     if (hold === undefined || hold.state !== "open") return;
     const remaining = hold.heldMicros - hold.drawnMicros;
+    // An estimate is only ever the whole of what the hold still holds (the actual is unknown).
+    const estimated = how.kind === "settle" && how.actualMicros === undefined ? how.estimated : undefined;
     const kept = how.kind === "release" ? 0 : how.actualMicros === undefined ? remaining : Math.max(0, how.actualMicros - hold.drawnMicros);
     const committed = await store.transact([
       {
         kind: "update", key: holdKey(companyId, id),
-        ops: [change.set("state", how.kind === "release" ? "released" : "settled"), change.set("keptMicros", kept), change.set("closedAt", now().toISOString())],
+        ops: [
+          change.set("state", how.kind === "release" ? "released" : "settled"), change.set("keptMicros", kept), change.set("closedAt", now().toISOString()),
+          ...(estimated === undefined ? [] : [change.set("estimated", true), change.set("estimatedFor", estimated.operationId)]),
+        ],
         condition: when.and(when.eq("state", "open"), when.eq("drawnMicros", hold.drawnMicros)),
       },
       { kind: "delete", key: openHoldKey(companyId, hold.expiresAt, id) },
       {
         kind: "update", key: companyDayKey(companyId, hold.day),
-        ops: [change.add("reservedMicros", -remaining), change.add("loadMicros", kept - remaining), ...(kept > 0 ? [change.add("settledMicros", kept)] : [])],
+        ops: [
+          change.add("reservedMicros", -remaining), change.add("loadMicros", kept - remaining), ...(kept > 0 ? [change.add("settledMicros", kept)] : []),
+          ...(estimated !== undefined && kept > 0 ? [change.add("estimatedMicros", kept)] : []),
+        ],
         condition: when.present(),
       },
     ]);

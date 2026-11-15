@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, USAGE_CHECKPOINTS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -91,5 +91,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   EVAL_FILES_FEATURE,
   // The approved plan a coding run keeps in its conversation summaries (compaction.ts).
   "task.workflowApprovedPlan.v1",
+  // Per-run dollar stop: a run asked for `usageCheckpoints` reports its usage while it runs, not only at its end (run-task.ts `checkpointUsage`).
+  USAGE_CHECKPOINTS_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];
