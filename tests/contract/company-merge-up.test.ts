@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AgentXError, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, companyScoped } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { LEGACY_KEY_SCOPE, scopedProjectPk } from "../../packages/broker/src/e2e/legacy-key-scope.js";
 import { routeLinkingRequest } from "../../packages/broker/src/aws/developer-routes.js";
@@ -16,14 +16,29 @@ function harness(companyId?: string) {
   h.claims.scope = "projects:create projects:members";
   h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app", amr: "oidc", administrator: true });
   h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, provider: "oidc" });
-  h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web", audience: "web-app", redirectUris: ["https://web.example.test/callback"], loopback: false, scopes: ["projects:create", "projects:members"], createdAt: TIME, updatedAt: TIME, updatedBy: "test" });
+  // Shared first-party client: T3 requires its operator-owned install-level marker.
+  h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", installLevel: true, clientId: "web-app", name: "Web", audience: "web-app", redirectUris: ["https://web.example.test/callback"], loopback: false, scopes: ["projects:create", "projects:members"], createdAt: TIME, updatedAt: TIME, updatedBy: "test" });
   const bearer = `Bearer ${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify({ azp: "web-app" })).toString('base64url')}.test`;
   const companyOf = vi.fn(async () => companyId);
   if (companyId !== undefined) h.deps.companies = { companyOf };
-  h.db.set({ ...h.db.get("SESSION#session", "META")!, pk: "SESSION#native", clientId: undefined });
+  // Native task fixtures use Slack, preserving the pinned T2 writer gaps. The
+  // registered OIDC fixture supplies the live company policy now required by T3.
+  h.db.set({ ...h.db.get("SESSION#session", "META")!, pk: "SESSION#native", clientId: undefined, amr: "slack" });
+  const signInAs = (company: string) => {
+    h.deps.companies = { companyOf: vi.fn(async () => company) };
+    const issuer = `https://${company}.identity.example.test`;
+    h.db.set({ ...h.db.get("SESSION#session", "META")!, sessionId: "11111111-1111-4111-8111-111111111111", companyId: company });
+    h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, provider: "oidc", issuer, revoked: false });
+    h.db.set({ pk: companyScoped(company, "SIGNIN_ISSUER"), sk: "OIDC", entityType: "COMPANY_SIGNIN_ISSUER", issuer,
+      clientId: "test-company-client", displayName: "Company", requiredValues: [], enabled: true, enabledSince: Date.parse(TIME) / 1000 });
+  };
+  if (companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) { signInAs(companyId); h.deps.companies = { companyOf }; }
   const call = (path = projectPath, method = "GET", body?: unknown) => {
-    if (path.startsWith("/v1/dev/tasks/")) h.claims.sid = "native";
-    return h.read(path, { method, headers: { authorization: bearer }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const native = path.startsWith("/v1/dev/tasks/");
+    if (native) { h.claims.sid = "native"; h.claims.amr = "slack"; delete h.claims.azp; }
+    // The decoded token and verified claims must both identify the native session.
+    const authorization = native ? `Bearer ${Buffer.from('{}').toString('base64url')}.${Buffer.from('{}').toString('base64url')}.test` : bearer;
+    return h.read(path, { method, headers: { authorization }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   };
   const project = (company?: unknown, administrator = false) => {
     h.project(company);
@@ -31,7 +46,7 @@ function harness(companyId?: string) {
     h.db.set({ ...row, definition: { name: "shared-project", revision: 1, repositories: [{ name: "api", url: "https://github.com/example/api.git", defaultBranch: "main" }] } });
     if (administrator) h.db.set({ pk: `MEMBER#${PERSON}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "administrator" });
   };
-  return { ...h, call, project, bearer, companyOf };
+  return { ...h, call, project, bearer, companyOf, signInAs };
 }
 const parsed = (response: { body: string }) => JSON.parse(response.body) as { projects: unknown[]; repositories: unknown[] };
 
@@ -61,7 +76,9 @@ describe("merge-up membership-resolved reads", () => {
     for (const [path, method] of [[projectPath, "GET"], ["/v1/dev/access", "POST"], ...taskPaths.map((path) => [path, "GET"])] as const) {
       const response = await h.call(path, method);
       expect(response.statusCode, path).toBe(401);
-      expect(response.body).toBe(JSON.stringify({ error: { code: "AUTH_REQUIRED", message: "your AgentX sign-in has ended; run agentx login <url> again" }, requestId: "company-test" }));
+      const message = path.startsWith("/v1/dev/tasks/") ? "your AgentX sign-in has ended; run agentx login <url> again"
+        : "this access check needs a signed-in person's token for this service, or a confidential service's own credentials";
+      expect(response.body).toBe(JSON.stringify({ error: { code: "AUTH_REQUIRED", message }, requestId: "company-test" }));
     }
   });
   it("hides thrown membership causes on all new checked routes", async () => {
@@ -149,12 +166,12 @@ describe("named T-lane known gaps (not isolation claims)", () => {
     expect((await h.call("/v1/dev/client/repositories")).statusCode).toBe(200);
     expect(h.deps.clientRepositories).toHaveBeenCalledExactlyOnceWith();
     h.deps.createClientProject = vi.fn(async () => { h.project(); return { name: "shared-project", latestRevision: 1 }; });
-    await h.call("/v1/dev/client/projects", "POST", { repository: "example/api" });
+    expect((await h.call("/v1/dev/client/projects", "POST", { repository: "example/api" })).statusCode).toBe(404);
     expect(h.deps.createClientProject).toHaveBeenCalledExactlyOnceWith(PERSON, { repository: "example/api" });
   });
   it.each(["GET", "PUT", "DELETE"])("T2/T3 client member %s still operates across company boundaries", async (method) => {
     const h = harness(COMPANY_B.orgId); h.project(COMPANY_A.orgId);
-    h.db.set({ pk: `DEVELOPER#${PERSON}`, sk: "META", developerId: PERSON, displayName: "Test Person", revoked: false });
+    h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, developerId: PERSON, displayName: "Test Person", revoked: false });
     expect((await h.call(`${projectPath}/members${method === "GET" ? "" : `/${PERSON}`}`, method)).statusCode).toBe(200);
   });
   it.each(["messages", "comments"])("T2 task POST %s does not resolve supplied membership", async (kind) => {
@@ -221,7 +238,7 @@ describe("merge-up 2 membership-resolved reads", () => {
     const get = (url: string) => h.read(url, { headers: { authorization: h.bearer } });
     expect(parsed(await get("/v1/dev/projects")).projects).toEqual([]);
     expect((await get(path)).statusCode).toBe(404);
-    h.deps.companies = { companyOf: async () => COMPANY_A.orgId };
+    h.signInAs(COMPANY_A.orgId);
     expect(parsed(await get("/v1/dev/projects")).projects).toHaveLength(1);
     expect((await get(path)).statusCode).toBe(200);
   });
@@ -248,7 +265,8 @@ describe("merge-up 2 named T-lane known gaps (not isolation claims)", () => {
     h.project(COMPANY_A.orgId);
     const request = { method: "GET", path: "/v1/dev/workspaces", headers: { authorization: h.bearer }, requestId: "test" };
     expect(await routeLinkingRequest(h.deps, request, new URL(request.path, "https://broker.example.test"))).toMatchObject({ projects: [{ name: "shared-project" }], workspaces: [] });
-    expect(h.companyOf).not.toHaveBeenCalled();
+    // T3 now checks the client member at authentication; this catalog still lacks a project fence.
+    expect(h.companyOf).toHaveBeenCalledExactlyOnceWith(PERSON);
   });
 });
 
