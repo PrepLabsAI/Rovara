@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, policyHookSettingsFromEnvironment, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
@@ -156,5 +156,30 @@ describe("the install's policy hook settings (one setting for the engine and the
   it("reads well-formed settings (the engine applies them before the seal; #717's settings routes take the same value)", () => {
     const settings = JSON.stringify({ address: "https://hook.example/answer", keys: [{ kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "k1", alg: "RS256" }] });
     expect(policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: settings })).toMatchObject({ address: "https://hook.example/answer" });
+  });
+});
+
+describe("the lessons API for the developer routes (lane LM8)", () => {
+  const people = () => ({ approvers: async () => ({}) as never, onProjectRoster: async () => true, linkedAccounts: async () => [], displayName: async () => "Ada", isErased: async () => false });
+
+  it("is not built while the engine switch is off, while the lessons switch is off, or without the deployment's people", () => {
+    const tables = fakeTables();
+    expect(createBrokerCoreRoot(rootInputs({ ROVARA_CORE_LESSONS: "on" }, tables.client, { lessonsPeople: people })).lessons).toBeUndefined();
+    expect(createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client, { lessonsPeople: people })).lessons).toBeUndefined();
+    expect(createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }, tables.client)).lessons).toBeUndefined();
+    expect(tables.reads).toEqual([]);
+  });
+
+  it("is built with the lessons switch on and the people given; a person with no membership is asked to sign in again", async () => {
+    const tables = fakeTables();
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }, tables.client, { lessonsPeople: people }));
+    expect(root.lessons).toBeDefined();
+    await expect(root.lessons!.answer({ method: "GET", path: "/v1/dev/projects/payments/lessons", query: new URLSearchParams() }, { personId: "dev-nobody" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+  });
+
+  it("reads a project role from the broker's own grant: administrator is a maintainer, developer a contributor, anything else none", () => {
+    expect(projectRoleOf("administrator")).toBe("maintainer");
+    expect(projectRoleOf("developer")).toBe("contributor");
+    expect(projectRoleOf(undefined)).toBeUndefined();
   });
 });

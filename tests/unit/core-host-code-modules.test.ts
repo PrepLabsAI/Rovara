@@ -79,6 +79,8 @@ describe("Code's AWS adapter modules", () => {
         callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }),
         now: () => new Date("2026-11-15T10:00:00.000Z"), log: () => undefined,
         services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }),
+        // Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
+        ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const },
       }),
     });
     const store = (await app.registry()).require("storage");

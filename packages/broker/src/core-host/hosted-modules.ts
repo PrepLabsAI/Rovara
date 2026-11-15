@@ -29,7 +29,10 @@ const OWNER = "E2 step 5 (the first staging run)";
 
 // ---- settings (the function's environment)
 
-/** The companies that may start work on the core: `org_...[:org_...]`. Absent or empty: no company may (the admission module refuses to build). */
+/**
+ * The companies that may start work on the core: `all` (every company with its own id: DEC 229a, the owner's "everyone", still under the caps) or `org_...[:org_...]`. Absent or
+ * empty: no company may (the admission module refuses to build).
+ */
 export const CORE_ALLOWED_COMPANIES_VARIABLE = "ROVARA_CORE_ALLOWED_COMPANIES";
 /** The per-task cap in whole dollars. Default 5. */
 export const CORE_TASK_CAP_VARIABLE = "ROVARA_CORE_TASK_CAP_USD";
@@ -40,8 +43,12 @@ export const DEFAULT_COMPANY_DAY_CAP_USD = 25;
 /** The highest cap either setting may hold, in dollars: a typo of extra digits refuses instead of lifting the cap. */
 const CAP_MAX_USD = 1_000;
 
+/** The value of CORE_ALLOWED_COMPANIES_VARIABLE that lets every company in (never the implicit laptop company). */
+export const ALL_COMPANIES = "all";
+
 export interface HostedAdmissionSettings {
-  allowedCompanies: readonly OrgId[];
+  /** `all`: every company with its own id (DEC 229a); else exactly these. */
+  allowedCompanies: readonly OrgId[] | typeof ALL_COMPANIES;
   taskCapMicros: number;
   companyDayCapMicros: number;
 }
@@ -57,10 +64,14 @@ const wholeDollars = (raw: string | undefined, fallback: number): number | undef
 export function readHostedAdmissionSettings(env: NodeJS.ProcessEnv): { settings: HostedAdmissionSettings } | { problem: string } {
   const raw = env[CORE_ALLOWED_COMPANIES_VARIABLE]?.trim() ?? "";
   if (raw === "") return { problem: "no company is allowed on the core engine" };
-  const ids = raw.split(":");
-  if (ids.some((id) => !OrgIdSchema.safeParse(id).success || id === IMPLICIT_COMPANY_ID)) return { problem: "an allowed company id is not well formed" };
   const task = wholeDollars(env[CORE_TASK_CAP_VARIABLE], DEFAULT_TASK_CAP_USD);
   const day = wholeDollars(env[CORE_COMPANY_DAY_CAP_VARIABLE], DEFAULT_COMPANY_DAY_CAP_USD);
+  if (raw === ALL_COMPANIES) {
+    if (task === undefined || day === undefined) return { problem: "a spend cap is not a whole number of dollars from 1 to 1000" };
+    return { settings: { allowedCompanies: ALL_COMPANIES, taskCapMicros: task * 1_000_000, companyDayCapMicros: day * 1_000_000 } };
+  }
+  const ids = raw.split(":");
+  if (ids.some((id) => !OrgIdSchema.safeParse(id).success || id === IMPLICIT_COMPANY_ID)) return { problem: "an allowed company id is not well formed" };
   if (task === undefined || day === undefined) return { problem: "a spend cap is not a whole number of dollars from 1 to 1000" };
   return { settings: { allowedCompanies: [...new Set(ids)] as OrgId[], taskCapMicros: task * 1_000_000, companyDayCapMicros: day * 1_000_000 } };
 }
@@ -83,11 +94,13 @@ export interface HostedAdmissionOptions {
 /** The staging admission (see the file comment). */
 export function createHostedAdmission(options: HostedAdmissionOptions): Admission {
   const { settings, ledger } = options;
-  const allowed = new Set<string>(settings.allowedCompanies);
+  const listed = settings.allowedCompanies === ALL_COMPANIES ? undefined : new Set<string>(settings.allowedCompanies);
+  // `all`: any well-formed company id of its own; the implicit laptop company never.
+  const isAllowed = (companyId: string): boolean => (listed === undefined ? OrgIdSchema.safeParse(companyId).success && companyId !== IMPLICIT_COMPANY_ID : listed.has(companyId));
 
   /** The decision and, when allowed, the conditions that hold it at commit. Any spend that cannot be read as dollars refuses. */
   async function decide(request: AdmissionRequest): Promise<{ decision: AdmissionDecision; holds: TransactItem[] }> {
-    if (typeof request?.companyId !== "string" || !allowed.has(request.companyId)) return { decision: refuse("company_not_allowed", COMPANY_NOT_ALLOWED), holds: [] };
+    if (typeof request?.companyId !== "string" || !isAllowed(request.companyId)) return { decision: refuse("company_not_allowed", COMPANY_NOT_ALLOWED), holds: [] };
     const companyId = request.companyId;
     const estimate: Cost | undefined = request.estimate?.cost;
     if (estimate !== undefined && (estimate === null || typeof estimate !== "object" || estimate.currency !== "USD" || !Number.isSafeInteger(estimate.micros) || estimate.micros < 0)) {

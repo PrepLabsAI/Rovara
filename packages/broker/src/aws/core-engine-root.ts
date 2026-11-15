@@ -21,13 +21,15 @@
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
-  type AdapterRegistry, type PolicyHookSettings, type DocumentStore, type OrgId, type OrgRole, type Principal,
+  type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
+import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
+import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
@@ -71,6 +73,11 @@ export interface BrokerCoreRootInputs {
   lessonsPeople?: (companyId: OrgId) => HostedLessonPeople;
   /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   lessonsLearning?: CoreLessonsOptions["learning"];
+  /**
+   * The project's own CI mode reader (core-host/switch-blockers.ts, honest CI). Absent: the `honest-ci` switch blocker refuses a company's runtime wherever merge tracking would run
+   * (lane L3 gives it with merge tracking).
+   */
+  ciReporting?: CiReporting;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
   services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry) => Partial<Record<CoreServiceName, CoreService>>;
   /** The API's own address (a session's link). */
@@ -84,6 +91,11 @@ export interface BrokerCoreRoot {
   readonly app: CoreHostApp;
   /** The developer task routes' core entry. Undefined while the switch is off: the routes never reach the core. */
   readonly coreTasks: CoreTaskEntry | undefined;
+  /**
+   * Lane LM8: the Code lessons API for the developer routes (`deps.lessons`). Undefined while the engine switch is off, while ROVARA_CORE_LESSONS is off, or without the deployment's
+   * people port: every lessons route then answers "Lessons are off." and reads nothing.
+   */
+  readonly lessons: LessonsApi | undefined;
   /** A schedule's core job event, or a State table stream batch. `undefined`: not the core's. */
   handleEvent(event: unknown, options?: { remainingMs?: number | undefined }): Promise<unknown>;
   /**
@@ -124,14 +136,26 @@ export function membershipWithRoleFromDynamo(client: DynamoSender, tableName: st
   };
 }
 
-/** Whether the person holds a project grant that lets them use the project (`MEMBER#<person>` / `PROJECT#<name>`, role developer or administrator: the broker's own rule, FR-013.1). */
-export function projectGrantFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string) => Promise<boolean> {
+/** The person's project grant role (`MEMBER#<person>` / `PROJECT#<name>`, the broker's own rows, FR-013.1): `developer` or `administrator`, else undefined. */
+export function projectGrantRoleFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> {
   return async (personId, project) => {
-    if (typeof personId !== "string" || personId === "" || /[#\s]/u.test(personId) || typeof project !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u.test(project)) return false;
+    if (typeof personId !== "string" || personId === "" || /[#\s]/u.test(personId) || typeof project !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u.test(project)) return undefined;
     const response = await client.send(new GetCommand({ TableName: tableName, Key: { pk: `MEMBER#${personId}`, sk: `PROJECT#${project}` }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
     const row = response?.Item;
-    return row !== undefined && row["pk"] === `MEMBER#${personId}` && row["sk"] === `PROJECT#${project}` && row["projectName"] === project && mayUseProject(row["role"]);
+    if (row === undefined || row["pk"] !== `MEMBER#${personId}` || row["sk"] !== `PROJECT#${project}` || row["projectName"] !== project) return undefined;
+    return mayUseProject(row["role"]) ? row["role"] : undefined;
   };
+}
+
+/** Whether the person holds a project grant that lets them use the project (developer or administrator: the broker's own rule). */
+export function projectGrantFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string) => Promise<boolean> {
+  const role = projectGrantRoleFromDynamo(client, tableName);
+  return async (personId, project) => (await role(personId, project)) !== undefined;
+}
+
+/** The project role the lessons API reads, from the broker's grant: a project administrator is a `maintainer`, a developer a `contributor`; anything else none. */
+export function projectRoleOf(grant: "developer" | "administrator" | undefined): ProjectRole | undefined {
+  return grant === "administrator" ? "maintainer" : grant === "developer" ? "contributor" : undefined;
 }
 
 export const NOT_A_MEMBER_HERE = "You are not a member of this company.";
@@ -190,7 +214,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const membershipOf = inputs.signInTableName === undefined || inputs.signInTableName === ""
     ? async () => undefined
     : membershipWithRoleFromDynamo(inputs.documentClient, inputs.signInTableName);
-  const projectGrant = projectGrantFromDynamo(inputs.documentClient, inputs.stateTableName);
+  const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
+  const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   const displayNameOf = async (personId: string): Promise<string | undefined> => {
     if (inputs.signInTableName === undefined || inputs.signInTableName === "" || /[#\s]/u.test(personId) || personId === "") return undefined;
     const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: { pk: `DEVELOPER#${personId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
@@ -219,6 +244,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
       log,
+      ...(inputs.ciReporting === undefined ? {} : { ciReporting: inputs.ciReporting }),
       services: (flow) => {
         let lessons: CoreLessons | undefined;
         if (inputs.lessonsPeople === undefined) {
@@ -246,6 +272,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
 
   // Off: nothing below is built, and the developer routes never get a core entry.
   let coreTasks: CoreTaskEntry | undefined;
+  let lessons: LessonsApi | undefined;
   if (app.serving) {
     // The library's install-wide learning gate follows the lessons switch.
     setCoreLessonsGate(env);
@@ -268,6 +295,27 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }) };
     };
     coreTasks = coreTaskEntryFrom(routes, deployedCallerOf);
+    // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
+    // runtime's (built once); the person's project role is the broker's own project grant (administrator: maintainer, developer: contributor).
+    const lessonsPeople = inputs.lessonsPeople;
+    if (lessonsSwitch.value.mode !== "off" && lessonsPeople !== undefined) {
+      lessons = createLessonsApi({
+        lessonsSwitch: lessonsSwitch.value,
+        companyOf: async (caller) => await membershipOf(caller.personId),
+        lessonsOf: async (companyId) => {
+          try { await app.runtimeFor(companyId); } catch { return undefined; }
+          return lessonsByCompany.get(companyId);
+        },
+        people: {
+          onProjectRoster: (companyId, project, personId) => lessonsPeople(companyId).onProjectRoster(companyId, project, personId),
+          displayName: (companyId, personId) => lessonsPeople(companyId).displayName(companyId, personId),
+          isErased: (companyId, personId) => lessonsPeople(companyId).isErased(companyId, personId),
+        },
+        projectRole: async (companyId, project, personId) => ((await membershipOf(personId))?.companyId !== companyId ? undefined : projectRoleOf(await projectGrantRole(personId, project))),
+        now: () => now().getTime(),
+        log,
+      });
+    }
   }
 
   const table = { documentClient: inputs.documentClient, tableName: inputs.stateTableName };
@@ -297,6 +345,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   return {
     app,
     coreTasks,
+    lessons,
     async callback(request) {
       if (coreTasks === undefined) return undefined;
       const match = CORE_CALLBACK.exec(request.path.split("?")[0] ?? "");

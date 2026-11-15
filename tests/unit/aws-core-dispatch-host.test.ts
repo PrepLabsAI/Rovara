@@ -325,6 +325,8 @@ describe("the core on the dispatcher", () => {
     expect(runtime.flow.deps.modelAccess).toBe(route);
     expect(runtime.flow.deps.standingInstructions).toBeUndefined();
     expect(DISPATCHER_FLOW_DECLARATIONS).toEqual(["standingInstructions", "modelAccess", "learned"]);
+    // The dispatcher is a dispatch-only root: no CI mode reader is handed in (it runs no merge tracking), and the honest-CI switch blocker does not refuse it.
+    expect(runtime.ciReporting).toBeUndefined();
     // The machines are the fleet bound to the company, and a start places the worker on the install's subnet and launch template.
     const workspaceId = world.workspace(COMPANY_A);
     await runtime.flow.deps.machines.start({ machineKey: workspaceId, companyId: COMPANY_A });

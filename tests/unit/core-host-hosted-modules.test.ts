@@ -126,6 +126,24 @@ describe("the staging admission", () => {
   });
 });
 
+describe("the admission for every company (DEC 229a)", () => {
+  it("reads `all` with the caps, and lets any company with its own id in, never the laptop's implicit company or a malformed id, still under the caps", async () => {
+    const read = readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_COMPANY_DAY_CAP_USD: "1" });
+    expect(read).toEqual({ settings: { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 1_000_000 } });
+    if (!("settings" in read)) throw new Error("unreachable");
+    const store = new MemoryDocumentStore();
+    const ledger = createCostLedger({ store, metering: exactMeter, now: () => NOW });
+    const admission = createHostedAdmission({ settings: read.settings, ledger, now: () => NOW });
+    for (const companyId of [ORG, OTHER]) expect((await admission.admit(start({ companyId }))).allowed, companyId).toBe(true);
+    for (const companyId of [IMPLICIT_COMPANY_ID, "org_short", "", "ORG_STAGING0000000000001"]) expect(await admission.admit(start({ companyId })), companyId).toEqual({ allowed: false, code: "company_not_allowed", message: COMPANY_NOT_ALLOWED });
+    // The caps still hold for every company.
+    await ledger.recordUsage(entry("d", 1_000_000, { companyId: OTHER, taskId: "11111111-2222-4333-8444-555555555555" }));
+    expect(await admission.admit(start({ companyId: OTHER }))).toEqual({ allowed: false, code: "company_day_cap", message: COMPANY_DAY_CAP_REACHED });
+    expect(readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_TASK_CAP_USD: "0" })).toHaveProperty("problem");
+    expect(readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "ALL" })).toHaveProperty("problem");
+  });
+});
+
 describe("the admission's settings", () => {
   it("reads the allow-list and the caps, defaulting to $5 a task and $25 a company day", () => {
     expect(readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: `${ORG}:${ORG}` })).toEqual({ settings: { allowedCompanies: [ORG], taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 } });

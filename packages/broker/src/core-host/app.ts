@@ -113,7 +113,8 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
         const gaps = options.dispatchOnly === true ? [] : serviceGaps(runtime.services, areas);
         if (gaps.length > 0) throw new Error(`the core runtime lacks services for the areas switched on: ${gaps.join(", ")}`);
         // The switch blockers (switch-blockers.ts): required checks, by id. Honest CI is asked where the merge area is on or merge tracking runs at all.
-        const blockers = switchBlockers(runtime, areas);
+        // A dispatch-only root (the dispatcher) runs no merge tracking and marks nothing ready, so honest CI is the broker's root's to require, not its.
+        const blockers = options.dispatchOnly === true ? [] : switchBlockers(runtime, areas);
         if (blockers.length > 0) throw new CoreSwitchBlockedError(blockers);
         return runtime;
       })();
