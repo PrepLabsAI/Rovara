@@ -3,11 +3,15 @@
 // The controller decided that, once the host is deployed, these answers come from the core itself, not from adapters on the old broker:
 //   - sessions (`/v1/app/sessions...`): a session's read (the task view with its evidence), the understanding answers (`POST .../answers`), stop, retry, follow;
 //   - a task's read (`GET /v1/dev/tasks/<id>`), whose view carries the evidence kept for its checked code;
-//   - decision cards (`GET /v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card needs a proof that a person
-//     on a recently signed-in page acts; this API has none yet, so approve, reject, request changes and evidence-opened are refused (the same open question as script tokens);
+//   - decision cards (`/v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card (approve, reject, request changes,
+//     evidence-opened) needs a FRESH STEP-UP (lane ID part 2): the person proved it was them with a factor Code owns (an emailed code, a passkey, or a company sign-in's own
+//     re-authentication), no longer ago than the company's window. A Slack, Google or GitHub round trip never counts, and a tool holding an ordinary API token has no step-up;
 //   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project;
-//   - script tokens (`/v1/app/script-tokens...`): list and revoke. MAKING one is refused here: the laptop's rule is that only a page the person signed in to a few minutes ago may make
-//     one, and the deployed API has no such credential today (QUESTION R2-SCRIPT-TOKEN-CREDENTIAL). A token's own requests are not accepted here either (the broker's sign-in decides that).
+//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
+//     "a page signed in to a few minutes ago" rule, with Code's own factor as the proof). A token's own requests are not accepted here either (the broker's sign-in decides that).
+//   - The step-up's time comes only from the caller the broker's sign-in vouched for (`DeployedCaller.stepUp`, read from the verified access token), never from a header, a query or a
+//     body. The age is checked HERE, on every such request, against the company's window (`stepUpWindowSeconds`, the policy hook's answer, which may only shorten the default), so a
+//     token whose step-up is older than the window is refused whatever the calling service says.
 //
 // Rules:
 //   - Off (the default) is byte-identical: `route` answers `undefined` for every request without reading anything, and the old broker answers as before.
@@ -17,14 +21,14 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { AgentXError, OrgRoleSchema, agentXError, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
+import { AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
 import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies } from "../core/decisions/routes.js";
 import type { SessionMembers } from "../core/sessions/access.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
-import { listScriptTokens, revokeScriptToken, scriptTokensEnabled, type ScriptTokenCaller } from "../core/script-tokens/index.js";
+import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, type ScriptTokenCaller } from "../core/script-tokens/index.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
@@ -40,9 +44,10 @@ const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:ho
 const SCRIPT_TOKENS = /^\/v1\/app\/script-tokens(?:\/([^/]+)\/revoke)?$/u;
 
 export const NOT_ON_THE_CORE_YET = "That is not on the core engine on this install yet.";
-export const MAKE_SCRIPT_TOKEN_ON_A_PAGE = "A script token is made on its page, in a browser you signed in to a few minutes ago: it is a long-lived credential, so a tool that holds an API token cannot make one.";
+export const MAKE_SCRIPT_TOKEN_ON_A_PAGE = "A script token is made right after you confirm it's you on the sign-in page: it is a long-lived credential, so a tool that holds an API token cannot make one. Confirm it's you, then try again within a few minutes.";
 export const SIGN_IN_AGAIN = "Sign in again.";
-export const DECIDE_ON_A_PAGE = "A decision is made on its page, in a browser you signed in to a few minutes ago: a tool that holds an API token cannot approve or reject.";
+export const DECIDE_ON_A_PAGE = "A decision is made right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
+export const COMPANY_RULES_NO_ANSWER = "The company rules service did not answer, so nothing was done. Try again in a moment.";
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 const PROJECT_NOT_FOUND = "project not found";
 
@@ -52,6 +57,18 @@ export interface DeployedCaller {
   client?: string | undefined;
   /** Set by the broker's sign-in when the request carries a script token (never from a body). Such a caller reaches only a task's read here. */
   scriptToken?: { tokenId: string } | undefined;
+  /**
+   * Lane ID part 2: the person's last step-up as the VERIFIED access token states it (`stepUpOf` over its `step_up_at` and `step_up_amr`), set by the broker's sign-in and never from a
+   * header, a query or a body. `at` is an ISO time. Absent: no step-up in this session. The age is checked on the route, never trusted from it.
+   */
+  stepUp?: { at: string; method: string } | undefined;
+}
+
+/** A decision card's caller on the deployed API: who acts and, for the deployment's performer, the person with the step-up time as `Principal.authTime`. */
+export interface DeployedDecisionCaller extends DecisionCaller {
+  principal: Principal;
+  /** Present on an act (approve, reject, request changes, evidence-opened): the fresh step-up the route checked. Absent on a read. */
+  stepUp?: { at: string; method: string };
 }
 
 /** What membership says about the caller: the company and the live role in it (never a token claim). */
@@ -64,8 +81,13 @@ export interface CompanyMembership {
 export interface CoreDevWiring {
   /** The session levels from the company's own records (lanes ID and T). Without it the session routes are not served (the laptop's default is the sole owner). */
   members?: SessionMembers;
-  /** The decision cards' sources and performer (each checks the caller's live authority). */
-  decisions?: DecisionRouteDependencies<DecisionCaller>;
+  /** The decision cards' sources and performer (each checks the caller's live authority). An act reaches the performer only after the route checked a fresh step-up. */
+  decisions?: DecisionRouteDependencies<DeployedDecisionCaller>;
+  /**
+   * The company's step-up window in seconds, through the policy hook. It may only shorten FRESH_SIGN_IN_SECONDS (ten minutes, the sign-in server's DEVELOPER_STEP_UP_WINDOW_SECONDS). Absent: that default. A throw, or an answer that is not a whole
+   * number from 0 to 86400, is no answer: the act is refused (`COMPANY_RULES_NO_ANSWER`), never let through on the default.
+   */
+  stepUpWindowSeconds?: () => Promise<unknown>;
   /** How we work, read through the company's code host. Served only with `canReadProject`. */
   playbook?: PlaybookService;
   /** Whether this person may read this project (their project grant from the company's own records). A project they may not read answers exactly like a missing one. */
@@ -99,6 +121,40 @@ function owns(path: string, method: string): boolean {
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
+
+/** A request body as one JSON object; anything else is a fixed refusal (no echo of what was sent). */
+function bodyOf(request: BrokerRequest): Record<string, unknown> {
+  if (request.body === undefined || request.body === "") return {};
+  let value: unknown;
+  try { value = JSON.parse(request.body); } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw agentXError("CONFIG_INVALID", "the request body must be an object");
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Lane ID part 2: the caller's step-up, if it is fresh enough for this company now; otherwise the refusal. The window is the company's (through the hook) and may only be shorter than
+ * the default; a missing, unreadable, too-old or future step-up time is refused (`checkApprovalSignIn`'s window rule, with its clock-skew allowance).
+ */
+async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs: number, refusal: string): Promise<{ at: string; method: string }> {
+  let seconds = FRESH_SIGN_IN_SECONDS;
+  if (wiring.stepUpWindowSeconds !== undefined) {
+    let answer: unknown;
+    try { answer = await wiring.stepUpWindowSeconds(); } catch { answer = undefined; }
+    if (typeof answer !== "number" || !Number.isInteger(answer) || answer < 0 || answer > 86_400) throw agentXError("RUNTIME_UNAVAILABLE", COMPANY_RULES_NO_ANSWER);
+    seconds = Math.min(seconds, answer);
+  }
+  const stepUp = caller.stepUp;
+  if (stepUp === undefined || stepUp === null || typeof stepUp !== "object" || typeof stepUp.at !== "string" || typeof stepUp.method !== "string" || stepUp.method === "") throw agentXError("REAUTH_REQUIRED", refusal);
+  // A zero window refuses every step-up; checkApprovalSignIn's window needs at least a minute, so it is decided here.
+  if (seconds === 0) throw agentXError("REAUTH_REQUIRED", refusal);
+  const verdict = checkApprovalSignIn({ mode: "window", seconds: Math.max(seconds, 60) }, { authTime: stepUp.at }, nowMs, { companySignIn: false });
+  if (!verdict.ok) throw agentXError("REAUTH_REQUIRED", refusal);
+  // Below a minute, checkApprovalSignIn's floor would be looser than the company asked: the exact age is checked too.
+  if (nowMs - Date.parse(stepUp.at) > seconds * 1000) throw agentXError("REAUTH_REQUIRED", refusal);
+  return { at: stepUp.at, method: stepUp.method };
+}
+
+const nowOf = (target: Mounted): number => (target.runtime.flow.deps.now?.() ?? new Date()).getTime();
 
 interface Mounted {
   runtime: CoreRuntime;
@@ -170,10 +226,19 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         }
         if (DECISIONS.test(path)) {
           if (target.wiring.decisions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          // Reading the cards only: approve, reject, request changes and evidence-opened need a proof that a person on a recently signed-in page acts, and this API has none yet.
-          if (request.method !== "GET") throw agentXError("FORBIDDEN", DECIDE_ON_A_PAGE);
+          // Reading the cards needs no step-up; approve, reject, request changes and evidence-opened need a fresh one, checked here before anything else is read.
+          const stepUp = request.method === "GET" ? undefined : await freshStepUp(caller, target.wiring, nowOf(target), DECIDE_ON_A_PAGE);
+          const body = request.method === "GET" ? {} : bodyOf(request);
           const url = new URL(request.path, "http://core");
-          const reply = await routeDecisionCards(target.wiring.decisions, { orgId: companyId, developerId: developerIdOf(caller.principal) }, { method: request.method, pathname: path, searchParams: url.searchParams, body: {} });
+          // The step-up time is the person's fresh sign-in for the performer's own rules (`Principal.authTime`); on a read nothing is decided and the principal carries no sign-in time.
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop them
+          const { authTime: _ignored, methods: _alsoIgnored, ...person } = caller.principal;
+          const decisionCaller: DeployedDecisionCaller = {
+            orgId: companyId, developerId: developerIdOf(caller.principal),
+            principal: stepUp === undefined ? person : { ...person, authTime: stepUp.at, methods: [stepUp.method] },
+            ...(stepUp === undefined ? {} : { stepUp }),
+          };
+          const reply = await routeDecisionCards(target.wiring.decisions, decisionCaller, { method: request.method, pathname: path, searchParams: url.searchParams, body });
           if (reply === undefined) throw agentXError("NOT_FOUND", "route not found");
           return json(reply.statusCode, reply.body);
         }
@@ -189,11 +254,20 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         if (tokens !== null) {
           const enabled = target.wiring.scriptTokens?.enabled ?? (() => scriptTokensEnabled());
           if (target.wiring.scriptTokens === undefined || !enabled()) throw agentXError("NOT_FOUND", "route not found");
-          // Making a token needs a recently signed-in page; this API has no such credential (the question is open), so it is refused for every caller.
-          if (tokens[1] === undefined && request.method === "POST") throw agentXError("FORBIDDEN", MAKE_SCRIPT_TOKEN_ON_A_PAGE);
-          const deps = { store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => (target.runtime.flow.deps.now?.() ?? new Date()).getTime() };
+          const deps = { store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target) };
           // The live role from membership decides whether the list and revoke reach every token of the company (an administrator) or only the caller's own.
           const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };
+          if (tokens[1] === undefined && request.method === "POST") {
+            // Making a token needs a fresh step-up, checked before the body is read.
+            await freshStepUp(caller, target.wiring, nowOf(target), MAKE_SCRIPT_TOKEN_ON_A_PAGE);
+            const canRead = target.wiring.canReadProject;
+            if (canRead === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+            // A token is made only for projects this person may read now; one they may not read answers exactly like a missing one.
+            const made = await createScriptToken(deps, scriptCaller, bodyOf(request), async (project) => {
+              if (!(await canRead(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+            });
+            return json(201, made);
+          }
           if (tokens[1] === undefined && request.method === "GET") return json(200, { tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });
           if (tokens[1] !== undefined && request.method === "POST") return json(200, { token: await revokeScriptToken(deps, scriptCaller, tokenIdOf(tokens[1])) });
           throw agentXError("NOT_FOUND", "route not found");
