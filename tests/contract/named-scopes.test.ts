@@ -77,7 +77,7 @@ describe("the route table", () => {
 
 /** The concrete paths a router regex literal matches, each `([^/]+)` as `{}`. */
 function expandRegex(source: string): string[] {
-  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}");
+  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}");
   const expand = (text: string): string[] => {
     const start = text.search(/\((\?:)?/);
     if (start < 0) return [text];
