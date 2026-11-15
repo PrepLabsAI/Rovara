@@ -60,7 +60,8 @@ describe("proofHolds: the ready rule's truth table", () => {
     expect(hold({ proof: proof([lint, VACUOUS]), checkKinds: { lint: "lint", unit: "test" } })).toMatchObject({ holds: true, provenCount: 0 });
     expect(hold({ proof: proof([lint]), checkKinds: { lint: "newer_kind" } }).provenCount).toBe(0);
     expect(hold({ proof: proof([PROVES]), checkKinds: { unit: "test" } }).provenCount).toBe(1);
-    expect(hold({ proof: proof([PROVES]), checkKinds: { unit: "eval" } }).provenCount).toBe(1);
+    // TE-AI-EVIDENCE (DEC 200): an eval is registered with countsTowardProof false, so a proving-looking eval row is not change proof.
+    expect(hold({ proof: proof([PROVES]), checkKinds: { unit: "eval" } }).provenCount).toBe(0);
   });
 });
 
