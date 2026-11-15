@@ -62,7 +62,7 @@ import {
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
   SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
-  ActorRefSchema,
+  ActorRefSchema, COMPANY_AUDIT_RECORDS_PATH, COMPANY_EVENTS_PATH,
   SignInClientViewSchema,
   AccessCheckRequestSchema,
   AccessCheckResponseSchema,
@@ -79,6 +79,7 @@ import {
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
@@ -182,6 +183,8 @@ export interface DeveloperRouteDependencies {
   chatgpt?: ChatGptConnections;
   /** Spec 062: channel account links; without them /review/link/* and /v1/dev/channel-links answer NOT_FOUND. */
   channelLinks?: ChannelLinkDependencies;
+  /** Lanes AU and EV: the company audit and event reads for a company administrator; without them those two routes answer NOT_FOUND. */
+  companyReads?: CompanyReadsConfiguration;
 }
 /** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string }
@@ -1009,6 +1012,21 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   // Plan v3.2 lane ID: only a route in the table, and only with its scope.
   const route = devRouteOf(request.method, url.pathname);
   if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // Lanes AU and EV: the company's audit records and events, read as the company administrator of the caller's own company.
+  if (url.pathname === COMPANY_AUDIT_RECORDS_PATH || url.pathname === COMPANY_EVENTS_PATH) {
+    const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    requireRouteScope(route, reader);
+    if (deps.companyReads === undefined) throw agentXError("NOT_FOUND", "route not found");
+    const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${reader.developerId}`);
+    if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+    // A person's name: the host's lookup, else the sign-in table's display name, shown only for a person of the caller's own company.
+    const resolveCompany = deps.companyReads.companyOf;
+    const personName = deps.companyReads.personName ?? (async (developerId: string, companyId: string) => {
+      if (resolveCompany !== undefined && (await resolveCompany(developerId)) !== companyId) return undefined;
+      return (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName;
+    });
+    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator }, url, deps.now());
+  }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
   if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {

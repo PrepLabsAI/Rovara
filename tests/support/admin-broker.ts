@@ -59,6 +59,8 @@ export async function createAdminBroker(options: {
   channelAdapters?: boolean;
   /** Spec 065b: what a sign-in client's project is built from. */
   clientProjects?: unknown;
+  /** Lanes AU and EV: the company audit and event reads (a document store, and the company resolver). */
+  companyReads?: unknown;
   /** Sign in with ChatGPT (#338): built over the same fake table when given. */
   chatgpt?: (db: FakeDynamoDb) => ChatGptConnections;
   /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
@@ -91,6 +93,7 @@ export async function createAdminBroker(options: {
     ...(options.developer ? { developer: options.developer } : {}),
     ...(options.linking ? { linking: options.linking } : {}),
     ...(options.clientProjects === undefined ? {} : { clientProjects: options.clientProjects }),
+    ...(options.companyReads === undefined ? {} : { companyReads: options.companyReads }),
     ...(options.channelAdapters ? { channelAdapters: { secretPrefix: "agentx/production/", secrets: { put: vi.fn() } } } : {}),
     ...(options.chatgpt ? { chatgpt: options.chatgpt(db) } : {}),
   } as never);

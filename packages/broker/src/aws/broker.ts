@@ -310,6 +310,7 @@ import {
   storedCharge,
   type ChannelConversationDependencies,
 } from "./channel-conversation.js";
+import type { CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import type { DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
@@ -605,6 +606,11 @@ interface AwsBrokerDependencies {
     repositories(): Promise<ClientRepositoriesResponse["installations"]>;
     workerBinding(): Promise<Ec2RuntimeBinding>;
   };
+  /**
+   * Lanes AU and EV: the company audit and event reads for a company administrator (`/v1/dev/client/company/*`): the company's document store, the host's company
+   * resolver (membership) and a name lookup. Absent, both routes answer NOT_FOUND.
+   */
+  companyReads?: CompanyReadsConfiguration;
   /**
    * Spec 064: the legacy deployment's sign-in, for account linking only. Set instead of `developer`, so developer
    * tasks, sharing and admin changes stay off; /v1/dev/* and /review/* serve linking alone (routeLinkingRequest).
@@ -14184,10 +14190,11 @@ function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: 
 const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
 
 /** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. */
-function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "clientRepositories"> {
+function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "clientRepositories" | "companyReads"> {
   const clientProjects = dependencies.clientProjects;
-  if (clientProjects === undefined) return {};
+  if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
   return {
+    ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }),
     clientRepositories: () => clientProjects.repositories(),
     async createClientProject(developerId, input) {
       const url = `https://github.com/${input.repository}.git`;
