@@ -5,4 +5,5 @@ export * from "./engine-stamp.js";
 export * from "./flags.js";
 export * from "./jobs.js";
 export * from "./registry.js";
+export * from "./retention.js";
 export * from "./step-fence.js";
