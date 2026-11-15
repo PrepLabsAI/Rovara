@@ -345,6 +345,8 @@ const WEBHOOK_SCOPE: GitHubTokenScope = { system: "webhook" };
 
 /** What a tracking pass's reads ask for: the pull request, its reviews, the head's checks and statuses, the base branch and the workflow files, all at read. */
 const STATUS_TOKEN_PERMISSIONS = { contents: "read", pull_requests: "read", checks: "read", statuses: "read" } as const;
+/** TE-E0: the reads of check runs and commit statuses alone. */
+const CHECK_READ_PERMISSIONS = { checks: "read", statuses: "read" } as const;
 /** The same without the checks and statuses access, for an installation that has not accepted it yet. */
 /** How many pages of 100 reviews a tracking read takes. */
 const REVIEW_PAGES_MAX = 5;
@@ -868,14 +870,20 @@ export class GitHubAppCredentialProvider {
     return provider;
   }
 
-  private async trackingJson(url: string, token: string, init: { method?: string; body?: unknown; rateLimit?: boolean } = {}): Promise<{ status: number; body: unknown }> {
+  private async trackingJson(url: string, token: string, init: { method?: string; body?: unknown; rateLimit?: boolean; maxBytes?: number } = {}): Promise<{ status: number; body: unknown; tooLarge?: true }> {
     const response = await this.fetchImplementation(url, {
       method: init.method ?? "GET", headers: githubHeaders(token), redirect: "error", signal: AbortSignal.timeout(8_000),
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
     });
     let body: unknown;
+    let tooLarge = false;
     try {
-      body = response.status === 204 ? undefined : await response.json();
+      // TE-E0: a caller that names `maxBytes` reads the body as a stream and stops past it (the answer is then unread, never cut).
+      if (init.maxBytes !== undefined && response.status !== 204) {
+        const capped = await cappedJsonBody(response, init.maxBytes);
+        tooLarge = capped.tooLarge;
+        body = capped.body;
+      } else body = response.status === 204 ? undefined : await response.json();
     } catch {
       body = undefined;
     }
@@ -885,7 +893,7 @@ export class GitHubAppCredentialProvider {
       const retryAt = compareRateLimitRetryAt(response, body, this.now());
       if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
     }
-    return { status: response.status, body };
+    return { status: response.status, body, ...(tooLarge ? { tooLarge: true as const } : {}) };
   }
 
   /**
@@ -1347,10 +1355,10 @@ export class GitHubAppCredentialProvider {
     const provider = this.trackingProvider(budget);
     const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
     const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
-    const token = await provider.createInstallationToken(repository, STATUS_TOKEN_PERMISSIONS, scope);
-    const run = await provider.trackingJson(`${root}/check-runs/${checkRunId}`, token, { rateLimit: true });
+    const token = await provider.createInstallationToken(repository, CHECK_READ_PERMISSIONS, scope);
+    const run = await provider.trackingJson(`${root}/check-runs/${checkRunId}`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
     if (run.status === 404 || run.status === 403 || run.status === 410) return undefined;
-    if (run.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run lookup failed with HTTP ${run.status}`);
+    if (run.status !== 200 || run.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run lookup failed with HTTP ${run.status}`);
     let job: unknown;
     if (options.actionsJob === true) {
       let actionsToken: string | undefined;
@@ -1361,8 +1369,8 @@ export class GitHubAppCredentialProvider {
         if (!isAgentXError(error) || (error.code !== "GITHUB_NOT_CONNECTED" && error.code !== "RUNTIME_UNAVAILABLE")) throw error;
       }
       if (actionsToken !== undefined) {
-        const read = await provider.trackingJson(`${root}/actions/jobs/${checkRunId}`, actionsToken, { rateLimit: true });
-        if (read.status === 200) job = read.body;
+        const read = await provider.trackingJson(`${root}/actions/jobs/${checkRunId}`, actionsToken, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+        if (read.status === 200 && read.tooLarge !== true) job = read.body;
         else if (read.status !== 404 && read.status !== 403 && read.status !== 410) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub job lookup failed with HTTP ${read.status}`);
       }
     }
@@ -1381,19 +1389,28 @@ export class GitHubAppCredentialProvider {
     const provider = this.trackingProvider(budget);
     const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
     const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
-    const ref = revision ?? ("branch" in at ? at.branch.split("/").map(encodeURIComponent).join("/") : "");
-    const token = await provider.createInstallationToken(repository, STATUS_TOKEN_PERMISSIONS, scope);
-    const wanted = { name: check.name, ...(check.appId === undefined ? {} : { appId: check.appId }), ...(revision === undefined ? {} : { expectedSha: revision }) };
-    const runs = await provider.trackingJson(`${root}/commits/${ref}/check-runs?check_name=${encodeURIComponent(check.name)}&filter=latest&per_page=100`, token, { rateLimit: true });
+    const token = await provider.createInstallationToken(repository, CHECK_READ_PERMISSIONS, scope);
+    // A branch is read at one commit: its head is looked up once, and both reads below are of that commit (the branch can move between them).
+    let ref = revision;
+    if (ref === undefined && "branch" in at) {
+      const branch = await provider.trackingJson(`${root}/branches/${at.branch.split("/").map(encodeURIComponent).join("/")}`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+      if (branch.status === 404) return undefined;
+      const sha = (branch.body as { commit?: { sha?: unknown } } | undefined)?.commit?.sha;
+      if (branch.status !== 200 || branch.tooLarge === true || typeof sha !== "string" || !/^[a-f0-9]{40}$/u.test(sha)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub branch lookup failed with HTTP ${branch.status}`);
+      ref = sha;
+    }
+    if (ref === undefined) throw agentXError("CONFIG_INVALID", "commit sha is invalid");
+    const wanted = { name: check.name, ...(check.appId === undefined ? {} : { appId: check.appId }), expectedSha: ref };
+    const runs = await provider.trackingJson(`${root}/commits/${ref}/check-runs?check_name=${encodeURIComponent(check.name)}&filter=latest&per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
     if (runs.status === 404 || runs.status === 422) return undefined;
-    if (runs.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check runs lookup failed with HTTP ${runs.status}`);
+    if (runs.status !== 200 || runs.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check runs lookup failed with HTTP ${runs.status}`);
     const unreadable = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned check runs Rovara cannot read"); };
     let found: LatestCheckRun | undefined;
     try { found = latestCheckRunOf(runs.body, wanted); } catch { unreadable(); }
     if (found !== undefined || check.appId !== undefined) return found;
-    const statuses = await provider.trackingJson(`${root}/commits/${ref}/status?per_page=100`, token, { rateLimit: true });
+    const statuses = await provider.trackingJson(`${root}/commits/${ref}/status?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
     if (statuses.status === 404 || statuses.status === 422) return undefined;
-    if (statuses.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub commit status lookup failed with HTTP ${statuses.status}`);
+    if (statuses.status !== 200 || statuses.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub commit status lookup failed with HTTP ${statuses.status}`);
     try { return latestStatusOf(statuses.body, wanted); } catch { return unreadable(); }
   }
 
@@ -1401,21 +1418,27 @@ export class GitHubAppCredentialProvider {
    * TE-E0 option A, setup: the check names seen on the five most recently updated pull requests' heads (their check runs and commit statuses), at most `SEEN_CHECKS_MAX`, sorted. Read-only, eleven requests at
    * most. A head whose checks cannot be read is skipped: this is a list a person ticks, never a decision.
    */
-  async listSeenCheckNames(repositoryUrl: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<SeenCheckName[]> {
+  async listSeenCheckNames(repositoryUrl: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<{ checks: SeenCheckName[]; complete: boolean }> {
     const provider = this.trackingProvider(budget);
     const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
     const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
     const token = await provider.createInstallationToken(repository, STATUS_TOKEN_PERMISSIONS, scope);
-    const pulls = await provider.trackingJson(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=${String(SEEN_PULL_REQUESTS)}`, token, { rateLimit: true });
-    if (pulls.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request list failed with HTTP ${pulls.status}`);
+    const pulls = await provider.trackingJson(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=${String(SEEN_PULL_REQUESTS)}`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+    if (pulls.status !== 200 || pulls.tooLarge === true) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request list failed with HTTP ${pulls.status}`);
     const seen = new Map<string, SeenCheckName>();
+    let complete = true;
     for (const head of recentPullRequestHeads(pulls.body, SEEN_PULL_REQUESTS)) {
-      const runs = await provider.trackingJson(`${root}/commits/${head}/check-runs?per_page=100`, token, { rateLimit: true });
-      const statuses = await provider.trackingJson(`${root}/commits/${head}/status?per_page=100`, token, { rateLimit: true });
-      addSeenCheckNames(seen, runs.status === 200 ? runs.body : undefined, statuses.status === 200 ? statuses.body : undefined);
+      const runs = await provider.trackingJson(`${root}/commits/${head}/check-runs?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+      const statuses = await provider.trackingJson(`${root}/commits/${head}/status?per_page=100`, token, { rateLimit: true, maxBytes: CHECK_LIST_MAX_BYTES });
+      const readable = (answer: { status: number; tooLarge?: true }) => answer.status === 200 && answer.tooLarge !== true;
+      // A head whose checks could not be read, or a list longer than one page, leaves the listing incomplete: the setup screen says so, never "no checks seen".
+      if (!readable(runs) || !readable(statuses)) complete = false;
+      if (!addSeenCheckNames(seen, readable(runs) ? runs.body : undefined, readable(statuses) ? statuses.body : undefined)) complete = false;
     }
-    return [...seen.values()].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : (left.source ?? "").localeCompare(right.source ?? "")));
+    const checks = [...seen.values()].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : (left.source ?? "").localeCompare(right.source ?? "")));
+    return { checks, complete };
   }
+
 
   /** Reads a bounded PR diff summary for a code-aware, owner-approved feedback proposal. */
   async getPullRequestChangedFiles(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<GitHubPullRequestChangedFile[]> {
@@ -3133,6 +3156,28 @@ function workingBranchInput(repositoryUrl: string, expected: { installationId: n
 
 export interface WorkingBranchPage { branches: string[]; page: number; mayHaveMore: boolean; omittedUnsupported: boolean }
 /** Bound both metadata and list bodies independently of content-length or unknown provider fields. */
+/** TE-E0: the most bytes one check-run or status answer is read to (100 runs with their output summaries fit well within it). */
+const CHECK_LIST_MAX_BYTES = 2 * 1024 * 1024;
+
+/** A JSON body read as a stream to at most `maxBytes`; past it the read stops and nothing is parsed. */
+async function cappedJsonBody(response: Response, maxBytes: number): Promise<{ body: unknown; tooLarge: boolean }> {
+  if (response.body === null) return { body: undefined, tooLarge: false };
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk: unknown = next.value;
+      if (!(chunk instanceof Uint8Array)) return { body: undefined, tooLarge: false };
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) { await reader.cancel(); return { body: undefined, tooLarge: true }; }
+      chunks.push(chunk);
+    }
+    return { body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown, tooLarge: false };
+  } finally { reader.releaseLock(); }
+}
+
 async function workingBranchPageJson(response: Response): Promise<unknown> {
   if (response.body === null) throw workingBranchUnavailable();
   const reader = response.body.getReader(), chunks: Uint8Array[] = [];
