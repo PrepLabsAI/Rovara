@@ -907,10 +907,13 @@ export class ControlPlaneStack extends Stack {
         pendingWindow: Duration.days(7),
         removalPolicy: RemovalPolicy.DESTROY,
       });
-      chatGptConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
-        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
-        actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
-      }));
+      // Named environments only: the legacy (production) template keeps the grant on the broker's role, as mainline deploys it.
+      if (naming.env !== undefined) {
+        chatGptConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
+          principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+          actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
+        }));
+      } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       broker.addEnvironment("CHATGPT_CONNECTION_KEY_ARN", chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
@@ -941,11 +944,19 @@ export class ControlPlaneStack extends Stack {
         "channel-events": channelAdapters.eventDeadLetters,
       };
       broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
-      for (const queue of Object.values(deadLetterQueues)) queue.addToResourcePolicy(new iam.PolicyStatement({
-        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
-        actions: ["sqs:GetQueueAttributes"],
-        resources: [queue.queueArn],
-      }));
+      // Named environments only: the legacy (production) template keeps one statement on the broker's role, as mainline deploys it.
+      if (naming.env !== undefined) {
+        for (const queue of Object.values(deadLetterQueues)) queue.addToResourcePolicy(new iam.PolicyStatement({
+          principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+          actions: ["sqs:GetQueueAttributes"],
+          resources: [queue.queueArn],
+        }));
+      } else {
+        broker.addToRolePolicy(new iam.PolicyStatement({
+          actions: ["sqs:GetQueueAttributes"],
+          resources: Object.values(deadLetterQueues).map((queue) => queue.queueArn),
+        }));
+      }
       // C10: the ingress reads shared thread records by key; its SLACK_BINDING# statement is unchanged.
       slackIngress.addEnvironment("SHARED_TASKS", "enabled");
       slackIngress.addToRolePolicy(new iam.PolicyStatement({
@@ -984,12 +995,15 @@ export class ControlPlaneStack extends Stack {
       // Lambda validates destination permissions when creating EventInvokeConfig. Keep this
       // grant on the execution role, and explicitly order both grant and any queue policy first.
       // SqsDestination repeats the identical grant; CDK deduplicates it in DefaultPolicy.
-      const handOffGrant = handOffFailures.grantSendMessages(broker);
+      // Named environments only: the legacy (production) template is unchanged.
+      const handOffGrant = naming.env !== undefined ? handOffFailures.grantSendMessages(broker) : undefined;
       broker.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
-      const brokerInvokeConfig = broker.node.findChild("EventInvokeConfig");
-      handOffGrant.applyBefore(brokerInvokeConfig);
-      const handOffQueuePolicy = handOffFailures.node.tryFindChild("Policy");
-      if (handOffQueuePolicy) brokerInvokeConfig.node.addDependency(handOffQueuePolicy);
+      if (handOffGrant !== undefined) {
+        const brokerInvokeConfig = broker.node.findChild("EventInvokeConfig");
+        handOffGrant.applyBefore(brokerInvokeConfig);
+        const handOffQueuePolicy = handOffFailures.node.tryFindChild("Policy");
+        if (handOffQueuePolicy) brokerInvokeConfig.node.addDependency(handOffQueuePolicy);
+      }
       slackIngress.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
       new cloudwatch.Alarm(this, "SlackHandOffFailuresAlarm", {
         alarmName: naming.alarmName("SlackHandOffFailures"),
