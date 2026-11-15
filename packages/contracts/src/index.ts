@@ -135,6 +135,7 @@ export * from "./checks-reply.js";
 export * from "./cancel-callback-key.js";
 export * from "./task-comments.js";
 export * from "./task-people.js";
+export * from "./task-readers.js";
 export * from "./e2e-openapi-fixture.js";
 export * from "./e2e-executor.js";
 export * from "./e2e-model-channel.js";
@@ -185,7 +186,7 @@ export * from "./script-tokens.js";
 
 
 export { TICKET_PATTERN } from "./confirmation.js";
-export { SetMyNameBodySchema, type SetMyNameBody, SetMyNameResponseSchema, type SetMyNameResponse, SetMyNameResponseReaderSchema } from "./developer-web.js";
+export { SetMyNameBodySchema, type SetMyNameBody, SetMyNameResponseSchema, type SetMyNameResponse, SetMyNameResponseReaderSchema, SetDisplayNameRequestSchema, type SetDisplayNameRequest, type SetDisplayNameResponse } from "./developer-web.js";
 
 export { TaskResponseSchema, TaskResponseReaderSchema } from "./task-response.js";
 

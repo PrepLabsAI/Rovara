@@ -16,11 +16,14 @@ export interface ProjectAuthorityRevision {
 }
 
 export interface ProjectDeveloperMembership { pk?: string; sk?: string; projectName: string; role?: string }
+/** FR-013.1: the membership roles that let a person use a project. An administrator may do all a developer may. */
+export type ProjectUseRole = "developer" | "administrator";
+export const mayUseProject = (role: unknown): role is ProjectUseRole => role === "developer" || role === "administrator";
 export interface ProjectChannelBinding extends SlackChannelBinding { pk?: string; sk?: string }
 export interface ProjectAuthorityWitness {
   projectRevision: { pk: string; sk: string; revision: number; developerTasksPresent: boolean; developerTasks?: unknown };
   access: "granted" | "channel";
-  membership?: { pk: string; sk: string; projectName: string; role: "developer" };
+  membership?: { pk: string; sk: string; projectName: string; role: ProjectUseRole };
   binding?: { pk: string; sk: string; teamId: string; channelId: string; projectName: string; updatedAt: string };
 }
 
@@ -64,7 +67,7 @@ export function evaluateProjectAuthority(input: {
   const policy = developerTaskPolicy(input.revision.definition);
   const matchingBindings = input.bindings.filter((binding) => binding.projectName === input.project);
   const channelIds = [...new Set(matchingBindings.map((binding) => binding.channelId))].sort();
-  const membership = input.memberships.find((row) => row.projectName === input.project && row.role === "developer");
+  const membership = input.memberships.find((row): row is ProjectDeveloperMembership & { role: ProjectUseRole } => row.projectName === input.project && mayUseProject(row.role));
   const developerGrant = membership !== undefined;
 
   let access: "granted" | "channel" | undefined;
@@ -88,7 +91,7 @@ export function evaluateProjectAuthority(input: {
   } : undefined;
   const witness: ProjectAuthorityWitness | undefined = projectRevision === undefined ? undefined : {
     projectRevision, access,
-    ...(access === "granted" && membership?.pk !== undefined && membership.sk !== undefined ? { membership: { pk: membership.pk, sk: membership.sk, projectName: membership.projectName, role: "developer" as const } } : {}),
+    ...(access === "granted" && membership?.pk !== undefined && membership.sk !== undefined ? { membership: { pk: membership.pk, sk: membership.sk, projectName: membership.projectName, role: membership.role } } : {}),
     ...(access === "channel" && binding?.pk !== undefined && binding.sk !== undefined ? { binding: { pk: binding.pk, sk: binding.sk, teamId: binding.teamId, channelId: binding.channelId, projectName: binding.projectName, updatedAt: binding.updatedAt } } : {}),
   };
   if (witness !== undefined && ((access === "granted" && witness.membership === undefined) || (access === "channel" && witness.binding === undefined))) return { kind: "unavailable" };

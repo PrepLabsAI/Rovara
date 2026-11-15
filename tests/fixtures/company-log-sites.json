@@ -35,6 +35,7 @@
   "packages/broker/src/aws/slack-notice-channel.ts": 2,
   "packages/broker/src/aws/slack-workflow-choice.ts": 2,
   "packages/broker/src/aws/swebench.ts": 7,
+  "packages/broker/src/aws/task-readers.ts": 1,
   "packages/broker/src/aws/turns.ts": 1,
   "packages/broker/src/aws/workflow-cancel-reconcile.ts": 1,
   "packages/broker/src/chatgpt/task-model.ts": 1,
@@ -80,7 +81,7 @@
   "packages/broker/src/lessons/task-end.ts": 1,
   "packages/broker/src/local/app/app.ts": 1,
   "packages/broker/src/local/app/automation.ts": 1,
-  "packages/broker/src/local/runtime.ts": 5,
+  "packages/broker/src/local/runtime.ts": 6,
   "packages/broker/src/plugins/channel/slack/plugin.ts": 1,
   "packages/broker/src/services/merge-tracking.ts": 1
 }
