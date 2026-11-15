@@ -122,6 +122,21 @@ describe("queueing", () => {
     expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: true });
     expect((await readFollowup(d, at()))?.state).toBe("superseded");
   });
+  it("a re-queue that races a newer commit taking the pointer neither runs the old commit nor takes the pointer back", async () => {
+    const { d, store, now } = deps();
+    await queueFullSuiteFollowup(d, at());
+    await recordFollowupResult(d, { ...at(), result: { outcome: "rovara_problem", finishedAt: "2026-11-15T10:40:00.000Z" } });
+    now.value += 1_000;
+    let first = true;
+    const racing: FollowupDeps = { ...d, store: { get: store.get.bind(store), update: store.update.bind(store), transact: async (items) => {
+      // Between this call's pointer read and its write, a newer commit is queued.
+      if (first) { first = false; now.value -= 500; await queueFullSuiteFollowup(d, at(ORG, "task-1", D2, H2)); now.value += 500; }
+      return store.transact(items);
+    } } };
+    expect((await queueFullSuiteFollowup(racing, at())).queued).toBe(false);
+    expect((await readFollowup(d, at()))?.state).toBe("errored");
+    expect((await readFollowup(d, at(ORG, "task-1", D2, H2)))?.state).toBe("queued");
+  });
   it("a charge for a run that did not queue is given back: a lost race and a store fault", async () => {
     const released: string[] = [];
     const lost = deps({ release: async (input) => { released.push(input.taskId); } });
@@ -137,7 +152,7 @@ describe("queueing", () => {
     const racing = { ...d, store: { get: store.get.bind(store), update: store.update.bind(store), transact: async (items: Parameters<typeof store.transact>[0]) => {
       if (first) { first = false; await queueFullSuiteFollowup(d, at()); }
       return store.transact(items);
-    } } } as FollowupDeps;
+    } } } satisfies FollowupDeps;
     expect(await queueFullSuiteFollowup(racing, at())).toEqual({ queued: true, replayed: true });
   });
   it("two commits whose digests share the stored prefix are refused, never mixed up", async () => {
