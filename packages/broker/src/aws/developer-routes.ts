@@ -173,7 +173,8 @@ export interface DeveloperRouteDependencies {
   /** Spec 062: channel account links; without them /review/link/* and /v1/dev/channel-links answer NOT_FOUND. */
   channelLinks?: ChannelLinkDependencies;
 }
-export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
+/** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
+export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string }
 
 /** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
 export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
@@ -856,11 +857,11 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
     return authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization));
   }
   const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));
-  requireRouteScope(route, person);
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  requireRouteScope(route, person);
   return {
-    developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName,
+    developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName, clientId: person.client.clientId,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
   };

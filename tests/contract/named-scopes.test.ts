@@ -26,6 +26,11 @@ describe("the route table", () => {
     for (const route of DEV_ROUTES) expect([...NAMED, "full", "none"]).toContain(route.requires);
   });
 
+  it("lets only the access check and the per-person project read need no scope", () => {
+    expect(DEV_ROUTES.filter((route) => route.requires === "none").map((route) => `${route.method} ${route.path}`).sort())
+      .toEqual(["GET /v1/dev/client/projects/{project}", "POST /v1/dev/access"]);
+  });
+
   it("has one row per method and path", () => {
     const keys = DEV_ROUTES.map((route) => `${route.method} ${route.path.replace(/\{[A-Za-z]+\}/g, "{}")}`);
     expect(new Set(keys).size).toBe(keys.length);
@@ -222,6 +227,12 @@ describe("the developer API with a scoped client's token (a named environment)",
     const read = devRouteOf("GET", "/v1/dev/tasks")!;
     expect(await call("GET", "/v1/dev/tasks", await scoped("tasks:read", "tasks:start"))).toMatchObject({ status: 403, body: { error: { message: scopeRefusal(read) } } });
     expect(refusedForScope(await call("POST", "/v1/dev/tasks", await scoped("tasks:read", "tasks:start")))).toBe(false);
+  });
+
+  it("refuses a removed person's client token as a sign-in that ended, before any scope check", async () => {
+    cloudClient(NAMED);
+    db.set({ pk: `DEVELOPER#${ADA}`, sk: "META", developerId: ADA, provider: "oidc", issuer: "https://idp.example.test", subject: "ada", displayName: "Ada", firstSignInAt: "x", lastSignInAt: "x", revoked: true });
+    expect((await call("GET", "/v1/dev/workspaces", await scoped())).status).toBe(401);
   });
 
   it("serves a scoped route as the person (their own name, their projects)", async () => {
