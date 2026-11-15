@@ -32,7 +32,9 @@ describe("company secret names", () => {
     expect(companyOfSecretName(account.slice("agentx/local/".length))).toEqual({path: "org-test-accounts", company: A});
   });
   it("pins the intentionally unwired read families in the inventory", () => {
-    const docs = readFileSync(new URL("../../docs/ports.md", import.meta.url), "utf8");
-    for (const row of ["org-connectors", "org-hooks", "org-test-accounts", "T4/T5", "lane G", "T7", "R2"]) expect(docs).toContain(row);
+    for (const path of ["../../docs/ports.md", "../../docs/architecture/company-inventory.md"]) {
+      const docs = readFileSync(new URL(path, import.meta.url), "utf8");
+      for (const row of ["org-connectors", "org-hooks", "org-test-accounts", "T4/T5", "lane G", "T7", "R2"]) expect(docs).toContain(row);
+    }
   });
 });

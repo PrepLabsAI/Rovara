@@ -1,6 +1,6 @@
 import { OrgIdSchema, agentXError, type SecretRef, type SecretStore } from "@agentx/contracts";
 import { LocalSecretError } from "../ports/secret-error.js";
-import type { CompanyMembershipReader } from "./company-membership-reader.temporary.js";
+import type { CompanyMembershipReader } from "../aws/company-check.js";
 import type { ConnectionSecrets } from "./org-secrets.js";
 
 async function companyFor(companies: CompanyMembershipReader, personId: string): Promise<string> {

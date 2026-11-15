@@ -1,7 +1,12 @@
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, realpath, rm, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { companyMembershipFromStore } from "../../packages/broker/src/aws/company-check.js";
+import { createSecretsManagerSecretStore } from "../../packages/aws-adapters/src/secrets-manager/index.js";
+import { COMPANY_SECRET_PATHS } from "../../packages/aws-adapters/src/secrets-manager/company-names.js";
+import { FakeSecretsManager } from "../support/ports/aws-fakes.js";
 import { createCompanySecretStore } from "../../packages/testing/src/isolation/secret-ledger.js";
 import { createMemberSecretReader, memberBoundConnectionSecrets } from "../../packages/broker/src/connections/company-secrets.js";
 import { LocalSecretError } from "../../packages/broker/src/ports/secret-error.js";
@@ -44,6 +49,8 @@ describe("membership-bound secrets", () => {
     await expect(bound.put(B,name(B),"bad")).rejects.toMatchObject({code:"FORBIDDEN",message:"FORBIDDEN: that secret does not belong to this company"});
     await expect(bound.scheduleDelete(B,name(B))).rejects.toMatchObject({code:"FORBIDDEN"});
     expect(inner.calls).toEqual([]); expect(count).toBe(3);
+    expect(await bound.read(B, name(A))).toBeUndefined();
+    expect(inner.calls).toEqual([]);
     // The argument is a bug guard even when the supplied name happens to be our own.
     await expect(bound.put(B,name(A),"bad")).rejects.toMatchObject({code:"FORBIDDEN"});
     await expect(bound.scheduleDelete(B,name(A))).rejects.toMatchObject({code:"FORBIDDEN"});
@@ -64,4 +71,56 @@ describe("membership-bound secrets", () => {
       expect(await readdir(directory)).toEqual([]);
     } finally {await rm(directory,{recursive:true,force:true});}
   });
+});
+
+// This boundary is type-only: runtime assertions cannot detect a duplicate interface.
+it("uses R4's reader surface and removes the temporary membership interface", () => {
+  const source = readFileSync(new URL("../../packages/broker/src/connections/company-secrets.ts", import.meta.url), "utf8");
+  expect(source).toContain('import type { CompanyMembershipReader } from "../aws/company-check.js"');
+  expect(existsSync(new URL("../../packages/broker/src/connections/company-membership-reader.temporary.ts", import.meta.url))).toBe(false);
+});
+
+it("composes R4 membership with T6 secret reads, revocation and fixed refusals", async () => {
+  let company: string | undefined = A;
+  let unavailable = false;
+  const people: unknown[] = [];
+  const companies = companyMembershipFromStore({ get: async (key) => {
+    people.push(key);
+    if (unavailable) throw new Error("private-membership-cause");
+    return company === undefined ? undefined : {
+      ...key, entityType: "COMPANY_MEMBERSHIP", personId: "person-a", companyId: company,
+      role: "member", joinedAt: "2026-11-13T00:00:00.000Z",
+    };
+  } });
+  const service = new FakeSecretsManager();
+  let clients = 0;
+  const store = createSecretsManagerSecretStore({ namePrefix: "agentx/local/", companyPaths: COMPANY_SECRET_PATHS,
+    clientFor: () => { clients++; return service; } });
+  const reader = createMemberSecretReader({ companies, store });
+  for (const family of COMPANY_SECRET_PATHS) {
+    service.set(`agentx/local/${family}/${A}/own`, "own-value");
+    service.set(`agentx/local/${family}/${B}/exists`, "foreign-value");
+    expect(await reader.readAs("person-a", { awsSecret: `${family}/${B}/exists` })).toBeUndefined();
+    expect(await reader.readAs("person-a", { awsSecret: `${family}/${B}/missing` })).toBeUndefined();
+  }
+  expect(clients).toBe(0);
+  expect(service.reads).toEqual([]);
+  expect((await reader.readAs("person-a", { awsSecret: `org-connectors/${A}/own` }))?.reveal()).toBe("own-value");
+  company = B;
+  expect((await reader.readAs("person-a", { awsSecret: `org-connectors/${B}/exists` }))?.reveal()).toBe("foreign-value");
+  const reads = [...service.reads];
+  const inner = new InMemoryConnectionSecrets("local");
+  const bound = memberBoundConnectionSecrets({ companies, personId: "person-a", inner });
+  for (const failsWithThrow of [false, true]) {
+    company = undefined; unavailable = failsWithThrow;
+    for (const call of [
+      () => reader.readAs("person-a", REF), () => bound.read(A, name(A)),
+      () => bound.put(A, name(A), "value"), () => bound.scheduleDelete(A, name(A)),
+    ]) await expect(call()).rejects.toThrow(new RegExp(`^${REFUSAL}$`, "u"));
+  }
+  expect(service.reads).toEqual(reads);
+  expect(clients).toBe(2);
+  expect(inner.calls).toEqual([]);
+  expect(people).toHaveLength(COMPANY_SECRET_PATHS.length * 2 + 10);
+  expect(people.every((key) => JSON.stringify(key) === JSON.stringify({ pk: "COMPANY_MEMBER#person-a", sk: "COMPANY" }))).toBe(true);
 });
