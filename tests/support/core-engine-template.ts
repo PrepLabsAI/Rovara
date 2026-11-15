@@ -48,6 +48,13 @@ export function withoutCoreEngine(template: unknown): unknown {
   expect(brokers).toHaveLength(1);
   const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
   expect(variables.ROVARA_CORE_ENGINE).toStrictEqual({ Ref: "CoreEngine" });
+  // L1a adds only these broker references; core-engine-infrastructure pins the full pre-L1a template after removing them.
+  for (const [name, queueId] of [["CORE_DISPATCH_QUEUE_URL", "CoreEngineJobsQueue"], ["CORE_DISPATCH_DEAD_LETTER_URL", "CoreEngineJobsDeadLetterQueue"]] as const) {
+    const matches = added.filter(([id, resource]) => id.startsWith(queueId) && resource.Type === "AWS::SQS::Queue");
+    expect(matches).toHaveLength(1);
+    expect(variables[name]).toStrictEqual({ Ref: matches[0]![0] });
+    delete variables[name];
+  }
   delete variables.ROVARA_CORE_ENGINE;
   return template;
 }

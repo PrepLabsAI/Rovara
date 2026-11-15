@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
@@ -181,5 +181,46 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
     expect(projectRoleOf("administrator")).toBe("maintainer");
     expect(projectRoleOf("developer")).toBe("contributor");
     expect(projectRoleOf(undefined)).toBeUndefined();
+  });
+});
+
+describe("the broker core dispatch queue piece (L1a)", () => {
+  const url = "https://sqs.us-east-1.amazonaws.com/123456789012/core-dispatch";
+  const deadLetterUrl = `${url}-dead`;
+  const words = "the broker needs valid core dispatch queue URLs";
+
+  it("builds the same queue settings as the dispatcher, with an optional region", () => {
+    for (const region of [undefined, "us-east-1"]) {
+      const env = { ROVARA_CORE_ENGINE: "on", CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl, ...(region === undefined ? {} : { AWS_REGION: region }) };
+      expect(brokerCoreDispatchQueue(env)).toEqual({ settings: { ...(region === undefined ? {} : { region }), queues: { "task-dispatch": { url, deadLetterUrl } } } });
+    }
+  });
+
+  it("refuses missing or invalid URLs in fixed words without echoing either value", () => {
+    for (const variable of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL"]) {
+      for (const value of [undefined, "", "  ", "zzq-private-input", "https://zzq-private-input/", "ftp://zzq-private-input/queue", "https://example/queue?zzq-private-input", "https://example/queue\n", 42, null]) {
+        const env = { ROVARA_CORE_ENGINE: "on", CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl, [variable]: value } as NodeJS.ProcessEnv;
+        expect(() => brokerCoreDispatchQueue(env)).toThrow(/^the broker needs valid core dispatch queue URLs$/u);
+        try { brokerCoreDispatchQueue(env); } catch (error) {
+          expect(error).toMatchObject({ name: "BrokerCoreQueueNotConfigured", message: words });
+          expect(String(error)).not.toContain("zzq-private-input");
+        }
+      }
+    }
+    expect(() => brokerCoreDispatchQueue({ CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: `${deadLetterUrl}.fifo` })).toThrow(words);
+  });
+
+  it("never invokes the queue piece with the switch off, even with unreadable queue settings", async () => {
+    const env = { ROVARA_CORE_ENGINE: "off" };
+    Object.defineProperty(env, "CORE_DISPATCH_QUEUE_URL", { get() { throw new Error("queue env read while off"); } });
+    const codeModules = vi.fn(() => { brokerCoreDispatchQueue(env); throw new Error("composition still owed"); });
+    const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client, { codeModules }));
+    expect(root.coreTasks).toBeUndefined();
+    await expect(root.app.registry()).rejects.toThrow("no registry is built");
+    expect(codeModules).not.toHaveBeenCalled();
+  });
+
+  it("keeps the complete broker dependency builder refusing until L6 composes the pieces", () => {
+    expect(() => brokerCoreModuleDeps({ CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl })).toThrow(BROKER_CORE_NOT_CONFIGURED);
   });
 });

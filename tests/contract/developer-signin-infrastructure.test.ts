@@ -588,7 +588,8 @@ describe("task-token key and membership IAM", () => {
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
     // and R2 step 4 (the dispatcher's core queue mapping, its reads, the conditional deleter policy, its core variables, the outbox pending index).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("b8175bf72b4876d9d78575f6aafe78464c7da55471ed1b98c86bd6fefeca5f5e");
+    // L1a re-pins the stacked baseline (also measured before L1a edits); the helper checks and strips both new broker queue references.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("93c005411e7fcf171b145fc2bd60d27e0ff462c7e5ad0d61e6815bfd05f817af");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1546,20 +1547,7 @@ function resolvedInlineSize(template: TemplateJson): number {
 
 const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRequestQueue", "queue:DispatchDeadLetterQueue", "queue:SlackRequestDeadLetterQueue", "queue:DeveloperTaskNotifierNoticeDeadLetterQueue", "queue:DeveloperTaskNotifierStreamFailureQueue", "queue:ChannelApiEventDeadLetters", "key:ChatGptConnectionKey"];
 
-/** #663 (R2 core engine): the core dispatch queues' broker grants (queue policies) and the scheduler's invoke role, which #666's list predates. */
-const coreEngineTuples: AccessTuple[] = [
-  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsQueue","{}"],
-  ["role:CoreEngineJobsInvokeRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
-];
+// Core-engine grants are already pinned in beforeTuples (the stacked #666 fixture). Do not count them twice.
 /**
  * Hosted wiring: (a) SES SendEmail for the sign-in function on the StepUpEmailSender identity; (b) its passkey Query/DeleteItem on PASSKEYS#; (c) the policy hook's key (broker Sign,
  * public key to the broker and the sign-in function, key-policy Denies); (h) the company-secrets role; (i) the TLS-only Deny on both core dispatch queues. All additive.
@@ -1587,7 +1575,7 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...coreEngineTuples, ...hostedWiringTuples].sort(byText);
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples].sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {

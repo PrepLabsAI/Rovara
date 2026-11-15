@@ -77,7 +77,6 @@ export class CoreEngine extends Construct {
       maxLength: CORE_ENGINE_PARAMETER_MAX_LENGTH,
       description: "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do; drain: no new task starts on the core and its running tasks finish there",
     });
-    broker.addEnvironment(CORE_ENGINE_VARIABLE, this.parameter.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).
@@ -95,6 +94,9 @@ export class CoreEngine extends Construct {
       visibilityTimeout: CORE_DISPATCH_VISIBILITY_TIMEOUT,
       enforceSSL: true,
     });
+    broker.addEnvironment(CORE_ENGINE_VARIABLE, this.parameter.valueAsString);
+    broker.addEnvironment(CORE_DISPATCH_QUEUE_URL_VARIABLE, this.queue.queueUrl);
+    broker.addEnvironment(CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, this.deadLetters.queueUrl);
     // Exactly these two queues, granted on each queue's own resource policy, not on the broker's role: the broker role's inline policy is at IAM's size limit (one more statement there makes
     // CDK split it into a managed policy, which the deploy role may not create). Same account, so the queue policy alone grants it; the permissions boundary still bounds the role (it allows sqs).
     for (const queue of [this.queue, this.deadLetters]) {

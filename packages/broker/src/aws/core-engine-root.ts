@@ -20,11 +20,11 @@
 // the admission hold sweep) refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
   type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
-import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
+import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
@@ -415,6 +415,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   };
 }
 
+/** L1a's queue piece, called by L6 only when composing a serving broker's complete dependencies. Makes no client or queue. */
+export function brokerCoreDispatchQueue(env: NodeJS.ProcessEnv): CodeModuleDeps["queue"] {
+  const url = env[CORE_DISPATCH_QUEUE_URL_VARIABLE];
+  const deadLetterUrl = env[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE];
+  // Same URL shape and queue-kind rule as the SQS adapter; validate here before a registry can be built, with fixed refusal words.
+  const queueUrl = (value: unknown): value is string => typeof value === "string" && /^https?:\/\/[^\s/]+\/(?:[^\s/]+\/)*[A-Za-z0-9_-]{1,80}(?:\.fifo)?$/u.test(value);
+  if (!queueUrl(url) || !queueUrl(deadLetterUrl) || url.endsWith(".fifo") !== deadLetterUrl.endsWith(".fifo")) {
+    throw Object.assign(new Error("the broker needs valid core dispatch queue URLs"), { name: "BrokerCoreQueueNotConfigured" });
+  }
+  return { settings: { ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }), queues: { [CORE_DISPATCH_QUEUE]: { url, deadLetterUrl } } } };
+}
+
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */
 export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engine's adapters yet: it needs the core dispatch queue's URLs in its environment, a code host provider for the core (the GitHub App behind the scoped provider interface) and its side of the workers' operations";
 
@@ -423,6 +435,7 @@ export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engi
  * inputs are complete (aws/worker-machines/dispatcher-core.ts); the broker's land with the infrastructure step that passes the queue URLs and the code host bridge.
  */
 export function brokerCoreModuleDeps(env: NodeJS.ProcessEnv): CodeModuleDeps {
+  // L6 composes the per-lane pieces: L1a queue, L1b code host, L1c worker operations, ...
   void env;
   throw Object.assign(new Error(BROKER_CORE_NOT_CONFIGURED), { name: "BrokerCoreNotConfigured" });
 }

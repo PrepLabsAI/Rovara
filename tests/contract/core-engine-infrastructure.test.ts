@@ -9,6 +9,7 @@
 //      deleter start and the callback signing key only while the switch is not off; no EC2 terminate; the State table's outbox pending index. The legacy template has none of it.
 // Dropped from the monolith's test, with reason: the packed-settings and Slack-ingress cases (Code's broker does not pack settings; the ingress wiring comes with the Slack step), the catalog
 // repositories (another lane's), and the IAM simulation (Code has no simulator support; the services check stands in).
+import { createHash } from "node:crypto";
 import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -326,5 +327,28 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     for (const word of [CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, "DispatcherCorePolicy", "DispatcherMapping", OUTBOX_PENDING_INDEX.name, CORE_ENGINE_VARIABLE]) expect(text).not.toContain(word);
     const legacyDispatcher = resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))!;
     expect((legacyDispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("CALLBACK_SIGNING_KEY");
+  });
+});
+
+describe("L1a broker environment-only template change", () => {
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value).replace(/[a-f0-9]{64}/gu, "<asset-hash>")).digest("hex");
+
+  it("adds only the two broker environment references: no resource, IAM or other property changes", () => {
+    const before = structuredClone(inApp);
+    const queues = Object.entries(before.Resources).filter(([, resource]) => resource.Type === "AWS::SQS::Queue");
+    const queue = queues.find(([, resource]) => resource.Properties.QueueName === coreDispatchQueueName("staging"))!;
+    const dead = queues.find(([, resource]) => resource.Properties.QueueName === coreDispatchDeadLetterName("staging"))!;
+    const broker = Object.entries(before.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
+    const variables = (broker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables.CORE_DISPATCH_QUEUE_URL).toEqual({ Ref: queue[0] });
+    expect(variables.CORE_DISPATCH_DEAD_LETTER_URL).toEqual({ Ref: dead[0] });
+    delete variables.CORE_DISPATCH_QUEUE_URL;
+    delete variables.CORE_DISPATCH_DEAD_LETTER_URL;
+    // Full pre-L1a named template, recorded before production edits. No git history required in CI.
+    expect(digest(before)).toBe("652a4941d01f4da3099d50c2b0382d2766df46a951a2e66c6ae846f2c4d21c2e");
+  });
+
+  it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
+    expect(digest(legacy.toJSON())).toBe("9a7942afbd5561cef0077003fe43e470ef6b83993bef9ca72068f9e475247b06");
   });
 });
