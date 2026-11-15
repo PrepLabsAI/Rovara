@@ -37,6 +37,12 @@ const routes = {
   "/nbsp-label-b": shell(`<h1>Settings</h1><p>Password:&nbsp;swordfish9</p>`),
   "/dl-copy": shell(`<h1>Settings</h1><dl><dt>API key:</dt><dd><code>abcd1234</code> <button>Copy</button></dd></dl>`),
   "/div-show": shell(`<h1>Settings</h1><div>Password:</div><div>hunter2x <a href="#">Show</a></div>`),
+  "/link-label": shell(`<h1>Settings</h1><p><a href="#"><b>Password:</b> hunter2x</a></p>`),
+  "/copy-button": shell(`<h1>Settings</h1><dl><dt>API key:</dt><dd><button>abcd1234</button></dd></dl>`),
+  "/dd-link": shell(`<h1>Settings</h1><dl><dt>Token:</dt><dd><a href="#">abcd1234</a></dd></dl>`),
+  // Shown: a masked row ("Password: •••••••• [Change]") and years on separate lines of a <pre>.
+  "/dots-row": shell(`<h1>Settings</h1><p>Password: •••••••• <button>Change</button></p>`),
+  "/pre-years": shell(`<h1>History</h1><pre>2019\n2020\n2021\n2022\n2023</pre>`),
   "/slot-label": shell(`<h1>Settings</h1><x-field>abcd1234</x-field><script>customElements.define("x-field", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = "<dl><dt>API key:</dt><dd><slot></slot></dd></dl>"; } });</script>`),
   // Sign-in forms laid out on one line: they must be shown.
   "/signin-inline": shell(`<h1>Sign in</h1><form><label>Password:</label> <input type="password" value="hunter2-y"><button>Sign in</button></form><p><label>Password: <input type="password"></label> <a href="/forgot">Forgot?</a></p>`),

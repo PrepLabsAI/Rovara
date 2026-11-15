@@ -194,24 +194,28 @@ function maskPage(arg: PageArg): PageVerdict {
   if (hits(doc.title)) return "dirty";
   // The page's text as it is composed on screen (shadow roots in place of their hosts' children, slotted nodes where their slot is, hidden elements left out, whitespace
   // collapsed, a line break at every block edge and <br>), read whole so a secret split over several elements is seen. Two views from one walk: `shown`, everything as rendered, for
-  // the ordinary masks; and `labels`, where links, buttons, selects and form fields are line breaks and a label's edges start a line, for the labelled masks.
+  // the ordinary masks; and `labels`, for the labelled masks, where a form field is a marker line, a link or a button is its own line (its text kept) and a label's edges start a line.
   type El = Child & { tagName?: string; getAttribute?(name: string): string | null; shadowRoot?: { childNodes: ArrayLike<Child> } | null; childNodes?: ArrayLike<Child>; assignedNodes?(options: { flatten: boolean }): ArrayLike<Child> };
-  const view = globalThis as unknown as { getComputedStyle(element: unknown): { display: string; visibility: string } };
+  const view = globalThis as unknown as { getComputedStyle(element: unknown): { display: string; visibility: string; whiteSpace?: string } };
   const skipped = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "TITLE"]);
-  const controls = new Set(["A", "BUTTON", "SELECT", "OPTION", "INPUT", "TEXTAREA", "IMG"]);
+  // In the label view: a form field is a line of its own holding only a marker (too short to be a value), so a "Password:" label is never "followed" across its own field; a link
+  // or a button is a line of its own WITH its text, so a value inside one (a click-to-copy key, a key that is a link) is still read as the line after its label.
+  const fields = new Set(["SELECT", "INPUT", "TEXTAREA"]);
+  const lines = new Set(["A", "BUTTON", "SUMMARY"]);
   let shown = "";
   let labels = "";
   let walked = 0;
   let tooLarge = false;
-  const walk = (node: El, visible: boolean, inControl: boolean): void => {
+  const walk = (node: El, visible: boolean, pre: boolean): void => {
     if (tooLarge) return;
     walked += 1;
     if (walked > arg.maxNodes || shown.length > arg.maxChars) { tooLarge = true; return; }
     if (node.nodeType === 3) {
       if (!visible) return;
-      const text = (node.nodeValue ?? "").replace(/[ \t\n\r\f]+/gu, " ");
+      // Whitespace as it is rendered: collapsed, except where the element keeps it (pre), so numbers on separate lines stay on separate lines.
+      const text = pre ? (node.nodeValue ?? "") : (node.nodeValue ?? "").replace(/[ \t\n\r\f]+/gu, " ");
       shown += text;
-      if (!inControl) labels += text;
+      labels += text;
       return;
     }
     if (node.nodeType !== 1 && node.nodeType !== 11) return;
@@ -219,24 +223,26 @@ function maskPage(arg: PageArg): PageVerdict {
     if (skipped.has(tag)) return;
     let block = false;
     let seen = visible;
+    let keep = pre;
     if (node.nodeType === 1) {
       const style = view.getComputedStyle(node);
       if (style.display === "none") return;
       seen = style.visibility !== "hidden" && style.visibility !== "collapse";
       block = !style.display.startsWith("inline") && style.display !== "contents";
+      keep = typeof style.whiteSpace === "string" ? style.whiteSpace.startsWith("pre") || style.whiteSpace === "break-spaces" : pre;
     }
-    const control = controls.has(tag) || node.getAttribute?.("role") === "button";
     if (tag === "BR") { shown += "\n"; labels += "\n"; return; }
-    // In the label view a control is a line of its own holding only a marker (too short to be a value), so a label is never "followed" across a field, a button or a link.
-    const edge = block || tag === "LABEL";
+    const field = fields.has(tag);
+    const line = lines.has(tag) || node.getAttribute?.("role") === "button";
+    const edge = block || line || tag === "LABEL";
     if (block) shown += "\n";
-    if (control && !inControl) labels += "\n\u25aa\n";
+    if (field) labels += "\n\u25aa\n";
     else if (edge) labels += "\n";
     const slotted = tag === "SLOT" && typeof node.assignedNodes === "function" ? Array.from(node.assignedNodes({ flatten: true })) : [];
     const children = node.shadowRoot ? Array.from(node.shadowRoot.childNodes) : slotted.length > 0 ? slotted : Array.from(node.childNodes ?? []);
-    for (const child of children) walk(child as El, seen, inControl || control);
+    for (const child of children) walk(child as El, seen, keep);
     if (block) shown += "\n";
-    if (edge) labels += "\n";
+    if (edge || field) labels += "\n";
   };
   walk(doc.documentElement as El, true, false);
   if (tooLarge) return "too_large";

@@ -241,9 +241,9 @@ export const BROWSER_EVIDENCE_TEXT_MASKS: ReadonlyArray<Readonly<TextMask>> = Ob
   { source: "\\bSK[a-f0-9]{32}\\b", flags: "gu" },
   { source: "\\bbearer\\s+[A-Za-z0-9._~+/-]{8,}=*", flags: "giu" },
   // Labelled secrets (`label`): the label, then the value on the same line or alone at the start of the next line. Over a page these run on its "label view" (the driver's), where
-  // links, buttons and form controls are line breaks, so "API key: abcd1234 [Copy]" is caught and a "Password:" label beside its field and a "Sign in" button or "Forgot?" link is not.
-  { source: "\\b(?:password|passwd|secret|token|api[ _-]?key)[^\\S\\n]*[:=][^\\S\\n]*[^\\s]{4,}", flags: "giu", label: true },
-  { source: "\\b(?:password|passwd|secret|token|api[ _-]?key)[^\\S\\n]*[:=][^\\S\\n]*\\n[^\\S\\n]*[^\\s]{4,}[^\\S\\n]*(?=\\n|$)", flags: "giu", label: true },
+  // links and buttons are lines of their own and form fields are marker lines, and a value made only of dots or asterisks (already masked) is not one; so "API key: abcd1234 [Copy]" is caught and a "Password:" label beside its field and a "Sign in" button or "Forgot?" link is not.
+  { source: "\\b(?:password|passwd|secret|token|api[ _-]?key)[^\\S\\n]*[:=][^\\S\\n]*(?=[^\\s]*[^\\s•*●·∙.])[^\\s]{4,}", flags: "giu", label: true },
+  { source: "\\b(?:password|passwd|secret|token|api[ _-]?key)[^\\S\\n]*[:=][^\\S\\n]*\\n[^\\S\\n]*(?=[^\\s]*[^\\s•*●·∙.])[^\\s]{4,}[^\\S\\n]*(?=\\n|$)", flags: "giu", label: true },
 ] satisfies TextMask[]).map((mask) => Object.freeze(mask)));
 export const BROWSER_EVIDENCE_TEXT_MASK = "•••";
 const TEXT_MASKS = BROWSER_EVIDENCE_TEXT_MASKS.map((mask) => new RegExp(mask.source, mask.flags));
