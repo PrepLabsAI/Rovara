@@ -23,7 +23,12 @@ type PeekInvocation = Extract<WorkerInvocation, { kind: "peek" }>;
 const roots: string[] = [];
 afterEach(async () => { gitCalls.length = 0; await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
-const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } });
+// No automatic maintenance or gc after a commit: it runs detached and adds and removes files under .git (maintenance.lock) while the
+// read-only test snapshots the tree.
+const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8", env: {
+  ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "false", GIT_CONFIG_KEY_1: "gc.auto", GIT_CONFIG_VALUE_1: "0",
+} });
 
 /** A prepared workspace: one repository `app` with two committed files, the manifest the worker reads, and whatever `change` does to the tree. */
 async function workspace(change: (repo: string) => Promise<void> = async () => undefined, repositoryName = "app"): Promise<{ root: string; repo: string }> {

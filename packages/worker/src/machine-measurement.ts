@@ -7,7 +7,8 @@ import { proveEnvironment, type ProveInput, type ProvePorts } from "./prove.js";
 /** Read the sandbox's cgroup v2 peak, never the worker host's. A fresh sandbox cgroup bounds this measurement's lifetime.
  * The setup executor supplies the trusted cgroup directory. Symlinks, missing files and malformed readings are unknown.
  * A fixed-size read also handles cgroup pseudo-files whose stat size is zero. */
-export async function readCgroupPeakMemoryMiB(cgroupDirectory: string): Promise<number | undefined> {
+export async function readCgroupPeakMemoryMiB(cgroupDirectory?: string): Promise<number | undefined> {
+  if (cgroupDirectory === undefined) return undefined;
   let file: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const directory = resolve(cgroupDirectory);
@@ -27,8 +28,8 @@ export async function readCgroupPeakMemoryMiB(cgroupDirectory: string): Promise<
 
 /** Single setup integration point, intentionally not called by production yet. Call while the fresh sandbox cgroup exists;
  * Prove samples after the full suite and before ports.release. Gate AND worker advertisement are required. */
-export function proveWithMachineMeasurement(ports: ProvePorts, input: Omit<ProveInput, "measureMachine" | "machineChip">, measurement: { machineSize: boolean; workerFeatures: readonly string[]; machineChip: MachineChip; cgroupDirectory: string }) {
+export function proveWithMachineMeasurement(ports: ProvePorts, input: Omit<ProveInput, "measureMachine" | "machineChip">, measurement: { machineSize: boolean; workerFeatures: readonly string[]; machineChip?: MachineChip; cgroupDirectory?: string }) {
   return proveEnvironment({ ...ports, peakMemory: () => readCgroupPeakMemoryMiB(measurement.cgroupDirectory) }, {
-    ...input, ...machineMeasurementRequest(measurement.machineSize, measurement.workerFeatures), machineChip: measurement.machineChip,
+    ...input, ...machineMeasurementRequest(measurement.machineSize && (measurement.machineChip === "arm64" || measurement.machineChip === "x86_64"), measurement.workerFeatures), ...(measurement.machineChip === undefined ? {} : { machineChip: measurement.machineChip }),
   });
 }

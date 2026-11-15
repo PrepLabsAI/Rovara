@@ -7,6 +7,12 @@ import type { ServiceCatalogSource } from "./dependency-plan.js";
 
 export interface TestEnvDeps {
   store: DocumentStore;
+  /** Trusted resolver backed by the stored project, never by the due item. Old records resolve to the implicit company. */
+  projectCompany?: (project: string) => Promise<string | undefined>;
+  /** Hosted callers must set this; missing resolver refuses rather than adopting the message's company. */
+  projectCompanyRequired?: boolean;
+  /** Fixed company refusal events; never includes the claimed company or resolver error. */
+  companyLog?: (entry: Record<string, unknown>) => void;
   now(): number;
   /** Records what changed (an approval, a setting): the steps join the change's own transaction. Absent: nothing is recorded (Code's default sink writes nothing). */
   audit?: AuditSink | undefined;

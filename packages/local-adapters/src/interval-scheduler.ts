@@ -16,7 +16,7 @@
 // The timer is `setInterval` (every 20 seconds by default, never keeps the process alive); tests give none and call `tick()` with their own clock.
 import { createHash } from "node:crypto";
 import {
-  SchedulerError, companyScoped, isScheduleId, when,
+  SchedulerError, companyScoped, companyOfKey, companyLog, OrgIdSchema, checkScheduleCompany, isScheduleId, when,
   type DocumentKey, type DocumentStore, type DueSchedule, type StoredDocument, type ScheduleEntry, type ScheduleSubscription, type Scheduler, type SchedulerCapabilities,
 } from "@agentx/contracts";
 
@@ -85,6 +85,7 @@ export function slotIdOf(companyId: string, scheduleId: string, scheduledAt: str
 
 /** Refuses an entry this adapter could not run: the id, the rule, the zone, the interval and the lateness window. */
 export function checkEntry(entry: ScheduleEntry): void {
+  checkScheduleCompany(entry);
   if (!isScheduleId(entry.scheduleId)) throw new SchedulerError("refused", "not a schedule id");
   if (entry.when.kind === "cron") {
     if (!INTERVAL_SCHEDULER_CAPABILITIES.timezones.includes(entry.when.timezone)) throw new SchedulerError("refused", "this scheduler does not run that time zone");
@@ -131,7 +132,7 @@ export interface IntervalSchedulerOptions {
   retryWaitsMs?: readonly number[];
   sleep?: (ms: number) => Promise<void>;
   /** One short fixed-word event a line; never a target's content. */
-  log?: (event: { event: string; scheduleId?: string; attempt?: number; reason?: string }) => void;
+  log?: (event: { event: string; companyId?: string; scheduleId?: string; attempt?: number; reason?: string }) => void;
 }
 
 export interface IntervalScheduler extends Scheduler {
@@ -144,11 +145,20 @@ interface StoredSchedule { entry: ScheduleEntry; anchorMs: number; handledMs: nu
 const entryKey = (companyId: string, scheduleId: string): DocumentKey => ({ pk: companyScoped(companyId, "SCHEDULER"), sk: `SCHEDULE#${scheduleId}` });
 const companyKey = (companyId: string): DocumentKey => ({ pk: COMPANIES_PARTITION, sk: companyId });
 
-function readStored(item: Readonly<Record<string, unknown>> | undefined): StoredSchedule | undefined {
+function readStored(item: Readonly<Record<string, unknown>> | undefined, log: NonNullable<IntervalSchedulerOptions["log"]>): StoredSchedule | undefined {
   if (item === undefined) return undefined;
   const { entry, anchorMs, handledMs } = item;
   if (typeof entry !== "object" || entry === null || typeof anchorMs !== "number" || typeof handledMs !== "number") return undefined;
-  return { entry: entry as ScheduleEntry, anchorMs, handledMs };
+  const spec = entry as ScheduleEntry;
+  try {
+    checkEntry(spec);
+    if (!Number.isFinite(anchorMs) || !Number.isFinite(handledMs) || item.pk !== entryKey(spec.companyId, spec.scheduleId).pk || item.sk !== entryKey(spec.companyId, spec.scheduleId).sk) throw new Error("invalid schedule");
+  } catch {
+    const owner = typeof item.pk === "string" ? companyOfKey(item.pk) : undefined;
+    if (OrgIdSchema.safeParse(owner).success) companyLog(owner!, (line) => log(line as { event: string }))({ event: "scheduler.row_invalid" });
+    return undefined;
+  }
+  return { entry: spec, anchorMs, handledMs };
 }
 
 export function createIntervalScheduler(options: IntervalSchedulerOptions): IntervalScheduler {
@@ -177,7 +187,7 @@ export function createIntervalScheduler(options: IntervalSchedulerOptions): Inte
     let cursor: string | undefined;
     do {
       const page = await store.query({ pk: COMPANIES_PARTITION, ...(cursor === undefined ? {} : { cursor }) });
-      for (const item of page.items) if (typeof item["sk"] === "string") rows.push(item["sk"]);
+      for (const item of page.items) if (OrgIdSchema.safeParse(item["sk"]).success) rows.push(item["sk"]);
       cursor = page.cursor;
     } while (cursor !== undefined);
     return rows;
@@ -192,11 +202,11 @@ export function createIntervalScheduler(options: IntervalSchedulerOptions): Inte
         await current({ companyId: entry.companyId, scheduleId: entry.scheduleId, scheduledAt, slotId: slotIdOf(entry.companyId, entry.scheduleId, scheduledAt), attempt, target: structuredClone(entry.target) });
         return;
       } catch {
-        log({ event: "scheduler.handler_failed", scheduleId: entry.scheduleId, attempt });
+        companyLog(entry.companyId, (line) => log(line as { event: string }))({ event: "scheduler.handler_failed", scheduleId: entry.scheduleId, attempt });
         if (attempt < ATTEMPTS_MAX) await sleep(waits[Math.min(attempt - 1, waits.length - 1)] ?? 0);
       }
     }
-    log({ event: "scheduler.fire_given_up", scheduleId: entry.scheduleId, reason: "handler_failed" });
+    companyLog(entry.companyId, (line) => log(line as { event: string }))({ event: "scheduler.fire_given_up", scheduleId: entry.scheduleId, reason: "handler_failed" });
   }
 
   async function tickOnce(): Promise<void> {
@@ -211,7 +221,7 @@ export function createIntervalScheduler(options: IntervalSchedulerOptions): Inte
         try { page = await store.query({ pk: companyScoped(companyId, "SCHEDULER"), sk: { op: "beginsWith", prefix: "SCHEDULE#" }, ...(cursor === undefined ? {} : { cursor }) }); } catch { break; }
         cursor = page.cursor;
         for (const item of page.items) {
-          const stored = readStored(item);
+          const stored = readStored(item, log);
           if (stored === undefined || !stored.entry.enabled) continue;
           const lookBackMs = (stored.entry.maxLateSeconds ?? DEFAULT_MAX_LATE_SECONDS) * 1000;
           let slot: number | undefined;
@@ -233,7 +243,7 @@ export function createIntervalScheduler(options: IntervalSchedulerOptions): Inte
       checkEntry(entry);
       const at = now();
       const key = entryKey(entry.companyId, entry.scheduleId);
-      const previous = readStored(await store.get(key));
+      const previous = readStored(await store.get(key), log);
       // The rule's anchor moves only when the rule or its switch changed: putting the same entry again (every approval does) keeps the schedule where it is. A rule that is new, changed or switched back on never fires for a slot before now.
       const keep = previous !== undefined && sameJson(previous.entry.when, entry.when) && previous.entry.enabled === entry.enabled;
       const anchorMs = keep ? previous.anchorMs : at;
@@ -243,12 +253,14 @@ export function createIntervalScheduler(options: IntervalSchedulerOptions): Inte
     },
 
     async remove(companyId, scheduleId) {
+      if (!OrgIdSchema.safeParse(companyId).success) return false;
       const removed = await store.delete({ key: entryKey(companyId, scheduleId), condition: when.present(), return: "old" });
       return removed.applied;
     },
 
     async get(companyId, scheduleId) {
-      const stored = readStored(await store.get(entryKey(companyId, scheduleId)));
+      if (!OrgIdSchema.safeParse(companyId).success) return undefined;
+      const stored = readStored(await store.get(entryKey(companyId, scheduleId)), log);
       return stored === undefined ? undefined : structuredClone(stored.entry);
     },
 

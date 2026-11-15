@@ -62,9 +62,11 @@ describe("the producer line", () => {
 // M4: the first line never says "Real" for a pack that did not run in a sealed round or that rests on scripted AI replies.
 describe("the first line is never better than where the checks ran", () => {
   it("words a 'real run' claimed outside a sealed round as what it was", () => {
-    const first = renderEvidence(withLevel("rovara_real_run", "sandbox")).firstLine;
-    expect(first).toBe("Verified · Run by Rovara, not sealed");
-    expect(first).not.toMatch(/real/iu);
+    for (const [isolation, expected] of [["sandbox", "Run by Rovara, not sealed"], ["developer_machine", "Ran on a developer machine"], ["imported", "Imported, not run by Rovara"]]) {
+      const first = renderEvidence(withLevel("rovara_real_run", isolation)).firstLine;
+      expect(first, isolation).toBe(`Verified · ${expected}`);
+      expect(first).not.toMatch(/real/iu);
+    }
   });
 
   // TE-A2b review M3: only a sealed round or the agent's sandbox is a Rovara run; a stored pack (read tolerantly) that says otherwise is worded as where it really ran.
@@ -359,8 +361,9 @@ describe("callers", () => {
     ];
     expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText"))).toEqual(writerFiles);
     for (const name of proofOnly) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
+    // setup-prove.ts (DEC 185 / TE-C5 part A) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
     expect(callers(["inertEvidenceText"])).toEqual([
-      "packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
+      "packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/setup-prove.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
     ].sort());
   });
 });
@@ -398,4 +401,31 @@ it("keeps runner-measure provenance visible even with long check labels and iner
   expect(renderEvidence(pack).text).toContain("score");
   for (const row of pack.checks) delete row.measures;
   expect(renderEvidence(pack).text).not.toContain("reported by the project's test runner");
+});
+
+describe("no callers", () => {
+  it("nothing outside packages/contracts uses any export the evidence pack v2 lane added except its approved callers", () => {
+    const root = fileURLToPath(new URL("../..", import.meta.url));
+    const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
+    const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
+    const v2Start = (text: string) => text.slice(text.indexOf("// ---- evidence pack v2 (TE-A2a"));
+    const newerStart = (text: string) => text.slice(text.indexOf("// ---- newer evidence (TE-A2)"));
+    const names = [
+      ...exported(source("check-kinds.ts")), ...exported(source("evidence-render.ts")), ...exported(source("evidence-inert.ts")), ...exported(v2Start(source("evidence.ts"))), ...exported(newerStart(source("forward-reader.ts"))),
+    ];
+    expect(names.length).toBeGreaterThan(60);
+    expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
+    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect([0, 1]).toContain(found.status);
+    const hits = found.stdout.split("\n").filter((entry) => entry !== "");
+    const approved = new Set([
+      "packages/broker/src/core/proof/evidence-guard.ts", "packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts",
+      "packages/broker/src/core/proof/evidence-pack.ts", "packages/broker/src/core/proof/evidence-v2-lines.ts", "packages/broker/src/core/proof/proof-table.ts",
+      "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts",
+      "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
+      // setup-prove.ts (DEC 185 / #629) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
+      "packages/worker/src/setup-prove.ts",
+    ]);
+    expect(hits.filter((file) => !file.startsWith("packages/contracts/") && !approved.has(file))).toEqual([]);
+  });
 });
