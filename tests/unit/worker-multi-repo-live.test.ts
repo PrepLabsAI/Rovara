@@ -281,6 +281,7 @@ describe("MR1-LIVE: link safety", () => {
     ["an interpreter link into the workspace", async (w: { root: string }) => { await put(w.root, "tools/python", "#!/bin/sh\n", 0o755); await rm(join(w.root, "app/.venv/bin/python")); await symlink(join(w.root, "tools/python"), join(w.root, "app/.venv/bin/python")); }],
     ["a non-interpreter link out of the workspace in bin", async (w: { root: string }) => symlink(pythonInfo().executable, join(w.root, "app/.venv/bin/tool"))],
     ["an interpreter-named link outside bin", async (w: { root: string }) => symlink(pythonInfo().executable, join(w.root, `app/.venv/lib/python${pythonInfo().version}/python`))],
+    ["an interpreter link to a non-executable file outside the workspace", async (w: { root: string }) => { const outside = join(await temporary("mr1-outside-"), "python3"); await writeFile(outside, "not a program\n"); await rm(join(w.root, "app/.venv/bin/python")); await symlink(outside, join(w.root, "app/.venv/bin/python")); }],
     ["an interpreter link to a directory", async (w: { root: string }) => { await rm(join(w.root, "app/.venv/bin/python")); await symlink(dirname(pythonInfo().executable), join(w.root, "app/.venv/bin/python")); }],
   ])("refuses %s", async (_label, plant) => {
     const w = await pythonWorkspace();
