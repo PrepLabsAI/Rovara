@@ -97,6 +97,8 @@ export const LessonViewSchema = z.object({
   rejectedReason: z.string().max(200).optional(),
   /** What this viewer may do with it, worked out by the server (the routes check again when asked). */
   canApprove: z.boolean(), canReject: z.boolean(), canRetire: z.boolean(),
+  /** "Used in N tasks": the distinct tasks the lesson was given to in the last 180 days (at most 500; `more`: there were more). Absent: not counted (the Lessons tab), or it could not be counted. */
+  usedIn: z.object({ tasks: z.number().int().min(0).max(500), more: z.literal(true).optional() }).strict().optional(),
 }).strict();
 export type LessonView = z.infer<typeof LessonViewSchema>;
 
