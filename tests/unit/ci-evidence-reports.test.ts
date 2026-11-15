@@ -149,7 +149,10 @@ describe("the client's artifact read", () => {
     expect(asked.some((path) => path.includes("/artifacts"))).toBe(false);
   });
   it("says unreadable when a matching artifact expired (the rest would be a partial report)", async () => {
-    const { provider } = client({ [`${API}/actions/runs/9/jobs`]: oneJob, [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit", size_in_bytes: 1, expired: true }, { id: 4, name: "test-results", size_in_bytes: 1 }]) });
+    const { provider } = client({
+      [`${API}/actions/runs/9/jobs`]: oneJob, [`${API}/actions/runs/9/artifacts`]: list([{ id: 1, name: "junit", size_in_bytes: 1, expired: true }, { id: 4, name: "test-results", size_in_bytes: 1 }]),
+      [`${API}/actions/artifacts/4/zip`]: redirect(`https://${BLOB}/c/d.zip`), [`${BLOB}/c/d.zip`]: () => new Response(zip([{ name: "report.xml", text: "<x/>" }]), { status: 200 }),
+    });
     expect(await provider.getRunReportFiles("https://github.com/acme/svc", "9", ORG)).toEqual({ kind: "unreadable" });
   });
   it("says none for a run with no such artifact, and unreadable for one sent elsewhere or too large", async () => {
@@ -283,14 +286,18 @@ describe("per-test reports in a tracking pass", () => {
     expect((await entry(w))?.["failedTests"]).toBeUndefined();
     expect((await entry(w))?.["counts"]).toBeUndefined();
   });
-  it("keeps the report text on one item within its byte budget", async () => {
+  it("keeps the report text on one item within its byte budget, across its marked checks", async () => {
+    const names = ["e2e-a", "e2e-b", "e2e-c"];
+    const many: CiEvidenceSettings = settings({ markedChecks: names.map((name) => ({ name, calledAs: name, longOrPaid: true })) });
     const huge = junit(Array.from({ length: 20 }, (_, index) => ({ name: `t${String(index)}${"é".repeat(250)}`, failure: "ü".repeat(2_000) })));
-    const fake: Fake = { reports: { "7700": [huge] }, reads: [], base: undefined };
-    const { w, deps } = await world(settings(), fake);
-    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask({ ...deps, autonomy: () => "suggest" }, TASK_ID);
-    const kept = (await entry(w))?.["failedTests"] as Array<{ id: string; text?: string }>;
-    expect(Buffer.byteLength(kept.map((test) => test.id + (test.text ?? "")).join(""), "utf8")).toBeLessThanOrEqual(32 * 1024);
+    const fake: Fake = { reports: { "100": [huge], "200": [huge], "300": [huge] }, reads: [], base: undefined };
+    const { w, deps } = await world(many, fake);
+    setChecks(w, [unit, ...names.map((name, index) => e2e({ name, runId: String(index + 1), conclusion: "failure" }))]);
+    for (let pass = 0; pass < 3; pass += 1) { await trackTask({ ...deps, autonomy: () => "suggest" }, TASK_ID); w.now.value += MIN; }
+    expect(fake.reads).toEqual(["100", "200", "300"]);
+    const entries = ((await w.trackingOf(w.prs[0]!)) as { ciMarked: Array<{ failedTests?: Array<{ id: string; text?: string }> }> }).ciMarked;
+    const text = entries.flatMap((one) => one.failedTests ?? []).map((test) => test.id + (test.text ?? "")).join("");
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(32 * 1024);
   });
   it("keeps a flaky history: a test that failed on an earlier run of this head and passes on the re-run", async () => {
     const fake: Fake = { reports: { "7700": [junit([{ name: "wobbly", failure: "timeout" }])], "7800": [junit([{ name: "wobbly" }])] }, reads: [], base: { revision: "c".repeat(40), check: e2e() } };
