@@ -179,3 +179,42 @@ describe("proofHoldFactsOf: the facts from the checks a pack already has", () =>
     expect(({} as Record<string, unknown>)["unit"]).toBeUndefined();
   });
 });
+
+
+describe("Round 2 M2: only explicit assertion proof counts", () => {
+  it.each([
+    { ...PROVES, verdict: "future_verdict" },
+    { ...PROVES, verdict: null },
+    { ...PROVES, verdict: undefined },
+    { ...PROVES, reason: "load_failure_on_old" },
+    { ...PROVES, reason: "future_reason" },
+    null,
+  ])("fails closed on an unsupported row %j", (bad) => {
+    for (const items of [[bad], [VACUOUS, bad], [PROVES, bad]]) {
+      const result = hold({ proof: proof(items as TestProofItem[]) });
+      expect(result).toMatchObject({ holds: true, provenCount: 0 });
+      expect(result.verdicts).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain("future_");
+    }
+  });
+  it("rejects oversized rows before parsing them and supports the maximum", () => {
+    expect(hold({ proof: proof(Array.from({ length: 200 }, () => PROVES)) }).provenCount).toBe(200);
+    expect(hold({ proof: proof(Array.from({ length: 201 }, () => PROVES)) })).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
+    const many = new Array<TestProofItem>(1_000_000).fill(PROVES);
+    const start = performance.now();
+    expect(hold({ proof: proof(many) })).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+});
+
+
+describe("Round 2: proof boundary validation", () => {
+  it.each([
+    { ...proof([PROVES]), status: "future_status" },
+    { ...proof([PROVES]), items: null },
+    { ...proof([PROVES]), weakening: [{ checkId: "unit", skippedBefore: 0, skippedAfter: 0, absentOnNew: ["missing"], absentOnNewCount: 0 }] },
+    { ...proof([PROVES]), weakeningNotCompared: [{ checkId: "unit", reason: "future_reason" }] },
+  ])("never silently drops malformed proof input %j", (raw) => {
+    expect(hold({ proof: raw as TestProof })).toMatchObject({ holds: true, provenCount: 0, verdicts: [] });
+  });
+});

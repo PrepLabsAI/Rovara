@@ -215,6 +215,26 @@ export interface ProofHoldDecision {
 const OWN = (record: Readonly<Record<string, string>> | undefined, key: string): string | undefined => (record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined);
 const finiteCount = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0);
 
+/** Reject oversized collections before schema traversal; the whole proof must be understood before any row can prove the change. */
+function proofForHold(raw: TestProof | undefined): { proof?: TestProof; invalid: boolean } {
+  if (raw === undefined) return { invalid: false };
+  try {
+    if (!Array.isArray(raw.items) || raw.items.length > 200
+      || (raw.weakening !== undefined && (!Array.isArray(raw.weakening) || raw.weakening.length > 64
+        || raw.weakening.some((row) => !Array.isArray(row.absentOnNew) || row.absentOnNew.length > ABSENT_ON_NEW_MAX)))
+      || (raw.weakeningNotCompared !== undefined && (!Array.isArray(raw.weakeningNotCompared) || raw.weakeningNotCompared.length > 64))
+      || (raw.scriptedReplies !== undefined && (!Array.isArray(raw.scriptedReplies) || raw.scriptedReplies.length > 200))) return { invalid: true };
+    const parsed = TestProofSchema.safeParse(raw);
+    if (!parsed.success
+      || (raw.weakening !== undefined && parsed.data.weakening === undefined)
+      || (raw.weakeningNotCompared !== undefined && parsed.data.weakeningNotCompared === undefined)
+      || parsed.data.items.some((entry) => entry.verdict === "proves_change" && entry.reason !== "assertion_failed_on_old")) return { invalid: true };
+    return { proof: parsed.data, invalid: false };
+  } catch {
+    return { invalid: true };
+  }
+}
+
 /**
  * The ready rule: whether the draft is held. Pure. `mode` is the preset's (`off` when the gate is off); `recent` is the project's hold history, which relaxes `hold` to a warning above 10% (O43).
  * Hold reasons are `proof_failed` (every counted test also passes on the old code), `changed_code_not_run` (coverage says no test ran any changed line), `test_absent_on_new`, `flaky_on_change` and
@@ -227,7 +247,7 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
   let vacuous = 0;
   let loadFailureOnOld = 0;
   let counted = false;
-  const proof = facts.proof;
+  const { proof, invalid } = proofForHold(facts.proof);
   if (proof !== undefined && proof.status === "checked") {
     for (const entry of proof.items) {
       if (entry.verdict === "not_applicable" || entry.verdict === "not_checked") continue;
@@ -236,7 +256,7 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
       if (kind !== undefined && checkKindInfo(kind)?.countsTowardProof !== true) continue;
       if (entry.verdict === "could_not_run_on_old") loadFailureOnOld += 1;
       else if (entry.verdict === "does_not_prove") vacuous += 1;
-      else {
+      else if (entry.verdict === "proves_change" && entry.reason === "assertion_failed_on_old") {
         const origin = OWN(facts.scriptedReplies, entry.checkId);
         if (origin !== undefined && !COUNTING_REPLY_ORIGINS.has(origin)) provenUncounted += 1;
         else {
@@ -246,7 +266,7 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
       }
     }
   }
-  const reasons: ProofHoldReason[] = [];
+  const reasons: ProofHoldReason[] = invalid ? ["proof_failed"] : [];
   if (proof?.status === "checked" && provenCount === 0) {
     if (vacuous > 0) reasons.push("proof_failed");
     else if (provenUncounted > 0) reasons.push("replies_not_counted");
@@ -261,7 +281,7 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
   const wouldHold = input.mode !== "off" && reasons.length > 0;
   if (!wouldHold) return { holds: false, warns: false, wouldHold: false, relaxed: false, ...base, reasons: input.mode === "off" ? [] : reasons };
   if (input.mode === "warn") return { holds: false, warns: true, wouldHold: true, relaxed: false, ...base };
-  const relaxed = proofHoldRelaxes(input.recent);
+  const relaxed = !invalid && proofHoldRelaxes(input.recent);
   return { holds: !relaxed, warns: relaxed, wouldHold: true, relaxed, ...base };
 }
 

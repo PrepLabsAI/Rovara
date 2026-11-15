@@ -75,7 +75,7 @@ function decide(actor: unknown, action: string, task: unknown, company: unknown)
   const orgRole = own(actor, "orgRole");
   if (typeof orgRole !== "string" || !isKnownOrgRole(orgRole)) return refuse("not_a_member");
   const isAdmin = orgRole === "owner" || orgRole === "admin";
-  if (level === "company" || (level === "project" && isAdmin)) return isAdmin ? allow("admin") : refuse("not_allowed");
+  if (level === "company") return isAdmin ? allow("admin") : refuse("not_allowed");
 
   // The task (or the project) the decision is about: it must exist, be this company's, and name its project.
   if (task === null || task === undefined) return refuse("no_task");
@@ -83,7 +83,7 @@ function decide(actor: unknown, action: string, task: unknown, company: unknown)
   const taskCompany = own(task, "companyId");
   const project = own(task, "project");
   if (!nonEmpty(taskCompany) || !nonEmpty(project)) return refuse("unknown_actor");
-  if (taskCompany !== companyId) return refuse("other_company");
+  if (taskCompany !== companyId) return refuse(level === "project" ? "no_task" : "other_company");
 
   // An owner or admin of the company is a maintainer of every project. Anyone else is a maintainer only through a role read for THIS project.
   if (isAdmin) return allow("admin");

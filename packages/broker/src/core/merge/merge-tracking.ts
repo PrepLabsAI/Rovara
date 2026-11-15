@@ -655,7 +655,7 @@ async function trackOne(
   let wantsReady = wantsReadyOtherwise;
   let markedAnyway = false;
   if (wantsReadyOtherwise && !held && status.draft && deps.proofHold !== undefined) {
-    const gate = await judgeProofHold({ store: deps.store, timeline: deps.timeline, proofHold: deps.proofHold, ...(deps.log === undefined ? {} : { log: (event: string, fields: Record<string, unknown>) => deps.log?.(event, fields) }) }, task, pullRequest, status.headRevision, now);
+    const gate = await judgeProofHold({ store: deps.store, timeline: deps.timeline, proofHold: deps.proofHold, budget, ...(deps.log === undefined ? {} : { log: (event: string, fields: Record<string, unknown>) => deps.log?.(event, fields) }) }, task, pullRequest, status.headRevision, now);
     if (gate.kind !== "proceed") wantsReady = false;
     else markedAnyway = gate.overridden === true;
   }

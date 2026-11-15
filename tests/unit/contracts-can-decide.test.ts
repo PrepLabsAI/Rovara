@@ -71,7 +71,7 @@ describe("canDecide: company-level actions", () => {
   it("a product AI key may also be connected by a maintainer of the project (DECISIONS 157)", () => {
     expect(canDecide(actor({ projectRole: { project: "web", role: "maintainer" } }), "connect_product_ai_key", TASK, COMPANY).allowed).toBe(true);
     expect(canDecide(actor(), "connect_product_ai_key", TASK, COMPANY).allowed).toBe(false);
-    expect(canDecide(actor({ orgRole: "admin" }), "connect_product_ai_key", undefined, COMPANY).allowed).toBe(true);
+    expect(canDecide(actor({ orgRole: "admin" }), "connect_product_ai_key", undefined, COMPANY).allowed).toBe(false);
   });
 });
 
@@ -109,4 +109,24 @@ describe("canDecide: fails closed", () => {
   it("lists every action once, with its level", () => {
     expect(Object.keys(DECISION_ACTIONS).sort()).toEqual([...TASK_LEVEL, ...COMPANY_LEVEL, "connect_product_ai_key"].sort());
   });
+});
+
+
+describe("Round 2 M1: project target before authority", () => {
+  it.each(["admin", "owner", "member"])("refuses a foreign target like a missing target for %s", (orgRole) => {
+    const person = actor({ orgRole, projectRole: { project: "web", role: "maintainer" } });
+    const missing = canDecide(person, "connect_product_ai_key", undefined, COMPANY);
+    expect(missing).toEqual({ allowed: false, reason: "no_task" });
+    expect(canDecide(person, "connect_product_ai_key", { ...TASK, companyId: "co-2" }, COMPANY)).toEqual(missing);
+    expect(canDecide(person, "connect_product_ai_key", TASK, COMPANY)).toEqual({ allowed: true, reason: orgRole === "member" ? "maintainer" : "admin" });
+  });
+});
+
+
+it("Round 2 M1: the reviewer's co-1 admin cannot connect a co-2 product key", () => {
+  const person = { personId: "admin-1", companyId: "co-1", orgRole: "admin" };
+  const missing = canDecide(person, "connect_product_ai_key", undefined, COMPANY);
+  expect(canDecide(person, "connect_product_ai_key", { companyId: "co-2", project: "web" }, COMPANY)).toEqual(missing);
+  expect(missing).toEqual({ allowed: false, reason: "no_task" });
+  expect(canDecide(person, "connect_product_ai_key", { companyId: "co-1", project: "web" }, COMPANY)).toEqual({ allowed: true, reason: "admin" });
 });

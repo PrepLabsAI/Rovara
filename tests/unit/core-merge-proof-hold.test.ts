@@ -1,11 +1,12 @@
 // TE-B5: the tracking pass holds a draft whose change was not proven, says why, and lets the task's owner or a maintainer "mark ready anyway" (recorded once, audited, for that head only). Driven through the real
 // tracking pass and the real `markReadyAnyway` over the in-memory store and the fake host.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type ProofHoldFacts, type ProofHoldMode, type TestProof, type TestProofItem } from "../../packages/contracts/src/index.js";
 import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
 import {
   OVERRIDE_REASON_MAX, judgeProofHold, markReadyAnyway, plainReason, proofHoldKey, proofOverrideKey, readProofHold, readProofHoldHistory, trackPullRequest, type LiveRoles, type MarkReadyInput, type ProofHoldSource,
 } from "../../packages/broker/src/core/merge/index.js";
+import { PROOF_READ_MAX_MS } from "../../packages/broker/src/core/proof/proof-keep.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const DIGEST = "d".repeat(64);
@@ -466,5 +467,192 @@ describe("review fixes: second press and the early company guard (L6)", () => {
     const outcome = await press(world, { actorId: "owner-1", companyId: "org-other" }, spy).then(() => true, (error: { code?: string }) => error.code);
     expect(outcome).toBe("TASK_ACCESS_DENIED");
     expect(asked).toEqual([]);
+  });
+});
+
+
+describe("Round 2: fail-closed broker regressions", () => {
+  it.each(["future_verdict", "proves_change"])("an unsupported assertion row never makes tracking ready (%s)", async (verdict) => {
+    const bad = { ...item("proves_change", "load_failure_on_old"), verdict } as TestProofItem;
+    const { tracking, draft } = await heldWorld({ proof: proof([item("does_not_prove", "passed_on_old"), bad]) });
+    await trackPullRequest(tracking, TASK_ID);
+    expect(draft()).toBe(true);
+  });
+  it("redacts the reviewer's cut-straddling token before storing an override", async () => {
+    const secret = ["ghp", "A".repeat(36)].join("_");
+    const reason = `${" ".repeat(1_190)}${secret}`;
+    expect(plainReason(reason)).not.toContain(secret.slice(0, 10));
+    const { tracking, world, pr } = await heldWorld(VACUOUS);
+    await trackPullRequest(tracking, TASK_ID);
+    const result = await press(world, { actorId: "owner-1", reason });
+    expect(JSON.stringify(result)).not.toContain(secret.slice(0, 10));
+    expect(JSON.stringify(await world.store.get(proofOverrideKey(TASK_ID, pr.repositoryId, pr.number)))).not.toContain(secret.slice(0, 10));
+  });
+  it.each([290, 1_190, 262_134])("never leaves a secret prefix at cut %s", (offset) => {
+    const secret = ["ghp", "B".repeat(36)].join("_");
+    expect(plainReason(`${"x ".repeat(Math.floor(offset / 2))}${secret}${" tail".repeat(100)}`)).not.toContain(secret.slice(0, 8));
+  });
+  it("redacts again after removing hidden characters", () => {
+    const secret = ["ghp", "C".repeat(36)].join("_");
+    expect(plainReason(`reviewed ${secret}\u200d`)).not.toContain(secret.slice(0, 8));
+  });
+  it("a never-settling facts source times out, aborts, and cannot write late", async () => {
+    vi.useFakeTimers();
+    let release!: (facts: ProofHoldFacts) => void;
+    let signal: AbortSignal | undefined;
+    let settled = false;
+    try {
+      const { world, pr, tracking, draft } = await heldWorld(undefined);
+      const source: ProofHoldSource = { mode: () => "hold", facts: (input) => {
+        signal = input.signal;
+        return new Promise((resolve) => { release = resolve; });
+      } };
+      const pending = trackPullRequest({ ...tracking, proofHold: source }, TASK_ID).then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
+      expect(settled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      expect(draft()).toBe(true);
+      expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+      release(PROVEN);
+      await pending;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+    } finally { release?.(PROVEN); vi.useRealTimers(); }
+  });
+  it("uses one total deadline across mode and facts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { world, pr } = await heldWorld(undefined);
+      const delayed = <T,>(value: T) => new Promise<T>((resolve) => { setTimeout(() => resolve(value), 1_000); });
+      let result: Awaited<ReturnType<typeof judgeProofHold>> | undefined;
+      const pending = judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => delayed("hold" as const), facts: () => delayed(PROVEN) } }, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value).then((value) => { result = value; });
+      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
+      expect(result).toEqual({ kind: "unreadable" });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await pending;
+      expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
+  it("joins the sweep budget and stops when it refuses a proof read", async () => {
+    const { world, pr } = await heldWorld(PROVEN);
+    const controller = new AbortController();
+    let reads = 0;
+    let factsReads = 0;
+    const deps = { store: world.store, timeline: world.timeline, budget: { signal: controller.signal, beforeRequest: () => { reads += 1; if (reads === 2) throw new Error("private cause"); } }, proofHold: { mode: () => "hold" as const, facts: async () => { factsReads += 1; return PROVEN; } } };
+    expect(await judgeProofHold(deps, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value)).toEqual({ kind: "unreadable" });
+    expect(reads).toBe(2);
+    expect(factsReads).toBe(0);
+    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+  });
+});
+
+
+describe("Round 2: read cancellation boundaries", () => {
+  it("forwards the sweep abort to facts and observes the next pull request after a timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = await mergeWorld({ pullRequests: [{ repositoryId: "app", number: 7 }, { repositoryId: "api", number: 8 }] });
+      for (const pr of world.prs) pr.model.getChangeRequest(String(pr.number)).draft = true;
+      const parent = new AbortController();
+      const signals = new Map<string, AbortSignal>();
+      const source: ProofHoldSource = { mode: () => "hold", facts: async (input) => {
+        const signal = input.signal;
+        if (signal !== undefined) signals.set(input.repositoryId, signal);
+        return input.repositoryId === "app" ? new Promise(() => {}) : PROVEN;
+      } };
+      const pending = trackPullRequest({ ...world.tracking, proofHold: source, budget: { signal: parent.signal, beforeRequest: () => {} } }, TASK_ID);
+      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
+      await pending;
+      expect(signals.size).toBe(2);
+      expect(signals.get("app")?.aborted).toBe(true);
+      expect(parent.signal.aborted).toBe(false);
+      expect(world.prs.map((pr) => pr.model.getChangeRequest(String(pr.number)).draft)).toEqual([true, false]);
+    } finally { vi.useRealTimers(); }
+  });
+  it("sweep abort ends an in-flight facts read immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      const { world, tracking, draft, pr } = await heldWorld(undefined);
+      const parent = new AbortController();
+      let signal: AbortSignal | undefined;
+      let settled = false;
+      const source: ProofHoldSource = { mode: () => "hold", facts: async (input) => {
+        signal = input.signal;
+        return new Promise(() => {});
+      } };
+      const pending = trackPullRequest({ ...tracking, proofHold: source, budget: { signal: parent.signal, beforeRequest: () => {} } }, TASK_ID).then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      parent.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      await pending;
+      expect(draft()).toBe(true);
+      expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
+  it("the deadline includes store reads and reads each judgment input once", async () => {
+    vi.useFakeTimers();
+    try {
+      const { world, pr } = await heldWorld(PROVEN);
+      const get = world.store.get.bind(world.store);
+      let reads = 0;
+      world.store.get = async (key) => {
+        reads += 1;
+        return key.sk.startsWith("PROOF_OVERRIDE#") ? new Promise(() => {}) : get(key);
+      };
+      let result: Awaited<ReturnType<typeof judgeProofHold>> | undefined;
+      const pending = judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => PROVEN } }, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value).then((value) => { result = value; });
+      const before = reads;
+      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
+      expect(result).toEqual({ kind: "unreadable" });
+      await pending;
+      expect(reads - before).toBe(3);
+      expect(await get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
+  it("redacts a token made recognizable by the final cut", () => {
+    const token = ["SK", "a".repeat(32)].join("");
+    const padding = "x ".repeat(133);
+    expect(plainReason(`${padding}${token}z`)).not.toContain(token);
+  });
+});
+
+
+describe("Round 2: unreadable proof words", () => {
+  it.each(["mode", "facts"] as const)("never echoes the %s failure or an error name", async (stage) => {
+    const { world, pr } = await heldWorld(PROVEN);
+    const secret = ["ghp", "D".repeat(36)].join("_");
+    const error = new Error(secret);
+    error.name = secret;
+    const logs: unknown[] = [];
+    const gate = await judgeProofHold({ store: world.store, timeline: world.timeline, log: (event, fields) => { logs.push({ event, fields }); }, proofHold: { mode: () => { if (stage === "mode") throw error; return "hold"; }, facts: async () => { throw error; } } }, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value);
+    expect(gate).toEqual({ kind: "unreadable" });
+    expect(JSON.stringify(logs)).not.toContain(secret);
+    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
+  });
+});
+
+
+it("Round 2 M3: drops a token crossing the raw work limit", () => {
+  const secret = ["ghp", "E".repeat(36)].join("_");
+  expect(plainReason(`${" ".repeat(262_134)}${secret}`)).toBeUndefined();
+});
+
+
+describe("Round 2: bounded judgment inputs", () => {
+  it("charges exactly five reads and reads each store input once", async () => {
+    const { world, pr } = await heldWorld(PROVEN);
+    let reads = 0;
+    const deps = { store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold" as const, facts: async () => PROVEN }, budget: { signal: new AbortController().signal, beforeRequest: () => { reads += 1; } } };
+    expect((await judgeProofHold(deps, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value)).kind).toBe("proceed");
+    expect(reads).toBe(5);
+  });
+  it("an unsupported mode refuses without reading facts", async () => {
+    const { world, pr } = await heldWorld(PROVEN);
+    let reads = 0;
+    const source = { mode: () => "future_mode" as ProofHoldMode, facts: async () => { reads += 1; return PROVEN; } };
+    expect(await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value)).toEqual({ kind: "unreadable" });
+    expect(reads).toBe(0);
   });
 });
