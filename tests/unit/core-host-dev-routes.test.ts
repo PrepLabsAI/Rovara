@@ -5,10 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
+import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
 const OTHER = "org_corehost00000000000b";
@@ -128,14 +128,14 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(get("/v1/app/script-tokens"), caller))?.statusCode).toBe(404);
   });
 
-  it("lists and revokes script tokens, and refuses to make one for every caller (the recently-signed-in page rule has no credential on this API yet)", async () => {
+  it("lists and revokes script tokens, and refuses to make one for a caller with no step-up (an ordinary API token)", async () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const caller = remember(FAKE_COMPANY);
     expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toEqual({ tokens: [] });
     const made = await routes.route(post("/v1/app/script-tokens", { name: "ci", projects: ["payments"], permissions: ["read"], expiresInDays: 30 }), caller);
     expect(made?.statusCode).toBe(403);
-    expect((JSON.parse(made!.body) as { error: { message: string } }).error.message).toBe(MAKE_SCRIPT_TOKEN_ON_A_PAGE);
+    expect(JSON.parse(made!.body)).toEqual({ error: { code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE } });
     expect((await routes.route(post("/v1/app/script-tokens/sct_nothing/revoke"), caller))?.statusCode).toBe(404);
     // Switched off by its own setting: not there.
     const disabled = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, scriptTokens: { enabled: () => false } }) });
@@ -165,7 +165,7 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(post("/v1/app/script-tokens/%E0/revoke"), owner))?.statusCode).toBe(404);
   });
 
-  it("reads the decision cards but refuses every act on them (no recently-signed-in proof on this API yet)", async () => {
+  it("reads the decision cards but refuses every act on them without a step-up", async () => {
     const { app, companyOf, remember } = await world2();
     const list = vi.fn(async () => []);
     const performer = { approve: vi.fn(), reject: vi.fn() };
@@ -175,8 +175,9 @@ describe("the core's handlers on the deployed API", () => {
     for (const action of ["approve", "reject", "request-changes", "evidence-opened"]) {
       const answer = await routes.route(post(`/v1/app/decisions/plan/${randomUUID()}/${action}`, { digest: "x" }), caller);
       expect(answer?.statusCode, action).toBe(403);
-      expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(DECIDE_ON_A_PAGE);
+      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "REAUTH_REQUIRED", message: DECIDE_ON_A_PAGE } });
     }
+    expect(list).not.toHaveBeenCalled();
     expect(performer.approve).not.toHaveBeenCalled();
     expect(performer.reject).not.toHaveBeenCalled();
   });
@@ -215,5 +216,156 @@ describe("the core's handlers on the deployed API", () => {
       expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
     }
     expect((await routes.route(get(`/v1/dev/tasks/${randomUUID()}`), caller))?.statusCode).toBe(404);
+  });
+});
+
+// Lane ID part 2: a fresh step-up (a factor Code owns, checked on the route against the company's window) opens the two acts this API refused.
+describe("a fresh step-up opens making a script token and acting on a decision card", () => {
+  const BODY = { requestId: "", name: "ci", projects: ["payments"], permissions: ["read"] };
+  const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
+  const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
+
+  async function setup(extra: Partial<CoreDevWiring> = {}) {
+    const w = await world2();
+    const list = vi.fn(async (...seen: unknown[]) => (seen.length >= 0 ? [] : []));
+    const performer = { approve: vi.fn(), reject: vi.fn() };
+    const decisions = { sources: { list, locks: async () => ({}) as never }, performer, store: { findDecision: async () => undefined } as never, now: () => 0 } as unknown as NonNullable<CoreDevWiring["decisions"]>;
+    const routesFor = (more: Partial<CoreDevWiring>) => createCoreDevRoutes({ app: w.app, companyOf: w.companyOf, wiring: () => ({ ...WIRED, decisions, canReadProject: async (_person, project) => project === "payments", ...extra, ...more }) });
+    return { ...w, routes: routesFor({}), routesFor, list, performer };
+  }
+
+  it("makes a script token for a caller whose step-up is inside the window, and lists it after", async () => {
+    const { world, routes, remember } = await setup();
+    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 2), method: "email_code" } };
+    const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(made?.statusCode).toBe(201);
+    const created = JSON.parse(made!.body) as { token: { tokenId: string }; secret: string };
+    expect(created.secret.length).toBeGreaterThan(20);
+    const listed = JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ tokenId: string }> };
+    expect(listed.tokens.map((token) => token.tokenId)).toEqual([created.token.tokenId]);
+  });
+
+  it("writes the step-up's method as the token's amr and its time as the token's sign-in time (ID-STEPUP-FOLLOWUPS d)", async () => {
+    const { world, app, routes, remember } = await setup();
+    for (const method of ["email_code", "passkey", "company_reauth"] as const) {
+      const at = minutesAgo(world, 3);
+      const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: `ci-${method}` }), { ...remember(FAKE_COMPANY), stepUp: { at, method } });
+      expect(made?.statusCode).toBe(201);
+      const tokenId = (JSON.parse(made!.body) as { token: { tokenId: string } }).token.tokenId;
+      const record = await readScriptToken({ store: (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store }, FAKE_COMPANY, tokenId);
+      expect(record).toMatchObject({ amr: method, authTime: at });
+    }
+  });
+
+  it("passes the install's session cap through: a token lives no longer than a session would, and an unreadable cap makes nothing", async () => {
+    const { world, app, routesFor, remember } = await setup();
+    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const store = (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store;
+    const capped = await routesFor({ sessionCapSeconds: 3_600 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), days: 30 }), caller);
+    expect(capped?.statusCode).toBe(201);
+    const record = await readScriptToken({ store }, FAKE_COMPANY, (JSON.parse(capped!.body) as { token: { tokenId: string } }).token.tokenId);
+    expect(Date.parse(record!.expiresAt) - Date.parse(record!.createdAt)).toBe(3_600_000);
+    // No cap: the days asked for, as before.
+    const open = await routesFor({}).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-open", days: 30 }), caller);
+    const openRecord = await readScriptToken({ store }, FAKE_COMPANY, (JSON.parse(open!.body) as { token: { tokenId: string } }).token.tokenId);
+    expect(Date.parse(openRecord!.expiresAt) - Date.parse(openRecord!.createdAt)).toBe(30 * 86_400_000);
+    for (const cap of [0, -5, 1.5, Number.NaN, "3600"]) {
+      const refused = await routesFor({ sessionCapSeconds: cap as number }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-bad" }), caller);
+      expect(refused?.statusCode, String(cap)).toBe(503);
+      expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: SESSION_CAP_UNREADABLE });
+    }
+    // The step-up comes first: a stale one is refused for that, whatever the cap.
+    const stale = await routesFor({ sessionCapSeconds: 0 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-stale" }), { ...caller, stepUp: { at: minutesAgo(world, 11), method: "passkey" } });
+    expect(errorOf(stale)).toEqual({ code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE });
+    const listed = JSON.parse((await routesFor({}).route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ name: string }> };
+    expect(listed.tokens.map((token) => token.name).sort()).toEqual(["ci", "ci-open"]);
+  });
+
+  it("refuses a step-up older than the window, in the future, or unreadable, whatever the body or a header claims", async () => {
+    const { world, routes, remember, list } = await setup();
+    const base = remember(FAKE_COMPANY);
+    const stale = [
+      { at: minutesAgo(world, 11), method: "email_code" }, { at: minutesAgo(world, -5), method: "passkey" }, { at: "yesterday", method: "email_code" },
+      { at: minutesAgo(world, 1), method: "" }, { at: 12345 as never, method: "email_code" }, null as never,
+      // A federated round trip is not a factor Code owns, and a looser time form is not read.
+      { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, 1), method: "oidc" }, { at: "2026-11-15", method: "email_code" }, { at: new Date(world.clock.now - 60_000).toUTCString(), method: "email_code" },
+    ];
+    for (const stepUp of stale) {
+      const caller: DeployedCaller = { ...base, stepUp };
+      const body = { ...BODY, requestId: randomUUID(), stepUp: { at: new Date(world.clock.now).toISOString(), method: "email_code" } };
+      const request = { ...post("/v1/app/script-tokens", body), headers: { "x-step-up-at": new Date(world.clock.now).toISOString() } };
+      const made = await routes.route(request, caller);
+      expect(made?.statusCode, JSON.stringify(stepUp)).toBe(403);
+      expect(errorOf(made)).toEqual({ code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE });
+      const acted = await routes.route(post(`/v1/app/decisions/plan/${randomUUID()}/approve`, body), caller);
+      expect(errorOf(acted)).toEqual({ code: "REAUTH_REQUIRED", message: DECIDE_ON_A_PAGE });
+    }
+    expect(list).not.toHaveBeenCalled();
+    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), base))!.body)).toEqual({ tokens: [] });
+  });
+
+  it("takes the company's shorter window from the hook, never a longer one, and refuses when the hook gives no readable answer", async () => {
+    const { world, routesFor, remember } = await setup();
+    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 5), method: "email_code" } };
+    const routesWith = async (answer: () => Promise<unknown>) => routesFor({ stepUpWindowSeconds: answer });
+    // A 2-minute company window refuses a 5-minute-old step-up; a 30-minute answer is capped at the 10-minute default.
+    expect(errorOf(await (await routesWith(async () => 120)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller)).code).toBe("REAUTH_REQUIRED");
+    // A zero window refuses even a step-up made this very moment.
+    expect(errorOf(await (await routesWith(async () => 0)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 0), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
+    expect(errorOf(await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 0.75), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
+    const old: DeployedCaller = { ...caller, stepUp: { at: minutesAgo(world, 11), method: "email_code" } };
+    expect(errorOf(await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), old)).code).toBe("REAUTH_REQUIRED");
+    expect((await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
+    // Positive short windows: a 30 s window takes a 20 s-old step-up, a 120 s window a 60 s-old one; and the future-skew allowance never exceeds the window.
+    expect((await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 20 / 60), method: "email_code" } }))?.statusCode).toBe(201);
+    expect((await (await routesWith(async () => 120)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci2" }), { ...caller, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }))?.statusCode).toBe(201);
+    expect(errorOf(await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, -1), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
+    // No step-up: refused without asking the hook.
+    const asked = vi.fn(async () => 600);
+    expect(errorOf(await (await routesWith(asked)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY))).code).toBe("REAUTH_REQUIRED");
+    expect(asked).not.toHaveBeenCalled();
+    for (const answer of [async () => { throw new Error("hook down"); }, async () => "600", async () => -1, async () => 1.5, async () => undefined, async () => 90_000]) {
+      const refused = await (await routesWith(answer)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+      expect(refused?.statusCode).toBe(503);
+      expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: COMPANY_RULES_NO_ANSWER });
+    }
+  });
+
+  it("makes a token only for projects the person may read now; one they may not read answers like a missing one", async () => {
+    const { world, routes, remember } = await setup();
+    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const hidden = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), projects: ["secret"] }), caller);
+    expect(hidden?.statusCode).toBe(404);
+    expect(errorOf(hidden).message).toBe("project not found");
+    const { canReadProject: _dropped, ...withoutAccess } = { ...WIRED, canReadProject: undefined };
+    void _dropped;
+    const unwired = await createCoreDevRoutes({ app: (await world2()).app, companyOf: async () => ({ companyId: FAKE_COMPANY, role: "owner" }), wiring: () => withoutAccess }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(errorOf(unwired).message).toBe(NOT_ON_THE_CORE_YET);
+  });
+
+  it("lets an act on a card reach the cards with the step-up as the person's sign-in time (and a read carries none)", async () => {
+    const { world, routes, remember, list } = await setup();
+    const at = minutesAgo(world, 3);
+    const base = remember(FAKE_COMPANY);
+    const caller: DeployedCaller = { ...base, principal: { ...base.principal, authTime: minutesAgo(world, 0) }, stepUp: { at, method: "email_code" } };
+    const acted = await routes.route(post(`/v1/app/decisions/approve_plan/${randomUUID()}/reject`, { requestId: randomUUID(), reason: "not_now" }), caller);
+    // Past the step-up gate: the card is simply not waiting for them (the sources list is empty).
+    expect(acted?.statusCode).toBe(404);
+    expect(list).toHaveBeenCalledTimes(1);
+    const seen = list.mock.calls[0]![0] as { principal: { authTime?: string; methods?: string[] }; stepUp?: unknown };
+    expect(seen.principal.authTime).toBe(at);
+    expect(seen.principal.methods).toEqual(["email_code"]);
+    expect(seen.stepUp).toEqual({ at, method: "email_code" });
+    await routes.route(get("/v1/app/decisions"), caller);
+    const read = list.mock.calls[1]![0] as { principal: { authTime?: string }; stepUp?: unknown };
+    expect(read.principal.authTime).toBeUndefined();
+    expect(read.stepUp).toBeUndefined();
+    // A malformed body is a fixed refusal, never an echo.
+    const bad = await routes.route({ ...post(`/v1/app/decisions/plan/${randomUUID()}/approve`), body: "{not json <script>" }, caller);
+    expect(errorOf(bad)).toEqual({ code: "CONFIG_INVALID", message: "the request body is not JSON" });
+    // An unknown key in the body is refused in fixed words, never named back.
+    const unknown = await routes.route(post(`/v1/app/decisions/approve_plan/${randomUUID()}/reject`, { requestId: randomUUID(), reason: "not_now", "<img src=x>": 1 }), caller);
+    expect(errorOf(unknown).message).not.toContain("<img");
+    expect(errorOf(unknown).code).toBe("CONFIG_INVALID");
   });
 });
