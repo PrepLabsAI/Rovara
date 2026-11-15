@@ -130,14 +130,23 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
     const spans: EvidenceSpan[] = [];
     for (const comment of feedback.comments.slice(0, MAX_PULL_REQUEST_COMMENTS)) {
       if (comment.body.trim() === "" || isRovareReplyComment(comment.body)) continue;
-      const trust = await trustOf(comment.author);
       let person: string;
+      let trust: TrustClass;
       if (hosted !== undefined) {
+        // On a hosted install a comment is a member's only when its account is linked to a person of the company who is on the project's roster now, and the code host also gives the account write
+        // standing. An unlinked account is an outsider (its words are removed before any model call), and an erased person's comment is not read at all.
         const linked = await hosted.personOfAccount?.(options.companyId, provider, comment.author);
-        // A comment by a person who was erased is not read.
-        if (linked !== undefined && await hosted.people.isErased(options.companyId, linked)) continue;
-        person = linked ?? accountPerson(provider, { login: comment.author });
+        if (linked === undefined) {
+          person = accountPerson(provider, { login: comment.author });
+          trust = "outsider";
+        } else {
+          const standingNow = await standingOf(linked, task.project);
+          if (standingNow === undefined) continue;
+          person = linked;
+          trust = standingNow === "member" ? await trustOf(comment.author) : "outsider";
+        }
       } else {
+        trust = await trustOf(comment.author);
         person = options.ownerAccounts?.has(comment.author) === true ? ownerId : accountPerson(provider, { login: comment.author });
       }
       const place = comment.path === undefined ? undefined : cleanForLearning(comment.path, COMMENT_PATH_MAX);
@@ -262,6 +271,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       const found = await queryAll(flow.store, { pk: `DEVTASK#${input.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } });
       const row = found.find((item) => item["entityType"] === "TASK_REVERT" && item["taskId"] === input.taskId && item["project"] === input.project);
       if (row === undefined) return undefined;
+      // On a hosted install a reverter's account is not proved to be any person here, so no one is named (the revert still counts as an outcome).
+      if (hosted !== undefined) return {};
       return typeof row["reverter"] === "string" && row["reverter"] !== "" ? { actorDeveloperId: ownerId === row["reverter"] ? ownerId : accountPerson("host", { login: row["reverter"] }) } : {};
     },
   };

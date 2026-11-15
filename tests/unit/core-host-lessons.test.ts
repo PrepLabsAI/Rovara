@@ -13,7 +13,7 @@ import { learnedLessonsSwitchOn, setLearnedLessonsGate } from "../../packages/br
 import { pumpReflectQueue, reflectMessageCompany } from "../../packages/broker/src/lessons/host-glue.js";
 import { reflectQueueOf } from "../../packages/broker/src/lessons/reflect-queue.js";
 import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
-import { createLessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
+import { createLessonRepositories, type LessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
 import type { PipelineModel } from "../../packages/broker/src/lessons/ports.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -289,10 +289,95 @@ describe("erasing a person's lessons", () => {
     // The switch is off now: erasing must still work.
     setLearnedLessonsGate(() => false);
     const report = await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now });
-    expect(report).toMatchObject({ complete: true, projects: 1, purged: 1 });
+    expect(report).toMatchObject({ projects: 1, purged: 1 });
     expect(await a.runtime.store.get({ workspaceId: A, project: "payments" }, "les_aaaa1111")).toBeUndefined();
     expect(await b.runtime.store.get({ workspaceId: B, project: "payments" }, "les_aaaa1111")).toBeDefined();
     // Idempotent: a second call finds nothing more to do.
-    expect(await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now })).toMatchObject({ complete: true, purged: 0 });
+    expect(await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now })).toMatchObject({ purged: 0 });
+  });
+});
+
+describe("review fixes", () => {
+  it("the erase walks the whole project catalog (every page), not only its first page", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: ["ann"], [B]: [] }), new Map());
+    const a = companies.get(A)!.lessons!;
+    // 1,050 more projects: more than one store page; the person's lesson is in the last one by name.
+    for (let i = 0; i < 1_050; i += 1) await world.store.put({ item: { ...orgProjectCatalogKey(A, `p${String(i).padStart(4, "0")}`), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
+    const last = { ...activeLesson(A, "les_bbbb2222", "Late project lesson"), project: "zz-last" };
+    await world.store.put({ item: { ...orgProjectCatalogKey(A, "zz-last"), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
+    await putLesson(a, last);
+    const report = await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now });
+    expect(report.projects).toBe(1_052);
+    expect(await a.runtime.store.get({ workspaceId: A, project: "zz-last" }, "les_bbbb2222")).toBeUndefined();
+  });
+
+  it("a reflection pass stops taking messages when too little of its budget is left", async () => {
+    const world = createFakeWorld();
+    const queue = await reflectQueueOf(world.queues);
+    for (let i = 0; i < 3; i += 1) await queue.enqueue({ body: { orgId: A, taskId: randomUUID(), outcome: "merged", requestId: randomUUID() }, dedupeId: randomUUID() });
+    const deadlines: number[] = [];
+    const host = { reflectOne: async (_body: string, _v: unknown, deadlineMs?: number) => { deadlines.push(deadlineMs ?? -1); world.clock.advance(20); return { result: "done", retry: false } as never; } };
+    const report = await pumpReflectQueue({ queues: world.queues, perPass: 10, now: () => world.clock.now, log: () => undefined, hostFor: async () => host, deadlineAt: world.clock.now + 50_000 });
+    // 50 s budget: the first message gets the time left (less a margin); after 20 s, 30 s are left (still enough); after 40 s only 10 s are left, so the third waits for the next pass.
+    expect(report).toMatchObject({ received: 2, reflected: 2 });
+    expect(deadlines[0]).toBe(45_000);
+  });
+
+  it("a switched-on company whose lessons are missing is a retry, never dropped as lessons off", async () => {
+    const world = createFakeWorld();
+    const hosts = new Map<string, CoreLessons>();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: `on:${A}:${B}` }, peopleOf({ [A]: [], [B]: [] }), hosts);
+    hosts.delete(B);
+    const queue = await reflectQueueOf(world.queues);
+    await queue.enqueue({ body: { orgId: B, taskId: randomUUID(), outcome: "merged", requestId: randomUUID() }, dedupeId: randomUUID() });
+    const report = await companies.get(A)!.lessons!.service.pass({ budgetMs: 50_000 });
+    expect(report).toMatchObject({ received: 1, dropped: 0, retried: 1 });
+  });
+
+  it("on a hosted install a pull request comment is a member's only when its account is linked to a person on the roster; an unlinked account is an outsider and an erased person's comment is not read", async () => {
+    const world = createFakeWorld();
+    const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
+    await registerProject(world, A);
+    const task = { taskId: "task-pr", companyId: A, project: "payments", developerId: "ann", startingRevision: 1, title: "Add health", requestText: "Add a /health endpoint",
+      workflow: { revision: 3, artifacts: [], reviews: [], decisions: [], outcome: "MERGED", pullRequests: [{ repositoryId: "demo", number: 7, url: "https://github.com/example/demo/pull/7", state: "MERGED", headSha: "a".repeat(40) }] } };
+    await world.store.put({ item: { ...taskKey("task-pr"), entityType: "DEVTASK", ...task } });
+    const comments = [
+      { id: "1", kind: "review_comment", author: "ann-gh", body: "Name it healthz like the others" },
+      { id: "2", kind: "review_comment", author: "stranger-gh", body: "Unlinked account words" },
+      { id: "3", kind: "review_comment", author: "gone-gh", body: "Erased person words" },
+      { id: "4", kind: "review_comment", author: "viewer-gh", body: "Linked but off the roster" },
+    ];
+    const codeHost = { kind: "github", feedback: async () => ({ comments, changeRequest: { headTreeRevision: "t" } }), standing: async () => ({ permission: "write", accountType: "person" }) };
+    const repo = { name: "demo", url: "https://github.com/example/demo.git", place: "github:repo/1", fullName: "example/demo", private: true, codeHost, repository: { url: "https://github.com/example/demo.git" }, scope: {} };
+    const repos = { ...createLessonRepositories({ flow: { store: world.store, projects: undefined as never }, registry, companyId: A, now: () => world.clock.now }), ofProject: async () => [repo], ofTask: async () => repo } as unknown as LessonRepositories;
+    const linked: Record<string, string> = { "ann-gh": "ann", "gone-gh": "gone", "viewer-gh": "vic" };
+    const sources = createLocalLessonSources({
+      flow: { store: world.store, projects: undefined as never }, companyId: A, ownerId: "rovara-system", repos, now: () => world.clock.now,
+      hosted: { people: peopleOf({ [A]: ["ann", "gone"] }, ["gone"]), personOfAccount: async (_c, _p, login) => linked[login] },
+    });
+    const read = await sources.source.read({ workspaceId: A, taskId: "task-pr" });
+    const prSpans = (read?.facts.rest.spans ?? []).filter((span) => span.kind === "pr_comment");
+    expect(prSpans.map((span) => [span.authorId, span.trust])).toEqual([["ann", "member"], ["github_stranger-gh", "outsider"], ["vic", "outsider"]]);
+    expect(JSON.stringify(prSpans)).not.toContain("Erased person words");
+  });
+
+  it("a send-back is its decider's: an erased decider's is not an outcome, one off the roster is an outsider's, and a close reason follows the same rule", async () => {
+    const world = createFakeWorld();
+    const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
+    await registerProject(world, A);
+    const decision = (requestId: string, actorId: string, extra: Record<string, unknown> = {}) => ({ requestId, workflowRevision: 1, decision: "REQUEST_CHANGES", actorId, actorRole: "TASK_OWNER", reason: `reason of ${actorId}`, source: "SEND_BACK", at: "2026-11-15T10:00:00.000Z", ...extra });
+    const task = { taskId: "task-sb", companyId: A, project: "payments", developerId: "ann", startingRevision: 1, title: "t", requestText: "r",
+      workflow: { revision: 3, artifacts: [], reviews: [], pullRequests: [], outcome: "CLOSED", decisions: [decision("r-gone", "gone"), decision("r-out", "otto"), decision("r-ann", "ann"), { ...decision("r-close", "gone"), decision: "REJECT", source: "CLOSE" }] } };
+    await world.store.put({ item: { ...taskKey("task-sb"), entityType: "DEVTASK", ...task } });
+    const repos = { ofProject: async () => [], ofTask: async () => undefined } as unknown as LessonRepositories;
+    const sources = createLocalLessonSources({ flow: { store: world.store, projects: undefined as never }, companyId: A, ownerId: "rovara-system", repos, now: () => world.clock.now, hosted: { people: peopleOf({ [A]: ["ann", "gone"] }, ["gone"]) } });
+    void registry;
+    const ask = (requestId: string) => sources.rows.sendBack({ workspaceId: A, project: "payments", taskId: "task-sb", requestId });
+    expect(await ask("r-gone")).toBeUndefined();
+    expect(await ask("r-out")).toMatchObject({ origin: "human", actorDeveloperId: "otto", actorTrust: "outsider" });
+    expect(await ask("r-ann")).toMatchObject({ origin: "human", actorDeveloperId: "ann", actorTrust: "member" });
+    const read = await sources.source.read({ workspaceId: A, taskId: "task-sb" });
+    expect((read?.facts.rest.spans ?? []).filter((span) => span.kind === "close_reason")).toEqual([]);
   });
 });

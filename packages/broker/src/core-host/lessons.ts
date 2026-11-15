@@ -158,34 +158,49 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   milestones.register(host.milestone);
 
   async function projectNames(): Promise<string[]> {
-    const page = await deps.store.query({ pk: orgProjectCatalogKey(companyId, "x").pk, limit: 200 }).catch(() => ({ items: [] as Array<{ sk: string }> }));
-    return page.items.map((item) => item.sk).filter((sk) => sk.startsWith("PROJECT#")).map((sk) => sk.slice("PROJECT#".length));
+    return await companyProjects(deps.store, companyId);
   }
 
-  /** Whether today's upkeep is still to run: the first pass of a day claims it, so two passes never run it twice. */
-  async function claimNightly(): Promise<boolean> {
+  /** Whether today's upkeep is still to run: the first pass of a day claims it, so two passes never run it twice. A pass whose upkeep fails gives the claim back (`releaseNightly`). */
+  async function claimNightly(): Promise<number | undefined> {
     const day = Math.floor(now() / 86_400_000);
     const written = await deps.store.put({
       item: { ...nightlyKey(companyId), entityType: "LESSONS_NIGHTLY", day },
       condition: { op: "or", conditions: [{ op: "notExists", path: ["pk"] }, { op: "lt", path: ["day"], value: day }] },
     });
-    return written.applied;
+    return written.applied ? day : undefined;
   }
+  async function releaseNightly(day: number): Promise<void> {
+    await deps.store.put({ item: { ...nightlyKey(companyId), entityType: "LESSONS_NIGHTLY", day: day - 1 }, condition: { op: "eq", path: ["day"], value: day } }).catch(() => undefined);
+  }
+
+  // A company the switch covers always has lessons: a host that is missing for one is a fault to retry, never "lessons off" (which would drop its reflections).
+  const hostFor = async (id: string): Promise<Pick<LessonsHost, "reflectOne"> | undefined> => {
+    if (id === companyId) return host;
+    const found = await options.hostFor(id);
+    if (found === undefined && switchCovers(options.lessonsSwitch, id)) throw new Error("the lessons of a switched-on company are not built");
+    return found;
+  };
 
   const service: CoreService = {
     async pass({ budgetMs }) {
       if (!enabled()) return { skipped: "lessons_off" };
       const started = now();
+      const deadlineAt = started + budgetMs;
       const delivered = await milestones.deliverDue().catch((error: unknown) => { log("milestones_failed", { error: error instanceof Error ? error.name : "unknown" }); return { attempted: 0 }; });
-      const reflected = await pumpReflectQueue({ queues: registry.require("queue"), hostFor: options.hostFor, perPass: REFLECT_PER_PASS, now, log }).catch((error: unknown) => {
+      // The upkeep goes first while there is time: it is bounded and cheap. Reflection then takes what is left, one message at a time (each reflection's deadline is the time left).
+      let nightly = false;
+      if (deadlineAt - now() > budgetMs / 2) {
+        const day = await claimNightly().catch(() => undefined);
+        if (day !== undefined) {
+          nightly = true;
+          try { await host.nightly(await projectNames()); } catch (error) { log("nightly_failed", { error: error instanceof Error ? error.name : "unknown" }); await releaseNightly(day); nightly = false; }
+        }
+      }
+      const reflected = await pumpReflectQueue({ queues: registry.require("queue"), hostFor, perPass: REFLECT_PER_PASS, now, log, deadlineAt }).catch((error: unknown) => {
         log("reflect_pass_failed", { error: error instanceof Error ? error.name : "unknown" });
         return { received: 0, reflected: 0, dropped: 0, retried: 0 };
       });
-      let nightly = false;
-      if (now() - started < budgetMs / 2 && await claimNightly().catch(() => false)) {
-        nightly = true;
-        await host.nightly(await projectNames()).catch((error: unknown) => log("nightly_failed", { error: error instanceof Error ? error.name : "unknown" }));
-      }
       return { milestones: delivered.attempted, ...reflected, nightly };
     },
   };
@@ -202,46 +217,50 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   return { companyId, runtime, host, milestones, sources: { source: sources.source, rows: sources.rows }, readTask: readOwnTask, attach, service };
 }
 
-/** The most projects one erase call walks; a company with more gets `complete: false` and the erase calls again. */
-export const LESSONS_ERASE_PROJECTS_MAX = 200;
+/** Every project of the company, from its catalog, every page. Throws when the catalog cannot be read. */
+export async function companyProjects(store: DocumentStore, companyId: OrgId): Promise<string[]> {
+  const items = await queryAll(store, { pk: orgProjectCatalogKey(companyId, "x").pk, sk: { op: "beginsWith", prefix: "PROJECT#" } });
+  return items.map((item) => item.sk.slice("PROJECT#".length)).filter((name) => name !== "");
+}
 
 export interface ErasePersonLessonsReport {
-  /** Every project of the company was walked and every step finished. False: call again (the steps are idempotent). */
-  complete: boolean;
   projects: number;
   purged: number;
   scrubbed: number;
-  /** Rows that named the person outside a lesson (a comment's retire request) and were removed. */
+  /** Rows that named the person or a purged lesson outside the lesson itself (a comment's retire request, the "used in" list of a purged lesson) and were removed. */
   rows: number;
 }
 
 /**
  * The lessons part of erasing one person of a company (row 13.1; the person erase of the core calls it). It runs WHATEVER the lessons switch says: lessons that exist must be erased even when the switch
- * is off. For each project of the company: every lesson the person wrote or that rests only on their words is hard-deleted (head, versions, vector, load references), the person is scrubbed from the
- * rest and from every audience snapshot, and the person's retire requests are removed. Only this company's partitions are touched. Throws on a failed step (the caller retries; nothing reports done early).
+ * is off. For every project of the company (the whole catalog): every lesson the person wrote or that rests only on their words is hard-deleted (head, versions, vector, load references) with its "used in"
+ * list, the person is scrubbed from the rest and from every audience snapshot, and the person's retire requests are removed. Only this company's partitions are touched. Throws on a failed step (the caller
+ * retries; every step is idempotent, so a retry finishes the work and nothing reports done early).
  */
 export async function erasePersonLessons(input: { store: DocumentStore; audit: AuditSink; companyId: OrgId; personId: string; now: () => number; vectors?: LessonVectors; log?: (entry: Record<string, unknown>) => void }): Promise<ErasePersonLessonsReport> {
   const { store, companyId, personId, now } = input;
   const lessons = new DocumentLessonStore(store, now, (id) => id, () => undefined);
   const deletion = lessonDeletionPort({ store: lessons, vectors: input.vectors ?? documentLessonVectors(store), audit: lessonAuditSink(input.audit, now, companyId), now });
-  const catalog = await store.query({ pk: orgProjectCatalogKey(companyId, "x").pk, limit: LESSONS_ERASE_PROJECTS_MAX + 1 });
-  const projects = catalog.items.map((item) => item.sk).filter((sk) => sk.startsWith("PROJECT#")).map((sk) => sk.slice("PROJECT#".length));
-  const walked = projects.slice(0, LESSONS_ERASE_PROJECTS_MAX);
+  const projects = await companyProjects(store, companyId);
   let purged = 0;
   let scrubbed = 0;
   let rows = 0;
-  for (const project of walked) {
+  const removeAll = async (pk: string, keep: (row: Record<string, unknown>) => boolean = () => false): Promise<void> => {
+    for (const row of await queryAll(store, { pk })) {
+      if (keep(row)) continue;
+      await store.delete({ key: { pk: row.pk, sk: row.sk } });
+      rows += 1;
+    }
+  };
+  for (const project of projects) {
     await deletion.resumePending(companyId, project);
     const done = await deletion.erasePerson(companyId, project, { developerId: personId }, new Set());
     purged += done.purged.length;
     scrubbed += done.scrubbed.length;
     await deletion.scrubAudienceIds(companyId, project, [personId]);
-    for (const row of await queryAll(store, { pk: companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`) })) {
-      if (row["personId"] !== personId) continue;
-      await store.delete({ key: { pk: row.pk, sk: row.sk } });
-      rows += 1;
-    }
+    for (const lessonId of done.purged) await removeAll(companyScoped(companyId, `LESSON_USE#${project}#${lessonId}`));
+    await removeAll(companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`), (row) => row["personId"] !== personId);
   }
-  input.log?.({ component: "core-lessons", companyId, event: "person_erased", projects: walked.length, purged, scrubbed, rows });
-  return { complete: projects.length <= LESSONS_ERASE_PROJECTS_MAX && catalog.cursor === undefined, projects: walked.length, purged, scrubbed, rows };
+  input.log?.({ component: "core-lessons", companyId, event: "person_erased", projects: projects.length, purged, scrubbed, rows });
+  return { projects: projects.length, purged, scrubbed, rows };
 }

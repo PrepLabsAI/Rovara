@@ -68,7 +68,7 @@ export interface LessonsHost {
   /** The milestone handler: a merged or closed task of this company is queued for reflection (nothing while off, or where the project's mode does not reflect). */
   milestone: CodeMilestoneHandler;
   /** One message of the reflection queue, already routed to this company by its company id. */
-  reflectOne(body: string, visibility?: ReflectWorkerDeps["visibility"]): Promise<ReflectOutcome>;
+  reflectOne(body: string, visibility?: ReflectWorkerDeps["visibility"], deadlineMs?: number): Promise<ReflectOutcome>;
   /** The daily upkeep of these projects. */
   nightly(projects: readonly string[]): Promise<void>;
   /** A pull request of the task was reverted: the task is reflected on again, as a reverted one. */
@@ -192,15 +192,15 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     reflect: { model: runtime.judgeModel, spend: runtime.spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause },
     process: runtime.process, counters: runtime.counters, log: (event, fields) => log(event, fields),
   };
-  const workerDeps = (visibility?: ReflectWorkerDeps["visibility"]): ReflectWorkerDeps => ({
-    claims, now, deadlineMs: LESSONS_WORKER_DEADLINE_SECONDS * 1000, ...(visibility === undefined ? {} : { visibility }), log: (event, fields) => log(event, fields),
+  const workerDeps = (visibility?: ReflectWorkerDeps["visibility"], deadlineMs = LESSONS_WORKER_DEADLINE_SECONDS * 1000): ReflectWorkerDeps => ({
+    claims, now, deadlineMs: Math.min(deadlineMs, LESSONS_WORKER_DEADLINE_SECONDS * 1000), ...(visibility === undefined ? {} : { visibility }), log: (event, fields) => log(event, fields),
     // A message names its company: one of another company is never this company's to learn from (it is answered as having nothing to learn from, and not retried).
     learn: async (message) => (message.workspaceId !== companyId ? { status: "no_facts", retry: false } : await learnFromEndedTaskTyped(learning, message)),
   });
 
   /** One message of the reflection queue, for this company (the caller routed it here by its company). */
-  async function reflectOne(body: string, visibility?: ReflectWorkerDeps["visibility"]): Promise<ReflectOutcome> {
-    return await runReflectMessage(workerDeps(visibility), body).catch(() => ({ result: "failed" as const, retry: true }));
+  async function reflectOne(body: string, visibility?: ReflectWorkerDeps["visibility"], deadlineMs?: number): Promise<ReflectOutcome> {
+    return await runReflectMessage(workerDeps(visibility, deadlineMs), body).catch(() => ({ result: "failed" as const, retry: true }));
   }
 
   const onTaskEnd = learningTaskEndHandler(() => ({ queue: { send: async (message) => (await sender()).send(message) }, log: (event, fields) => log(event, fields) }));
@@ -263,14 +263,25 @@ export function reflectMessageCompany(body: unknown): string | undefined {
  * its own tasks. A message for a company with no host (lessons off for it, or no such company) is removed: with lessons off nothing is learned, and nothing is kept to be paid for later. A host that cannot
  * be built now leaves the message for a retry. A message that is not one is handed to no company and removed (the worker's own parser would refuse it too).
  */
-export async function pumpReflectQueue(input: { queues: QueueService; hostFor: (companyId: string) => Promise<Pick<LessonsHost, "reflectOne"> | undefined>; perPass?: number; now: () => number; log: (event: string, fields?: Record<string, unknown>) => void }): Promise<{ received: number; reflected: number; dropped: number; retried: number }> {
+/** The least time left for which a pass still takes a message: a reflection is one model call, and a message started with less time would only time out and come back. */
+export const REFLECT_MIN_TIME_MS = 30_000;
+
+export async function pumpReflectQueue(input: {
+  queues: QueueService; hostFor: (companyId: string) => Promise<Pick<LessonsHost, "reflectOne"> | undefined>; perPass?: number; now: () => number; log: (event: string, fields?: Record<string, unknown>) => void;
+  /** When the pass must be done (ms since the epoch). Messages are taken one at a time while at least `REFLECT_MIN_TIME_MS` is left, and each reflection's own deadline is the time left. Absent: no limit of its own. */
+  deadlineAt?: number;
+}): Promise<{ received: number; reflected: number; dropped: number; retried: number }> {
   const queue = await reflectQueueOf(input.queues);
   const visibility = queueReflectVisibility(queue);
-  const received = await queue.receive({ maxMessages: input.perPass ?? REFLECT_PER_PASS, visibilityTimeoutSeconds: 10 * 60 });
+  let received = 0;
   let reflected = 0;
   let dropped = 0;
   let retried = 0;
-  for (const message of received) {
+  const timeLeft = (): number => (input.deadlineAt === undefined ? Number.POSITIVE_INFINITY : input.deadlineAt - input.now());
+  for (let taken = 0; taken < (input.perPass ?? REFLECT_PER_PASS) && timeLeft() >= REFLECT_MIN_TIME_MS; taken += 1) {
+    const [message] = await queue.receive({ maxMessages: 1, visibilityTimeoutSeconds: 10 * 60 });
+    if (message === undefined) break;
+    received += 1;
     const companyId = reflectMessageCompany(message.body);
     let host: Pick<LessonsHost, "reflectOne"> | undefined;
     try {
@@ -287,7 +298,8 @@ export async function pumpReflectQueue(input: { queues: QueueService; hostFor: (
       await queue.ack(message.receiptHandle).catch(() => undefined);
       continue;
     }
-    const outcome = await host.reflectOne(JSON.stringify(message.body), visibility);
+    const left = timeLeft();
+    const outcome = await host.reflectOne(JSON.stringify(message.body), visibility, Number.isFinite(left) ? Math.max(1_000, left - 5_000) : undefined);
     if (outcome.retry) {
       retried += 1;
       await queue.changeVisibility(message.receiptHandle, retryDelayFor(message.receiveCount, "retryAt" in outcome ? outcome.retryAt : undefined, input.now())).catch(() => undefined);
@@ -296,5 +308,5 @@ export async function pumpReflectQueue(input: { queues: QueueService; hostFor: (
       await queue.ack(message.receiptHandle).catch(() => undefined);
     }
   }
-  return { received: received.length, reflected, dropped, retried };
+  return { received, reflected, dropped, retried };
 }
