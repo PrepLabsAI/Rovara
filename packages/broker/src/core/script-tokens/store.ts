@@ -74,8 +74,14 @@ export const LAST_USED_EVERY_MS = 5 * 60_000;
 const REQUEST_MEMORY_DAYS = 7;
 const REVOKE_TRIES = 3;
 
-/** The sign-in methods a stored record may name: Cloud's, and `local` for the owner of a laptop. */
-const METHODS = ["slack", "oidc", "cloud", "github", "saml", "local"] as const satisfies readonly (DeveloperSignInMethod | "local")[];
+/**
+ * The sign-in methods a stored record may name: Cloud's, `local` for the owner of a laptop, and (ID-STEPUP-FOLLOWUPS d) the step-up factor a deployed install's maker proved it was them
+ * with just before making the token (`email_code`, `passkey`, `company_reauth`).
+ */
+const STEP_UP_METHODS = ["email_code", "passkey", "company_reauth"] as const;
+const METHODS = ["slack", "oidc", "cloud", "github", "saml", "local", ...STEP_UP_METHODS] as const satisfies readonly (DeveloperSignInMethod | "local" | (typeof STEP_UP_METHODS)[number])[];
+/** How the maker proved it was them just before making the token: the step-up's factor and time, which the record keeps as its `amr` and `authTime`. */
+export interface ScriptTokenSignIn { amr: (typeof STEP_UP_METHODS)[number]; authTime: string }
 const Instant = z.string().datetime();
 
 /** A token as stored. `secretHash` is the SHA-256 hex of the token. `createdRole` is the creator's company role when they made it: the token works only while it is still theirs. */
@@ -210,7 +216,7 @@ function auditEvent(input: { orgId: OrgId; at: string; actor: AuditEvent["actor"
  *
  * Who may call this is the surface's rule, not this function's: in Code only a local page the owner opened a few minutes ago does (never the API token, which an AI tool holds).
  */
-export async function createScriptToken(deps: ScriptTokenDependencies, caller: ScriptTokenCaller, body: unknown, checkProject: (project: string) => Promise<void>, options: { lifetimeCapSeconds?: number } = {}): Promise<CreatedScriptToken> {
+export async function createScriptToken(deps: ScriptTokenDependencies, caller: ScriptTokenCaller, body: unknown, checkProject: (project: string) => Promise<void>, options: { lifetimeCapSeconds?: number; signIn?: ScriptTokenSignIn } = {}): Promise<CreatedScriptToken> {
   const parsed = CreateScriptTokenBodySchema.safeParse(body);
   if (!parsed.success) throw invalidBody(parsed.error.issues[0]);
   const input = parsed.data;
@@ -239,7 +245,9 @@ export async function createScriptToken(deps: ScriptTokenDependencies, caller: S
   // Where an install caps every session, a token lives no longer than a session would.
   const expiresMs = Math.min(nowMs + days * DAY_MS, options.lifetimeCapSeconds === undefined ? Number.MAX_SAFE_INTEGER : nowMs + options.lifetimeCapSeconds * 1000);
   const record: ScriptTokenRecord = {
-    orgId, tokenId, developerId, personId: caller.personId, name: input.name, projects, permissions, createdAt: isoOf(nowMs), expiresAt: isoOf(expiresMs), createdRole: caller.orgRole, amr: "local", secretHash: hash,
+    orgId, tokenId, developerId, personId: caller.personId, name: input.name, projects, permissions, createdAt: isoOf(nowMs), expiresAt: isoOf(expiresMs), createdRole: caller.orgRole, secretHash: hash,
+    // Absent (a laptop's owner on their own page): `local`, as before.
+    ...(options.signIn === undefined ? { amr: "local" as const } : { amr: options.signIn.amr, authTime: options.signIn.authTime }),
   };
   const event = auditEvent({
     orgId, at: record.createdAt, actor: { type: "person", id: developerId }, action: "script_token.created", key: occurrence(tokenId, "created"), tokenId,

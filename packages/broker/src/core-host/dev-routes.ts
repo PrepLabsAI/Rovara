@@ -28,7 +28,7 @@ import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies
 import type { SessionMembers } from "../core/sessions/access.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
-import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, type ScriptTokenCaller } from "../core/script-tokens/index.js";
+import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
@@ -49,6 +49,7 @@ export const SIGN_IN_AGAIN = "Sign in again.";
 export const DECIDE_ON_A_PAGE = "A decision is made right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
 export const COMPANY_RULES_NO_ANSWER = "The company rules service did not answer, so nothing was done. Try again in a moment.";
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
+export const SESSION_CAP_UNREADABLE = "This install's session limit could not be read, so no token was made. Try again later, or ask whoever runs the install.";
 const PROJECT_NOT_FOUND = "project not found";
 
 /** The deployed caller, as the broker's sign-in vouches for it. */
@@ -94,6 +95,11 @@ export interface CoreDevWiring {
   canReadProject?: (personId: string, project: string) => Promise<boolean>;
   /** Script tokens' list and revoke (the token store is the core's; the audit sink is the registry's). */
   scriptTokens?: { enabled?: () => boolean };
+  /**
+   * ID-STEPUP-FOLLOWUPS (d): the install's session cap in seconds, where it caps every session: a script token made here lives no longer than a session would. Absent: no cap (the days
+   * asked for). Anything but a positive whole number makes no token (fixed words), never one without the cap.
+   */
+  sessionCapSeconds?: number;
   /** The URL clients reach the API at (a session's `link`). */
   origin: () => string;
 }
@@ -266,13 +272,16 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };
           if (tokens[1] === undefined && request.method === "POST") {
             // Making a token needs a fresh step-up, checked before the body is read.
-            await freshStepUp(caller, target.wiring, nowOf(target), MAKE_SCRIPT_TOKEN_ON_A_PAGE);
+            const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), MAKE_SCRIPT_TOKEN_ON_A_PAGE);
             const canRead = target.wiring.canReadProject;
             if (canRead === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+            const cap = target.wiring.sessionCapSeconds;
+            if (cap !== undefined && (typeof cap !== "number" || !Number.isSafeInteger(cap) || cap <= 0)) throw agentXError("RUNTIME_UNAVAILABLE", SESSION_CAP_UNREADABLE);
             // A token is made only for projects this person may read now; one they may not read answers exactly like a missing one.
+            // The record keeps how the maker proved it was them (the step-up's factor as its amr, and its time), and the token never outlives the install's session cap.
             const made = await createScriptToken(deps, scriptCaller, bodyOf(request), async (project) => {
               if (!(await canRead(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-            });
+            }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), signIn: { amr: stepUp.method as ScriptTokenSignIn["amr"], authTime: stepUp.at } });
             return json(201, made);
           }
           if (tokens[1] === undefined && request.method === "GET") return json(200, { tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });

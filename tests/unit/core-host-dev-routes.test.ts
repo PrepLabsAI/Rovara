@@ -5,10 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
+import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
 const OTHER = "org_corehost00000000000b";
@@ -243,6 +243,39 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     expect(created.secret.length).toBeGreaterThan(20);
     const listed = JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ tokenId: string }> };
     expect(listed.tokens.map((token) => token.tokenId)).toEqual([created.token.tokenId]);
+  });
+
+  it("writes the step-up's method as the token's amr and its time as the token's sign-in time (ID-STEPUP-FOLLOWUPS d)", async () => {
+    const { world, app, routes, remember } = await setup();
+    for (const method of ["email_code", "passkey", "company_reauth"] as const) {
+      const at = minutesAgo(world, 3);
+      const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: `ci-${method}` }), { ...remember(FAKE_COMPANY), stepUp: { at, method } });
+      expect(made?.statusCode).toBe(201);
+      const tokenId = (JSON.parse(made!.body) as { token: { tokenId: string } }).token.tokenId;
+      const record = await readScriptToken({ store: (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store }, FAKE_COMPANY, tokenId);
+      expect(record).toMatchObject({ amr: method, authTime: at });
+    }
+  });
+
+  it("passes the install's session cap through: a token lives no longer than a session would, and an unreadable cap makes nothing", async () => {
+    const { world, app, routesFor, remember } = await setup();
+    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const store = (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store;
+    const capped = await routesFor({ sessionCapSeconds: 3_600 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), days: 30 }), caller);
+    expect(capped?.statusCode).toBe(201);
+    const record = await readScriptToken({ store }, FAKE_COMPANY, (JSON.parse(capped!.body) as { token: { tokenId: string } }).token.tokenId);
+    expect(Date.parse(record!.expiresAt) - Date.parse(record!.createdAt)).toBe(3_600_000);
+    // No cap: the days asked for, as before.
+    const open = await routesFor({}).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-open", days: 30 }), caller);
+    const openRecord = await readScriptToken({ store }, FAKE_COMPANY, (JSON.parse(open!.body) as { token: { tokenId: string } }).token.tokenId);
+    expect(Date.parse(openRecord!.expiresAt) - Date.parse(openRecord!.createdAt)).toBe(30 * 86_400_000);
+    for (const cap of [0, -5, 1.5, Number.NaN, "3600"]) {
+      const refused = await routesFor({ sessionCapSeconds: cap as number }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-bad" }), caller);
+      expect(refused?.statusCode, String(cap)).toBe(503);
+      expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: SESSION_CAP_UNREADABLE });
+    }
+    const listed = JSON.parse((await routesFor({}).route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ name: string }> };
+    expect(listed.tokens.map((token) => token.name).sort()).toEqual(["ci", "ci-open"]);
   });
 
   it("refuses a step-up older than the window, in the future, or unreadable, whatever the body or a header claims", async () => {
