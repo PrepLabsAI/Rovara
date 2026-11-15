@@ -231,15 +231,24 @@ describe("review fixes (A3 review 1)", () => {
   });
   it("tells a result once even when another pass committed first", async () => {
     const { w, deps } = await world(settings());
+    // A first pass while the check runs (the item and its head index exist), then the result lands and two passes race.
+    setChecks(w, [unit, e2e({ state: "pending", conclusion: undefined })]);
+    await trackTask(deps, TASK_ID);
     setChecks(w, [unit, e2e()]);
     // The racing pass: it reads the same (empty) item, then the other pass commits and tells the result before this one's first write.
     let raced = false;
     const racing: MergeTrackingDependencies = { ...deps, store: wrapStore(w.store, { transact: async (items: Parameters<typeof w.store.transact>[0]) => {
-      if (!raced) { raced = true; await trackTask(deps, TASK_ID); }
+      if (!raced) {
+        raced = true;
+        // The other pass sees one more check still running, so the two passes write different items and this one's retry really commits.
+        setChecks(w, [unit, e2e(), { name: "lint", state: "pending", required: false, url: "", runId: "12" }]);
+        await trackTask(deps, TASK_ID);
+      }
       return w.store.transact(items);
     } }) };
     await trackTask(racing, TASK_ID);
     expect(raced).toBe(true);
+    expect((await item(w)).ci).toBe("passing");
     expect(comments(w)).toHaveLength(1);
   });
   it("counts a long check's round past its cap, after a Retry, as the person's extra round", async () => {
