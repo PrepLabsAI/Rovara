@@ -692,6 +692,12 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `packages/broker/src/${AWS}/tenantBudgets.ts`,
     `packages/broker/src/${AWS}/teamDevices.ts`,
     `${INFRA}/lib/sharedGateway.ts`,
+    `packages/broker/src/${AWS}/${CLD}/map.ts`,
+    `${INFRA}/${CLD}/search/index.ts`,
+    `${INFRA}/lib/${CLD}-watch-x.ts`,
+    `${INFRA}/lib/${CLD}.watch.ts`,
+    `${INFRA}/lib/${CLD}-9.ts`,
+    `${INFRA}/lib/api/gateway.ts`,
     `${INFRA}/lib/${CLD.toUpperCase()}Stack.ts`,
   ])("refuses a NEW Cloud-only deployment path, as cloud-path: %s", (path) => {
     expect(addedFileRule(path)?.rule).toBe("cloud-path");
@@ -713,6 +719,12 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/api-gateway-stack.ts`,
     `${INFRA}/lib/gateway-endpoints.ts`,
     `${INFRA}/lib/vpc-gateway-endpoint.ts`,
+    `${INFRA}/lib/vpn-gateway.ts`,
+    `${INFRA}/lib/virtual-private-gateway.ts`,
+    `${INFRA}/lib/direct-connect-gateway.ts`,
+    `${INFRA}/lib/NatGateway.ts`,
+    `${INFRA}/lib/web-application-firewall.ts`,
+    `${INFRA}/lib/${CLD[0]!.toUpperCase()}${CLD.slice(1)}9Stack.ts`,
     `docs/billing.md`,
     `packages/broker/src/billing-notes.ts`,
   ])("lets an ordinary Code path through: %s", (path) => {

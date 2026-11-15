@@ -273,7 +273,8 @@ const isTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/.test(lowe
  * - PREFIX: a word or join that STARTS with one of these (gateways, spending, budgets, organizations);
  * - WHOLE: a word that IS one of these (org, orgs, price, devices; "organic" and "storage" are ordinary);
  * - a word that starts or ends with "cloud", unless it is an AWS service name (cloudwatch, cloudformation, ...);
- * - "gateway" unless the word before it names an AWS gateway (nat, internet, api, vpc, transit, ...) or "endpoint" follows it.
+ * - "gateway" unless the word before it in the same file or folder name names an AWS gateway (nat, internet, api, vpc, transit, ...) or
+ *   "endpoint" follows it; a word starting with "cloud" is read with its next camel hump only (CloudWatch), never across - or /.
  * Any letter outside ASCII in a deployment path is refused outright, so a look-alike letter cannot split a word.
  */
 const CLOUD_DEPLOYMENT_ANYWHERE = [
@@ -282,7 +283,10 @@ const CLOUD_DEPLOYMENT_ANYWHERE = [
 ];
 const CLOUD_DEPLOYMENT_PREFIX = ["pricing", "spend", "budget", "organization", "edition"];
 const CLOUD_DEPLOYMENT_WHOLE = new Set(["org", "orgs", "price", "prices", "meter", "meters", "devices"]);
-const AWS_GATEWAY_BEFORE = new Set(["nat", "internet", "api", "apis", "vpc", "transit", "egress", "virtual", "customer", "storage", "http", "rest", "websocket", "lb", "load", "balancer"]);
+const AWS_GATEWAY_BEFORE = new Set([
+  "nat", "internet", "api", "apis", "vpc", "vpn", "transit", "egress", "virtual", "private", "customer", "storage", "http", "rest", "websocket", "lb",
+  "load", "balancer", "connect", "carrier", "local", "iot",
+]);
 const AWS_CLOUD_WORDS = /^cloud(?:watch|formation|front|trail|map|search|hsm|shell|9)/;
 
 const DEPLOYMENT_DETAIL =
@@ -293,20 +297,37 @@ export function cloudDeploymentPathRule(path: string): string | null {
   const unified = path.replaceAll("\\", "/");
   if (!DEPLOYMENT_PATH.test(posix.normalize(unified.normalize("NFKC")).replace(/^\.\//, "").toLowerCase())) return null;
   if (/[^\x20-\x7e]/.test(unified)) return "a letter outside ASCII in a path under aws/ or infra/ (a look-alike letter could hide a Cloud-only name)";
-  const spaced = posix.normalize(unified).replace(/^\.\//, "")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .replace(/([A-Za-z])([0-9])/g, "$1 $2")
-    .replace(/([0-9])([A-Za-z])/g, "$1 $2");
-  const words = spaced.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  // Words with where they came from: the path segment (between slashes) and the run of letters and digits (between separators) each sits in.
+  const words: Array<{ word: string; segment: number; run: number }> = [];
+  let run = 0;
+  posix.normalize(unified).replace(/^\.\//, "").split("/").forEach((segment, index) => {
+    for (const raw of segment.match(/[A-Za-z0-9]+/g) ?? []) {
+      run += 1;
+      const humps = raw
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+        .replace(/([A-Za-z])([0-9])/g, "$1 $2")
+        .replace(/([0-9])([A-Za-z])/g, "$1 $2")
+        .toLowerCase()
+        .split(" ");
+      for (const word of humps) words.push({ word, segment: index, run });
+    }
+  });
   const cloudy = (word: string): boolean => (word.startsWith("cloud") && !AWS_CLOUD_WORDS.test(word)) || (word.length > 5 && word.endsWith("cloud"));
   for (let i = 0; i < words.length; i += 1) {
-    const word = words[i]!;
-    // A camel-cased AWS service name (CloudWatch) is split by the humps: read it with the word after it.
-    if ((cloudy(word) && !AWS_CLOUD_WORDS.test(word + (words[i + 1] ?? ""))) || CLOUD_DEPLOYMENT_WHOLE.has(word)) return DEPLOYMENT_DETAIL;
-    if (word.startsWith("gateway") && !AWS_GATEWAY_BEFORE.has(words[i - 1] ?? "") && !(word.slice(7).startsWith("endpoint") || (words[i + 1] ?? "").startsWith("endpoint"))) return DEPLOYMENT_DETAIL;
+    const { word, segment, run: from } = words[i]!;
+    const next = words[i + 1];
+    const before = words[i - 1];
+    // A camel-cased AWS service name (CloudWatch) is split by the humps: read it with the next hump of the same run only (not across - or /).
+    const awsName = next !== undefined && next.run === from && AWS_CLOUD_WORDS.test(word + next.word);
+    if ((cloudy(word) && !awsName) || CLOUD_DEPLOYMENT_WHOLE.has(word)) return DEPLOYMENT_DETAIL;
+    // An AWS gateway (nat-gateway, NatGateway, gateway-endpoints) names its kind in the same file or folder name, never across a slash.
+    const awsGateway = (before !== undefined && before.segment === segment && AWS_GATEWAY_BEFORE.has(before.word)) ||
+      word.slice(7).startsWith("endpoint") || (next !== undefined && next.segment === segment && next.word.startsWith("endpoint"));
+    if (word.startsWith("gateway") && !awsGateway) return DEPLOYMENT_DETAIL;
     for (let n = 1; n <= 3 && i + n <= words.length; n += 1) {
-      const candidate = words.slice(i, i + n).join("");
+      // "web application" (as in a web application firewall) is an AWS name, not the Cloud web app.
+      const candidate = words.slice(i, i + n).map((entry) => entry.word).join("").replaceAll("webapplication", "");
       if (CLOUD_DEPLOYMENT_ANYWHERE.some((stem) => candidate.includes(stem))) return DEPLOYMENT_DETAIL;
       if (CLOUD_DEPLOYMENT_PREFIX.some((stem) => candidate.startsWith(stem))) return DEPLOYMENT_DETAIL;
     }
