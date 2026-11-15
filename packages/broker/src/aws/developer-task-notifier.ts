@@ -3,6 +3,8 @@
 // notifier's own queue; the queue brings each notice back, and it is posted once. Logs carry event
 // names, IDs, notice kinds and Slack error codes only: never a token, a post's text or a task's text.
 // Spec 025 E13: it also posts an admin change's Slack Confirm message, and edits it when the change ends.
+import { LambdaClient } from "@aws-sdk/client-lambda";
+import { invokeCoreOutbox, outboxCompanyOf, streamFailures, type StreamBatchResponse } from "./core-outbox-stream.js";
 import { chatGptFallbackText } from "../chatgpt/fallback-notice.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { createHash } from "node:crypto";
@@ -37,6 +39,8 @@ interface PostInput { channel: string; threadTs?: string; text: string; blocks?:
 interface UpdateInput { channel: string; ts: string; text: string; blocks: unknown[] }
 
 export interface NotifierDependencies {
+  /** Named environments reuse this stream reader for core outbox inserts. */
+  relayCoreOutbox?: (records: unknown[], remainingMs?: number) => Promise<StreamBatchResponse>;
   documentClient: Client;
   tableName: string;
   enqueue(notices: readonly Notice[]): Promise<void>;
@@ -1595,15 +1599,32 @@ async function recordDeliveryFailure(deps: NotifierDependencies, notice: Notice,
 }
 
 export function createNotifierHandler(deps: NotifierDependencies) {
-  return async (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
+  return async (event: { Records?: unknown[] }, context?: { getRemainingTimeInMillis(): number }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
     const records = event.Records ?? [];
     const queued = records.filter((record): record is QueueRecord => (record as { eventSource?: unknown }).eventSource === "aws:sqs");
     if (queued.length === 0) {
-      const { notices, skipped } = readStream(records as StreamRecord[]);
-      // Named by event ID and name only: a record's content could hold a task's text.
-      for (const record of skipped) deps.log({ event: "developer_notifier.record_unreadable", ...record });
-      if (notices.length > 0) await deps.enqueue(notices);
-      return { batchItemFailures: [] };
+      const coreRecords = deps.relayCoreOutbox === undefined ? [] : records.filter((record) => outboxCompanyOf(record) !== undefined);
+      const coreSet = new Set(coreRecords);
+      const noticeRecords = records.filter((record) => !coreSet.has(record));
+      const batchItemFailures: StreamBatchResponse["batchItemFailures"] = [];
+      try {
+        const { notices, skipped } = readStream(noticeRecords as StreamRecord[]);
+        for (const record of skipped) deps.log({ event: "developer_notifier.record_unreadable", ...record });
+        if (notices.length > 0) await deps.enqueue(notices);
+      } catch (error) {
+        // The legacy mapping retries thrown failures; named mappings use sequence numbers.
+        if (deps.relayCoreOutbox === undefined) throw error;
+        batchItemFailures.push(...streamFailures(noticeRecords));
+      }
+      if (coreRecords.length > 0) {
+        try {
+          const answer = context === undefined ? await deps.relayCoreOutbox!(coreRecords) : await deps.relayCoreOutbox!(coreRecords, context.getRemainingTimeInMillis());
+          batchItemFailures.push(...answer.batchItemFailures);
+        } catch {
+          batchItemFailures.push(...streamFailures(coreRecords));
+        }
+      }
+      return { batchItemFailures };
     }
     const batchItemFailures: Array<{ itemIdentifier: string }> = [];
     for (const record of queued) {
@@ -1843,7 +1864,10 @@ function createAwsNotifierHandler() {
     now: () => new Date().toISOString(),
   });
   const reviewUrlBase = process.env.CONTROL_PLANE_URL;
+  const coreBroker = process.env.BROKER_FUNCTION_NAME;
+  const coreLambda = coreBroker === undefined ? undefined : new LambdaClient({});
   return createNotifierHandler({
+    ...(coreBroker === undefined ? {} : { relayCoreOutbox: (records: unknown[], remainingMs?: number) => invokeCoreOutbox(coreLambda!, coreBroker, records, remainingMs) }),
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
     async enqueue(notices) {
@@ -1920,7 +1944,7 @@ export async function workflowE2ENotifierBlocks(input: { task: Pick<DeveloperTas
 let awsHandler: ReturnType<typeof createNotifierHandler> | undefined;
 
 /** The Lambda entry: the state table's stream and the notice queue both invoke it. */
-export const handler = (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
+export const handler = (event: { Records?: unknown[] }, context?: { getRemainingTimeInMillis(): number }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
   awsHandler ??= createAwsNotifierHandler();
-  return awsHandler(event);
+  return awsHandler(event, context);
 };

@@ -18,9 +18,10 @@
 //
 // What the registry still lacks (approvers, model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
 // the admission hold sweep) refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use.
+import { relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
+  IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema,
   type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -199,22 +200,8 @@ export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => P
   };
 }
 
-// ---- the stream hook
-
-/** The companies whose outbox a State table stream batch inserted rows into (an INSERT whose new image has `outboxState` and a company-scoped key). Others are not the core's. */
-export function outboxCompaniesOf(event: unknown): string[] | undefined {
-  const records = (event as { Records?: unknown } | null)?.Records;
-  if (!Array.isArray(records) || records.length === 0 || !records.every((record) => (record as { eventSource?: unknown })?.eventSource === "aws:dynamodb")) return undefined;
-  const companies = new Set<string>();
-  for (const record of records as Array<{ eventName?: unknown; dynamodb?: { NewImage?: Record<string, { S?: unknown }> } }>) {
-    if (record.eventName !== "INSERT") continue;
-    const image = record.dynamodb?.NewImage;
-    if (image?.["outboxState"] === undefined || typeof image["pk"]?.S !== "string") continue;
-    const company = companyOfKey(image["pk"].S);
-    if (company !== undefined) companies.add(company);
-  }
-  return [...companies];
-}
+// ---- the stream hook (shared with the notifier's existing reader)
+export { outboxCompaniesOf } from "./core-outbox-stream.js";
 
 // ---- the root
 
@@ -408,9 +395,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     async handleEvent(event, options) {
       if (isCoreJobEvent(event)) return await app.handleScheduledJob(event, options);
-      const companies = outboxCompaniesOf(event);
-      if (companies !== undefined) return { relayed: await app.relayOutbox(companies) };
-      return undefined;
+      return await relayCoreOutboxStream(event, (companies) => app.relayOutbox(companies));
     },
   };
 }

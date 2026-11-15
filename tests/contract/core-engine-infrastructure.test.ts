@@ -328,3 +328,42 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect((legacyDispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("CALLBACK_SIGNING_KEY");
   });
 });
+
+
+describe("L9 core outbox stream reader reuse", () => {
+  it("keeps two State readers and filters core outbox INSERTs on the notifier", () => {
+    const mappings = resources(named, "AWS::Lambda::EventSourceMapping").filter(([, entry]) => JSON.stringify(entry.Properties.EventSourceArn).includes("StreamArn"));
+    expect(mappings).toHaveLength(2);
+    const mapping = mappings.find(([id]) => id.startsWith("DeveloperTaskNotifierStateStreamMapping"))![1];
+    expect(mapping.Properties.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
+    const filters = (mapping.Properties.FilterCriteria as { Filters: Array<{ Pattern: string }> }).Filters;
+    expect(filters).toHaveLength(5);
+    expect(filters.map(({ Pattern }) => JSON.parse(Pattern) as unknown)).toContainEqual({ eventName: ["INSERT"], dynamodb: { NewImage: { entityType: { S: ["OUTBOX"] }, pk: { S: [{ prefix: "ORG#" }] }, outboxState: { S: [{ exists: true }] } } } });
+  });
+});
+
+it("grants the reused notifier only InvokeFunction on this broker, with no third stream principal", () => {
+  const brokerId = resources(named, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/u.test(id))![0];
+  const policies = resources(named, "AWS::IAM::Policy");
+  const notifier = policies.find(([id]) => id.startsWith("DeveloperTaskNotifierFunctionServiceRoleDefaultPolicy"))![1];
+  const statements = (notifier.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+  expect(statements.filter((entry) => JSON.stringify(entry.Action).includes("lambda:"))).toEqual([
+    { Sid: "RelayCoreOutboxToBroker", Effect: "Allow", Action: "lambda:InvokeFunction", Resource: { "Fn::GetAtt": [brokerId, "Arn"] } },
+  ]);
+  const streamReaders = policies.flatMap(([id, policy]) => {
+    const streamGrants = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement.filter((entry) => JSON.stringify(entry.Action).includes("dynamodb:DescribeStream"));
+    for (const grant of streamGrants) {
+      expect(grant.Resource).toEqual({ "Fn::GetAtt": [resources(named, "AWS::DynamoDB::Table").find(([tableId]) => /^State[0-9A-F]{8}$/u.test(tableId))![0], "StreamArn"] });
+      expect([grant.Action].flat().sort()).toEqual(["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"].sort());
+    }
+    return streamGrants.map(() => id);
+  });
+  expect(streamReaders).toHaveLength(2);
+  expect(streamReaders.every((id) => id.startsWith("OutboxPublisher") || id.startsWith("DeveloperTaskNotifier"))).toBe(true);
+});
+
+
+it("excludes company rows from the existing publisher reader in named environments only", () => {
+  const mapping = resources(named, "AWS::Lambda::EventSourceMapping").find(([id]) => id.startsWith("OutboxStreamMapping"))![1];
+  expect(mapping.Properties.FilterCriteria).toEqual({ Filters: [{ Pattern: JSON.stringify({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } }) }] });
+});

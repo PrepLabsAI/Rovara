@@ -399,8 +399,7 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     const notifierMapping = mappings.find(([, mapping]) => JSON.stringify(mapping.Properties.FunctionName).includes("DeveloperTaskNotifierFunction"))![1];
     const patterns = (notifierMapping.Properties.FilterCriteria as { Filters: Array<{ Pattern: string }> }).Filters.map((filter) => JSON.parse(filter.Pattern) as unknown);
     expect(patterns).toEqual([
-      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK"] } } } },
-      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK_POINTER"] } } } },
+      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK", "DEVELOPER_TASK_POINTER"] } } } },
       // #342: every ended operation, so one that left its owner's ChatGPT plan says so; the code keeps a developer's
       // own for their notices and drops the rest.
       { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
@@ -409,8 +408,9 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       // Task 19: a fifth, for refused Slack presses, on this same mapping. Spec 061: comment nudges share it, since a
       // mapping takes five filters by default.
       { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL", "TASK_COMMENT_NUDGE", "TASK_PEOPLE_NOTIFICATION"] } } } },
+      { eventName: ["INSERT"], dynamodb: { NewImage: { entityType: { S: ["OUTBOX"] }, pk: { S: [{ prefix: "ORG#" }] }, outboxState: { S: [{ exists: true }] } } } },
     ]);
-    expect(JSON.stringify(patterns.at(-1))).toContain("TASK_PEOPLE_NOTIFICATION");
+    expect(JSON.stringify(patterns.at(-2))).toContain("TASK_PEOPLE_NOTIFICATION");
     expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, MaximumRetryAttempts: 10, BisectBatchOnFunctionError: true });
     // A batch that still fails (the notice queue refusing sends, say) leaves a record of its shard and
     // sequence numbers, never its item images, and the operator is told.
@@ -590,7 +590,7 @@ describe("task-token key and membership IAM", () => {
     // and R2 step 4 (the dispatcher's core queue mapping, its reads, the conditional deleter policy, its core variables, the outbox pending index).
     // #722 re-pins the COMBINED stacked baseline (#689's hosted wiring and R2 step 4 together; each PR pinned only its own base). No template change of #722's own; the IAM
     // tuples are checked exactly against the reviewed lists below. Same value as L1a (#731) measured before its own edits.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("93c005411e7fcf171b145fc2bd60d27e0ff462c7e5ad0d61e6815bfd05f817af");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("44ce8fe54c56a84123498ae27aea4965cb540b5873065900117ec12ecc1956ae");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1576,7 +1576,9 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples].sort(byText);
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples,
+  ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
+].sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {
