@@ -204,6 +204,9 @@ function maskPage(arg: PageArg): PageVerdict {
   const lines = new Set(["A", "BUTTON", "SUMMARY"]);
   let shown = "";
   let labels = "";
+  // A second label view, `inline`: the same, except links and buttons do not break lines, so a label beside a button ("API key: [Hide key] abcd1234"), a value inside a link with
+  // more text, or a label that is itself a link is read on one line. The labelled masks run over both views.
+  let inline = "";
   let walked = 0;
   let tooLarge = false;
   const walk = (node: El, visible: boolean, pre: boolean): void => {
@@ -216,6 +219,7 @@ function maskPage(arg: PageArg): PageVerdict {
       const text = pre ? (node.nodeValue ?? "") : (node.nodeValue ?? "").replace(/[ \t\n\r\f]+/gu, " ");
       shown += text;
       labels += text;
+      inline += text;
       return;
     }
     if (node.nodeType !== 1 && node.nodeType !== 11) return;
@@ -231,23 +235,24 @@ function maskPage(arg: PageArg): PageVerdict {
       block = !style.display.startsWith("inline") && style.display !== "contents";
       keep = typeof style.whiteSpace === "string" ? style.whiteSpace.startsWith("pre") || style.whiteSpace === "break-spaces" : pre;
     }
-    if (tag === "BR") { shown += "\n"; labels += "\n"; return; }
+    if (tag === "BR") { shown += "\n"; labels += "\n"; inline += "\n"; return; }
     const field = fields.has(tag);
     const line = lines.has(tag) || node.getAttribute?.("role") === "button";
     const edge = block || line || tag === "LABEL";
     if (block) shown += "\n";
-    if (field) labels += "\n\u25aa\n";
-    else if (edge) labels += "\n";
+    if (field) { labels += "\n\u25aa\n"; inline += "\n\u25aa\n"; }
+    else { if (edge) labels += "\n"; if (block || tag === "LABEL") inline += "\n"; }
     const slotted = tag === "SLOT" && typeof node.assignedNodes === "function" ? Array.from(node.assignedNodes({ flatten: true })) : [];
     const children = node.shadowRoot ? Array.from(node.shadowRoot.childNodes) : slotted.length > 0 ? slotted : Array.from(node.childNodes ?? []);
     for (const child of children) walk(child as El, seen, keep);
     if (block) shown += "\n";
     if (edge || field) labels += "\n";
+    if (block || tag === "LABEL" || field) inline += "\n";
   };
   walk(doc.documentElement as El, true, false);
   if (tooLarge) return "too_large";
   // Empty lines left by nested block edges are folded, so a <dt> label and its <dd> value are on neighbouring lines.
-  if (joinedHits(shown, plain) || joinedHits(labels.replace(/(?:[^\S\n]*\n)+/gu, "\n"), labelled)) return "dirty";
+  if (joinedHits(shown, plain) || joinedHits(labels.replace(/(?:[^\S\n]*\n)+/gu, "\n"), labelled) || joinedHits(inline.replace(/(?:[^\S\n]*\n)+/gu, "\n"), labelled)) return "dirty";
   return "clean";
 }
 

@@ -119,6 +119,10 @@ describe("masking", () => {
     expect(scrubVisibleText("API key:\nabcd1234\nmore")).not.toContain("abcd1234");
     expect(scrubVisibleText("Password:\nForgot password? Sign in")).toBe("Password:\nForgot password? Sign in");
     expect(scrubVisibleText("Password:\u00a0hunter2x")).not.toContain("hunter2x");
+    // An already-masked value (only dots or asterisks) is not a secret: the row is left as it is.
+    expect(scrubVisibleText("Password: •••••••• Change")).toBe("Password: •••••••• Change");
+    expect(scrubVisibleText("API key: ************")).toBe("API key: ************");
+    expect(scrubVisibleText("DB_PASSWORD=hunter2x")).not.toContain("hunter2x");
     expect(out).toContain("Signed in as");
     expect(scrubVisibleText("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.")).toBe("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.");
   });

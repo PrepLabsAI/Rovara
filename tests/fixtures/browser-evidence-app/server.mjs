@@ -42,6 +42,15 @@ const routes = {
   "/dd-link": shell(`<h1>Settings</h1><dl><dt>Token:</dt><dd><a href="#">abcd1234</a></dd></dl>`),
   // Shown: a masked row ("Password: •••••••• [Change]") and years on separate lines of a <pre>.
   "/dots-row": shell(`<h1>Settings</h1><p>Password: •••••••• <button>Change</button></p>`),
+  "/dots-split": shell(`<h1>Settings</h1><p><span>Password:</span> <span>••••••••</span> <button>Change</button></p>`),
+  // A control between label and value, a value inside a link or button with more text, a label that is itself a link, must be withheld; an environment-style line is scrubbed in place (same picture for two values).
+  "/ctrl-before": shell(`<h1>Settings</h1><p>API key: <button>Hide key</button> <code>abcd1234</code></p>`),
+  "/chip-copy": shell(`<h1>Settings</h1><p>API key: <button class="copy"><code>abcd1234</code> <span>Copy</span></button></p>`),
+  "/link-badge": shell(`<h1>Keys</h1><ul><li>API key: <a href="/keys/1">abcd1234 <span>prod</span></a></li></ul>`),
+  "/label-link": shell(`<h1>Settings</h1><p><a href="/docs">API key</a>: <code>abcd1234</code></p>`),
+  "/label-link-dt": shell(`<h1>Settings</h1><dl><dt><a href="/docs">Token</a>:</dt><dd>abcd1234</dd></dl>`),
+  "/env-line": shell(`<h1>Config</h1><pre>DB_HOST=db\nDB_PASSWORD=hunter2x</pre>`),
+  "/env-line-b": shell(`<h1>Config</h1><pre>DB_HOST=db\nDB_PASSWORD=swordfish9</pre>`),
   "/pre-years": shell(`<h1>History</h1><pre>2019\n2020\n2021\n2022\n2023</pre>`),
   "/slot-label": shell(`<h1>Settings</h1><x-field>abcd1234</x-field><script>customElements.define("x-field", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = "<dl><dt>API key:</dt><dd><slot></slot></dd></dl>"; } });</script>`),
   // Sign-in forms laid out on one line: they must be shown.
