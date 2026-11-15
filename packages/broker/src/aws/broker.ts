@@ -1,3 +1,4 @@
+import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
@@ -275,8 +276,10 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
-import { GithubMergeRateLimitError, isWebhookSecretMissing, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials } from "./github-credentials.js";
+import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, type GithubInstallationBindings } from "./github-credentials.js";
+import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
+import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
@@ -353,7 +356,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -367,7 +370,7 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
+import { companyPreapprovalsThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -486,6 +489,7 @@ export interface RegisteredProjectRecord {
   pk: string;
   sk: string;
   entityType: "PROJECT";
+  companyId?: string;
   definition: ProjectDefinition;
   runtimeBinding: RuntimeBinding;
   registeredBy: string;
@@ -568,7 +572,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFilesPage" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "installationIdFor" | "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFilesPage" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
   /** Trusted server-side source capture for setup discovery and exact-commit E2E planning context. */
   projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
   /** Server-selected catalog namespace for an already configured setup verifier. */
@@ -581,6 +585,12 @@ interface AwsBrokerDependencies {
    */
   e2eAgentInstallation?: () => Promise<E2EAgentInstallation>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
+  githubBindings?: GithubInstallationBindings;
+  githubBindingInstallations?: {
+    get(installationId: number): Promise<{ installationId: number; accountLogin: string } | undefined>;
+    page(page: number): Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }>;
+  };
+  companies?: CompanyMembershipReader;
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
   descriptionUpdateMaxMs?: number;
@@ -701,7 +711,7 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     ...(developer === undefined ? {} : { channelMembers: (request: ChannelMembersRequest) => developer.channelMembers(request) }),
     limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
     now: Date.now,
-    log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+    log: brokerLogLine,
     ...dependencies.adminReads,
   };
 }
@@ -763,6 +773,7 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
       limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
       ...(developer?.endDeveloperSessions === undefined ? {} : { endDeveloperSessions: developer.endDeveloperSessions }),
       ...(signIn?.signInClients === undefined ? {} : { signInClients: signIn.signInClients }),
+      ...(signIn?.companies === undefined ? {} : { companies: signIn.companies }),
       now: Date.now,
     },
     handlers: adminChangeHandlers(dependencies),
@@ -943,7 +954,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -954,8 +965,28 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
       }
     }
+    if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-claim") {
+      try {
+        // IAM protects direct Lambda invocation. HTTP/admin-shaped envelopes are
+        // refused even if they carry the source string; no body flag grants authority.
+        const input = z.object({ source: z.literal("agentx.github-binding-claim"), installationId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), companyId: OrgIdSchema }).strict().parse(event);
+        if (dependencies.githubBindings === undefined || dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
+        const installation = await dependencies.githubBindingInstallations.get(input.installationId);
+        if (installation === undefined || installation.installationId !== input.installationId) throw githubBindingRefusal();
+        await dependencies.githubBindings.claimOperator(input.companyId, installation);
+        companyLog(input.companyId, brokerLogLine)({ event: "github.binding_claimed", installationId: input.installationId });
+        return json({ claimed: true }, "github-binding-claim");
+      } catch { return json({ error: { code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" } }, "github-binding-claim", 403); }
+    }
+    if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-backfill") {
+      try {
+        const input = z.object({ source: z.literal("agentx.github-binding-backfill"), continuation: z.number().int().positive().max(1_000_000).optional() }).strict().parse(event);
+        if (dependencies.githubBindings === undefined || dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
+        return json(await dependencies.githubBindings.backfillPage(page => dependencies.githubBindingInstallations!.page(page), input.continuation), "github-binding-backfill");
+      } catch { return json({ error: "backfill_failed" }, "github-binding-backfill", 500); }
+    }
     if (isGithubWebhookRecoveryEvent(event)) {
-      try { return json(await retryDueGithubWebhookEvents(dependencies), "github-webhook-recovery"); }
+      try { return json(await retryDueGithubWebhookEvents(dependencies, "continuation" in event ? event.continuation : undefined), "github-webhook-recovery"); }
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
         return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
@@ -1111,7 +1142,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           return await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url) as { statusCode: number; headers: Record<string, string>; body: string };
         }
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
-        return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -1142,17 +1173,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
             rawBody: request.body ?? "",
             headers: request.headers,
             secret: webhookSecret,
-            authorizeRepository: (scope) => authorizeLinkedGithubWebhook({
-              documentClient: dependencies.documentClient,
-              tableName: dependencies.tableName,
-              scope,
-              loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
-              repositoryUrl: async (projectName, revision, repositoryId) => {
-                const project = await requireProject(dependencies, projectName, revision);
-                return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
-              },
-              verifyRepository: (repositoryUrl, webhookScope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, webhookScope),
-            }),
+            ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
+            authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
             process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
             now: () => new Date().toISOString(),
           });
@@ -1294,7 +1316,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -1518,7 +1540,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         // Spec 064: the legacy deployment's linking-only sign-in keeps the same registry.
         const registry = (dependencies.developer ?? dependencies.linking)?.signInClients;
         if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json({ clients: await registry.list() }, request.requestId);
+        return json({ clients: await registry.list(await resolveCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey)) }, request.requestId);
       }
       // #343: Sign in with ChatGPT, for rovara doctor.
       if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
@@ -1748,11 +1770,12 @@ async function routeWorkspaceRequest(
     const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
     const repository = github.repositories.find((entry) => entry.name === repositoryName);
     if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
+    await requireGithubProjectBinding(dependencies, project, repository.url);
     const revision = project.definition.revision;
     if (!parsed?.success) {
       const types = dependencies.connectorTypes ?? BUILT_IN_CONNECTOR_TYPES;
       const discovery = await discoverLegacyGitHubScope({
-        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies), types),
+        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies, project), types),
         githubTypeKnown: Object.hasOwn(types, "github"),
         connectorName: github.name, repository: repository.name, projectName: workspace.projectName,
         context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
@@ -1773,7 +1796,7 @@ async function routeWorkspaceRequest(
   const connectorRoute = /^\/v1\/workspaces\/([0-9a-f-]+)\/connectors\/([a-z][a-z0-9-]{0,19})\/(tools|call)$/.exec(url.pathname);
   if (connectorRoute?.[1] && connectorRoute[2] && ((request.method === "GET" && connectorRoute[3] === "tools") || (request.method === "POST" && connectorRoute[3] === "call"))) {
     const { workspace, project } = await authorizeWorkspaceConnectors(dependencies, identity, connectorRoute[1]);
-    const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies), dependencies.connectorTypes)
+    const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies, project), dependencies.connectorTypes)
       .find((entry) => entry.name === connectorRoute[2]);
     if (!connector) throw agentXError("NOT_FOUND", "connector not found");
     const parsed = request.method === "POST" ? ConnectorCallRequestSchema.safeParse(body) : undefined;
@@ -1890,9 +1913,15 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
   return { workspace, project, github };
 }
 
-function connectorTypeContext(dependencies: AwsBrokerDependencies): ConnectorTypeContext {
+function connectorTypeContext(dependencies: AwsBrokerDependencies, project?: RegisteredProjectRecord): ConnectorTypeContext {
+  const githubMcp = dependencies.githubMcp === undefined || project === undefined || dependencies.githubBindings === undefined
+    ? dependencies.githubMcp
+    : { ...dependencies.githubMcp, credentials: async (repository: { url: string; credentialRef: string }, access: "read" | "write") => {
+      await requireGithubProjectBinding(dependencies, project, repository.url);
+      return dependencies.githubMcp!.credentials(repository, access);
+    } };
   return {
-    ...(dependencies.githubMcp ? { githubMcp: dependencies.githubMcp } : {}),
+    ...(githubMcp ? { githubMcp } : {}),
     ...(dependencies.credentialRegistry ? { credentialRegistry: dependencies.credentialRegistry } : {}),
   };
 }
@@ -1960,8 +1989,35 @@ function parseRegistrationInput(value: unknown): { definition: ProjectDefinition
 
 const TAKEOVER_REASON_MAX = 500;
 
+/** Missing membership wiring cannot turn on the legacy path when bindings are enabled. */
+async function githubCallerCompany(dependencies: AwsBrokerDependencies, personId: string, budget: ReturnType<typeof boundedCompanyReads>) {
+  if (dependencies.githubBindings === undefined) return undefined;
+  if (personId === "") throw agentXError("AUTH_REQUIRED", "your AgentX sign-in has ended; run agentx login <url> again");
+  return budget.read(() => resolveCompany(dependencies.companies ?? { companyOf: async () => undefined }, personId));
+}
+
+async function checkRegistrationCompany(dependencies: AwsBrokerDependencies, name: string, companyId: string | undefined, budget: ReturnType<typeof boundedCompanyReads>) {
+  if (companyId === undefined) return;
+  const response = await budget.client.send(new QueryCommand({ TableName: dependencies.tableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)", ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":revision": "REV#" },
+    ScanIndexForward: false, Limit: 1, ConsistentRead: true })) as { Items?: unknown[] };
+  if (response.Items?.[0] !== undefined && !recordInCompany(response.Items[0], companyId)) throw agentXError("NOT_FOUND", "registered project not found");
+}
+
+async function checkCompanyRepository(dependencies: AwsBrokerDependencies, companyId: string | undefined, url: string, budget: ReturnType<typeof boundedCompanyReads>) {
+  if (dependencies.githubBindings === undefined) return;
+  const repository = parseGitHubRepository(url);
+  try {
+    if (companyId === undefined || dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
+    const installationId = await budget.read(() => dependencies.githubPullRequests.installationIdFor!(url));
+    await dependencies.githubBindings.withBudget(budget).requireBound(companyId, installationId);
+  } catch {
+    throw agentXError("CONFIG_INVALID", `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`);
+  }
+}
+
 /** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
-async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<PreflightOutcome | undefined> {
+async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean, scoped?: { companyId: string | undefined; budget: ReturnType<typeof boundedCompanyReads> }): Promise<PreflightOutcome | undefined> {
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const nameProblems = presentedNameProblems(definition);
@@ -1973,7 +2029,11 @@ async function registrationChecks(dependencies: AwsBrokerDependencies, identity:
   const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
   if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
   // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
+  const companyBudget = scoped?.budget ?? boundedCompanyReads(dependencies.documentClient);
+  const companyId = scoped === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : scoped.companyId;
+  await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   for (const repository of definition.repositories) {
+    await checkCompanyRepository(dependencies, companyId, repository.url, companyBudget);
     await dependencies.checkRepositoryAccess?.(repository);
   }
   if (!wantsPreflight) return undefined;
@@ -1986,10 +2046,13 @@ async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   value: unknown,
-  checked?: { preflight?: PreflightOutcome },
+  checked?: { preflight?: PreflightOutcome; githubCompany?: { companyId: string | undefined; budget: ReturnType<typeof boundedCompanyReads> } },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
+  const companyBudget = checked?.githubCompany?.budget ?? boundedCompanyReads(dependencies.documentClient);
+  const companyId = checked?.githubCompany === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : checked.githubCompany.companyId;
+  await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
   let ownershipTakenOver = false;
@@ -2047,6 +2110,7 @@ async function registerProject(
    * Judged against the project as it is now, and again on every attempt, so a registrant who lost a race for the first revision is refused on the next one.
    */
   const judgeAuthority = async (newestRevision: number): Promise<"first" | "administrator" | "takeover"> => {
+    await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
     if (newestRevision === 0) return "first";
     const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
     if (authority?.role === "administrator") return "administrator";
@@ -2058,6 +2122,8 @@ async function registerProject(
   const repairCatalogPointerFromHistory = () => repairProjectCatalogPointerFromHistory(dependencies, definition.name);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
+    if (!recordInCompany(existing, companyId)) throw agentXError("NOT_FOUND", "registered project not found");
+    for (const repository of definition.repositories) await checkCompanyRepository(dependencies, companyId, repository.url, companyBudget);
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
     if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
@@ -2070,11 +2136,12 @@ async function registerProject(
   }
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
   await judgeAuthority((await readCatalogSnapshot()).newestRevision);
-  const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight);
+  const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight, { companyId, budget: companyBudget });
   const now = new Date().toISOString();
   const record: RegisteredProjectRecord = {
     ...key,
     entityType: "PROJECT",
+    ...(companyId === undefined ? {} : { companyId }),
     definition,
     runtimeBinding,
     registeredBy: identity.ownerKey,
@@ -2160,6 +2227,7 @@ async function registerProject(
       // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
       const winner = await getItem<RegisteredProjectRecord>(dependencies, key);
       if (winner !== undefined) {
+        if (!recordInCompany(winner, companyId)) throw agentXError("NOT_FOUND", "registered project not found");
         if (!sameJsonContent(winner.definition, definition) || !sameJsonContent(winner.runtimeBinding, runtimeBinding)
           || !sameJsonContent(winner.setupApproval, setupApprovalBinding)) {
           throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
@@ -6787,7 +6855,7 @@ async function handleCallback(
   }
   if (action === "e2e-model-budget") {
     return json(await handleE2EModelBudgetCallback({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, orgOf: async () => LEGACY_E2E_COMPANY,
-      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+      log: brokerLogLine,
       ...(dependencies.e2eAgentInstallation === undefined ? {} : { e2eAgentInstallation: dependencies.e2eAgentInstallation }) }, operation, body), request.requestId);
   }
   if (action === "feedback-bundles") {
@@ -10756,26 +10824,71 @@ async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, e
     loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
     repositoryUrl: async (projectName, revision, repositoryId) => {
       const project = await requireProject(dependencies, projectName, revision);
+      if (dependencies.githubBindings !== undefined) {
+        try {
+          const companyId = await dependencies.githubBindings.ownerOf(event.installationId);
+          if (companyId === undefined || !recordInCompany(project, companyId)) return undefined;
+        } catch { return undefined; }
+      }
       return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
     },
     verifyRepository: (repositoryUrl, scope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, scope),
   });
 }
 
-async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; processed: number; delayed: number }> {
+async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies, continuation?: unknown): Promise<{ attempted: number; processed: number; delayed: number; more?: true; continuation?: string; skipped?: number }> {
   const now = new Date().toISOString();
-  const due = await listDueGithubWebhookDeliveries({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now, limit: 25 });
+  const due: Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"]; companyId?: string }> = [];
+  let next: ReturnType<typeof readGithubRecoveryContinuation> | undefined;
+  let skipped = 0;
+  if (dependencies.githubBindings === undefined) due.push(...await listDueGithubWebhookDeliveries({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now, limit: 25 }));
+  else {
+    const cursor = readGithubRecoveryContinuation(continuation);
+    // Only registry/partition listing spends this budget. Finish listing before any
+    // delivery is claimed, so provider latency and retry writes cannot exhaust it.
+    const budget = boundedCompanyReads(dependencies.documentClient);
+    const reads = { documentClient: budget.client, tableName: dependencies.tableName };
+    let registry: Awaited<ReturnType<typeof listGithubWebhookCompanies>>;
+    try { registry = await listGithubWebhookCompanies({ ...reads, ...(cursor.afterCompany === undefined ? {} : { afterCompany: cursor.afterCompany }) }); }
+    catch { return { attempted: 0, processed: 0, delayed: 0, more: true, continuation: Buffer.from(JSON.stringify(cursor)).toString("base64url") }; }
+    const companies = [...new Set([...(cursor.companyId === undefined ? [] : [cursor.companyId]), ...registry.companies])];
+    let afterCompany = cursor.afterCompany;
+    for (const companyId of companies) {
+      const resume = { ...(afterCompany === undefined ? {} : { afterCompany }), companyId,
+        ...(companyId === cursor.companyId && cursor.delivery !== undefined ? { delivery: cursor.delivery } : {}) };
+      if (due.length >= 100) { next = resume; break; }
+      try {
+        budget.check();
+        const rows = await listDueGithubWebhookDeliveries({ ...reads, now, limit: Math.min(25, 100 - due.length), companyId,
+          ...(resume.delivery === undefined ? {} : { continuation: resume.delivery }) });
+        skipped += rows.skipped ?? 0;
+        due.push(...rows.map(row => ({ ...row, companyId })));
+        if (rows.more) { next = { ...resume, delivery: rows.continuation! }; break; }
+      } catch {
+        // No claim has occurred. Resume before the unfinished page on a bounded read.
+        next = resume; break;
+      }
+      afterCompany = companyId;
+    }
+    if (next === undefined && registry.more) next = { afterCompany: registry.companies.at(-1)! };
+  }
   let processed = 0;
   let delayed = 0;
   for (const delivery of due) {
     try {
       const result = await processGithubWebhookDelivery({
         documentClient: dependencies.documentClient,
+        ...(delivery.companyId === undefined ? {} : { companyId: delivery.companyId }),
         tableName: dependencies.tableName,
         received: { delivery: "ACCEPTED", deliveryId: delivery.deliveryId, event: delivery.event },
         process: async (event) => {
           // Revalidate under the delivery lease. Revoked scope is terminal; transient GitHub/API
           // errors consume the ordinary bounded retry budget instead of leaving a hot due row.
+          let owner: string | undefined;
+          if (dependencies.githubBindings !== undefined) {
+            try { owner = await dependencies.githubBindings.ownerOf(event.installationId); } catch { /* fixed refusal below */ }
+            if (owner !== delivery.companyId || owner === undefined) throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
+          }
           if (!await githubEventStillAuthorized(dependencies, event)) {
             throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
           }
@@ -10789,24 +10902,40 @@ async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies):
       console.log(JSON.stringify({ component: "broker", event: "github.webhook_retry_failed", deliveryId: delivery.deliveryId, error: error instanceof Error ? error.name : "unknown" }));
     }
   }
-  return { attempted: due.length, processed, delayed };
+  return { attempted: due.length, processed, delayed, ...(next === undefined ? {} : { more: true as const, continuation: Buffer.from(JSON.stringify(next)).toString("base64url") }), ...(skipped === 0 ? {} : { skipped }) };
 }
 
 export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, deliveryId: string) {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
+  const checked = dependencies.companies !== undefined || dependencies.githubBindings !== undefined;
+  if (checked && identity.developer === undefined) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in has ended; run agentx login <url> again");
+  const companyId = checked ? await resolveCompany(dependencies.companies ?? { companyOf: async () => undefined }, identity.developer!.developerId) : undefined;
   const key = { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: "META" };
   const stored = await getItem<Record<string, unknown>>(dependencies, key);
+  if (companyId !== undefined && !recordInCompany(stored, companyId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
   if (stored === undefined || (stored.status !== "RETRYABLE" && stored.status !== "DEAD") || stored.event === undefined) throw agentXError("CONFIG_INVALID", "only a failed GitHub delivery can be retried");
+  if (dependencies.companies !== undefined || dependencies.githubBindings !== undefined) {
+    try {
+      const event = readGithubWebhookEvent(stored.event);
+      if (stored.entityType !== "GITHUB_WEBHOOK_DELIVERY" || stored.deliveryId !== deliveryId
+        || stored.installationId !== event.installationId || stored.repositoryId !== event.repositoryId) throw githubBindingRefusal();
+    } catch { throw agentXError("NOT_FOUND", "webhook delivery not found"); }
+  }
+  const rowCompany = (stored.companyId === undefined ? IMPLICIT_COMPANY_ID : stored.companyId) as string;
+  if (dependencies.githubBindings !== undefined) {
+    try { await dependencies.githubBindings.requireBound(rowCompany, (stored.event as ReceivedGithubWebhook["event"]).installationId); }
+    catch { throw agentXError("NOT_FOUND", "webhook delivery not found"); }
+  }
   const event = stored.event as ReceivedGithubWebhook["event"];
   if (!await githubEventStillAuthorized(dependencies, event)) throw agentXError("FORBIDDEN", "linked GitHub pull request is no longer authorized");
   const now = new Date().toISOString();
   await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Update: { TableName: dependencies.tableName, Key: key,
       UpdateExpression: "SET #status = :received, updatedAt = :now, nextAttemptAt = :now, webhookRecoveryPk = :pk, webhookRecoverySk = :sk REMOVE leaseToken, leaseExpiresAt, attempts",
-      ConditionExpression: "#status = :retryable OR #status = :dead",
+      ConditionExpression: companyId === undefined ? "#status = :retryable OR #status = :dead" : "(#status = :retryable OR #status = :dead)" + (rowCompany === IMPLICIT_COMPANY_ID ? " AND (attribute_not_exists(companyId) OR companyId = :companyId)" : " AND companyId = :companyId"),
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":received": "RECEIVED", ":retryable": "RETRYABLE", ":dead": "DEAD", ":now": now, ":pk": "GITHUB_WEBHOOK_RECOVERY", ":sk": `${now}#${deliveryId}` },
+      ExpressionAttributeValues: { ":received": "RECEIVED", ":retryable": "RETRYABLE", ":dead": "DEAD", ":now": now, ":pk": githubRecoveryPartition(dependencies.githubBindings === undefined ? undefined : rowCompany), ...(companyId === undefined ? {} : { ":companyId": companyId }), ":sk": `${now}#${deliveryId}` },
     } },
     { Put: { TableName: dependencies.tableName, Item: { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: `RETRY#${now}`, entityType: "GITHUB_WEBHOOK_RETRY_AUDIT", deliveryId, actor: identity.subject, at: now }, ConditionExpression: "attribute_not_exists(pk)" } },
   ] }));
@@ -11384,7 +11513,7 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
       readArtifactText: async (key) => { const bytes = await readStoredBytes(dependencies, key, 64 * 1024 + 1); return bytes?.toString("utf8"); },
       recycleWorker: (current) => recycleDriftedWorker(ec2Sessions, current.workspaceId),
       now: Date.now,
-      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+      log: brokerLogLine,
     };
     const outcome = await runWorkflowAutofix(deps, task, { expectedRevision: item.workflowRevision, startedAt: item.createdAt, cause: autofixBlockCauseOf(item.autofixCause) });
     if (outcome !== "WAITING") { await remove(); return outcome === "STALE" || outcome === "DISABLED" ? "STALE" : "DISPATCHED"; }
@@ -14167,7 +14296,7 @@ async function publicationProject(
 /** Spec 062: the link store the developer routes use, when the deployment has channel adapters. */
 /** Spec 064: what the legacy deployment's linking routes need: sign-in and the links, never developer tasks. */
 function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: DeveloperApiConfiguration) {
-  return { documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: linking, now: Date.now, ...channelLinkRouteDependencies(dependencies), ...clientProjectRouteDependencies(dependencies) };
+  return { documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: linking, now: Date.now, ...(linking.companies === undefined ? {} : { companies: linking.companies }), ...channelLinkRouteDependencies(dependencies), ...clientProjectRouteDependencies(dependencies) };
 }
 
 /** What a chat agent is told about a project a sign-in client created; the project's administrators refine it later. */
@@ -14178,10 +14307,21 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
   const clientProjects = dependencies.clientProjects;
   if (clientProjects === undefined) return {};
   return {
-    clientRepositories: () => clientProjects.repositories(),
+    async clientRepositories(developerId) {
+      if (dependencies.githubBindings === undefined) return clientProjects.repositories();
+      const budget = boundedCompanyReads(dependencies.documentClient);
+      const companyId = await githubCallerCompany(dependencies, developerId ?? "", budget);
+      try {
+        const listed = await budget.read(() => clientProjects.repositories());
+        return await filterInstallationsFor(companyId!, listed, dependencies.githubBindings, budget);
+      } catch { throw githubBindingRefusal(); }
+    },
     async createClientProject(developerId, input) {
       const url = `https://github.com/${input.repository}.git`;
-      const found = await clientProjects.repositoryDefaults(url);
+      const budget = boundedCompanyReads(dependencies.documentClient);
+      const companyId = await githubCallerCompany(dependencies, developerId, budget);
+      await checkCompanyRepository(dependencies, companyId, url, budget);
+      const found = companyId === undefined ? await clientProjects.repositoryDefaults(url) : await budget.read(() => clientProjects.repositoryDefaults(url));
       const repositoryName = found.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/^([^a-z])/, "r-$1").slice(0, 63) || "repository";
       const name = input.name ?? repositoryName;
       const existing = await dependencies.documentClient.send(new QueryCommand({
@@ -14200,7 +14340,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
       });
       // As the person: their developer ID owns the project, so they administer it and it is listed for them.
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
-      await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false });
+      await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false }, { githubCompany: { companyId, budget } });
       return { name, latestRevision: 1 };
     },
   };
@@ -14727,6 +14867,16 @@ function issueRepositoryGrant(
   });
 }
 
+async function requireGithubProjectBinding(dependencies: AwsBrokerDependencies, project: RegisteredProjectRecord, repositoryUrl: string): Promise<void> {
+  if (dependencies.githubBindings === undefined) return;
+  try {
+    const raw = (project as RegisteredProjectRecord & { companyId?: unknown }).companyId;
+    const companyId = OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw);
+    if (dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
+    await dependencies.githubBindings.requireBound(companyId, await dependencies.githubPullRequests.installationIdFor(repositoryUrl));
+  } catch { throw githubBindingRefusal(); }
+}
+
 async function exchangeRepositoryCredential(
   dependencies: AwsBrokerDependencies,
   request: AdaptedHttpRequest,
@@ -14744,6 +14894,15 @@ async function exchangeRepositoryCredential(
   }
   const operation = await requireOperation(dependencies, workspaceId, operationId);
   if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
+  if (dependencies.githubBindings !== undefined) {
+    const claims = dependencies.repositoryGrants.inspect(grant);
+    if (claims.workspaceId !== workspaceId || claims.operationId !== operationId || !claims.repositories.some(repository => repository.credentialRef === credentialRef && repository.repositoryUrl === input.repositoryUrl && repository.access === access)) {
+      throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
+    }
+    const workspace = await requireWorkspace(dependencies, workspaceId);
+    const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    await requireGithubProjectBinding(dependencies, project, input.repositoryUrl);
+  }
   return dependencies.repositoryGrants.exchange(grant, {
     workspaceId,
     operationId,
@@ -14961,6 +15120,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     endDeveloperSessions: endDeveloperSessionsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     setDisplayName: setDisplayNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    ...(process.env.COMPANY_SIGNIN === "enabled" ? { companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // Spec 065: a registered service's /v1/dev/client/* routes are OFF unless SIGN_IN_CLIENT_ROUTES=enabled (nothing in infra sets it).
     ...(process.env.SIGN_IN_CLIENT_ROUTES === "enabled" ? { clientRoutes: true as const } : {}),
@@ -15015,6 +15175,7 @@ export const handler = createAwsBrokerHandler({
   repositoryGrants,
   githubPullRequests: githubCredentials,
   // Spec 065b: where the foundation's worker settings are given, a sign-in client may create projects.
+  githubBindingInstallations: { get: id => githubCredentials.bindingInstallation(id), page: page => githubCredentials.bindingInstallations(page) },
   ...(process.env.EC2_WORKER_SUBNETS && process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID ? { clientProjects: {
     credentialRef: githubCredentials.credentialRef,
     repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
@@ -15075,7 +15236,7 @@ export const handler = createAwsBrokerHandler({
       deadLetterQueues: process.env.HEALTH_DEAD_LETTER_QUEUES,
       slackAuthCheck: developer?.slackAuthCheck,
       github: githubCredentials,
-      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+      log: brokerLogLine,
     }),
   },
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
@@ -15115,3 +15276,6 @@ export const handler = createAwsBrokerHandler({
       }
     : {}),
 });
+
+/** One broker log line writer; company-scoped events wrap it with companyLog so the helper owns companyId. */
+function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.stringify({ component: "broker", ...entry })); }

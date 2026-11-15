@@ -36,7 +36,7 @@ export const heldStepModel = (choice: OperationModelChoice): Extract<StepModelOu
  * The choice for a step of a task, or undefined when this operation has none to make (it is not a workflow step with a model, a design-review round carries its own models, or the install has no per-step rule):
  * the install's one model then stands, as it always did. An operation that already holds a choice (a repeat delivery) keeps it.
  */
-export async function chooseStepModel(deps: Pick<TaskFlowDeps, "stepModels" | "store">, operation: OperationRecord): Promise<StepModelOutcome | undefined> {
+export async function chooseStepModel(deps: Pick<TaskFlowDeps, "stepModels" | "store" | "companyId">, operation: OperationRecord): Promise<StepModelOutcome | undefined> {
   const stepModels: Pick<ModelSelectionService, "choose"> | undefined = deps.stepModels;
   if (stepModels === undefined || operation.dispatch.kind !== "task" || operation.designReview !== undefined) return undefined;
   if (operation.modelChoice !== undefined) return heldStepModel(operation.modelChoice);

@@ -100,8 +100,7 @@ describe("serving", () => {
     expect(second.headers["retry-after"]).toBeDefined();
     expect((JSON.parse(second.body) as { error: { code: string } }).error.code).toBe("rate_limit_exceeded");
     expect(w.summary()).toMatchObject({ scripted: { before_task: 1 }, failurePack: 1, countsTowardProof: 1 });
-    const cut = await request(`${w.base}/p/openai/f/cut_off_stream/v1/chat/completions`, { method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] }) });
-    expect(cut.body).not.toContain("[DONE]");
+    await expect(request(`${w.base}/p/openai/f/cut_off_stream/v1/chat/completions`, { method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] }) })).rejects.toThrow("aborted");
     expect(w.summary().failurePack).toBe(2);
   });
   it("the ledger holds no body, header value, query or prompt (only a hash of the prompt)", async () => {

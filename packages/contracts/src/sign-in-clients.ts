@@ -2,6 +2,7 @@
 // audience), which Rovara's own API never accepts unless the client has full access (spec 066), and may ask Rovara what
 // a signed-in person can do.
 import { z } from "zod";
+import { OrgIdSchema } from "./company-scope.js";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE } from "./developer.js";
 import { publicHttpsUrlProblem } from "./mcp-connector.js";
 
@@ -20,8 +21,13 @@ export const SignInRedirectUriSchema = z.string().max(2_048).superRefine((value,
 /**
  * Spec 065: what a sign-in client may do on Rovara as the signed-in person, beyond the access check. An administrator
  * names them when registering the client; the client asks for them at sign-in and its tokens carry the allowed ones.
+ * Plan v3.2 lane ID: each /v1/dev/* route needs one of them (the broker's route table, dev-route-scopes.ts), or full
+ * access. A scope only narrows what the person may do; it never adds a right.
  */
-export const CLIENT_SCOPES = ["projects:members", "projects:create"] as const;
+export const CLIENT_SCOPES = [
+  "projects:members", "projects:create",
+  "profile:name", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide",
+] as const;
 export const ClientScopeSchema = z.enum(CLIENT_SCOPES);
 export type ClientScope = z.infer<typeof ClientScopeSchema>;
 const ClientScopesSchema = z.array(ClientScopeSchema).max(CLIENT_SCOPES.length).refine((scopes) => new Set(scopes).size === scopes.length, "scopes must be unique");
@@ -58,7 +64,9 @@ export const SignInClientRegistrationSchema = z.object({
   .refine((registration) => registration.fullAccess === undefined || registration.keepSecret === true || registration.secretHash !== undefined, { message: "only a confidential client can have full access", path: ["fullAccess"] });
 export type SignInClientRegistration = z.infer<typeof SignInClientRegistrationSchema>;
 
-export const SignInClientRecordSchema = z.object({
+const ClientRecord = z.object({
+  companyId: OrgIdSchema.optional(),
+  installLevel: z.literal(true).optional(),
   clientId: SignInClientIdSchema,
   name: z.string().min(1).max(80),
   audience: SignInClientAudienceSchema,
@@ -71,10 +79,12 @@ export const SignInClientRecordSchema = z.object({
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1).max(512),
 }).strict();
+const oneOwner = (record: { companyId?: string | undefined; installLevel?: true | undefined }) => record.companyId === undefined || record.installLevel === undefined;
+export const SignInClientRecordSchema = ClientRecord.refine(oneOwner, "a client has one owner");
 export type SignInClientRecord = z.infer<typeof SignInClientRecordSchema>;
 
 /** A client as anyone but the sign-in server sees it: never its secret's hash. */
-export const SignInClientViewSchema = SignInClientRecordSchema.omit({ secretHash: true }).extend({ confidential: z.boolean() }).strict();
+export const SignInClientViewSchema = ClientRecord.omit({ secretHash: true }).extend({ confidential: z.boolean() }).strict().refine(oneOwner, "a client has one owner");
 export type SignInClientView = z.infer<typeof SignInClientViewSchema>;
 
 export function signInClientView(record: SignInClientRecord): SignInClientView {
@@ -108,11 +118,11 @@ export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----
 
 /** `keepSecret`: carry the stored client's secret hash over, which only the sign-in server holds. */
-export const PutSignInClientRequestSchema = z.object({ kind: z.literal("put-sign-in-client"), client: SignInClientRecordSchema, keepSecret: z.literal(true).optional() }).strict();
+export const PutSignInClientRequestSchema = z.object({ kind: z.literal("put-sign-in-client"), companyId: OrgIdSchema.optional(), client: SignInClientRecordSchema, keepSecret: z.literal(true).optional() }).strict();
 export type PutSignInClientRequest = z.infer<typeof PutSignInClientRequestSchema>;
-export const RemoveSignInClientRequestSchema = z.object({ kind: z.literal("remove-sign-in-client"), clientId: SignInClientIdSchema }).strict();
+export const RemoveSignInClientRequestSchema = z.object({ kind: z.literal("remove-sign-in-client"), companyId: OrgIdSchema.optional(), clientId: SignInClientIdSchema }).strict();
 export type RemoveSignInClientRequest = z.infer<typeof RemoveSignInClientRequestSchema>;
-export const ListSignInClientsRequestSchema = z.object({ kind: z.literal("list-sign-in-clients") }).strict();
+export const ListSignInClientsRequestSchema = z.object({ kind: z.literal("list-sign-in-clients"), companyId: OrgIdSchema.optional() }).strict();
 export type ListSignInClientsRequest = z.infer<typeof ListSignInClientsRequestSchema>;
 
 export type SignInClientsResponse =

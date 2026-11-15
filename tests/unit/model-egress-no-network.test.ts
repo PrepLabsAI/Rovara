@@ -91,6 +91,8 @@ describe("no request reaches a real model host", () => {
 const F1C_CALLERS: ReadonlySet<string> = new Set([
   "packages/worker/src/model-bridge.ts", "packages/worker/src/model-bridge-ledger.ts", "packages/worker/src/model-helper-bridge-client.ts", "packages/worker/src/model-record-cache.ts",
   "packages/broker/src/local/model-egress/adapter.ts", "packages/broker/src/local/model-egress/forwarder.ts", "packages/broker/src/local/model-egress/index.ts", "packages/broker/src/local/model-egress/key-store.ts",
+  // Eval host binding (plan v3.2 row 20.2): the eval's metered stage over an injected hold-and-egress, and the egress the sandbox exec is handed.
+  "packages/worker/src/verification/eval-model-access.ts", "packages/worker/src/verification/eval-runner.ts",
 ]);
 
 describe("no callers yet", () => {

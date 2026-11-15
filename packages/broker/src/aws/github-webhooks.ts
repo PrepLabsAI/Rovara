@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped, WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
 import { isConditional } from "./broker-shared.js";
+import { boundedCompanyReads, recordInCompany } from "./company-check.js";
 import { feedbackReopenedMeasure, type FeedbackReviewMeasure } from "../developer/feedback-review-measures.js";
 
 const DELIVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -27,6 +28,33 @@ const MAX_REVIEW_COMMENT_CHARS = 8_000;
 export const GITHUB_WEBHOOK_RECOVERY_INDEX = "github-webhook-recovery";
 const GITHUB_WEBHOOK_RECOVERY_PK = "GITHUB_WEBHOOK_RECOVERY";
 const MAX_WEBHOOK_ATTEMPTS = 8;
+const deliveryScopeRefusal = () => new GithubWebhookRefusal("GitHub delivery scope is unavailable");
+export function githubRecoveryPartition(companyId?: string): string {
+  if (companyId === undefined) return GITHUB_WEBHOOK_RECOVERY_PK;
+  if (!OrgIdSchema.safeParse(companyId).success) throw deliveryScopeRefusal();
+  return companyScoped(companyId, GITHUB_WEBHOOK_RECOVERY_PK);
+}
+function deliveryCompanyCondition(companyId?: string): string {
+  return companyId === undefined ? "" : companyId === IMPLICIT_COMPANY_ID
+    ? " AND (attribute_not_exists(companyId) OR companyId = :companyId)" : " AND companyId = :companyId";
+}
+const RecoveryEvent = z.object({
+  kind: z.enum(["PULL_REQUEST", "PR_COMMENT"]), action: z.string().min(1).max(80),
+  installationId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  repositoryId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  fullName: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(300), number: z.number().int().positive(),
+  headSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+  comment: z.object({ id: z.number().int().positive(), body: z.string().max(65_536), truncated: z.boolean(), url: z.string().url(), author: z.string().min(1).max(100),
+    updatedAt: z.string().datetime().optional(), path: z.string().max(500).optional(), line: z.number().int().positive().optional(),
+    diffHunk: z.string().max(8_000).optional(), source: z.enum(["review", "review_comment", "pr_discussion"]) }).optional(),
+});
+
+/** Validate persisted event data without reordering the legacy response bytes. */
+export function readGithubWebhookEvent(value: unknown): ReceivedGithubWebhook["event"] {
+  try { RecoveryEvent.strict().parse(value); return value as ReceivedGithubWebhook["event"]; }
+  catch { throw deliveryScopeRefusal(); }
+}
+
 
 export const GITHUB_WEBHOOK_SIGNATURE_INVALID = "GitHub webhook signature is invalid";
 
@@ -518,6 +546,7 @@ function removeControlCharacters(value: string): string {
 }
 
 export async function reserveGithubWebhookDelivery(input: {
+  companyId?: string;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   deliveryId: string;
@@ -532,10 +561,13 @@ export async function reserveGithubWebhookDelivery(input: {
     || !Number.isSafeInteger(input.repositoryId) || input.repositoryId < 1) {
     throw new GithubWebhookRefusal("GitHub delivery identity is invalid");
   }
+  const recoveryPk = githubRecoveryPartition(input.companyId);
+  if (input.companyId !== undefined) await input.documentClient.send(new PutCommand({ TableName: input.tableName, Item: { pk: "GITHUB_WEBHOOK_COMPANIES", sk: input.companyId } }));
   const key = { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" };
   const record = {
     ...key,
     entityType: "GITHUB_WEBHOOK_DELIVERY",
+    ...(input.companyId === undefined ? {} : { companyId: input.companyId }),
     deliveryId: input.deliveryId,
     installationId: input.installationId,
     repositoryId: input.repositoryId,
@@ -544,7 +576,7 @@ export async function reserveGithubWebhookDelivery(input: {
     receivedAt: input.now,
     event: input.event,
     nextAttemptAt: input.now,
-    webhookRecoveryPk: GITHUB_WEBHOOK_RECOVERY_PK,
+    webhookRecoveryPk: recoveryPk,
     webhookRecoverySk: `${input.now}#${input.deliveryId}`,
   };
   try {
@@ -558,7 +590,7 @@ export async function reserveGithubWebhookDelivery(input: {
     if (!isConditional(error)) throw error;
   }
   const stored = await input.documentClient.send(new GetCommand({ TableName: input.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
-  if (stored.Item?.eventHash === input.eventHash
+  if (recordInCompany(stored.Item, input.companyId) && stored.Item?.eventHash === input.eventHash
     && stored.Item?.installationId === input.installationId
     && stored.Item?.repositoryId === input.repositoryId) {
     return stored.Item.status === "COMPLETED" ? "duplicate" : "retry";
@@ -594,6 +626,7 @@ export async function completeGithubWebhookDelivery(input: {
 
 /** Claims a received/retryable delivery, or recovers a worker whose processing lease expired. */
 export async function claimGithubWebhookDelivery(input: {
+  companyId?: string;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   deliveryId: string;
@@ -601,6 +634,7 @@ export async function claimGithubWebhookDelivery(input: {
   now: string;
   leaseMs?: number;
 }): Promise<boolean> {
+  const recoveryPk = githubRecoveryPartition(input.companyId);
   const leaseMs = input.leaseMs ?? 60_000;
   const now = Date.parse(input.now);
   if (!DELIVERY_ID.test(input.deliveryId) || !/^[0-9a-f-]{36}$/i.test(input.leaseToken)
@@ -612,12 +646,13 @@ export async function claimGithubWebhookDelivery(input: {
       TableName: input.tableName,
       Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
       UpdateExpression: "SET #status = :processing, leaseToken = :leaseToken, leaseExpiresAt = :leaseExpiresAt, webhookRecoveryPk = :recoveryPk, webhookRecoverySk = :recoverySk, updatedAt = :now REMOVE nextAttemptAt ADD attempts :one",
-      ConditionExpression: "((#status = :received OR #status = :retryable) AND (attribute_not_exists(nextAttemptAt) OR nextAttemptAt <= :now)) OR (#status = :processing AND leaseExpiresAt <= :now)",
+      ConditionExpression: "(((#status = :received OR #status = :retryable) AND (attribute_not_exists(nextAttemptAt) OR nextAttemptAt <= :now)) OR (#status = :processing AND leaseExpiresAt <= :now))" + deliveryCompanyCondition(input.companyId),
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":processing": "PROCESSING", ":received": "RECEIVED", ":retryable": "RETRYABLE", ":leaseToken": input.leaseToken,
         ":leaseExpiresAt": new Date(now + leaseMs).toISOString(), ":now": input.now, ":one": 1,
-        ":recoveryPk": GITHUB_WEBHOOK_RECOVERY_PK,
+        ":recoveryPk": recoveryPk,
+        ...(input.companyId === undefined ? {} : { ":companyId": input.companyId }),
         ":recoverySk": `${new Date(now + leaseMs).toISOString()}#${input.deliveryId}`,
       },
     }));
@@ -630,17 +665,20 @@ export async function claimGithubWebhookDelivery(input: {
 
 /** Releases an owned claim for durable retry; stale workers cannot overwrite a newer claim. */
 export async function retryGithubWebhookDelivery(input: {
+  companyId?: string;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   deliveryId: string;
   leaseToken: string;
   now: string;
 }): Promise<void> {
+  const recoveryPk = githubRecoveryPartition(input.companyId);
   const existing = await input.documentClient.send(new GetCommand({
     TableName: input.tableName,
     Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
     ConsistentRead: true,
   })) as { Item?: { attempts?: number } };
+  if (!recordInCompany(existing.Item, input.companyId)) throw deliveryScopeRefusal();
   const attempts = typeof existing.Item?.attempts === "number" ? existing.Item.attempts : 1;
   const terminal = attempts >= MAX_WEBHOOK_ATTEMPTS;
   const delayMs = Math.min(60_000 * (2 ** Math.max(0, attempts - 1)), 60 * 60_000);
@@ -652,14 +690,15 @@ export async function retryGithubWebhookDelivery(input: {
       UpdateExpression: terminal
         ? "SET #status = :dead, updatedAt = :now REMOVE leaseToken, leaseExpiresAt, webhookRecoveryPk, webhookRecoverySk, nextAttemptAt"
         : "SET #status = :retryable, updatedAt = :now, nextAttemptAt = :nextAttemptAt, webhookRecoveryPk = :recoveryPk, webhookRecoverySk = :recoverySk REMOVE leaseToken, leaseExpiresAt",
-      ConditionExpression: "#status = :processing AND leaseToken = :leaseToken",
+      ConditionExpression: "#status = :processing AND leaseToken = :leaseToken" + deliveryCompanyCondition(input.companyId),
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         // DynamoDB refuses a request that carries a value no expression uses, so each branch sends only its own.
         ":processing": "PROCESSING", ":leaseToken": input.leaseToken, ":now": input.now,
+        ...(input.companyId === undefined ? {} : { ":companyId": input.companyId }),
         ...(terminal
           ? { ":dead": "DEAD" }
-          : { ":retryable": "RETRYABLE", ":nextAttemptAt": nextAttemptAt, ":recoveryPk": GITHUB_WEBHOOK_RECOVERY_PK, ":recoverySk": `${nextAttemptAt}#${input.deliveryId}` }),
+          : { ":retryable": "RETRYABLE", ":nextAttemptAt": nextAttemptAt, ":recoveryPk": recoveryPk, ":recoverySk": `${nextAttemptAt}#${input.deliveryId}` }),
       },
     }));
   } catch (error) {
@@ -693,11 +732,14 @@ export async function rejectGithubWebhookDelivery(input: {
 
 /** Reads only due delivery rows through the sparse recovery index. */
 export async function listDueGithubWebhookDeliveries(input: {
+  companyId?: string;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   now: string;
   limit?: number;
-}): Promise<Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"] }>> {
+  continuation?: GithubDeliveryContinuation;
+}): Promise<CompanyGithubDeliveries> {
+  if (input.companyId !== undefined) return listCompanyGithubDeliveries({ ...input, companyId: input.companyId });
   const response = await input.documentClient.send(new QueryCommand({
     TableName: input.tableName,
     IndexName: GITHUB_WEBHOOK_RECOVERY_INDEX,
@@ -711,8 +753,84 @@ export async function listDueGithubWebhookDeliveries(input: {
     : []);
 }
 
+const deliveryContinuationSchema = z.object({
+  partition: z.number().int().min(0).max(1),
+  after: z.object({ pk: z.string().regex(/^GITHUB_DELIVERY#[0-9a-f-]{36}$/i), sk: z.literal("META"),
+    webhookRecoveryPk: z.string().max(200), webhookRecoverySk: z.string().max(100) }).strict().optional(),
+}).strict();
+export type GithubDeliveryContinuation = z.infer<typeof deliveryContinuationSchema>;
+const recoveryContinuationSchema = z.object({ afterCompany: OrgIdSchema.optional(), companyId: OrgIdSchema.optional(), delivery: deliveryContinuationSchema.optional() }).strict();
+export function readGithubRecoveryContinuation(value: unknown): z.infer<typeof recoveryContinuationSchema> {
+  if (value === undefined) return {};
+  if (typeof value !== "string" || value.length > 2_000) throw deliveryScopeRefusal();
+  try { return recoveryContinuationSchema.parse(JSON.parse(Buffer.from(value, "base64url").toString("utf8"))); }
+  catch { throw deliveryScopeRefusal(); }
+}
+export type CompanyGithubDeliveries = Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"]; companyId?: string }> & { more?: boolean; continuation?: GithubDeliveryContinuation; skipped?: number };
+async function listCompanyGithubDeliveries(input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: string; limit?: number; companyId: string; continuation?: GithubDeliveryContinuation }): Promise<CompanyGithubDeliveries> {
+  const partition = githubRecoveryPartition(input.companyId);
+  const limit = input.limit ?? 25;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isFinite(Date.parse(input.now))) throw deliveryScopeRefusal();
+  const budget = boundedCompanyReads(input.documentClient);
+  const result: CompanyGithubDeliveries = [];
+  const seen = new Set<string>();
+  const partitions = input.companyId === IMPLICIT_COMPANY_ID ? [partition, GITHUB_WEBHOOK_RECOVERY_PK] : [partition];
+  let scanned = 0;
+  try {
+    const cursor = input.continuation === undefined ? { partition: 0 } : deliveryContinuationSchema.parse(input.continuation);
+    if (cursor.partition >= partitions.length || (cursor.after !== undefined && cursor.after.webhookRecoveryPk !== partitions[cursor.partition])) throw deliveryScopeRefusal();
+    for (let index = cursor.partition; index < partitions.length; index++) {
+      const pk = partitions[index]!;
+      if (scanned >= limit) { result.more = true; result.continuation = { partition: index }; break; }
+      const page = await budget.client.send(new QueryCommand({ TableName: input.tableName, IndexName: GITHUB_WEBHOOK_RECOVERY_INDEX,
+        KeyConditionExpression: "webhookRecoveryPk = :pk AND webhookRecoverySk <= :sk", ExpressionAttributeValues: { ":pk": pk, ":sk": `${input.now}#~` }, Limit: limit - scanned,
+        ...(index === cursor.partition && cursor.after !== undefined ? { ExclusiveStartKey: cursor.after } : {}) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: GithubDeliveryContinuation["after"] };
+      if (!Array.isArray(page.Items ?? []) || (page.Items?.length ?? 0) > limit - scanned) throw deliveryScopeRefusal();
+      scanned += page.Items?.length ?? 0;
+      for (const row of page.Items ?? []) {
+        try {
+          if (!recordInCompany(row, input.companyId) || row.entityType !== "GITHUB_WEBHOOK_DELIVERY"
+            || typeof row.deliveryId !== "string" || !DELIVERY_ID.test(row.deliveryId)
+            || !["RECEIVED", "RETRYABLE", "PROCESSING"].includes(String(row.status))) throw deliveryScopeRefusal();
+          const event = readGithubWebhookEvent(row.event);
+          if (row.installationId !== event.installationId || row.repositoryId !== event.repositoryId || seen.has(row.deliveryId)) throw deliveryScopeRefusal();
+          seen.add(row.deliveryId);
+          result.push({ deliveryId: row.deliveryId, event });
+        } catch {
+          // Old install-wide rows can be poisoned by a disabled-mode retry. Never route
+          // them to another company; count them and advance past them for this sweep.
+          if (pk !== GITHUB_WEBHOOK_RECOVERY_PK) throw deliveryScopeRefusal();
+          result.skipped = (result.skipped ?? 0) + 1;
+        }
+      }
+      if (page.LastEvaluatedKey !== undefined) {
+        result.more = true; result.continuation = deliveryContinuationSchema.parse({ partition: index, after: page.LastEvaluatedKey }); break;
+      }
+    }
+    return result;
+  } catch { throw deliveryScopeRefusal(); }
+}
+
+/** Install-wide registry carries only company ids, never delivery or repository data. */
+export async function listGithubWebhookCompanies(input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; afterCompany?: string }): Promise<{ companies: string[]; more: boolean }> {
+  try {
+    if (input.afterCompany !== undefined) OrgIdSchema.parse(input.afterCompany);
+    const response = await input.documentClient.send(new QueryCommand({ TableName: input.tableName, KeyConditionExpression: "pk = :pk",
+      ExpressionAttributeValues: { ":pk": "GITHUB_WEBHOOK_COMPANIES" }, Limit: 49, ConsistentRead: true,
+      ...(input.afterCompany === undefined ? {} : { ExclusiveStartKey: { pk: "GITHUB_WEBHOOK_COMPANIES", sk: input.afterCompany } }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: unknown };
+    if (!Array.isArray(response.Items ?? []) || (response.Items?.length ?? 0) > 49) throw deliveryScopeRefusal();
+    const companies = new Set(input.afterCompany === undefined ? [IMPLICIT_COMPANY_ID] : []);
+    for (const row of response.Items ?? []) {
+      if (row.pk !== "GITHUB_WEBHOOK_COMPANIES" || !OrgIdSchema.safeParse(row.sk).success) throw deliveryScopeRefusal();
+      companies.add(row.sk as string);
+    }
+    return { companies: [...companies], more: response.LastEvaluatedKey !== undefined };
+  } catch { throw deliveryScopeRefusal(); }
+}
+
 /** Processes one reserved event under a lease; provider failure leaves a durable retry state. */
 export async function processGithubWebhookDelivery(input: {
+  companyId?: string;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   received: ReceivedGithubWebhook;
@@ -729,6 +847,7 @@ export async function processGithubWebhookDelivery(input: {
     deliveryId: input.received.deliveryId,
     leaseToken,
     now: claimAt,
+    ...(input.companyId === undefined ? {} : { companyId: input.companyId }),
   });
   if (!claimed) return "IN_PROGRESS";
   try {
@@ -756,7 +875,7 @@ export async function processGithubWebhookDelivery(input: {
     if (error instanceof GithubWebhookRefusal) {
       await rejectGithubWebhookDelivery({ documentClient: input.documentClient, tableName: input.tableName, deliveryId: input.received.deliveryId, leaseToken, now: input.now() });
     } else {
-      await retryGithubWebhookDelivery({ documentClient: input.documentClient, tableName: input.tableName, deliveryId: input.received.deliveryId, leaseToken, now: input.now() });
+      await retryGithubWebhookDelivery({ ...(input.companyId === undefined ? {} : { companyId: input.companyId }), documentClient: input.documentClient, tableName: input.tableName, deliveryId: input.received.deliveryId, leaseToken, now: input.now() });
     }
     throw error;
   }
@@ -764,6 +883,8 @@ export async function processGithubWebhookDelivery(input: {
 
 /** Shared endpoint path: verify, durably reserve, claim, process, then record the outcome. */
 export async function handleGithubWebhook(input: {
+  companyId?: string;
+  companyForInstallation?: (installationId: number) => Promise<string | undefined>;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   rawBody: string;
@@ -773,22 +894,30 @@ export async function handleGithubWebhook(input: {
   process(event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void>;
   now(): string;
 }): Promise<{ status: "ACCEPTED" | "DUPLICATE" | "IN_PROGRESS"; deliveryId: string }> {
+  let companyId = input.companyId;
   const received = await receiveGithubWebhook({
     rawBody: input.rawBody,
     headers: input.headers,
     secret: input.secret,
     authorizeRepository: input.authorizeRepository,
-    reserveDelivery: (delivery) => reserveGithubWebhookDelivery({
+    reserveDelivery: async (delivery) => {
+      if (input.companyForInstallation !== undefined) {
+        companyId = await input.companyForInstallation(delivery.installationId);
+        if (companyId === undefined) throw deliveryScopeRefusal();
+      }
+      return reserveGithubWebhookDelivery({
       documentClient: input.documentClient,
       tableName: input.tableName,
       ...delivery,
+      ...(companyId === undefined ? {} : { companyId }),
       now: input.now(),
-    }),
+    }); },
   });
   const processed = await processGithubWebhookDelivery({
     documentClient: input.documentClient,
     tableName: input.tableName,
     received,
+    ...(companyId === undefined ? {} : { companyId }),
     process: (event, deliveryId) => input.process(event, deliveryId),
     now: () => input.now(),
   });
