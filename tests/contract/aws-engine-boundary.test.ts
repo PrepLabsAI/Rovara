@@ -151,7 +151,7 @@ async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "me
   const app = appOver(world);
   const owner = localOwnerPrincipal({ companyId: FAKE_COMPANY });
   const runtime = await app.runtimeFor(FAKE_COMPANY);
-  const { task } = await runtime.flow.start({ principal: owner, client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+  const { task } = await runtime.flow.start({ principal: owner, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
   const principals = new Map<string, DeployedCaller>([[MAYA.developerId, { principal: owner, client: "cli" }], [OMAR.developerId, { principal: localOwnerPrincipal({ companyId: OTHER }), client: "cli" }]]);
   const members = new Map<string, CompanyMembership>([[`${owner.personId}${FAKE_COMPANY}`, { companyId: FAKE_COMPANY, role: "owner" }], [`${owner.personId}${OTHER}`, { companyId: OTHER, role: "owner" }]]);
   // OMAR signed in to the broker but unknown to the core: no principal for him, or a principal with no membership.

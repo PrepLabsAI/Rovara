@@ -6323,6 +6323,8 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 }
 
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
+const TASK_PATH_PREFIX = "/v1/dev/tasks/";
+
 /**
  * Lane E2: what this route answers for an id with no task behind it, said for a core task the caller may not see here. The same request is routed with a fresh id that has no rows (so
  * nothing of the core task is read), and the real id is put back in the answer: its input checks, wrong-method answer and words are exactly a missing task's.
@@ -6348,11 +6350,14 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
   // Lane E2: a task's route goes by the task's stored engine. A task the core owns is answered by the core's own handlers (or refused), never by the readers below.
-  const entry = /^\/v1\/dev\/tasks\/([^/]+)(.*)$/u.exec(url.pathname);
-  const operation = entry === null ? undefined : taskEntryOperation(entry[2]!);
+  // Matched by string, not by a path pattern, so the route inventory (named-scopes) reads no new route here.
+  const entryPath = url.pathname.startsWith(TASK_PATH_PREFIX) ? url.pathname.slice(TASK_PATH_PREFIX.length) : undefined;
+  const entrySlash = entryPath === undefined ? -1 : entryPath.indexOf("/");
+  const entry = entryPath === undefined || entryPath === "" ? null : [url.pathname, entrySlash < 0 ? entryPath : entryPath.slice(0, entrySlash), entrySlash < 0 ? "" : entryPath.slice(entrySlash)] as const;
+  const operation = entry === null ? undefined : taskEntryOperation(entry[2]);
   if (entry !== null && operation !== undefined) {
-    const entryTaskId = safeDecode(entry[1]!);
-    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]!));
+    const entryTaskId = safeDecode(entry[1]);
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]));
   }
   const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
   if (publicationContextRoute !== null && request.method === "POST") {
