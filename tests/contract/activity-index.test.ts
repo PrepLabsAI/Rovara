@@ -118,6 +118,21 @@ describe("the usage index (A5, A9)", () => {
     });
   });
 
+  it("records a task's usage on the task too, under the usage record's own key; a Slack thread's usage and a store without it record nothing more (#651)", async () => {
+    const added: Array<[string, string, unknown]> = [];
+    const index = { ...store([...taskWorkspace, operation({})]), addTaskUsage: async (taskId: string, usageId: string, usage: unknown) => { added.push([taskId, usageId, usage]); } };
+    await indexActivity([usageEvent(telemetry), usageEvent({ ...telemetry, costUsd: null })], index, vi.fn());
+    expect(added).toEqual([
+      [TASK, `${String(Date.parse("2026-09-30T08:10:00.000Z"))}_${OPERATION}`, { at: "2026-09-30T08:10:00.000Z", usd: 0.42, inputTokens: 1_050, outputTokens: 200 }],
+      [TASK, `${String(Date.parse("2026-09-30T08:10:00.000Z"))}_${OPERATION}`, { at: "2026-09-30T08:10:00.000Z", usd: null, inputTokens: 1_050, outputTokens: 200 }],
+    ]);
+    const slack = { ...store([...slackWorkspace, operation({})]), addTaskUsage: vi.fn() };
+    await indexActivity([usageEvent(telemetry)], slack, vi.fn());
+    expect(slack.addTaskUsage).not.toHaveBeenCalled();
+    const plain = store([...taskWorkspace, operation({})]);
+    expect((await indexActivity([usageEvent(telemetry)], plain, vi.fn())).usage).toBe(1);
+  });
+
   it.each([
     { input: 3, cacheRead: 900, cacheWrite: 70, expected: 973 },
     { input: 0, cacheRead: 900, cacheWrite: 0, expected: 900 },

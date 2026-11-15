@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 
+const PYTHON = "python3";
+const HAS_PYTHON = spawnSync(PYTHON, ["-I", "-c", "import sys; assert sys.version_info >= (3, 8)"]).status === 0;
 const preload = resolve("tests/fixtures/model-sdk-compat/sitecustomize.py");
 // Removing an exact allowance kills its positive control; broadening it kills
 // the refusal cases. The downstream audit hook prevents every native load,
@@ -27,7 +29,7 @@ for (const [label, expression, expected, macOnly = false] of [
     ["venv traversal", "os.path.join(sys.prefix,'..','outside-library')", "refused"],
     ["venv prefix sibling", "sys.prefix + '-other/library'", "refused"],
 ] as const) {
-    it.skipIf(macOnly && process.platform !== "darwin")(`Python ctypes ${label} is ${expected} before native loading`, () => {
+    it.skipIf(!HAS_PYTHON || (macOnly && process.platform !== "darwin"))(`Python ctypes ${label} is ${expected} before native loading`, () => {
         const dir = realpathSync(mkdtempSync(join(tmpdir(), "sdk-ctypes-")));
         const log = join(dir, "wire.jsonl");
         const program = `
@@ -55,7 +57,7 @@ else:
  raise AssertionError('native boundary not exercised')
 `;
         try {
-            const child = spawnSync("/usr/bin/python3", ["-I", "-c", program], {
+            const child = spawnSync(PYTHON, ["-I", "-c", program], {
                 env: { HOME: dir, SDK_TRIPWIRE_LOG: log, SDK_PRIVATE_ROOT: join(dir, "private") },
                 encoding: "utf8", timeout: 10000,
             });

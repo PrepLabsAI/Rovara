@@ -1,11 +1,13 @@
 // Lane L10, the build step: starting the steps after the plan is approved. Each start reads the task fresh, answers STALE when the task is no longer where the dispatch row left it, and
 // accepts the operation in one transaction with the workflow change that makes it RUNNING (the stage machine's `acceptStep`). The request id of each is made from the task, the revision and
 // the candidate, so a recovered or repeated row is the first one's duplicate.
+import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
   AgentXError, EVIDENCE_CAPTURE_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { evalRequestForChecks } from "../proof/eval-round-reader.js";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
 import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
 import { withTestRule } from "../proof/verification-report.js";
@@ -128,9 +130,11 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     const plan = await approvedCodingPlan(deps.artifacts, workflow);
     // The plan as structured data for the worker's conversation compaction: the worker never reads it back out of the prompt, which can hold a teammate's words.
     approvedPlan = { markdown: shortenMarkdown(plan.text, WORKFLOW_PLAN_MAX_BYTES), sha256: plan.sha256, ownerInstructions: ownerPlanInstructions(workflow) };
+    // A plan nobody approved (the lighter flow skipped the approval of a small change) is never called approved.
+    const approved = !planApprovalSkipped(workflow, plan.sha256);
     prompt = found2.length === 0
-      ? implementPrompt(plan)
-      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: lastOwnerWords(workflow) });
+      ? implementPrompt(plan, approved)
+      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: lastOwnerWords(workflow), approved });
   }
   const startFrom = fixStartHead(workflow);
   const readiness = selectedCheckCommands(workflow).readiness;
@@ -222,7 +226,8 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     await commitWorkflow(deps, task, blockWorkflow(workflow, testPlan, receivedAt));
     return settled(deps, row, "STALE");
   }
-  const payload = jsonOf({ ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
+  const evalRequest = await evalRequestForChecks(deps, task, workflow);
+  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,

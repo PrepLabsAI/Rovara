@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SIGN_IN_CLIENTS_PK, SignInClientRegistrationSchema, type AdminChangeInput } from "@agentx/contracts";
 import { signInClientsThroughLambda } from "../../packages/broker/src/aws/developer-routes.js";
-import { newClientSecret, signInClientId, signInClientRegistration } from "../../packages/cli/src/admin/sign-in-clients.js";
+import { newClientSecret, signInClientId, signInClientRegistration, signInClientUpdate } from "../../packages/cli/src/admin/sign-in-clients.js";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
@@ -111,6 +111,42 @@ describe("registering and removing, as admin changes (FR-001)", () => {
   });
 });
 
+describe("updating a client, keeping its secret", () => {
+  const current = { clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: [], loopback: true, confidential: true, createdAt: "2026-11-13T00:00:00.000Z", updatedAt: "2026-11-13T00:00:00.000Z", updatedBy: "admin" };
+
+  it("changes only the settings given, and keeps the secret unless a new one is made", () => {
+    expect(signInClientUpdate(current, { scope: "projects:members" })).toEqual({ name: "Web App", audience: "web-app", redirectUris: [], loopback: true, scopes: ["projects:members"], keepSecret: true });
+    expect(signInClientUpdate({ ...current, scopes: ["projects:members"] }, { redirect: ["https://cloud.example.com/callback"] }))
+      .toEqual({ name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: true, scopes: ["projects:members"], keepSecret: true });
+    expect(signInClientUpdate({ ...current, scopes: ["projects:members"] }, { scope: "none" })).not.toHaveProperty("scopes");
+    const { secretHash } = newClientSecret();
+    expect(signInClientUpdate(current, {}, secretHash)).toMatchObject({ secretHash });
+    expect(signInClientUpdate(current, {}, secretHash)).not.toHaveProperty("keepSecret");
+    expect(signInClientUpdate({ ...current, confidential: false }, { name: "Cloud" })).not.toHaveProperty("keepSecret");
+    expect(() => signInClientUpdate(current, { scope: "projects:delete" })).toThrow("--scope");
+    expect(() => signInClientUpdate(current, { redirect: ["https://cloud.example.com/callback"], clearRedirects: true })).toThrow("not both");
+  });
+
+  it("carries the stored secret over in the sign-in server, which alone holds it", async () => {
+    const { rows, change } = await setUp();
+    const { secretHash } = newClientSecret();
+    await (await change({ kind: "register_sign_in_client", clientId: "scheduler", registration: { ...registration, secretHash } })).apply();
+    const kept = await change({ kind: "register_sign_in_client", clientId: "scheduler", registration: { ...registration, scopes: ["projects:members"], keepSecret: true } });
+    expect((kept.planned.body.change as { effect: string }).effect).toContain("It is confidential, and keeps its current secret.");
+    expect((await kept.apply()).body.change).toMatchObject({ status: "applied" });
+    expect(rows()).toEqual([expect.objectContaining({ sk: "CLIENT#scheduler", secretHash, scopes: ["projects:members"] })]);
+    expect(rows()[0]).not.toHaveProperty("keepSecret");
+  });
+
+  it("refuses to keep a secret a client does not have", async () => {
+    const { change } = await setUp();
+    await (await change({ kind: "register_sign_in_client", clientId: "scheduler", registration })).apply();
+    const refused = await change({ kind: "register_sign_in_client", clientId: "scheduler", registration: { ...registration, keepSecret: true } });
+    expect(refused.planned.status).toBe(400);
+    expect(refused.planned.body.error).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("has no secret to keep") as unknown });
+  });
+});
+
 describe("agentx admin sign-in-client (FR-001)", () => {
   const CHANGE = "55555555-5555-4555-8555-555555555555";
   const view = (status: string) => ({ changeId: CHANGE, kind: "register_sign_in_client", status, effect: "Register sign-in client scheduler (Scheduler).", methodsOffered: ["cli"], createdAt: "2026-11-12T09:00:00.000Z", expiresAt: "2026-11-12T09:10:00.000Z", ...(status === "applied" ? { methodUsed: "cli" } : {}) });
@@ -133,8 +169,22 @@ describe("agentx admin sign-in-client (FR-001)", () => {
     let stderr = "";
     const io = { fetchImplementation: fetch, tokenStore: tokens, confirm: async () => outcome === "applied", stdout: { write: (text: string) => { stdout += text; return true; } }, stderr: { write: (text: string) => { stderr += text; return true; } } };
     const run = (args: string[]) => executeCli(["--config-dir", directory, "--deployment-file", deploymentFile, "--allow-loopback", "admin", "sign-in-client", ...args], io);
-    return { run, bodies, directory, out: () => stdout, err: () => stderr };
+    return { run, bodies, directory, fetch: fetch as unknown as ReturnType<typeof vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>>, out: () => stdout, err: () => stderr };
   }
+
+  it("update reads the client, keeps every setting not named and its secret, and makes no secret", async () => {
+    const session = await cli("applied");
+    const listed = { clients: [{ clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: [], loopback: true, confidential: true, createdAt: "2026-11-13T00:00:00.000Z", updatedAt: "2026-11-13T00:00:00.000Z", updatedBy: "admin" }] };
+    const base = session.fetch.getMockImplementation()!;
+    session.fetch.mockImplementation(async (input: string | URL | Request, init?: RequestInit) =>
+      (new URL(input instanceof Request ? input.url : input).pathname === "/v1/admin/sign-in-clients" ? Response.json(listed) : base(input, init)));
+    expect(await session.run(["update", "web-app", "--scope", "projects:members"])).toBe(0);
+    expect((session.bodies[0] as { change: unknown }).change).toEqual({
+      kind: "register_sign_in_client", clientId: "web-app",
+      registration: { name: "Web App", audience: "web-app", redirectUris: [], loopback: true, scopes: ["projects:members"], keepSecret: true },
+    });
+    expect(session.err()).not.toContain("Client secret");
+  });
 
   it("sends only the secret's hash, and shows the secret once the change applied", async () => {
     const session = await cli("applied");

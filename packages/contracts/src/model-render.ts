@@ -35,6 +35,8 @@ export interface RenderContext {
   readonly lineEnding: SseLineEnding;
   readonly created: number;
   readonly enumEncoding: "string" | "int";
+  /** The request set `stream_options.include_usage` to the literal `true`: only then an OpenAI chat stream ends with a usage-only chunk. Absent means false. */
+  readonly includeUsage?: boolean | undefined;
 }
 
 export const JSON_CONTENT_TYPE = "application/json";
@@ -142,8 +144,9 @@ export function renderUtilityOperation(facts: ModelRequestFacts, requestBytes: n
   return undefined;
 }
 
-/** F2 adds a usage-only chunk immediately before the stream terminator. */
-export function appendOpenAiStreamUsage(body: string, reply: ModelReply, context: Pick<RenderContext, "seed" | "model" | "created" | "lineEnding">): string {
+/** Adds a usage-only chunk immediately before the stream terminator, as OpenAI does ONLY when the request set `stream_options.include_usage` to true; otherwise the body is returned unchanged. */
+export function appendOpenAiStreamUsage(body: string, reply: ModelReply, context: Pick<RenderContext, "seed" | "model" | "created" | "lineEnding" | "includeUsage">): string {
+  if (context.includeUsage !== true) return body;
   const usage = replyUsage(reply);
   const chunk = JSON.stringify({ id: `chatcmpl-${seededId(context.seed)}`, object: "chat.completion.chunk", created: context.created, model: context.model, choices: [], usage: { prompt_tokens: usage.inputTokens, completion_tokens: usage.outputTokens, total_tokens: usage.inputTokens + usage.outputTokens } });
   return body.replace(/data: \[DONE\](?=(?:\r?\n){2}$)/u, `${sseBody([chunk], context.lineEnding)}data: [DONE]`);

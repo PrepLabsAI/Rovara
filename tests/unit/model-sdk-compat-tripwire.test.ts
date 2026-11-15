@@ -5,6 +5,9 @@ import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, it, expect } from "vitest";
 const fixture = resolve("tests/fixtures/model-sdk-compat");
+// Python from PATH; the Python tests skip when it is absent.
+const PYTHON = "python3";
+const HAS_PYTHON = spawnSync(PYTHON, ["-I", "-c", "import sys; assert sys.version_info >= (3, 8)"]).status === 0;
 for (const [door, call, allowed] of [
     ["sendto", "_socket.socket(type=socket.SOCK_DGRAM).sendto(b'canary',('192.0.2.1',9))", "sys.audit('socket.sendto',None,('127.0.0.1',9))"],
     ["sendmsg", "_socket.socket(type=socket.SOCK_DGRAM).sendmsg([b'canary'],[],0,('192.0.2.1',9))", "sys.audit('socket.sendmsg',None,('::1',9))"],
@@ -13,7 +16,7 @@ for (const [door, call, allowed] of [
     ["ctypes outside venv", "ctypes.CDLL('/outside/lib-canary')", "sys.audit('ctypes.dlopen',os.path.join(sys.prefix,'own-library'))"],
     ["ctypes relative path", "ctypes.CDLL('lib-canary')", "sys.audit('ctypes.dlopen',os.path.join(sys.prefix,'own-library'))"],
 ] as const) {
-    it(`Python audits native ${door} before a system call and permits the narrow allowed case`, () => {
+    it.skipIf(!HAS_PYTHON)(`Python audits native ${door} before a system call and permits the narrow allowed case`, () => {
         const dir = mkdtempSync(join(tmpdir(), "sdk-compat-"));
         const log = join(dir, "wire.jsonl");
         writeFileSync(log, "");
@@ -31,7 +34,7 @@ except PermissionError: pass
 else: raise AssertionError('guard absent')
 `;
         try {
-            const child = spawnSync("/usr/bin/python3", ["-I", "-c", program], { env: { HOME: dir, SDK_TRIPWIRE_LOG: log, SDK_PRIVATE_ROOT: join(dir, "private") }, encoding: "utf8", timeout: 10000 });
+            const child = spawnSync(PYTHON, ["-I", "-c", program], { env: { HOME: dir, SDK_TRIPWIRE_LOG: log, SDK_PRIVATE_ROOT: join(dir, "private") }, encoding: "utf8", timeout: 10000 });
             expect(child.status, child.stderr).toBe(0);
         } finally { rmSync(dir, { recursive: true, force: true }); }
     });
@@ -42,7 +45,7 @@ it("both preloads prove one canary refusal before loading an SDK", () => {
     writeFileSync(join(dir, "tripwire.mjs"), readFileSync(join(fixture, "tripwire.mjs.fixture")));
     try {
         const programs = [
-            { command: "/usr/bin/python3", args: ["-I", "-c", `import socket,runpy\ndef inert(*a,**k): raise RuntimeError('unguarded')\nsocket.socket.connect=inert\nrunpy.run_path(${JSON.stringify(join(fixture, "sitecustomize.py"))})`] },
+            ...(HAS_PYTHON ? [{ command: PYTHON, args: ["-I", "-c", `import socket,runpy\ndef inert(*a,**k): raise RuntimeError('unguarded')\nsocket.socket.connect=inert\nrunpy.run_path(${JSON.stringify(join(fixture, "sitecustomize.py"))})`] }] : []),
             { command: process.execPath, args: ["--input-type=module", "-e", `import net from 'node:net';net.Socket.prototype.connect=()=>{throw new Error('unguarded')};await import(${JSON.stringify(pathToFileURL(join(dir, "tripwire.mjs")).href)});`] },
         ];
         for (const program of programs) {
@@ -92,7 +95,7 @@ describe("SDK subprocess tripwires", () => {
             rmSync(dir, { recursive: true, force: true });
         }
     });
-    it("Python refuses native connect and DNS doors and denies private-home reads", () => {
+    it.skipIf(!HAS_PYTHON)("Python refuses native connect and DNS doors and denies private-home reads", () => {
         const dir = mkdtempSync(join(tmpdir(), "sdk-pywire-"));
         const log = join(dir, "wire.jsonl");
         writeFileSync(log, "");
@@ -124,7 +127,7 @@ except PermissionError: pass
 else: raise AssertionError('subprocess not denied')
 `;
         try {
-            const child = spawnSync("/usr/bin/python3", ["-I", "-c", program], { env: { HOME: dir, SDK_TRIPWIRE_LOG: log, SDK_PRIVATE_ROOT: join(dir, "private") }, encoding: "utf8", timeout: 10000 });
+            const child = spawnSync(PYTHON, ["-I", "-c", program], { env: { HOME: dir, SDK_TRIPWIRE_LOG: log, SDK_PRIVATE_ROOT: join(dir, "private") }, encoding: "utf8", timeout: 10000 });
             expect(child.status, child.stderr).toBe(0);
             expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(12);
         }

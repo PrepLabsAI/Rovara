@@ -107,6 +107,8 @@ export interface FailureContext {
   readonly lineEnding: SseLineEnding;
   readonly created: number;
   readonly enumEncoding: "string" | "int";
+  /** The request set `stream_options.include_usage` to the literal `true` (OpenAI chat streams then end with a usage-only chunk). Absent means false. */
+  readonly includeUsage?: boolean | undefined;
   /** The first tool the request declared; `unknown_tool` when none. */
   readonly toolName?: string | undefined;
 }
@@ -119,7 +121,7 @@ const BAD_ARGS_TEXT = '{"value": [1, 2';
 /** Arguments that are an object but break the declared schema (wrong keys, wrong types): google-genai (Python) raises on non-object args before customer code runs, so the object form is what a test of the customer's own validation needs. */
 const WRONG_SHAPE_ARGS = { rovara_wrong_key: ["not", "the", "declared", "type"] } as const;
 
-const renderContext = (context: FailureContext): RenderContext => ({ wire: context.wire, operation: context.operation, model: context.model, stream: context.stream, seed: context.seed, lineEnding: context.lineEnding, created: context.created, enumEncoding: context.enumEncoding });
+const renderContext = (context: FailureContext): RenderContext => ({ wire: context.wire, operation: context.operation, model: context.model, stream: context.stream, seed: context.seed, lineEnding: context.lineEnding, created: context.created, enumEncoding: context.enumEncoding, includeUsage: context.includeUsage });
 
 /** Cuts an SSE body inside an event: the first half of the events whole, then half of the next event's data. No terminal event is ever reached. */
 function cutSse(body: string, lineEnding: SseLineEnding): string {

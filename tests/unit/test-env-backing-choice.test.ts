@@ -396,6 +396,31 @@ describe("test accounts: available only when active, approved, for this project 
     // An AWS account whose role is on the list.
     expect(steps(chooseBacking(dynamo({ accounts: [dynamoAccount()], allowed: allow({ emulated: false }), prodDeny: { accountIds: ["222222222222"], hosts: [], arnPrefixes: [] } })))).toContain("test_account:account_names_production");
   });
+  // FIX-0518: a stored account may hold a model host (it did not come through today's schema, or the catalog grew). The backing choice never picks it, and says why in fixed words.
+  const modelHostAccount = (hosts: string[], over: Record<string, unknown> = {}): TestAccount => {
+    // Approvals cover the exact record, so they are stamped again for the changed hosts: the account is still approved, active and unexpired, and only its hosts are wrong.
+    const record = { ...account({ id: "model-test", secretRef: testAccountSecretRef("staging", ORG, "model-test", "apiKey") }), hosts, ...over };
+    const digest = testAccountApprovalDigest(record);
+    return { ...record, approvals: record.approvals.map((each) => ({ ...each, approvedDigest: digest })) };
+  };
+  it("is not an AI model service, whatever the stored record says", () => {
+    for (const hosts of [["api.openai.com"], ["API.OPENAI.COM."], ["my-resource.openai.azure.com"], ["api.example-pay.com", "generativelanguage.googleapis.com"]]) {
+      const choice = pick([modelHostAccount(hosts)]);
+      expect(choice.backing.kind, hosts.join()).toBe("none");
+      expect(steps(choice), hosts.join()).toContain("test_account:account_is_model_service");
+      expect(choice.skipped.find((each) => each.reason === "account_is_model_service")?.words).toBe(SKIP_REASON_WORDS.account_is_model_service);
+    }
+    // Even with the production list empty, the model reason is the one named.
+    expect(steps(pick([modelHostAccount(["api.openai.com"])], { prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] } }))).toContain("test_account:account_is_model_service");
+    // The company's own gateway host, when the caller has it.
+    expect(pick([modelHostAccount(["llm.corp-gateway.example.com"])]).backing.kind).toBe("test_account");
+    expect(steps(pick([modelHostAccount(["llm.corp-gateway.example.com"])], { modelGatewayHosts: ["llm.corp-gateway.example.com"] }))).toContain("test_account:account_is_model_service");
+  });
+  it("skips a model-host account for a clean one", () => {
+    const clean = account({ id: "zzz-test", secretRef: testAccountSecretRef("staging", ORG, "zzz-test", "apiKey") });
+    const choice = pick([modelHostAccount(["api.openai.com"], { id: "aaa-test" }), clean]);
+    expect(choice.backing).toEqual({ kind: "test_account", accountId: "zzz-test" });
+  });
   it("skips an unclean account for a clean one, and takes the lowest id", () => {
     const first = account({ id: "aaa-test", secretRef: testAccountSecretRef("staging", ORG, "aaa-test", "apiKey") });
     const second = account({ id: "bbb-test", secretRef: testAccountSecretRef("staging", ORG, "bbb-test", "apiKey") });

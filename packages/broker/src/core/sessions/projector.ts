@@ -1,7 +1,7 @@
 // The projector (lane L6b, inventory B6): keeps summaries current by listening to the task's changes. In the hosted product it reads the table's stream; here it is a consumer of the document store's change
 // feed (the port's replacement for the stream readers). It works out which sessions a batch touches and refreshes each once; a refresh recomputes from the source records, so a stale, repeated or out-of-order
 // batch only means looking again. The session sweep (sweep.ts) catches whatever a batch missed.
-import type { DocumentChange, OrgId, SessionId } from "@agentx/contracts";
+import { companyOfChange, type DocumentChange, type OrgId, type SessionId } from "@agentx/contracts";
 import { refreshSessionSummary, type SummaryDependencies } from "./summary.js";
 
 export const SESSION_PROJECTOR_CONSUMER = "session-projector";
@@ -18,8 +18,10 @@ export function sessionTargetsOf(changes: readonly DocumentChange[]): SessionTar
   const targets = new Map<string, SessionTarget>();
   for (const change of changes) {
     if (!change.key.pk.startsWith("DEVTASK#")) continue;
+    const companyId = companyOfChange(change);
+    if (companyId === undefined) continue;
     for (const document of [change.after, change.before]) {
-      const orgId = document?.["companyId"] ?? document?.["orgId"];
+      const orgId = companyId;
       const sessionId = document?.["sessionId"];
       if (typeof orgId === "string" && typeof sessionId === "string") targets.set(`${orgId}\u0000${sessionId}`, { orgId: orgId, sessionId: sessionId });
     }

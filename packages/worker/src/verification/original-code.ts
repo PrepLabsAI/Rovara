@@ -8,6 +8,7 @@
 // so a worker that stops mid-way loses nothing: recoverAgentFiles puts them back before the next task.
 import { rmdir, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { RunnerKillUnconfirmedError } from "../collected-process.js";
 import { assertNoEmbeddedRepositories } from "../git.js";
 import { addWorkTree } from "../isolated-git.js";
 import { runIsolatedGit, withIsolatedRepository } from "../isolated-repository.js";
@@ -38,10 +39,27 @@ export interface OriginalCode {
 
 /** The agent's files could not be restored exactly. They are kept under ORIGINAL_CODE_REF; the task must not go on. */
 export class AgentFilesRestoreError extends Error {
-  constructor(message: string) {
+  /** True when the files were not restored because a command that was stopped could not be confirmed stopped (nothing in the workspace may be touched). */
+  readonly unconfirmedStop: boolean;
+  constructor(message: string, options: { unconfirmedStop?: boolean } = {}) {
     super(message);
     this.name = "AgentFilesRestoreError";
+    this.unconfirmedStop = options.unconfirmedStop === true;
   }
+}
+
+/**
+ * An error a caller of `OriginalCode.run` (or of a check round) must NOT absorb: the workspace is not in a state anyone may trust, so the task
+ * must stop and nothing may read or write the workspace on its way out. Either the agent's files could not be put back, or a command that
+ * was stopped could not be confirmed stopped and may still be writing (FIX-RUNNER-ABORT-JOIN).
+ */
+export function isWorkspaceUnsafe(error: unknown): boolean {
+  return error instanceof AgentFilesRestoreError || error instanceof RunnerKillUnconfirmedError;
+}
+
+/** The narrower case: a stopped command could not be confirmed stopped, so a caller's own clean-up must not write the workspace either. */
+export function isUnconfirmedStop(error: unknown): boolean {
+  return error instanceof RunnerKillUnconfirmedError || (error instanceof AgentFilesRestoreError && error.unconfirmedStop);
 }
 
 export function gitOriginalCode(repositories: readonly OriginalCodeRepository[]): OriginalCode {
@@ -66,6 +84,12 @@ export function gitOriginalCode(repositories: readonly OriginalCodeRepository[])
         result = { value: await work() };
       } catch (error) {
         workError = error;
+      }
+      // FIX-RUNNER-ABORT-JOIN: work stopped a command that could not be confirmed stopped, so it may still be writing this tree. Restoring now
+      // would race it, and a restore it then overwrote would be trusted. Nothing is touched: the agent's files stay under ORIGINAL_CODE_REF
+      // (recoverAgentFiles puts them back before the next task) and the task must not go on, as for any restore that failed.
+      if (workError instanceof RunnerKillUnconfirmedError && swapped.length > 0) {
+        throw new AgentFilesRestoreError(`AgentX could not confirm that the command it ran on the original code stopped, so it did not restore the agent's files; they are kept under ${ORIGINAL_CODE_REF}.`, { unconfirmedStop: true });
       }
       // Restore in reverse order; every repository is tried even when one fails.
       const failures: string[] = [];

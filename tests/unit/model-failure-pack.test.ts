@@ -251,9 +251,23 @@ describe("bad_tool_json", () => {
     const stream = answer("bad_tool_json", { wire: "openai", operation: "chat_completions", stream: "sse" }).body;
     expect(stream).not.toContain("rovara_bad_tool_json");
     const args = parseSseText(stream, { requireSpace: true });
-    const pieces = args.ok ? args.events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event).choices[0]?.delta?.tool_calls?.[0]?.function?.arguments).filter((piece): piece is string => typeof piece === "string") : [];
+    const pieces = args.ok ? args.events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event).choices[0].delta.tool_calls?.[0]?.function?.arguments).filter((piece): piece is string => typeof piece === "string") : [];
     expect(pieces.length).toBeGreaterThan(0);
     expect(() => JSON.parse(pieces.join(""))).toThrow();
+  });
+  it("OpenAI chat stream: the usage-only chunk is added only when the request asked for include_usage", () => {
+    const choicesOf = (body: string): number[] => (parseSseText(body, { requireSpace: true }) as { events: string[] }).events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event).choices.length);
+    for (const mode of ["bad_tool_json", "refusal", "token_limit"] as const) {
+      const plain = answer(mode, { wire: "openai", operation: "chat_completions", stream: "sse" }, mode === "refusal" ? { variant: "filter" } : {});
+      const off = (plain.body.match(/"choices":\[\]/gu) ?? []).length;
+      expect(off, mode).toBe(0);
+      const asked = answer(mode, { wire: "openai", operation: "chat_completions", stream: "sse", includeUsage: true }, mode === "refusal" ? { variant: "filter" } : {});
+      expect((asked.body.match(/"choices":\[\]/gu) ?? []).length, mode).toBe(1);
+    }
+    const asked = answer("bad_tool_json", { wire: "openai", operation: "chat_completions", stream: "sse", includeUsage: true }).body;
+    expect(choicesOf(asked).filter((n) => n === 0)).toHaveLength(1);
+    expect(choicesOf(asked).at(-1)).toBe(0);
+    expect(choicesOf(answer("bad_tool_json", { wire: "openai", operation: "chat_completions", stream: "sse" }).body).every((n) => n === 1)).toBe(true);
   });
   it("Cohere: arguments that do not parse, whole and streamed", () => {
     const body = json(answer("bad_tool_json", { wire: "cohere", operation: "chat" }).body);

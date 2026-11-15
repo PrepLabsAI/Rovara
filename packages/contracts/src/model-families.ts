@@ -94,10 +94,10 @@ const F0A_OPERATIONS: Record<ModelWire, readonly string[]> = { gemini: ["generat
 function scriptedFor(route: FamilyRouteOk, reply: ModelReply, env: ScriptedEnv): ModelAnswer | undefined {
   if (F0A_OPERATIONS[route.wire].includes(route.operation)) {
     const answer = serveModelRequest(env.rows, env.request, { reply, seed: env.seed, lineEnding: env.lineEnding, created: env.created });
-    return { status: answer.status, headers: answer.headers, body: route.wire === "openai" && route.stream === "sse" ? appendOpenAiStreamUsage(answer.body, reply, { seed: env.seed, model: route.model ?? env.facts.model ?? "unknown-model", created: env.created, lineEnding: env.lineEnding }) : answer.body };
+    return { status: answer.status, headers: answer.headers, body: route.wire === "openai" && route.stream === "sse" ? appendOpenAiStreamUsage(answer.body, reply, { seed: env.seed, model: route.model ?? env.facts.model ?? "unknown-model", created: env.created, lineEnding: env.lineEnding, includeUsage: env.facts.includeUsage }) : answer.body };
   }
   const model = route.model ?? env.facts.model ?? "unknown-model";
-  const context = { wire: route.wire, operation: route.operation, model, stream: route.stream, seed: env.seed, lineEnding: env.lineEnding, created: env.created, enumEncoding: route.enumEncoding };
+  const context = { wire: route.wire, operation: route.operation, model, stream: route.stream, seed: env.seed, lineEnding: env.lineEnding, created: env.created, enumEncoding: route.enumEncoding, includeUsage: env.facts.includeUsage };
   return isChatOperation(route.wire, route.operation) ? renderModelReply(reply, context) : renderUtilityOperation(env.facts, env.requestBytes, context);
 }
 
