@@ -31,7 +31,7 @@ So no core-side hold check is needed today. The drain (#709) still counts any ru
 
 ## When this must be revisited
 
-A core-side check becomes required as soon as the core can start work on the registered test runtime. Concretely, that happens if either of these changes:
+A core-side check becomes required as soon as the core can start work on the registered test runtime. Concretely, that happens if any of these changes:
 - code under `core`, `core-host` or `local` starts writing `workflowE2EAdmission`, or dispatches onto `E2E_FEATURE_VERIFIER` / registered-runtime endpoints;
 - anything calls the core's ready-made, unused round start seams: `core/e2e/baseline.ts`, `grounding.ts` and `replay.ts` export `request...` and `...StartItem` functions;
 - a deployment passes `e2e` into the core host's `flowOptions`, which `core-host/core-runtime.ts` passes straight to the task flow;
