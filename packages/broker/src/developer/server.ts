@@ -7,6 +7,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
+  IMPLICIT_COMPANY_ID,
+  OrgIdSchema,
   ChannelInfoRequestSchema,
   ChannelByNameRequestSchema,
   ChannelMembersRequestSchema,
@@ -61,6 +63,9 @@ import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResu
 import type { SlackDirectory } from "./slack-directory.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk } from "./tokens.js";
+import type { CompanySignInStore } from "./company-membership.js";
+import type { SelectedCompanyIssuer } from "./company-issuer.js";
+import { companyOperator, type CompanyOperatorRequest, type CompanyOperatorResponse } from "./company-operator.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
@@ -74,6 +79,10 @@ export interface DeveloperIdentityDependencies {
   directory: SlackDirectory;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
+  company?: CompanySignInStore;
+  companyIssuer?: (companyId: string) => Promise<SelectedCompanyIssuer | undefined>;
+  companyDirectory?: (companyId: string) => SlackDirectory | undefined;
+  slackTeamCompany?: (teamId: string) => string | undefined | Promise<string | undefined>;
 }
 export interface HttpResult { statusCode: number; headers: Record<string, string>; body: string; cookies?: string[] }
 /** The invoke's answer: the broker's contract, plus a refusal for a request that is not one. */
@@ -185,6 +194,44 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (found === undefined) throw new ProviderNotConfiguredError(`${methodLabel(method)} sign-in is not set up in this environment`);
     return found;
   };
+  const methodUnavailable = () => page(400, "Sign-in method not available", ["Run agentx login again."]);
+  const companyNotFinished = (request: AuthRequestRecord) => request.browserReturnTo === undefined
+    ? toClient(request.clientRedirectUri, { error: "access_denied", error_description: "sign-in is not finished", state: request.clientState })
+    : browserReturn(request.browserReturnTo, false);
+  const providerFor = async (method: DeveloperSignInMethod, companyId?: string): Promise<SignInProvider> => {
+    if (deps.company === undefined || companyId === undefined || method === "slack") return provider(method);
+    if (companyId === IMPLICIT_COMPANY_ID) throw new ProviderNotConfiguredError("sign-in is not finished");
+    const selected = await deps.companyIssuer?.(companyId);
+    if (selected === undefined) throw new ProviderNotConfiguredError("sign-in is not finished");
+    return selected.provider;
+  };
+  const methodsFor = async (companyId?: string): Promise<DeveloperSignInMethod[] | undefined> => {
+    if (deps.company === undefined || companyId === undefined) return enabledMethods(deps);
+    if (companyId === IMPLICIT_COMPANY_ID || !OrgIdSchema.safeParse(companyId).success || !await deps.company.companyExists(companyId)) return undefined;
+    const selected = await deps.companyIssuer?.(companyId);
+    if (selected === undefined) return undefined;
+    return [...enabledMethods(deps).filter((method) => method === "slack"), "oidc"];
+  };
+  const slackCompany = async (): Promise<string | undefined> => {
+    if (config.slack.teamId === undefined) return undefined;
+    return deps.slackTeamCompany === undefined ? IMPLICIT_COMPANY_ID : deps.slackTeamCompany(config.slack.teamId);
+  };
+  /** Recheck live membership at each mint. The stored company only selects the method. */
+  async function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false): Promise<boolean> {
+    if (deps.company === undefined) return true;
+    try {
+      const candidate = amr === "slack" ? await slackCompany() : companyId ?? IMPLICIT_COMPANY_ID;
+      if (!OrgIdSchema.safeParse(candidate).success || (companyId !== undefined && companyId !== candidate)) return false;
+      let member = await deps.company.membership(personId);
+      if (member === undefined && legacy && candidate === IMPLICIT_COMPANY_ID) {
+        const joined = await deps.company.join({ personId, companyId: IMPLICIT_COMPANY_ID });
+        if (joined.ok) member = joined.membership;
+      }
+      // Company is live membership; a registered audience cannot cross its owner.
+      return member !== undefined && member.revokedAt === undefined && member.companyId === candidate
+        && (registered === undefined || registered.installLevel === true || member.companyId === (registered.companyId ?? IMPLICIT_COMPANY_ID));
+    } catch { return false; }
+  }
 
   /** Spec 063 FR-002: a registered client's session gets tokens addressed to that client, which Rovara's API refuses. */
   // Spec 065 FR-002: the scopes asked for at sign-in that the client's registration still allows, so removing one from
@@ -197,7 +244,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
   const registeredClient = async (clientId: string): Promise<SignInClientRecord | undefined> =>
-    SignInClientIdSchema.safeParse(clientId).success ? store.getClient(clientId) : undefined;
+    SignInClientIdSchema.safeParse(clientId).success ? store.getClient(clientId, undefined, deps.company !== undefined) : undefined;
 
   type ClientCheck = { ok: true; client?: SignInClientRecord } | { ok: false; result: HttpResult };
   /**
@@ -230,15 +277,24 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   }
 
   async function authorize(query: URLSearchParams): Promise<HttpResult> {
-    const methods = enabledMethods(deps);
+    let methods = enabledMethods(deps);
     const requestId = query.get("request");
     if (requestId !== null) {
       const method = query.get("method");
+      if (deps.company !== undefined && (method === "slack" || method === "oidc")) {
+        try {
+          const pending = await store.getAuthRequest(requestId);
+          if (pending === undefined) return expired();
+          const selected = await methodsFor(pending.companyId);
+          if (selected === undefined) return methodUnavailable();
+          methods = selected;
+        } catch { return methodUnavailable(); }
+      }
       if ((method !== "slack" && method !== "oidc") || !methods.includes(method)) return page(400, "Sign-in method not available", ["Run agentx login again."]);
       const request = await store.chooseMethod(requestId, method);
       if (request === undefined) return expired();
       try {
-        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState);
+        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState, request.companyId);
       } catch (error) {
         return serverError(error, "/v1/auth/authorize", request.clientRedirectUri, request.clientState);
       }
@@ -260,6 +316,20 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return page(400, "This sign-in link is not from the AgentX CLI", ["Start signing in from your terminal with agentx login <url>."]);
     }
     const clientState = query.get("state") ?? "";
+    let selectedCompany = deps.company === undefined ? undefined : query.get("company") ?? undefined;
+    if (deps.company !== undefined && client !== undefined && client.installLevel !== true) {
+      const owner = client.companyId ?? IMPLICIT_COMPANY_ID;
+      if (selectedCompany !== undefined && selectedCompany !== owner) return methodUnavailable();
+      // An implicit legacy client retains the install provider and exact old response path.
+      if (owner !== IMPLICIT_COMPANY_ID) selectedCompany = owner;
+    }
+    if (selectedCompany !== undefined) {
+      try {
+        const selected = await methodsFor(selectedCompany);
+        if (selected === undefined) return methodUnavailable();
+        methods = selected;
+      } catch { return methodUnavailable(); }
+    }
     const challenge = query.get("code_challenge") ?? "";
     const invalid = (description: string) => toClient(redirectUri, { error: "invalid_request", error_description: description, ...(clientState === "" ? {} : { state: clientState }) });
     if (query.get("response_type") !== "code") return invalid("response_type must be code; update the AgentX CLI and run agentx login again");
@@ -275,11 +345,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         ...(client === undefined ? {} : { clientId: client.clientId }),
         // Spec 065 FR-002: a scope the registration does not allow is dropped, not refused.
         ...(client === undefined ? {} : grantedScopes(query.get("scope"), client)),
+        ...(selectedCompany === undefined ? {} : { companyId: selectedCompany }),
       });
       if (methods.length === 1) {
         const method = methods[0]!;
         if (await store.chooseMethod(request.id, method) === undefined) return expired();
-        return await toProvider(request.id, request.nonce, method, redirectUri, clientState);
+        return await toProvider(request.id, request.nonce, method, redirectUri, clientState, request.companyId);
       }
     } catch (error) {
       return serverError(error, "/v1/auth/authorize", redirectUri, clientState);
@@ -320,16 +391,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   }
 
   /** Once the CLI's redirect URI and state are known, any failure goes back to the CLI, so it never
-   * waits out its timeout behind a 500 page. Only the error's name is logged. */
+   * waits out its timeout behind a 500 page. Company mode logs only a fixed code;
+   * the legacy path retains its error-name log. */
   function serverError(error: unknown, path: string, clientRedirect: string, clientState: string): HttpResult {
-    deps.log({ event: "signin.error", path, error: errorName(error) });
+    deps.log({ event: "signin.error", path, error: deps.company === undefined ? errorName(error) : "sign_in_failed" });
     return toClient(clientRedirect, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: clientState });
   }
 
-  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string): Promise<HttpResult> {
+  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string, companyId?: string): Promise<HttpResult> {
     try {
-      return redirect(await provider(method).authorizeUrl({ state: requestId, nonce, redirectUri: endpoint(`/callback/${method}`) }));
+      return redirect(await (await providerFor(method, companyId)).authorizeUrl({ state: requestId, nonce, redirectUri: endpoint(`/callback/${method}`) }));
     } catch (error) {
+      if (deps.company !== undefined && companyId !== undefined) {
+        deps.log({ event: "signin.error", path: "/v1/auth/authorize", error: "sign_in_failed" });
+        return toClient(clientRedirect, { error: "access_denied", state: clientState, error_description: "sign-in is not finished" });
+      }
       return providerFailure(error, method, clientRedirect, clientState);
     }
   }
@@ -342,7 +418,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (error instanceof ProviderNotConfiguredError) {
       // These messages are written by the providers and the Lambda entry, never copied from a
       // secret or a remote answer, so they are safe to show and log.
-      deps.log({ event: "signin.not_configured", method, detail: error.message });
+      deps.log({ event: "signin.not_configured", method, detail: deps.company === undefined ? error.message : "sign_in_not_configured" });
       return toClient(clientRedirect, { error: "access_denied", state: clientState, error_description: `${methodLabel(method)} sign-in is not finished: ${error.message}` });
     }
     throw error;
@@ -375,8 +451,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return await completeSignIn(method, request, query.get("code"));
     } catch (error) {
       // The state is spent, so tell the CLI now rather than leave it waiting for its timeout.
+      if (deps.company !== undefined && request.companyId !== undefined && request.companyId !== IMPLICIT_COMPANY_ID) {
+        deps.log({ event: "signin.error", path: `/v1/auth/callback/${method}`, error: "sign_in_failed" });
+        return companyNotFinished(request);
+      }
       if (request.browserReturnTo !== undefined) {
-        deps.log({ event: "signin.browser_error", method, error: errorName(error) });
+        deps.log({ event: "signin.browser_error", method, error: deps.company === undefined ? errorName(error) : "sign_in_failed" });
         return browserReturn(request.browserReturnTo, false);
       }
       return serverError(error, `/v1/auth/callback/${method}`, request.clientRedirectUri, request.clientState);
@@ -391,12 +471,20 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       : browserReturn(request.browserReturnTo, false);
     let result: ProviderResult;
     try {
-      result = await provider(method).complete({ code, nonce: request.nonce, redirectUri: endpoint(`/callback/${method}`) });
+      result = await (await providerFor(method, request.companyId)).complete({ code, nonce: request.nonce, redirectUri: endpoint(`/callback/${method}`) });
     } catch (error) {
+      if (deps.company !== undefined && request.companyId !== undefined) {
+        deps.log({ event: "signin.error", path: `/v1/auth/callback/${method}`, error: "sign_in_failed" });
+        return companyNotFinished(request);
+      }
       if (request.browserReturnTo !== undefined) throw error;
       return providerFailure(error, method, request.clientRedirectUri, request.clientState);
     }
     if (!result.ok) {
+      if (deps.company !== undefined && request.companyId !== undefined) {
+        deps.log({ event: "signin.refused", method, reason: "not_invited" });
+        return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: "not invited" }) : browserReturn(request.browserReturnTo, false);
+      }
       deps.log({ event: "signin.refused", method, reason: result.reason });
       if (request.browserReturnTo !== undefined) return browserReturn(request.browserReturnTo, false);
       // A provider may quietly reuse the refused account's session on the next try, so say how to switch.
@@ -411,24 +499,43 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (request.browserReturnTo !== undefined) return browserReturn(request.browserReturnTo, false);
       return client({ error: "access_denied", error_description: "your AgentX sign-in was turned off by an admin; contact an admin" });
     }
+    let companyId: string | undefined;
+    if (deps.company !== undefined) {
+      let candidate: string | undefined;
+      try { candidate = method === "slack" ? await slackCompany() : request.companyId ?? IMPLICIT_COMPANY_ID; } catch { candidate = undefined; }
+      const registered = request.clientId === undefined ? undefined : await registeredClient(request.clientId);
+      const clientAllowed = request.clientId === undefined || (registered !== undefined && (registered.installLevel === true || (registered.companyId ?? IMPLICIT_COMPANY_ID) === candidate));
+      const joined = candidate === undefined || !OrgIdSchema.safeParse(candidate).success || (request.companyId !== undefined && request.companyId !== candidate) || !clientAllowed
+        ? { ok: false as const, reason: "not_invited" as const }
+        : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
+      if (!joined.ok) {
+        const text = { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
+        deps.log({ event: "signin.refused", reason: joined.reason, developerId });
+        return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: text }) : browserReturn(request.browserReturnTo, false);
+      }
+      companyId = joined.membership.companyId;
+    }
     let slackUserId = identity.slackUserId;
     // ProviderIdentity.email is set only for a verified email (providers.ts), so only a verified
     // email is ever looked up in Slack.
-    if (slackUserId === undefined && identity.email !== undefined) {
-      const link = await deps.directory.lookupByEmail(identity.email);
-      slackUserId = link === "unavailable" ? existing?.slackUserId : link === "none" ? undefined : link.userId;
+    const directory = companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? deps.directory : deps.companyDirectory?.(companyId);
+    if (slackUserId === undefined && identity.email !== undefined && directory !== undefined) {
+      const link = await directory.lookupByEmail(identity.email);
+      slackUserId = link === "unavailable" ? (companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? existing?.slackUserId : undefined) : link === "none" ? undefined : link.userId;
     }
     await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
       ...(identity.email === undefined ? {} : { email: identity.email }),
       ...(slackUserId === undefined ? {} : { slackUserId }),
-    });
+    }, companyId);
     if (request.browserReturnTo !== undefined) {
+      if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined)) return browserReturn(request.browserReturnTo, false);
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
       const endsAt = Math.floor(deps.now() / 1000) + SESSION_MAX_AGE_SECONDS;
       const { session } = await store.createSession({ developerId, amr: method,
         ...(slackUserId === undefined ? {} : { slackUserId }),
         reviewExpiresAt: endsAt, endsAt,
+        ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
       });
       deps.log({ event: "signin.browser_succeeded", method, developerId });
       return browserReturn(request.browserReturnTo, true, session.sessionId);
@@ -437,8 +544,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
       ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
       ...(request.scopes === undefined ? {} : { scopes: request.scopes }),
-      // FR-005: only a company sign-in can make an administrator.
-      ...(method === "oidc" && identity.administrator === true ? { administrator: true as const } : {}),
+      ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
+      // Only the install issuer can make an install-wide administrator.
+      ...(method === "oidc" && request.companyId === undefined && identity.administrator === true ? { administrator: true as const } : {}),
     });
     deps.log({ event: "signin.succeeded", method, developerId, linkedToSlack: slackUserId !== undefined, ...(request.clientId === undefined ? {} : { clientId: request.clientId }) });
     return client({ code: agentxCode });
@@ -449,6 +557,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (redeemed === undefined) return oauthError(400, ...INVALID_CODE);
     // A code is redeemed only by the client it was issued to (it is burned either way).
     if (redeemed.clientId !== client?.clientId) return oauthError(400, ...INVALID_CODE);
+    if (!await companyMayMint(redeemed.developerId, redeemed.amr, redeemed.companyId, client)) return oauthError(400, ...SIGN_IN_ENDED);
+    if (deps.company !== undefined && redeemed.companyId !== undefined && redeemed.companyId !== IMPLICIT_COMPANY_ID && redeemed.amr === "oidc") {
+      try { methods = await methodsFor(redeemed.companyId) ?? []; } catch { return oauthError(400, ...SIGN_IN_ENDED); }
+    }
     if (!methods.includes(redeemed.amr)) return oauthError(400, "invalid_grant", `${methodLabel(redeemed.amr)} sign-in was turned off in this environment; run agentx login again`);
     const developer = await store.getDeveloper(redeemed.developerId);
     if (developer === undefined || developer.revoked) return oauthError(400, "invalid_grant", "your AgentX sign-in was turned off by an admin; contact an admin");
@@ -469,6 +581,20 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const { session } = lookup;
     // Spec 063: a refresh token works only for the client it was issued to, and not across a removal and re-registration.
     if (session.clientId !== client?.clientId) return ended;
+    if (!await companyMayMint(session.developerId, session.amr, session.companyId, client, true)) {
+      await revoke(session.sessionId, "company_changed"); return ended;
+    }
+    let companySince: number | undefined;
+    if (deps.company !== undefined && session.companyId !== undefined && session.companyId !== IMPLICIT_COMPANY_ID && session.amr === "oidc") {
+      try {
+        const selected = await deps.companyIssuer?.(session.companyId);
+        if (selected === undefined) { await revoke(session.sessionId, "method_disabled"); return ended; }
+        methods = ["oidc", ...enabledMethods(deps).filter((method) => method === "slack")];
+        companySince = selected.since;
+        const person = await store.getDeveloper(session.developerId);
+        if (session.amr === "oidc" && person?.issuer !== selected.issuer) { await revoke(session.sessionId, "method_disabled"); return ended; }
+      } catch { return ended; }
+    }
     if (client !== undefined && Date.parse(session.startedAt) < Date.parse(client.createdAt)) {
       await revoke(session.sessionId, "client_removed");
       return ended;
@@ -477,7 +603,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       await revoke(session.sessionId, "method_disabled");
       return oauthError(400, "invalid_grant", `${methodLabel(session.amr)} sign-in was turned off in this environment; sign in another way with agentx login`);
     }
-    if (startedBeforeMethodOn(session.startedAt, session.amr === "slack" ? config.slack.since : config.oidc?.since)) {
+    if (startedBeforeMethodOn(session.startedAt, session.amr === "slack" ? config.slack.since : companySince ?? config.oidc?.since)) {
       await revoke(session.sessionId, "method_disabled");
       return oauthError(400, "invalid_grant", `your sign-in ended when ${methodLabel(session.amr)} was turned off; sign in again with agentx login`);
     }
@@ -624,13 +750,22 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse> => {
+      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest | CompanyOperatorRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse | CompanyOperatorResponse> => {
+    if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
+      if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, clients: store, now: deps.now, log: deps.log }, event);
       // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
+        if (deps.company !== undefined) {
+          try {
+            await store.putClient(parsed.data.client, parsed.data.companyId ?? IMPLICIT_COMPANY_ID, { ...(parsed.data.keepSecret === true ? { keepSecret: true } : {}) });
+            deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId });
+            return { ok: true };
+          } catch { return { ok: false, error: "invalid_request" }; }
+        }
         let client = parsed.data.client;
         // An update that keeps the secret: only this server holds the hash, so it carries it over.
         if (parsed.data.keepSecret === true) {
@@ -647,12 +782,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (event.kind === "remove-sign-in-client") {
         const parsed = RemoveSignInClientRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
+        if (deps.company !== undefined) {
+          try { return { ok: true, removed: await store.removeClient(parsed.data.clientId, parsed.data.companyId ?? IMPLICIT_COMPANY_ID) }; }
+          catch { return { ok: false, error: "invalid_request" }; }
+        }
         const removed = await store.removeClient(parsed.data.clientId);
         deps.log({ event: "signin.client_removed", clientId: parsed.data.clientId, removed });
         return { ok: true, removed };
       }
       if (event.kind === "list-sign-in-clients") {
-        if (!ListSignInClientsRequestSchema.safeParse(event).success) return { ok: false, error: "invalid_request" };
+        const parsed = ListSignInClientsRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        if (deps.company !== undefined) {
+          try { return { ok: true, clients: (await store.listClients(parsed.data.companyId ?? IMPLICIT_COMPANY_ID)).map(signInClientView) }; }
+          catch { return { ok: false, error: "unavailable" }; }
+        }
         return { ok: true, clients: (await store.listClients()).map(signInClientView) };
       }
       if (event.kind === "end-developer-sessions") {
