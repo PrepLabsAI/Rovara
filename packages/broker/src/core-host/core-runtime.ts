@@ -15,7 +15,7 @@ import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flo
 import { withStepFenceRetry } from "./step-fence.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
-import { checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
+import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
 
 /** A core service a scheduled job runs, per company. */
 export interface CoreService {
@@ -115,9 +115,13 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
   };
   // Validated here, refused by the root (`switchBlockers`): an invalid wiring is the same as none, so the switch is blocked by id rather than failing here with the given value.
   const ciReporting = checkedCiReporting((options as { ciReporting?: unknown }).ciReporting);
-  const services = options.services?.(flow, { ciMode: ciReporting?.ciMode }) ?? {};
+  // An invalid wiring never reaches the services as "no reader" (which merge tracking would read as its default mode): they get a reader that always refuses.
+  const services = options.services?.(flow, { ciMode: ciReporting?.ciMode ?? refusingCiMode }) ?? {};
   return { companyId, flow, services, ...(ciReporting === undefined ? {} : { ciReporting }) };
 }
+
+/** The CI mode reader a runtime without a valid `ciReporting` hands its services: every read is refused with the fixed words, never the default mode. */
+const refusingCiMode = (): Promise<never> => Promise.reject(new Error(CI_MODE_UNREADABLE_WORDS));
 
 /** The services an area needs that this runtime lacks. */
 export function serviceGaps(services: Partial<Record<CoreServiceName, CoreService>>, areas: readonly CoreArea[]): CoreServiceName[] {

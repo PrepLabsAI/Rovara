@@ -132,6 +132,17 @@ describe("the root refuses a company's runtime while a blocker stands", () => {
     expect(await runtime.ciReporting!.ciMode(TASK)).toBe("sandbox_only");
   });
 
+  it("without a valid reader, the services still never get 'no reader' (merge tracking's default mode): they get one that always refuses", async () => {
+    const seen: Array<((task: typeof TASK) => Promise<unknown>) | undefined> = [];
+    const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "on" }, { honest: false, ciMode: () => "sandbox_only" }, {
+      services: (_flow, wiring) => { seen.push(wiring.ciMode); return ALL_SERVICES(); },
+    });
+    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreSwitchBlockedError);
+    expect(seen).toHaveLength(1);
+    expect(typeof seen[0]).toBe("function");
+    await expect(seen[0]!(TASK)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
+  });
+
   it("the merge area off (drain, no merge tracking) is not asked: a held company's flow tasks are still served", async () => {
     const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "drain" }, undefined, { servedCompanies: async () => [FAKE_COMPANY], services: flowOnly });
     await expect(app.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
