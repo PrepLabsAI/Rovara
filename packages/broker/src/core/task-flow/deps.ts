@@ -328,6 +328,12 @@ export interface TaskFlowDeps {
    */
   learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
   /**
+   * Learn on send-back: told after a PERSON's send-back of the task to coding is committed (the owner's send-back action calls it, best effort, after its own write). The lessons host queues one reflection of ids so the
+   * correction can help the next task while this one is open; it reads the task itself (company, the send-back's words, the switch and the project's mode), so the caller passes only the task's id. It never throws into the
+   * action. Absent: the install has no lessons, and the send-back is learned from only when the task ends.
+   */
+  lessonsSentBack?: (taskId: string) => Promise<void>;
+  /**
    * The lighter flow, install-wide: a change whose plan is estimated exactly small skips its planning steps (plan check, design review, the requirements, design and plan approvals) and gets, after each push, the
    * reviewer's fixed questions and the quick checks of what it touched; one that grows after the build stops and gets the grown tier's reviews on its current head before it can merge. Off or absent: today's flow.
    * Switching it on needs `tierReviewCall` (construction refuses it without one), and there is no way to switch the reviewer's questions off.

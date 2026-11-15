@@ -172,7 +172,9 @@ function correctionsOf(base: TaskSubjectBase, subject: ReflectSubject, at: numbe
  * The judge is the counters' (the company's own model path, scoped to this task's failure tally and cost total); where it cannot rate (no usable model, the month used up) `recordTaskOutcome` records nothing.
  */
 async function countOutcome(deps: TaskLearningDeps, base: TaskSubjectBase, subject: ReflectSubject, input: { taskId: string }, tally: TaskFailureTally, phase: "before" | "after"): Promise<void> {
-  if (deps.counters === undefined || subject.outcome === undefined) return;
+  // A send-back's reflection is of a task that has not ended: nothing about its outcome is counted until it ends.
+  if (deps.counters === undefined || subject.outcome === undefined || subject.outcome === "sent_back") return;
+  const ended = subject.outcome;
   try {
     const attempt = currentLearningAttempt();
     if (attempt?.signal?.aborted === true) return;
@@ -191,7 +193,7 @@ async function countOutcome(deps: TaskLearningDeps, base: TaskSubjectBase, subje
     // The judge runs as its own attempt: the deadline and the signal are the reflection's, but no lease, no key noted on it and no "a call started" mark, and its faults are its own.
     const judging = attempt === undefined || !needsJudge ? undefined : { deadlineAt: attempt.deadlineAt, ...(attempt.signal === undefined ? {} : { signal: attempt.signal }), ...(attempt.attemptId === undefined ? {} : { attemptId: `${attempt.attemptId}-outcome` }) };
     const run = () => recordTaskOutcome(counters, {
-      workspaceId: subject.workspaceId, project: subject.project, taskId: input.taskId, outcome: subject.outcome!, sendBacks: Math.max(subject.spans.filter((span) => span.kind === "send_back").length, base.sendBackRequestIds.length),
+      workspaceId: subject.workspaceId, project: subject.project, taskId: input.taskId, outcome: ended, sendBacks: Math.max(subject.spans.filter((span) => span.kind === "send_back").length, base.sendBackRequestIds.length),
       ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}),
     });
     const result = await (judging === undefined ? run() : withLearningAttempt(judging, run));
@@ -214,7 +216,25 @@ export interface LearnResult { status: LearnStatus; retry: boolean; retryAt?: nu
 
 const final = (status: LearnStatus): LearnResult => ({ status, retry: false });
 
-/** Reflects on one finished task. Never throws. */
+/**
+ * Learn on send-back: the once-key that says a person's send-back (its span's event id, `task:<task>:sendback:<request>`) was already reflected on while the task was open. Only a `sent_back` reflection that
+ * reflected writes it; every later reflection of the task (the next send-back, the merge or the close) leaves that send-back out of what the reflector reads, so the same correction is not drafted twice. A task
+ * with no send-back reflection has no such key, so its reflections read exactly what they did before. Ids only: never a person's words.
+ */
+export const sendBackReflectedKey = (eventId: string): string => `sent-back-reflected:${eventId}`;
+/** The person's own send-back words a send-back reflection may learn from: a member's, not code's fixed sentence, with an event id to mark. */
+const ownSendBack = (span: ReflectSubject["spans"][number]): boolean => span.kind === "send_back" && span.trust === "member" && span.fixedText !== true && span.eventId !== undefined;
+
+/** The subject without the send-backs an earlier send-back reflection already learned from. Throws when a key cannot be read (the reflection is then retried, never run on a guess). */
+async function withoutReflectedSendBacks(store: Pick<LessonStore, "seenOnce">, key: ScopeKey, subject: ReflectSubject): Promise<ReflectSubject> {
+  const learned = new Set<string>();
+  for (const span of subject.spans) {
+    if (span.kind === "send_back" && span.eventId !== undefined && await store.seenOnce(key, sendBackReflectedKey(span.eventId))) learned.add(span.eventId);
+  }
+  return learned.size === 0 ? subject : { ...subject, spans: subject.spans.filter((span) => !(span.kind === "send_back" && span.eventId !== undefined && learned.has(span.eventId))) };
+}
+
+/** Reflects on one finished task (or, `outcome: "sent_back"`, on a person's send-back of a task that is still open). Never throws. */
 export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { workspaceId: string; taskId: string; outcome?: ReflectSubject["outcome"] }): Promise<LearnResult> {
   const faultBefore = currentLearningAttempt();
   if (faultBefore !== undefined) delete faultBefore.fault;
@@ -234,6 +254,9 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     if (!modeAllows(learning.mode, "reflect")) return final("off");
     const subject = await subjectFrom(deps, base, input.workspaceId, input.outcome);
     if (subject === undefined) return final("no_facts");
+    // What the reflector reads leaves out the send-backs an earlier send-back reflection already learned from (the counters still see the whole task).
+    const reflectKey = { workspaceId: input.workspaceId, project: base.facts.project };
+    const toReflect = await withoutReflectedSendBacks(deps.process.store, reflectKey, subject);
     // What needs no judge is counted BEFORE the reflection (idempotent: a once-key per task and lesson, a queued mark that is only replaced or removed), so it happens on every attempt whatever the reflection comes to (a refusal,
     // a model that failed, an attempt that will be retried, a deadline that cut it); a revert's re-reflection takes the merge's queued helpful mark back here. What needs the judge is counted AFTER the reflection.
     // This task's failed model calls (the outcome judge, the reflection and each draft's judge) count toward `model_failed` once per kind, not once per call.
@@ -253,7 +276,7 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
       // Review: the reflection is given what is left of the task's one Public cap (the human-edit job may have spent from it); a task with nothing left makes no call.
       const room = taskCap === undefined ? undefined : Math.round((taskCap - tally.heldUsd) * 1e6) / 1e6;
       if (room !== undefined && room < 0.001) return final("not_reflected");
-      const result = await reflectSubject({ ...withFailuresCountedOnce(deps.reflect, tally), taskBudget: tally, ...(room === undefined ? {} : { capsOverride: { ...deps.reflect.capsOverride, perTaskUsd: room } }) }, subject);
+      const result = await reflectSubject({ ...withFailuresCountedOnce(deps.reflect, tally), taskBudget: tally, ...(room === undefined ? {} : { capsOverride: { ...deps.reflect.capsOverride, perTaskUsd: room } }) }, toReflect);
       if (result.status !== "ok") {
         // "learning_paused" is a refusal (no provider, every model forbidden, a price or budget that cannot fit, the month's limit): the reason is already recorded as the project's pause, and trying again changes
         // nothing, so it ends the reflection (final) whatever fault state an earlier step left. A spend look that could not read the counter is "spend_refused" with a retryable fault (nothing was held or sent).
@@ -268,6 +291,13 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
         // At the deadline no new draft is started (the store's writes are refused too, `deadline-guard.ts`). The model has been paid for; what is cut is lost, not repeated.
         if (signal?.aborted === true) { deps.log?.("learning.drafts_cut_at_deadline", { task: logRef(input.workspaceId, input.taskId) }); break; }
         try { await processDraftRetrying(processDeps, key, draft, { ...(deps.log === undefined ? {} : { log: (event, fields) => deps.log!(event, { task: logRef(input.workspaceId, input.taskId), ...fields }) }) }); } catch { deps.log?.("learning.draft_failed", { task: logRef(input.workspaceId, input.taskId) }); }
+      }
+      // A send-back's reflection was made: the send-backs it read are learned, and later reflections of the task leave them out. Best effort: a key not written means a later reflection may read them again
+      // (the curator's copy check then meets the same advice), never that a correction is lost.
+      if (toReflect.outcome === "sent_back") {
+        for (const span of toReflect.spans.filter(ownSendBack)) {
+          try { await deps.process.store.markOnce(key, sendBackReflectedKey(span.eventId!)); } catch { deps.log?.("learning.send_back_mark_failed", { task: logRef(input.workspaceId, input.taskId) }); }
+        }
       }
       return final("reflected");
     };

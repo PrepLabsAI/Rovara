@@ -5,12 +5,26 @@ import { LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_QUEUE, LESSONS_REFLECT_VI
 import { z } from "zod";
 import type { HumanEditJob } from "./capture-types.js";
 
-export const REFLECT_OUTCOMES = ["merged", "closed", "abandoned", "reverted"] as const;
+/** `sent_back`: a person sent the still-open task back with their words (learn on send-back): reflected now, so the correction can help the next task before this one ends. */
+export const REFLECT_OUTCOMES = ["merged", "closed", "abandoned", "reverted", "sent_back"] as const;
 export type ReflectOutcome = (typeof REFLECT_OUTCOMES)[number];
 
+/** The most send-backs of ONE task that are reflected on while it is open (each is one paid learning call, inside the company's monthly learning cap); later ones are learned at the task's end. */
+export const SEND_BACK_REFLECTIONS_MAX = 3;
+
 const IdSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9._:#-]+$/u);
-export const ReflectMessageSchema = z.object({ orgId: OrgIdSchema, taskId: IdSchema, outcome: z.enum(REFLECT_OUTCOMES), requestId: IdSchema }).strict();
+/**
+ * One reflection: ids and one fixed word. A `sent_back` message also carries `round`, which human send-back of the task it is (1, 2, ...): its lease is per round (`reflectLeaseOutcome`), so a redelivery of the same
+ * round is paid once and the next round is its own reflection. Every other outcome has no round.
+ */
+export const ReflectMessageSchema = z.object({ orgId: OrgIdSchema, taskId: IdSchema, outcome: z.enum(REFLECT_OUTCOMES), requestId: IdSchema, round: z.number().int().min(1).max(SEND_BACK_REFLECTIONS_MAX).optional() }).strict()
+  .refine((message) => (message.outcome === "sent_back") === (message.round !== undefined));
 export type ReflectMessage = z.infer<typeof ReflectMessageSchema>;
+
+/** The word the reflection's lease is taken on: the outcome, and for a send-back its round (`sent_back-2`). */
+export const reflectLeaseOutcome = (message: Pick<ReflectMessage, "outcome" | "round">): string => (message.outcome === "sent_back" ? `sent_back-${String(message.round)}` : message.outcome);
+/** The queue's dedupe id of a send-back's reflection: the same task and round is the same message (a second notice of the same send-back is stored once). */
+export const sendBackRequestId = (taskId: string, round: number): string => `${taskId}:sent_back:${String(round)}`;
 
 /**
  * Lessons capture: a human fix-up commit on a merged Rovara pull request, to be read from the code host and learned from (the code host capture). A sibling message type on the same queue (the same

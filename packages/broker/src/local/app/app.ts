@@ -568,6 +568,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   flow.deps.learned = (input) => lessons.learnedFor(input);
   flow.deps.lessonsUsed = (task, repositoryId) => lessons.usedInPullRequest(task, repositoryId);
+  flow.deps.lessonsSentBack = (taskId) => lessons.noteSentBack(taskId);
   // The setup agent: a run that sets a project up by running its commands in a sandbox, its journal, the websites it asks for and the owner's use of what it found. Its decisions go through the gate above.
   const setupAgent = createLocalSetupAgent({
     flow: flow.deps, registry, gate, owner, companyId, now: () => clock().getTime(), enabled: options.setupAgent ?? true,

@@ -88,7 +88,7 @@ export interface CoreLessons {
   readonly sources: { source: TaskSubjectSource; rows: OutcomeRowReader };
   /** The task, when it is this company's (company, project and person). */
   readTask(taskId: string): Promise<{ companyId: string; project: string; developerId: string } | undefined>;
-  /** Fills the task flow's lessons slots (`learned`, `lessonsUsed`, `milestones`). Call once, before the first task of the company is started or dispatched. */
+  /** Fills the task flow's lessons slots (`learned`, `lessonsUsed`, `lessonsSentBack`, `milestones`). Call once, before the first task of the company is started or dispatched. */
   attach(): void;
   /** The scheduled pass: milestones due, the shared reflection queue, and once a day the upkeep of the company's projects. */
   readonly service: CoreService;
@@ -211,6 +211,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     attached = true;
     deps.learned = (input) => host.learnedFor(input);
     deps.lessonsUsed = (task, repositoryId) => host.usedInPullRequest(task, repositoryId);
+    deps.lessonsSentBack = (taskId) => host.noteSentBack(taskId);
     deps.milestones = milestones;
   }
 
