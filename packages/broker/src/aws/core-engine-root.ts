@@ -41,6 +41,9 @@ import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
+import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
+import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
+import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService } from "../services/index.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -96,6 +99,13 @@ export interface BrokerCoreRoot {
    * people port: every lessons route then answers "Lessons are off." and reads nothing.
    */
   readonly lessons: LessonsApi | undefined;
+  /**
+   * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` while the
+   * switch is off or for any other path. (The broker's HTTP API mounts no /v1/app/* path yet: see the switch-on lanes.)
+   */
+  personErase(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined>;
+  /** Finishes one company's owed person erases (the learning step first, then the evidence walk). For the scheduled job when it lands. Rejects while the switch is off. */
+  resumePersonErases(companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }>;
   /** A schedule's core job event, or a State table stream batch. `undefined`: not the core's. */
   handleEvent(event: unknown, options?: { remainingMs?: number | undefined }): Promise<unknown>;
   /**
@@ -225,6 +235,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   const lessonsSwitch = readCoreLessonsSwitch(env);
   const lessonsByCompany = new Map<string, CoreLessons>();
+  const teamRecords = new Map<string, CoreTeamRecord>();
 
   const app = createCoreHostApp({
     env,
@@ -262,6 +273,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           if (lessons !== undefined) {
             lessons.attach();
             lessonsByCompany.set(companyId, lessons);
+            // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
+            // context sources' `teamSearch` (kept here for that wiring).
+            teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
           }
         }
         return { ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }) };
@@ -342,10 +356,40 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     return found;
   };
 
+  // Person erase: the engine's erase with the deployed learning step (lessons and Team record), the evidence bucket's version delete, and the company's audit sink.
+  const eraseDepsOver = (registry: AdapterRegistry, companyId: string): PersonEraseDeps => {
+    const store = registry.require("storage");
+    const audit = registry.require("audit-sink");
+    const objects = registry.require("object-storage") as unknown as Partial<PersonEraseObjects>;
+    if (typeof objects.deleteEveryVersion !== "function") throw new Error("the object storage cannot delete every version");
+    void companyId;
+    return { store, audit, objects: objects as PersonEraseObjects, eraseLearning: hostedEraseLearning({ store, audit, now: () => now().getTime(), log }), now: () => now().getTime(), log };
+  };
+  const standingOf = async (companyId: string, personId: string): Promise<"member" | "former" | "unknown"> => {
+    if (inputs.signInTableName === undefined || inputs.signInTableName === "") throw new Error("no sign-in table");
+    const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
+    const parsed = Membership.safeParse(response?.Item);
+    if (!parsed.success || parsed.data.personId !== personId || parsed.data.companyId !== companyId) return "unknown";
+    return parsed.data.revokedAt === undefined ? "member" : "former";
+  };
+
   return {
     app,
     coreTasks,
     lessons,
+    async personErase(request, caller) {
+      if (!app.serving || !(request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return undefined;
+      const registry = await app.registry();
+      return await createPersonEraseRoute({
+        app, log, standing: standingOf,
+        companyOf: async (who) => await membershipOf(who.principal.personId),
+        eraseDeps: (companyId) => eraseDepsOver(registry, companyId),
+      }).route(request, caller);
+    },
+    async resumePersonErases(companyId, budgetMs) {
+      const registry = await app.registry();
+      return await resumePersonErases(eraseDepsOver(registry, companyId), companyId, budgetMs);
+    },
     async callback(request) {
       if (coreTasks === undefined) return undefined;
       const match = CORE_CALLBACK.exec(request.path.split("?")[0] ?? "");

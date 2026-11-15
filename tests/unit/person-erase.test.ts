@@ -268,6 +268,24 @@ describe("person erase: bounded and resumable", () => {
     expect(await w.store.get({ pk: personErasePendingPartition(A), sk: MALLORY })).toBeUndefined();
   });
 
+  it("with a learning erase given, runs it again before each owed walk; when it fails the walk is not run and the pending row stays for the next run", async () => {
+    const w = world();
+    const tasks = [await task(w, MALLORY, A), await task(w, MALLORY, A)];
+    const real = w.deps.objects;
+    w.deps.objects = { deleteEveryVersion: async () => { w.clock.now += 10_000; return "out_of_time" as const; } };
+    expect((await erase(w, { budgetMs: 5_000 })).evidence).toBe("owed");
+    w.deps.objects = real;
+    const learning: string[] = [];
+    const failing = async (companyId: string, personId: string) => { learning.push(`${companyId}:${personId}`); throw new Error("lessons store down"); };
+    expect(await resumePersonErases({ ...w.deps, eraseLearning: failing }, A, 5_000)).toEqual({ finished: 0, owed: 1 });
+    expect(left(w, tasks.flatMap((entry) => entry.prefixes))).toBeGreaterThan(0);
+    expect(await w.store.get({ pk: personErasePendingPartition(A), sk: MALLORY })).toBeDefined();
+    const working = async (companyId: string, personId: string) => { learning.push(`${companyId}:${personId}`); };
+    expect(await resumePersonErases({ ...w.deps, eraseLearning: working }, A, 5_000)).toEqual({ finished: 1, owed: 0 });
+    expect(learning).toEqual([`${A}:${MALLORY}`, `${A}:${MALLORY}`]);
+    expect(left(w, tasks.flatMap((entry) => entry.prefixes))).toBe(0);
+  });
+
   it("a task that fails is kept for retry and never holds the cursor: later tasks are erased, and the walk is not done until the retry succeeds", async () => {
     const w = world();
     const bad = await task(w, MALLORY, A);
