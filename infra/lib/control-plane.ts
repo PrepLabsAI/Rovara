@@ -77,8 +77,10 @@ function unlistedAlarms(scope: Construct, prefix: string): string[] {
     if (!(construct instanceof cloudwatch.CfnAlarm)) return [];
     // The foundation's egress alarms keep the live names agentx-<env>-blocked-dns-spike and agentx-<env>-nat-egress-spike-<az>, which the probe's single-word suffixes
     // cannot list. They notify the alerts topic and are not on the admin health route.
-    if (construct.node.scopes.some((parent) => parent instanceof EgressAlarms)) return [];
+    // Only those names: any other alarm inside EgressAlarms is still refused.
     const name = construct.alarmName;
+    if (name !== undefined && !Token.isUnresolved(name) && name.startsWith(prefix) && construct.node.scopes.some((parent) => parent instanceof EgressAlarms)
+      && (name === `${prefix}blocked-dns-spike` || /^nat-egress-spike-[a-z0-9]+-az[0-9]+$/.test(name.slice(prefix.length)))) return [];
     if (name !== undefined && !Token.isUnresolved(name) && listed.has(name)) return [];
     return [`the health probe does not read alarm ${construct.node.path} (${String(name)}): name it ${prefix}<suffix> and add the suffix to HEALTH_ALARM_SUFFIXES`];
   });

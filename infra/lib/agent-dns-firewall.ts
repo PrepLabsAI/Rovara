@@ -30,7 +30,7 @@ const REGION = /^[a-z]{2}(-[a-z]+)+-\d$/u;
 /**
  * The AWS hosts the install's own machines resolve in its region. These replace `*.amazonaws.com` and `*.aws`, which would let any AWS customer's bucket or API through.
  * KNOWN RESIDUALS, each a name under which anyone in the region can host something, kept because the owning stack generates the name after this stack is deployed:
- * `*.s3.<region>` (the artifact buckets and the ECR layer bucket), `*.execute-api.<region>` (the control plane's API), `*.<region>.elb` and `*.<region>.rds` (a model gateway's load
+ * `*.s3.<region>` (the artifact buckets and the ECR layer bucket) and `s3.<region>` itself (a path-style request reaches any bucket in the region), `*.execute-api.<region>` (the control plane's API), `*.<region>.elb` and `*.<region>.rds` (a model gateway's load
  * balancer and database). Closing them needs the owning stacks to publish their exact names to the firewall.
  */
 export const INSTALL_AWS_HOSTS: ReadonlyArray<{ host: (region: string, account?: string) => string | undefined; why: string }> = [

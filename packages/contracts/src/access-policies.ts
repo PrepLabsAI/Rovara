@@ -245,6 +245,13 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
       Resource: "*",
     },
     { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: defaultBoundaryArn(scope) },
+    // The DNS firewall fails closed and is the VPC's only resolver path: no AgentX role may switch it to fail open, share it, or route DNS around it, whatever a later Allow says.
+    {
+      Sid: "DenyDnsFirewallEscapes",
+      Effect: "Deny",
+      Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"],
+      Resource: "*",
+    },
   ];
 }
 

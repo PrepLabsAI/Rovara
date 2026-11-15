@@ -31,14 +31,15 @@ export function withoutSwitchoverControlPlaneParity(template: unknown): unknown 
   rules.splice(1);
   const roleId = Object.keys(synthesized.Resources).find((id) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id))!;
   const functionId = Object.keys(synthesized.Resources).find((id) => /^Broker[0-9A-F]{8}$/.test(id) && synthesized.Resources[id]!.Type === "AWS::Lambda::Function")!;
-  expect(synthesized.Resources[roleId]!.Properties.RoleName).toBe("agentx-staging-broker-role");
-  expect(synthesized.Resources[functionId]!.Properties.FunctionName).toBe("agentx-staging-broker");
+  const roleName = synthesized.Resources[roleId]!.Properties.RoleName as string;
+  expect(roleName).toMatch(/^agentx-[a-z][a-z0-9-]*-broker-role$/);
+  expect(synthesized.Resources[functionId]!.Properties.FunctionName).toBe(roleName.replace(/-role$/, ""));
   delete synthesized.Resources[roleId]!.Properties.RoleName;
   delete synthesized.Resources[functionId]!.Properties.FunctionName;
   return template;
 }
 
-/** Access: the DnsFirewall and DnsFirewallList statements in the deploy role's policy and the default boundary, and route53resolver in their service-linked role lists. */
+/** Access: the DnsFirewall and DnsFirewallList statements in the deploy role's policy and the default boundary, the boundary's DenyDnsFirewallEscapes, and route53resolver in their service-linked role lists. */
 export function withoutDnsFirewallAccess(template: unknown): unknown {
   const synthesized = template as Template;
   const documents: Array<{ Statement: Statement[] }> = [];
@@ -52,7 +53,7 @@ export function withoutDnsFirewallAccess(template: unknown): unknown {
     if (!sids.includes("DnsFirewall")) continue;
     firewallDocuments += 1;
     expect(sids.filter((sid) => sid === "DnsFirewall" || sid === "DnsFirewallList")).toEqual(["DnsFirewall", "DnsFirewallList"]);
-    document.Statement = document.Statement.filter((statement) => statement.Sid !== "DnsFirewall" && statement.Sid !== "DnsFirewallList");
+    document.Statement = document.Statement.filter((statement) => statement.Sid !== "DnsFirewall" && statement.Sid !== "DnsFirewallList" && statement.Sid !== "DenyDnsFirewallEscapes");
     const linked = document.Statement.find((statement) => statement.Sid === "ServiceLinkedRoles")!;
     expect(linked.Condition!.StringLike!["iam:AWSServiceName"]).toEqual(["ecs.amazonaws.com", "route53resolver.amazonaws.com"]);
     linked.Condition!.StringLike!["iam:AWSServiceName"] = ["ecs.amazonaws.com"];

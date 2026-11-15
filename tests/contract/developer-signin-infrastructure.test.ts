@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -581,6 +582,8 @@ describe("task-token key and membership IAM", () => {
     expect([reads, families]).toEqual([1, 1]);
     // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts; its shape is asserted here, then it is taken out so the digest still pins everything else.
     withoutCoreEngine(remainder);
+    // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
+    withoutSwitchoverControlPlaneParity(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain.
     expect(createHash("sha256").update(text).digest("hex")).toBe("a1dd557411883920332ddf90e23cec2c6c20be9bc3e178fcd378f4dfad9bfc7b");

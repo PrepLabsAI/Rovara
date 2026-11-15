@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { App, Stack } from "aws-cdk-lib";
+import { App, Stack, aws_cloudwatch as cloudwatch, aws_logs as logs, aws_sns as sns } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_AGENT_ALLOW_DOMAINS } from "@agentx/contracts";
@@ -8,6 +8,7 @@ import {
   DNS_FIREWALL_ASSOCIATION_PRIORITY, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, installAgentAllowDomains, isBroadAllowedDomain, parseExtraAllowDomains,
 } from "../../infra/lib/agent-dns-firewall.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
+import { EgressAlarms } from "../../infra/lib/egress-alarms.js";
 import { ProductionFoundationStack } from "../../infra/lib/production-foundation.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -155,5 +156,27 @@ describe("the staging broker keeps its fixed names", () => {
     expect(functions[0]![1].Properties.FunctionName).toBeUndefined();
     const roles = Object.entries(resourcesOf(legacy, "AWS::IAM::Role")).filter(([id]) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id));
     expect(roles[0]![1].Properties.RoleName).toBeUndefined();
+  });
+});
+
+describe("the health probe's egress-alarm exemption", () => {
+  it("covers only the two live egress alarm names; another alarm inside EgressAlarms still fails synthesis", () => {
+    const app = new App();
+    const stack = new ControlPlaneStack(app, "ExemptionControlPlane", { naming: environmentNaming("staging") });
+    const alarms = new EgressAlarms(stack, "EgressAlarms", {
+      env: "staging", resourcePrefix: "agentx-staging", natGateways: [],
+      dnsFirewallLogGroup: new logs.LogGroup(stack, "QueryLogs"), alertsTopic: new sns.Topic(stack, "Alerts"),
+    });
+    new cloudwatch.Alarm(alarms, "Extra", { alarmName: "agentx-staging-something-else", metric: new cloudwatch.Metric({ namespace: "X", metricName: "Y" }), threshold: 1, evaluationPeriods: 1 });
+    expect(() => app.synth()).toThrow(/health probe does not read alarm .*agentx-staging-something-else/);
+  });
+});
+
+describe("the default boundary keeps the DNS firewall closed", () => {
+  it("denies switching it to fail open, sharing it, and routing DNS around it, in the synthesized access stack", () => {
+    const access = buildAgentXApp({ agentxEnv: "staging", agentxRegion: "us-west-2" }).node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === "agentx-staging-access")!;
+    const boundary = Object.values(resourcesOf(Template.fromStack(access), "AWS::IAM::ManagedPolicy"))[0]!;
+    const statements = (boundary.Properties.PolicyDocument as { Statement: Array<{ Sid?: string; Effect: string; Action: string[] }> }).Statement;
+    expect(statements.find((statement) => statement.Sid === "DenyDnsFirewallEscapes")).toMatchObject({ Effect: "Deny", Action: expect.arrayContaining(["route53resolver:UpdateFirewallConfig"]) as unknown });
   });
 });

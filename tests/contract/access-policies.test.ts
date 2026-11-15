@@ -78,7 +78,7 @@ describe("service role policy", () => {
 
   it("manages the DNS firewall only in this account and region, and only lists it on any resource", () => {
     for (const statements of [serviceRoleStatements(scope), defaultBoundaryStatements(scope)]) {
-      const resolver = statements.filter((s) => s.Action.some((a) => a.startsWith("route53resolver:")));
+      const resolver = statements.filter((s) => s.Effect === "Allow" && s.Action.some((a) => a.startsWith("route53resolver:")));
       expect(resolver).toEqual([
         { Sid: "DnsFirewall", Effect: "Allow", Action: ["route53resolver:*"], Resource: "arn:aws:route53resolver:us-east-1:123456789012:*" },
         { Sid: "DnsFirewallList", Effect: "Allow", Action: ["route53resolver:List*"], Resource: "*" },
@@ -296,6 +296,8 @@ describe("default permission boundary", () => {
       { Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
       { Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"], Resource: "*" },
       { Action: ["iam:*Policy*"], Resource: "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary" },
+      // No role may switch the DNS firewall to fail open, share it, or route DNS around it.
+      { Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"], Resource: "*" },
     ]);
     expect(denies.every((s) => s.Condition === undefined)).toBe(true);
   });
