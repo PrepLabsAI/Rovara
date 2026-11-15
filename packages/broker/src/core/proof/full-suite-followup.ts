@@ -16,7 +16,7 @@
 // Records, in the company's own partition (`ORG#<co>#FULLRUN`): RUN#<project>#<task>#<digest16> (the follow-up), LATEST#<project>#<task> (the commit the task's pointer names) and DAY#<project>#<date>
 // (the day's count). All expire.
 import {
-  agentXError, change, companyScoped, when, type DecisionRisk, type DocumentStore, type EvidenceSelectionSchema, type OrgId, type RovaraCheckFullSuite, type TransactItem,
+  INDEX_EXPIRY_ATTRIBUTE, agentXError, change, companyScoped, when, type DecisionRisk, type DocumentStore, type EvidenceSelectionSchema, type OrgId, type RovaraCheckFullSuite, type TransactItem,
 } from "@agentx/contracts";
 import type { z } from "zod";
 import type { FullSuiteState } from "./verification-result.js";
@@ -24,7 +24,7 @@ import type { FullSuiteState } from "./verification-result.js";
 type EvidenceSelection = z.infer<typeof EvidenceSelectionSchema>;
 
 export interface FollowupDeps {
-  store: Pick<DocumentStore, "get" | "transact" | "update" | "ttlAttribute">;
+  store: Pick<DocumentStore, "get" | "transact" | "update">;
   now(): number;
   /** Charges the follow-up to the project's budget. Throws the scope's own error when a budget has no room. Nothing is queued without it. */
   admit(input: { orgId: OrgId; project: string; taskId: string; purpose: "full_suite_followup" }): Promise<void>;
@@ -61,11 +61,11 @@ function checked(input: FollowupTarget & { headSha?: string }): void {
     throw agentXError("CONFIG_INVALID", "the follow-up names a project, a task, a commit and a code digest");
   }
 }
-const pk = (orgId: OrgId): string => companyScoped(orgId, FOLLOWUP_ENTITY);
-const runKey = (input: FollowupTarget) => ({ pk: pk(input.orgId), sk: `RUN#${input.project}#${input.taskId}#${input.candidateDigest.slice(0, 16)}` });
-const latestKey = (input: Omit<FollowupTarget, "candidateDigest">) => ({ pk: pk(input.orgId), sk: `LATEST#${input.project}#${input.taskId}` });
-const dayKey = (orgId: OrgId, project: string, ms: number) => ({ pk: pk(orgId), sk: `DAY#${project}#${new Date(ms).toISOString().slice(0, 10)}` });
-const expiry = (deps: FollowupDeps, at: number): Record<string, number> => (deps.store.ttlAttribute === undefined ? {} : { [deps.store.ttlAttribute]: Math.floor(at / 1000) });
+const runKey = (input: FollowupTarget) => ({ pk: companyScoped(input.orgId, FOLLOWUP_ENTITY), sk: `RUN#${input.project}#${input.taskId}#${input.candidateDigest.slice(0, 16)}` });
+const latestKey = (input: Omit<FollowupTarget, "candidateDigest">) => ({ pk: companyScoped(input.orgId, FOLLOWUP_ENTITY), sk: `LATEST#${input.project}#${input.taskId}` });
+const dayKey = (orgId: OrgId, project: string, ms: number) => ({ pk: companyScoped(orgId, FOLLOWUP_ENTITY), sk: `DAY#${project}#${new Date(ms).toISOString().slice(0, 10)}` });
+/** Every record expires (the index expiry attribute every Rovara table sweeps). */
+const expiry = (at: number): Record<string, number> => ({ [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(at / 1000) });
 
 const COUNTS_OK = (counts: number[]): boolean => counts.every((count) => Number.isSafeInteger(count) && count >= 0);
 
@@ -88,7 +88,7 @@ export async function queueFullSuiteFollowup(deps: FollowupDeps, input: Followup
   checked(input);
   const now = deps.now();
   const key = runKey(input);
-  const latestItem = { ...latestKey(input), entityType: FOLLOWUP_ENTITY, kind: "latest", orgId: input.orgId, digest: input.candidateDigest, ...expiry(deps, now + TTL_MS) };
+  const latestItem = { ...latestKey(input), entityType: FOLLOWUP_ENTITY, kind: "latest", orgId: input.orgId, digest: input.candidateDigest, ...expiry(now + TTL_MS) };
   if ((await deps.store.get(key)) !== undefined) {
     // Same task and commit: the same follow-up (also after it finished: it is not run twice). It takes the pointer back, as a push of that commit again would.
     await deps.store.transact([{ kind: "put", item: latestItem }]);
@@ -106,12 +106,12 @@ export async function queueFullSuiteFollowup(deps: FollowupDeps, input: Followup
       kind: "put", condition: when.absent(),
       item: {
         ...key, entityType: FOLLOWUP_ENTITY, kind: "run", orgId: input.orgId, project: input.project, taskId: input.taskId, candidateDigest: input.candidateDigest, headSha: input.headSha, state: "queued",
-        queuedAtMs: now, queuedAt: new Date(now).toISOString(), ...expiry(deps, now + TTL_MS),
+        queuedAtMs: now, queuedAt: new Date(now).toISOString(), ...expiry(now + TTL_MS),
       },
     },
     {
       kind: "update", key: dayKey(input.orgId, input.project, now),
-      ops: [change.set("entityType", FOLLOWUP_ENTITY), change.add("count", 1), ...(deps.store.ttlAttribute === undefined ? [] : [change.set([deps.store.ttlAttribute], Math.floor((now + DAY_TTL_MS) / 1000))])],
+      ops: [change.set("entityType", FOLLOWUP_ENTITY), change.add("count", 1), change.set(INDEX_EXPIRY_ATTRIBUTE, Math.floor((now + DAY_TTL_MS) / 1000))],
       condition: when.or(when.notExists("count"), when.lt("count", FOLLOWUP_DAILY_CAP)),
     },
     { kind: "put", item: latestItem },
