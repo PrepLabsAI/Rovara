@@ -1,11 +1,14 @@
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { EVIDENCE_TRUST_CLASS_WORDS } from "@agentx/contracts";
 import { isServiceContract, type AnswerShape, type ContractAdapter, type ServiceContract } from "./service-contract.js";
 
-// Generic "answer shape -> labelled mock config" step of the contract finder (TE-G6). The adapter names the service and
-// its error cases; everything else is the same for every outside service.
-const RatesSchema = z.object({ modelError: z.number().min(0).max(1), throttled: z.number().min(0).max(1), timeout: z.number().min(0).max(1) }).strict().refine((rates) => rates.modelError + rates.throttled + rates.timeout <= 1);
-const ControlsSchema = z.object({ latencyMs: z.number().int().min(0).max(60_000), errorRates: RatesSchema }).strict();
+// Generic "answer shape -> labelled mock config" step of the contract finder (TE-G6). The adapter names the service, its
+// error cases and the keys of its independent error rates; everything else is the same for every outside service.
+// The scenario names low_score and high_score mean the low and high end of a numeric field, for any service.
+const ratesSchema = (adapter: ContractAdapter) => z.object(Object.fromEntries(adapter.errorRateKeys.map((key) => [key, z.number().min(0).max(1)]))).strict()
+  .refine((rates) => Object.values(rates).reduce((sum, rate) => sum + rate, 0) <= 1);
+const controlsSchema = (adapter: ContractAdapter) => z.object({ latencyMs: z.number().int().min(0).max(60_000), errorRates: ratesSchema(adapter) }).strict();
 type Variant = "typical" | "edge" | "low_score" | "high_score";
 function output(shape: AnswerShape, variant: Variant): unknown {
   switch (shape.type) {
@@ -40,7 +43,6 @@ function matches(value: unknown, shape: AnswerShape, depth = 0): boolean {
   }
 }
 const scenario = <T extends Variant>(name: T) => z.object({ scenario: z.literal(name), conformsToContract: z.literal(true), body: z.unknown() }).strict();
-const sameErrors = (actual: readonly unknown[], expected: readonly unknown[]) => JSON.stringify(actual) === JSON.stringify(expected);
 
 /** The versioned document for the later stand-in, deliberately not a record or runtime backing.
  * The empty response is an intentional invalid-response exercise when the contract
@@ -58,21 +60,22 @@ export function serviceMockConfigSchema(adapter: ContractAdapter) {
       z.object({ scenario: z.literal("empty"), conformsToContract: z.boolean(), body: z.null() }).strict(),
     ]),
     errors: z.array(z.object({ scenario: z.string(), status: z.number().int().optional() }).strict()),
-    ...ControlsSchema.shape,
+    ...controlsSchema(adapter).shape,
   }).strict().superRefine((config, ctx) => {
-    if (!sameErrors(config.errors, adapter.errorCases)) ctx.addIssue({ code: "custom", message: "Error cases do not match the service's error cases" });
+    if (!isDeepStrictEqual(config.errors, adapter.errorCases)) ctx.addIssue({ code: "custom", message: "Error cases do not match the service's error cases" });
     if (!isServiceContract(config.contract)) return;
+    if (!adapter.kinds.includes(config.contract.source.kind)) ctx.addIssue({ code: "custom", message: "Contract source kind is not one of the service's source kinds" });
     for (const entry of config.outputs) {
       if (matches(entry.body, config.contract.shape) !== entry.conformsToContract) ctx.addIssue({ code: "custom", message: "Output does not match its stated contract conformance" });
     }
   });
 }
 export type ServiceMockConfig = z.infer<ReturnType<typeof serviceMockConfigSchema>>;
-export interface ServiceMockOptions { latencyMs?: number; errorRates?: z.infer<typeof RatesSchema> }
+export interface ServiceMockOptions { latencyMs?: number; errorRates?: Record<string, number> }
 
 export function generateServiceMock(adapter: ContractAdapter, contract: ServiceContract, options: ServiceMockOptions = {}): ServiceMockConfig {
   if (!isServiceContract(contract)) throw new Error("Invalid service contract");
-  const controls = ControlsSchema.parse({ latencyMs: options.latencyMs ?? 0, errorRates: options.errorRates ?? { modelError: 0, throttled: 0, timeout: 0 } });
+  const controls = controlsSchema(adapter).parse({ latencyMs: options.latencyMs ?? 0, errorRates: options.errorRates ?? Object.fromEntries(adapter.errorRateKeys.map((key) => [key, 0])) });
   return serviceMockConfigSchema(adapter).parse({
     version: 1, service: adapter.service, trust: "made_by_rovara", label: EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara,
     contract: structuredClone(contract),

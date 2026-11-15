@@ -50,6 +50,7 @@ export const sageMakerAdapter: ContractAdapter = {
   service: "sagemaker",
   kinds: ["fixture", "inference", "output_schema"],
   errorCases: [{ scenario: "model_error", status: 424 }, { scenario: "throttled", status: 429 }, { scenario: "timeout" }],
+  errorRateKeys: ["modelError", "throttled", "timeout"],
   read(file): AdapterRead {
     if (file.kind === "inference") {
       const literal = inferenceLiteral(file.content);

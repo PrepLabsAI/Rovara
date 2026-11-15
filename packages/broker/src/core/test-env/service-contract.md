@@ -5,7 +5,14 @@ contract source (a `ContractAdapter` reads one kind of repo file) -> answer shap
 `service-contract.ts`) -> labelled mock config (`generateServiceMock`, `service-contract-mock.ts`). An adapter names its
 `service`, its source `kinds` in priority order, its `errorCases`, and a `read` function that turns one file's text into a
 parsed value (an example answer or a schema) or says it is unsupported. Everything below the adapter is the same for every
-service. SageMaker (`sagemaker-contract.ts`, `sagemaker-mock.ts`) is the first adapter; the binding functions
+service. A `read` that throws, or returns anything outside its contract (an unknown status or form, a pointer over 65,536
+characters), gives the fixed reason `unsupported_shape`; no text is echoed. The shared reason words `invalid_json` and
+`unsupported_inference` mean "could not parse" and "could not understand the code" for any adapter. The mock config checks
+that the contract's source kind is one the adapter lists, that its `errors` equal the adapter's `errorCases`, and that its
+`errorRates` have exactly the adapter's `errorRateKeys`. The scenario names `low_score` and `high_score` mean the low and
+high end of a numeric field for any service.
+
+The rest of this file describes the SageMaker adapter (inference rules, its 424 / 429 / timeout cases and rates). SageMaker (`sagemaker-contract.ts`, `sagemaker-mock.ts`) is the first adapter; the binding functions
 `findSageMakerContract`, `isSageMakerContract` and `generateSageMakerMock` keep their behaviour.
 
 `findSageMakerContract` accepts classified file contents for **one model**. A caller

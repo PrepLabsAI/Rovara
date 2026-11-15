@@ -27,11 +27,14 @@ export type AdapterRead =
   | { status: "ok"; form: "example" | "schema"; value: unknown; pointer: string }
   | { status: "unsupported"; reason: "invalid_json" | "unsupported_inference" };
 /** One outside service's way of finding its contract. `kinds` is the priority order: the first supported file of the
- * first kind wins. `errorCases` are the labelled failure answers the mock config carries (fixed words, no echoed input). */
+ * first kind wins. `errorCases` are the labelled failure answers the mock config carries (fixed words, no echoed input).
+ * A `read` that throws or returns anything unexpected counts as unsupported, never as a guess. */
 export interface ContractAdapter {
   service: string;
   kinds: readonly ContractSourceKind[];
   errorCases: readonly { scenario: string; status?: number }[];
+  /** Keys of the independent error rates a mock config carries (each 0 to 1, summing to at most 1; all default to 0). */
+  errorRateKeys: readonly string[];
   read(file: { kind: ContractSourceKind; path: string; content: string }): AdapterRead;
 }
 
@@ -119,7 +122,7 @@ export function findServiceContract(adapter: ContractAdapter, files: readonly Co
       try { read = adapter.read({ kind, path: file.path, content: file.content }); } catch { result.reason = "unsupported_shape"; continue; }
       if (!object(read) || (read.status !== "ok" && read.status !== "unsupported")) { result.reason = "unsupported_shape"; continue; }
       if (read.status === "unsupported") { result.reason = read.reason === "invalid_json" ? "invalid_json" : "unsupported_inference"; continue; }
-      if ((read.form !== "example" && read.form !== "schema") || typeof read.pointer !== "string") { result.reason = "unsupported_shape"; continue; }
+      if ((read.form !== "example" && read.form !== "schema") || typeof read.pointer !== "string" || read.pointer.length > CONTRACT_LIMITS.characters) { result.reason = "unsupported_shape"; continue; }
       const source = { kind, path: file.path, pointer: read.pointer };
       try {
         const shape = (read.form === "schema" ? shapeFromSchema : shapeFromValue)(read.value, source, 0, { nodes: 0 });
