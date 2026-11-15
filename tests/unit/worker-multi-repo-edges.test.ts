@@ -183,6 +183,28 @@ describe("MR2 deadline and syntax guards", () => {
     expect(result.entries[0]).toMatchObject({ after: "not_run", output: "AgentX did not run this check: the time budget for checks ran out." });
     expect(supplier.evidence()).toBeUndefined();
   });
+  it("a derivation that ran out of one round's budget is derived again by the next round", async () => {
+    const f = await fixture([pkg("app", { dependencies: { lib: "*" } }), pkg("lib")]);
+    const { createRepositoryCheckSupplier } = await import("../../packages/worker/src/multi-repo-supplier.js");
+    const { createCheckRunners, runChecks } = await import("../../packages/worker/src/verification/checks.js");
+    const original = candidateFs.readFileIn;
+    let charged = false;
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const spy = vi.spyOn(candidateFs, "readFileIn").mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (!charged && args[1] === "package.json") { charged = true; await vi.advanceTimersByTimeAsync(1_000); }
+      return result;
+    });
+    const supplier = createRepositoryCheckSupplier({ rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
+    const runners = supplier.scope(createCheckRunners({ rootPath: f.root, local: true }));
+    const first = await runChecks({ source: "project", readiness: [{ executable: process.execPath, args: ["-e", "throw Error('must not run')"], cwd: "repo0", timeoutSeconds: 10 }] }, runners, { signal: new AbortController().signal, budgetMs: 1_000 });
+    expect(charged).toBe(true);
+    expect(first.entries[0]?.after).toBe("not_run");
+    spy.mockRestore(); vi.useRealTimers();
+    const second = await runChecks({ source: "project", readiness: [{ executable: process.execPath, args: ["-e", "console.log('second round')"], cwd: "repo0", timeoutSeconds: 10 }] }, runners, { signal: new AbortController().signal, budgetMs: 30_000 });
+    expect(second.entries[0]).toMatchObject({ after: "passed", output: "second round\n" });
+    expect(supplier.evidence()?.edges).toEqual([{ consumer: "repo0", provider: "repo1", language: "node", source: "both" }]);
+  });
   it("rejects malformed project headers instead of silently ignoring a dependency", async () => {
     const f = await fixture([{ "pyproject.toml": '[project\nname="app"\ndependencies=["lib"]\n' }, { "setup.cfg": "[metadata]\nname=lib\n" }]);
     expect(await f.derive()).toEqual({ edges: [], notes: ["dependency manifest unreadable"] });

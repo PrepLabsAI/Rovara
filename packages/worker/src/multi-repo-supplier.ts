@@ -50,7 +50,9 @@ export function createRepositoryCheckSupplier(input: {
               ? Promise.resolve({ edges: [], notes: [input.repositories.length > 32 ? "too many repositories or dependencies; tested separately" : "dependency manifest unreadable"] })
               : deriveRepositoryEdges(input.repositories.map(repository => ({ name: repository.repositoryId, directory: resolve(input.rootPath, repository.path), baseCommit: repository.baseCommit })), { signal, remainingMs });
           }
-          facts = await derivation; notes = facts.notes;
+          // Only a finished derivation is kept: one that ran out of this round's budget is derived again by the next round, under its own budget.
+          try { facts = await derivation; } catch (error) { derivation = undefined; throw error; }
+          notes = facts.notes;
           if (signal.aborted || remainingMs() <= 0) throw new Error("aborted");
           const old = phase.getStore();
           if (facts.edges.length === 0) return old === undefined ? run(base) : gitOriginalCode(old).run(() => run(base));
