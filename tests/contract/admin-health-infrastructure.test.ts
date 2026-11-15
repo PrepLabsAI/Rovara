@@ -131,6 +131,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/e2e/requalify-hold.ts",
       // Spec 062 FR-031: a channel link code, one-time and dead after 10 minutes.
       "packages/broker/src/aws/channel-links.ts",
+      // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item the workflow reads (an AppNote), with a 400-day expiry; it reads that item back too.
+      "packages/broker/src/developer/task-code-routes.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

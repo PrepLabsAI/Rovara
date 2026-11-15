@@ -564,7 +564,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFilesPage" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
   /** Trusted server-side source capture for setup discovery and exact-commit E2E planning context. */
   projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
   /** Server-selected catalog namespace for an already configured setup verifier. */
@@ -6228,6 +6228,8 @@ export function workflowApplicationRouteDependencies(dependencies: AwsBrokerDepe
       validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact, input.reapproval === true ? { reapproval: true } : {}),
     registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : (url: string) => dependencies.githubPullRequests.getRepositoryIdentity!(url),
     refreshTaskFeedback: (taskId: string) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
+    readPullRequestDiff: dependencies.githubPullRequests.getPullRequestFilesPage === undefined ? undefined
+      : (repositoryUrl: string, number: number, page: number) => dependencies.githubPullRequests.getPullRequestFilesPage!(repositoryUrl, number, page, 30),
   };
 }
 
