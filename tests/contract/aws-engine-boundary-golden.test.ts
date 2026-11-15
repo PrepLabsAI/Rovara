@@ -47,7 +47,7 @@ async function both<T>(db: { onWrite(listener: (change: unknown) => void): () =>
     bypass.on = on;
     const writes: string[] = [];
     const stop = db.onWrite((change) => writes.push(JSON.stringify(change)));
-    try { return { answer: withoutRequestId(JSON.stringify(await request())), writes }; } finally { stop(); bypass.on = false; }
+    try { return { answer: withoutRequestId(JSON.stringify(await request()) ?? "undefined"), writes }; } finally { stop(); bypass.on = false; }
   };
   const before = await run(true);
   const after = await run(false);
@@ -102,6 +102,9 @@ describe("no core task, switch off: the AWS developer routes are byte-identical 
     for (const [name, request] of [
       ["workspace", () => actions.workspace(workspaceId)], ["operations", () => actions.operations(workspaceId)], ["pull requests", () => actions.pullRequests(workspaceId)],
       ["artifacts", async () => actions.artifacts(workspaceId, (await actions.operations(workspaceId)).at(-1)!.id)],
+      ["workflow binding", async () => actions.workflowBinding(workspaceId, (await actions.operations(workspaceId)).at(-1)!.id)],
+      ["candidate digest", async () => actions.workflowCandidateSourceExportDigest(workspaceId, (await actions.operations(workspaceId)).at(-1)!.id)],
+      ["missing operation", async () => actions.workflowBinding(workspaceId, "missing-operation").catch((error: unknown) => String(error))],
     ] as Array<[string, () => Promise<unknown>]>) {
       const { before, after } = await both(db, request);
       expect(after.answer, name).toBe(before.answer);

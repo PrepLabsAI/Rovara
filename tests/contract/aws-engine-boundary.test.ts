@@ -13,6 +13,7 @@ import {
   TASK_ENTRY_AREAS, coreAnswerValue, coreTaskEntryFrom, entryOwner, ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace, taskEntryOperation, type CoreTaskEntry,
 } from "../../packages/broker/src/aws/engine-boundary.js";
 import { workspaceOwner } from "../../packages/broker/src/aws/admin-reads.js";
+import { requireOperation } from "../../packages/broker/src/aws/cancellation.js";
 import { getTaskPageState, getWorkflowFeedbackReview, listPageComments, loadOwnedTask } from "../../packages/broker/src/aws/developer-tasks.js";
 import { resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
@@ -347,5 +348,45 @@ describe("the AWS readers see only workflow rows", () => {
     const { db, task, brokerInput } = await coreWorld();
     const owner = await workspaceOwner({ documentClient: db, tableName: brokerInput.tableName } as never, { id: task.workspaceId, ownerKey: "k" } as never);
     expect(owner).toEqual({ origin: "ai_tool", owner: { taskId: task.taskId } });
+  });
+
+});
+
+describe("the operation readers behind requireOperation see only workflow rows (T1 follow-up)", () => {
+  const operationOf = async (db: FakeDynamoDb, workspaceId: string) => db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && String(item.sk).startsWith("OPERATION#"))[0] as { id: string; sk: string };
+  const notHere = { code: "NOT_FOUND", message: `NOT_FOUND: ${NOT_ON_THE_CORE_YET}` };
+
+  for (const entry of ["workflowBinding", "workflowCandidateSourceExportDigest", "requireOperation"] as const) {
+    it(`${entry} answers a core task's operation with the fixed words and never reads the operation row`, async () => {
+      const { db, task, actions, brokerInput } = await coreWorld();
+      const operation = await operationOf(db, task.workspaceId);
+      expect(operation).toBeDefined();
+      const sent = vi.spyOn(db, "send");
+      sent.mockClear();
+      const read = entry === "requireOperation"
+        ? requireOperation({ documentClient: db, tableName: brokerInput.tableName }, task.workspaceId, operation.id)
+        : actions[entry](task.workspaceId, operation.id);
+      await expect(read).rejects.toMatchObject(notHere);
+      expect(sent.mock.calls.some(([command]) => JSON.stringify((command as { input?: unknown }).input ?? {}).includes(operation.sk))).toBe(false);
+    });
+  }
+
+  it("a failed engine read fails the operation read; it is never taken for the workflow", async () => {
+    const { db, task, actions } = await coreWorld();
+    const operation = await operationOf(db, task.workspaceId);
+    db.injectFault({ command: "GetCommand", match: (input) => JSON.stringify(input).includes("DEVELOPER_TASK"), error: { name: "ProvisionedThroughputExceededException" } });
+    await expect(actions.workflowBinding(task.workspaceId, operation.id)).rejects.toMatchObject({ name: "ProvisionedThroughputExceededException" });
+  });
+
+  it("a workflow task's operation still reads through all three", async () => {
+    const { actions, dev, db, brokerInput } = await coreWorld();
+    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    const { workspaceId } = db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
+    const operation = await operationOf(db, workspaceId);
+    expect((await requireOperation({ documentClient: db, tableName: brokerInput.tableName }, workspaceId, operation.id)).id).toBe(operation.id);
+    expect(await actions.workflowBinding(workspaceId, operation.id)).toBeUndefined();
+    expect(await actions.workflowCandidateSourceExportDigest(workspaceId, operation.id)).toBeUndefined();
+    await expect(actions.workflowBinding(workspaceId, "missing-operation")).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: operation not found" });
   });
 });
