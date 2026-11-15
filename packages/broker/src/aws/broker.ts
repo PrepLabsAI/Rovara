@@ -974,7 +974,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const remainingMs = typeof context?.getRemainingTimeInMillis === "function" ? context.getRemainingTimeInMillis() : undefined;
         return json((await core.handleEvent(event, { remainingMs })) ?? { skipped: "not_core" }, "core-engine");
       } catch (error) {
-        console.log(JSON.stringify({ component: "broker", event: "core_engine.event_failed", error: error instanceof Error ? error.name : "unknown" }));
+        process.stderr.write(`${JSON.stringify({ component: "broker", event: "core_engine.event_failed", error: error instanceof Error ? error.name : "unknown" })}\n`);
         return json({ error: "core_event_failed" }, "core-engine", 500);
       }
     }
@@ -15199,7 +15199,7 @@ const coreRoot = createBrokerCoreRoot({
   codeModules: () => brokerCoreModuleDeps(process.env),
   policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
   origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
-  log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
+  log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
 });
 const developer = linkingOnly || signIn === undefined ? undefined : coreRoot.coreTasks === undefined ? signIn : { ...signIn, coreTasks: coreRoot.coreTasks };
 
