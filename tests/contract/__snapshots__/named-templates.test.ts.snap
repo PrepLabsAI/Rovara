@@ -2477,6 +2477,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Ref": "State1C20CC9A",
             },
             "SWEBENCH_SETTINGS_PREFIX": "/agentx/staging/",
+            "TASK_TOKEN_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInTaskTokenKey10D3ED68",
+                "Arn",
+              ],
+            },
             "TURN_RECORDS_TABLE_NAME": {
               "Ref": "TurnRecords69ECFCD9",
             },
@@ -3276,6 +3282,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     "DEVELOPER#*",
                     "EMAIL#*",
                     "SIGNIN_CLIENTS",
+                    "COMPANY_MEMBER#*",
                   ],
                 },
               },
@@ -5222,6 +5229,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "SLACK_VIA_CHANNEL": {
               "Ref": "SlackViaChannel",
             },
+            "TASK_TOKEN_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInTaskTokenKey10D3ED68",
+                "Arn",
+              ],
+            },
           },
         },
         "Handler": "index.handler",
@@ -5427,6 +5440,16 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
+              "Action": "kms:GetPublicKey",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTaskTokenKey10D3ED68",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": [
                 "secretsmanager:GetSecretValue",
                 "secretsmanager:DescribeSecret",
@@ -5541,6 +5564,125 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::DynamoDB::Table",
       "UpdateReplacePolicy": "Retain",
+    },
+    "DeveloperSignInTaskTokenKey10D3ED68": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "Signs AgentX staging task tokens",
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Sign",
+                "kms:GetPublicKey",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": "kms:Sign",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "BrokerServiceRole1938BCC9",
+                      "Arn",
+                    ],
+                  },
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "SignOnlyAsBroker",
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": [
+                    {
+                      "Fn::GetAtt": [
+                        "BrokerServiceRole1938BCC9",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DeveloperSignInFunctionServiceRole47322E59",
+                        "Arn",
+                      ],
+                    },
+                  ],
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "KeySpec": "RSA_2048",
+        "KeyUsage": "SIGN_VERIFY",
+        "PendingWindowInDays": 7,
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperSignInTaskTokenKeyAliasBA394975": {
+      "Properties": {
+        "AliasName": "alias/agentx/staging/task-tokens",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "DeveloperSignInTaskTokenKey10D3ED68",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
     },
     "DeveloperSignInTokenKey9F4912A4": {
       "DeletionPolicy": "Delete",
