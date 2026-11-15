@@ -6,6 +6,9 @@ import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { packagedFunction } from "./control-plane.js";
 
+/** One plain address, or empty. The function checks it again (packages/broker/src/aws/step-up-email.ts) and builds no sender for anything else. */
+export const STEP_UP_EMAIL_SENDER_PATTERN = "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$";
+
 const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
 const DEV_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
 const FEEDBACK_REVIEW_ROUTE_KEY = "ANY /review/{proxy+}";
@@ -16,6 +19,8 @@ export interface DeveloperSignInParameters {
   slackSince: CfnParameter; oidcSince: CfnParameter;
   /** Named environments only: the developer task settings, which the legacy deployment does not have. */
   tasks?: DeveloperTaskParameters;
+  /** Hosted wiring (a), named environments only: the verified SES identity (one address) step-up codes are sent from; empty: no email factor. */
+  stepUpEmailSender?: CfnParameter;
 }
 
 export interface DeveloperTaskParameters {
@@ -29,7 +34,7 @@ export interface DeveloperTaskParameters {
  * Declared on the stack itself, so the parameter names are exactly these. Spec 064: the legacy deployment
  * (`tasks: false`) gets the sign-in ones only, declared in the same order so named templates are unchanged.
  */
-export function developerSignInParameters(stack: Stack, options: { tasks: boolean } = { tasks: true }): DeveloperSignInParameters {
+export function developerSignInParameters(stack: Stack, options: { tasks: boolean; named?: boolean } = { tasks: true }): DeveloperSignInParameters {
   const signIn = {
     slackTeamId: new CfnParameter(stack, "SlackTeamId", { type: "String", default: "", allowedPattern: "^$|^[TE][A-Z0-9]{2,31}$", description: "The Slack workspace (team) ID this environment serves; Slack sign-in is refused while it is empty" }),
     slack: new CfnParameter(stack, "DeveloperSignInSlack", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "enabled: developers may sign in with Slack; disabled: they may not" }),
@@ -51,7 +56,10 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
     workflowDependenciesEnabled: new CfnParameter(stack, "WorkflowDependenciesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether bounded serial task work breakdowns are enabled in this environment" }),
     mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
-  return { ...signIn, tasks };
+  if (options.named !== true) return { ...signIn, tasks };
+  // Hosted wiring (a): named environments only, declared last, so the legacy template keeps its parameters exactly.
+  const stepUpEmailSender = new CfnParameter(stack, "StepUpEmailSender", { type: "String", default: "", maxLength: 254, allowedPattern: STEP_UP_EMAIL_SENDER_PATTERN, description: "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)" });
+  return { ...signIn, tasks, stepUpEmailSender };
 }
 
 /**
@@ -130,6 +138,19 @@ export class DeveloperSignIn extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // Hosted wiring (c): the policy hook's question key, a separate key from the task key (plan v3.2 7.5: a question can never pass for a task token, or the other way round). Named
+    // environments only; the legacy template stays as deployed.
+    const policyHookKeyAlias = tasks === undefined ? undefined : props.naming.policyHookKeyAlias;
+    const policyHookKey = policyHookKeyAlias === undefined ? undefined : new kms.Key(this, "PolicyHookKey", {
+      alias: policyHookKeyAlias,
+      description: `Signs AgentX ${props.naming.environmentTagValue} policy hook questions`,
+      keySpec: kms.KeySpec.RSA_2048,
+      keyUsage: kms.KeyUsage.SIGN_VERIFY,
+      pendingWindow: Duration.days(7),
+      // A question lives six minutes: nothing outlives the key for long.
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     const oidcSecretName = `agentx/${props.env}/developer-oidc`;
     const fn = this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-identity.ts", {
       AGENTX_ENV: props.env,
@@ -198,6 +219,58 @@ export class DeveloperSignIn extends Construct {
       fn.addEnvironment("TASK_TOKEN_KEY_ARN", taskTokenKey.keyArn);
       props.broker.addEnvironment("TASK_TOKEN_KEY_ARN", taskTokenKey.keyArn);
     }
+    if (policyHookKey !== undefined) {
+      // As the task key: key-policy grants, so the broker's inline policy does not grow. Only the broker signs; only the broker and this function read the public key.
+      policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "BrokerSignsPolicyQuestions",
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ArnPrincipal(props.broker.role!.roleArn)],
+        actions: ["kms:Sign", "kms:GetPublicKey"],
+        resources: ["*"],
+      }));
+      policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "SignOnlyAsBroker",
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["kms:Sign"],
+        resources: ["*"],
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": props.broker.role!.roleArn } },
+      }));
+      policyHookKey.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity",
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["kms:GetPublicKey"],
+        resources: ["*"],
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": [props.broker.role!.roleArn, fn.role!.roleArn] } },
+      }));
+      policyHookKey.grant(fn, "kms:GetPublicKey");
+      fn.addEnvironment("POLICY_HOOK_KEY_ARN", policyHookKey.keyArn);
+      props.broker.addEnvironment("POLICY_HOOK_KEY_ARN", policyHookKey.keyArn);
+    }
+    // Named environments only (the legacy deployment runs tasks too, but its template stays as deployed).
+    const named = props.naming.env !== undefined;
+    if (named && tasks !== undefined) {
+      // Hosted wiring (a): step-up codes by email, sent only as the one identity the parameter names. SES authorizes SendEmail on the sender identity's ARN; the condition pins the From
+      // address too. (While the account is in the SES sandbox, SES also checks the recipient's identity: move the account out of the sandbox before people other than the verified
+      // test addresses step up.) An empty parameter names no identity, and the function then builds no sender.
+      if (p.stepUpEmailSender === undefined) throw new Error("a named environment declares StepUpEmailSender");
+      const sender = p.stepUpEmailSender.valueAsString;
+      fn.addEnvironment("STEP_UP_EMAIL_FROM", sender);
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["ses:SendEmail"],
+        resources: [stack.formatArn({ service: "ses", resource: "identity", resourceName: sender })],
+        conditions: { StringEquals: { "ses:FromAddress": sender } },
+      }));
+      // Hosted wiring (b): passkeys owned by Code, with the relying-party id the API's own host (the function reads it from the issuer).
+      fn.addEnvironment("DEVELOPER_PASSKEYS", "enabled");
+      // Lane ID part 2b: listing and removing a person's passkeys (DeveloperSignInStore listPasskeys, removePasskey, removeAllPasskeys), only in their PASSKEYS# partitions.
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:Query", "dynamodb:DeleteItem"],
+        resources: [table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+      }));
+    }
     props.slackSecret.grantRead(fn);
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
@@ -245,8 +318,14 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
     broker.addEnvironment("DEVELOPER_SIGNIN_SLACK_SINCE", p.slackSince.valueAsString);
     broker.addEnvironment("DEVELOPER_OIDC_SINCE", p.oidcSince.valueAsString);
-    if (tasks !== undefined) broker.addEnvironment("MCP_CONFIRM_ELICITATION", tasks.mcpConfirmElicitation.valueAsString);
-    else broker.addEnvironment("DEVELOPER_API_SCOPE", "linking");
+    if (tasks !== undefined) {
+      broker.addEnvironment("MCP_CONFIRM_ELICITATION", tasks.mcpConfirmElicitation.valueAsString);
+      // Hosted wiring (d), named environments only: the company audit and event reads (still behind SIGN_IN_CLIENT_ROUTES, which nothing in infra sets). Membership is read from
+      // COMPANY_MEMBER# (granted below, also named only).
+      if (named) broker.addEnvironment("COMPANY_READS", "enabled");
+    } else {
+      broker.addEnvironment("DEVELOPER_API_SCOPE", "linking");
+    }
     fn.grantInvoke(broker);
     // Spec 025 25e: EMAIL# is the email index resolveDeveloper reads to name a developer by email.
     // Spec 063: SIGNIN_CLIENTS holds the registered clients the access check authenticates.

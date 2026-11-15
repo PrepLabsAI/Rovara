@@ -140,7 +140,11 @@ describe("the core dispatch queue", () => {
     const policies = resources(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes(queue[0]) || JSON.stringify(policy.Properties.Queues).includes(deadLetters[0]));
     expect(policies).toHaveLength(2);
     for (const [target, [, policy]] of [[queue[0], policies.find(([, p]) => JSON.stringify(p.Properties.Queues) === JSON.stringify([{ Ref: queue[0] }]))!], [deadLetters[0], policies.find(([, p]) => JSON.stringify(p.Properties.Queues) === JSON.stringify([{ Ref: deadLetters[0] }]))!]] as const) {
-      const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+      const all = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+      // #663 review: the one Deny is every request not over TLS (enforceSSL); the one Allow is the broker's.
+      expect(all).toHaveLength(2);
+      expect(all.filter((statement) => statement.Effect === "Deny")).toEqual([{ Action: "sqs:*", Condition: { Bool: { "aws:SecureTransport": "false" } }, Effect: "Deny", Principal: { AWS: "*" }, Resource: { "Fn::GetAtt": [target, "Arn"] } }]);
+      const statements = all.filter((statement) => statement.Effect !== "Deny");
       expect(statements).toHaveLength(1);
       expect(statements[0]!.Effect).toBe("Allow");
       expect(statements[0]!.Principal).toEqual({ AWS: { "Fn::GetAtt": [brokerRoleId, "Arn"] } });

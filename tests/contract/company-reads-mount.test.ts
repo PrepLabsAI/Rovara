@@ -40,7 +40,7 @@ async function broker(options: { clientRoutes?: true; companyReads?: unknown } =
   };
   ({ db, handler } = await createAdminBroker({ linking, channelAdapters: true, ...(options.companyReads === undefined ? {} : { companyReads: options.companyReads }) }));
   const at = new Date(T0 - 60_000).toISOString();
-  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, createdAt: at, updatedAt: at, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, fullAccess: true, createdAt: at, updatedAt: at, updatedBy: "admin" });
   for (const [id, name] of [[ADA, "Ada"], [BO, "Bo"], [CY, "Cy"]] as const) db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, provider: "oidc", issuer: "https://idp.example.test", subject: name.toLowerCase(), displayName: name, email: `${name.toLowerCase()}@example.com`, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
   session("s-ada", ADA, { administrator: true });
   session("s-bo", BO, { administrator: true });
@@ -61,6 +61,19 @@ afterEach(() => { vi.useRealTimers(); });
 
 const AUDIT = "/v1/dev/client/company/audit/records";
 const EVENTS = "/v1/dev/client/company/events";
+
+// Hosted wiring: with lane ID's route table (#646) in front, the two reads need full access until a named company-read scope exists (the fixture's client has it).
+describe("the company reads behind lane ID's route table", () => {
+  it("refuses a client without full access, before anything is read", async () => {
+    const at = new Date(T0 - 60_000).toISOString();
+    db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, createdAt: at, updatedAt: at, updatedBy: "admin" });
+    for (const path of [AUDIT, EVENTS]) {
+      const read = await call("GET", path, await token());
+      expect(read.status, path).toBe(403);
+      expect(JSON.stringify(read.body)).not.toContain("evt_a");
+    }
+  });
+});
 type Records = { records: Array<{ eventId: string; actor: { developerId: string; name: string } }>; next?: string };
 
 describe("the company audit read on the developer API", () => {
