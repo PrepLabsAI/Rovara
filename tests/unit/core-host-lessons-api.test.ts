@@ -495,10 +495,13 @@ describe("used in N tasks", () => {
       const answer = await call(target, personId, "GET", `${P}/lessons`);
       if (!answer.ok) return answer;
       expect(answer.body["usedInIncomplete"]).toBeUndefined();
-      return Object.fromEntries((answer.body["lessons"] as Array<{ id: string; usedIn?: unknown }>).map((one) => [one.id, one.usedIn]));
+      return Object.fromEntries((answer.body["lessons"] as Array<{ id: string; usedInTasks?: unknown; usedInTasksMore?: unknown }>).map((one) => [one.id, one.usedInTasksMore === undefined ? one.usedInTasks : [one.usedInTasks, one.usedInTasksMore]]));
     };
-    expect(await usedOf("a-contrib")).toEqual({ les_aaaa1111: { tasks: 2 }, les_aaaa2222: { tasks: 0 } });
-    expect(await usedOf("b-contrib")).toEqual({ les_aaaa1111: { tasks: 4 } });
+    expect(await usedOf("a-contrib")).toEqual({ les_aaaa1111: 2, les_aaaa2222: 0 });
+    expect(await usedOf("b-contrib")).toEqual({ les_aaaa1111: 4 });
+    // Past the cap the number is the cap and the answer says there were more.
+    for (let i = 0; i < 501; i += 1) await w.world.store.put(row(A, "les_aaaa2222", `m-${String(i)}`));
+    expect(await usedOf("a-contrib")).toEqual({ les_aaaa1111: 2, les_aaaa2222: [500, true] });
     // The answer still matches the contract (strict) with the count in it.
     const answer = await call(target, "a-contrib", "GET", `${P}/lessons`);
     for (const one of (answer.ok ? answer.body["lessons"] : []) as unknown[]) expect(LessonViewSchema.safeParse(one).success).toBe(true);
@@ -517,7 +520,7 @@ describe("used in N tasks", () => {
     const answer = await call(target, "a-contrib", "GET", `${P}/lessons`);
     spy.mockRestore();
     expect(answer).toMatchObject({ ok: true, body: { usedInIncomplete: true } });
-    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedIn");
+    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedInTasks");
   });
   it("the proposed list is not counted: a proposed lesson was never given to a task", async () => {
     const w = await setUp();
@@ -530,7 +533,7 @@ describe("used in N tasks", () => {
     spy.mockRestore();
     expect(answer.ok && (answer.body["lessons"] as Array<{ id: string }>).map((one) => one.id)).toEqual(["les_apend001"]);
     expect(answer.ok && answer.body["usedInIncomplete"]).toBeUndefined();
-    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedIn");
+    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedInTasks");
     expect(asked).toBe(0);
   });
 });

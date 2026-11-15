@@ -2,7 +2,7 @@
 // route below (full access only, like the other company-admin routes); `aws/developer-routes.ts` authenticates the caller and hands the request here through its optional `lessons` dependency
 // (absent: every route answers "Lessons are off."). The deployed wiring (Step 6) builds this with `createLessonsApi` for the install.
 //
-//   GET  /v1/dev/projects/{project}/lessons?list=proposed|approved|retired&since=<ms>&limit=1..100&cursor=<next>   one page of one list (since: created at or after); each lesson's `usedIn` = distinct tasks given it
+//   GET  /v1/dev/projects/{project}/lessons?list=proposed|approved|retired&since=<ms>&limit=1..100&cursor=<next>   one page of one list (since: created at or after); each lesson's `usedInTasks` = distinct tasks given it
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/approve          { version, edit? }                   Keep: a person approves the version they read, or an edit of it (title, description, body)
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/reject           { version, reason }                  Drop: reason is one of REJECT_REASONS (fixed words, never a person's text)
 //   POST /v1/dev/projects/{project}/lessons/decisions                   { decisions: [...] }                 Keep or Drop for up to 20 proposed lessons at once (the inbox's batch row); one answer each
@@ -259,10 +259,10 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "list takes list (proposed, approved or retired), since, limit (1 to 100) and cursor, once each");
       const after = query.data.cursor === undefined ? undefined : decodeCursor(query.data.cursor, query.data.list);
       const page = await buildLessonsPage(deps, who, project, { list: query.data.list, limit: query.data.limit ?? PAGE_DEFAULT, ...(after === undefined ? {} : { after }), ...(query.data.since === undefined ? {} : { since: query.data.since }) });
-      // "Used in N tasks": the distinct tasks each shown lesson was given to (its use rows, this company and project only). A lesson that could not be counted has no `usedIn`, and the page says so.
-      // A proposed lesson has never been given to a task, so the proposed list is not counted (no `usedIn`, and the page is not incomplete for it).
+      // "Used in N tasks": the distinct tasks each shown lesson was given to (its use rows, this company and project only). A lesson that could not be counted has no `usedInTasks`, and the page says so (`usedInIncomplete`).
+      // A proposed lesson has never been given to a task, so the proposed list is not counted (no `usedInTasks`, and the page is not incomplete for it).
       const used = query.data.list === "proposed" ? { counts: new Map<string, { tasks: number; more?: true }>(), incomplete: false } : await countLessonUses(runtime.documents, { companyId, project, lessonIds: page.lessons.map((one) => one.id), now: options.now() });
-      const lessonsShown = page.lessons.map((one) => { const count = used.counts.get(one.id); return count === undefined ? one : { ...one, usedIn: count }; });
+      const lessonsShown = page.lessons.map((one) => { const count = used.counts.get(one.id); return count === undefined ? one : { ...one, usedInTasks: count.tasks, ...(count.more === true ? { usedInTasksMore: true as const } : {}) }; });
       return { ...page, lessons: lessonsShown, ...(used.incomplete ? { usedInIncomplete: true } : {}), ...(page.next === undefined ? {} : { next: encodeLessonCursor(page.next) }) };
     }
 
