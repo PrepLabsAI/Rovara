@@ -264,7 +264,7 @@ describe("the weekly lessons summary", () => {
     const slack = adapter();
     const base = deps(w, A, slack);
     const access = { taskVisibility: base.access.taskVisibility, mayRead: async (_orgId: string, _viewer: unknown, places: ReadonlyArray<{ restrictedScopes: readonly string[] }>) => places.map((place) => place.restrictedScopes.length === 0) };
-    expect(await run({ ...base, access: access as unknown as DigestNoticeDeps["access"] })).toMatchObject({ sent: 1 });
+    expect(await run({ ...base, access: access })).toMatchObject({ sent: 1 });
     const text = (slack.events[0] as { data: { text: string } }).data.text;
     expect(text).toContain('"Fading soon"');
     expect(text).not.toContain("Secret fading");
