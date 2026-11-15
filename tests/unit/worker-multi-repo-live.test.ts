@@ -161,7 +161,7 @@ describe("MR1-LIVE: ordinary single-edge tasks pass identically to today's path"
   it("an ignored folder named only in the source's .git/info/exclude stays out of MR1's tree snapshots", async () => {
     const w = await nodeWorkspace("");
     await writeFile(join(w.root, "app/.git/info/exclude"), "node_modules/\n");
-    const plan: CheckPlan = { source: "project", readiness: [{ executable: process.execPath, args: ["-e", "require('fs').mkdirSync('node_modules/.cache',{recursive:true}); require('fs').writeFileSync('node_modules/.cache/x','1'); console.log(require('lib'))"], cwd: "app", timeoutSeconds: 20 }] };
+    const plan: CheckPlan = { source: "project", readiness: [{ executable: process.execPath, args: ["-e", "require('fs').mkdirSync('node_modules/.cache',{recursive:true}); require('fs').writeFileSync('node_modules/.cache/x',String(Math.random())); console.log(require('lib'))"], cwd: "app", timeoutSeconds: 20 }] };
     const { today, result, live } = await bothPaths(w, plan);
     expect(comparable(result)).toEqual(comparable(today));
     expect(result.entries[0]?.after).toBe("passed");
