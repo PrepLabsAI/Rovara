@@ -40,13 +40,14 @@ const nobody = (): HostedLessonPeople => ({
 
 interface Company { runtime: CoreRuntime; lessons: CoreLessons | undefined; taskId: string }
 
-async function world(env: NodeJS.ProcessEnv): Promise<{ world: FakeWorld; companies: Map<OrgId, Company>; lessonsSwitch: { mode: string } }> {
+async function world(env: NodeJS.ProcessEnv): Promise<{ world: FakeWorld; companies: Map<OrgId, Company>; lessonsSwitch: { mode: string }; logs: string[] }> {
   const fake = createFakeWorld();
   setCoreLessonsGate(env);
   const registry = await buildCoreRegistry({ modules: fake.modules, context: fake.context(), areas: ["flow", "build", "merge"] });
   const lessonsSwitch = readCoreLessonsSwitch(env).value;
   const hosts = new Map<string, CoreLessons>();
   const companies = new Map<OrgId, Company>();
+  const logs: string[] = [];
   for (const companyId of [A, B]) {
     await fake.store.put({ item: { ...projectRevisionKey(companyId, DEFINITION.name, DEFINITION.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(DEFINITION)) as JsonValue } });
     await fake.store.put({ item: { ...orgProjectCatalogKey(companyId, DEFINITION.name), entityType: "PROJECT_CATALOG", latestRevision: DEFINITION.revision } });
@@ -54,14 +55,14 @@ async function world(env: NodeJS.ProcessEnv): Promise<{ world: FakeWorld; compan
       registry, companyId, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,
     });
-    const lessons = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch, people: nobody(), hostFor: async (id) => hosts.get(id)?.host, now: () => fake.clock.now });
+    const lessons = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch, people: nobody(), hostFor: async (id) => hosts.get(id)?.host, now: () => fake.clock.now, log: (entry) => { logs.push(String(entry["event"])); } });
     lessons?.attach();
     if (lessons !== undefined) hosts.set(companyId, lessons);
     const principal = localOwnerPrincipal({ companyId });
     const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     companies.set(companyId, { runtime, lessons, taskId: task.taskId });
   }
-  return { world: fake, companies, lessonsSwitch };
+  return { world: fake, companies, lessonsSwitch, logs };
 }
 
 type Decision = { source: "SEND_BACK" | "FINDINGS" | "AUTO_FIX" | "GATE"; decision?: "REQUEST_CHANGES" | "APPROVE"; reason: string; agent?: true };
@@ -127,7 +128,7 @@ describe("queueing: a person's send-back, behind the switch and the mode, for th
   });
 
   it("the second send-back is round 2; a findings request-changes counts as a send-back; past the round bound nothing is queued", async () => {
-    const { world: fake, companies } = await world({ [CORE_LESSONS_VARIABLE]: "on" });
+    const { world: fake, companies, logs } = await world({ [CORE_LESSONS_VARIABLE]: "on" });
     const a = companies.get(A)!;
     await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "first" }, { source: "FINDINGS", reason: "Fix the null check the reviewer found." }]);
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
@@ -135,6 +136,8 @@ describe("queueing: a person's send-back, behind the switch and the mode, for th
     await decide(fake, a.taskId, Array.from({ length: SEND_BACK_REFLECTIONS_MAX - 1 }, (_, i) => ({ source: "SEND_BACK" as const, reason: `again ${String(i)}` })));
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
     expect(await queued(fake)).toEqual([]);
+    // Refused by the round bound itself, not by a failed send.
+    expect(logs).not.toContain("send_back_not_queued");
   });
 
   it("an automatic send-back, a findings approval, a send-back in code's fixed words, and a closed task queue nothing", async () => {
