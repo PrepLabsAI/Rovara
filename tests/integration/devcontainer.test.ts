@@ -477,6 +477,19 @@ describe("the devcontainer CLI seam", () => {
     expect(Object.keys(options[0]!).sort()).toEqual(["signal", "timeoutMs"]);
   });
 
+  it("never passes the text 'undefined': a name whose value is undefined is left out of --remote-env and really UNSET in the container (an unset of a name the command does not set)", async () => {
+    const { cli, calls } = fakeCli();
+    await runDevcontainerCommand(cli, target, {
+      cwd: "repo/sample", executable: "npm", args: ["ci"], timeoutSeconds: 60, env: { NODE_ENV: "test", GEMINI_KEY: undefined, AWS_PROFILE: undefined } as unknown as Record<string, string>,
+    });
+    const joined = (calls[0] ?? []).join("\n");
+    expect(joined).not.toContain("undefined");
+    expect(calls[0]).toContain("NODE_ENV=test");
+    expect(calls[0]?.some((arg) => arg.startsWith("GEMINI_KEY") || arg.startsWith("AWS_PROFILE"))).toBe(false);
+    // the wrapper unsets exactly the names whose value is undefined, before the command starts
+    expect(joined).toContain("unset AWS_PROFILE GEMINI_KEY; ");
+  });
+
   it("sends a timed-out project command's env to the command only, never to the TERM and KILL execs (#54, #174)", async () => {
     vi.useFakeTimers();
     try {

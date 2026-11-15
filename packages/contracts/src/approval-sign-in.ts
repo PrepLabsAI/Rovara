@@ -5,7 +5,7 @@
 // Pure and browser-safe: the setting's shape, its validation, and the one check. The stored copy and its edit are in the broker (`core/decisions/sign-in-setting.ts`).
 import { z } from "zod";
 import { FRESH_SIGN_IN_SECONDS } from "./developer.js";
-import type { ApprovalSignInRule, Principal } from "./ports/policy.js";
+import type { ApprovalAnswer, ApprovalRequirement, ApprovalRisk, ApprovalSignInRule, Principal } from "./ports/policy.js";
 
 export const APPROVAL_SIGN_IN_WINDOW_MIN_SECONDS = 60;
 export const APPROVAL_SIGN_IN_WINDOW_MAX_SECONDS = 86_400;
@@ -56,4 +56,61 @@ export function checkApprovalSignIn(rule: ApprovalSignInRule, approver: Pick<Pri
   if (signedIn > nowMs + APPROVAL_SIGN_IN_SKEW_SECONDS * 1000) return { ok: false, reason: "sign_in_in_future" };
   if (checked.mode === "any-active") return { ok: true };
   return nowMs - signedIn <= checked.seconds * 1000 ? { ok: true } : { ok: false, reason: "sign_in_too_old" };
+}
+
+// ---- Owner decision 211, gap G1: sign-in rules for some answers, risks and methods ----
+
+const ANSWERS = ["approve", "reject", "request_changes"] as const;
+const RISKS = ["low", "medium", "high"] as const;
+
+/** A scoped rule as a plug-in may state it (`ApprovalRequirement.signInRules`). Empty lists are refused: "no method" is not a way to say "every method". */
+export const ApprovalSignInScopeSchema = z.object({
+  outcomes: z.array(z.enum(ANSWERS)).min(1).max(ANSWERS.length),
+  risks: z.array(z.enum(RISKS)).min(1).max(RISKS.length).optional(),
+  methods: z.array(z.string().min(1).max(100)).min(1).max(50).optional(),
+  rule: ApprovalSignInSettingSchema,
+}).strict();
+const ApprovalSignInScopesSchema = z.array(ApprovalSignInScopeSchema).max(50);
+
+/** One answer, as the rules are matched against it. A risk that is not one of the three names (absent, `critical`, `HIGH`) counts as high, and an outcome that is not one of the three as a rejection (fail closed). */
+export interface ApprovalSignInAt {
+  outcome: ApprovalAnswer;
+  risk: ApprovalRisk | undefined;
+  method: string;
+}
+
+export type ApprovalSignInRules = { ok: true; rules: ApprovalSignInRule[] } | { ok: false; reason: "invalid_rule" };
+
+/**
+ * The sign-in rules that apply to one answer: `signIn` for a high-risk approval and for every rejection (its meaning before decision 211, unchanged), then each scoped rule whose answers, risks and methods all
+ * cover this one. A plug-in's rules are data: when any scoped rule cannot be read the answer is `invalid_rule`, whatever answer it was about, and the caller refuses. Rules only ever add.
+ */
+export function signInRulesFor(requirement: Pick<ApprovalRequirement, "signIn" | "signInRules">, at: ApprovalSignInAt): ApprovalSignInRules {
+  const risk: ApprovalRisk = at.risk !== undefined && RISKS.includes(at.risk) ? at.risk : "high";
+  const outcome: ApprovalAnswer = ANSWERS.includes(at.outcome) ? at.outcome : "reject";
+  const rules: ApprovalSignInRule[] = [];
+  if (requirement.signIn !== undefined && (outcome === "reject" || (outcome === "approve" && risk === "high"))) rules.push(requirement.signIn);
+  if (requirement.signInRules === undefined) return { ok: true, rules };
+  const scopes = ApprovalSignInScopesSchema.safeParse(requirement.signInRules);
+  if (!scopes.success) return { ok: false, reason: "invalid_rule" };
+  for (const scope of scopes.data) {
+    if (!scope.outcomes.includes(outcome)) continue;
+    if (scope.risks !== undefined && !scope.risks.includes(risk)) continue;
+    if (scope.methods !== undefined && !scope.methods.includes(at.method)) continue;
+    rules.push(scope.rule);
+  }
+  return { ok: true, rules };
+}
+
+/** Whether an approver's sign-in satisfies EVERY rule that applies to this answer (`signInRulesFor`, then `checkApprovalSignIn` for each). The first rule that fails gives the reason. */
+export function checkApprovalSignInFor(
+  requirement: Pick<ApprovalRequirement, "signIn" | "signInRules">, at: ApprovalSignInAt, approver: Pick<Principal, "authTime">, nowMs: number, context: { companySignIn: boolean },
+): ApprovalSignInVerdict {
+  const applying = signInRulesFor(requirement, at);
+  if (!applying.ok) return applying;
+  for (const rule of applying.rules) {
+    const verdict = checkApprovalSignIn(rule, approver, nowMs, context);
+    if (!verdict.ok) return verdict;
+  }
+  return { ok: true };
 }

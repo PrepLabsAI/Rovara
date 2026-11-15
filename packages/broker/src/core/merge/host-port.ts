@@ -52,12 +52,15 @@ export function rateLimitRetryAt(error: unknown): number | undefined {
 export const isHostRateLimit = (error: unknown): boolean => rateLimitRetryAt(error) !== undefined;
 
 export const CHANGED_PATH_PAGES = 10;
-/** The files a change request changes, as the host lists them (at most `CHANGED_PATH_PAGES` pages), and whether that is all of them. `beforeRequest` is the caller's read allowance. */
-export async function readChangeRequestFiles(codeHost: CodeHost, ref: ChangeRequestRef, scope: HostScope, beforeRequest?: () => void): Promise<{ files: ChangeRequestFile[]; complete: boolean }> {
+/**
+ * The files a change request changes, as the host lists them (at most `CHANGED_PATH_PAGES` pages), and whether that is all of them. `beforeRequest` is the caller's read allowance. `expectedHead` is the head the caller
+ * classifies: a host whose head differs leaves the file entry types out, so an `entry` never describes a newer head than the one the caller holds (an absent entry is not known, and the tier reads it as risky).
+ */
+export async function readChangeRequestFiles(codeHost: CodeHost, ref: ChangeRequestRef, scope: HostScope, beforeRequest?: () => void, expectedHead?: string): Promise<{ files: ChangeRequestFile[]; complete: boolean }> {
   const files: ChangeRequestFile[] = [];
   for (let page = 1; page <= CHANGED_PATH_PAGES; page += 1) {
     beforeRequest?.();
-    const read = await codeHost.changedFiles(ref, page, scope);
+    const read = await codeHost.changedFiles(ref, page, scope, ...(expectedHead === undefined ? [] : [{ expectedHead }] as const));
     files.push(...read.files);
     if (read.nextPage === undefined) return { files, complete: true };
   }

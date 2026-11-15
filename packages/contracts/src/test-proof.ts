@@ -71,6 +71,16 @@ const TestProofWeakeningReadSchema = z.object(weakeningShape).refine(countCheck,
 export type TestProofWeakening = z.infer<typeof TestProofWeakeningSchema>;
 
 const notComparedShape = { checkId: z.string().min(1).max(64), reason: TestProofNotComparedReasonSchema };
+// Reply facts travel with the proof so provenance cannot go missing independently.
+const replyShape = {
+  checkId: z.string().min(1).max(64),
+  taskMade: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  counted: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+};
+const boundedReplies = z.unknown().refine((items) => Array.isArray(items) && items.length <= 200, "unsupported");
+const uniqueReplies = (items: { checkId: string }[]) => new Set(items.map((item) => item.checkId)).size === items.length;
+const repliesWrite = boundedReplies.pipe(z.array(z.object(replyShape).strict()).refine(uniqueReplies, "unsupported"));
+const repliesRead = boundedReplies.pipe(z.array(z.object(replyShape)).refine(uniqueReplies, "unsupported"));
 const proofShape = {
   schemaVersion: z.literal(1),
   /** The candidate digest of the code the checks passed on. A proof for any other digest is ignored. */
@@ -86,6 +96,7 @@ const proofShape = {
 /** What the WORKER writes (strict). */
 export const TestProofWriteSchema = z.object({
   ...proofShape,
+  scriptedReplies: repliesWrite.optional(),
   /** TE-B3: per compared check, what the original code's run shows about tests the change did not touch. */
   weakening: z.array(TestProofWeakeningSchema).max(64).optional(),
   /** TE-B3: the checks that were run on the original code and could not be compared, with the fixed reason. */
@@ -95,6 +106,8 @@ export const TestProofWriteSchema = z.object({
 /** What READERS parse: the same, but a key a newer writer added is dropped, and a weakening part that does not read is dropped alone (the rest of the proof still reads). */
 export const TestProofSchema = z.object({
   ...proofShape,
+  // A present unreadable provenance part invalidates the WHOLE proof. Never catch-and-drop it.
+  scriptedReplies: repliesRead.optional(),
   weakening: z.array(TestProofWeakeningReadSchema).max(64).optional().catch(undefined),
   weakeningNotCompared: z.array(z.object(notComparedShape)).max(64).optional().catch(undefined),
 });

@@ -1,3 +1,5 @@
+import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
+import { EVAL_ROUND_ARTIFACT, evalResultFromArtifact } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -66,7 +68,7 @@ import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } 
 import { exportBaselineSource, type BaselineSourceExport } from "./baseline-source-export.js";
 import { proposedChecksOfPlan, runPlanDryRun } from "./plan-dry-run.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
-import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
+import { ABORT_JOIN_MS, untilAborted, CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { RunFindings, type FindingsRecorder } from "./no-change-findings.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
 import { currentWorkspaceSafety } from "./workspace-safety.js";
@@ -96,7 +98,9 @@ import { createSourceTextGuard, guardArtifactSink, guardEventSink, type SourceTe
 import { isContextSourceStage, type ContextToolCatalog } from "@agentx/contracts";
 import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import { localBashOperations, taskSandboxFor, taskShellSelection, type TaskSandbox, type TaskShellSelection } from "./task-sandbox.js";
+import { withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
 import { startTaskTestServices, withTestServices, type TestServicesConfig } from "./test-services-run.js";
+import { modelHelperPlanFor, withModelHelperRound, type ModelHelperRoundSource } from "./model-helper-round.js";
 import type { FixtureSetCallback } from "./fixture-delivery.js";
 
 export interface TaskInvocationResult {
@@ -137,10 +141,14 @@ export interface TaskInvocationResult {
 }
 
 export interface TaskInvocationDependencies {
+  /** TE-R1: worker-only task repository selection and sandbox dependency edges; absent preserves single-repo execution. */
+  multiRepoChecks?: Omit<MultiRepoChecks, "rootPath">;
   rootPath: string;
   model: WorkspaceModelConfiguration;
   eventSink: EventBatchSink;
   artifactSink: ArtifactSink;
+  /** Trusted eval capabilities; only the worker's own wiring sets it. */
+  evalFinalCheck?: EvalFinalCheckPorts;
   feedbackBundleReader?: FeedbackBundleReader;
   workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
@@ -167,6 +175,8 @@ export interface TaskInvocationDependencies {
   devcontainerCli?: DevcontainerCli;
   /** The runners AgentX's checks use; tests supply fakes. Default: as preparation and the agent's shell run. */
   checkRunners?: CheckRunners;
+  /** TE-F2 part B: the scripted-replies model helper beside each check round (model-helper-round.ts). Absent: nothing changes. The hosted wiring is F1-b's, the laptop's is `localModelHelperPlan`. */
+  modelHelperRound?: ModelHelperRoundSource;
   /** Each check round's budget; tests supply short ones. Default: CHECK_ROUND_BUDGET_MS (P-3). */
   checkBudgetMs?: () => number;
   /** D-16: the original code for before results; tests supply a fake. Default: each repository's preparation commit. */
@@ -391,6 +401,12 @@ async function runTask(
   const testServices = await startTaskTestServices({ plan: step?.kind === "agent" ? undefined : invocation.payload.testEnvironment, mode, sandbox, devcontainer: devcontainer !== undefined, nightly: invocation.payload.nightlyRun !== undefined, operationId: invocation.operationId, rootPath: canonicalRoot,
     repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), config: dependencies.testServices, artifactSink: dependencies.artifactSink, cancellation: dependencies.cancellationController, fixtureSet: dependencies.fixtureSet })
     .catch((error: unknown) => reportFeedbackReviewStartFailure(error));
+  const scopeChecks = (runners: CheckRunners): CheckRunners => {
+    const multi = dependencies.multiRepoChecks;
+    if (multi === undefined) return runners;
+    if (multi.repositories.length !== manifest.repositories.length || manifest.repositories.some((repository) => !multi.repositories.some((selected) => selected.repositoryId === repository.name && selected.path === repository.path && selected.baseCommit === repository.resolvedCommit))) throw new Error("multi-repository selection does not cover the prepared repositories");
+    return withMultiRepoChecks({ ...multi, rootPath: canonicalRoot, coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath) ?? multi.coveragePaths }, runners);
+  };
   // R56: the agent's file tools run in the same container as its shell, never in the worker (sandbox-file-tools.ts), for every
   // Pi session of this task: the main ones, the feedback review and the critic and security reviews.
   const fileToolsDocker = dependencies.docker ?? (dependencies.taskShell?.kind === "sandbox" ? dependencies.taskShell.docker : undefined) ?? createDockerCli();
@@ -496,11 +512,11 @@ async function runTask(
   if (invocation.payload.nightlyRun !== undefined) {
     return runNightlyInvocation(invocation, {
       rootPath: canonicalRoot, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, nightlyResult: dependencies.nightlyResult,
-      runners: dependencies.checkRunners ?? createCheckRunners({
+      runners: scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }), ...(sandbox === undefined ? {} : { sandbox }), ...(localShell ? { local: true } : {}),
-      }),
+      }))),
     }, manifest);
   }
   // Spec 051 Ruling L: the check history as it was before the agent ran. The agent can write to .agentx, so every
@@ -544,13 +560,13 @@ async function runTask(
         : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
         ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
-      const runners = withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+      const runners = scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(sandbox === undefined ? {} : { sandbox }),
         ...(localShell ? { local: true } : {}),
-      }));
+      }))));
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
@@ -613,6 +629,30 @@ async function runTask(
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
         if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events);
+      }
+      // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
+      if (invocation.payload.evalRequest !== undefined) {
+        const remaining = roundBudgetMs - (Date.now() - roundStarted);
+        if (remaining <= 0) stop.abort();
+        const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
+        let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
+        try {
+          const running = runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
+            status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
+          }).then(value => { evalArtifact = value; return value; });
+          await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
+        } catch (error) {
+          if (isWorkspaceUnsafe(error) || !stop.signal.aborted) throw error;
+        } finally { clearTimeout(deadline); }
+        assertWorkspaceSafe();
+        const afterEval = await readCandidateRepositories(repositories);
+        if (createCandidateManifest(afterEval).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterEval;
+        if (evalArtifact !== undefined) {
+          const result = evalResultFromArtifact(evalArtifact);
+          await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No drop found." });
+          try { await dependencies.artifactSink({ name: EVAL_ROUND_ARTIFACT, mediaType: "application/json", content: JSON.stringify(evalArtifact) }); }
+          catch { await events.append("progress", { message: "Eval result could not be saved." }); }
+        }
       }
       await events.append("result", {
         status: "SUCCEEDED", conversationId: invocation.payload.conversationId, workflowMode: "CHECKS", checks: compact,
@@ -760,12 +800,12 @@ async function runTask(
     // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
     ...(containerPaths === undefined ? {} : { cdTarget: (target: string) => workspaceRelativeCdTarget(target, containerPaths, canonicalRoot) }),
   });
-  const checkRunners = withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+  const checkRunners = scopeChecks(withModelHelperRound(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot }), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
     rootPath: canonicalRoot,
     ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(localShell ? { local: true } : {}),
-  }));
+  }))));
   const checkBudgetMs = dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS);
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;
@@ -804,7 +844,7 @@ async function runTask(
     // I-3: an earlier settle's report is stale once the agent has a regression to fix.
     onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
-    ...(dependencies.originalCode === undefined ? defaultOriginalCode(manifest, canonicalRoot) : { originalCode: dependencies.originalCode }),
+    ...(dependencies.originalCode === undefined ? defaultOriginalCode(manifest, canonicalRoot, checkRunners.originalCode) : { originalCode: dependencies.originalCode }),
   });
 
   // The agent's shell: the devcontainer's or the sandbox's, or the local one when it was chosen.
@@ -2171,8 +2211,8 @@ function candidateInputs(
  * D-16 (#290): every repository at the commit preparation recorded. When any repository has no usable commit (an old
  * manifest), there is no original code to show, so AgentX measures no before results rather than mixing states.
  */
-function defaultOriginalCode(manifest: PreparationManifest, root: string): { originalCode?: OriginalCode } {
+function defaultOriginalCode(manifest: PreparationManifest, root: string, originalCode = gitOriginalCode): { originalCode?: OriginalCode } {
   const repositories = manifest.repositories.map((repository) => ({ directory: resolve(root, repository.path), commit: repository.resolvedCommit }));
   if (repositories.length === 0 || repositories.some(({ commit }) => !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit ?? ""))) return {};
-  return { originalCode: gitOriginalCode(repositories) };
+  return { originalCode: originalCode(repositories) };
 }

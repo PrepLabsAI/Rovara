@@ -83,6 +83,8 @@ export const EVIDENCE_TRUST_CLASS_WORDS: Record<EvidenceTrustClass, string> = {
 export const PROOF_BASES = ["scripted_ai_replies"] as const;
 export type ProofBasis = (typeof PROOF_BASES)[number];
 /** An AI product's change counts as proven when the new tests fail on main and pass with the change against scripted model replies. The label is this and never "Real". */
+export const AGENT_REPLIES_UNCONFIRMED_WORDS = "proven with scripted replies written in this task: check them";
+export const AGENT_REPLIES_DISAGREED_WORDS = "scripted replies written in this task: the real model did not agree";
 export const SCRIPTED_AI_PROOF_WORDS = "proven with scripted AI replies";
 export const PROOF_BASIS_WORDS: Record<ProofBasis, string> = { scripted_ai_replies: SCRIPTED_AI_PROOF_WORDS };
 

@@ -45,8 +45,9 @@ describe("a reader of a v1 pack", () => {
     expect(EvidencePackReadSchema.safeParse(onCheck).success).toBe(false);
     expect(EvidencePackReadSchema.safeParse({ ...(pack() as object), extra: 1 }).success).toBe(false);
   });
-  it("a pack with the new parts is refused by the writer's schema until the writer ships (it does not write them yet)", () => {
-    expect(EvidencePackSchema.safeParse(pack({ absentOnNew: ["a"], absentOnNewCount: 1 })).success).toBe(false);
+  it("round-trips the real B3 writer output through the tolerant reader", () => {
+    const written = EvidencePackSchema.parse(pack({ absentOnNew: ["a"], absentOnNewCount: 1 }));
+    expect(EvidencePackReadSchema.parse(JSON.parse(JSON.stringify(written)))).toEqual(written);
   });
 });
 

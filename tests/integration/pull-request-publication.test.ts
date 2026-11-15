@@ -44,6 +44,23 @@ afterEach(async () => {
 });
 
 describe("pull request publication", () => {
+  it("captures zero TE-R1 checkout files including generated package, Go and Maven manifests", async () => {
+    const fixture = await createFixture();
+    const reserved = join(fixture.checkout, ".agentx-check-fixture", "app");
+    await mkdir(reserved, { recursive: true });
+    for (const name of ["package.json", "go.mod", "pom.xml"]) {
+      await writeFile(join(reserved, name), "sandbox-only wiring\n");
+      await writeFile(join(fixture.checkout, name), "customer's manifest edit\n");
+    }
+    await git(fixture.checkout, ["add", "-f", ".agentx-check-fixture"]);
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation: fixture.invocation,
+      stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }),
+      credentialProvider: async () => ({}), pullRequestSink: async () => ({ number: 13, url: "https://github.com/example/demo/pull/13", reconciled: false }) });
+    const files = (await git(fixture.bare, ["ls-tree", "-r", "--name-only", result.commit])).trim().split("\n");
+    expect(files).toEqual(["README.md", "go.mod", "package.json", "pom.xml"]);
+    expect(await readFile(join(reserved, "package.json"), "utf8")).toBe("sandbox-only wiring\n");
+  });
+
   it("refuses a candidate-tree publication without a broker-selected mode before credentials or push", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
