@@ -19,7 +19,7 @@
 // refuses by name and every core record comes back (the intended fail-closed state; the CLI accepts only `off` meanwhile, CORE_ENGINE_BROKER_WIRED).
 import { createHmac } from "node:crypto";
 import {
-  CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type DocumentStore, type OrgId,
+  CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type DocumentStore, type OrgId,
 } from "@agentx/contracts";
 import type { TaskAccess } from "../../core/task-flow/deps.js";
 import type { GitHubCodeHostProvider } from "../../plugins/code-host/github/index.js";
@@ -116,13 +116,12 @@ export const DISPATCHER_FLOW_DECLARATIONS = ["standingInstructions", "modelAcces
 export type DispatcherFlowWiring = { [K in (typeof DISPATCHER_FLOW_DECLARATIONS)[number]]: RegistryTaskFlowOptions[K] | null };
 /** The words a company's runtime on the dispatcher refuses with while a flow input is not declared. Fixed. */
 export const DISPATCHER_FLOW_NOT_DECLARED = "the dispatcher's flow inputs are not declared (standing instructions, model route, lessons): no worker job is built without them";
-/**
- * The flow inputs the deployment declares on the dispatcher for the first staging run: no standing instructions (no company rules seam on AWS yet), no model route (a worker uses the
- * model keys it is given), and no lessons. Lessons cannot be carried on the dispatcher yet, so while ROVARA_CORE_LESSONS covers any company nothing is declared: every company's runtime
- * is refused and its records come back, rather than a worker job going out without the lessons its company has switched on.
- */
-export function hostedDispatcherFlow(env: NodeJS.ProcessEnv): DispatcherFlowWiring | undefined {
-  if (readCoreLessonsSwitch(env).value.mode !== "off") return undefined;
+/** The deployment's explicit flow inputs. L6 supplies createDispatcherLearned for this
+ * company's runtime while lessons are on; a missing reader still refuses declaration. */
+export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryTaskFlowOptions["learned"]): DispatcherFlowWiring | undefined {
+  if (readCoreLessonsSwitch(env).value.mode !== "off") {
+    return typeof learned !== "function" ? undefined : { standingInstructions: null, modelAccess: null, learned };
+  }
   return { standingInstructions: null, modelAccess: null, learned: null };
 }
 
@@ -181,7 +180,7 @@ export interface DispatcherCoreInputs {
   /** SQS ChangeMessageVisibility on the core dispatch queue. */
   changeVisibility: (receiptHandle: string, seconds: number) => Promise<void>;
   /** The flow inputs every worker job carries, each declared (see DISPATCHER_FLOW_DECLARATIONS). Absent, or any key missing: every company's runtime is refused and its records come back. */
-  flow?: DispatcherFlowWiring;
+  flow?: DispatcherFlowWiring | ((registry: AdapterRegistry, companyId: OrgId) => DispatcherFlowWiring | undefined);
   /** The points Code's AWS modules do not fill (admission, metering, identity, approvers, audit-sink, model keys: lane E2 step 5), added after them. Absent: the registry refuses by name. */
   extraModules?: readonly CoreAdapterModule[];
   /** Wraps the registry's store (the deployment's retention rule, core-host/retention.ts, is applied by the storage module itself). */
@@ -238,8 +237,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     // The dispatcher runs no scheduled job and relays no outbox (the broker does): its runtimes are built for the dispatch consumer alone.
     dispatchOnly: true,
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
-    runtime: () => {
-      const flow = inputs.flow;
+    runtime: (registry, companyId) => {
+      const flow = typeof inputs.flow === "function" ? inputs.flow(registry, companyId) : inputs.flow;
       // Declared means present AND `null` (an explicit none) or a value: a key that is there with `undefined` in it is not a declaration.
       if (flow === undefined || flow === null || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name) || flow[name] === undefined)) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
       const { standingInstructions, modelAccess, learned } = flow;
