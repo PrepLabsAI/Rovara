@@ -152,6 +152,9 @@ export interface LocalOwnerApproversOptions {
  * Decision 45.3: in Code a person's approval is proved by the local machine owner (their local session), or by a comment from a
  * repository collaborator with write permission on the change request. One approver is enough, and the person who asked may approve.
  * A proof is good for the one request, revision and digest it names, until the request expires, and once (in this process).
+ * Owner decision 211 (port gaps G1-G4): the local owner takes each new part's absent value on purpose. It names no scoped sign-in rule (it has no sign-in time), offers no sole-approver exception (one approver
+ * is already enough), never claims a part of a proof (no `claimId`, no `commitClaim`/`releaseClaim`; `parts` are ignored, never a stand-in for the token), and binds proofs by request, revision and digest, not by
+ * `card`.
  */
 export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = {}): Approvers {
   const owner = options.owner ?? localOwnerPrincipal();

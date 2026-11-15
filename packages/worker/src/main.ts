@@ -1,3 +1,4 @@
+import { withWorkspaceGuard } from "./workspace-quarantine.js";
 import {taskFallbackAuthorizer} from "./model-fallback-authority.js";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
@@ -33,6 +34,7 @@ import { removeLeftoverMaskVolumes } from "./devcontainer.js";
 import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.js";
 import { removeLeftoverSetupRuns, setupWorkspaceKey } from "./setup-network.js";
 import { createSavedEnvFallbackReporter, createSavedEnvLoginProvider } from "./saved-env/login.js";
+import { runSetupProveJob } from "./setup-prove.js";
 import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js";
 import { savedEnvOptionsOf } from "./saved-env/use.js";
 import { createDockerCli } from "./swebench/containers.js";
@@ -108,7 +110,8 @@ const state = createWorkerServerState(
     ...(workerBootFailureOf(workerScratch) === undefined ? {} : { bootFailure: workerBootFailureOf(workerScratch)! }),
     steer: (invocation) => handleSteerInvocation(invocation, cancellationController, journal),
     peek: (invocation) => handlePeekInvocation(invocation, rootPath),
-    async execute(invocation: WorkerInvocation): Promise<unknown> {
+    // FIX-RUNNER-ABORT-JOIN: every kind of invocation (preparation, publication, maintenance, a task) runs inside the workspace-safety latch, so a command that could not be confirmed stopped is recorded and quarantined wherever it ran.
+    execute: (invocation: WorkerInvocation): Promise<unknown> => withWorkspaceGuard(rootPath, async () => {
       assertWorkerScratchReady(workerScratch);
       if (invocation.kind === "project-setup-smoke") {
         return projectSetupRuntime.execute(invocation);
@@ -147,6 +150,16 @@ const state = createWorkerServerState(
             otherOperations: async () => (anotherOperationActive(state, invocation.operationId) ? [{ id: "another-operation", rootPath }] : []),
             cloneCredentialValues: () => cloneCredentials.values(),
           });
+        }
+        if (invocation.payload.setupProve !== undefined) {
+          const stop = new AbortController();
+          const unregister = cancellationController.register(invocation.operationId, { abort: async () => { stop.abort(); } });
+          try {
+            await runSetupProveJob({
+              rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(), signal: stop.signal,
+              otherOperations: async () => (anotherOperationActive(state, invocation.operationId) ? [{ id: "another-operation", rootPath }] : []),
+            });
+          } finally { unregister(); }
         }
         return {
           manifestPath: ".agentx/preparation-manifest.json",
@@ -231,7 +244,7 @@ const state = createWorkerServerState(
         return closeInvocationResult(rootPath, () => anotherOperationActive(state, invocation.operationId));
       }
       throw new Error(`worker operation ${invocation.kind} is not implemented in this delivery slice`);
-    },
+    }),
   },
   {
     log: consoleWorkerLog,

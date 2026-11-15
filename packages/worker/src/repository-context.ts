@@ -4,7 +4,7 @@ import { AgentXNameSchema, RelativeWorkspacePathSchema, WORKFLOW_RULE_FILES_UNVE
 import { inertContextText, inertLabel, quotedContextText } from "./context-text.js";
 import type { PreparationManifest } from "./prepare.js";
 import { runFileOp } from "./sandbox-file-ops.js";
-import { readVerifiedBaseRuleFile, type BaseRuleFile } from "./trusted-base-objects.js";
+import { BaseObjectsUnverified, readVerifiedBaseRuleFile, type BaseRuleFile } from "./trusted-base-objects.js";
 
 // Pi discovers these names in its working directory, in the directories above it, and in the
 // agent directory. The worker runs Pi at the workspace root, so the repositories checked out
@@ -322,11 +322,18 @@ async function readBaseCommitRuleFile(
 ): Promise<RuleFileRead> {
   const commit = repository.baseCommit;
   if (commit === undefined) return { diagnostic: `skipped the context file of ${repository.name}: no usable base commit` };
-  let found: BaseRuleFile;
-  try {
-    found = await readVerifiedBaseRuleFile(directory, commit, REPOSITORY_CONTEXT_FILE_CANDIDATES, MAX_REPOSITORY_CONTEXT_FILE_BYTES, { workspaceRoot });
-  } catch {
-    throw agentXError("CONFIG_INVALID", WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE);
+  let found: BaseRuleFile | undefined;
+  // #569: a read whose git process could not start or ran out of time (load, limits) is tried once more, with the same checks; a read that did
+  // not verify is never retried. Each failure is logged by its step and error code only, so the cause is on record.
+  for (let attempt = 1; found === undefined; attempt += 1) {
+    try {
+      found = await readVerifiedBaseRuleFile(directory, commit, REPOSITORY_CONTEXT_FILE_CANDIDATES, MAX_REPOSITORY_CONTEXT_FILE_BYTES, { workspaceRoot });
+    } catch (error) {
+      const unverified = error instanceof BaseObjectsUnverified ? error : undefined;
+      const retrying = unverified?.transient === true && attempt === 1;
+      console.error(JSON.stringify({ component: "worker", event: "rule_files.unverified", repository: repository.name, attempt, reason: unverified?.reason ?? "unexpected", retrying }));
+      if (!retrying) throw agentXError("CONFIG_INVALID", WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE);
+    }
   }
   if (found.kind === "absent") return { usable: true };
   if (found.kind === "symlink") {

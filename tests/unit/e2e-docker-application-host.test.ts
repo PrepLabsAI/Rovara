@@ -1370,7 +1370,8 @@ describe("docker application host: the model channel", () => {
     const mounts = fake.mountsFor("executor");
     expect(mounts.filter((mount) => mount.endsWith(":/run/rovara/model.sock"))).toEqual([`${MODEL_SOCKET(s.runRoot, s.runId)}:/run/rovara/model.sock`]);
     const executorArgs = fake.argsFor("executor");
-    expect(executorArgs.join(" ")).not.toMatch(/AWS_|AGENTX_|TOKEN|SECRET|bedrock|amazonaws/i);
+    // The checkout's own path is no name the executor is given: CodeBuild's contains "amazonaws.com" (its CodeConnections source).
+    expect(executorArgs.join(" ").replaceAll(process.cwd(), "<checkout>")).not.toMatch(/AWS_|AGENTX_|TOKEN|SECRET|bedrock|amazonaws/i);
     // Only the executor's arguments name the model; the app, seed, build, mock and keeper containers never do.
     for (const args of fake.calls.filter((call) => call[0] === "run" && !call[call.indexOf("--name") + 1]?.startsWith("rovara-executor-"))) {
       expect(args.join(" "), args.join(" ")).not.toMatch(/model/i);

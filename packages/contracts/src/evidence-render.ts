@@ -1,12 +1,17 @@
 // The one renderer of an evidence pack (TE-A2a, design testing-build-plan section 3.1): the first line and the body block of the pull request, the Check Run summary, the task page model and Code's local report all
-// come from here, so both editions say the same thing in the same words. It is PURE (a pack in, text out; no clock, no network, no storage) and it has NO CALLERS yet: the broker still writes and prints v1 (TE-A2b/TE-A2-cl switch it).
+// come from here, so both editions say the same thing in the same words. It is PURE (a pack in, text out; no clock, no network, no storage) and its callers are the broker's pull request description (TE-A2b, only for a v2 pack and a v2 writer) and, in Cloud, the TE-A2-cl mirror; the writer is v1 unless a caller says v2.
 // Every word that a repository, a person or an agent wrote (a check label, a dependency name, a not-tested reason) is made inert here (no hidden characters, mention, link, image, issue reference, closing key or HTML), and every
 // list and line is bounded, with the rest counted ("and 52 more checks"), so the block stays inside a pull request description however large the pack is. Browser-safe: nothing here imports a Node module.
 import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPTED_AI_PROOF_WORDS, checkKindWords, trustLabelWords, type ProofBasis, type EvidenceTrustClass } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
+import { renderAiEvidence } from "./evidence-ai-render.js";
+import { weakeningLines } from "./evidence-weakening.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
+
+/** The last line of the compact form: where the checks, the dependencies and the not-tested list are. */
+export const EVIDENCE_COMPACT_POINTER = "Checks, dependencies and what was not tested: open in Rovara";
 
 export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3 } as const;
 
@@ -28,6 +33,9 @@ export const EVIDENCE_LEVEL_WORDS: Record<(typeof EVIDENCE_LEVELS)[number], stri
 /** The level words for a pack that claims a real run but ran somewhere that is not a sealed round, or whose proof rests on scripted AI replies (DECISIONS 156: never "Real"). */
 const NOT_SEALED_LEVEL_WORDS = "Run by Rovara, not sealed";
 const SCRIPTED_AI_LEVEL_WORDS = "Run against scripted AI replies";
+/** The level words when the checks did not run in a sealed round or the agent's sandbox: only those two are a Rovara run, so a laptop report, an imported result or a place this build does not know says where it ran (O26) and never "Run by Rovara". */
+const ELSEWHERE_LEVEL_WORDS = { developer_machine: "Ran on a developer machine", imported: "Imported, not run by Rovara" } as const;
+const UNKNOWN_PLACE_LEVEL_WORDS = "Where the checks ran is not known";
 /** Where the checks ran (O26, O44). */
 export const EVIDENCE_PRODUCER_WORDS = {
   developer_machine: "Ran on a developer machine",
@@ -41,15 +49,21 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 /** Slots other lanes fill: the time-target line (TE-D9) and the "Rovara problem" line (TE-B8). Each is shown only when it is present and not blank. */
 export interface EvidenceRenderOptions {
+  questionLimit?: 10 | 5 | 2 | 0 | undefined;
   timeTargetLine?: string | undefined;
   rovaraProblemLine?: string | undefined;
   /** What `readEvidencePack` reported, for the "newer evidence" line. */
   newer?: NewerEvidence | undefined;
+  /**
+   * The short form a pull request description falls back to when it has no room (TE-A2b): the first line, where the checks ran, the flags and the "tests may be weaker" lines, and a pointer to Rovara for the rest. The
+   * words that warn a reviewer are never left out, and the form is bounded by those lists, not by the pack.
+   */
+  compact?: boolean | undefined;
 }
 export interface EvidenceRendering {
   /** The line a pull request or a check summary leads with. */
   firstLine: string;
-  /** Where the checks ran. Also `body[0]`. */
+  /** Where the checks ran; follows AI checks when recorded. */
   producerLine: string;
   /** Everything after the first line. */
   body: string[];
@@ -115,8 +129,10 @@ function checksLines(checks: readonly Check[]): string[] {
   const other = checks.filter((check) => !(OUTCOME_ORDER as readonly string[]).includes(check.after)).length;
   if (other > 0) counts.push(`${number(other)} ${NEWER_EVIDENCE_WORDS.toLowerCase()}`);
   const listed = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).map(checkLine);
+  const measuresSource = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).some((check) => (check.measures?.length ?? 0) > 0)
+    ? ["Measures: reported by the project's test runner, not measured by Rovara"] : [];
   const more = checks.length - listed.length;
-  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
+  return [line(`Checks: ${number(checks.length)} (${counts.join(", ")})`), ...measuresSource, ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more check")}`)] : [])];
 }
 
 function trustOf(entry: Dependency): EvidenceTrustClass | undefined {
@@ -161,16 +177,47 @@ function proofLines(proof: NonNullable<EvidencePackV2Read["proof"]>, scripted: b
   return lines;
 }
 
-function weakeningLine(weakening: NonNullable<EvidencePackV2Read["weakening"]>): string | undefined {
-  const parts = [
-    ...(weakening.skipRise === undefined ? [] : [`skipped tests rose from ${number(weakening.skipRise.before)} to ${number(weakening.skipRise.after)}`]),
-    ...(weakening.removedTests.length === 0 ? [] : [`${plural(weakening.removedTests.length, "test")} removed`]),
-    ...(weakening.absentOnNew.length === 0 ? [] : [`${plural(weakening.absentOnNew.length, "test")} missing on the new code`]),
-    ...(weakening.changedTestConfig.length === 0 ? [] : [`${plural(weakening.changedTestConfig.length, "test config file")} changed`]),
-    ...(weakening.changedSnapshots.length === 0 ? [] : [`${plural(weakening.changedSnapshots.length, "snapshot")} changed`]),
-    ...(weakening.changedFixtures.length === 0 ? [] : [`${plural(weakening.changedFixtures.length, "fixture")} changed`]),
-  ];
-  return parts.length === 0 ? undefined : line(`Tests may be weaker: ${parts.join("; ")}`);
+/** The flag lines (instruction files and CI-executed files, shown right after the producer line) and the "tests may be weaker" lines of a pack: the words are `weakeningLines` (evidence-weakening.ts), shared with the pull request description. */
+function weakeningPart(pack: EvidencePackV2Read): { flags: string[]; weakening: string[] } {
+  const weakening = pack.weakening;
+  const lines = weakeningLines({
+    ...(weakening === undefined ? {} : { skipRise: weakening.skipRise, removedTests: weakening.removedTests, absentOnNew: weakening.absentOnNew, absentOnNewCount: weakening.absentOnNewCount, changedTestConfig: weakening.changedTestConfig, changedSnapshots: weakening.changedSnapshots, changedFixtures: weakening.changedFixtures }),
+    ...(pack.flags === undefined ? {} : { instructionFiles: pack.flags.instructionFiles, ciExecutedFiles: pack.flags.ciExecutedFiles }),
+  });
+  return { flags: lines.flags.map(bullet), weakening: lines.weakening.length === 0 ? [] : ["Tests may be weaker:", ...lines.weakening.map(bullet)] };
+}
+
+/** What the first line is made from (TE-B12 shares it with the public summary, so both say the same words for the same facts). */
+export interface EvidenceFirstLineFacts {
+  result: unknown;
+  /** `level.reached`. */
+  reached: unknown;
+  /** `producer.isolation`. */
+  isolation: unknown;
+  /** Some check's proof rests on scripted AI replies. */
+  scripted: boolean;
+  /** The weakest stage's words, already safe to print (they are made inert here too). */
+  weakestWords?: string | undefined;
+}
+/**
+ * The first line: never better than where the checks ran. A "real run" claimed by a pack that ran in the sandbox, on a laptop or elsewhere, or whose proof rests on scripted AI replies, is worded as what it was, and a sandbox
+ * run says "not sealed".
+ */
+export function evidenceFirstLine(facts: EvidenceFirstLineFacts): string {
+  const isolation = facts.isolation as string;
+  const reached = facts.reached as string;
+  const rovaraRan = isolation === "sealed" || isolation === "sandbox";
+  // A level that is about a Rovara run or the sandbox (`rovara_real_run`, `sandbox_only`) is never worded as one when the checks ran elsewhere: a stored pack is read tolerantly, so its producer and its level can disagree.
+  const elsewhere = !rovaraRan && (reached === "rovara_real_run" || reached === "sandbox_only")
+    ? (Object.hasOwn(ELSEWHERE_LEVEL_WORDS, isolation) ? ELSEWHERE_LEVEL_WORDS[isolation as keyof typeof ELSEWHERE_LEVEL_WORDS] : UNKNOWN_PLACE_LEVEL_WORDS)
+    : undefined;
+  const level = elsewhere ?? (reached === "rovara_real_run" && facts.scripted ? SCRIPTED_AI_LEVEL_WORDS : reached === "rovara_real_run" && isolation !== "sealed" ? NOT_SEALED_LEVEL_WORDS : wordOf(EVIDENCE_LEVEL_WORDS, facts.reached));
+  return line([
+    wordOf(EVIDENCE_RESULT_WORDS, facts.result),
+    level,
+    ...(facts.weakestWords === undefined ? [] : [`weakest: ${inert(facts.weakestWords, 100)}`]),
+    ...(isolation === "sandbox" && !level.includes("not sealed") ? ["not sealed"] : []),
+  ].join(" · "));
 }
 
 /** The first line and the body of a v2 pack. Pure; the same pack and options always give the same text. */
@@ -179,25 +226,28 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const isolation = pack.producer.isolation as string;
   const weakest = pack.level.weakest;
   const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
-  // The first line is never better than where the checks ran: a "real run" claimed by a pack that ran in the sandbox, on a laptop or elsewhere, or whose proof rests on scripted AI replies, is worded as what it was.
-  const level = pack.level.reached === "rovara_real_run" && scripted ? SCRIPTED_AI_LEVEL_WORDS : pack.level.reached === "rovara_real_run" && isolation !== "sealed" ? NOT_SEALED_LEVEL_WORDS : wordOf(EVIDENCE_LEVEL_WORDS, pack.level.reached);
-  const firstLine = line([
-    wordOf(EVIDENCE_RESULT_WORDS, pack.result),
-    level,
-    ...(weakest === undefined ? [] : [`weakest: ${inert(weakest.words, 100)}`]),
-    ...(isolation === "sandbox" && !level.includes("not sealed") ? ["not sealed"] : []),
-  ].join(" · "));
+  // TE-B5 (O30): keep the override on the first line in both the full and compact forms, also when the AI evidence supplies the first line.
+  const withOverride = (text: string) => line([text, ...(pack.proof?.override === undefined ? [] : ["marked ready anyway"])].join(" · "));
+  let firstLine = withOverride(evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words }));
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
   const newer = options.newer ?? noNewerEvidence();
   const notTested = pack.notTested;
+  const flagged = weakeningPart(pack);
+  if (options.compact === true) {
+    const ai = renderAiEvidence(pack.ai, options.questionLimit ?? 0);
+    firstLine = ai.firstLine === undefined ? firstLine : withOverride(ai.firstLine);
+    const short = [...ai.lines, producerLine, ...flagged.flags, ...slot(options.rovaraProblemLine), ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
+    return { firstLine, producerLine, body: short, text: [firstLine, ...short].join("\n") };
+  }
   const body = [
     producerLine,
+    ...flagged.flags,
     ...slot(options.rovaraProblemLine),
     ...slot(options.timeTargetLine),
     ...checksLines(pack.checks),
     ...(pack.proof === undefined ? [] : proofLines(pack.proof, scripted)),
-    ...(pack.weakening === undefined ? [] : weakeningLine(pack.weakening) === undefined ? [] : [weakeningLine(pack.weakening)!]),
+    ...flagged.weakening,
     ...dependencyLines(pack.dependencies ?? []),
     ...(pack.meters === undefined ? [] : [line(`Spent: ${dollars(pack.meters.modelUsd)} model, ${plural(pack.meters.machineMinutes, "machine minute")} (${dollars(pack.meters.machineUsd)})`)]),
     ...(notTested.length === 0 ? [] : [
@@ -207,6 +257,11 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
     ]),
     ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []),
   ];
+  const ai = renderAiEvidence(pack.ai, options.questionLimit, Math.max(1000, EVIDENCE_RENDER_LIMITS.textMax - [firstLine, ...body].join("\n").length - 1));
+  firstLine = ai.firstLine === undefined ? firstLine : withOverride(ai.firstLine);
+  body.unshift(...ai.lines);
+  // Keep verdicts and weakening flags; the existing compact pointer records omitted detail.
+  if (pack.ai !== undefined && [firstLine, ...body].join("\n").length > EVIDENCE_RENDER_LIMITS.textMax) return renderEvidence(pack, { ...options, compact: true });
   return { firstLine, producerLine, body, text: [firstLine, ...body].join("\n") };
 }
 

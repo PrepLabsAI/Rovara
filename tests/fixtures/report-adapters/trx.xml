@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results>
+<UnitTestResult testName="same" outcome="Passed" duration="00:00:00.0124000" startTime="2026-01-01T00:00:00Z" endTime="2026-01-01T00:00:00.012Z"/>
+<UnitTestResult testName="same" outcome="Failed"><Output><ErrorInfo><Message>assert</Message></ErrorInfo></Output></UnitTestResult>
+<UnitTestResult testName="skip &amp; wait" outcome="NotExecuted"/>
+<UnitTestResult testName="load" outcome="Error"/>
+</Results><ResultSummary outcome="Failed"><Counters total="999" passed="999"/></ResultSummary></TestRun>
