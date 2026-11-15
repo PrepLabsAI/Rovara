@@ -1,0 +1,1 @@
+{"statusCode":400,"headers":{"content-type":"application/json","cache-control":"no-store"},"body":"{\"error\":{\"code\":\"CONFIG_INVALID\",\"message\":\"invalid project: repository: Invalid input: expected string, received undefined\"},\"requestId\":\"golden\"}"}

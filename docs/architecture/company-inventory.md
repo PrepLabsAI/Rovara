@@ -1,4 +1,4 @@
-387 record kinds: 38 company-scoped, 8 install-wide, 341 needs-company. 175 routes: 11 company-scoped, 2 install-wide, 162 needs-company.
+390 record kinds: 39 company-scoped, 10 install-wide, 341 needs-company. 175 routes: 12 company-scoped, 2 install-wide, 161 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -27,18 +27,16 @@ The membership-absent path and the seven original golden pairs keep their respon
 
 ## Record constructors, dispatch paths and gateway paths
 
-| kind | identity | class | table | checked | methods | reason |
-|---|---|---|---|---|---|---|
 | record | pk:CORE_ENGINE_IN_USE; entity:CORE_ENGINE_IN_USE | install-wide | State table | no | - | Internal root-job directory of companies with core work; intentionally enumerates all companies, not a customer data endpoint. |
 | record | pk:TASK_ENGINE; entity:TASK_ENGINE | needs-company | State table | no | - | T1/T2: stamp carries orgId but engineOfStoredTask reads an unscoped task key without a company argument. |
 | record | pk:PROJECT_MEMBERS; entity:PROJECT_MEMBER | needs-company | State table | no | - | T1/T3: reverse project-member index is keyed by project name only; client member reads/writes need company-aware grants and targets. |
 | record | pk:LAST_EVENT | needs-company | other | no | - | T4/T8: channel-state newest-event key is channel plus conversation, without a company binding check. |
 | route | /v1/dev/client/ | needs-company | State table | no | ANY | Spec 065 prefix dispatcher includes unchecked members/create/repository routes; opt-in flag is not company isolation. |
-| route | /v1/dev/client/projects | needs-company | State table | no | POST | T3/T5 known gap: createClientProject callback has no company parameter; writer and project-name namespace changes exceed R4. |
+| route | /v1/dev/client/projects | needs-company | State table | yes | POST | T5: optional AWS binding path resolves creator membership, requires an operator binding and persists companyId. Shared project-name namespace remains T1; disabled paths remain legacy. |
 | route | /v1/dev/client/projects/{id} | company-scoped | State table | yes | GET | Membership resolved once, both grant/admin lists filtered, final revision checked before repository output; one shared read budget. |
 | route | /v1/dev/client/projects/{id}/members | needs-company | State table | no | GET | T2/T3 known gap: unscoped reverse-member index and install administrator authority; target membership requires changes to admin-actions/store. |
 | route | /v1/dev/client/projects/{id}/members/{id} | needs-company | State table | no | PUT, DELETE | T1/T2 known gap: T3 fences the target identity to the caller company, but project grant/revoke keys and project administrator authority remain unscoped. |
-| route | /v1/dev/client/repositories | needs-company | other | no | GET | T5 known gap: clientRepositories callback enumerates GitHub installations without a company argument. |
+| route | /v1/dev/client/repositories | company-scoped | other | yes | GET | T5: optional AWS binding path filters installations by authenticated membership. Unclaimed/foreign installations are hidden; disabled paths remain legacy. |
 | route | /v1/dev/tasks/{taskId}/messages | needs-company | State table | yes | GET, POST | GET resolves membership and forwards company to existing task/note/comment checks; POST membership/writer integration remains T2/T3. |
 | route | /v1/dev/tasks/{taskId}/comments | needs-company | State table | yes | GET, POST | GET resolves membership and forwards company to existing task/comment checks; POST membership/writer integration remains T2/T3. |
 | route | /v1/dev/tasks/{taskId}/diff | needs-company | State table | yes | GET | Task ownership/company gate is membership-resolved; workspace PR list and diff-provider company binding remain T2/T7, not an end-to-end repository isolation claim. |
@@ -69,8 +67,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:EVAL_BATCHES | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:EVENT; entity:EVENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:FINISHED_RELEASE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | pk:GITHUB_DELIVERY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | pk:GITHUB_PR | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | pk:GITHUB_DELIVERY | needs-company | State table | no | - | T5: companyId and scoped recovery writes with githubBindings; legacy rows are implicit. Other readers and disabled paths still require T1 proof. |
+| record | pk:GITHUB_PR | needs-company | State table | no | - | T1: raw repository key has no company; T5 webhook authorization checks the installation owner against the linked project. |
 | record | pk:IDEMPOTENCY; entity:IDEMPOTENCY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:INTAKE_SOURCES | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:LEARN | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -83,7 +81,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:OPEN_APPROVALS | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:OPEN_CHAIN_RUNS | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:OPERATION; entity:OPERATION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | pk:ORG | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | pk:ORG | needs-company | State table | no | - | T1/T6: mixed org-prefixed families include connection metadata/directories; a company-shaped key alone does not prove membership at every caller. T6 isolates secret adapters, not every ORG record read. |
 | record | pk:OUTBOX; entity:OUTBOX | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:OWNER | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:PENDING_TRIGGER_SCHEDULES | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -121,7 +119,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | builder:packages/broker/src/chatgpt/connections.ts:pkOf | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/context-sources/citations.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/context-sources/controller-events.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | builder:packages/broker/src/context-sources/mcp-servers.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | builder:packages/broker/src/context-sources/mcp-servers.ts:partition | needs-company | State table | no | - | T6: orgScoped(orgId, MCPSRV) separates registered MCP metadata; HTTP tokens and stdio secret documents use org-connectors. R2/T2 membership binding of all callers remains unproven. |
 | record | builder:packages/broker/src/context-sources/quotes.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/context-sources/store.ts:partition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | builder:packages/broker/src/core/channel/links.ts:channelLinksPartition | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -227,8 +225,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:DIAGNOSIS_RATE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:DIAGNOSIS_RECORD | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:DIAGNOSIS_REQUEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:E2E_ACCOUNT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:E2E_ACCOUNT_LATEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:E2E_ACCOUNT | needs-company | State table | no | - | T6/T7: account definitions use company/project keys and secret references, not values. T6 guards org-test-accounts adapter reads; T7 worker dynamic-reference authorization remains unproven. |
+| record | entity:E2E_ACCOUNT_LATEST | needs-company | State table | no | - | T6/T7: company/project latest-account pointers select revisions, not secret values. T7 must prove worker/account authority together; T6 adapter isolation alone does not promote this family. |
 | record | entity:E2E_MODEL_BUDGET_RESERVATION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:E2E_MODEL_CHECK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:E2E_MODEL_CHECK_LATEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -305,8 +303,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:MODEL_SELECTION_POLICY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:NOTICE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:OPERATION_EVENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:ORG_CONNECTION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:ORG_CONNECTION_DIRECTORY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:ORG_CONNECTION | needs-company | State table | no | - | T6: connectionKey scopes metadata and secretVersion by org; secret values live outside State. Store callers still supply orgId; R2 membership-bound hosted wiring and T2 route proof remain. |
+| record | entity:ORG_CONNECTION_DIRECTORY | needs-company | State table | no | - | T6: connectionsKey scopes directory entries by org; entries hold no secret value. R2/T2 must bind all listing callers to membership before promoting this record family. |
 | record | entity:PAGE_COMMENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:PLANNER_REPLIES | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:PLAN_EVIDENCE_POINTER | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -544,8 +542,8 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/threads/workspace/prepare | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workflows/quick-start | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workspaces/{id}/artifacts/{id} | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
-| route | /v1/workspaces/{id}/connectors/{id}/call | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
-| route | /v1/workspaces/{id}/connectors/{id}/tools | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
+| route | /v1/workspaces/{id}/connectors/{id}/call | needs-company | State table | no | POST | T6/T2: POST executes a workspace connector with its configured secret reference. T6 adapter membership helpers are not wired at this dispatcher; R2/T2 caller binding and T7 execution proof remain. |
+| route | /v1/workspaces/{id}/connectors/{id}/tools | needs-company | State table | no | GET | T6/T2: GET discovers workspace connector tools. Secret adapter isolation does not prove route membership; R2/T2 binding remains, so checked=no. |
 | route | /v1/workspaces/{id}/conversations | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workspaces/{id}/github/call | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/workspaces/{id}/github/tools | needs-company | State table | no | GET | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
@@ -567,6 +565,42 @@ The membership-absent path and the seven original golden pairs keep their respon
 | gateway | POST /v1/slack/channel-events | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
 | gateway | POST /v1/slack/events | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
 | gateway | POST /v1/slack/interactions | needs-company | other | no | POST | T2: gateway forwarding is not a membership check; authorization remains the dispatcher's job. |
+| record | pk:GITHUB_INSTALLATION; entity:GITHUB_INSTALLATION_BINDING; entity:GITHUB_INSTALLATION_CLAIM_AUDIT | company-scoped | State table | no | - | T5: operator-only conditional binding; requireBound denies foreign companies. github-installation-binding and github-two-company tests. |
+| record | pk:GITHUB_INSTALLATION_BINDING | install-wide | State table | no | - | T5: operator backfill completion marker; no customer data. Missing marker keeps legacy installations implicit. |
+| record | pk:GITHUB_WEBHOOK_COMPANIES | install-wide | State table | no | - | T5: ids-only recovery registry; bounded sweep must discover company partitions without scanning delivery contents. |
+
+## GitHub installation operator runbook (T5)
+
+Only an install operator with existing direct broker Lambda invocation permission may run these events. They have no HTTP route; company-admin tokens and HTTP-shaped invocations cannot claim. Keep the optional binding and membership dependencies behind the staging/review gate. No IAM or infrastructure change is included here.
+
+Before backfill, inspect the GitHub App's installations and confirm which belong to the implicit company. Freeze installation changes while walking pages. **Bind the pilot company's installation with `agentx.github-binding-claim`** before backfill if it already exists, or after backfill if it is installed later. Backfill preserves explicit bindings and assigns only validated unbound installations to the implicit company. It cannot infer a company's ownership from a GitHub account name.
+
+An operator invokes the existing broker Lambda with this payload (substitute verified positive installation id and company id):
+
+```json
+{"source":"agentx.github-binding-claim","installationId":77,"companyId":"org_aaaaaaaaaaaaaaaaaaaa"}
+```
+
+The broker verifies the installation through this App's GitHub credentials, then atomically writes its conditional binding and `AUDIT#CLAIM` record. A second claim, including the same company, is refused. Unknown, foreign, invalid and already-bound requests have the same fixed refusal. `boundBy`/audit actor is `operator-lambda`; Retain the operator invocation evidence to identify the IAM caller. Never try to reassign an existing binding with a raw table write. Later T3/Cloud self-service must verify WITH GITHUB that the person administers the installation account.
+
+Next invoke `{"source":"agentx.github-binding-backfill"}`. Each call makes one installation-list request (25 rows, 1 MB response, 5-second HTTP timeout), no repository/token fan-out, then at most 25 validated binding writes under a fresh 304-command/1 MB/10-second store budget. On `more:true`, invoke again with the returned numeric `continuation`. A persisted page checkpoint refuses skipped pages. A full page requires a following page; only the final page seals the completion marker. On a failure, retry the same page; inspect the saved progress if a successful response was lost. Confirm `more:false`, the marker, implicit bindings and the pilot binding before enabling any second company.
+
+Recovery similarly returns `more:true` and an opaque `continuation` when bounded listing stops. Invoke `agentx.github-webhook-recovery` again with that exact continuation until `more` is absent. Each call lists at most 50 companies and processes at most 100 deliveries (25 rows per company page). Registry/partition reads alone spend the shared 512-command/2,000-item/8 MB/10-second budget; processing uses the plain client and existing expiring delivery leases. Listing stops before claiming any unfinished page. Invalid legacy rows are skipped and counted in `skipped`; inspect and repair them under the owning company's authority. Other company partitions still run.
+
+Bindings absent retains the existing webhook/recovery response bytes. With bindings present and membership absent, retry fails closed. Legacy administrator registration/retry identities without a checked developer identity also fail closed; the authenticated client creation path supplies its checked developer id.
+
+## T5 inventory refresh after code/next merge
+
+The task-flow `keyOf` forwarding sites moved from line 207 to line 210 when task-token origin metadata was added to `TaskRecord`. Both still forward `document.pk` and `document.sk` unchanged; the forwarding table now pins their current locations. The exhaustive scan found no new or removed record-constructor, dispatch-path or gateway-path identities. The summary was recomputed using the inventory test's row-counting rules and remains unchanged; generic forwarding contributes no record kinds. Existing needs-company classifications and their named known-gap tests remain in force.
+
+## M4a project settings (ANSWER-1)
+
+| kind | identity | class | table | checked | methods | reason |
+|---|---|---|---|---|---|---|
+| record | entity:PROJECT_SETTINGS | company-scoped | State table | no | - | Code is the sole owner. projectSettingsKey uses companyScoped(companyId, PROJECT_SETTINGS plus validated project name); the rows reader validates the stored company and project. Revision-conditional transaction includes one COMPANY_LOG audit under that same company. |
+| route | /v1/dev/projects/{id}/settings | company-scoped | State table | yes | GET, PUT | Full-access routes resolve live membership and check the project row before any settings read. PUT also checks the project administrator grant in that company. tests/contract/project-settings.test.ts covers both companies, foreign grants, stale revision and atomic audit. |
+
+New key construction sites: aws/project-settings.ts projectSettingsKey and the COMPANY_LOG audit partition both use the existing companyScoped builder. The audit entity reuses COMPANY_LOG. No generic forwarding site was added. The raw-name PROJECT and MEMBER families retain their existing needs-company classifications: this adapter checks their company before using them; it does not migrate their writers. The developer-routes forwarding expressions are unchanged and relocated by four lines.
 
 ## Generic forwarding coverage (not record kinds)
 
@@ -754,26 +788,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | packages/broker/src/services/merge-tracking.ts:397 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | forwarding | packages/broker/src/aws/admin-change-audit.ts:157:18:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | adminChangeAuditKey / ADMIN_CHANGE export records |
 | forwarding | packages/broker/src/aws/admin-change-audit.ts:157:31:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | adminChangeAuditKey / ADMIN_CHANGE export records |
-| forwarding | packages/broker/src/aws/broker.ts:2087:27:pk | membership.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:2087:46:sk | membership.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:5696:50:sk | marker.dispatchSk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:9539:12:pk | record.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:9539:27:sk | record.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10850:17:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10850:30:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10937:61:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10937:74:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10968:106:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10968:119:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10976:59:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:10976:72:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:11029:25:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:11029:38:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:11158:17:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:11158:30:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:12196:106:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:12196:119:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
-| forwarding | packages/broker/src/aws/broker.ts:14878:5:entityType | record.entityType | Generic runtime entityType forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
 | forwarding | packages/broker/src/aws/channel-conversation-state.ts:39:54:sk | conversationSubject(conversation) | Conversation-derived sort key; channel tenant/thread identity is retained, but company binding is not yet proven (T4). | pk:LAST_EVENT in aws/channel-conversation-state.ts |
 | forwarding | packages/broker/src/aws/channel-conversation.ts:155:22:pk | (member as { pk: string }).pk | Projects the partition supplied by the named key constructor; no new family. | developer/limits.ts chargeFor and channel counters |
 | forwarding | packages/broker/src/aws/channel-conversation.ts:155:57:sk | (member as { sk: string }).sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | developer/limits.ts chargeFor and channel counters |
@@ -785,8 +799,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/aws/connector-metrics.ts:38:7:computed | [metric] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/aws/connector-metrics.ts (emitConnectorMetric) |
 | forwarding | packages/broker/src/aws/credentials.ts:287:94:pk | token.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | tokenPartition and credential registry constructors in credentials.ts |
 | forwarding | packages/broker/src/aws/credentials.ts:287:108:sk | token.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | tokenPartition and credential registry constructors in credentials.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:519:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:540:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:395:39:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:395:54:sk | marker.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:458:43:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
@@ -954,7 +966,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/developer/company-membership.ts:21:136:sk | emailIndexKey(CompanyEmail.parse(email)).pk | The existing normalized email hash becomes the preapproval sort key inside its company partition. | preapprovalKey -> companyScoped(companyId, "PREAPPROVAL") |
 | forwarding | packages/broker/src/developer/company-membership.ts:139:47:pk | z.literal(pk) | Runtime validation of the queried company partition, not a new key family. | preapprovalKey / preapprovalHashKey |
 | forwarding | packages/broker/src/developer/company-membership.ts:139:66:sk | z.string().regex(/^EMAIL#[a-f0-9]{64}$/) | Runtime validation of the normalized email hash sort key within its company partition. | preapprovalKey / preapprovalHashKey |
-| forwarding | packages/broker/src/developer/store.ts:98:116:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | emailIndexKey, signInClientKey |
 | forwarding | packages/broker/src/developer/task-person-identity.ts:82:100:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | DEVELOPER identity / MEMBER grant / PROJECT revision constructors |
 | forwarding | packages/broker/src/developer/task-person-identity.ts:82:104:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | DEVELOPER identity / MEMBER grant / PROJECT revision constructors |
 | forwarding | packages/broker/src/developer/task-project-access.ts:88:5:pk | revision.pk! | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | PROJECT revision / MEMBER grant / channelBindingKey constructors |
@@ -1120,14 +1131,14 @@ Compared with the original R4 baseline, the incoming developer-routes helpers ar
 
 The nine new dispatch patterns and four new record families are listed above. No new gateway path was added. Existing sign-in token/authorize routes still serve install identity; sign-in client registration, its scopes/keepSecret update, and per-company ownership remain T3 (entity:SIGN_IN_CLIENT and /v1/admin/sign-in-clients). routeLinkingRequest reuses the same checked access/detail paths and retains the existing self-owned channel-link paths. Token authentication itself is unchanged.
 
-Named behavioural gaps in tests/contract/company-merge-up.test.ts: T3/T5 client repository/create callbacks lack a company argument; T2/T3 client member GET/PUT/DELETE operate across company boundaries; T2 task POST messages/comments do not resolve membership. These routes need shared writer/registry/provider changes beyond developer-routes.ts. GET diff's task gate is checked, but its workspace pull-request provider still lacks company binding (T2/T7); enabling a repository provider requires that follow-up. None of these gaps is reported as isolation PASS.
+Named behavioural gaps in tests/contract/company-merge-up.test.ts: T2/T3 client member GET/PUT/DELETE operate across company boundaries; T2 task POST messages/comments do not resolve membership. These routes need shared writer/registry/provider changes beyond developer-routes.ts. GET diff's task gate is checked, but its workspace pull-request provider still lacks company binding (T2/T7); enabling a repository provider requires that follow-up. None of these gaps is reported as isolation PASS.
+
+T5 deployment gate: installation claims are install-operator-only. Before enabling a second company, the controller must complete the required staging GitHub installation backfill and verify its marker. The later T3/Cloud self-serve connect flow must verify with GitHub that the claimant administers the installation account; never trust on first use. T5 now wires the spec 065 listing/create checks and operator-invoked backfill event. Backfill now reads validated installation-only pages of 25 with durable continuation; see the operator runbook below. Production dependencies remain absent until controller activation after staging proof and review. All nine company-separation parts must pass first.
 
 Forwarding sites were re-anchored to the merged sources without weakening the scanner. The sole new expression is conversationSubject(conversation) in the LAST_EVENT sort key; it preserves conversation identity but requires T4 company binding. Record and route totals are recomputed by the existing ratchet, which reads no git history.
 
 ## Merge-up 2: full-access callers, chosen names and task readers
 
-| kind | identity | class | table | checked | methods | reason |
-|---|---|---|---|---|---|---|
 | record | builder:packages/broker/src/e2e/legacy-key-scope.ts:scopedProjectPk | needs-company | State table | no | - | T1: mixed scoped/legacy constructor accepts a legacy-unscoped selector without resolving membership; named known-gap test pins that responsibility. Incoming e2e-legacy-scope-fallback tests prove existing callers restrict legacy reads to the implicit company. |
 | route | /v1/dev/me/name | install-wide | sign-in table | no | PUT | Verified person's own sign-in identity/display name, deliberately shared across their company contexts; developer-own-name tests cover caller-only updates. |
 | route | /v1/dev/tasks/{taskId}/readers | needs-company | State table | yes | GET | Membership-resolved task gate, including viewer fallback, under the total read budget. Returned person/project-grant metadata is still install-wide; T2/T3 recipient membership binding is a named known gap. |
@@ -1139,10 +1150,33 @@ The new loadReadableTask viewer fallback rechecks recordInCompany before consult
 
 All incoming source identities are classified without changing the scanner; forwarding expressions are identical and only source locations moved. No new API Gateway path appeared. The inventory's method column remains manual, and optional-company read checks do not claim isolation for unchecked writers, recipient metadata or workspace providers.
 
+## T6 secret records and entry points
+
+T6 uses R4's `CompanyMembershipReader` from `packages/broker/src/aws/company-check.ts`. Each bound operation resolves membership afresh; missing, malformed or throwing membership refuses with the existing fixed sentence. A valid foreign connector, hook, MCP or test-account name reads as missing before secret-client selection or any Secrets Manager call. The adapter's absent-options byte goldens and R4's absent-`deps.companies` route goldens remain the compatibility controls. This type-only reader swap changes no runtime guard or default.
+
+The counted rows above retain **needs-company** for mixed or incompletely wired record/route families. The rows below classify secret storage and entry points outside the scanner's record/dispatch grammar; they are **not extra counted identities**. A company-scoped secret adapter does not establish end-to-end route isolation. Local routes are outside the scanner's `aws/` dispatch set; contract-only hook paths and worker references must not be presented as scanned, checked routes.
+
+| Surface / record kind | Class | Storage / route | Evidence and remaining owner |
+|---|---|---|---|
+| Connector secret values | company-scoped | other: `agentx/<env>/org-connectors/<company>/<id>` | `company-secrets.ts`, `secrets-manager/index.ts`, `connection-secrets.ts`; `secrets-company-member`, `aws-secrets-manager-company`, `secrets-tagged-session` tests. Membership-bound composition is opt-in; R2 wires hosted callers. |
+| Connection metadata and directory | needs-company | State: `ORG_CONNECTION`, `ORG_CONNECTION_DIRECTORY`, `connectionKey`, `connectionsKey` (counted above) | Keys include company; records store only presence/version. `connections-store.test.ts` covers versions and cross-company refusal. Caller membership is still an R2/T2 obligation. |
+| Hook secret values | company-scoped | other: `agentx/<env>/org-hooks/<company>/<id>` | Same T6 reader/writer guards; create uses `rovara:use=hook`. `secrets-company-names`, `aws-secrets-manager-company`, `secrets-tagged-session` tests. |
+| Hook record, directory, replay and rate; hook lookup | needs-company | State: contract constructors `hookKey`, `hookDirectoryKey`, `hookEventKey`, `hookRateKey`; global `hookLookupKey` | `contracts/src/event-hooks.ts` scopes the first four; lookup is deliberately global before signature verification. No corresponding hook dispatcher/store is present in this Code tree. T2/T8 must prove signature, lookup, replay and membership authority; T6 does not promote them. |
+| Registered MCP token / stdio secret document | company-scoped | other: `orgMcpServerSecretName` uses `org-connectors/<company>/<serverId>` | `context-sources/wiring.ts` uses the connection secret port; T6 name and adapter tests include this shared family. Hosted membership wiring remains R2. |
+| Registered MCP metadata | needs-company | State: `orgScoped(orgId, "MCPSRV")` / `SRV#<serverId>` (partition builder counted above) | `context-sources/mcp-servers.ts` scopes keys; local caller authority alone does not prove all callers. R2/T2 integration remains. |
+| Test-account secret values | company-scoped | other: `agentx/<env>/org-test-accounts/<company>/<account>` | `contracts/src/test-account.ts` builds names/tags; T6 reader same-answer tests cover this family. T6 connection writer accepts connector/hook names only. T7 owns worker dynamic-reference authorization; this lane does not supply a test-account writer. |
+| Account definitions / latest pointers | needs-company | State: `E2E_ACCOUNT`, `E2E_ACCOUNT_LATEST` (counted above) | Company/project keys hold references; T7 must bind worker execution and secret resolution to the approved account. |
+| Connector execution and discovery | needs-company | POST `/v1/workspaces/{id}/connectors/{id}/call`; GET `/v1/workspaces/{id}/connectors/{id}/tools` (counted above, checked=no) | T6 helpers do not add `deps.companies` at these routes; R2/T2/T7 retain wiring and execution proof. |
+| Local connection and MCP reads / page writes | needs-company | GET `/v1/dev/connections`, GET `/v1/dev/connections/{id}`, GET `/v1/dev/mcp-servers`; owner page actions | `local/app/connections.ts` compares the caller principal with the install company and gates writes on a fresh page. It does not resolve R4 membership; other HTTP methods refuse. R2/T2 multi-company binding remains; these local paths are outside the scanned AWS route set. |
+| Hook delivery | needs-company | Contract-only POST `/v1/hooks/{source}/{hookId}` | Described by `contracts/src/event-hooks.ts`; no matching Code dispatcher in this tree. T2/T8 must prove delivery authority, with T6 secret guard as one layer. |
+| Test-account dynamic reference | needs-company | Worker `test-account-secret.ts`, no dedicated scanned secret HTTP route | T7 owns worker authority and role cutover; T6 cannot claim the worker path is membership-checked. |
+| GitHub App key/webhook and Slack install secrets | install-wide | other: configured install secret names/ARNs | T4/T5; outside T6 company-name families. |
+| Model provider keys | install-wide | other: model-key port and model-runtime environment ARNs | lane G; no model-key family is admitted by T6. |
+
+Old unscoped names belong only to the explicitly configured implicit company in hosted mode; `companyPaths` without an owner refuses them. GitHub App/Slack install secrets remain T4/T5; model keys remain lane G. Real IAM/TagSession policies, backfill, role split and staging evidence remain in `T6-SECRETS-IAM-20261114-v2`; fake tests do not establish deployed IAM behavior. No checked=yes row is added by T6.
+
 ## Merge-up 3: proof holds and mark-ready overrides
 
-| kind | identity | class | table | checked | methods | reason |
-|---|---|---|---|---|---|---|
 | record | entity:PROOF_HOLD | needs-company | State table | no | - | T1: proofHoldKey constructs DEVTASK/task + PROOF_HOLD/repository/number without company. holdRecordOf/readProofHold check orgId and taskId, but judgeProofHold compares the raw stateKey and writes without a company fence: a same-task collision can suppress or replace another company's judgement. Named known-gap test in company-inventory.test.ts. |
 | record | entity:PROOF_OVERRIDE | needs-company | State table | no | - | T1: proofOverrideKey constructs DEVTASK/task + PROOF_OVERRIDE/repository/number without company. overrideRecordOf and markReadyAnyway check company/task and live roles; their absent/head conditions do not namespace uniqueness by company. A foreign row at that key blocks an otherwise authorized mark-ready. Named known-gap test in company-inventory.test.ts; foreign override contents are refused. |
 | record | entity:PROOF_HOLD_HISTORY | company-scoped | State table | no | - | historyKey uses companyScoped(orgId, "PROOF_HOLD_HISTORY") and validates the project sort key; every history reader/writer uses that constructor. The same-project two-company behavioural test in company-inventory.test.ts proves separate history totals. |
@@ -1171,8 +1205,6 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 
 ## T3 merge-up: code/next lessons extraction
 
-| kind | identity | class | table | checked | methods | reason |
-|---|---|---|---|---|---|---|
 | record | entity:LESSONS_NIGHTLY | company-scoped | State table | no | - | core-host/lessons.ts nightlyKey uses companyScoped(companyId, LESSONS_NIGHTLY) for both claimNightly and releaseNightly; core-host-lessons tests exercise two-company nightly isolation. |
 | record | pk:COMPANY_PURGE; entity:COMPANY_PURGE | install-wide | State table | no | - | Company purge state, one row per company (sort key = company id). The operator-only resume job enumerates every company's purge by design; no customer route reads it; every write is conditioned on that row's status, request id and lease. |
 | record | builder:packages/broker/src/core/company/purge.ts:marksPk; entity:COMPANY_PURGE_MARK | company-scoped | State table | no | - | Partition named by the purging company's id (COMPANY_PURGE_MARK#<company>), read and written only with that purge's own company; company-purge two-company tests pin separation. |
@@ -1181,14 +1213,31 @@ Retained gaps: second-company Slack binding and directory (T4); operator/company
 | record | builder:packages/broker/src/core/people/erase.ts:personErasePendingPartition; entity:PERSON_ERASE_PENDING | company-scoped | State table | no | - | ORG-prefixed key constructor (orgScoped); person-erase tests pin company scope. |
 | record | entity:PERSON_ERASED | company-scoped | State table | no | - | Receipt row under personErasedKey, an ORG-prefixed key (orgScoped); person-erase tests pin company scope. |
 | record | pk:TASKSPEND; entity:TASK_SPEND | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| forwarding | packages/broker/src/developer/store.ts:98:116:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | emailIndexKey, signInClientKey |
+| forwarding | packages/broker/src/aws/broker.ts:2152:27:pk | membership.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:2152:46:sk | membership.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:5762:50:sk | marker.dispatchSk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:9605:12:pk | record.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:9605:27:sk | record.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:10977:17:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:10977:30:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11064:61:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11064:74:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11095:106:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11095:119:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11103:59:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11103:72:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11156:25:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11156:38:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11285:17:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:11285:30:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:12323:106:pk | item.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:12323:119:sk | item.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/broker.ts:15035:5:entityType | record.entityType | Generic runtime entityType forwarding; preserves caller/loaded record identity rather than assigning a new record family. | membershipRecord / taskKey / workflow dispatch and setup constructors in broker.ts and developer/task-records.ts |
+| forwarding | packages/broker/src/aws/github-webhooks.ts:565:155:sk | input.companyId | Runtime-validated company id in ids-only recovery registry. | GITHUB_WEBHOOK_COMPANIES |
+| forwarding | packages/broker/src/aws/github-webhooks.ts:758:21:pk | z.string().regex(/^GITHUB_DELIVERY#[0-9a-f-]{36}$/i) | Runtime-validated recovery cursor schema; no stored key construction. | GITHUB_DELIVERY |
+| forwarding | packages/broker/src/aws/github-webhooks.ts:820:106:sk | input.afterCompany | Validated company id resumes the ids-only recovery registry. | GITHUB_WEBHOOK_COMPANIES |
+| forwarding | packages/broker/src/aws/developer-routes.ts:519:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
+| forwarding | packages/broker/src/aws/developer-routes.ts:540:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
 
 Forwarding rows were relocated by exact expression; the extracted host-glue rows and core-host erase/catalog forwarding are enumerated separately above. No scanner rule or limit changed.
-
-## M4a project settings (ANSWER-1)
-
-| kind | identity | class | table | checked | methods | reason |
-|---|---|---|---|---|---|---|
-| record | entity:PROJECT_SETTINGS | company-scoped | State table | no | - | Code is the sole owner. projectSettingsKey uses companyScoped(companyId, PROJECT_SETTINGS plus validated project name); the rows reader validates the stored company and project. Revision-conditional transaction includes one COMPANY_LOG audit under that same company. |
-| route | /v1/dev/projects/{id}/settings | company-scoped | State table | yes | GET, PUT | Full-access routes resolve live membership and check the project row before any settings read. PUT also checks the project administrator grant in that company. tests/contract/project-settings.test.ts covers both companies, foreign grants, stale revision and atomic audit. |
-
-New key construction sites: aws/project-settings.ts projectSettingsKey and the COMPANY_LOG audit partition both use the existing companyScoped builder. The audit entity reuses COMPANY_LOG. No generic forwarding site was added. The raw-name PROJECT and MEMBER families retain their existing needs-company classifications: this adapter checks their company before using them; it does not migrate their writers. The developer-routes forwarding expressions are unchanged and relocated by four lines.
