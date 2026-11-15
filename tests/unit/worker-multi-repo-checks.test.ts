@@ -31,7 +31,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const roots: string[] = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+const LIVE_ROUND = { kind: "local" as const, signal: new AbortController().signal, budgetMs: 0 };
+afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const git = (directory: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Codex", "-c", "user.email=noreply@openai.com", ...args], { cwd: directory, env: { ...isolatedGitEnvironment(directory), GIT_ALLOW_PROTOCOL: "file" }, encoding: "utf8" }).trim();
 const put = async (root: string, path: string, text: string) => { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), text); };
 const command = (script: string, cwd = "app"): ProjectCommand => ({ executable: process.execPath, args: ["-e", script], cwd, timeoutSeconds: 20 });
@@ -236,10 +237,10 @@ describe("candidate-bound multi-repository rounds", () => {
     await expect(stat(join(f.root, "app/ready.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it.each(["wrong branch", "dirty base", "duplicate", "outside"])("refuses %s before any command", async (kind) => {
+  it.each(["wrong branch", "unchanged tree at wrong HEAD", "duplicate", "outside"])("refuses %s before any command", async (kind) => {
     const f = await fixture();
     if (kind === "wrong branch") f.input.repositories = f.input.repositories.map((r) => ({ ...r, ...(r.repositoryId === "app" ? { taskBranch: "refs/heads/main" } : {}) }));
-    if (kind === "dirty base") await put(f.root, "lib/code.cjs", "changed base");
+    if (kind === "unchanged tree at wrong HEAD") git(join(f.root, "lib"), "commit", "--allow-empty", "-qm", "empty change");
     if (kind === "duplicate") f.input.repositories = [...f.input.repositories, f.input.repositories[0]!];
     if (kind === "outside") f.input.repositories = [{ ...f.input.repositories[0]!, path: "../outside" }, f.input.repositories[1]!];
     let ran = false;
@@ -732,15 +733,18 @@ describe("candidate-bound multi-repository rounds", () => {
     const f = await fixture();
     f.input.setup = [command("setup")];
     const base = createCheckRunners({ rootPath: f.root, local: true });
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     let aborted = false;
     const runners = withMultiRepoChecks(f.input, { ...base, runProjectCommand: async (_cmd, signal) => {
-      await new Promise<void>((resolve) => { const timer = setTimeout(resolve, 2_000); signal.addEventListener("abort", () => { aborted = true; clearTimeout(timer); resolve(); }, { once: true }); });
+      const stopped = new Promise<void>((resolve) => { signal.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true }); });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await stopped;
       return { exitCode: 0, timedOut: false, stdout: "", stderr: "" };
     } });
     const began = Date.now();
     const round = await runChecks({ source: "project", readiness: [command("check")] }, runners, { signal: new AbortController().signal, budgetMs: 1_000 });
     expect(aborted).toBe(true);
-    expect(Date.now() - began).toBeLessThan(2_500);
+    expect(Date.now() - began).toBe(1_000);
     expect(round.entries[0]?.output).toBe("AgentX did not run this check: the time budget for checks ran out.");
   });
 
@@ -807,6 +811,141 @@ describe("candidate-bound multi-repository rounds", () => {
 
 });
 
+describe("MR2 candidate selection", () => {
+  it("selects detached edited HEAD plus working files without a task branch", async () => {
+    const f = await fixture();
+    git(join(f.root, "app"), "checkout", "--detach");
+    f.input.repositories = f.input.repositories.map(repository => {
+      const detached = { ...repository };
+      delete detached.taskBranch;
+      return detached;
+    });
+    const before = await f.identity();
+    const result = await f.run([command("console.log(require('./code.cjs'))")]);
+    expect(result.entries[0]).toMatchObject({ after: "passed", output: "dirty candidate\n" });
+    expect(await f.identity()).toEqual(before);
+  });
+});
+
+describe("MR2 report pruning", () => {
+  it("prunes only old UUID directories, never links, files, young or active reports", async () => {
+    const f = await fixture(); const parent = join(f.root, ".agentx/multi-repo-reports"); await mkdir(parent, { recursive: true });
+    const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    const stale = randomUUID(); const young = randomUUID(); const link = randomUUID(); const file = randomUUID();
+    await mkdir(join(parent, stale)); await put(parent, `${stale}/report`, "old"); await fileSystem.utimes(join(parent, stale), old, old);
+    await mkdir(join(parent, young)); await mkdir(join(parent, "customer")); await fileSystem.utimes(join(parent, "customer"), old, old);
+    await put(f.root, "canary/keep", "safe"); await symlink(join(f.root, "canary"), join(parent, link)); await fileSystem.utimes(join(f.root, "canary"), old, old); await put(parent, file, "safe");
+    await f.run([command("console.log('ok')")]);
+    expect(await readdir(parent)).not.toContain(stale);
+    for (const kept of [young, "customer", link, file]) expect(await readdir(parent)).toContain(kept);
+    expect(await readFile(join(f.root, "canary/keep"), "utf8")).toBe("safe");
+    const active = f.reports(); await fileSystem.utimes(active, old, old);
+    await f.run([command("console.log('ok')")]); expect((await stat(active)).isDirectory()).toBe(true);
+  });
+  it("bounds 300 folders across passes and ignores an unavailable report parent", async () => {
+    const f = await fixture(); const parent = join(f.root, ".agentx/multi-repo-reports"); await mkdir(parent, { recursive: true });
+    const old = new Date(Date.now() - 25 * 60 * 60 * 1000); const names: string[] = [];
+    for (let i = 0; i < 300; i++) { const name = randomUUID(); names.push(name); await mkdir(join(parent, name)); await fileSystem.utimes(join(parent, name), old, old); }
+    await f.run([command("console.log('ok')")]);
+    const left = (await readdir(parent)).filter(n => names.includes(n)).length; expect(left).toBe(236);
+    for (let i = 0; i < 4; i++) await f.run([command("console.log('ok')")]);
+    expect((await readdir(parent)).filter(n => names.includes(n))).toEqual([]);
+  });
+});
+
+describe("MR2 automatic invocation (MR1 off: edges recorded, checks unchanged)", () => {
+  it.each(["removed edge", "provider edited"])("CHECKS runs in the shared workspace as today, records %s from workflow bases and preserves publication identity", async variant => {
+    const f = await fixture();
+    for (const repo of f.input.repositories) {
+      const directory = join(f.root, repo.path);
+      git(directory, "reset", "--hard", repo.baseCommit);
+      await put(directory, "package.json", JSON.stringify({ name: repo.repositoryId, ...(repo.repositoryId === "app" ? { dependencies: { lib: "*" } } : {}) }));
+      git(directory, "add", "."); git(directory, "commit", "-qm", "workflow base");
+    }
+    const bases = f.input.repositories.map(repo => ({ repositoryId: repo.repositoryId, baseCommitSha: git(join(f.root, repo.path), "rev-parse", "HEAD") }));
+    if (variant === "removed edge") await put(f.root, "app/package.json", '{"name":"app"}');
+    else await put(f.root, "lib/code.cjs", "module.exports = 'provider candidate';\n");
+    const check = command("console.log(process.cwd()); console.log(require('fs').existsSync('node_modules/lib')); require('fs').writeFileSync('report.json',JSON.stringify({testResults:[{name:'wired.test.cjs',assertionResults:[{fullName:'wired provider',status:'passed',failureMessages:[]}]}]}));");
+    check.args.push("--", "--outputFile=report.json", "--reporter=json");
+    const before = await readCandidateRepositories(f.input.repositories.map(repo => ({ repositoryId: repo.repositoryId, directory: join(f.root, repo.path), baseCommitSha: bases.find(b => b.repositoryId === repo.repositoryId)!.baseCommitSha })));
+    await put(f.root, ".agentx/preparation-manifest.json", JSON.stringify({ schemaVersion: 2, projectName: "mr2", projectRevision: 1, repositories: f.input.repositories.map(repo => ({ name: repo.repositoryId, path: repo.path, defaultBranch: "main", resolvedCommit: repo.baseCommit })), completedSetupSteps: [], readinessResults: [], readinessCommandKeys: [], complete: true, updatedAt: new Date().toISOString() }));
+    const artifacts = new Map<string, string>();
+    const result = await runTaskInvocation({ protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64), payload: { workflowMode: "CHECKS", workflowBase: bases, evidenceCapture: true, conversationId: randomUUID(), prompt: "check", readiness: [check] } }, {
+      rootPath: f.root, model: FAUX_MODEL, taskShell: { kind: "local" }, stopBeforeReading: { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) }, eventSink: async () => undefined, artifactSink: async artifact => { artifacts.set(artifact.name, String(artifact.content)); },
+    });
+    expect(result.checks?.checks[0]?.after).toBe("passed");
+    // Today's path: the check ran in the task's own repository folder, with no MR1 wiring, and no check root or report folder was made.
+    expect(result.checks?.checks[0]?.output).toBe(`${join(f.root, "app")}\nfalse\n`);
+    expect((await readdir(f.root)).some(name => name.startsWith(".agentx-check-"))).toBe(false);
+    await expect(stat(join(f.root, ".agentx/multi-repo-reports"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((JSON.parse(artifacts.get("evidence-raw.json")!) as { repositoryEdges: unknown }).repositoryEdges).toEqual({ edges: [{ consumer: "app", provider: "lib", language: "node", source: variant === "removed edge" ? "base" : "both" }], notes: [] });
+    expect(result.workflowCheckCandidateRepositories).toEqual(before);
+    expect(await readFile(join(f.root, "app/package.json"), "utf8")).toBe(variant === "removed edge" ? '{"name":"app"}' : '{"name":"app","dependencies":{"lib":"*"}}');
+  });
+});
+
+describe("MR2 report ownership", () => {
+  it("a prune read failure leaves the folder and does not fail the round or leak its cause", async () => {
+    const f = await fixture(); const parent = join(f.root, ".agentx/multi-repo-reports"); await mkdir(parent, { recursive: true });
+    const old = randomUUID(); await mkdir(join(parent, old));
+    const original = vi.mocked(fileSystem.opendir).getMockImplementation()!;
+    vi.mocked(fileSystem.opendir).mockImplementationOnce(original).mockRejectedValueOnce(new Error("private-customer-path"));
+    const result = await f.run([command("console.log('ok')")]);
+    expect(result.entries[0]).toMatchObject({ after: "passed", output: "ok\n" });
+    expect((await stat(join(parent, old))).isDirectory()).toBe(true);
+  });
+  it("completed task reports become eligible, while another invocation retains ownership", async () => {
+    const { withMultiRepoReportLifetime } = await import("../../packages/worker/src/multi-repo-checks.js");
+    const f = await fixture(); let report = "";
+    await withMultiRepoReportLifetime(async () => { await f.run([command("console.log('ok')")]); report = f.reports(); });
+    const old = new Date(Date.now() - 25 * 60 * 60 * 1000); await fileSystem.utimes(report, old, old);
+    await f.run([command("console.log('ok')")]);
+    await expect(stat(report)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("MR2 ordinary-path goldens", () => {
+  it.each(["single repo", "no edge", "missing manifest", "malformed root file"])("%s: unchanged evidence and test-proof bytes", async variant => {
+    const { createRepositoryCheckSupplier } = await import("../../packages/worker/src/multi-repo-supplier.js");
+    const f = await fixture();
+    if (variant === "single repo") f.input.repositories = f.input.repositories.slice(0, 1);
+    if (variant !== "missing manifest") for (const repo of f.input.repositories) await put(f.root, `${repo.path}/package.json`, variant === "malformed root file" ? "{" : JSON.stringify({ name: repo.repositoryId }));
+    await put(f.root, "app/change.test.cjs", "const passed=require('fs').readFileSync('code.cjs','utf8').includes('dirty candidate'); console.log('change.test.cjs'); require('fs').writeFileSync('report.json',JSON.stringify({testResults:[{name:'change.test.cjs',assertionResults:[{fullName:'candidate is fixed',status:passed?'passed':'failed',failureMessages:passed?[]:['AssertionError']}]}]})); if(!passed) process.exitCode=1;");
+    const before = await f.identity();
+    const check = command("eval(require('fs').readFileSync('change.test.cjs','utf8'))"); check.args.push("--", "--outputFile=report.json", "--reporter=json");
+    const plan = { source: "project" as const, readiness: [check] };
+    const base = createCheckRunners({ rootPath: f.root, local: true });
+    const capture = async (runners: typeof base) => {
+      const round = await runChecks(plan, runners, { signal: new AbortController().signal, budgetMs: 30_000 });
+      expect(round.entries[0]?.after).toBe("passed");
+      const repositories = f.input.repositories.map((repo, index) => ({ repositoryId: repo.repositoryId, directory: join(f.root, repo.path), startCommit: repo.baseCommit, candidateTreeSha: before[index]!.treeSha }));
+      const evidence = await collectEvidenceRaw({ rootPath: f.root, commands: [check], entries: round.entries, candidateDigest: "a".repeat(64), repositories });
+      const proof = await runTestProof({ rootPath: f.root, plan, newEntries: round.entries, runners, repositories, now: () => 0, candidateDigest: "a".repeat(64), signal: new AbortController().signal, budgetMs: 120_000 });
+      expect(proof?.items[0]?.verdict).toBe("proves_change");
+      return JSON.stringify({ evidence, proof });
+    };
+    const golden = await capture(base);
+    const supplier = createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories: f.input.repositories });
+    expect(await capture(supplier.scope(base))).toBe(golden);
+    expect((await supplier.evidence(LIVE_ROUND))).toBeUndefined();
+    expect((await readdir(f.root)).some(name => name.startsWith(".agentx-check-"))).toBe(false);
+    await expect(stat(join(f.root, ".agentx/multi-repo-reports"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("MR2 prune traversal limits", () => {
+  it.each(["entries", "depth"])("bounds total %s, and accepts the stated maximum", async kind => {
+    for (const excess of [false, true]) {
+      const f = await fixture(); const folder = join(f.root, ".agentx/multi-repo-reports", randomUUID()); await mkdir(folder, { recursive: true });
+      if (kind === "depth") await mkdir(join(folder, ...Array.from({ length: excess ? 65 : 64 }, () => "child")), { recursive: true });
+      else for (let i = 0; i < (excess ? 300 : 255); i++) await writeFile(join(folder, `item${i}`), "old");
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000); await fileSystem.utimes(folder, old, old);
+      expect((await f.run([command("console.log('ok')")])).entries[0]?.after).toBe("passed");
+      if (excess) expect((await stat(folder)).isDirectory()).toBe(true);
+      else await expect(stat(folder)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+});
 
 it.each([0, 2])("attributes multi-repository setup separately when it serves %i replies", async (setupReplies) => {
   const f = await fixture({ "go.mod": "module example.com/$NAME\n" });

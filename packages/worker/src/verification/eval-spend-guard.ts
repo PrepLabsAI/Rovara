@@ -33,10 +33,13 @@ export async function openMeteredStage(input: { grant: EvalSpendGrant; meter: Mo
     if (dispatched >= calls) { failure = "cap"; callFailure = "cap"; return Promise.reject(stopped()); }
     dispatched++;
     const work = (async () => {
+      let answered = false;
       try {
         const result = await held.call(frame);
         if (!whole(result.costMicros)) costKnown = false;
         else { cost += result.costMicros; if (!Number.isSafeInteger(cost)) costKnown = false; }
+        // Only now is the call's cost read and accounted; a throw before this (an unreadable result included) leaves it unknown.
+        answered = true;
         if (result.calls !== 1 || !costKnown) { failure = "provider_error"; throw stopped(); }
         if (cost > costMicros) { failure = "cap"; throw stopped(); }
         if (result.class !== "ok") {
@@ -47,6 +50,8 @@ export async function openMeteredStage(input: { grant: EvalSpendGrant; meter: Mo
       } catch (error) {
         // A budget refusal dispatched nothing: not counted, not an unknown spend.
         if (error instanceof EvalCallRefused) { dispatched--; failure ??= error.reason; callFailure = failure; throw stopped(); }
+        // A call that threw after dispatch has an unknown cost, whatever failure an earlier call already recorded.
+        if (!answered) costKnown = false;
         if (failure === undefined) { failure = "provider_error"; costKnown = false; }
         callFailure = failure;
         throw stopped();

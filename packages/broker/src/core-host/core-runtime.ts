@@ -78,7 +78,7 @@ export const CORE_START_REFUSED_WORDS = "the core engine starts no new task for 
 export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
   const { registry, companyId } = options;
   // Checked at run time, not only by the type: the core's own default is the laptop's sole-owner rule, which a deployed install must never get by omission.
-  if ((options as { access?: unknown }).access === undefined) throw new Error("the core runtime needs an access rule");
+  if ((options as { access?: unknown }).access == null) throw new Error("the core runtime needs an access rule");
   const store = registry.require("storage");
   const given = options.flowOptions?.startExtras;
   // Every core start writes the engine stamp with the task (a task keeps its engine). Joined with any start extras the deployment gives. A start the switch does not send to the core
