@@ -142,6 +142,14 @@ describe("MR1-LIVE: ordinary single-edge tasks pass identically to today's path"
     expect(await checkRoots(w.root)).toEqual([]);
   });
 
+  it("Python bytecode written by a check in the copy is not candidate-source drift (MR1 runs first, no cache yet)", async () => {
+    const w = await pythonWorkspace();
+    const live = createRepositoryCheckSupplier({ live: true, rootPath: w.root, repositories: w.repositories });
+    const round = await runChecks(pythonPlan, live.scope(withPip(w.root, createCheckRunners({ rootPath: w.root, local: true }), "copy")), options());
+    expect(round.entries.map((entry) => [entry.after, entry.output])).toEqual([["passed", "third app lib\n"], ["passed", "third app lib True True\n"]]);
+    expect(live.notes()).toEqual([]);
+  });
+
   it("Python with the host's own pip: MR1 or a recorded fallback, never a different result", async () => {
     const w = await pythonWorkspace();
     const { today, result, live } = await bothPaths(w, pythonPlan);
