@@ -12,7 +12,11 @@
 //               It authenticates no credential itself.
 //   audit-sink  Code's audit records: the `AUDIT` rows of the company's own partition (the document audit sink), read back by lane AU's company audit read.
 //
-// Not here: `approvers` (the task owner and the existing rules, with #662's fresh step-up) and `model-keys` (lane G). Each stays empty, so the registry refuses the switch by name.
+//   approvers   Switch-on lane L2a (core-host/hosted-approvers.ts): the task owner, as the broker's existing rule, with #662's fresh step-up proved for one act, bound to its card, and
+//               its one-time part claimed in the company's partition. Built after identity (it names people through that point). A host without the proof key (the dispatcher, which
+//               decides nothing for a person) refuses every proof.
+//
+// Not here: `model-keys` (lane L2b). It stays empty, so the registry refuses the switch by name.
 import auditSinkPlugin from "@agentx/local-adapters/audit-sink";
 import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import {
@@ -21,6 +25,7 @@ import {
 } from "@agentx/contracts";
 import { createCostLedger, companyDayKey, costPartition, utcDayOf, type CostLedger } from "../core/cost/ledger.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
+import { createHostedApprovers, stepUpApprovalKeyOf } from "./hosted-approvers.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
 /** The identity adapter's name on a deployed install: the principals it names were signed in by Code's own sign-in. */
@@ -207,6 +212,8 @@ export interface HostedSecurityInputs {
   identity: HostedIdentityOptions;
   /** The meter's prices (tests). Absent: the catalog's. */
   prices?: ModelPrices;
+  /** The install's callback signing key, from which the approval proof key is derived (the broker). Absent: the approvers point refuses every proof (the dispatcher). */
+  callbackSigningKey?: string;
 }
 
 /**
@@ -226,6 +233,13 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
       },
     }),
     coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: OWNER, create: () => createHostedIdentity(inputs.identity) }),
+    coreAdapter({
+      point: "approvers", name: "hosted-step-up", owner: "switch-on lane L2a",
+      create: (context, registry) => createHostedApprovers({
+        store: registry.require("storage"), identity: registry.require("identity"), now: context.now,
+        ...(inputs.callbackSigningKey === undefined ? {} : { key: stepUpApprovalKeyOf(inputs.callbackSigningKey) }),
+      }),
+    }),
     coreAdapter({
       point: "audit-sink", name: "document", owner: OWNER,
       create: (context, registry) => auditSinkPlugin.create({ defaultCompanyId: context.installCompanyId, settings: {}, registry: registry, now: context.now }),
