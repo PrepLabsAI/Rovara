@@ -202,7 +202,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience, scopes: (session.scopes ?? []).filter((scope) => client.scopes?.includes(scope as ClientScope) === true) } }),
       ...(session.stepUpAt === undefined || session.stepUpMethod === undefined ? {} : { stepUp: { at: session.stepUpAt, method: session.stepUpMethod } }),
     });
-  const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log });
+  const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
   const registeredClient = async (clientId: string): Promise<SignInClientRecord | undefined> =>
@@ -280,7 +280,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
     const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
     // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
-    if (stepUp && deps.stepUp?.email === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
+    if (stepUp && deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
     let request: AuthRequestRecord;
     try {
       request = await store.createAuthRequest({
@@ -621,7 +621,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     jwks_uri: endpoint("/.well-known/jwks.json"), response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS, revocation_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS,
     subject_types_supported: ["public"], id_token_signing_alg_values_supported: ["RS256"], scopes_supported: ["openid"],
-    ...(deps.stepUp?.email === undefined ? {} : { acr_values_supported: [DEVELOPER_STEP_UP_ACR] }),
+    ...(deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined ? {} : { acr_values_supported: [DEVELOPER_STEP_UP_ACR] }),
   });
 
   async function route(method: string, pathname: string, url: URL, body: string | undefined, headers: Record<string, string | undefined>): Promise<HttpResult> {
@@ -646,7 +646,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       }
     }
     if (method === "POST" && pathname === "/v1/auth/step-up/email") return stepUpPages.sendEmail(headers);
-    if (method === "POST" && pathname === "/v1/auth/step-up/verify") return stepUpPages.verify(headers, new URLSearchParams(body ?? ""), (grant, clientState) => issueCode(grant, clientState, 303));
+    if (method === "POST" && pathname === "/v1/auth/step-up/verify") return stepUpPages.verify(headers, new URLSearchParams(body ?? ""));
+    if (method === "POST" && pathname === "/v1/auth/step-up/continue") return stepUpPages.continueWithoutPasskey(headers);
+    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/options") return stepUpPages.passkeyOptions(headers);
+    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/verify") return stepUpPages.passkeyVerify(headers, body);
+    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/register") return stepUpPages.passkeyRegister(headers, body);
     if (method === "POST" && pathname === "/v1/auth/token") return token(new URLSearchParams(body ?? ""), headers.authorization);
     if (method === "POST" && pathname === "/v1/auth/revoke") return revokeToken(new URLSearchParams(body ?? ""), headers.authorization);
     return jsonResult(404, { error: "not_found" });

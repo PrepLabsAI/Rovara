@@ -96,10 +96,15 @@ those can send a person straight back without asking anything. Instead Rovara as
    can start at most five pages an hour.
 3. Once the code is right, the browser goes back to your `redirect_uri` (HTTP 303) with the code. Redeem it as usual.
    It starts a new session: revoke the old one with `<api>/v1/auth/revoke`.
-4. The access token carries `step_up_at` (when, in seconds since 1970) and `step_up_amr` (`email_code`, or
-   `company_reauth`). A refresh keeps the original time; it never makes a step-up fresh again. The route that needs a
+4. The access token carries `step_up_at` (when, in seconds since 1970) and `step_up_amr` (`email_code`, `passkey`
+   or `company_reauth`). A refresh keeps the original time; it never makes a step-up fresh again. The route that needs a
    fresh sign-in checks the time itself, against the company's window (ten minutes unless the company sets a shorter
    one), whatever the calling service says.
+
+Passkeys: once the emailed code is right, the page offers to add a passkey (WebAuthn, owned by Rovara; it keeps
+only the public key). From then on a passkey tap is the step-up (`step_up_amr: passkey`), and the email code stays
+the fallback. A passkey is only ever added after the email code on the same page, never on the strength of the
+Slack, Google or GitHub sign-in alone.
 
 A company sign-in counts by itself only when it signs the person in again and says when (`auth_time`) and that is
 inside the window and not before this sign-in request; Rovara asks it with `prompt=login` and `max_age`. Otherwise its people get the email code too.

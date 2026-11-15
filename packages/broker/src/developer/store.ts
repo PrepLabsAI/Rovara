@@ -6,6 +6,7 @@ import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteComma
 import {
   DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_CODE_SECONDS,
+  DEVELOPER_PASSKEYS_MAX,
   DEVELOPER_SESSION_SECONDS,
   DEVELOPER_STEP_UP_ATTEMPTS_MAX,
   DEVELOPER_STEP_UP_EMAILS_MAX,
@@ -44,11 +45,19 @@ export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; sl
  * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
  * is the SHA-256 of the last emailed code bound to this record. `emailsSent` and `attempts` count up to their limits and never reset.
  */
+/** Lane ID part 2b: one passkey registered with Code. `publicKey` is the COSE public key, base64url. */
+export interface PasskeyRecord { credentialId: string; publicKey: string; counter: number; createdAt: string; transports?: string[] }
+
 export interface StepUpRecord {
   grant: CodeGrant & { codeChallenge: string; redirectUri: string };
   clientState: string;
-  /** Where the code goes: the person's email as it stood before the sign-in that started this page. */
-  email: string;
+  /** Where the code goes: the person's email as it stood before the sign-in that started this page. Absent: no email factor (a passkey only). */
+  email?: string;
+  /** Lane ID part 2b: the WebAuthn challenge handed out last on this page, and for which ceremony (`get` signs in with a passkey; `create` registers one). */
+  challenge?: string;
+  challengeKind?: "get" | "create";
+  /** Set when the emailed code was right and the person is offered a passkey before going back: the step-up's time (epoch seconds). */
+  verifiedAt?: number;
   expiresAt: number;
   emailsSent: number;
   attempts: number;
@@ -351,6 +360,79 @@ export class DeveloperSignInStore {
       await this.input.documentClient.send(new PutCommand({
         TableName: this.input.tableName, Item: { ...key, entityType: "STEP_UP_RATE", windowStart: now, pages: 1, expiresAt: now + 7200 },
         ConditionExpression: "attribute_not_exists(pk) OR windowStart <= :cutoff", ExpressionAttributeValues: { ":cutoff": now - 3600 },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Hands out a WebAuthn challenge on a live page (replacing any earlier one). False: the page is gone. */
+  async setStepUpChallenge(secret: string, challenge: string, kind: "get" | "create"): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET challenge = :challenge, challengeKind = :kind",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt)",
+        ExpressionAttributeValues: { ":challenge": challenge, ":kind": kind, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Marks the emailed code as proved, once, at `at` (epoch seconds), and spends the code. False: already marked, or the page is gone. */
+  async markStepUpVerified(secret: string, at: number): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET verifiedAt = :at REMOVE emailCodeHash",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND attribute_not_exists(verifiedAt)",
+        ExpressionAttributeValues: { ":at": at, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  // ---- Lane ID part 2b: the passkeys a person registered with Code ----
+
+  /** The person's passkeys (at most DEVELOPER_PASSKEYS_MAX are ever read). Rows that do not read are left out. */
+  async listPasskeys(developerId: string): Promise<PasskeyRecord[]> {
+    const response = await this.input.documentClient.send(new QueryCommand({
+      TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: DEVELOPER_PASSKEYS_MAX,
+    })) as { Items?: Array<Record<string, unknown>> };
+    return (response.Items ?? []).flatMap((item) => {
+      const { credentialId, publicKey, counter, createdAt, transports } = item;
+      if (typeof credentialId !== "string" || typeof publicKey !== "string" || typeof counter !== "number" || !Number.isSafeInteger(counter) || counter < 0 || typeof createdAt !== "string") return [];
+      const listed = Array.isArray(transports) ? transports.filter((entry): entry is string => typeof entry === "string").slice(0, 8) : undefined;
+      return [{ credentialId, publicKey, counter, createdAt, ...(listed === undefined ? {} : { transports: listed }) }];
+    });
+  }
+
+  /** Registers a passkey; false when this credential is already registered (to anyone's row of this person). */
+  async addPasskey(developerId: string, passkey: PasskeyRecord): Promise<boolean> {
+    try {
+      await this.put({ pk: `PASSKEYS#${developerId}`, sk: passkey.credentialId, entityType: "PASSKEY", ...passkey }, "attribute_not_exists(pk)");
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Moves a passkey's signature counter on, only from the value it was read at (two uses of one assertion cannot both pass). */
+  async setPasskeyCounter(developerId: string, credentialId: string, from: number, to: number): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk: credentialId },
+        UpdateExpression: "SET #counter = :to, lastUsedAt = :at", ConditionExpression: "attribute_exists(pk) AND #counter = :from",
+        ExpressionAttributeNames: { "#counter": "counter" }, ExpressionAttributeValues: { ":to": to, ":from": from, ":at": this.iso() },
       }));
       return true;
     } catch (error) {

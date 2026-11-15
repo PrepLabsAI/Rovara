@@ -43,6 +43,8 @@ export const DEVELOPER_STEP_UP_EMAILS_MAX = 3;
 export const DEVELOPER_STEP_UP_ATTEMPTS_MAX = 5;
 /** Step-up pages one person may start in an hour: bounds the emails (x3) and the guesses (x5) anyone holding their Slack session can cause. */
 export const DEVELOPER_STEP_UP_PAGES_PER_HOUR = 5;
+/** Passkeys one person may register with Code (lane ID part 2b). */
+export const DEVELOPER_PASSKEYS_MAX = 10;
 
 export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
 import { ExternalAccountRefSchema, SignInMethodIdSchema, readExternalAccount } from "./outside-account.js";
