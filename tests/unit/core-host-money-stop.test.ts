@@ -215,7 +215,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
   it("the callback layer acks the batch and asks the run to stop (CANCEL_REQUESTED, the code, a cancel to its worker); another company's run is never touched", async () => {
     const store = new MemoryDocumentStore();
     const signingKey = Buffer.alloc(32, 7);
-    const delivered: Array<{ machineId: string; kind: string; target?: string }> = [];
+    const delivered: Array<{ machineId: string; kind: string; target: string | undefined }> = [];
     const stop: MoneyStop = { async keepWholeHold() {} };
     const flowFor = (companyId: OrgId) => ({
       companyId, store, callbackSigningKey: signingKey, now: () => NOW, moneyStop: stop,

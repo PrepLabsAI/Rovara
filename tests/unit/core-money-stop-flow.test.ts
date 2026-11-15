@@ -17,7 +17,7 @@ interface StopWorld {
   h: Harness;
   kept: Array<{ reservationId: string | undefined; operationId: string; taskId: string }>;
   /** Runs at each wait of a Stop (the worker's side: it may send its result here). */
-  onWait: { run?: () => Promise<void> };
+  onWait: { run?: (() => Promise<void>) | undefined };
   cancels: WorkerInvocation[];
 }
 
