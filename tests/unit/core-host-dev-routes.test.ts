@@ -250,6 +250,17 @@ describe("a task's start on the deployed API (lane E2 step 6)", () => {
     expect(await routes.route(post("/v1/dev/tasks", startBody()), callerOf(FAKE_COMPANY))).toBeUndefined();
   });
 
+  it("leaves the start to the old broker for a drained company that still holds core tasks (its runtime is served, its new tasks are not)", async () => {
+    const { world, app, companyOf, remember } = await world2();
+    const own = remember(FAKE_COMPANY);
+    expect((await createCoreDevRoutes({ app, companyOf, wiring: () => WIRED }).route(post("/v1/dev/tasks", startBody()), own))?.statusCode).toBe(200);
+    const drained = appOver(world, { ROVARA_CORE_ENGINE: "drain" });
+    // The drained root still serves the company (it holds a core task)...
+    await expect(drained.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
+    // ...but a new start is the old broker's.
+    expect(await createCoreDevRoutes({ app: drained, companyOf, wiring: () => WIRED }).route(post("/v1/dev/tasks", startBody()), own)).toBeUndefined();
+  });
+
   it("refuses with the sign-in words, never falling back, when membership cannot be read or names another company than the principal's", async () => {
     const { app, remember } = await world2();
     const failing = createCoreDevRoutes({ app, companyOf: async () => { throw new Error("membership store down"); }, wiring: () => WIRED });

@@ -1,5 +1,5 @@
 // Engine host (lane E2, step 5): the security-list points for the first staging run. Admission: an allow-list and two dollar caps read from the core's cost ledger (the task's total and the
-// company's UTC day), held in the start's own transaction; metering: list prices, an unknown model at a cautious price (never $0); identity: membership only; audit: Code's audit rows.
+// company's UTC day), as start gates checked again in the start's own transaction (nothing reserved); metering: list prices, an unknown model at a cautious price (never $0); identity: membership only; audit: Code's audit rows.
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type AdmissionRequest, type MeterEntry, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -109,7 +109,8 @@ describe("the staging admission", () => {
 
   it("refuses when the spend cannot be read as dollars: an unpriced usage today, a non-dollar task, or an estimate that is not dollars", async () => {
     const unpriced = setup();
-    await unpriced.ledger.recordUsage({ ...entry("u", 0), usage: usage("unpriced", 1, 0) });
+    // On ANOTHER task: only the company's day can refuse it here.
+    await unpriced.ledger.recordUsage({ ...entry("u", 0), usage: usage("unpriced", 1, 0), taskId: "11111111-2222-4333-8444-555555555555" });
     expect(await unpriced.admission.admit(start())).toEqual({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
     const { admission } = setup();
     for (const cost of [{ micros: 1, currency: "EUR" }, { micros: -1, currency: "USD" }, { micros: 1.5, currency: "USD" }, null]) {
