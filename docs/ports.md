@@ -499,6 +499,8 @@ token with its callback capability (`GET /v1/internal/model-access`, action `mod
 the proxy reads the real key through the `model-keys` port, forwards to the provider, meters through the `metering` port and holds the task budget. It
 mirrors Cloud's proxy (packages/model-proxy in Cloud is LiteLLM plus a Python guard, which Code does not carry): the guard's per-route field allow-lists,
 header bans, `anthropic-beta` allow-list and no-redirect rule are carried over field for field (`providers.ts`). Details and limits are in `docs/local.md`.
+The same `GET /v1/internal/model-access` route is answered by the local proxy on a laptop and by the signed task-token handler when its host sets a gateway address. The signed path returns a 15-minute token only while the task operation holds its workspace; it refuses access when the payer cannot be resolved from server records. The worker uses the same response in either mode.
+
 Interfaces added: the `model-access` callback action, `ModelGrantSource` (what a capability entitles an operation to), the `x-rovara-workspace` stamp the
 egress gateway puts on worker calls, and `AGENTX_MODEL_PROXY_URL` in a worker machine's environment.
 
