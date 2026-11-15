@@ -72,12 +72,31 @@ async function bearer(who: Developer): Promise<string> {
 /** A signed access token for `who`, as an `authorization` header value (Task 16 plants it in a token store). */
 export const bearerFor = bearer;
 
+/** A sign-in client's access token for `who` (its own session, `sid`), with the step-up the sign-in would have put in it: `ageSeconds` old, made with `method`. */
+async function clientBearer(who: Developer, client: { clientId: string; audience: string; scope?: string }, sessionId: string, stepUp?: { ageSeconds: number; method?: string }): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const claims = {
+    iss: DEV_ISSUER, aud: client.audience, azp: client.clientId, sub: who.developerId, amr: who.provider, env: "staging", sid: sessionId, iat: now, nbf: now, exp: now + 3600,
+    ...(client.scope === undefined ? {} : { scope: client.scope }),
+    ...(stepUp === undefined ? {} : { step_up_at: now - stepUp.ageSeconds, step_up_amr: stepUp.method ?? "email_code" }),
+  };
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: (await signer.publicJwk()).kid })).toString("base64url");
+  const input = `${header}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}`;
+  return `Bearer ${input}.${(await signer.sign(Buffer.from(input))).toString("base64url")}`;
+}
+
+/** The two sign-in clients the page tests use: the web app (registered with full access, spec 066) and an AI tool's client (scoped to read and act on tasks, no full access). */
+export const WEB_CLIENT = { clientId: "web-app", audience: "web-app" } as const;
+export const TOOL_CLIENT = { clientId: "tool-app", audience: "tool-app", scope: "tasks:read tasks:act" } as const;
+
 type DeveloperTaskBrokerHarness = ReturnType<typeof createBroker> & {
   actions: DeveloperTaskActions;
   s3: ReturnType<typeof memoryS3>;
   channelMembers: Mock<(request: ChannelMembersRequest) => Promise<ChannelMembersResponse>>;
   channelInfo: Mock<(request: ChannelInfoRequest) => Promise<ChannelInfoResponse>>;
   dev: (who: Developer, method: string, path: string, body?: unknown) => Promise<{ status: number; body: Record<string, unknown> }>;
+  /** DEC 236h: the same request as a sign-in client's token, as the signed-in person. "web": the web app (full access); "tool": an AI tool's client (scoped, no full access). `stepUp`: the step-up the token carries (none by default). */
+  client: (kind: "web" | "tool", who: Developer, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => Promise<{ status: number; body: Record<string, unknown> }>;
   callback: (workspaceId: string, operationId: string, action: string, body: unknown) => Promise<Record<string, unknown>>;
   finish: (workspaceId: string, operationId: string, status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED", detail?: { result?: unknown; error?: string }) => Promise<Record<string, unknown>>;
   events: (workspaceId: string, operationId: string, events: Array<{ type: string; payload: unknown }>) => Promise<Record<string, unknown>>;
@@ -143,6 +162,24 @@ export async function createDeveloperTaskBroker(options: {
     });
     return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
   };
+  const at = new Date(Date.now() - 3_600_000).toISOString();
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, createdAt: at, updatedAt: at, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#tool-app", entityType: "SIGN_IN_CLIENT", clientId: "tool-app", name: "AI Tool", audience: "tool-app", redirectUris: ["https://tool.example.com/callback"], loopback: false, secretHash: "e".repeat(64), scopes: ["tasks:read", "tasks:act"], createdAt: at, updatedAt: at, updatedBy: "admin" });
+  for (const who of [MAYA, OMAR]) {
+    for (const client of [WEB_CLIENT, TOOL_CLIENT]) {
+      db.set({ pk: `SESSION#${client.clientId}-${who.sessionId}`, sk: "META", sessionId: `${client.clientId}-${who.sessionId}`, developerId: who.developerId, amr: who.provider, clientId: client.clientId, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
+    }
+  }
+  const client = async (kind: "web" | "tool", who: Developer, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => {
+    const which = kind === "web" ? WEB_CLIENT : TOOL_CLIENT;
+    const response = await handler({
+      version: "2.0", rawPath: path.split("?")[0], rawQueryString: path.split("?")[1] ?? "",
+      headers: { authorization: await clientBearer(who, which, `${which.clientId}-${who.sessionId}`, stepUp) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      requestContext: { requestId: randomUUID(), http: { method } },
+    });
+    return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+  };
   const capability = (operationId: string) => {
     const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
     const value = (outbox?.invocation as { callbackCapability?: string } | undefined)?.callbackCapability;
@@ -158,7 +195,7 @@ export async function createDeveloperTaskBroker(options: {
     return response.body;
   };
   return {
-    db, handler, actions, s3, brokerInput, deleteEc2Session, channelMembers, channelInfo, dev, callback,
+    db, handler, actions, s3, brokerInput, deleteEc2Session, channelMembers, channelInfo, dev, client, callback,
     finish: (workspaceId: string, operationId: string, status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED", detail: { result?: unknown; error?: string } = {}) =>
       callback(workspaceId, operationId, "result", { operationId, status, ...(detail.result === undefined ? {} : { result: detail.result }), ...(detail.error === undefined ? {} : { error: detail.error }) }),
     events: (workspaceId: string, operationId: string, events: Array<{ type: string; payload: unknown }>) =>

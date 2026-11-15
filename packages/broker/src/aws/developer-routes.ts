@@ -79,6 +79,7 @@ import {
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import { stepUpOf } from "../developer/verify-token.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
@@ -181,7 +182,13 @@ export interface DeveloperRouteDependencies {
   channelLinks?: ChannelLinkDependencies;
 }
 /** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
-export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string }
+export interface DeveloperCaller {
+  developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string;
+  /** DEC 236h: set only for a sign-in client registered with full access (a full-access web session), from its registration; never for the Rovara CLI's token or a scoped client's. */
+  fullAccess?: true;
+  /** DEC 236h: the person's last step-up as the VERIFIED access token states it (`stepUpOf`), for the acts that need a fresh sign-in; its age is checked where it is used. Never from a header, a query or a body. */
+  stepUp?: { at: string; method: string };
+}
 
 /** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
 export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
@@ -894,7 +901,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; stepUp?: { at: string; method: string } }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -926,7 +933,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
     // access has the person's rights, so every scope.
     const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
-    return { client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt };
+    const stepUp = stepUpOf(claims);
+    return { client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt, ...(stepUp === undefined ? {} : { stepUp }) };
   } catch (error) {
     if (deps.companies !== undefined && amr === "oidc") throw refused();
     throw error;
@@ -974,6 +982,7 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
     developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName, clientId: person.client.clientId,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
+    ...(person.client.fullAccess === true ? { fullAccess: true as const, ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }) } : {}),
   };
 }
 

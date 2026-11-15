@@ -4521,6 +4521,9 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       ({ requestId: randomUUID(), expectedRevision: blocked.revision, candidateDigest: setup.candidate.digest, resolutions, ...extra });
     return { harness, ...setup, blocked, route, body };
   }
+  /** DEC 236h: accepting a security finding is the web page's: the web app's full-access client, with a step-up made a few seconds ago. */
+  const asPage = (t: { harness: { client: (kind: "web" | "tool", who: typeof MAYA, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => Promise<{ status: number; body: Record<string, unknown> }> }; route: string }, body: unknown, stepUp: { ageSeconds: number; method?: string } | undefined = { ageSeconds: 5 }) =>
+    t.harness.client("web", MAYA, "POST", t.route, body, stepUp);
 
   it("moves to the pull request when every finding is accepted, and the pull request lists each with its reason, made inert", async () => {
     const t = await blockedOnFindings([{ ...PARSER, text: "Ping @octocat: see <https://evil.example|here> and #12" }], [TOKEN]);
@@ -4529,7 +4532,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       { findingId: id("SECURITY", TOKEN), action: "ACCEPT" as const, note: "Test token only." },
     ];
     const request = t.body(resolutions);
-    expect((await t.harness.dev(MAYA, "POST", t.route, request)).status).toBe(200);
+    expect((await asPage(t, request)).status).toBe(200);
     const after = taskWorkflow(t.harness, t.taskId);
     expect(after).toMatchObject({ stage: "PULL_REQUEST", state: "READY", revision: t.blocked.revision + 1 });
     expect(after.acceptedFindings).toHaveLength(2);
@@ -4545,7 +4548,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     expect(lines.join("\n")).not.toContain("earlier issue");
     expect(dispatchRows(t.harness)).toEqual([]);
     // A replay answers as the first did and starts nothing new.
-    expect((await t.harness.dev(MAYA, "POST", t.route, request)).status).toBe(200);
+    expect((await asPage(t, request)).status).toBe(200);
     expect(taskWorkflow(t.harness, t.taskId).revision).toBe(after.revision);
     expect(operations(t.harness, t.workspaceId).filter((item) => item.kind === "publish")).toHaveLength(1);
   });
@@ -4579,9 +4582,10 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     it("takes the Resolve findings event from the owner only, through the same route and rules as an AI tool", async () => {
       const t = await slackBlockedOnFindings();
       const slackThread = t.thread;
+      // DEC 236h: Slack is not the web page, so it accepts the code review's finding and fixes the security one; a security accept from Slack is refused (tested below).
       const resolutions = [
-        { findingId: id("CRITIC", { text: PARSER.text, file: PARSER.file, line: PARSER.line }), action: "FIX", note: "Keep the last line." },
-        { findingId: id("SECURITY", TOKEN), action: "ACCEPT", note: "Test token only." },
+        { findingId: id("CRITIC", { text: PARSER.text, file: PARSER.file, line: PARSER.line }), action: "ACCEPT", note: "The parser drops it on purpose." },
+        { findingId: id("SECURITY", TOKEN), action: "FIX", note: "Keep the last line." },
       ];
       const event = { source: "agentx.slack-ingress", action: "workflow-resolve-findings", taskId: t.taskId, thread: slackThread, requestId: randomUUID(),
         expectedRevision: t.blocked.revision, candidateDigest: t.candidate.digest, resolutions };
@@ -4599,12 +4603,16 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       const bad = await t.harness.handler({ ...event, userId: MAYA.slackUserId, resolutions: [{ findingId: "nope", action: "ACCEPT", note: "x" }] });
       expect(bad.statusCode).not.toBe(202);
       expect(taskWorkflow(t.harness, t.taskId).revision).toBe(t.blocked.revision);
+      // Slack is not the web page (DEC 236h): accepting the security finding there is refused, with fixed words, and nothing changes.
+      const security = await t.harness.handler({ ...event, userId: MAYA.slackUserId, requestId: randomUUID(), resolutions: [resolutions[0]!, { ...resolutions[1]!, action: "ACCEPT", note: "Test token only." }] });
+      expect(JSON.stringify(JSON.parse(security.body))).toContain("Accepting a security finding needs the Rovara web page with a fresh sign-in");
+      expect(taskWorkflow(t.harness, t.taskId).revision).toBe(t.blocked.revision);
       // The owner's answer: the accepted finding is recorded, and the finding to fix goes back to coding with the instruction.
       const saved = await t.harness.handler({ ...event, userId: MAYA.slackUserId });
       expect(saved.statusCode, saved.body).toBe(200);
       const after = taskWorkflow(t.harness, t.taskId);
       expect(after).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-      expect(after.acceptedFindings).toEqual([expect.objectContaining({ role: "SECURITY", reason: "Test token only." })]);
+      expect(after.acceptedFindings).toEqual([expect.objectContaining({ role: "CRITIC", reason: "The parser drops it on purpose." })]);
       const coding = operations(t.harness, t.workspaceId).find((item) => item.requestId === event.requestId)!;
       expect(outboxPrompt(t.harness, String(coding.id))).toContain("Keep the last line.");
       // Delivered again (Lambda retries an asynchronous invoke), it changes nothing more.
@@ -4643,7 +4651,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       { findingId: id("CRITIC", PARSER), action: "FIX", note: "Keep the footer; add a test with a trailing newline." },
       { findingId: id("SECURITY", TOKEN), action: "ACCEPT", note: "Test token only." },
     ]);
-    expect((await t.harness.dev(MAYA, "POST", t.route, request)).status).toBe(200);
+    expect((await asPage(t, request)).status).toBe(200);
     const sentBack = taskWorkflow(t.harness, t.taskId);
     expect(sentBack).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", revision: t.blocked.revision + 2 });
     expect(sentBack.decisions.at(-1)).toMatchObject({ requestId: request.requestId, decision: "REQUEST_CHANGES", source: "FINDINGS", reason: "1 accepted, 1 to fix" });
@@ -4663,7 +4671,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     // The owner's instruction sits outside the untrusted section, after it.
     expect(prompt.indexOf("Owner instructions for these problems")).toBeGreaterThan(prompt.lastIndexOf("</problem>"));
     // A replay answers with the same run and starts nothing new.
-    expect((await t.harness.dev(MAYA, "POST", t.route, request)).status).toBe(200);
+    expect((await asPage(t, request)).status).toBe(200);
     expect(operations(t.harness, t.workspaceId).filter((item) => item.workflowMode === "IMPLEMENT")).toHaveLength(2);
   });
 
@@ -4723,16 +4731,57 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
   it("refuses a stale revision or candidate, a finding that is not open, a missing answer, and anyone but the owner", async () => {
     const t = await blockedOnFindings([PARSER], [TOKEN]);
     const both = [{ findingId: id("CRITIC", PARSER), action: "ACCEPT" as const, note: "ok" }, { findingId: id("SECURITY", TOKEN), action: "ACCEPT" as const, note: "ok" }];
-    expect((await t.harness.dev(OMAR, "POST", t.route, t.body(both))).status).toBe(404);
-    expect((await t.harness.dev(MAYA, "POST", t.route, t.body(both, { expectedRevision: t.blocked.revision - 1 }))).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    expect((await t.harness.dev(MAYA, "POST", t.route, t.body(both, { candidateDigest: "f".repeat(64) }))).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect((await t.harness.client("web", OMAR, "POST", t.route, t.body(both), { ageSeconds: 5 })).status).toBe(404);
+    expect((await asPage(t, t.body(both, { expectedRevision: t.blocked.revision - 1 }))).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect((await asPage(t, t.body(both, { candidateDigest: "f".repeat(64) }))).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect((await t.harness.dev(MAYA, "POST", t.route, t.body([both[0]!]))).body.error).toMatchObject({ code: "CONFIG_INVALID" });
-    expect((await t.harness.dev(MAYA, "POST", t.route, t.body([...both, { findingId: "f".repeat(64), action: "FIX", note: "" }]))).body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    expect((await asPage(t, t.body([...both, { findingId: "f".repeat(64), action: "FIX", note: "" }]))).body.error).toMatchObject({ code: "CONFIG_INVALID" });
     // A request ID an earlier decision of another kind used cannot be reused.
     const requestId = randomUUID();
     expect((await t.harness.dev(MAYA, "POST", `/v1/dev/tasks/${t.taskId}/workflow/send-back`, { requestId, expectedRevision: t.blocked.revision, instructions: "Fix it." })).status).toBe(200);
-    expect((await t.harness.dev(MAYA, "POST", t.route, t.body(both, { requestId }))).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect((await asPage(t, t.body(both, { requestId }))).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(taskWorkflow(t.harness, t.taskId).acceptedFindings).toBeUndefined();
+  });
+
+  it("accepts a security finding only on the web page with a fresh step-up (DEC 236h): the CLI's token, an AI tool's client, and a page with no step-up, a stale one or one made another way are refused, and nothing changes", async () => {
+    const t = await blockedOnFindings([PARSER], [TOKEN]);
+    const WORDS = "Accepting a security finding needs the Rovara web page with a fresh sign-in";
+    const NOTE = "SENTINEL-REASON-NOT-TO-ECHO";
+    const request = t.body([{ findingId: id("CRITIC", PARSER), action: "ACCEPT", note: "Fine." }, { findingId: id("SECURITY", TOKEN), action: "ACCEPT", note: NOTE }]);
+    const attempts: Array<[string, { status: number; body: Record<string, unknown> }, string]> = [
+      ["the CLI's token", await t.harness.dev(MAYA, "POST", t.route, request), "FORBIDDEN"],
+      ["an AI tool's client with a fresh step-up", await t.harness.client("tool", MAYA, "POST", t.route, request, { ageSeconds: 5 }), "FORBIDDEN"],
+      ["the web app with no step-up", await t.harness.client("web", MAYA, "POST", t.route, request), "REAUTH_REQUIRED"],
+      ["the web app with a stale step-up", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: 601 }), "REAUTH_REQUIRED"],
+      ["the web app with a step-up from the future", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: -3_600 }), "REAUTH_REQUIRED"],
+      ["the web app with a Slack round trip", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: 5, method: "slack" }), "REAUTH_REQUIRED"],
+    ];
+    for (const [name, answer, code] of attempts) {
+      expect(answer.body.error, name).toMatchObject({ code, message: expect.stringContaining(WORDS) as string });
+      expect(JSON.stringify(answer.body), name).not.toContain(NOTE);
+      expect(answer.status, name).toBeGreaterThanOrEqual(400);
+    }
+    expect(taskWorkflow(t.harness, t.taskId)).toMatchObject({ stage: "REVIEW", state: "BLOCKED", revision: t.blocked.revision });
+    expect(taskWorkflow(t.harness, t.taskId).acceptedFindings).toBeUndefined();
+    expect(operations(t.harness, t.workspaceId).filter((item) => item.kind === "publish")).toHaveLength(0);
+    // The web page with a fresh step-up may.
+    expect((await asPage(t, request)).status).toBe(200);
+    expect(taskWorkflow(t.harness, t.taskId)).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
+    expect(taskWorkflow(t.harness, t.taskId).acceptedFindings).toHaveLength(2);
+  });
+
+  it("still lets the CLI's token and an AI tool's client accept the code review's findings, and fix a security finding (DEC 236h)", async () => {
+    for (const via of ["cli", "tool"] as const) {
+      const t = await blockedOnFindings([PARSER], [TOKEN]);
+      const request = t.body([{ findingId: id("CRITIC", PARSER), action: "ACCEPT", note: "Fine." }, { findingId: id("SECURITY", TOKEN), action: "FIX", note: "Remove the log line." }]);
+      const answer = via === "cli" ? await t.harness.dev(MAYA, "POST", t.route, request) : await t.harness.client("tool", MAYA, "POST", t.route, request);
+      expect(answer.status, via).toBe(200);
+      expect(taskWorkflow(t.harness, t.taskId), via).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+      expect(taskWorkflow(t.harness, t.taskId).acceptedFindings?.map((entry) => entry.role), via).toEqual(["CRITIC"]);
+    }
+    const codeOnly = await blockedOnFindings([PARSER], []);
+    expect((await codeOnly.harness.client("tool", MAYA, "POST", codeOnly.route, codeOnly.body([{ findingId: id("CRITIC", PARSER), action: "ACCEPT", note: "Fine." }]))).status).toBe(200);
+    expect(taskWorkflow(codeOnly.harness, codeOnly.taskId)).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
   });
 
   it("does not hold a retried review on the same candidate for a finding already accepted", async () => {
@@ -4757,7 +4806,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       { findingId: id("CRITIC", PARSER), action: "FIX", note: "" },
       { findingId: id("SECURITY", TOKEN), action: "ACCEPT", note: "Test token only." },
     ]);
-    expect((await t.harness.dev(MAYA, "POST", t.route, request)).status).toBe(200);
+    expect((await asPage(t, request)).status).toBe(200);
     const coding = operations(t.harness, t.workspaceId).find((item) => item.requestId === request.requestId)!;
     const fixed = createCandidateManifest([{ repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "d".repeat(40), baseCommitSha: "e".repeat(40) }]);
     await t.harness.finish(t.workspaceId, String(coding.id), "SUCCEEDED", { result: { workflowCandidateRepositories: fixed.repositories, workflowCheckCandidateRepositories: fixed.repositories, checks: passingChecks() } });
@@ -4769,8 +4818,8 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     expect(workflowContracts.openReviewFindings(again).map((finding) => finding.text)).toEqual([TOKEN.text]);
     // The old acceptance, for the old code, is refused for the new one.
     const old = { requestId: randomUUID(), expectedRevision: again.revision, candidateDigest: t.candidate.digest, resolutions: [{ findingId: id("SECURITY", TOKEN), action: "ACCEPT", note: "Test token only." }] };
-    expect((await t.harness.dev(MAYA, "POST", t.route, old)).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    expect((await t.harness.dev(MAYA, "POST", t.route, { ...old, candidateDigest: fixed.digest })).status).toBe(200);
+    expect((await asPage(t, old)).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect((await asPage(t, { ...old, candidateDigest: fixed.digest })).status).toBe(200);
     expect(taskWorkflow(t.harness, t.taskId)).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
   });
 });

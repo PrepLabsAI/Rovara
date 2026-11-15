@@ -1,5 +1,6 @@
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED } from "./developer-tasks.js";
 import { PROJECT_RECORD_NEEDS_ADMIN } from "./broker-shared.js";
+import { SECURITY_ACCEPT_ON_THE_PAGE } from "./security-accept.js";
 import { STOP_WHILE_PUBLISHING_REFUSAL, STOP_WHILE_PUBLISHING_TEXT, WORKFLOW_ACTIONABLE_REFUSALS } from "../developer/workflow-actions.js";
 
 /**
@@ -72,7 +73,8 @@ export function slackRefusalMessage(code: string, outOfDate: string, reason = ""
     case "IDEMPOTENCY_CONFLICT": return LOST_RACE.test(reason) ? slackLostRace(reason, decidedBy) : outOfDate;
     case "WORKSPACE_BUSY":
     case "TASK_BUSY": return "AgentX is still working on the previous step. Try again when it posts.";
-    case "FORBIDDEN": return "Only the task owner can do that.";
+    // DEC 236h: accepting a security finding is the web page's; Slack says so in the fixed words rather than "only the owner", since the presser is the owner.
+    case "FORBIDDEN": return reason === SECURITY_ACCEPT_ON_THE_PAGE ? `${SECURITY_ACCEPT_ON_THE_PAGE}.` : "Only the task owner can do that.";
     case "TASK_NOT_FOUND": return "This task can't be changed from Slack. Continue it where it was started, or start a new request.";
     default: return undefined;
   }
