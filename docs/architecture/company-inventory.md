@@ -571,6 +571,30 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:GITHUB_INSTALLATION_BINDING | install-wide | State table | no | - | T5: operator backfill completion marker; no customer data. Missing marker keeps legacy installations implicit. |
 | record | pk:GITHUB_WEBHOOK_COMPANIES | install-wide | State table | no | - | T5: ids-only recovery registry; bounded sweep must discover company partitions without scanning delivery contents. |
 
+## GitHub installation operator runbook (T5)
+
+Only an install operator with existing direct broker Lambda invocation permission may run these events. They have no HTTP route; company-admin tokens and HTTP-shaped invocations cannot claim. Keep the optional binding and membership dependencies behind the staging/review gate. No IAM or infrastructure change is included here.
+
+Before backfill, inspect the GitHub App's installations and confirm which belong to the implicit company. Freeze installation changes while walking pages. **Bind the pilot company's installation with `agentx.github-binding-claim`** before backfill if it already exists, or after backfill if it is installed later. Backfill preserves explicit bindings and assigns only validated unbound installations to the implicit company. It cannot infer a company's ownership from a GitHub account name.
+
+An operator invokes the existing broker Lambda with this payload (substitute verified positive installation id and company id):
+
+```json
+{"source":"agentx.github-binding-claim","installationId":77,"companyId":"org_aaaaaaaaaaaaaaaaaaaa"}
+```
+
+The broker verifies the installation through this App's GitHub credentials, then atomically writes its conditional binding and `AUDIT#CLAIM` record. A second claim, including the same company, is refused. Unknown, foreign, invalid and already-bound requests have the same fixed refusal. `boundBy`/audit actor is `operator-lambda`; Retain the operator invocation evidence to identify the IAM caller. Never try to reassign an existing binding with a raw table write. Later T3/Cloud self-service must verify WITH GITHUB that the person administers the installation account.
+
+Next invoke `{"source":"agentx.github-binding-backfill"}`. Each call makes one installation-list request (25 rows, 1 MB response, 5-second HTTP timeout), no repository/token fan-out, then at most 25 validated binding writes under a fresh 304-command/1 MB/10-second store budget. On `more:true`, invoke again with the returned numeric `continuation`. A persisted page checkpoint refuses skipped pages. A full page requires a following page; only the final page seals the completion marker. On a failure, retry the same page; inspect the saved progress if a successful response was lost. Confirm `more:false`, the marker, implicit bindings and the pilot binding before enabling any second company.
+
+Recovery similarly returns `more:true` and an opaque `continuation` when bounded listing stops. Invoke `agentx.github-webhook-recovery` again with that exact continuation until `more` is absent. Each call lists at most 50 companies and processes at most 100 deliveries (25 rows per company page). Registry/partition reads alone spend the shared 512-command/2,000-item/8 MB/10-second budget; processing uses the plain client and existing expiring delivery leases. Listing stops before claiming any unfinished page. Invalid legacy rows are skipped and counted in `skipped`; inspect and repair them under the owning company's authority. Other company partitions still run.
+
+Bindings absent retains the existing webhook/recovery response bytes. With bindings present and membership absent, retry fails closed. Legacy administrator registration/retry identities without a checked developer identity also fail closed; the authenticated client creation path supplies its checked developer id.
+
+## T5 inventory refresh after code/next merge
+
+The task-flow `keyOf` forwarding sites moved from line 207 to line 210 when task-token origin metadata was added to `TaskRecord`. Both still forward `document.pk` and `document.sk` unchanged; the forwarding table now pins their current locations. The exhaustive scan found no new or removed record-constructor, dispatch-path or gateway-path identities. The summary was recomputed using the inventory test's row-counting rules and remains unchanged; generic forwarding contributes no record kinds. Existing needs-company classifications and their named known-gap tests remain in force.
+
 ## Generic forwarding coverage (not record kinds)
 
 Each row names its feeding constructor set. A generic DocumentStore/stream site can receive every constructor through the port; module-specific sites name the constructor helpers or record families they consume. Runtime sort-key components do not define another partition family. This table does not grant permission for a constructor to become unreadable.
@@ -1102,7 +1126,9 @@ Compared with the original R4 baseline, the incoming developer-routes helpers ar
 
 The nine new dispatch patterns and four new record families are listed above. No new gateway path was added. Existing sign-in token/authorize routes still serve install identity; sign-in client registration, its scopes/keepSecret update, and per-company ownership remain T3 (entity:SIGN_IN_CLIENT and /v1/admin/sign-in-clients). routeLinkingRequest reuses the same checked access/detail paths and retains the existing self-owned channel-link paths. Token authentication itself is unchanged.
 
-Named behavioural gaps in tests/contract/company-merge-up.test.ts: T3/T5 client repository/create callbacks lack a company argument; T2/T3 client member GET/PUT/DELETE operate across company boundaries; T2 task POST messages/comments do not resolve membership. These routes need shared writer/registry/provider changes beyond developer-routes.ts. GET diff's task gate is checked, but its workspace pull-request provider still lacks company binding (T2/T7); enabling a repository provider requires that follow-up. None of these gaps is reported as isolation PASS.
+Named behavioural gaps in tests/contract/company-merge-up.test.ts: T2/T3 client member GET/PUT/DELETE operate across company boundaries; T2 task POST messages/comments do not resolve membership. These routes need shared writer/registry/provider changes beyond developer-routes.ts. GET diff's task gate is checked, but its workspace pull-request provider still lacks company binding (T2/T7); enabling a repository provider requires that follow-up. None of these gaps is reported as isolation PASS.
+
+T5 deployment gate: installation claims are install-operator-only. Before enabling a second company, the controller must complete the required staging GitHub installation backfill and verify its marker. The later T3/Cloud self-serve connect flow must verify with GitHub that the claimant administers the installation account; never trust on first use. T5 now wires the spec 065 listing/create checks and operator-invoked backfill event. Backfill now reads validated installation-only pages of 25 with durable continuation; see the operator runbook below. Production dependencies remain absent until controller activation after staging proof and review. All nine company-separation parts must pass first.
 
 Forwarding sites were re-anchored to the merged sources without weakening the scanner. The sole new expression is conversationSubject(conversation) in the LAST_EVENT sort key; it preserves conversation identity but requires T4 company binding. Record and route totals are recomputed by the existing ratchet, which reads no git history.
 
