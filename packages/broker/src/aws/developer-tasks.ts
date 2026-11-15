@@ -2662,8 +2662,6 @@ async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow
     ...(loaded.format === "structured" ? { notChanging: loaded.plan.notChanging } : {}) };
 }
 
-/** How many of the owner's plan-review instructions a coding prompt repeats (the newest): each is at most 500 characters. */
-
 /**
  * What every later round of the coder must keep to, whoever sent the work back (the owner's Send back, a finding to fix, a restart, or Rovara by itself): the owner's own instructions from
  * plan review (their Request changes reasons) and the approved plan's Not changing list. A fix prompted only by "the app stopped" cannot then undo what the owner told the planner, as
