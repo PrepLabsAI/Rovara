@@ -5,7 +5,7 @@
 //
 // Digests (64 hex characters) and ISO timestamps (exact shape) are skipped: a run of digits inside a hash is not a card number, and scanning them would block about one pack in a hundred for nothing. Text is
 // normalised (NFKC) before it is scanned.
-import type { DataGuardReport, EvidencePack, EvidenceRaw, TestEnvProdDeny } from "@agentx/contracts";
+import type { DataGuardReport, EvidencePack, EvidencePackV2, EvidenceRaw, TestEnvProdDeny } from "@agentx/contracts";
 import type { NewArtifact } from "./evidence-pack.js";
 import { fixedToolName } from "./evidence-risk.js";
 
@@ -98,4 +98,38 @@ export function guardPack(pack: EvidencePack, newArtifacts: readonly NewArtifact
     return { ...base, label: labelFound.length > 0 ? `Check ${String(index + 1)}` : label, ...(tests === undefined ? {} : { tests }), ...(coverage === undefined ? {} : { coverage }), ...(findings === undefined ? {} : { findings }), ...(migrations === undefined ? {} : { migrations }), ...(outputTailRef === undefined ? {} : { outputTailRef }) };
   });
   return { pack: { ...rest, checks: kept }, newArtifacts: newArtifacts.filter((artifact) => !lostTails.has(artifact.ref.sha256)), dropped };
+}
+
+/**
+ * TE-A2b: the parts only a version 2 pack has and a repository, a person or a caller wrote in (the proof's override actor and reason, the changed files' names in `flags` and `weakening`, the repositories' branch names,
+ * the meters) go through the same guard as the rest, because the v1 pack was guarded before they were added. A part that holds a finding is DROPPED, counted, and its text never kept: an override keeps its actor and time
+ * without the reason when only the reason is the finding, and the whole proof goes when the actor is; the repositories become none. The caller adds the "left out" line.
+ */
+export function guardV2Parts(pack: EvidencePackV2, deny: TestEnvProdDeny, scan: DataGuardScan): { pack: EvidencePackV2; dropped: GuardCount } {
+  const dropped: GuardCount = { parts: 0, kinds: [] };
+  const out: EvidencePackV2 = { ...pack };
+  const found = (value: unknown): boolean => { const kinds = evidenceFindings(value, deny, scan); if (kinds.length > 0) merge(dropped, kinds); return kinds.length > 0; };
+  if (out.proof !== undefined && found(out.proof)) {
+    const { override, ...rest } = out.proof;
+    if (override === undefined) delete out.proof;
+    else {
+      const { reason: _reason, ...withoutReason } = override;
+      void _reason;
+      // Counted once already: the retry only decides how much is kept.
+      const retry = evidenceFindings({ ...rest, override: withoutReason }, deny, scan);
+      if (retry.length === 0) out.proof = { ...rest, override: withoutReason };
+      else delete out.proof;
+    }
+  }
+  // Inert text can add a joiner and, on a second pass, spacing after it. Scan the underlying
+  // text values, not schema keys such as newlyPass, which are not customer credentials.
+  if (out.ai !== undefined && found(evidenceTexts(out.ai).map(text => text.replace(/\u200d\s*/gu, "")))) {
+    const { oldNewLines: _lines, ...ai } = out.ai; void _lines;
+    out.ai = { ...ai, eval: { ...ai.eval, questions: [], notices: [...new Set([...ai.eval.notices, "details_withheld" as const])] } };
+  }
+  if (out.weakening !== undefined && found(out.weakening)) delete out.weakening;
+  if (out.flags !== undefined && found(out.flags)) delete out.flags;
+  if (out.meters !== undefined && found(out.meters)) delete out.meters;
+  if (found(out.candidate.repositories)) out.candidate = { ...out.candidate, repositories: [] };
+  return { pack: out, dropped };
 }

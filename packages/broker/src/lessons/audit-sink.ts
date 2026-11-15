@@ -18,6 +18,14 @@ const word = (value: unknown, fallback: string): string => (typeof value === "st
 
 const modelWord = (value: unknown): string => (typeof value === "string" && /^[A-Za-z0-9:_\-.#@/]{1,128}$/u.test(value) ? value : "default");
 
+/**
+ * How the audit chain names a project: `p_` and 24 hex characters of a hash of the company and the project's name. The same project always gets the same reference (a reader that knows the name can find its
+ * events), and the name itself is never written into the chain, which is kept for good and never erased.
+ */
+export function auditProjectRef(companyId: string, project: string): string {
+  return `p_${createHash("sha256").update(`lessons-audit-project\u0000${companyId}\u0000${project}`).digest("hex").slice(0, 24)}`;
+}
+
 const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.candidate_created": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: 1 }) },
   "lesson.pending": { action: "lesson.proposed", facts: (e) => ({ lessonType: "unknown", tier: num(e.facts["tier"]) }) },
@@ -98,10 +106,12 @@ export function lessonAuditSink(sink: AuditSink, now: () => number, companyId: s
     const at = new Date(now()).toISOString();
     // One event per occurrence: the time and a process counter keep two approvals of one lesson apart.
     counter += 1;
-    const lessonId = event.lessonId ?? `${event.project}`;
+    // The audit chain is never erased, so a project's NAME never enters it: the project is named by a reference made from the company and the name (LESSONS-AUDIT-PROJECT-NAME-IN-CHAIN).
+    const project = auditProjectRef(companyId, event.project);
+    const lessonId = event.lessonId ?? project;
     return {
       eventId: eventIdOf(mapped.action, event.workspaceId, lessonId, at, String(counter), event.actor ?? "system"), companyId, at, actor: actorOf(event.actor), action: mapped.action,
-      subject: { type: "lesson", id: lessonId.slice(0, 100) }, details: { project: event.project, ...mapped.facts(event) },
+      subject: { type: "lesson", id: lessonId.slice(0, 100) }, details: { project, ...mapped.facts(event) },
     };
   };
   return {

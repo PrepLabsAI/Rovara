@@ -128,7 +128,7 @@ export function runOutboxConformance(name: string, harness: OutboxHarness): void
       await under.settleIndexes?.();
       await under.outbox.relay({ companyId: COMPANY });
       const [message] = await (await under.queues.queue("dispatch")).receive();
-      expect(message!.attributes).toEqual({ kind: "task", outboxId: "op-7" });
+      expect(message!.attributes).toEqual({ kind: "task", outboxId: "op-7", companyId: COMPANY });
     }));
 
     it("keeps the state change and the message for the same task together in one commit", () => withOutbox(async (under) => {

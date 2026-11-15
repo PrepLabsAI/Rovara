@@ -1,3 +1,4 @@
+import type { WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
 import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
@@ -43,6 +44,8 @@ import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
+  /** Server start surface. Set by the route/adapter, never copied from request data. */
+  origin?: WorkOrigin;
   principal: Principal;
   client?: string | undefined;
   /**
@@ -55,6 +58,9 @@ export interface TaskCaller {
    */
   scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
 }
+
+/** Starting work always names the trusted server surface; other task actions need no origin. */
+export interface TaskStartCaller extends TaskCaller { origin: WorkOrigin }
 
 /** A registered project revision, as the flow needs it. */
 export interface ProjectRevision {

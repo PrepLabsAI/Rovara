@@ -22,8 +22,9 @@ const UNVERIFIED = "CONFIG_INVALID: couldn't verify the base rule files";
 
 type ObjectFormat = "sha1" | "sha256";
 
+// No automatic maintenance or gc after a commit: it runs detached and changes files under .git while a test compares them.
 const git = (directory: string, ...args: string[]) =>
-  execFileSync("git", ["-C", directory, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", ...args], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", directory, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args], { encoding: "utf8" }).trim();
 
 interface Fixture { rootPath: string; directory: string; base: string; baseBlob: string; baseTree: string; format: ObjectFormat }
 

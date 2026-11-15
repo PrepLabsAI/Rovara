@@ -7,7 +7,7 @@ import { join, relative } from "node:path";
 import { request as httpRequest } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, createCandidateManifest, type AdapterRegistry, type ModelSelection, type WorkerInvocation, type WorkflowSnapshot,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, createCandidateManifest, type AdapterRegistry, type ModelSelection, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
@@ -990,17 +990,19 @@ describe("R: attacks on the estimate, the reviewer calls, the merge records and 
   // ---- (3) the reviewer-call contract
   it("R05-t5-choose-throws: the checking stage's rule throws; the reviewer must not silently fall back to the install's (possibly weaker) model", async () => {
     const deps = {
+      companyId: OrgIdSchema.parse(IMPLICIT_COMPANY_ID),
       store: { query: async () => ({ items: [] }) } as never,
       stepModels: { choose: async () => { throw new Error("usable models unreadable"); } } as never,
       installModel: async () => ({ provider: "examplehost", modelId: "cheap-small" }),
     };
     const chosen = await checkingModelOf(deps, "ws_1");
-    expect(chosen.refused).toBeDefined();
+    expect(chosen.refused).toBe("the checking stage's model rule could not be read");
   });
 
   it("R06-t5-build-model-unknown: the build's operations cannot be read; the rule is asked with no reference, so 'same model as the build' is not known and must not be reported as 'no'", async () => {
     const seen: unknown[] = [];
     const deps = {
+      companyId: OrgIdSchema.parse(IMPLICIT_COMPANY_ID),
       store: { query: async () => { throw new Error("store down"); } } as never,
       stepModels: { choose: async (input: { reference?: unknown }) => { seen.push(input.reference); return { ok: true, step: { model: { provider: "p", modelId: "build-model" }, route: {}, reason: "r", thinkingLevel: null, sameModelAsChecked: false } }; } } as never,
     };

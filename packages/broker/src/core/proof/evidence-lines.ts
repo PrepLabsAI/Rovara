@@ -4,7 +4,7 @@
 //
 // What stays at every shrink level: the Environment line, the not-run line and the mocked or not-tested bullets (a reader must not miss what was not proved), and the link. The counts per kind and the
 // changed-line coverage go first, from level 2.
-import { evidenceIsFor, type EvidenceMode, type EvidencePack } from "@agentx/contracts";
+import { evidenceIsFor, type EvidenceMode, type EvidencePack, type EvidencePackRead } from "@agentx/contracts";
 import { AWS_PERMISSIONS_ITEM_ID } from "./dependency-evidence.js";
 import { packDependencyLines } from "./dependency-lines.js";
 import { inertLine } from "./inert-text.js";
@@ -13,6 +13,11 @@ import type { testProofQualifier } from "./proof-table.js";
 /** The evidence's part of the Proof context: the pack the broker built, how much of it the pull request shows, and the Rovara page that has the rest. */
 export interface ProofEvidenceContext {
   pack?: EvidencePack | undefined;
+  /**
+   * TE-A2b: the same pack as `readEvidencePack` read it (`loadEvidenceRead`): a v2 pack with what this build did not know reported. Used only by a description whose writer is version 2 (`evidenceWriter`), and only when it
+   * is a v2 pack for this very code. `pack` stays the v1 form for the lines that read v1 (`loadEvidencePack` gives it for both versions).
+   */
+  read?: EvidencePackRead | undefined;
   /** The mode after `resolveEvidenceMode` (a public or unknown repository never gets `embed`). */
   mode: EvidenceMode;
   /** The task page's address. Used only when it starts with `origin` and is an https address with no spaces, quotes or angle brackets. */
