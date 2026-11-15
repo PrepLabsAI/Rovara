@@ -1,7 +1,7 @@
 // Rovara Code (Plan 6 Task 13): the files a task's workspace diff names, read the way the risk rules and the pull request description need them. The shared `diffStat` (the task view's list) drops a file whose
 // header Git printed in quotes, records only the new name of a rename, and counts a file it cannot count as 0 lines. A risk judged on that list could miss a sensitive file or call a big change small, so this
 // reader keeps the real names (unquoted, both names of a rename) and leaves a count out when the diff has none to give (a new unstaged file, a binary patch, a change of mode or name only): unknown is not 0.
-import { redactText } from "@agentx/contracts";
+import { redactText, type ChangeRequestFile } from "@agentx/contracts";
 import { isTestPath, type ChangedFileEntry } from "./verification-report.js";
 
 /** The most files read; a diff that names this many may name more. */
@@ -153,4 +153,29 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
     ...(file.renamedFrom === undefined ? {} : { renamedFrom: redactText(file.renamedFrom) }),
   }));
   return { files, complete: all.length < CHANGED_FILES_MAX && !INCOMPLETE_NOTES.some((note) => note.test(text)) };
+}
+
+/** A path from the host that a one-line diff header could not carry honestly (a line break or a control character) is not listed, and the list is then not complete. */
+export const plainChangedPath = (path: string): boolean => !/[\p{Cc}\p{Cf}]/u.test(path) && path.length > 0 && path.length <= 4_096;
+
+/**
+ * The files one change request changes, as the code host reports them, in the shape the risk rules read. The host's counts are kept; the flags the risk rules read from the diff (a removed or skipped test, a changed test
+ * command, a route) come from the patch the host gave for the file, when it gave one. `complete` is false when the host's list was cut or a file had a path that cannot be listed.
+ */
+export function changedFilesFromHostFiles(repositoryId: string, files: readonly ChangeRequestFile[], listComplete: boolean): { files: ChangedFileEntry[]; complete: boolean } {
+  const usable = files.filter((file) => plainChangedPath(file.path) && (file.previousPath === undefined || plainChangedPath(file.previousPath)));
+  const text = [`## ${repositoryId}`, "### status", "### diff", ...usable.map((file) => {
+    const from = file.previousPath ?? file.path;
+    return [`diff --git a/${from} b/${file.path}`, ...(file.status === "removed" ? ["deleted file mode 100644"] : []), `--- a/${from}`, `+++ b/${file.path}`, ...(file.patch === undefined ? [] : [file.patch.startsWith("@@") ? file.patch : `@@ -0,0 +0,0 @@\n${file.patch}`])].join("\n");
+  })].join("\n");
+  const parsed = parseChangedFiles(text);
+  const counts = new Map(usable.map((file) => [`${file.previousPath ?? ""}\u0000${file.path}`, file]));
+  return {
+    // The host's own counts replace the ones read from a patch (a file with no patch has none to read, and "unknown" is not 0).
+    files: parsed.files.map((entry) => {
+      const source = counts.get(`${entry.renamedFrom ?? ""}\u0000${entry.path}`);
+      return source === undefined ? entry : { ...entry, added: source.additions, removed: source.deletions };
+    }),
+    complete: listComplete && usable.length === files.length && parsed.complete,
+  };
 }

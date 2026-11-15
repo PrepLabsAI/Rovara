@@ -363,6 +363,13 @@ export class FakeHostModel {
   // ---- reads
 
   changedFiles(id: string): ChangeRequestFile[] {
+    // Like a real host the fake gives the text of each change (every line of the old file removed, every line of the new one added), so what reads it sees a patch.
+    const textLines = (text: string): string[] => text.split("\n").filter((line, index, all) => !(index === all.length - 1 && line === ""));
+    const patchOf = (before: string | undefined, after: string): string => {
+      const old = before === undefined ? [] : textLines(before);
+      const now = textLines(after);
+      return `@@ -${old.length === 0 ? "0,0" : `1,${String(old.length)}`} +1,${String(now.length)} @@\n${[...old.map((line) => `-${line}`), ...now.map((line) => `+${line}`)].join("\n")}`;
+    };
     const cr = this.cr(id);
     const source = this.revision(this.headRevisionOf(cr)).files;
     const target = this.revision(cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch)).files;
@@ -370,7 +377,7 @@ export class FakeHostModel {
     for (const [path, content] of [...source.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
       const before = target.get(path);
       if (before === content) continue;
-      out.push({ path, status: before === undefined ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before) });
+      out.push({ path, status: before === undefined ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before), patch: patchOf(before, content) });
     }
     for (const [path, content] of [...target.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
       if (!source.has(path)) out.push({ path, status: "removed", additions: 0, deletions: lines(content) });

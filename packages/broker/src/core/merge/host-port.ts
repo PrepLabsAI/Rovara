@@ -7,7 +7,7 @@
 // Two small things that the CodeHost port does not carry yet live here, named, so the gap is visible and not silent:
 //   - `isTeamMember`: whether a person is in a team of the repository's organization (CODEOWNERS teams). GitHub-only today; absent means "unknown", which fails closed.
 //   - (P6 closed the rate-limit gap: a host's limit is the neutral `HostRateLimitError`, which GitHub's class extends.)
-import { hostRateLimitRetryAt, type ChangeRequestRef, type ChangeRequestStatus, type CheckRunner, type CodeHost, type HostScope, type OrgId, type Review } from "@agentx/contracts";
+import { hostRateLimitRetryAt, type ChangeRequestFile, type ChangeRequestRef, type ChangeRequestStatus, type CheckRunner, type CodeHost, type HostScope, type OrgId, type Review } from "@agentx/contracts";
 import type { ApprovalReview } from "./approval.js";
 
 /** One repository of a task's project, as the consumers read it. */
@@ -51,8 +51,19 @@ export function rateLimitRetryAt(error: unknown): number | undefined {
 
 export const isHostRateLimit = (error: unknown): boolean => rateLimitRetryAt(error) !== undefined;
 
-/** Every path a change request touches, a renamed file under both names, and whether that is all of them (the code-owner check). At most `CHANGED_PATH_PAGES` pages of the host's files. */
 export const CHANGED_PATH_PAGES = 10;
+/** The files a change request changes, as the host lists them (at most `CHANGED_PATH_PAGES` pages), and whether that is all of them. `beforeRequest` is the caller's read allowance. */
+export async function readChangeRequestFiles(codeHost: CodeHost, ref: ChangeRequestRef, scope: HostScope, beforeRequest?: () => void): Promise<{ files: ChangeRequestFile[]; complete: boolean }> {
+  const files: ChangeRequestFile[] = [];
+  for (let page = 1; page <= CHANGED_PATH_PAGES; page += 1) {
+    beforeRequest?.();
+    const read = await codeHost.changedFiles(ref, page, scope);
+    files.push(...read.files);
+    if (read.nextPage === undefined) return { files, complete: true };
+  }
+  return { files, complete: false };
+}
+/** Every path a change request touches, a renamed file under both names, and whether that is all of them (the code-owner check). At most `CHANGED_PATH_PAGES` pages of the host's files. */
 export async function changedPathsOf(codeHost: CodeHost, ref: ChangeRequestRef, scope: HostScope): Promise<{ paths: string[]; complete: boolean }> {
   const paths: string[] = [];
   for (let page = 1; page <= CHANGED_PATH_PAGES; page += 1) {

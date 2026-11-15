@@ -725,7 +725,7 @@ async function trackOne(
       if (merged.headByRovara) items.push(...prHeadItems({ orgId: task.orgId, repositoryKey, headSha: status.headRevision, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number }, now, deps.store.ttlAttribute).slice(0, 1));
     }
     if (action !== undefined) {
-      items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision), ...action.steps);
+      items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision, task.workflow), ...action.steps);
       // The dispatch the new workflow state is due for becomes a row through the task-flow core, and its milestones rows through the milestone hook: all in this one commit.
       if (action.dispatch !== undefined) items.push((deps.dispatchRow ?? defaultDispatchRow)({ companyId: task.orgId, taskId: task.taskId, ...action.dispatch }, stamp));
       for (const requested of action.milestones) items.push(...deps.milestones.items(requested.milestone, requested.n, { definitionVersion: action.workflow.definitionVersion }));
