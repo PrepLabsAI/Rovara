@@ -24,7 +24,9 @@ export async function openMeteredStage(input: { grant: EvalSpendGrant; meter: Mo
   let callFailure: EvalNotRunReason | undefined;
   const pending = new Set<Promise<unknown>>();
   const call: EvalMeterReservation["call"] = frame => {
-    if (closed || failure !== undefined || dispatched >= calls) return Promise.reject(stopped());
+    if (closed || failure !== undefined) return Promise.reject(stopped());
+    // More calls than the stage was held for: the eval is bigger than its estimate, so the round is over budget, never a comparison of what was answered.
+    if (dispatched >= calls) { failure = "cap"; callFailure = "cap"; return Promise.reject(stopped()); }
     dispatched++;
     const work = (async () => {
       try {

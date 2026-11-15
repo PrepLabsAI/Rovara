@@ -29,7 +29,7 @@ const V1_PARTS: readonly CheckPart[] = ["tests", "coverage", "findings", "migrat
 const REGISTRY_ROWS: CheckKindInfo[] = [
   { id: "test", words: "Tests", parts: [...V1_PARTS, "measures"], countsTowardProof: true },
   { id: "e2e", words: "End-to-end tests", parts: ["tests", "pairs", "measures"], countsTowardProof: true },
-  { id: "eval", words: "Eval", parts: ["tests", "measures"], countsTowardProof: true },
+  { id: "eval", words: "Eval", parts: ["tests", "measures"], countsTowardProof: false },
   { id: "lint", words: "Lint", parts: V1_PARTS, countsTowardProof: false },
   { id: "typecheck", words: "Type check", parts: V1_PARTS, countsTowardProof: false },
   { id: "security", words: "Security scan", parts: V1_PARTS, countsTowardProof: false },

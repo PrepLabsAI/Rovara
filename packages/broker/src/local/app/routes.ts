@@ -171,7 +171,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         return json(200, { opened: true });
       }
       if (path === "/v1/dev/tasks" && request.method === "POST") {
-        const started = await flow.start(caller, bodyOf(request));
+        const started = await flow.start({ ...caller, origin: "app" }, bodyOf(request));
         return json(started.duplicate ? 200 : 201, { task: await viewOf(caller, started.task.taskId) });
       }
       if (path === "/v1/dev/tasks" && request.method === "GET") {

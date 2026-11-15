@@ -24,6 +24,7 @@ export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
 export * from "./rovara-code.js";
+export * from "./person-erase.js";
 export * from "./project-playbook.js";
 export * from "./playbook-file.js";
 export * from "./design-review.js";
@@ -233,6 +234,7 @@ export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";
 export * from "./evidence-inert.js";
+export * from "./evidence-ai.js";
 export * from "./evidence-public.js";
 export * from "./evidence-render.js";
 export * from "./evidence-weakening.js";
@@ -391,5 +393,8 @@ export * from "./machine-size.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
+export * from "./eval-proof-basis.js";
 
+export * from "./model-gateway-token.js";
+export * from "./payer.js";
 export * from "./ports/company-log.js";
