@@ -128,12 +128,12 @@ See the specs: [sign-in clients](../specs/063-sign-in-clients/spec.md) and
 
 ## Full access
 
-A service you trust as much as the Rovara CLI, such as Rovara Cloud, can act as the signed-in person on Rovara's whole
+A service you trust as much as the Rovara CLI, such as a web app, can act as the signed-in person on Rovara's whole
 developer API (`/v1/dev/*`): their projects, workspaces, links and, where the deployment runs them, tasks. Its people
 then use Rovara through it with exactly their own rights.
 
 ```sh
-agentx admin sign-in-client update rovara-cloud --full-access
+agentx admin sign-in-client update web-app --full-access
 ```
 
 - Only a confidential client can have it, so its tokens are only ever issued to the service itself.

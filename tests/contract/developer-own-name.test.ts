@@ -1,4 +1,4 @@
-// #634: a person sets their own name (PUT /v1/dev/me/name), ported from Rovara Cloud's release 0.4.16 (abd4a061d). The sign-in
+// #634: a person sets their own name (PUT /v1/dev/me/name), ported from an earlier private release. The sign-in
 // Lambda owns the sign-in table, so it stores the name; a later sign-in leaves a chosen name alone.
 import { describe, expect, it, vi } from "vitest";
 import { setDisplayNameThroughLambda } from "../../packages/broker/src/aws/developer-routes.js";

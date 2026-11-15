@@ -213,7 +213,7 @@ export class DeveloperSignInStore {
       Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
       UpdateExpression: `SET ${[...setClauses, ...(withName ? ["displayName = :displayName"] : [])].join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
       // A name the person chose is theirs: the sign-in writes the provider's name only while they have not chosen one. The check is part of
-      // the write, so a name chosen while this sign-in is in flight is not overwritten either (ported from Rovara Cloud abd4a061d).
+      // the write, so a name chosen while this sign-in is in flight is not overwritten either (ported from an earlier private release).
       ...(withName ? { ConditionExpression: "attribute_not_exists(displayNameChosen) OR displayNameChosen = :false" } : {}),
       ExpressionAttributeValues: { ...values, ...(withName ? { ":displayName": profile.displayName } : {}) },
     }));

@@ -365,7 +365,7 @@ export function setDisplayNameThroughLambda(invoke: (payload: Uint8Array) => Pro
 }
 
 /**
- * #634 (ported from Rovara Cloud's release 0.4.16, abd4a061d): `PUT /v1/dev/me/name`, the signed-in person sets their own name. The person is the
+ * #634 (ported from an earlier private release): `PUT /v1/dev/me/name`, the signed-in person sets their own name. The person is the
  * verified caller, never anything the body carries; the body is the name alone (`SetMyNameBodySchema`). A sign-in then leaves the name alone.
  */
 async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest): Promise<SetMyNameResponse> {

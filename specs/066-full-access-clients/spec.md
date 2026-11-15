@@ -2,7 +2,7 @@
 
 ## Why
 
-A person registered in Rovara who signs in to Rovara Cloud with that identity should be able to use Rovara through
+A person registered in Rovara who signs in to a web app with that identity should be able to use Rovara through
 Cloud as they do with the Rovara CLI. Until now a sign-in client's tokens reached only the access check and the scoped
 routes of spec 065, so every Cloud feature needed a new route.
 

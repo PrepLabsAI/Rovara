@@ -13,7 +13,7 @@ const answer = (body: Record<string, unknown>) => Object.fromEntries(Object.entr
 /** Maya's task in payments; Omar is registered but not a member of payments until a test grants it. */
 async function mayasTask() {
   const harness = await createDeveloperTaskBroker();
-  const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "Rovara Cloud" });
+  const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "Web App" });
   const taskId = (started.body.task as { taskId: string }).taskId;
   const path = `/v1/dev/tasks/${taskId}`;
   const share = (who = OMAR.developerId, by = MAYA) => harness.dev(by, "PUT", `${path}/readers/${who}`, { requestId: randomUUID(), role: "viewer" });
