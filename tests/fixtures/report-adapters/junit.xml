@@ -1,0 +1,5 @@
+﻿<?xml version="1.0"?><testsuites><testsuite tests="99">
+<testcase file="tests/cart.py" classname="tests.cart" name="same" time="0.012"/>
+<testcase file="tests/cart.py" name="same"><failure/></testcase>
+<testcase name="skip"><skipped/></testcase><testcase name="load"><error/></testcase>
+</testsuite></testsuites>

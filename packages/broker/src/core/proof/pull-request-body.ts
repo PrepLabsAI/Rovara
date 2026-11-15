@@ -5,11 +5,14 @@
 import { attributionBodyLines, hideEmailAddresses, TESTING_RESULT_LABELS, type ActingAttribution, type RiskAssessment, type TestingView, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import { inertLine } from "./inert-text.js";
+import { boundEvidence } from "./evidence-lines.js";
+import { notComparedLines, weakeningBlock } from "./weakening-flags.js";
+import { evidencePublicAiLines, evidenceV2Lines } from "./evidence-v2-lines.js";
 import { reviewModelLines } from "./review-model-lines.js";
 import { testingSectionLines } from "./testing-section.js";
 import { linearCloseLine, neutralizeLinearWords, normalizeIssueKey, sealLinearText } from "./linear-close.js";
-import { PROOF_LEVEL_LAST, proofSection, type ProofContext } from "./proof-section.js";
-import { testProofLinesOf } from "./proof-table.js";
+import { PROOF_LEVEL_LAST, proofSection, recordedCheckIdsOf, type ProofContext } from "./proof-section.js";
+import { testProofLinesOf, testProofQualifier } from "./proof-table.js";
 import type { EvidenceRiskSignal } from "./evidence-risk.js";
 import { assessRisk, riskHeading } from "./risk.js";
 import { verificationReport, type ChangedFileEntry, type VerificationProject } from "./verification-report.js";
@@ -17,6 +20,8 @@ import { verificationReport, type ChangedFileEntry, type VerificationProject } f
 export { ROVARA_STATUS_START, ROVARA_STATUS_END };
 
 export const ROVARA_PULL_REQUEST_CLOSING = "Opened by Rovara after the approved plan, checks and reviews. A person must approve it and a person merges it.";
+/** The closing of a small change whose plan went to coding with no approval (the lighter flow). */
+export const ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL = "Opened by Rovara after the plan (no approval needed: small change), checks and reviews. A person must approve it and a person merges it.";
 
 /** The most bytes a description holds. */
 export const PULL_REQUEST_BODY_MAX_BYTES = 30_000;
@@ -65,6 +70,17 @@ export interface PullRequestBodyContext {
    * with one row per check instead of the `## Tests` lists, and the Proof table starts with the result. Absent, the description is exactly what it was.
    */
   testing?: TestingView | undefined;
+  /**
+   * TE-A2b: which version of the evidence the description prints. Absent or 1 (the default): exactly what it was, a v2 pack in `proof.evidence.read` changes nothing. 2: when `proof.evidence.read` is a v2 pack for this code,
+   * the description starts with an Evidence block from the shared renderer (first line, where the checks ran, the flags, the checks, what was not tested), which takes the place of the flags block below; with any other
+   * pack it is the v1 description. The caller chooses the version (in Cloud, by the TE-A1 company gate).
+   */
+  evidenceWriter?: 1 | 2 | undefined;
+  /**
+   * TE-A2b (B12 review M2): the repository is KNOWN to be private. The Evidence block carries check labels, test names and not-tested reasons, which a repository's own words and an address can reach, and a description
+   * is read by everyone who can see the repository, so, like the lessons' titles, the block is printed only when this is true. Absent (unknown) or false (public): no block, the v1 lines. The caller sets it from the code host.
+   */
+  repositoryKnownPrivate?: boolean | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -192,6 +208,15 @@ function testedCommitLine(workflow: WorkflowSnapshot, report: VerificationReport
 /** A test-proof line: its quoted names are cut already, so this only bounds the whole line. */
 const PROOF_LINE_MAX = 600;
 
+/** Supplied publication lines and derived rewrite lines carry the same mock qualifier. */
+function testProofBodyLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext): string[] {
+  const provenance = { recordedCheckIds: recordedCheckIdsOf(workflow), checkDependencies: context.proof?.checkDependencies, realModelRun: context.proof?.realModelRun };
+  const qualifier = testProofQualifier(context.proof?.testProof, workflow.candidate?.digest, provenance);
+  return context.proofLines === undefined
+    ? testProofLinesOf(context.proof?.testProof, workflow.candidate?.digest, provenance)
+    : context.proofLines.map((line) => `${qualifier}${line}`);
+}
+
 /** The lines of the old Tests section that the Testing section keeps: the tested commit, the tests added and the test proof. */
 function testingExtraLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, limit: number): string[] {
   const report: VerificationReport = verificationReport(workflow, context.changedFiles?.files ?? [], { ...(context.ciBasis === undefined ? {} : { ciBasis: context.ciBasis }) });
@@ -202,7 +227,7 @@ function testingExtraLines(workflow: WorkflowSnapshot, context: PullRequestBodyC
   if (context.changedFiles === undefined) lines.push("- Tests added: Rovara couldn't list the changed files, so it can't say.");
   else if (added.length === 0) lines.push(`- Tests added: none${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
   else lines.push(`- Tests added: ${joined(added, limit)}${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
-  for (const line of context.proofLines ?? testProofLinesOf(context.proof?.testProof, workflow.candidate?.digest)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
+  for (const line of testProofBodyLines(workflow, context)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
   return lines;
 }
 
@@ -222,7 +247,7 @@ function testLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, 
   else if (added.length === 0) lines.push(`- Tests added: none${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
   else lines.push(`- Tests added: ${joined(added, limit)}${context.changedFiles.complete ? "" : " (the list of changed files may be incomplete)"}`);
   // The test-proof lines have one home, this section. The publication passes the lines it read; the rewrite after a pushed fix has the proof the Proof section's reads gave it and derives the same lines from it.
-  for (const line of context.proofLines ?? testProofLinesOf(context.proof?.testProof, workflow.candidate?.digest)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
+  for (const line of testProofBodyLines(workflow, context)) lines.push(`- ${inertLine(line, PROOF_LINE_MAX)}`);
   return lines;
 }
 
@@ -236,12 +261,21 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
   let lines: string[] = [];
   const proof = proofSection(workflow, context.proof, context.testing === undefined ? undefined : TESTING_RESULT_LABELS[context.testing.result]);
   const testing = context.testing;
+  // TE-B3: the flags a reviewer reads first (instruction files, files CI runs, tests that ran before and not now, more skips, changed snapshots). Words only; nothing when there is none, so a description without flags is what it was.
+  // Only when the description has a proof to speak of (a test proof or an approved plan with claims): a task with neither reads as it did.
+  const weakeningProof = context.proof === undefined || (context.proof.testProof === undefined && (context.proof.plan?.claims?.length ?? 0) === 0) ? undefined : { testProof: context.proof.testProof, candidateDigest: workflow.candidate?.digest };
+  const flags = weakeningBlock(context.changedFiles?.files ?? [], boundEvidence(context.proof?.evidence, workflow.candidate?.digest), weakeningProof);
+  // TE-A2b: with the v2 writer and a v2 pack for this code, the shared renderer's block comes first and carries the same flags (once) and the same "could not compare" lines. It shrinks to its compact form with the lists.
+  const notCompared = weakeningProof === undefined ? [] : notComparedLines(weakeningProof.testProof, weakeningProof.candidateDigest);
+  const evidenceBlock = (level: number): string[] | undefined => (context.evidenceWriter !== 2 ? undefined : context.repositoryKnownPrivate === true ? evidenceV2Lines(context.proof?.evidence, workflow.candidate?.digest, context.changedFiles?.files, level, notCompared) : evidencePublicAiLines(context.proof?.evidence, workflow.candidate?.digest));
   // The Proof section shrinks with the lists: its evidence text first, then its proven and passed rows, never a failed row or a not-tested item. One more step after the lists are empty shortens it again.
   const steps = [...LIST_LIMITS.map((limit, index) => ({ limit, proofLevel: Math.min(index, 3) })), { limit: 0, proofLevel: PROOF_LEVEL_LAST }];
   for (const [level, { limit, proofLevel }] of steps.entries()) {
     // The last guard: whatever a path let through, no line has a Linear magic word before a key but Rovara's own Fixes line.
     // S3: no email address on GitHub; hidden before the size is checked, so the block still fits the budget it is given.
+    const block = evidenceBlock(level);
     lines = sealLinearText([
+      ...(block ?? flags),
       "## What changed", ...changedLines(context, limit), "",
       ...(testing === undefined ? ["## Tests", ...testLines(workflow, context, limit)] : testingSectionLines(testing, level, testingExtraLines(workflow, context, limit))), "",
       ...(proof === undefined ? [] : [...proof(proofLevel), ""]),

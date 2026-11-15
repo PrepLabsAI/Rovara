@@ -59,20 +59,20 @@ export async function runBaselineScans(scans: readonly BaselineScan[], run: Base
   const now = run.now ?? Date.now;
   if (scans.length === 0 || run.signal.aborted || run.budgetMs < MIN_BASELINE_BUDGET_MS || run.repositories.length === 0) return found;
   const subPlan: CheckPlan = { source: "project", readiness: scans.map((scan) => scan.command), projectBefore: scans.map(() => "unknown" as const) };
-  const originalCode = (run.originalCode ?? gitOriginalCode)(run.repositories.map((repository) => ({ directory: repository.directory, commit: repository.commit })));
+  const originalCode = (run.originalCode ?? run.runners.originalCode ?? gitOriginalCode)(run.repositories.map((repository) => ({ directory: repository.directory, commit: repository.commit })));
   // A stop that could not be confirmed: the scan files are not put back either, because a command that may still be running would write over them.
   let unconfirmedStop = false;
   try {
     await originalCode.run(async () => {
       // A file the candidate's run left is removed first, so one the baseline run did not write is never read as its result.
-      for (const scan of scans) await unlink(scan.path).catch(() => undefined);
+      if (run.runners.reportRoot === undefined) for (const scan of scans) await unlink(scan.path).catch(() => undefined);
       const startedAt = now();
       const round = await runChecks(subPlan, run.runners, { budgetMs: Math.max(0, Math.min(run.capMs ?? BASELINE_CAP_MS, run.budgetMs)), signal: run.signal });
       for (const [position, scan] of scans.entries()) {
         const entry = round.entries[position];
         // A scanner that found something usually exits non-zero: a finished run is a run, whatever its code. One that timed out, was stopped or never ran has no baseline.
         if (entry === undefined || (entry.after !== "passed" && entry.after !== "failed")) continue;
-        const read = await readContainedReport({ root: run.rootPath, cwd: scan.command.cwd, argument: scan.argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: startedAt });
+        const read = await readContainedReport({ root: run.runners.reportRoot?.() ?? run.rootPath, cwd: scan.command.cwd, argument: scan.argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: startedAt });
         if (read.ok) found.set(scan.index, read.bytes.toString("utf8"));
       }
     });
@@ -84,7 +84,7 @@ export async function runBaselineScans(scans: readonly BaselineScan[], run: Base
     }
     found.clear();
   } finally {
-    if (!unconfirmedStop) for (const scan of scans) await putBack(run.rootPath, scan);
+    if (!unconfirmedStop && run.runners.reportRoot === undefined) for (const scan of scans) await putBack(run.rootPath, scan);
   }
   return found;
 }

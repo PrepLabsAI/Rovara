@@ -2,8 +2,11 @@
 // A case that no list of words or paths can name (`question`) is answered by the model-based floor instead: the tier says the change owes the reviewer's questions, and a fake reviewer's yes raises it to risky.
 import { describe, expect, it } from "vitest";
 import {
-  factKey, needsReviewerFloor, patchDigestOf, recordTier, reviewerFloorRecorded, tierFromDiff, type ChangeTier, type HeadFacts, type TierFile,
+  factKey, needsReviewerFloor, patchDigestOf, recordTier, reviewerFloorRecorded, tierFromDiff as classify, type ChangeTier, type HeadFacts, type TierFile,
 } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { withPlainEntries } from "../support/tier-entries.js";
+// These cases model a host that reports each file's type (DEC 182); a case that wants "could not tell" passes `entry: undefined`.
+const tierFromDiff = (input: Parameters<typeof classify>[0], context: Parameters<typeof classify>[1]) => classify(withPlainEntries(input), context);
 import { TIER_QUESTIONS, applyReviewerFloor, recordReviewerFloor, type TierReviewer } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
 import { boundCommits, readHeadFacts } from "../../packages/broker/src/core/merge/change-tier-read.js";
 import type { CodeHost } from "../../packages/contracts/src/index.js";

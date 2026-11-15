@@ -35,7 +35,7 @@ export async function applyAccessRules(rules: readonly AccessCheckRule[] | undef
   let administrator = original.administrator;
   let kept = new Set(original.projects.map((project) => project.name));
   const current = (): AccessCheckResponse => ({
-    developerId: original.developerId, displayName: original.displayName, administrator,
+    developerId: original.developerId, displayName: original.displayName, nameChosen: original.nameChosen, administrator,
     projects: original.projects.filter((project) => kept.has(project.name)).map((project) => ({ name: project.name, access: project.access })),
     notices: [...original.notices],
   });

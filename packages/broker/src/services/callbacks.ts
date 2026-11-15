@@ -37,6 +37,8 @@ import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../core/design-review/outcome.js
 import { handleSetupAgentCallback, type SetupAgentCallbackDeps } from "../core/setup-agent/callback.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../repository-access.js";
 
+import { handleModelAccess, MODEL_ACCESS_PATH, type ModelGateway } from "../core/model-gateway/route.js";
+
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
 export const CAPABILITY_HEADER = "x-agentx-callback-capability";
 export { PLAN_RETENTION };
@@ -58,6 +60,8 @@ export const artifactObjectKey = (workspaceId: string, operationId: string, name
 export const artifactKey = (workspaceId: string, operationId: string, name: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: `ARTIFACT#${operationId}#${name}` });
 
 export interface CallbackDeps {
+  /** Set only on installs using the signed task-token path. */
+  modelGateway?: ModelGateway;
   flow: TaskFlowDeps;
   blobs: ObjectStorage;
   /** The repository grants this process issued; a worker exchanges one for a clone or push credential. */
@@ -247,6 +251,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (request.method === "GET" && (request.path.split("?")[0] ?? "") === DESIGN_REVIEW_PACKET_PATH) return await handleDesignReviewPacket(deps.flow, capabilities, request);
       // A stage reads the project's sources here (the capability names `context-tools`; the gateway stamps the workspace).
       const bare = request.path.split("?")[0] ?? "";
+      if (request.method === "GET" && bare === MODEL_ACCESS_PATH && typeof deps.modelGateway?.gatewayUrl === "string" && deps.modelGateway.gatewayUrl.trim() !== "") return await handleModelAccess(deps.flow, capabilities, deps.modelGateway, request);
       if (request.method === "GET" && bare === CONTEXT_TOOLS_PATH) return await handleContextTools(deps.flow, capabilities, deps.contextSources, request, "list");
       if (request.method === "POST" && bare === CONTEXT_TOOLS_CALL_PATH) return await handleContextTools(deps.flow, capabilities, deps.contextSources, request, "call");
       // The same tools as one MCP server for the agent's own MCP client: the exact path, POST only, the bearer the operation's own capability.

@@ -37,6 +37,7 @@ import {
 } from "../branch-sync/merge-action.js";
 import { noteBranchHead } from "../branch-sync/branch-writers.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
+import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
@@ -59,6 +60,11 @@ export const TRACKED_DEFINITION_VERSION = "1.1.0";
 export const NO_CI_GRACE_MS = SWEEP_INTERVAL_MS;
 /** TE-B2: how long a head's checks may stay unreadable (a missing `checks: read`, a failing list) before the state is "CI not readable" instead of `pending`. The same wait as "no CI": one sweep interval, so two sweeps in a row have failed. */
 export const CI_UNREADABLE_AFTER_MS = NO_CI_GRACE_MS;
+/**
+ * TE-B5: how long after Rovara's push a required check may stay unreported, with nothing else running, before the state is `required_missing`. Longer than a sweep: a job that `needs` another appears only when the first
+ * one is done, and a queued workflow can take a while to start. Measured from Rovara's push of this head, so a head a person pushed has no clock and keeps waiting as `pending`.
+ */
+export const CI_REQUIRED_MISSING_AFTER_MS = 15 * 60_000;
 /** How many reviewers' permissions one pass looks up; more than this and the approval is not trusted. */
 export const PERMISSION_LOOKUPS_MAX = 8;
 /** The message Rovara sends once when someone else pushed to a pull request (exact text), and the one that withdraws it. */
@@ -92,6 +98,12 @@ export function ciAllowsReady(ci: MergeTrackingItem["ci"], mode: ProjectCiMode):
  * only where the project's mode says it does not rely on CI (`sandbox_only`). Unreadable CI never counts.
  */
 export const ciCountsAsPassing = (ci: MergeTrackingItem["ci"], mode: ProjectCiMode): boolean => ci === "passing" || (ci === "none" && mode === "sandbox_only");
+/** The start of a person's head's missing-check wait, kept for the head it was seen on only. */
+export function missingSinceOf(item: Pick<MergeTrackingItem, "headSha" | "ciMissingSince"> | undefined, head: string): number | undefined {
+  if (item === undefined || item.headSha !== head || item.ciMissingSince === undefined) return undefined;
+  const since = Date.parse(item.ciMissingSince);
+  return Number.isFinite(since) ? since : undefined;
+}
 /** The wait for unreadable checks, kept for the head it was seen on only: a new head's checks are a new read. Shared by the tracking pass and the press. */
 export function unreadableSinceOf(item: Pick<MergeTrackingItem, "headSha" | "ciUnreadableSince"> | undefined, head: string): number | undefined {
   if (item === undefined || item.headSha !== head || item.ciUnreadableSince === undefined) return undefined;
@@ -128,6 +140,13 @@ export interface MergeTrackingDependencies {
   recordedHead?(workspaceId: string, repositoryId: string, number: number): Promise<string | undefined>;
   /** The project's real-check mode (TE-B2): what "No CI" and unreadable CI mean for marking ready. `DEFAULT_CI_MODE` when not given. */
   ciMode?(task: TrackedTask): Promise<ProjectCiMode> | ProjectCiMode;
+  /**
+   * TE-B5: what the change proof says about a draft (the preset's mode and the facts). Without it nothing is held for the proof and a draft is taken out of draft as before; with it, a draft whose change was not proven
+   * stays a draft with the reason until a person marks it ready anyway (proof-hold.ts).
+   */
+  proofHold?: ProofHoldSource;
+  /** Whether the task's draft must stay a draft (a small change that grew to risky, not yet kept by a person or not yet reviewed at risky). Absent: nothing holds it. */
+  readyHold?(task: TrackedTask, current: { repositoryId: string; headSha: string }): Promise<boolean>;
   /** The org's autonomy for Rovara Code, for the deciders; `prepare` when not given. */
   autonomy?(task: TrackedTask): Promise<Autonomy> | Autonomy;
   /**
@@ -202,7 +221,17 @@ export interface CiReading {
   recheckAt?: number;
   /** TE-B2: since when the checks could not be read, while they cannot (the row keeps it so the wait survives a pass). */
   unreadableSince?: number;
+  /** TE-B5 (L1): for a head a person pushed, since when the required check has been unreported on it (this head's own clock). */
+  missingSince?: number;
+  /** TE-B5: the required checks no app has reported, while `ci` is `required_missing`: at most ten, plain and short (the names come from the repository's settings). */
+  missingChecks?: string[];
 }
+
+/** A required check's name as a person reads it: control, format and hidden characters and line breaks gone, cut short. The base branch's settings are a repository's own words. */
+const plainCheckName = (name: string): string => Array.from(name.replace(/[\p{Cc}\p{Cf}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\s]+/gu, " ").trim()).slice(0, 120).join("");
+
+/** The distinct names of the checks, plain and short, at most ten. */
+const missingNames = (entries: ReadonlyArray<{ name: string }>): string[] => [...new Set(entries.map((entry) => plainCheckName(entry.name)).filter((name) => name !== ""))].slice(0, 10);
 
 /**
  * What the head's checks say. The checks that count are the base branch's required ones when it has any, else all of them (`ciBasis`). A required check that has not
@@ -210,7 +239,7 @@ export interface CiReading {
  * the head holds no workflow files: anything less is `pending`, so a slow start is never read as "nothing to wait for". Checks that cannot be read (`checksUnavailable`, or checks that exist but none can be
  * counted) are `pending` for `CI_UNREADABLE_AFTER_MS` from `unreadableSince` (the first time they were seen unreadable on this head; `now` when not given), then `unreadable`: never `pending` forever, never `passing`.
  */
-export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boolean; lastRovaraPushAt: number | undefined; now: number; unreadableSince?: number | undefined }): CiReading {
+export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boolean; lastRovaraPushAt: number | undefined; now: number; unreadableSince?: number | undefined; headByRovara?: boolean | undefined; missingSince?: number | undefined }): CiReading {
   const ciBasis = status.targetHasRequiredChecks ? "required" as const : "all_checks" as const;
   const unreadable = (): CiReading => {
     const since = input.unreadableSince !== undefined && input.unreadableSince <= input.now ? input.unreadableSince : input.now;
@@ -220,6 +249,10 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
   // Checks that could not be read are not known: nothing may say they passed.
   if (status.checksUnavailable === true) return unreadable();
   const required = status.requiredChecks;
+  // TE-B5 (L1): the clock of "a required check has not reported" starts at Rovara's push of this head; for a head a PERSON pushed it starts the first time this head was seen (kept on the row), never at an older Rovara push.
+  const person = input.headByRovara === false;
+  const missingStart = person ? (input.missingSince !== undefined && input.missingSince <= input.now ? input.missingSince : input.now) : input.lastRovaraPushAt;
+  const missingMark = person ? { missingSince: missingStart! } : {};
   // A required check is met by a check of that name, from the named source when the host's rule names one (a check with no source cannot meet a requirement that names one).
   const meets = (entry: ChangeRequestStatus["requiredChecks"][number], check: ChangeRequestStatus["checks"][number]): boolean =>
     check.name === entry.name && (entry.source === undefined || check.source === entry.source);
@@ -227,6 +260,12 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
     const settled = input.lastRovaraPushAt !== undefined && input.now - input.lastRovaraPushAt >= NO_CI_GRACE_MS;
     if (!input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && settled) return { ci: "none", ciBasis, failingChecks: [], failingDetails: [] };
     const waitEnds = !input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && input.lastRovaraPushAt !== undefined ? input.lastRovaraPushAt + NO_CI_GRACE_MS : undefined;
+    // TE-B5: a required check and nothing reported at all for a whole wait after Rovara's push: a workflow that never started, or a check no app runs.
+    if (required.length > 0 && missingStart !== undefined) {
+      const missingAt = missingStart + CI_REQUIRED_MISSING_AFTER_MS;
+      if (missingAt <= input.now) return { ci: "required_missing", ciBasis, failingChecks: [], failingDetails: [], missingChecks: missingNames(required), ...missingMark };
+      return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], recheckAt: missingAt, ...missingMark };
+    }
     return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], ...(waitEnds === undefined || waitEnds <= input.now ? {} : { recheckAt: waitEnds }) };
   }
   // A check counts when the host says the target requires it for this change request, or when a protection rule names it (the name is the fallback when `isRequired` says nothing).
@@ -241,7 +280,17 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
     return { ci: "failing", ciBasis, failingChecks: names, failingDetails };
   }
   // Every required check has to have reported: one that has not is not in the list yet, and nothing has passed for it.
-  if (required.some((entry) => !status.checks.some((check) => meets(entry, check)))) return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
+  const unreported = required.filter((entry) => !status.checks.some((check) => meets(entry, check)));
+  if (unreported.length > 0) {
+    // TE-B5: still running checks may be what the missing one waits for, so only a head with nothing running, a whole wait after Rovara's push, is told "a required check has not reported".
+    const running = status.checks.some((check) => check.state !== "completed" || check.conclusion === "action_required");
+    if (!running && missingStart !== undefined) {
+      const missingAt = missingStart + CI_REQUIRED_MISSING_AFTER_MS;
+      if (missingAt <= input.now) return { ci: "required_missing", ciBasis, failingChecks: [], failingDetails: [], missingChecks: missingNames(unreported), ...missingMark };
+      return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], recheckAt: missingAt, ...missingMark };
+    }
+    return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
+  }
   // Checks are listed but none of them counts (the host says the base requires checks, yet no required check can be told from the list): the answer is not known, so it times out like unreadable checks.
   if (counted.length === 0) return unreadable();
   const waiting = counted.some((check) => check.state !== "completed" || check.conclusion === "action_required");
@@ -335,13 +384,13 @@ export function deriveTrackingFields(input: TrackingInputs): Omit<MergeTrackingI
     : prior?.lastRovaraPushAt === undefined ? undefined : Date.parse(prior.lastRovaraPushAt);
   const checksEverSeen = prior?.checksEverSeen === true || status.checks.length > 0;
   // The wait for unreadable checks is kept on the row, for this head only: a new head's checks are a new read.
-  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: unreadableSinceOf(prior, status.headRevision) });
+  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: unreadableSinceOf(prior, status.headRevision), headByRovara, missingSince: missingSinceOf(prior, status.headRevision) });
   const today = new Date(now).toISOString().slice(0, 10);
   const reAsked = (prior?.review === "changes_requested" || prior?.review === "approved") && input.reviews.review === "requested";
   return {
     orgId: task.orgId, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number,
     headSha: status.headRevision, draft: status.draft, state: status.state, baseBranch: status.targetBranch,
-    ci: ci.ci, ciBasis: ci.ciBasis, ...(ci.unreadableSince === undefined ? {} : { ciUnreadableSince: new Date(ci.unreadableSince).toISOString() }), checksEverSeen, failingChecks: ci.failingChecks,
+    ci: ci.ci, ciBasis: ci.ciBasis, ...(ci.unreadableSince === undefined ? {} : { ciUnreadableSince: new Date(ci.unreadableSince).toISOString() }), ...(ci.missingChecks === undefined || ci.missingChecks.length === 0 ? {} : { ciMissingChecks: ci.missingChecks }), ...(ci.missingSince === undefined ? {} : { ciMissingSince: new Date(ci.missingSince).toISOString() }), checksEverSeen, failingChecks: ci.failingChecks,
     review: input.reviews.review, ...(input.reviews.approval === undefined ? {} : { approval: input.reviews.approval }),
     branch: readBranch(status), headByRovara,
     ...(lastRovaraPushAt === undefined ? {} : { lastRovaraPushAt: new Date(lastRovaraPushAt).toISOString() }),
@@ -444,6 +493,9 @@ const inertLine = (text: string): string => text.replace(/[\p{Cc}\p{Cf}@]/gu, " 
  * Follows every pull request of the task once: reads GitHub, keeps the tracking items, marks a draft ready for review and asks for the project's reviewers, and runs
  * `nextMergeAction`. Returns `gone` for a task that is closed, finished, not tracked or has no org, `changed` when an item or the workflow was written, else `unchanged`.
  */
+/** The held pull requests a person marked ready on the code host, logged once each (per process). */
+const heldNotDraftLogged = new Set<string>();
+
 export async function trackPullRequest(deps: MergeTrackingDependencies, taskId: string): Promise<TrackResult> {
   return (await trackTask(deps, taskId)).result;
 }
@@ -576,6 +628,7 @@ async function trackOne(
   const ci = readCi(status, {
     checksEverSeen: early.checksEverSeen, lastRovaraPushAt: early.lastRovaraPushAt === undefined ? undefined : Date.parse(early.lastRovaraPushAt), now,
     unreadableSince: early.ciUnreadableSince === undefined ? undefined : Date.parse(early.ciUnreadableSince),
+    headByRovara: early.headByRovara, missingSince: early.ciMissingSince === undefined ? undefined : Date.parse(early.ciMissingSince),
   });
   const ciMode = await (deps.ciMode?.(task) ?? DEFAULT_CI_MODE);
 
@@ -584,10 +637,28 @@ async function trackOne(
   // GitHub refusing one of the two (a missing permission, an error) leaves that step undone and the item still written; a rate limit or a spent allowance goes on up.
   // Only while the task waits for the merge with nothing being changed or checked: a pull request whose code is being fixed, or merged with its base and not yet checked and reviewed again (lane L10, owner
   // decision b), is not called ready, whatever its CI says.
-  const wantsReady = status.state === "open" && early.readyAt === undefined && early.headByRovara
+  const wantsReadyOtherwise = status.state === "open" && early.readyAt === undefined && early.headByRovara
     // A draft is taken out of draft only where the mode allows it; a pull request that is not a draft (the host refuses drafts, or a person marked it ready) cannot be kept back, so it gets its reviewers on passing CI or no CI.
     && (status.draft ? ciAllowsReady(ci.ci, ciMode) : ciAllowsMerge(ci.ci))
     && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING";
+  // A change that grew to risky stays a draft until a person keeps it and the risky reviews pass: it is not marked ready, and one a person marked ready on the code host is noted (it cannot be undone from here).
+  // A task that skipped planning is also held until its tier, its reviewer's questions and any grown review are on the record for the head the host shows (never ready on a stale or untiered head).
+  const held = deps.readyHold === undefined ? false : await deps.readyHold(task, { repositoryId: pullRequest.repositoryId, headSha: status.headRevision }).catch(() => true);
+  const heldKey = `${task.taskId}#${String(pullRequest.number)}#${status.headRevision}`;
+  if (held && status.state === "open" && !status.draft && !heldNotDraftLogged.has(heldKey)) {
+    if (heldNotDraftLogged.size > 1_000) heldNotDraftLogged.clear();
+    heldNotDraftLogged.add(heldKey);
+    deps.log?.("merge_tracking.held_pull_request_not_draft", { taskId: task.taskId, number: pullRequest.number });
+  }
+  // TE-B5: a draft that would be taken out of draft is first judged on the change proof. Held (or a judgement that could not be made) keeps it a draft this pass; a person's "mark ready anyway" for this head lets it go.
+  // A pull request that is not a draft cannot be kept back and is not judged.
+  let wantsReady = wantsReadyOtherwise;
+  let markedAnyway = false;
+  if (wantsReadyOtherwise && !held && status.draft && deps.proofHold !== undefined) {
+    const gate = await judgeProofHold({ store: deps.store, timeline: deps.timeline, proofHold: deps.proofHold, budget, ...(deps.log === undefined ? {} : { log: (event: string, fields: Record<string, unknown>) => deps.log?.(event, fields) }) }, task, pullRequest, status.headRevision, now);
+    if (gate.kind !== "proceed") wantsReady = false;
+    else markedAnyway = gate.overridden === true;
+  }
   let readyNow = false;
   let asked = false;
   let markedReady = false;
@@ -601,7 +672,7 @@ async function trackOne(
       return false;
     }
   };
-  if (wantsReady) {
+  if (wantsReady && !held) {
     // A host that cannot take a change request out of draft leaves it a draft: it is never read as ready.
     const markReady = codeHost.markReady?.bind(codeHost);
     const drafted = !status.draft || (markReady !== undefined && await attempt_(() => markReady(ref, scope, budget), "mark_ready"));
@@ -734,7 +805,7 @@ async function trackOne(
       const index = Math.max(0, (task.workflow.pullRequests ?? []).findIndex((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number));
       items.push(...deps.milestones.items({
         kind: "pr_ready", orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: stamp,
-        text: `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}`,
+        text: `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}${markedAnyway ? " It was held for its change proof and a person marked it ready anyway." : ""}`,
         pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
       }, index, { definitionVersion: task.workflow.definitionVersion }));
     }

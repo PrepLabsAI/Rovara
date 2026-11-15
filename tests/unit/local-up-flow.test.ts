@@ -1468,7 +1468,7 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     await commitRound(h, waiting.taskId, (workflow) => startWorkflowBranchSync(workflow, { repositoryId: "demo", number: 1, reason: "behind", now: new Date().toISOString() }), "SYNC");
     const sync = await h.nextJob(waiting.workspaceId, waiting.seen);
     /** The worker's merge commit on the host's branch: the given parents, and a tree. */
-    const merge = (sha: string, tree: string, parents: string[]) => { h.model.revisions.set(sha, { sha, tree, parents, files: new Map(), symlinks: new Set() }); h.model.branches.set(waiting.headBranch, sha); return sha; };
+    const merge = (sha: string, tree: string, parents: string[]) => { h.model.revisions.set(sha, { sha, tree, parents, files: new Map(), symlinks: new Set(), entries: new Map() }); h.model.branches.set(waiting.headBranch, sha); return sha; };
     const call = (commit: string) => ({ repository: "demo", pullRequestNumber: 1, action: "sync", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit });
     const lifecycle = (commit: string, treeSha: string) => ({ action: "sync", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit, treeSha, checks: [], reconciled: false });
     return { ...waiting, newBase, sync, merge, call, lifecycle };

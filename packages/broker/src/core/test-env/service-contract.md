@@ -1,4 +1,12 @@
-# Offline SageMaker contract helpers (SM-A)
+# Finding an outside service's contract (TE-G6), first adapter SageMaker (SM-A)
+
+Owner call O10: outside services are generic, not special cases. The flow is three steps:
+contract source (a `ContractAdapter` reads one kind of repo file) -> answer shape (`findServiceContract`,
+`service-contract.ts`) -> labelled mock config (`generateServiceMock`, `service-contract-mock.ts`). An adapter names its
+`service`, its source `kinds` in priority order, its `errorCases`, and a `read` function that turns one file's text into a
+parsed value (an example answer or a schema) or says it is unsupported. Everything below the adapter is the same for every
+service. SageMaker (`sagemaker-contract.ts`, `sagemaker-mock.ts`) is the first adapter; the binding functions
+`findSageMakerContract`, `isSageMakerContract` and `generateSageMakerMock` keep their behaviour.
 
 `findSageMakerContract` accepts classified file contents for **one model**. A caller
 must identify its response fixtures, inference source and output schemas; this
@@ -34,7 +42,7 @@ keyword refuses that candidate, including references, enums and compositions.
 Optional properties remain marked optional; the generator includes all declared
 properties. Missing or unsupported inputs produce `No contract found` with reasons.
 
-`generateSageMakerMock` produces a version 1 document validated by
+`generateSageMakerMock` produces a version 1 document (it also names its `service`) validated by
 `SageMakerMockConfigSchema`. It has typical, edge, low-score and high-score
 responses, plus a null empty-response exercise. The empty response states whether
 it conforms to the contract. Numeric scenarios use declared bounds, or synthetic

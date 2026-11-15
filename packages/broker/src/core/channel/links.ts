@@ -6,7 +6,7 @@
 import {
   ActorRefSchema, ChannelLinkCodeRecordSchema, ChannelLinkSchema, INDEX_EXPIRY_ATTRIBUTE, LINK_CODE_TTL_SECONDS, LinkCodeSchema, agentXError, generateLinkCode, linkCodeHash, maskChannelUserId, orgChannelLinkCodeKey,
   orgChannelLinkKey, orgDeveloperChannelLinkKey, orgScoped, queryAll, when,
-  type ActorRef, type ChannelLink, type DocumentStore, type OrgId, type StoredDocument,
+  type ActorRef, type ChannelLink, type DocumentStore, type OrgId, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 
 export interface ChannelLinkDeps {
@@ -25,6 +25,15 @@ const bare = (item: StoredDocument | undefined): Record<string, unknown> | undef
 export async function linkedPerson(deps: ChannelLinkDeps, actor: ActorRef): Promise<string | undefined> {
   const parsed = ChannelLinkSchema.safeParse(bare(await deps.store.get(orgChannelLinkKey(deps.orgId, actor))));
   return parsed.success ? parsed.data.developerId : undefined;
+}
+
+/**
+ * The check a write made for a linked chat account carries in its OWN transaction: the link row still names this person. The sink reads the link once per item; an unlink (or a re-link to someone
+ * else) that commits between that read and the write makes the write fail, so the account's rights end at the unlink with no window (the earlier hosted line's link fence, as Code's rule).
+ * `eq` on a missing row is false, so a removed link fails it too.
+ */
+export function channelLinkFence(orgId: OrgId, actor: ActorRef, personId: string): TransactItem {
+  return { kind: "check", key: orgChannelLinkKey(orgId, actor), condition: when.eq("developerId", personId) };
 }
 
 /** A one-time code bound to the chat account. Only its hash is stored; the code itself is shown once, to the person on that account. */

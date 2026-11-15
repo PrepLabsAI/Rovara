@@ -25,7 +25,10 @@ export async function loadTestProof(
       const artifact = artifacts.find((entry) => entry.name === TEST_PROOF_ARTIFACT);
       const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
       if (artifact === undefined || !artifact.objectKey.startsWith(prefix)) continue;
-      const parsed = TestProofSchema.safeParse(JSON.parse(await actions.readArtifact(artifact.objectKey, PROOF_READ_BYTES)) as unknown);
+      const raw: unknown = JSON.parse(await actions.readArtifact(artifact.objectKey, PROOF_READ_BYTES));
+      const parsed = TestProofSchema.safeParse(raw);
+      // Never revive an older proof that lacks the newest proof's unreadable reply provenance.
+      if (!parsed.success && typeof raw === "object" && raw !== null && "scriptedReplies" in raw) return undefined;
       if (parsed.success && parsed.data.candidateDigest === candidateDigest) return parsed.data;
     }
   } catch {

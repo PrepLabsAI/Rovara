@@ -74,9 +74,22 @@ describe("POST /v1/dev/access with the person's token for the service (FR-004)",
     const answer = await bearer();
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({
-      developerId, displayName: "Ada", administrator: true, notices: [],
+      developerId, displayName: "Ada", nameChosen: false, administrator: true, notices: [],
       projects: [{ name: "payments-api", access: "channel" }, { name: "solo", access: "granted" }],
     });
+  });
+
+  it("says when the person chose their own name (#634)", async () => {
+    db.set({ ...db.get(`DEVELOPER#${developerId}`, "META")!, displayName: "Ada L", displayNameChosen: true });
+    expect((await bearer()).body).toMatchObject({ displayName: "Ada L", nameChosen: true });
+  });
+
+  it("lists the projects they administer too (spec 065), once each, and only a registered one", async () => {
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#hidden", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "hidden", role: "administrator" });
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#gone", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "gone", role: "administrator" });
+    expect((await bearer()).body.projects).toEqual([
+      { name: "payments-api", access: "channel" }, { name: "solo", access: "granted" }, { name: "hidden", access: "administrator" },
+    ]);
   });
 
   it("reads grants live: a revoked grant is gone on the next call", async () => {
@@ -179,6 +192,19 @@ describe("a host's stricter rules on the access check (owner decision 132)", () 
     rules.push(() => ({ administrator: true, projects: ["payments-api", "solo", "hidden"] }) as unknown as { projects: string[] });
     const widened = await access(basic("scheduler", SECRET), { developerId });
     expect(widened.body).toMatchObject({ administrator: false, projects: [{ name: "payments-api" }, { name: "solo" }] });
+  });
+
+  it("never gives back a project the rules took away, even one the person administers (spec 065)", async () => {
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#hidden", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "hidden", role: "administrator" });
+    // Positive control: without a rule the administered project is in the answer.
+    expect((await bearer()).body.projects).toContainEqual({ name: "hidden", access: "administrator" });
+    rules.push(() => ({ projects: ["solo"] }));
+    const narrowed = await bearer();
+    expect(narrowed.status).toBe(200);
+    expect(narrowed.body.projects).toEqual([{ name: "solo", access: "granted" }]);
+    expect(JSON.stringify(narrowed.body.projects)).not.toContain("hidden");
+    const byId = await access(basic("scheduler", SECRET), { developerId });
+    expect(byId.body.projects).toEqual([{ name: "solo", access: "granted" }]);
   });
 
   it("cannot widen the answer by changing what it was given: the reviewer's probe", async () => {

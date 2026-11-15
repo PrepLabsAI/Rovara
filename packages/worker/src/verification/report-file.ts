@@ -6,6 +6,8 @@
 //
 // The inherent limit (EV-2): a report proves what the project's tooling wrote, not that it measured the real code. The check's command runs the agent's own tests and configuration in the round, and code there can write
 // a report with every changed line hit (or a scan with no findings) with a fresh modification and change time; no freshness rule can see that. Naming the file in the check's own command line is the least a report must do.
+import { parseReportParts, type ReportParts } from "./report-adapters.js";
+import { TEST_REPORT_MAX_BYTES } from "./test-report.js";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -71,4 +73,29 @@ export async function readContainedReport(input: { root: string; cwd: string; ar
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+/** Named adapter file, with the same freshness/byte bounds as other reports and strict UTF-8. Never guesses a path. */
+export async function readReportPartsFile(input: { root: string; cwd: string; argument: string; notBeforeMs: number | undefined; nowMs?: number }): Promise<{ ok: true; parts: ReportParts } | { ok: false; reason: ReportFileFailure | "malformed" | "newer" }> {
+  // Refuse intermediate symlinks too, even if they point back inside the workspace.
+  try {
+    const root = await realpath(input.root);
+    const target = resolve(root, input.cwd, input.argument);
+    const rel = relative(root, target);
+    if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return { ok: false, reason: "unsafe_path" };
+    let current = root;
+    for (const part of rel.split(sep)) {
+      current = join(current, part);
+      if ((await lstat(current)).isSymbolicLink()) return { ok: false, reason: "unsafe_path" };
+    }
+  } catch (error) {
+    return { ok: false, reason: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable" };
+  }
+  const read = await readContainedReport({ ...input, maxBytes: TEST_REPORT_MAX_BYTES });
+  if (!read.ok) return read;
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(read.bytes); } catch { return { ok: false, reason: "unreadable" }; }
+  const parts = parseReportParts(text);
+  if (parts === undefined) return { ok: false, reason: "malformed" };
+  return parts.newer === true ? { ok: false, reason: "newer" } : { ok: true, parts };
 }

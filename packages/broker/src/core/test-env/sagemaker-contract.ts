@@ -1,90 +1,22 @@
-// SM-A is an offline, pure discovery helper. Callers supply response payload files for
-// ONE model; no filesystem reads, Python execution, model calls, store or proof wiring.
-// Supported inference: a sole literal return in output_fn (preferred), or predict_fn
-// when output_fn is absent. Dynamic code is explicitly unsupported, never guessed.
-// Supported output schemas: type, properties, required, items, minimum and maximum.
-// Unsupported keywords refuse that candidate rather than silently weakening its shape.
-export const SAGEMAKER_CONTRACT_LIMITS = { files: 64, characters: 65_536, depth: 12, nodes: 256 } as const;
-export type SageMakerSourceKind = "fixture" | "inference" | "output_schema";
-export interface SageMakerSource { kind: SageMakerSourceKind; path: string; pointer: string }
-export type SageMakerShape = { source: SageMakerSource } & (
-  | { type: "object"; fields: { name: string; required: boolean; shape: SageMakerShape }[] }
-  | { type: "array"; items: SageMakerShape }
-  | { type: "number" | "integer"; minimum?: number; maximum?: number }
-  | { type: "string" | "boolean" | "null" }
-);
-export interface SageMakerContract { source: SageMakerSource; shape: SageMakerShape }
-export interface SageMakerContractFile { kind: SageMakerSourceKind; path: string; content: string | null }
-type Reason = "selected" | "lower_priority" | "invalid_input" | "unreadable" | "too_large" | "invalid_json" | "unsupported_inference" | "unsupported_shape";
-interface InputResult { index: number; reason: Reason }
-export type SageMakerContractResult =
-  | { status: "found"; contract: SageMakerContract; inputs: InputResult[] }
-  | { status: "not_found"; message: "No contract found"; reason: "too_many_inputs" | "no_supported_input"; inputs: InputResult[] };
-const kinds: SageMakerSourceKind[] = ["fixture", "inference", "output_schema"];
-const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-const pointer = (name: string) => name.replaceAll("~", "~0").replaceAll("/", "~1");
-function child(source: SageMakerSource, part: string): SageMakerSource { return { ...source, pointer: `${source.pointer}/${part}` }; }
-const unsupported = (): never => { throw new Error("unsupported_shape"); };
-interface Budget { nodes: number }
-function count(depth: number, budget: Budget): void {
-  if (depth > SAGEMAKER_CONTRACT_LIMITS.depth || ++budget.nodes > SAGEMAKER_CONTRACT_LIMITS.nodes) unsupported();
-}
-function signature(shape: SageMakerShape): string {
-  if (shape.type === "object") return JSON.stringify([shape.type, shape.fields.map((field) => [field.name, signature(field.shape)]).sort()]);
-  if (shape.type === "array") return JSON.stringify([shape.type, signature(shape.items)]);
-  return shape.type;
-}
-function fromValue(value: unknown, source: SageMakerSource, depth: number, budget: Budget): SageMakerShape {
-  count(depth, budget);
-  if (value === null) return { type: "null", source };
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) unsupported();
-    return { type: "number", source };
-  }
-  if (typeof value === "string") return { type: "string", source };
-  if (typeof value === "boolean") return { type: "boolean", source };
-  if (Array.isArray(value)) {
-    if (value.length === 0) unsupported();
-    const shapes = value.map((entry, i) => fromValue(entry, child(source, String(i)), depth + 1, budget));
-    const first = shapes[0]!;
-    if (shapes.some((entry) => signature(entry) !== signature(first))) unsupported();
-    return { type: "array", source, items: first };
-  }
-  if (!object(value)) return unsupported();
-  return { type: "object", source, fields: Object.entries(value).map(([name, entry]) => ({ name, required: true, shape: fromValue(entry, child(source, pointer(name)), depth + 1, budget) })) };
-}
-function fromSchema(value: unknown, source: SageMakerSource, depth: number, budget: Budget): SageMakerShape {
-  count(depth, budget);
-  if (!object(value)) return unsupported();
-  const allowed = value.type === "object" ? ["type", "properties", "required"] : value.type === "array" ? ["type", "items"] : value.type === "number" || value.type === "integer" ? ["type", "minimum", "maximum"] : ["type"];
-  if (Object.keys(value).some((key) => !allowed.includes(key))) unsupported();
-  if (value.type === "object") {
-    if (!object(value.properties)) return unsupported();
-    const properties = value.properties;
-    if (value.required !== undefined && (!Array.isArray(value.required) || value.required.some((key: unknown) => typeof key !== "string" || !Object.hasOwn(properties, key)))) unsupported();
-    const required = new Set(Array.isArray(value.required) ? value.required as string[] : []);
-    return { type: "object", source, fields: Object.entries(properties).map(([name, entry]) => ({ name, required: required.has(name), shape: fromSchema(entry, child(source, `properties/${pointer(name)}`), depth + 1, budget) })) };
-  }
-  if (value.type === "array") return { type: "array", source, items: fromSchema(value.items, child(source, "items"), depth + 1, budget) };
-  if (value.type === "number" || value.type === "integer") {
-    const shape: SageMakerShape = { type: value.type, source };
-    for (const key of ["minimum", "maximum"] as const) {
-      const n = value[key];
-      if (n !== undefined) {
-        if (typeof n !== "number" || !Number.isFinite(n)) unsupported();
-        shape[key] = n as number;
-      }
-    }
-    const minimum = shape.type === "integer" && shape.minimum !== undefined ? Math.ceil(shape.minimum) : shape.minimum;
-    const maximum = shape.type === "integer" && shape.maximum !== undefined ? Math.floor(shape.maximum) : shape.maximum;
-    const low = minimum ?? Math.min(0, maximum ?? 0);
-    const high = maximum ?? Math.max(1, low);
-    if (low > high) unsupported();
-    return shape;
-  }
-  if (value.type === "string" || value.type === "boolean" || value.type === "null") return { type: value.type, source };
-  return unsupported();
-}
+// SageMaker is the FIRST ADAPTER of the generic contract finder (service-contract.ts, plan lane TE-G6): it knows which
+// repo files describe one SageMaker model's answer and how to read them. Everything else (shape, limits, provenance,
+// validation, the labelled mock config) is generic. Offline and pure: callers supply file contents; no filesystem reads,
+// Python execution, model calls, store or proof wiring.
+// Supported inference: a sole literal return in output_fn (preferred), or predict_fn when output_fn is absent.
+// Dynamic code is explicitly unsupported, never guessed.
+import {
+  CONTRACT_LIMITS, findServiceContract, isServiceContract,
+  type AdapterRead, type AnswerShape, type ContractAdapter, type ContractFile, type ContractResult, type ContractSource, type ContractSourceKind, type ServiceContract,
+} from "./service-contract.js";
+
+export const SAGEMAKER_CONTRACT_LIMITS = CONTRACT_LIMITS;
+export type SageMakerSourceKind = ContractSourceKind;
+export type SageMakerSource = ContractSource;
+export type SageMakerShape = AnswerShape;
+export type SageMakerContract = ServiceContract;
+export type SageMakerContractFile = ContractFile;
+export type SageMakerContractResult = ContractResult;
+
 function inferenceLiteral(text: string): { value: unknown; pointer: string } | null {
   if (text.includes('"""') || text.includes("'''") || /^\s*@/m.test(text)) return null;
   // Anchored top-level functions only. A selected output_fn must itself be understood;
@@ -114,61 +46,20 @@ function inferenceLiteral(text: string): { value: unknown; pointer: string } | n
   try { return { value: JSON.parse(parts.join("")) as unknown, pointer: `${name}/return` }; } catch { return null; }
 }
 
-/** Inputs must be classified by the caller for one model. All decisions are indexed
- * back to the input list; no raw response values or inference source are retained. */
-export function findSageMakerContract(files: readonly SageMakerContractFile[]): SageMakerContractResult {
-  if (files.length > SAGEMAKER_CONTRACT_LIMITS.files) return { status: "not_found", message: "No contract found", reason: "too_many_inputs", inputs: [] };
-  const inputs: InputResult[] = files.map((file, index) => ({
-    index,
-    reason: !object(file) || !kinds.includes(file.kind) || typeof file.path !== "string" || (typeof file.content !== "string" && file.content !== null) ? "invalid_input" : "lower_priority",
-  }));
-  let contract: SageMakerContract | undefined;
-  for (const kind of kinds) {
-    for (const [index, file] of files.entries()) {
-      const result = inputs[index]!;
-      if (result.reason === "invalid_input" || file.kind !== kind || contract !== undefined) continue;
-      if (file.content === null) { result.reason = "unreadable"; continue; }
-      if (file.content.length > SAGEMAKER_CONTRACT_LIMITS.characters || file.path.length > 2048) { result.reason = "too_large"; continue; }
-      let value: unknown;
-      let location = "";
-      if (kind === "inference") {
-        const literal = inferenceLiteral(file.content);
-        if (literal === null) { result.reason = "unsupported_inference"; continue; }
-        value = literal.value; location = literal.pointer;
-      } else {
-        try { value = JSON.parse(file.content) as unknown; } catch { result.reason = "invalid_json"; continue; }
-      }
-      const source = { kind, path: file.path, pointer: location };
-      try {
-        const shape = (kind === "output_schema" ? fromSchema : fromValue)(value, source, 0, { nodes: 0 });
-        contract = { source, shape };
-        result.reason = "selected";
-      } catch { result.reason = "unsupported_shape"; }
+export const sageMakerAdapter: ContractAdapter = {
+  service: "sagemaker",
+  kinds: ["fixture", "inference", "output_schema"],
+  errorCases: [{ scenario: "model_error", status: 424 }, { scenario: "throttled", status: 429 }, { scenario: "timeout" }],
+  read(file): AdapterRead {
+    if (file.kind === "inference") {
+      const literal = inferenceLiteral(file.content);
+      return literal === null ? { status: "unsupported", reason: "unsupported_inference" } : { status: "ok", form: "example", value: literal.value, pointer: literal.pointer };
     }
-  }
-  return contract === undefined ? { status: "not_found", message: "No contract found", reason: "no_supported_input", inputs } : { status: "found", contract, inputs };
-}
+    try { return { status: "ok", form: file.kind === "output_schema" ? "schema" : "example", value: JSON.parse(file.content) as unknown, pointer: "" }; } catch { return { status: "unsupported", reason: "invalid_json" }; }
+  },
+};
 
+/** Inputs must be classified by the caller for one model. */
+export const findSageMakerContract = (files: readonly SageMakerContractFile[]): SageMakerContractResult => findServiceContract(sageMakerAdapter, files);
 /** Validate the normalized contract at the generator/config boundary too. */
-export function isSageMakerContract(value: unknown): value is SageMakerContract {
-  const keys = (entry: Record<string, unknown>, allowed: string[]) => Object.keys(entry).every((key) => allowed.includes(key));
-  const validSource = (source: unknown): source is SageMakerSource => object(source) && keys(source, ["kind", "path", "pointer"]) && kinds.includes(source.kind as SageMakerSourceKind) && typeof source.path === "string" && source.path.length <= 2048 && typeof source.pointer === "string" && source.pointer.length <= SAGEMAKER_CONTRACT_LIMITS.characters;
-  const budget = { nodes: 0 };
-  function valid(shape: unknown, depth: number): boolean {
-    count(depth, budget);
-    if (!object(shape) || !validSource(shape.source)) return false;
-    const allowed = shape.type === "object" ? ["fields"] : shape.type === "array" ? ["items"] : shape.type === "number" || shape.type === "integer" ? ["minimum", "maximum"] : [];
-    if (!keys(shape, ["type", "source", ...allowed])) return false;
-    switch (shape.type) {
-      case "object": return Array.isArray(shape.fields) && shape.fields.length <= SAGEMAKER_CONTRACT_LIMITS.nodes && new Set(shape.fields.map((field: unknown) => object(field) ? field.name : undefined)).size === shape.fields.length && shape.fields.every((field: unknown) => object(field) && keys(field, ["name", "required", "shape"]) && typeof field.name === "string" && typeof field.required === "boolean" && valid(field.shape, depth + 1));
-      case "array": return valid(shape.items, depth + 1);
-      case "number": case "integer": {
-        const numeric = fromSchema(Object.fromEntries(Object.entries(shape).filter(([key]) => key !== "source")), shape.source, 0, { nodes: 0 });
-        return numeric.type === shape.type;
-      }
-      case "string": case "boolean": case "null": return true;
-      default: return false;
-    }
-  }
-  try { return object(value) && keys(value, ["source", "shape"]) && validSource(value.source) && valid(value.shape, 0); } catch { return false; }
-}
+export const isSageMakerContract = (value: unknown): value is SageMakerContract => isServiceContract(value);
