@@ -18,7 +18,7 @@
 //      A pass that changed anything is followed by another from the start; the purge is `done` only after a whole pass found nothing left to do and read every row (a pass that met a row the store
 //      could not read never ends the purge). The company is closed, so late writers are stragglers; a row written behind the walk's cursor during the last pass is the one case a pass can miss.
 //      A due purge that finds the company open again is cancelled (with `company.purge_cancelled`), never held: a later close needs a new request and a new cooling-off.
-//   4. `dryRunCompanyPurge` (operator only): the same walk with no writes, answering counts by kind (never a key, an id or any content).
+//   4. `dryRunCompanyPurge` (operator only): the same walk, writing nothing to any company's data, answering counts by kind (never a key, an id or any content; its place between calls is an opaque handle).
 //
 // Kept on purpose: `ORG#<company>` / `META` (the closed company's marker), the audit chain's anchor (`ORG#<company>#AUDIT_COPY`), the purge's own rows, and people's sign-in rows (`DEVELOPER#<person>`
 // other than their task list, `EMAIL#`, `SESSION#`, `REFRESH#`, `AUTHREQ#`, `CODE#`): a person may belong to other companies, and is removed by the member removal or the person erase.
@@ -26,7 +26,7 @@
 //
 // Reports are counts. Log lines and errors name no company content, person, task or key.
 import { randomUUID } from "node:crypto";
-import { OrgIdSchema, agentXError, when, change, type AuditSink, type DocumentKey, type DocumentStore, type QueryPage, type StoredDocument, type TransactItem } from "@agentx/contracts";
+import { AgentXError, OrgIdSchema, agentXError, when, change, type AuditSink, type DocumentKey, type DocumentStore, type QueryPage, type StoredDocument, type TransactItem } from "@agentx/contracts";
 import { evidencePrefixesOf } from "../proof/evidence-erase.js";
 
 // ---- ports ----
@@ -47,13 +47,18 @@ export interface CompanyPurgeDeps {
   objects: CompanyPurgeObjects;
   /** The company's audit sink: the purge's own events commit with its state changes. */
   audit: Pick<AuditSink, "stage">;
-  /** Whether the company is closed. REQUIRED: the purge is never requested or run for a company that is not (an answer that is not `true`, or a throw, is "not closed"). */
-  companyClosed: (companyId: string) => Promise<boolean>;
+  /**
+   * Whether the company is closed, and WHICH close (`closeId`: an id or time that changes each time the company is closed). REQUIRED. A purge is requested only under a close, and runs only while
+   * that same close holds: `{ closed: false }`, or another close, cancels a scheduled purge and holds a running one. A throw or any other answer is "unknown": nothing runs, nothing is cancelled.
+   */
+  companyClosure: (companyId: string) => Promise<CompanyClosure>;
   now: () => number;
   /** The cooling-off delay; default COMPANY_PURGE_COOLING_OFF_MS, never below COMPANY_PURGE_COOLING_OFF_MIN_MS nor above COMPANY_PURGE_COOLING_OFF_MAX_MS. */
   coolingOffMs?: number;
   log?: (entry: Record<string, unknown>) => void;
 }
+
+export type CompanyClosure = { closed: true; closeId: string } | { closed: false };
 
 /** Who asks: an operator of the install, never a company member. The host sets it from its own operator sign-in. */
 export interface CompanyPurgeOperator {
@@ -82,6 +87,9 @@ export const PURGE_COMPANY_OPEN = "The company is not closed. Close it first; it
 export const PURGE_NOT_CANCELLABLE = "The purge can no longer be cancelled: its cooling-off time is over or it has started.";
 export const PURGE_NOT_FOUND = "There is no purge scheduled for that company.";
 const PURGE_NOT_RECORDED = "The purge could not be recorded just now. Send the same request again.";
+const PURGE_RUN_FAILED = "The purge could not go on just now; it continues from where it stopped on its next run.";
+export const PURGE_DRY_RUN_HANDLE = "That dry-run handle is not valid or has expired. Start the dry run again.";
+export const PURGE_NEW_REQUEST_ID = "That request id was used for an earlier purge of this company. Use a new request id.";
 
 const OPERATOR_ID = /^[A-Za-z0-9_.-]{1,100}$/u;
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -97,6 +105,10 @@ export const companyPurgeKey = (companyId: string): DocumentKey => ({ pk: COMPAN
 const partsPk = (companyId: string): string => `COMPANY_PURGE_PART#${companyId}`;
 /** The task and workspace ids this purge proved the company's (`task#<id>`, `ws#<id>`), so a row elsewhere that names one goes too. Deleted when the purge is done. */
 const marksPk = (companyId: string): string => `COMPANY_PURGE_MARK#${companyId}`;
+/** A dry run's place between calls, kept here under a random handle: the store's own cursor names a key, so it is never handed out. */
+const dryRunPk = (companyId: string): string => `COMPANY_PURGE_DRYRUN#${companyId}`;
+/** How long a dry run's handle can be used. */
+const DRY_RUN_HANDLE_MS = 3_600_000;
 
 function companyOf(companyId: unknown): string {
   const parsed = OrgIdSchema.safeParse(companyId);
@@ -112,9 +124,22 @@ function operatorOf(by: unknown): string {
 
 const errorName = (error: unknown): string => (error instanceof Error ? error.name : "unknown");
 
-async function closed(deps: Pick<CompanyPurgeDeps, "companyClosed">, companyId: string): Promise<boolean> {
-  if (typeof deps.companyClosed !== "function") throw new Error("the company-closed check is not wired");
-  try { return (await deps.companyClosed(companyId)) === true; } catch { return false; }
+/** A wiring that forgot the closed check fails loudly, before anything is read (it never reads as "unknown"). */
+function assertWired(deps: Pick<CompanyPurgeDeps, "companyClosure">): void {
+  if (typeof deps.companyClosure !== "function") throw new Error("the company-closed check is not wired");
+}
+
+const CLOSE_ID = /^[A-Za-z0-9_.:-]{1,100}$/u;
+/** The company's close as the host reads it: `closeId` when closed, `open`, or `unknown` (a throw or an answer of any other shape). */
+async function closureOf(deps: Pick<CompanyPurgeDeps, "companyClosure">, companyId: string): Promise<{ closeId: string } | "open" | "unknown"> {
+  if (typeof deps.companyClosure !== "function") throw new Error("the company-closed check is not wired");
+  let answer: unknown;
+  try { answer = await deps.companyClosure(companyId); } catch { return "unknown"; }
+  if (answer === null || typeof answer !== "object") return "unknown";
+  const { closed, closeId } = answer as { closed?: unknown; closeId?: unknown };
+  if (closed === false) return "open";
+  if (closed === true && typeof closeId === "string" && CLOSE_ID.test(closeId)) return { closeId };
+  return "unknown";
 }
 
 function coolingOff(deps: Pick<CompanyPurgeDeps, "coolingOffMs">): number {
@@ -163,6 +188,8 @@ export interface CompanyPurgeState {
 
 interface Row extends CompanyPurgeState {
   dueAtMs: number;
+  /** The close the purge was requested under. */
+  closeId: string;
   cursor?: string;
   acted: boolean;
   /** Rows the store could not read were met on this pass. */
@@ -179,7 +206,7 @@ function rowOf(item: StoredDocument | undefined): Row | undefined | "unreadable"
   const counts = item["counts"] as Record<string, unknown> | undefined;
   const text = (name: string): string | undefined => (typeof item[name] === "string" ? (item[name]) : undefined);
   if (typeof status !== "string" || !STATUSES.includes(status as CompanyPurgeStatus) || typeof item["dueAtMs"] !== "number" || text("companyId") === undefined || text("requestId") === undefined
-    || text("requestedBy") === undefined || text("requestedAt") === undefined || text("dueAt") === undefined || counts === null || typeof counts !== "object") return "unreadable";
+    || text("requestedBy") === undefined || text("requestedAt") === undefined || text("dueAt") === undefined || text("closeId") === undefined || counts === null || typeof counts !== "object") return "unreadable";
   const readCounts = zeroCounts();
   for (const name of Object.keys(readCounts) as (keyof CompanyPurgeCounts)[]) {
     const value = counts[name];
@@ -190,7 +217,7 @@ function rowOf(item: StoredDocument | undefined): Row | undefined | "unreadable"
   return {
     companyId: text("companyId")!, status: status as CompanyPurgeStatus, requestId: text("requestId")!, requestedBy: text("requestedBy")!, requestedAt: text("requestedAt")!, dueAt: text("dueAt")!,
     ...(text("cancelledAt") === undefined ? {} : { cancelledAt: text("cancelledAt")! }), ...(text("startedAt") === undefined ? {} : { startedAt: text("startedAt")! }),
-    ...(text("doneAt") === undefined ? {} : { doneAt: text("doneAt")! }), counts: readCounts, dueAtMs: item["dueAtMs"],
+    ...(text("doneAt") === undefined ? {} : { doneAt: text("doneAt")! }), counts: readCounts, dueAtMs: item["dueAtMs"], closeId: text("closeId")!,
     ...(typeof item["cursor"] === "string" ? { cursor: item["cursor"] } : {}), acted: item["acted"] === true, blocked: item["blocked"] === true,
     ...(typeof item["runId"] === "string" ? { runId: item["runId"] } : {}), ...(typeof item["leaseUntil"] === "number" ? { leaseUntil: item["leaseUntil"] } : {}),
   };
@@ -228,17 +255,24 @@ export async function requestCompanyPurge(deps: CompanyPurgeDeps, input: Company
   const operatorId = operatorOf(input.by);
   const companyId = companyOf(input.companyId);
   if (typeof input.requestId !== "string" || !REQUEST_ID.test(input.requestId)) throw agentXError("CONFIG_INVALID", "The request id is not valid.");
+  assertWired(deps);
+  return await fixedWords(async () => {
   const existing = await readRow(deps, companyId);
   // A scheduled or running purge is kept; a cancelled one, or one that is done (the company was closed again), gives way to a new request.
   const replaceable = (row: Row | undefined): boolean => row === undefined || row.status === "cancelled" || row.status === "done";
   if (!replaceable(existing)) return { ...publicState(existing!), alreadyRequested: true };
-  if (!(await closed(deps, companyId))) throw agentXError("FORBIDDEN", PURGE_COMPANY_OPEN);
+  // A new purge needs a new request id (its audit event is named by it).
+  if (existing !== undefined && existing.requestId === input.requestId) throw agentXError("CONFIG_INVALID", PURGE_NEW_REQUEST_ID);
+  const closure = await closureOf(deps, companyId);
+  if (typeof closure === "string") throw agentXError("FORBIDDEN", PURGE_COMPANY_OPEN);
+  // Marks an earlier purge of this company could not clear never carry into this one.
+  if (existing !== undefined && !(await clearMarks(deps, companyId, COMPANY_PURGE_ITEMS_PER_CALL))) throw agentXError("RUNTIME_UNAVAILABLE", PURGE_NOT_RECORDED);
   const nowMs = deps.now();
   const at = new Date(nowMs).toISOString();
   const dueAtMs = nowMs + coolingOff(deps);
   const item: StoredDocument = {
     ...companyPurgeKey(companyId), entityType: "COMPANY_PURGE", companyId, status: "scheduled", requestId: input.requestId, requestedBy: operatorId, requestedAt: at,
-    dueAt: new Date(dueAtMs).toISOString(), dueAtMs, acted: false, blocked: false, counts: { ...zeroCounts() },
+    dueAt: new Date(dueAtMs).toISOString(), dueAtMs, closeId: closure.closeId, acted: false, blocked: false, counts: { ...zeroCounts() },
   };
   const steps: TransactItem[] = [
     // A new purge only where none is, or over a cancelled one (never over one that is scheduled, running or done).
@@ -252,24 +286,49 @@ export async function requestCompanyPurge(deps: CompanyPurgeDeps, input: Company
     throw agentXError("RUNTIME_UNAVAILABLE", PURGE_NOT_RECORDED);
   }
   return { ...publicState(rowOf(item) as Row), alreadyRequested: false };
+  });
 }
 
-/** Cancels a scheduled purge inside its cooling-off time. Refused (fixed words) once it is due, running or done; a cancelled one answers as it is. */
+/**
+ * Cancels a scheduled purge inside its cooling-off time, or a running purge that is HELD (its company is open again, or closed again under another close: what was deleted stays deleted). Refused
+ * (fixed words) for a scheduled purge past its due time, a running purge whose close still holds (or cannot be read), and a done one; a cancelled one answers as it is.
+ */
 export async function cancelCompanyPurge(deps: CompanyPurgeDeps, input: { companyId: string; by: CompanyPurgeOperator }): Promise<CompanyPurgeState> {
   const operatorId = operatorOf(input.by);
   const companyId = companyOf(input.companyId);
-  const existing = await readRow(deps, companyId);
-  if (existing === undefined) throw agentXError("NOT_FOUND", PURGE_NOT_FOUND);
-  if (existing.status === "cancelled") return publicState(existing);
-  const nowMs = deps.now();
-  if (existing.status !== "scheduled" || nowMs >= existing.dueAtMs) throw agentXError("FORBIDDEN", PURGE_NOT_CANCELLABLE);
-  const at = new Date(nowMs).toISOString();
-  const committed = await deps.store.transact([
-    { kind: "update", key: companyPurgeKey(companyId), ops: [change.set("status", "cancelled"), change.set("cancelledAt", at), change.set("cancelledBy", operatorId)], condition: when.and(when.eq("status", "scheduled"), when.eq("requestId", existing.requestId), when.gt("dueAtMs", nowMs)) },
-    ...auditOf(deps, { companyId, eventId: `company-purge:${companyId}:${existing.requestId}:cancelled`, at, operatorId, action: "company.purge_cancelled" }),
-  ]);
-  if (!committed.applied) throw agentXError("FORBIDDEN", PURGE_NOT_CANCELLABLE);
-  return { ...publicState(existing), status: "cancelled", cancelledAt: at };
+  assertWired(deps);
+  return await fixedWords(async () => {
+    const existing = await readRow(deps, companyId);
+    if (existing === undefined) throw agentXError("NOT_FOUND", PURGE_NOT_FOUND);
+    if (existing.status === "cancelled") return publicState(existing);
+    const nowMs = deps.now();
+    let condition;
+    if (existing.status === "scheduled") {
+      if (nowMs >= existing.dueAtMs) throw agentXError("FORBIDDEN", PURGE_NOT_CANCELLABLE);
+      condition = when.and(when.eq("status", "scheduled"), when.eq("requestId", existing.requestId), when.gt("dueAtMs", nowMs));
+    } else if (existing.status === "running") {
+      const closure = await closureOf(deps, companyId);
+      if (closure === "unknown" || (typeof closure === "object" && closure.closeId === existing.closeId)) throw agentXError("FORBIDDEN", PURGE_NOT_CANCELLABLE);
+      condition = when.and(when.eq("status", "running"), when.eq("requestId", existing.requestId));
+    } else {
+      throw agentXError("FORBIDDEN", PURGE_NOT_CANCELLABLE);
+    }
+    const at = new Date(nowMs).toISOString();
+    const committed = await deps.store.transact([
+      { kind: "update", key: companyPurgeKey(companyId), ops: [change.set("status", "cancelled"), change.set("cancelledAt", at), change.set("cancelledBy", operatorId), change.remove("runId"), change.remove("leaseUntil")], condition },
+      ...auditOf(deps, { companyId, eventId: `company-purge:${companyId}:${existing.requestId}:cancelled`, at, operatorId, action: "company.purge_cancelled" }),
+    ]);
+    if (!committed.applied) throw agentXError("FORBIDDEN", PURGE_NOT_CANCELLABLE);
+    return { ...publicState(existing), status: "cancelled", cancelledAt: at };
+  });
+}
+
+/** Runs `work`; a fault that is not one of the purge's own refusals becomes fixed words (a store's error text can carry a key). */
+async function fixedWords<T>(work: () => Promise<T>): Promise<T> {
+  try { return await work(); } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("RUNTIME_UNAVAILABLE", PURGE_NOT_RECORDED);
+  }
 }
 
 /** The purge of a company as it stands, or undefined when none was ever requested. */
@@ -393,17 +452,29 @@ export interface CompanyPurgeDryRun {
   references: number;
   /** True when the whole store was read; otherwise pass `cursor` back to go on. */
   complete: boolean;
+  /** An opaque handle (a random id, good for an hour, used once): the walk's real place is kept by the purge, never handed out (a store cursor names a key). */
   cursor?: string;
 }
 
-/** Walks the store with no write and answers what the purge would remove, in counts. Bounded by time and items; resumable with its cursor. Operator only. */
+/** Walks the store, writing nothing to any company's data, and answers what the purge would remove, in counts. Bounded by time and items; resumable with its handle. Operator only. */
 export async function dryRunCompanyPurge(deps: Pick<CompanyPurgeDeps, "store" | "now">, input: { companyId: string; by: CompanyPurgeOperator; cursor?: string; budgetMs?: number }): Promise<CompanyPurgeDryRun> {
   operatorOf(input.by);
   const companyId = companyOf(input.companyId);
+  if (input.cursor !== undefined && (typeof input.cursor !== "string" || !REQUEST_ID.test(input.cursor))) throw agentXError("CONFIG_INVALID", PURGE_DRY_RUN_HANDLE);
+  return await fixedWords(async () => {
+  // A handle is used once: its row is read and deleted; an unknown or expired one is refused.
+  let storeCursor: string | undefined;
+  if (input.cursor !== undefined) {
+    const key = { pk: dryRunPk(companyId), sk: input.cursor };
+    const saved = await deps.store.get(key);
+    await deps.store.delete({ key });
+    if (saved === undefined || typeof saved["cursor"] !== "string" || typeof saved["expiresAtMs"] !== "number" || saved["expiresAtMs"] <= deps.now()) throw agentXError("CONFIG_INVALID", PURGE_DRY_RUN_HANDLE);
+    storeCursor = saved["cursor"];
+  }
   const stopAt = deps.now() + Math.max(0, input.budgetMs ?? COMPANY_PURGE_BUDGET_MS);
   const report: CompanyPurgeDryRun = { rows: {}, tombstones: 0, partitions: { task: 0, ws: 0 }, prefixes: input.cursor === undefined ? companyPrefixesOf(companyId).length : 0, refused: 0, conflicting: 0, references: 0, complete: false };
   const proved = new Set<string>();
-  let cursor = input.cursor;
+  let cursor = storeCursor;
   let read = 0;
   const kinds = new Set<string>();
   const add = (kind: string): void => {
@@ -415,7 +486,7 @@ export async function dryRunCompanyPurge(deps: Pick<CompanyPurgeDeps, "store" | 
     // At least one page is read per call, whatever its time.
     if (read > 0 && (deps.now() >= stopAt || read >= COMPANY_PURGE_ITEMS_PER_CALL)) break;
     const page = await deps.store.scanPage({ limit: PAGE, ...(cursor === undefined ? {} : { cursor }) });
-    read += page.items.length;
+    read += Math.max(1, page.items.length);
     for (const item of page.items) {
       const verdict = verdictOf(item, companyId);
       switch (verdict.act) {
@@ -436,7 +507,11 @@ export async function dryRunCompanyPurge(deps: Pick<CompanyPurgeDeps, "store" | 
     if (page.cursor === undefined) { report.complete = true; return report; }
     cursor = page.cursor;
   }
-  return cursor === undefined ? report : { ...report, cursor };
+  if (cursor === undefined) return report;
+  const handle = randomUUID();
+  await deps.store.put({ item: { pk: dryRunPk(companyId), sk: handle, entityType: "COMPANY_PURGE_DRYRUN", cursor, expiresAtMs: deps.now() + DRY_RUN_HANDLE_MS } });
+  return { ...report, cursor: handle };
+  });
 }
 
 // ---- the run ----
@@ -595,15 +670,21 @@ async function actOnPage(run: Run, items: readonly StoredDocument[]): Promise<vo
   }
 }
 
-/** Deletes the purge's marks once it is done. True when none is left. */
-async function clearMarks(run: Run): Promise<boolean> {
-  for (;;) {
-    if (outOfTime(run)) return false;
-    const page = await run.deps.store.query({ pk: marksPk(run.companyId), limit: PAGE });
-    run.read += page.items.length;
-    if (page.items.length === 0) return true;
-    for (const mark of page.items) await run.deps.store.delete({ key: { pk: mark.pk, sk: mark.sk } });
+/** Deletes the purge's marks and any dry-run handles of the company, at most `limit` rows. True when none is left. */
+async function clearMarks(deps: Pick<CompanyPurgeDeps, "store">, companyId: string, limit: number): Promise<boolean> {
+  let removed = 0;
+  for (const pk of [marksPk(companyId), dryRunPk(companyId)]) {
+    for (;;) {
+      const page = await deps.store.query({ pk, limit: PAGE });
+      if (page.items.length === 0) break;
+      for (const row of page.items) {
+        if (removed >= limit) return false;
+        await deps.store.delete({ key: { pk: row.pk, sk: row.sk } });
+        removed += 1;
+      }
+    }
   }
+  return true;
 }
 
 /**
@@ -613,38 +694,52 @@ async function clearMarks(run: Run): Promise<boolean> {
 export async function runCompanyPurge(deps: CompanyPurgeDeps, companyId: string, budgetMs = COMPANY_PURGE_BUDGET_MS): Promise<CompanyPurgeProgress> {
   const company = companyOf(companyId);
   const log = deps.log ?? (() => undefined);
-  const existing = await readRow(deps, company);
-  if (existing === undefined || existing.status === "cancelled") return { companyId: company, outcome: "idle" };
-  if (existing.status === "done") return { companyId: company, outcome: "done", counts: { ...existing.counts } };
-  const startMs = deps.now();
-  if (startMs < existing.dueAtMs) return { companyId: company, outcome: "waiting" };
-  if (!(await closed(deps, company))) {
-    log({ event: "company_purge.not_closed" });
-    if (existing.status !== "scheduled") return { companyId: company, outcome: "not_closed" };
-    // Due, not started, and the company is open again: the purge is cancelled, never held for a later close (which needs its own request and cooling-off).
-    const at = new Date(startMs).toISOString();
-    const cancelled = await deps.store.transact([
-      { kind: "update", key: companyPurgeKey(company), ops: [change.set("status", "cancelled"), change.set("cancelledAt", at), change.set("cancelledBy", "rovara")], condition: when.and(when.eq("status", "scheduled"), when.eq("requestId", existing.requestId)) },
-      ...auditOf(deps, { companyId: company, eventId: `company-purge:${company}:${existing.requestId}:cancelled`, at, action: "company.purge_cancelled", details: { reason: "company_open" } }),
-    ]);
-    return { companyId: company, outcome: cancelled.applied ? "cancelled" : "waiting" };
-  }
-  const stopAt = startMs + Math.max(0, budgetMs);
-  const runId = randomUUID();
-  const leaseUntil = stopAt + LEASE_GRACE_MS;
-  // Take the purge: a scheduled one starts (with its audit event); a running one is taken only when no other run holds it.
-  if (existing.status === "scheduled") {
-    const at = new Date(startMs).toISOString();
-    const started = await deps.store.transact([
-      { kind: "update", key: companyPurgeKey(company), ops: [change.set("status", "running"), change.set("startedAt", at), change.set("runId", runId), change.set("leaseUntil", leaseUntil)], condition: when.and(when.eq("status", "scheduled"), when.eq("requestId", existing.requestId), when.lte("dueAtMs", startMs)) },
-      ...auditOf(deps, { companyId: company, eventId: `company-purge:${company}:${existing.requestId}:started`, at, action: "company.purge_started" }),
-    ]);
-    if (!started.applied) return { companyId: company, outcome: "waiting" };
-    existing.status = "running";
-    existing.startedAt = at;
-  } else {
-    const taken = await deps.store.update({ key: companyPurgeKey(company), ops: [change.set("runId", runId), change.set("leaseUntil", leaseUntil)], condition: when.and(when.eq("status", "running"), when.or(when.notExists("leaseUntil"), when.lt("leaseUntil", startMs))) });
-    if (!taken.applied) return { companyId: company, outcome: "waiting" };
+  assertWired(deps);
+  let existing: Row | undefined;
+  let runId: string;
+  let stopAt: number;
+  try {
+    existing = await readRow(deps, company);
+    if (existing === undefined || existing.status === "cancelled") return { companyId: company, outcome: "idle" };
+    if (existing.status === "done") return { companyId: company, outcome: "done", counts: { ...existing.counts } };
+    const startMs = deps.now();
+    if (startMs < existing.dueAtMs) return { companyId: company, outcome: "waiting" };
+    const closure = await closureOf(deps, company);
+    if (closure === "unknown") { log({ event: "company_purge.closure_unknown" }); return { companyId: company, outcome: "waiting" }; }
+    if (closure === "open" || closure.closeId !== existing.closeId) {
+      log({ event: "company_purge.not_closed" });
+      // A started purge is held (an operator may cancel it); a due one that has not started is cancelled, never kept for a later close (which needs its own request and cooling-off).
+      if (existing.status !== "scheduled") return { companyId: company, outcome: "not_closed" };
+      const at = new Date(startMs).toISOString();
+      const cancelled = await deps.store.transact([
+        { kind: "update", key: companyPurgeKey(company), ops: [change.set("status", "cancelled"), change.set("cancelledAt", at), change.set("cancelledBy", "rovara")], condition: when.and(when.eq("status", "scheduled"), when.eq("requestId", existing.requestId)) },
+        ...auditOf(deps, { companyId: company, eventId: `company-purge:${company}:${existing.requestId}:cancelled`, at, action: "company.purge_cancelled", details: { reason: closure === "open" ? "company_open" : "closed_again" } }),
+      ]);
+      return { companyId: company, outcome: cancelled.applied ? "cancelled" : "waiting" };
+    }
+    stopAt = startMs + Math.max(0, budgetMs);
+    runId = randomUUID();
+    const leaseUntil = stopAt + LEASE_GRACE_MS;
+    // Take the purge: a scheduled one starts (with its audit event); a running one is taken only when no other run holds it. Either way the run works from the row AS TAKEN (re-read after the
+    // take), never from the copy read before it: another run may have moved on in between.
+    if (existing.status === "scheduled") {
+      const at = new Date(startMs).toISOString();
+      const started = await deps.store.transact([
+        { kind: "update", key: companyPurgeKey(company), ops: [change.set("status", "running"), change.set("startedAt", at), change.set("runId", runId), change.set("leaseUntil", leaseUntil)], condition: when.and(when.eq("status", "scheduled"), when.eq("requestId", existing.requestId), when.lte("dueAtMs", startMs)) },
+        ...auditOf(deps, { companyId: company, eventId: `company-purge:${company}:${existing.requestId}:started`, at, action: "company.purge_started" }),
+      ]);
+      if (!started.applied) return { companyId: company, outcome: "waiting" };
+    } else {
+      const taken = await deps.store.update({ key: companyPurgeKey(company), ops: [change.set("runId", runId), change.set("leaseUntil", leaseUntil)], condition: when.and(when.eq("status", "running"), when.eq("requestId", existing.requestId), when.or(when.notExists("leaseUntil"), when.lt("leaseUntil", startMs))) });
+      if (!taken.applied) return { companyId: company, outcome: "waiting" };
+    }
+    const taken = await readRow(deps, company);
+    if (taken === undefined || taken.status !== "running" || taken.runId !== runId) return { companyId: company, outcome: "waiting" };
+    existing = taken;
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    log({ event: "company_purge.run_failed", error: errorName(error) });
+    throw agentXError("RUNTIME_UNAVAILABLE", PURGE_RUN_FAILED);
   }
   const run: Run = { deps, companyId: company, runId, row: existing, stopAt, read: 0, startDone: doneSoFar(existing.counts), log };
   /** Ends the call normally with more to do: saves the place and lets go of the purge. */
@@ -694,7 +789,6 @@ export async function runCompanyPurge(deps: CompanyPurgeDeps, companyId: string,
         run.row.counts.passes += 1;
         return await pause(null);
       }
-      if (!(await clearMarks(run))) return await pause(null);
       const doneAt = new Date(deps.now()).toISOString();
       const counts = { ...run.row.counts };
       const finished = await deps.store.transact([
@@ -702,12 +796,14 @@ export async function runCompanyPurge(deps: CompanyPurgeDeps, companyId: string,
         ...auditOf(deps, { companyId: company, eventId: `company-purge:${company}:${existing.requestId}:done`, at: doneAt, action: "company.purged", details: { deleted: counts.deleted, tombstoned: counts.tombstoned, partitions: counts.partitions, prefixes: counts.prefixes, refused: counts.refused, conflicting: counts.conflicting, passes: counts.passes } }),
       ]);
       if (!finished.applied) throw new Error("the purge lease was lost");
+      // The marks go only once the purge is done (a pass never runs without them). What one call cannot clear is left for the next request of this company, which clears them first.
+      try { await clearMarks(deps, company, COMPANY_PURGE_ITEMS_PER_CALL); } catch (error) { log({ event: "company_purge.marks_left", error: errorName(error) }); }
       return { companyId: company, outcome: "done", counts };
     }
   } catch (error) {
     log({ event: "company_purge.run_failed", error: errorName(error) });
     try { await save(run); } catch { /* the place saved last stands; the work done since is repeated harmlessly */ }
-    throw agentXError("RUNTIME_UNAVAILABLE", "The purge could not go on just now; it continues from where it stopped on its next run.");
+    throw agentXError("RUNTIME_UNAVAILABLE", PURGE_RUN_FAILED);
   }
 }
 
