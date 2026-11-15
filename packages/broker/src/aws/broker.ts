@@ -1,3 +1,4 @@
+import { createBrokerCoreServices } from "./core-job-services.js";
 import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
@@ -15197,6 +15198,7 @@ const coreRoot = createBrokerCoreRoot({
   repositoryGrantKey: repositoryGrantSigningKey,
   repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
   codeModules: () => brokerCoreModuleDeps(process.env),
+  services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode! }),
   policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
   origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
   log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },

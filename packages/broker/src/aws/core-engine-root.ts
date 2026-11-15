@@ -16,16 +16,17 @@
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
 //
-// What the registry still lacks (approvers, model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices,
+// What the registry still lacks (approvers, model keys, the broker's worker machines) and any missing deployment job services (merge tracking, the session sweep, notices,
 // the admission hold sweep) refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, companyOfKey,
-  type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
+  type PolicySource, type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
-import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
+import { policyCiReporting } from "./core-job-services.js";
+import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
@@ -77,12 +78,14 @@ export interface BrokerCoreRootInputs {
   /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   lessonsLearning?: CoreLessonsOptions["learning"];
   /**
-   * The project's own CI mode reader (core-host/switch-blockers.ts, honest CI). Absent: the `honest-ci` switch blocker refuses a company's runtime wherever merge tracking would run
-   * (lane L3 gives it with merge tracking).
+   * Optional explicit CI reader. Otherwise the root adapts policySource (D1 today when no source was supplied).
+   * The runtime validates this reader and passes the same checked function to merge tracking.
    */
   ciReporting?: CiReporting;
+  /** D1 policy resolved per company/project. Absent: D1 today (their_ci_fix); never default on a failed read. */
+  policySource?: PolicySource;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
-  services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry) => Partial<Record<CoreServiceName, CoreService>>;
+  services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry, wiring: CoreServiceWiring) => Partial<Record<CoreServiceName, CoreService>>;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -255,8 +258,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
       log,
-      ...(inputs.ciReporting === undefined ? {} : { ciReporting: inputs.ciReporting }),
-      services: (flow) => {
+      ciReporting: inputs.ciReporting === undefined ? policyCiReporting(inputs.policySource) : inputs.ciReporting,
+      services: (flow, wiring) => {
         let lessons: CoreLessons | undefined;
         if (inputs.lessonsPeople === undefined) {
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
@@ -278,7 +281,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
           }
         }
-        return { ...(inputs.services?.(companyId, flow, registry) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }) };
+        return { ...(inputs.services?.(companyId, flow, registry, wiring) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }) };
       },
     }),
   });
