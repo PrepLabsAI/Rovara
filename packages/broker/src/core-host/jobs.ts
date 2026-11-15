@@ -39,6 +39,8 @@ export const CORE_JOBS: readonly CoreJob[] = [
   { name: "admission-hold-sweep", area: "flow", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("admission-hold-sweep") },
   // With automations off, the runs already started are stopped at a safe point (optional service). Does nothing while they are on.
   { name: "automation-stop", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("automation-stop") },
+  // Lessons (optional service, wired only where `ROVARA_CORE_LESSONS` covers the company): milestones due, the shared reflection queue, and once a day the upkeep (`lessons.ts`).
+  { name: "lessons", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("lessons") },
 ];
 
 /** The `source` of the event a core job schedule sends to the broker: `{ source: "agentx.core-job", job: <name> }`. */
