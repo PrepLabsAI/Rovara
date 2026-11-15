@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MERGE_NOT_READY_MESSAGES as M, type ApprovalProof } from "../../packages/contracts/src/index.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
-import { companyRouteHarness, TASK, TIME } from "../support/company-route-harness.js";
+import { companyRouteHarness, PERSON, TASK, TIME } from "../support/company-route-harness.js";
 import { MERGE_BODY, MERGE_NOT_SET_UP, MERGE_ON_A_PAGE, pressTaskMerge, routeTaskMerge, type TaskMergeWiring } from "../../packages/broker/src/aws/task-merge.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
@@ -123,23 +123,40 @@ describe("the merge route on the developer API", () => {
     expect(errorOf((await h.read(MERGE_PATH, { method: "POST", body: JSON.stringify({ requestId: REQUEST }) })).body)).toEqual({ code: "NOT_FOUND", message: MERGE_NOT_SET_UP });
   });
 
-  it("takes the step-up only from the verified token and the company only from membership", async () => {
+  it("never takes a step-up from the CLI's token: a tool holding it cannot merge", async () => {
     const h = companyRouteHarness();
     const { loadTask } = wired(h);
-    const press = (extras: Record<string, unknown> = {}) => h.read(`${MERGE_PATH}?companyId=${COMPANY_B.orgId}`, { method: "POST", headers: { "x-company": COMPANY_B.orgId }, body: JSON.stringify({ requestId: REQUEST }), ...extras });
-    expect(errorOf((await press()).body)).toEqual({ code: "REAUTH_REQUIRED", message: MERGE_ON_A_PAGE });
+    h.claims.step_up_at = Math.floor(Date.parse(TIME) / 1000) - 30; h.claims.step_up_amr = "email_code";
+    expect(errorOf((await h.read(MERGE_PATH, { method: "POST", body: JSON.stringify({ requestId: REQUEST }) })).body)).toEqual({ code: "REAUTH_REQUIRED", message: MERGE_ON_A_PAGE });
+    expect(loadTask).not.toHaveBeenCalled();
+  });
+
+  it("takes the step-up only from a full-access web client's verified token and the company only from membership", async () => {
+    const h = companyRouteHarness();
+    const { loadTask } = wired(h);
+    // A full-access sign-in client and its session (spec 066), so the person's token goes through the client path.
+    h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-01T00:00:00.000Z", updatedBy: "admin" });
+    h.db.set({ pk: "SESSION#web", sk: "META", sessionId: "web", developerId: PERSON, amr: "slack", clientId: "web-app", startedAt: TIME, endsAt: Date.parse(TIME) / 1000 + 3600 });
+    Object.assign(h.claims, { azp: "web-app", sid: "web" });
+    const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const press = () => h.read(`${MERGE_PATH}?companyId=${COMPANY_B.orgId}`, {
+      method: "POST", headers: { authorization: `Bearer ${part({ alg: "none" })}.${part(h.claims)}.sig`, "x-company": COMPANY_B.orgId }, body: JSON.stringify({ requestId: REQUEST, companyId: COMPANY_B.orgId }),
+    });
+    const pressPlain = () => h.read(MERGE_PATH, { method: "POST", headers: { authorization: `Bearer ${part({ alg: "none" })}.${part(h.claims)}.sig`, "x-company": COMPANY_B.orgId }, body: JSON.stringify({ requestId: REQUEST }) });
+    expect(errorOf((await pressPlain()).body)).toEqual({ code: "REAUTH_REQUIRED", message: MERGE_ON_A_PAGE });
     expect(loadTask).not.toHaveBeenCalled();
     h.claims.step_up_at = Math.floor(Date.parse(TIME) / 1000) - 30; h.claims.step_up_amr = "email_code";
+    // A company named in the body is never read: the strict body refuses it.
+    expect(errorOf((await press()).body)).toEqual({ code: "CONFIG_INVALID", message: MERGE_BODY });
+    const companies: string[] = [];
+    h.deps.taskMerge!.merge = (company: string) => { companies.push(company); return { host: { loadTask } } as never; };
     h.claims.companyId = COMPANY_B.orgId;
     h.deps.companies = { companyOf: async () => COMPANY_A.orgId };
     // The fake core has no such task: the press reads it in the MEMBERSHIP company and answers not found.
-    expect(errorOf((await press()).body)).toEqual({ code: "TASK_NOT_FOUND", message: "task not found" });
-    expect(loadTask).toHaveBeenCalledTimes(1);
-    const companies: string[] = [];
-    h.deps.taskMerge!.merge = (company: string) => { companies.push(company); return { host: { loadTask } } as never; };
-    await press();
+    expect(errorOf((await pressPlain()).body)).toEqual({ code: "TASK_NOT_FOUND", message: "task not found" });
     expect(companies).toEqual([COMPANY_A.orgId]);
+    expect(loadTask).toHaveBeenCalledTimes(1);
     h.deps.companies = { companyOf: async () => undefined };
-    expect((await press()).statusCode).toBe(401);
+    expect((await pressPlain()).statusCode).toBe(401);
   });
 });

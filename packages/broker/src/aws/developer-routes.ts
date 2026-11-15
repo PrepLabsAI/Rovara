@@ -861,10 +861,8 @@ async function authenticateCallerWithStepUp(deps: DeveloperRouteDependencies, au
     azp = undefined;
   }
   if (typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID || (await signInClientOf(deps, azp))?.fullAccess !== true) {
-    const claims = await deps.developer.verifyAccessToken(authorization);
-    const caller = await authenticateDeveloper(deps, claims);
-    const stepUp = claims === undefined ? undefined : stepUpOfClaims(claims);
-    return stepUp === undefined ? { caller } : { caller, stepUp };
+    // The Rovara CLI's token (or a tool holding it) never carries a step-up here: a merge or a loosened rule is a web client's press (plan 7.2 change 5).
+    return { caller: await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization)) };
   }
   const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));
   if (person.client.fullAccess !== true) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
@@ -910,8 +908,11 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
   let project: string;
   try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  // As readClientProject: one bounded read budget for the company-checked listing.
+  const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
   const companyId = await resolveCompany(deps.companies, person.developerId);
-  const access = await projectsAPersonUses(deps, person.developerId, companyId);
+  const access = await projectsAPersonUses(scope === undefined ? deps : { ...deps, documentClient: scope.client }, person.developerId, companyId);
+  scope?.check();
   if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   if (!access.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
   const store = { documentClient: deps.documentClient, tableName: deps.tableName };

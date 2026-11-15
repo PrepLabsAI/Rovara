@@ -6,7 +6,8 @@
 //     never calls a code host itself: it only refuses earlier (sign-in, company, owner, step-up, body).
 //   - The caller's company comes from membership (resolved by the developer API); a task of another company, a task the caller does not own and a task that does not exist all answer
 //     the same "task not found", checked before anything else is read about the task.
-//   - A merge needs a FRESH step-up with a factor Code owns (lane ID's contract, step-up-check.ts): an API token or an AI tool never merges.
+//   - A merge needs a FRESH step-up with a factor Code owns (lane ID's contract, step-up-check.ts), and only a full-access web client's token carries one to this route:
+//     the CLI's token, or an AI tool holding it, never merges.
 //   - The deployment wires the merge core for its company's tasks (`TaskMergeWiring`), which needs the core engine's task records on AWS (lane E2). Unwired, the route answers a fixed
 //     "not set up" refusal, and nothing is read.
 //   - "Merge by itself" (decision 223a) is NOT here: the merge core never merges on its own (owner decision 1), so a per-change opt-in needs the core to grow that first (follow-up).
