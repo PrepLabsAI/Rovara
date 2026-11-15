@@ -120,7 +120,7 @@ export function membershipWithRoleFromDynamo(client: DynamoSender, tableName: st
     const response = await client.send(new GetCommand({ TableName: tableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
     const parsed = Membership.safeParse(response?.Item);
     if (!parsed.success || parsed.data.personId !== personId || parsed.data.revokedAt !== undefined || !OrgRoleSchema.safeParse(parsed.data.role).success) return undefined;
-    return { companyId: parsed.data.companyId as OrgId, role: parsed.data.role };
+    return { companyId: parsed.data.companyId, role: parsed.data.role };
   };
 }
 
@@ -271,7 +271,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   }
 
   const table = { documentClient: inputs.documentClient, tableName: inputs.stateTableName };
-  const companyOfWorkspace = workspaceCompanyReader(inputs.documentClient as Parameters<typeof workspaceCompanyReader>[0], inputs.stateTableName);
+  const companyOfWorkspace = workspaceCompanyReader(inputs.documentClient, inputs.stateTableName);
   const callbackHandlers = new Map<string, Promise<(request: BrokerRequest) => Promise<BrokerResponse>>>();
   const callbackHandlerFor = (companyId: OrgId): Promise<(request: BrokerRequest) => Promise<BrokerResponse>> => {
     let found = callbackHandlers.get(companyId);

@@ -215,7 +215,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
     coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: OWNER, create: () => createHostedIdentity(inputs.identity) }),
     coreAdapter({
       point: "audit-sink", name: "document", owner: OWNER,
-      create: (context, registry) => auditSinkPlugin.create({ defaultCompanyId: context.installCompanyId, settings: {}, registry: registry as never, now: context.now }),
+      create: (context, registry) => auditSinkPlugin.create({ defaultCompanyId: context.installCompanyId, settings: {}, registry: registry, now: context.now }),
     }),
   ];
 }

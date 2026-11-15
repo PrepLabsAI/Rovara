@@ -125,7 +125,7 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
       const row = await deps.store.get(companyDayKey(companyId, day));
       const number = (name: string): number => (row !== undefined && typeof row[name] === "number" && natural(row[name]) ? row[name] : 0);
       // A row whose figures do not read is no figure: every entry of it is counted as left out, so a cap reader holds back.
-      const readable = row === undefined || ["usdMicros", "entries", "uncountedEntries"].every((name) => typeof row[name] === "number" && natural(row[name] as number));
+      const readable = row === undefined || ["usdMicros", "entries", "uncountedEntries"].every((name) => typeof row[name] === "number" && natural(row[name]));
       return readable ? { day, usdMicros: number("usdMicros"), entries: number("entries"), uncountedEntries: number("uncountedEntries") } : { day, usdMicros: number("usdMicros"), entries: 1, uncountedEntries: 1 };
     },
     async taskCost(companyId, taskId) {
