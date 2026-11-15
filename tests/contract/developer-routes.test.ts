@@ -183,7 +183,7 @@ describe("PUT /v1/dev/me/name (#634)", () => {
     const built = await createAdminBroker({ developer: { ...config, setDisplayName } });
     built.db.set({ pk: "SESSION#s-1", sk: "META", sessionId: "s-1", developerId, amr: "slack", slackUserId: "U0MAYA001", startedAt: new Date(T0).toISOString(), endsAt: T0 / 1000 + 604_800 });
     built.db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "slack", issuer: "https://slack.com", subject: "U0MAYA001", displayName: "Maya Chen", slackUserId: "U0MAYA001", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
-    return { setDisplayName, handler: built.handler };
+    return { setDisplayName, handler: built.handler, db: built.db };
   }
 
   it("stores the caller's own name through the sign-in Lambda, normalised, and answers it chosen", async () => {
@@ -194,6 +194,19 @@ describe("PUT /v1/dev/me/name (#634)", () => {
     expect(JSON.parse(response.body)).toMatchObject({ name: "Maya C", nameChosen: true });
     expect(setDisplayName).toHaveBeenCalledWith({ kind: "set-display-name", developerId, name: "Maya C" });
     expect(logs()).toContainEqual({ component: "broker", event: "developer.display_name_chosen", developerId });
+  });
+
+  it("puts the new name on the tasks the person started, and only theirs (#661)", async () => {
+    const logs = captureLogs();
+    const { handler: broker, db: built } = await withSetName({ ok: true, name: "Maya C" });
+    const mine = "11111111-1111-4111-8111-111111111111", theirs = "22222222-2222-4222-8222-222222222222";
+    built.set({ pk: `DEVTASK#${mine}`, sk: "META", taskId: mine, developerId, developerName: "Maya Chen" });
+    built.set({ pk: `DEVELOPER#${developerId}`, sk: `TASK#2026-09-27T12:00:00.000Z#${mine}`, taskId: mine });
+    built.set({ pk: `DEVTASK#${theirs}`, sk: "META", taskId: theirs, developerId: "e".repeat(64), developerName: "Eve" });
+    expect((await put(JSON.stringify({ name: "Maya C" }), broker)).statusCode).toBe(200);
+    expect(built.get(`DEVTASK#${mine}`, "META")).toMatchObject({ developerName: "Maya C" });
+    expect(built.get(`DEVTASK#${theirs}`, "META")).toMatchObject({ developerName: "Eve" });
+    expect(logs()).toContainEqual({ component: "broker", event: "developer.tasks_renamed", developerId, tasks: 1, renamed: 1 });
   });
 
   it("refuses a body that is not just a valid name, before it reaches the sign-in Lambda", async () => {

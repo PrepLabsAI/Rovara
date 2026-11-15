@@ -1,5 +1,5 @@
-// R4: membership is an internal, replaceable person -> company read. Only tests write the
-// approved stand-in today; T3 owns creation. A token's company is never membership.
+// R4: membership is an internal, replaceable person -> company read. T3 writes the
+// sign-in-table membership. A token's company is never membership.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
@@ -7,11 +7,13 @@ import { AgentXError, agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSche
 
 export interface CompanyMembershipReader { companyOf(personId: string): Promise<string | undefined>; membershipOf?(personId: string): Promise<{ companyId: string; role: OrgRole } | undefined> }
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
-const Membership = z.object({
+export const Membership = z.object({
   entityType: z.literal("COMPANY_MEMBERSHIP"), personId: z.string(), companyId: OrgIdSchema,
   role: OrgRoleSchema, joinedAt: z.iso.datetime(),
+  joinedVia: z.enum(["preapproval", "legacy"]).optional(),
+  revokedAt: z.iso.datetime().optional(), revokedBy: z.string().min(1).max(256).optional(),
 });
-const membershipKey = (personId: string) => ({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY" });
+export const membershipKey = (personId: string) => ({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY" });
 
 function membershipReader(read: (personId: string) => Promise<unknown>): CompanyMembershipReader {
   // Lane W: `membershipOf` adds the live role (for "a company administrator may change it"); `companyOf` answers exactly as before.
@@ -19,7 +21,7 @@ function membershipReader(read: (personId: string) => Promise<unknown>): Company
     if (typeof personId !== "string" || personId.length === 0 || personId.length > 256 || /[#\s]/.test(personId)) return undefined;
     try {
       const parsed = Membership.safeParse(await read(personId));
-      return parsed.success && parsed.data.personId === personId ? { companyId: parsed.data.companyId, role: parsed.data.role } : undefined;
+      return parsed.success && parsed.data.personId === personId && parsed.data.revokedAt === undefined ? { companyId: parsed.data.companyId, role: parsed.data.role } : undefined;
     } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
   };
   return { membershipOf, async companyOf(personId) { return (await membershipOf(personId))?.companyId; } };

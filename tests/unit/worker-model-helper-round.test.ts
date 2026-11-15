@@ -50,7 +50,8 @@ describe("evidence", () => {
     expect(modelHelperEvidence(UNTRUSTED_MODEL_SUMMARY, BLOCK).result).toBe("not_run");
     expect(modelHelperEvidence(undefined, BLOCK)).toMatchObject({ result: "not_run", countsTowardProof: 0 });
     const mixed = modelHelperEvidence(summary({ scripted: { before_task: 0, independent: 0, task_made: 3 }, failurePack: 2, unmatched: 1, countsTowardProof: 0 }), BLOCK);
-    expect(mixed.lines.join("\n")).toContain("scripted replies added in this task (not counted)");
+    expect(mixed.lines.join("\n")).toContain("scripted replies written in this task");
+    expect(mixed.lines.join("\n")).not.toContain("scripted replies written in this task (not counted)");
     expect(mixed.lines.join("\n")).toContain("failure pack: informational only, never proof (not counted)");
     expect(mixed.lines.join("\n")).toContain("not run: no scripted reply for this request");
     expect(mixed.countsTowardProof).toBe(0);

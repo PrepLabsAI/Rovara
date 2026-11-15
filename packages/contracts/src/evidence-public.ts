@@ -4,11 +4,13 @@
 // or service name, reason, actor, measure name, sample, screenshot reference, link or amount spent. A field a later writer adds to the pack, and a part this build does not know, are not on the list, so they are dropped, and
 // all the output says about them is the fixed "newer evidence" line. The "Full details" pointer goes behind sign-in (O27, O53); screenshots, thumbnails and details are not here. Every line is made inert anyway (defence in
 // depth: nothing in it can mention, link, embed or open a block), the one exception being the sign-in link itself, which must be a plain https address with no query, fragment or credentials (never a signed URL).
-// Pure and browser-safe. It is not wired to any caller yet (the pull request body and the Check summary call it when the Cloud half lands).
+// Pure and browser-safe. The v2 pull request body uses this for recorded AI evidence on public repositories.
 import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, SCRIPTED_AI_PROOF_WORDS, type EvidenceTrustClass } from "./check-kinds.js";
 import { EVIDENCE_CHECK_OUTCOMES, EVIDENCE_ISOLATIONS, EVIDENCE_LEVELS, EVIDENCE_RESULTS, hasNewerEvidence, noNewerEvidence, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { EVIDENCE_PRODUCER_WORDS, evidenceFirstLine } from "./evidence-render.js";
+import { publicEvidenceAi, type PublicEvidenceAi } from "./evidence-ai.js";
+import { renderPublicAi } from "./evidence-ai-render.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
 
 /** The kinds of change the public summary can name (O43, O61). The change type is decided by Rovara, so a caller gives it; the pack holds none yet. Anything else is not shown. */
@@ -36,6 +38,8 @@ export const PUBLIC_RENDER_LIMITS = Object.freeze({ lineMax: 300, linkMax: 300 }
 
 /** What the public summary may know about a pack: counts, flags and members of fixed tables. There is NOT ONE free-text field in it, by construction. */
 export interface PublicEvidenceView {
+  ai?: PublicEvidenceAi | undefined;
+  aiNotRecorded?: boolean | undefined;
   result: (typeof EVIDENCE_RESULTS)[number] | "newer";
   reached: (typeof EVIDENCE_LEVELS)[number] | "newer";
   isolation: (typeof EVIDENCE_ISOLATIONS)[number] | "newer";
@@ -129,7 +133,10 @@ export function publicEvidenceView(input: EvidencePackV2 | EvidencePackV2Read, n
   const skip = own(weakening, "skipRise");
   const skipRise = Math.max(0, count(own(skip, "after")) - count(own(skip, "before")));
   const absent = Math.max(count(own(weakening, "absentOnNewCount")), lengthOf(own(weakening, "absentOnNew")));
+  const aiRaw = own(pack, "ai");
+  const ai = publicEvidenceAi(aiRaw);
   return {
+    ...(aiRaw === undefined ? {} : ai === undefined ? { aiNotRecorded: true } : { ai }),
     result: member(EVIDENCE_RESULTS, own(pack, "result")),
     reached: member(EVIDENCE_LEVELS, own(own(pack, "level"), "reached")),
     isolation: member(EVIDENCE_ISOLATIONS, own(own(pack, "producer"), "isolation")),
@@ -199,9 +206,10 @@ const trustCount = (trust: EvidenceTrustClass | "newer", value: number): string 
 export function renderPublicView(view: PublicEvidenceView, options: PublicEvidenceOptions = {}): PublicEvidenceRendering {
   const weakestWords = view.weakest === "ci_none" ? PUBLIC_WEAKEST_WORDS[0] : view.weakest === "ci_unreadable" ? PUBLIC_WEAKEST_WORDS[1] : undefined;
   const first = evidenceFirstLine({ result: view.result, reached: view.reached, isolation: view.isolation, scripted: view.scripted, weakestWords });
-  const firstLine = view.weakest === "other" ? text(`${first} · ${WEAKEST_NOT_SHOWN_WORDS}`) : first;
+  const ai = renderPublicAi(view.ai);
+  const firstLine = ai.firstLine ?? (view.weakest === "other" ? text(`${first} · ${WEAKEST_NOT_SHOWN_WORDS}`) : first);
   const producer = view.isolation === "newer" ? NEWER_EVIDENCE_WORDS : EVIDENCE_PRODUCER_WORDS[view.isolation];
-  const body: string[] = [text(producer)];
+  const body: string[] = [...ai.lines, ...(view.aiNotRecorded === true ? ["AI checks: not recorded"] : []), text(producer)];
   if (view.isolation === "sandbox") body.push(text(PUBLIC_NOT_SEALED_WORDS));
   const changeType = typeof options.changeType === "string" && Object.hasOwn(PUBLIC_CHANGE_TYPE_WORDS, options.changeType) ? PUBLIC_CHANGE_TYPE_WORDS[options.changeType as PublicChangeType] : undefined;
   if (changeType !== undefined) body.push(text(`Change type: ${changeType}`));

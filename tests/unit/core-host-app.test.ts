@@ -23,6 +23,8 @@ const ALL_SERVICES = () => ({
   "notify-deliver": { pass: async () => ({ sent: 0 }) }, "admission-hold-sweep": { pass: async () => ({ charged: 0 }) },
 });
 
+const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
+
 function appOver(world: FakeWorld, env: NodeJS.ProcessEnv, extra: { servedCompanies?: () => Promise<readonly string[]>; services?: () => Partial<Record<CoreServiceName, CoreService>> } = {}): CoreHostApp {
   return createCoreHostApp({
     env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
@@ -31,6 +33,8 @@ function appOver(world: FakeWorld, env: NodeJS.ProcessEnv, extra: { servedCompan
       callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
       services: extra.services ?? ALL_SERVICES,
+      // Switch blocker honest-ci: a deployment hands in the project's own CI mode reader (core-host-switch-blockers.test.ts covers the refusals).
+      ciReporting: HONEST_CI,
     }),
   });
 }
@@ -209,7 +213,7 @@ describe("a task keeps the engine it started on", () => {
     await expect(on.runtimeFor(OTHER)).rejects.toMatchObject({ name: "CoreEngineOffError" });
     const runtime = await on.runtimeFor(FAKE_COMPANY);
     expect(await on.runtimeFor(FAKE_COMPANY)).toBe(runtime);
-    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test" };
+    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test", origin: "app" as const };
     const { task } = await runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     expect(await on.engineOfTask(world.store, task.taskId, "build")).toBe("core");
     expect(stampOf(await world.store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core", flags: `cc=on:${FAKE_COMPANY}` });
@@ -263,7 +267,7 @@ describe("review fixes: a start the switch does not send to the core is refused,
     await registerProject(world, FAKE_COMPANY);
     const app = appOver(world, { ROVARA_CORE_ENGINE: "drain" }, { servedCompanies: async () => [FAKE_COMPANY] });
     const runtime = await app.runtimeFor(FAKE_COMPANY);
-    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test" };
+    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test", origin: "app" as const };
     const put = vi.spyOn(world.store, "put");
     const transact = vi.spyOn(world.store, "transact");
     await expect(runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining(CORE_START_REFUSED_WORDS) as string });
@@ -284,11 +288,11 @@ describe("review fixes: a start the switch does not send to the core is refused,
     await registerProject(world, OTHER);
     const app = createCoreHostApp({
       env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES, ciReporting: HONEST_CI }),
     });
     expect(await app.handleScheduledJob({ source: "agentx.core-job", job: "dispatch-sweep" })).toMatchObject({ companies: [{ companyId: FAKE_COMPANY }] });
     const runtime = await app.runtimeFor(OTHER);
-    await runtime.flow.start({ principal: localOwnerPrincipal({ companyId: OTHER }), client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    await runtime.flow.start({ principal: localOwnerPrincipal({ companyId: OTHER }), client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     expect(await world.store.get(coreInUseKey(OTHER))).toMatchObject({ orgId: OTHER });
     const result = await app.handleScheduledJob({ source: "agentx.core-job", job: "dispatch-sweep" }) as { companies: { companyId: string; outcome: string }[] };
     expect(result.companies.map((entry) => entry.companyId).sort()).toEqual([FAKE_COMPANY, OTHER].sort());
@@ -299,7 +303,7 @@ describe("review fixes: a start the switch does not send to the core is refused,
     const world = createFakeWorld();
     const app = createCoreHostApp({
       env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(),
-      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: undefined as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: undefined as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES, ciReporting: HONEST_CI }),
     });
     await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
   });

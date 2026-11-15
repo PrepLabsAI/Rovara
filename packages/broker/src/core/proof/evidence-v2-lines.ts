@@ -5,7 +5,7 @@
 // The flags (instruction files and files CI runs) and the weakening words come from the description's own changed files and the pack's test parts (`weakeningFactsOf`, TE-B3), the same facts the v1 description uses, so a
 // description rewritten after a fix says what the code now on the pull request says; with no file list the pack's own `flags` and `weakening` parts are used. The words are `weakeningLines` (contracts), inside the renderer.
 // Every word a repository wrote reaches the text through the renderer's inert text. Bounded: the full form is at most the renderer's limits, and a shrink level of 3 or more gives the compact form.
-import { renderEvidence, type EvidencePackV2Read } from "@agentx/contracts";
+import { renderEvidencePublic, renderEvidence, type EvidencePackV2Read } from "@agentx/contracts";
 import type { ProofEvidenceContext } from "./evidence-lines.js";
 import { boundEvidence } from "./evidence-lines.js";
 import type { ChangedFileEntry } from "./verification-report.js";
@@ -90,6 +90,19 @@ export function evidenceV2Lines(context: ProofEvidenceContext | undefined, candi
   const facts = files === undefined || v1 === undefined ? undefined : weakeningFactsOf(files, v1);
   // With the description's own files the pack's weakening and flags are replaced by what those files and the pack's test parts say now; without them the pack's own are used.
   const pack = facts === undefined ? bound.pack : ({ ...withoutParts(bound.pack), ...weakeningPartsOf(facts, bound.pack.weakening?.removedTests ?? []) } as EvidencePackV2Read);
-  const rendering = renderEvidence(pack, { newer: bound.newer, compact: level >= EVIDENCE_V2_COMPACT_LEVEL });
+  const rendering = renderEvidence(pack, { newer: bound.newer, compact: level >= EVIDENCE_V2_COMPACT_LEVEL, questionLimit: level === 0 ? 10 : level === 1 ? 5 : level === 2 ? 2 : 0 });
   return [EVIDENCE_V2_HEADING, ...asMarkdown([rendering.firstLine, ...rendering.body, ...notCompared]), ""];
+}
+
+/** Public AI summary only when the optional section exists; older public bodies remain byte-identical. */
+export function evidencePublicAiLines(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined): string[] | undefined {
+  const bound = boundEvidenceV2(context, candidateDigest);
+  if (bound === undefined || bound.pack.ai === undefined) return undefined;
+  const rendering = renderEvidencePublic(bound.pack, { newer: bound.newer });
+  // The shared public renderer puts AI first. Stop at its final summary line;
+  // the rest of the B12 summary is not part of this optional PR addition.
+  const end = rendering.body.findIndex(line => line.startsWith("Real-model run:"));
+  const aiLines = rendering.body.slice(0, end === -1 ? 1 : end + 1);
+  const headline = rendering.firstLine.startsWith("Worse on eval") ? [rendering.firstLine] : [];
+  return [EVIDENCE_V2_HEADING, ...asMarkdown([...headline, ...aiLines]), ""];
 }
