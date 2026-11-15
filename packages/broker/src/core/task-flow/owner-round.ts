@@ -32,6 +32,7 @@ export const CLOSED_TASK = "This task is closed. Start a new one.";
 export const NEVER_STARTED_TASK = "This task never started and its workspace was released. Start a new task, and close this one.";
 export const WAITING_FOR_SPEND = "This task is waiting for more spend to be approved. Sending it on cannot skip that approval.";
 export const SPEND_UNKNOWN = "Rovara cannot tell what this task has spent, so it does not start more work on it. Try again in a moment.";
+export const TASK_PROJECT_GONE = (project: string): string => `project \`${project}\` no longer exists, so no new work starts on this task`;
 export const TASK_ARCHIVED = (project: string): string => `project \`${project}\` is archived; unarchive it to start new work`;
 const usd = (value: number): string => `$${value.toFixed(2)}`;
 
@@ -87,7 +88,9 @@ export const waitingForSpend = (workflow: Pick<WorkflowSnapshot, "state" | "bloc
  */
 export async function requireMayStartWork(deps: TaskFlowDeps, task: TaskRecord): Promise<void> {
   const project = await deps.projects.latest(task.project);
-  if (project?.archived === true) throw agentXError("PROJECT_ARCHIVED", TASK_ARCHIVED(task.project));
+  // A project that no longer exists takes no new work, like an archived one.
+  if (project === undefined) throw agentXError("CONFIG_INVALID", TASK_PROJECT_GONE(task.project));
+  if (project.archived === true) throw agentXError("PROJECT_ARCHIVED", TASK_ARCHIVED(task.project));
   const permitted = await deps.access.checkStep(task);
   if (!permitted.allowed) throw agentXError("FORBIDDEN", permitted.message);
 }

@@ -32,7 +32,7 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
   // A repeat answers what the first one did and writes nothing; the same id for other words is refused.
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);
   if (prior !== undefined) {
-    if (prior.source !== "SEND_BACK" || prior.reason !== words.slice(0, 500)) throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
+    if (prior.source !== "SEND_BACK" || prior.reason !== words.slice(0, 500).trim()) throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
     return taskViewOf(deps, task);
   }
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
@@ -62,7 +62,7 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
     // Lost a race: the same request already committed (answer it), or the task moved on (refuse).
     const fresh = await readTask(deps, task.taskId);
     const again = fresh?.workflow?.decisions.find((decision) => decision.requestId === request.requestId);
-    if (fresh !== undefined && again?.source === "SEND_BACK" && again.reason === words.slice(0, 500)) return taskViewOf(deps, fresh);
+    if (fresh !== undefined && again?.source === "SEND_BACK" && again.reason === words.slice(0, 500).trim()) return taskViewOf(deps, fresh);
     throw agentXError("IDEMPOTENCY_CONFLICT", SEND_BACK_OUT_OF_DATE);
   }
   // The coding run starts now; a start that fails leaves the row for the recovery sweep, and the send-back stands.

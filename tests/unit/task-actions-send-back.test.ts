@@ -56,6 +56,17 @@ describe("send back to coding", () => {
     expect(promptOf((await codingOperations(h))[0]!)).toContain("Unit failed");
   });
 
+  it("gives the coder the owner's words when nothing failed (a change ready to publish): never only the plan", async () => {
+    const ready = WorkflowSnapshotSchema.parse({ ...blockedReview({}, [report("CRITIC", "PASS", []), report("SECURITY", "PASS", [])]), stage: "PULL_REQUEST", state: "READY", blockReason: undefined });
+    const { h, caller } = await seed({ workflow: ready });
+    const view = await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6, "Rename retryFlag to retryEnabled before this is published."));
+    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    const prompt = promptOf((await codingOperations(h))[0]!);
+    expect(prompt).toContain("Owner note (the owner's own instructions for this step)");
+    expect(prompt).toContain("Rename retryFlag to retryEnabled before this is published.");
+    expect(prompt).toContain("no check or review problems were recorded; follow the owner note");
+  });
+
   it("is refused for anyone but the owner or a co-owner, and writes nothing", async () => {
     const guest = await seed();
     const before = await stateOf(guest.h);
@@ -218,6 +229,11 @@ describe("send back to coding", () => {
     const projects = archived.h.deps.projects;
     archived.h.deps.projects = { ...projects, latest: async (project) => { const found = await projects.latest(project); return found === undefined ? undefined : { ...found, archived: true }; } };
     await expect(createTaskActions(archived.h.deps).sendBack(archived.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "PROJECT_ARCHIVED" });
+    const gone = await seed();
+    gone.h.deps.projects = { ...gone.h.deps.projects, latest: async () => undefined };
+    const goneBefore = await stateOf(gone.h);
+    await expect(createTaskActions(gone.h.deps).sendBack(gone.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("no longer exists") as string });
+    expect(await stateOf(gone.h)).toEqual(goneBefore);
     const lost = await seed();
     lost.h.deps.access = { ...lost.h.deps.access, checkStep: async () => ({ allowed: false, message: "This person no longer has access to the project." }) };
     const before = await stateOf(lost.h);
