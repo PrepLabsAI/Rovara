@@ -7,7 +7,7 @@
 //                          request (a plan's Approve and Request changes), and never for a high risk one: that is decided on its page.
 import { createHash } from "node:crypto";
 import {
-  AgentXError, ChannelSpaceRefSchema, agentXError, maskChannelUserId, type AdapterRegistry, type ChannelAdapter, type ChannelDecision, type DocumentStore, type OrgId, type Principal,
+  AgentXError, ChannelSpaceRefSchema, agentXError, maskChannelUserId, type AdapterRegistry, type ChannelAdapter, type ChannelDecision, type DocumentStore, type OrgId, type Principal, type TransactItem,
 } from "@agentx/contracts";
 import { bindChannelSpace, listAllChannelBindings, unbindChannelSpace } from "../../core/channel/bindings.js";
 import type { ApprovalCard } from "../../core/channel/cards.js";
@@ -20,6 +20,7 @@ import type { ChatPageView, LocalActionResult, LocalPageActions } from "../../co
 import { NOTIFY_TARGETS_MAX, NotifyPrefsBodySchema, readNotifyPrefs, writeNotifyPrefs, type NotifyTarget } from "../../core/notify/index.js";
 import { developerIdOf, taskSessionId } from "../../core/sessions/create.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
+import { withStartFence } from "../../core/task-flow/start-fence.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { listProjects } from "./projects.js";
 
@@ -171,13 +172,14 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
   };
 
   const work = (channel: string): ChannelWork => ({
-    async message({ message, projectName, personId }) {
+    async message({ message, projectName, personId, fence }) {
       // One owner: a link to anyone else (a stale row from another install) starts nothing.
       if (personId !== ownerId) { log({ event: "chat.not_the_owner", channel }); return; }
-      const started = await deps.flow.start({ principal: deps.owner, origin: channel === "slack" ? "slack" : "app", client: channel }, { project: projectName, instructions: message.text, requestId: uuidOf(`${channel}/${message.eventId}`), workflow: true });
+      // The sink's link fence goes into the start's own transaction: an unlink that committed after the sink read the link starts nothing.
+      const started = await withStartFence(fence, () => deps.flow.start({ principal: deps.owner, origin: channel === "slack" ? "slack" : "app", client: channel }, { project: projectName, instructions: message.text, requestId: uuidOf(`${channel}/${message.eventId}`), workflow: true }));
       await recordTaskThread({ store, orgId, now: deps.now }, { sessionId: taskSessionId(started.task.taskId), conversation: message.conversation, personId, actor: message.actor });
     },
-    async decide({ card, decision, personId }: { card: ApprovalCard; decision: ChannelDecision; personId: string; projectName: string }): Promise<ChannelDecisionAnswer> {
+    async decide({ card, decision, personId, fence }: { card: ApprovalCard; decision: ChannelDecision; personId: string; projectName: string; fence: readonly TransactItem[] }): Promise<ChannelDecisionAnswer> {
       const outcome = OUTCOME_OF[decision.decision];
       if (personId !== ownerId || outcome === undefined) return { status: "refused", reason: "invalid" };
       const result = await deps.gate.decide({
@@ -185,6 +187,8 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
         // The credential names the account that pressed (the sink already matched it to the owner); it is a claim for the approvers plug-in to check against its own identity data, never believed by the gate. A `chat-*` method
         // can never be a strong method (`isCommentMethod`): the gate refuses it for a high-risk approval and a rejection whatever the plug-in names.
         credentials: [{ method: chatDecisionMethod(card.channel), token: pressToken(card, decision.actor), claimedAccount: { provider: card.channel, tenant: decision.actor.tenant, accountId: decision.actor.userId } }], reason: decision.reason,
+        // The sink's link fence: the decision commits only while the account is still linked to the owner.
+        fence,
       });
       return result.status === "refused" ? { status: "refused", reason: result.reason } : { status: "decided" };
     },

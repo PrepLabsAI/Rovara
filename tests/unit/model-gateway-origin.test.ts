@@ -51,7 +51,7 @@ it.each(["event", "schedule", "chain", "nightly", "automatic"] as const)("the se
 it.each(["slack", "examplechat"])("the registered %s chat surface records its origin", async channel => {
   const h = createHarness({ understandFirst: true }); await h.registerProject();
   const chat = createLocalChat({ registry: { get: () => undefined, names: () => [] }, store: h.store, companyId: h.deps.companyId, owner: h.owner.principal, now: () => h.clock.now, flow: h.flow, gate: { decide: async () => ({ status: "refused", reason: "invalid" }) } as never });
-  await chat.work(channel).message({ orgId: h.deps.companyId, projectName: "payments", personId: developerIdOf(h.owner.principal), message: { version: 2, channel, eventId: "event-1", text: "Build it", receivedAt: new Date(h.clock.now).toISOString(), actor: { channel, tenant: "T12345678", userId: "U12345678" }, conversation: { channel, tenant: "T12345678", space: "C12345678", thread: "1800000000.000001" } } });
+  await chat.work(channel).message({ orgId: h.deps.companyId, projectName: "payments", personId: developerIdOf(h.owner.principal), fence: [], message: { version: 2, channel, eventId: "event-1", text: "Build it", receivedAt: new Date(h.clock.now).toISOString(), actor: { channel, tenant: "T12345678", userId: "U12345678" }, conversation: { channel, tenant: "T12345678", space: "C12345678", thread: "1800000000.000001" } } });
   const task = (await h.flow.list(h.owner)).tasks[0]!;
   expect((await h.store.get(taskKey(task.taskId)))?.["origin"]).toBe(channel === "slack" ? "slack" : "app");
 });

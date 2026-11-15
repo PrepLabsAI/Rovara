@@ -56,6 +56,8 @@ export interface CollectEvidenceInput {
    * report: a round that ran against Postgres says so whether or not a test report was read.
    */
   testServices?: TestServicesUsageRecord | undefined;
+  /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
+  repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }
 
 type EvidenceSelection = NonNullable<EvidenceRaw["selection"]>;
@@ -214,6 +216,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     const raw: EvidenceRaw = {
       schemaVersion: 1, candidateDigest: input.candidateDigest, checks,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
+      ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(selectionOf(input.selection, measured) === undefined ? {} : { selection: selectionOf(input.selection, measured)! }),
     };
     const parsed = EvidenceRawSchema.safeParse(raw);
@@ -249,6 +252,8 @@ export async function saveEvidenceRaw(input: {
   baseline?: Pick<BaselineRun, "runners" | "signal" | "budgetMs" | "originalCode" | "capMs"> | undefined;
   /** Test services: the round's usage record (see `CollectEvidenceInput.testServices`). Absent for a task without dependencies: then the file is what it always was. */
   testServices?: TestServicesUsageRecord | undefined;
+  /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
+  repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }): Promise<boolean> {
   try {
     if (input.plan.source !== "project" || input.plan.readiness === undefined) return false;
@@ -264,6 +269,7 @@ export async function saveEvidenceRaw(input: {
       repositories: placed, repositoriesComplete: complete,
       selection: input.selection, coveragePaths: input.coveragePaths,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
+      ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(baseline === undefined || !complete ? {} : {
         baselineScans: (scans: readonly BaselineScan[]) => runBaselineScans(scans, { ...baseline, rootPath: input.rootPath, repositories: placed.map((repository) => ({ directory: repository.directory, commit: repository.startCommit })) }),
       }),

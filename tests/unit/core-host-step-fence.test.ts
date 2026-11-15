@@ -38,6 +38,7 @@ describe("retryOnFenceTrip", () => {
         callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }),
         now: () => new Date(world.clock.now), log: () => undefined,
         services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }),
+        ciReporting: { honest: true, ciMode: () => "their_ci_fix" },
       }),
     });
     const { flow } = await app.runtimeFor(FAKE_COMPANY);

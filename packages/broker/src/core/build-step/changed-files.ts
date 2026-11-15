@@ -54,7 +54,7 @@ export function riskFromFiles(workflow: WorkflowSnapshot, verified: ChangedFiles
 }
 
 /** What the worker reported it changed (its `workspace.diff`), NOT checked: shown as such and never used for the risk. Never throws. */
-export async function reportedChangedFiles(deps: Pick<TaskFlowDeps, "store" | "artifacts">, workspaceId: string): Promise<ChangedFilesRead | undefined> {
+export async function reportedChangedFiles(deps: Pick<TaskFlowDeps, "store" | "artifacts" | "companyId">, workspaceId: string): Promise<ChangedFilesRead | undefined> {
   if (deps.artifacts === undefined) return undefined;
   try {
     const finished = (await workspaceOperations(deps, workspaceId)).filter((operation) => operation.status === "SUCCEEDED" && (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS")).reverse();

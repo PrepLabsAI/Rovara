@@ -24,6 +24,7 @@ export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
 export * from "./rovara-code.js";
+export * from "./person-erase.js";
 export * from "./project-playbook.js";
 export * from "./playbook-file.js";
 export * from "./design-review.js";
@@ -56,6 +57,7 @@ export * from "./plan-grounding.js";
 export * from "./workflow-dependencies-node.js";
 export * from "./display-name.js";
 export * from "./environments.js";
+export * from "./core-engine-infra.js";
 export * from "./github-mcp.js";
 export * from "./oauth-profiles.js";
 export * from "./operation.js";
@@ -233,8 +235,10 @@ export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";
 export * from "./evidence-inert.js";
+export * from "./evidence-ai.js";
 export * from "./evidence-public.js";
 export * from "./evidence-render.js";
+export * from "./rovara-problem.js";
 export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
 export * from "./media-gate.js";
@@ -303,6 +307,12 @@ export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
 // TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
 export * from "./model-egress/index.js";
+// TE-F10 (0.5.20): old vs new prompt outputs side by side, with an independent judge (additive; no callers).
+export * from "./side-by-side.js";
+export * from "./side-by-side-judge.js";
+export * from "./side-by-side-judge-pin.js";
+export * from "./side-by-side-run.js";
+export * from "./side-by-side-render.js";
 export * from "./model-serve.js";
 // TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
 export * from "./model-sse-named.js";
@@ -392,6 +402,7 @@ export * from "./machine-size.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
+export * from "./eval-proof-basis.js";
 
 export * from "./model-gateway-token.js";
 export * from "./payer.js";
