@@ -62,7 +62,7 @@ export interface CoreDispatchRouting {
 export function withCoreDispatch<R extends DispatcherRecord, E extends DispatcherEvent<R>, C>(inner: DispatcherHandler<E, C>, routing: CoreDispatchRouting): DispatcherHandler<E, C> {
   const coreQueueArn = routing.coreQueueArn?.trim();
   if (coreQueueArn === undefined || coreQueueArn === "") return inner;
-  const log = routing.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "dispatcher", ...entry })));
+  const log = routing.log ?? ((entry: Record<string, unknown>) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); });
   return async (event, context) => {
     const records = event.Records ?? [];
     const core = records.filter((record) => record.eventSourceARN === coreQueueArn);
