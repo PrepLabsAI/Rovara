@@ -308,6 +308,15 @@ describe("review fixes: a start the switch does not send to the core is refused,
     await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
   });
 
+  it("refuses a null access rule too (the core's own fallback would take it as absent)", async () => {
+    const world = createFakeWorld();
+    const app = createCoreHostApp({
+      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: null as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+    });
+    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
+  });
+
   it("reports an unreadable switch once, by variable and fixed problem, never the value", () => {
     const world = createFakeWorld();
     const entries: Record<string, unknown>[] = [];

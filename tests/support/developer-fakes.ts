@@ -297,6 +297,8 @@ export function identityHarness(options: {
   slackUsers?: FakeSlackUser[]; oidcUsers?: FakeOidcUser[]; channels?: Record<string, string[]>;
   channelInfo?: Record<string, { name: string; isPrivate?: boolean }>;
   slackCredentials?: { clientId?: string; clientSecret?: string };
+  /** Lane ID part 2: the step-up factors (a fake email sender). */
+  stepUp?: DeveloperIdentityDependencies["stepUp"];
 } = {}): IdentityHarness {
   let clock = T0;
   const now = () => clock;
@@ -330,6 +332,7 @@ export function identityHarness(options: {
     directory: slackDirectory({ teamId, botToken: async () => BOT_TOKEN, fetch, now }),
     now,
     log: (entry) => logs.push(entry),
+    ...(options.stepUp === undefined ? {} : { stepUp: options.stepUp }),
   };
   const handler: ReturnType<typeof createDeveloperIdentityHandler> = createDeveloperIdentityHandler(deps);
   const http = async (event: HttpApiV2Event) => handler(event) as Promise<HttpResult>;
