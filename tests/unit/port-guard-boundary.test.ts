@@ -681,6 +681,18 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/my${CLD}.ts`,
     `${INFRA}/lib/b\u0456lling.ts`,
     `packages/broker/src/${AWS}/tool-budget.ts`,
+    `${INFRA}/lib/llmgateway.ts`,
+    `${INFRA}/lib/aigateway.ts`,
+    `packages/broker/src/${AWS}/orgadmin/index.ts`,
+    `packages/broker/src/${AWS}/metering.ts`,
+    `packages/broker/src/${AWS}/tenantBilling.ts`,
+    `packages/broker/src/${AWS}/mybilling.ts`,
+    `packages/broker/src/${AWS}/2billing.ts`,
+    `${INFRA}/lib/LlmGateway.ts`,
+    `packages/broker/src/${AWS}/tenantBudgets.ts`,
+    `packages/broker/src/${AWS}/teamDevices.ts`,
+    `${INFRA}/lib/sharedGateway.ts`,
+    `${INFRA}/lib/${CLD.toUpperCase()}Stack.ts`,
   ])("refuses a NEW Cloud-only deployment path, as cloud-path: %s", (path) => {
     expect(addedFileRule(path)?.rule).toBe("cloud-path");
   });
@@ -695,6 +707,12 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `packages/broker/src/${AWS}/connector-ledger.ts`,
     `packages/broker/src/${AWS}/storage-organic.ts`,
     `${INFRA}/lib/${CLD}front-cache.ts`,
+    `${INFRA}/lib/${CLD[0]!.toUpperCase()}${CLD.slice(1)}WatchAlarms.ts`,
+    `${INFRA}/lib/nat-gateway.ts`,
+    `${INFRA}/lib/internet-gateway.ts`,
+    `${INFRA}/lib/api-gateway-stack.ts`,
+    `${INFRA}/lib/gateway-endpoints.ts`,
+    `${INFRA}/lib/vpc-gateway-endpoint.ts`,
     `docs/billing.md`,
     `packages/broker/src/billing-notes.ts`,
   ])("lets an ordinary Code path through: %s", (path) => {
@@ -787,6 +805,10 @@ describe("plan v3.2: commits already public on mainline are not judged again for
     git(lane.dir, "rm", "-q", "docs/b.md");
     lane.commit("gone");
     expect(rules(lane.guard({ publicBase: "refs/heads/mainline" }))).toEqual(["private-name"]);
+    // the remote-tracking form CI passes works the same way
+    git(lane.dir, "update-ref", "refs/remotes/origin/mainline", "refs/heads/mainline");
+    expect(rules(lane.guard({ publicBase: "refs/remotes/origin/mainline" }))).toEqual(["private-name"]);
+    expect(() => lane.guard({ publicBase: "refs/remotes/origin/missing" })).toThrow(GuardError);
   });
 
   it("judges a file that a merge commit itself adds (no parent had it) as an added file", () => {

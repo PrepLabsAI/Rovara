@@ -41,7 +41,7 @@
 // pattern, never the text it matched. Exit status: 0 clean, 1 findings, 2 the guard could not run (bad range, git or gitleaks missing).
 //
 // Node runs this file directly, so only erasable syntax and only Node's own modules. Usage, from inside the lane's worktree:
-//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <rev>] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
+//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <full branch ref>] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
 // The controller's extended name list (one regular expression per line) is read from the file named by PORT_GUARD_PRIVATE_NAMES, if set.
 //
 // No name is written in this file or in its tests: the protected words are salted hashes (see NameSource), and the tests use invented names.
@@ -266,21 +266,23 @@ const DEPLOYMENT_PATH = /(^|\/)aws\/|^infra\//i;
 const isTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/.test(lower);
 
 /**
- * Word stems that name Cloud-only work in a deployment path (DEC 214: the model gateway, billing, the company admin backend and the other
- * Cloud-only parts stay in Cloud; also the Cloud-only directories of decision 41). A path word, or two or three adjacent path words joined,
- * that STARTS with a stem is refused, so plurals and other forms count too (gateways, invoicing, teamrecords). A word that starts with or ends
- * in "cloud" is Cloud's as well, unless it is an AWS service name (cloudwatch, cloudformation, ...). Any letter outside ASCII in a deployment
- * path is refused outright, so a look-alike letter cannot split a word.
+ * Words that name Cloud-only work in a deployment path (DEC 214: the model gateway, billing, the company admin backend and the other Cloud-only
+ * parts stay in Cloud; also the Cloud-only directories of decision 41). The path is split into words at separators, digits and camel-case
+ * humps (tenantBilling is tenant + billing), then lower-cased. Then:
+ * - ANYWHERE: a word, or two or three adjacent words joined, that CONTAINS one of these is refused (mybilling, llmgateway, orgadmin);
+ * - PREFIX: a word or join that STARTS with one of these (gateways, spending, budgets, organizations);
+ * - WHOLE: a word that IS one of these (org, orgs, price, devices; "organic" and "storage" are ordinary);
+ * - a word that starts or ends with "cloud", unless it is an AWS service name (cloudwatch, cloudformation, ...);
+ * - "gateway" unless the word before it names an AWS gateway (nat, internet, api, vpc, transit, ...) or "endpoint" follows it.
+ * Any letter outside ASCII in a deployment path is refused outright, so a look-alike letter cannot split a word.
  */
-const CLOUD_DEPLOYMENT_STEMS = [
-  "gateway", "modelproxy", "modelsproxy", "modelgateway", "modelsgateway",
-  "billing", "invoic", "stripe", "pricing", "price", "meter", "spend", "budget",
-  "org", "organization", "companyadmin", "admincon", "teamrecord", "auditledger", "devices",
-  "embedder", "edition", "webapp", "customdomain",
+const CLOUD_DEPLOYMENT_ANYWHERE = [
+  "billing", "invoic", "stripe", "metering", "teamrecord", "auditledger", "modelproxy", "modelsproxy", "modelgateway", "modelsgateway",
+  "llmgateway", "aigateway", "companyadmin", "orgadmin", "admincons", "embedder", "webapp", "customdomain",
 ];
-/** Stems that are refused only as a whole word (a longer word that merely starts with them is ordinary: "orgs" is refused, "organic" is not). */
+const CLOUD_DEPLOYMENT_PREFIX = ["pricing", "spend", "budget", "organization", "edition"];
 const CLOUD_DEPLOYMENT_WHOLE = new Set(["org", "orgs", "price", "prices", "meter", "meters", "devices"]);
-const CLOUD_DEPLOYMENT_PREFIX = CLOUD_DEPLOYMENT_STEMS.filter((stem) => !CLOUD_DEPLOYMENT_WHOLE.has(stem));
+const AWS_GATEWAY_BEFORE = new Set(["nat", "internet", "api", "apis", "vpc", "transit", "egress", "virtual", "customer", "storage", "http", "rest", "websocket", "lb", "load", "balancer"]);
 const AWS_CLOUD_WORDS = /^cloud(?:watch|formation|front|trail|map|search|hsm|shell|9)/;
 
 const DEPLOYMENT_DETAIL =
@@ -291,13 +293,21 @@ export function cloudDeploymentPathRule(path: string): string | null {
   const unified = path.replaceAll("\\", "/");
   if (!DEPLOYMENT_PATH.test(posix.normalize(unified.normalize("NFKC")).replace(/^\.\//, "").toLowerCase())) return null;
   if (/[^\x20-\x7e]/.test(unified)) return "a letter outside ASCII in a path under aws/ or infra/ (a look-alike letter could hide a Cloud-only name)";
-  const normal = posix.normalize(unified).replace(/^\.\//, "").toLowerCase();
-  const words = normal.match(/[a-z0-9]+/g) ?? [];
+  const spaced = posix.normalize(unified).replace(/^\.\//, "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([A-Za-z])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([A-Za-z])/g, "$1 $2");
+  const words = spaced.toLowerCase().match(/[a-z0-9]+/g) ?? [];
   const cloudy = (word: string): boolean => (word.startsWith("cloud") && !AWS_CLOUD_WORDS.test(word)) || (word.length > 5 && word.endsWith("cloud"));
   for (let i = 0; i < words.length; i += 1) {
+    const word = words[i]!;
+    // A camel-cased AWS service name (CloudWatch) is split by the humps: read it with the word after it.
+    if ((cloudy(word) && !AWS_CLOUD_WORDS.test(word + (words[i + 1] ?? ""))) || CLOUD_DEPLOYMENT_WHOLE.has(word)) return DEPLOYMENT_DETAIL;
+    if (word.startsWith("gateway") && !AWS_GATEWAY_BEFORE.has(words[i - 1] ?? "") && !(word.slice(7).startsWith("endpoint") || (words[i + 1] ?? "").startsWith("endpoint"))) return DEPLOYMENT_DETAIL;
     for (let n = 1; n <= 3 && i + n <= words.length; n += 1) {
       const candidate = words.slice(i, i + n).join("");
-      if (n === 1 && (cloudy(candidate) || CLOUD_DEPLOYMENT_WHOLE.has(candidate))) return DEPLOYMENT_DETAIL;
+      if (CLOUD_DEPLOYMENT_ANYWHERE.some((stem) => candidate.includes(stem))) return DEPLOYMENT_DETAIL;
       if (CLOUD_DEPLOYMENT_PREFIX.some((stem) => candidate.startsWith(stem))) return DEPLOYMENT_DETAIL;
     }
   }
@@ -1467,7 +1477,7 @@ export function main(argv: readonly string[]): number {
     else if (arg === "--public-base") {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("-")) {
-        console.error("port-guard: --public-base needs a revision such as origin/mainline");
+        console.error("port-guard: --public-base needs a full branch ref such as refs/remotes/origin/mainline");
         return 2;
       }
       publicBase = value;
@@ -1492,7 +1502,7 @@ export function main(argv: readonly string[]): number {
       i += 1;
     }
     else if (arg === "--help" || arg === "-h") {
-      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <rev>] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
+      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base <full branch ref>] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
       return 0;
     } else {
       console.error(`port-guard: unknown argument ${arg}`);
