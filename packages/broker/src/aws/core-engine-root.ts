@@ -443,6 +443,15 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   };
 }
 
+/**
+ * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): while the switch serves, the task routes' core entry and the /v1/app/* routes; off (neither is
+ * built), the configuration exactly as given, so the developer API is byte-identical.
+ */
+export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry }) {
+  if (root.coreTasks === undefined) return config;
+  return { ...config, coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }) };
+}
+
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */
 export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engine's adapters yet: it needs the core dispatch queue's URLs in its environment, a code host provider for the core (the GitHub App behind the scoped provider interface) and its side of the workers' operations";
 

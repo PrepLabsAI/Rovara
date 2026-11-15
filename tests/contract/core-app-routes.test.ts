@@ -316,7 +316,7 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect(made.status).toBe(201);
     expect(made.headers["cache-control"]).toBe("no-store");
     const tokenId = (made.body as { token: { tokenId: string } }).token.tokenId;
-    expect(made.body).toMatchObject({ token: { mine: true, status: "active" }, secret: expect.stringMatching(/^rvst_/u) });
+    expect(made.body).toMatchObject({ token: { mine: true, status: "active" }, secret: expect.stringMatching(/^rvst_/u) as unknown });
     const own = await call("GET", "/v1/app/script-tokens", await cli(ADA));
     expect(own.status).toBe(200);
     expect(JSON.stringify(own.body)).toContain(tokenId);
@@ -333,7 +333,7 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect(await erase(ADA)).toMatchObject({ status: 403, body: { error: { code: "REAUTH_REQUIRED", message: ERASE_ON_A_PAGE } } });
     const done = await erase(ADA, 30);
     expect(done.status).toBe(200);
-    expect(done.body).toMatchObject({ receipt: expect.any(Object) });
+    expect(done.body).toMatchObject({ receipt: expect.any(Object) as unknown });
     expect(JSON.stringify(done.body)).not.toContain("Cy");
   });
 
@@ -362,13 +362,13 @@ describe("the core app entry", () => {
       const entry = coreAppEntryFrom({ routes: throwing, personErase: throwing, deployedCallerOf, log: (line) => log.push(line) });
       const answer = await entry.route(request, caller);
       expect(answer?.statusCode).toBe(401);
-      expect(JSON.parse(answer!.body!)).toEqual({ error: { code: "UNAUTHENTICATED", message: CORE_APP_SIGN_IN_AGAIN } });
+      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "UNAUTHENTICATED", message: CORE_APP_SIGN_IN_AGAIN } });
     }
     const principal = { companyId: FAKE_COMPANY, personId: ADA, displayName: "Ada", roles: ["admin"], provider: "developer" } as never;
     const entry = coreAppEntryFrom({ routes: throwing, personErase: ok, deployedCallerOf: async () => ({ principal }), log: (line) => log.push(line) });
     const failed = await entry.route(request, caller);
     expect(failed?.statusCode).toBe(503);
-    expect(JSON.parse(failed!.body!)).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: CORE_APP_UNAVAILABLE } });
+    expect(JSON.parse(failed!.body)).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: CORE_APP_UNAVAILABLE } });
     expect(log).toEqual([{ event: "core_engine.app_route_unavailable", error: "RegistryRefused" }]);
     expect(JSON.stringify([failed, log])).not.toMatch(/secret-detail/u);
     // The person erase goes to its own route; anything outside /v1/app/ is not this entry's.

@@ -314,7 +314,7 @@ import {
 } from "./channel-conversation.js";
 import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, type BrokerCoreRoot } from "./core-engine-root.js";
+import { brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
@@ -15212,8 +15212,7 @@ const coreRoot = createBrokerCoreRoot({
   log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
 });
 // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
-const developer = linkingOnly || signIn === undefined ? undefined : coreRoot.coreTasks === undefined ? signIn
-  : { ...signIn, coreTasks: coreRoot.coreTasks, ...(coreRoot.coreApp === undefined ? {} : { coreApp: coreRoot.coreApp }) };
+const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
 
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;

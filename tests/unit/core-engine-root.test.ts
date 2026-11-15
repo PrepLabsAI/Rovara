@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
@@ -92,7 +92,7 @@ describe("the broker's core root, switch on", () => {
     for (const request of [{ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { method: "POST", path: "/v1/app/people/dev-c/erase", headers: {}, body: "{}" }]) {
       const answer = await root.coreApp!.route(request, { developerId: "dev-a", sessionId: "s", name: "Ada" });
       expect(answer?.statusCode, request.path).toBe(503);
-      expect(JSON.parse(answer!.body!)).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: CORE_APP_UNAVAILABLE } });
+      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: CORE_APP_UNAVAILABLE } });
       expect(answer!.body).not.toContain("adapters");
     }
     expect(lines.filter((line) => line.event === "core_engine.app_route_unavailable")).toHaveLength(2);
@@ -112,6 +112,16 @@ describe("the broker's core root, switch on", () => {
     expect(await standing(ORG, "dev-x")).toBe("unknown");
     expect(await standing(ORG, "dev-none")).toBe("unknown");
     await expect(personStandingFromDynamo(tables.client, undefined)(ORG, "dev-a")).rejects.toThrow();
+  });
+
+  it("gives the developer API its core entries only while the switch serves; off, the configuration is the very same object", () => {
+    const config = { issuer: "https://api.example" };
+    const off = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    expect(withCoreRoutes(config, off)).toBe(config);
+    const on = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, fakeTables().client));
+    expect(withCoreRoutes(config, on)).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks, coreApp: on.coreApp });
+    expect(withCoreRoutes(config, { coreTasks: on.coreTasks, coreApp: undefined })).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks });
+    expect(config).toEqual({ issuer: "https://api.example" });
   });
 
   it("refuses a start, rather than falling back, when membership cannot be read", async () => {
