@@ -409,7 +409,7 @@ it("FIX-3 operator promotes a replacement before demoting and revoking the forme
   expect(await h.invoke(revoke())).toEqual({ ok: true });
   expect(await h.invoke(revoke(q))).toEqual(lastOwner);
   expect(h.db.find((row) => row.entityType === "COMPANY_LOG").map(({ event, createdBy, ownerOverride }) => ({ event, createdBy, ownerOverride }))).toEqual([
-    { event: "company-member-role-set", createdBy: "operator", ownerOverride: undefined },
+    { event: "company-member-role-set", createdBy: "operator", ownerOverride: true },
     { event: "company-member-role-set", createdBy: "operator", ownerOverride: true },
     { event: "company-member-revoke", createdBy: "operator", ownerOverride: undefined },
   ]);
@@ -428,4 +428,54 @@ it.each([null, "", "operator", 0, false])("FIX-3 only omitted createdBy selects 
     expect(await h.invoke({ ...event, createdBy })).toEqual({ ok: false, error: "invalid_request" });
     expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
   }
+});
+
+
+it.each(["member", "admin"] as const)("FIX-4 admin cannot promote %s to owner even after step-up", async (role) => {
+  const h = world(); verifyStepUp(h); h.seed(p, role); h.seed(actor, "admin");
+  const before = [...h.db.items.values()];
+  expect(await h.invoke({ ...roleSet(p, "owner"), createdBy: actor })).toEqual(onlyOwner);
+  expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
+});
+it.each(["member", "admin"] as const)("FIX-4 live owner promotes %s after step-up and keeps person attribution", async (role) => {
+  const h = world(); verifyStepUp(h); h.seed(p, role); h.seed(actor, "owner");
+  expect(await h.invoke({ ...roleSet(p, "owner"), createdBy: actor })).toEqual({ ok: true });
+  expect(await h.store.membership(p)).toMatchObject({ role: "owner", updatedBy: actor });
+  assertMirror(h, p);
+  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([expect.objectContaining({
+    event: "company-member-role-set", companyId: A, personId: p, fromRole: role, toRole: "owner", createdBy: actor,
+  })]);
+  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")[0]).not.toHaveProperty("ownerOverride");
+  expect(h.db.refusals).toEqual([]);
+});
+it("FIX-4 owner promotion still requires step-up", async () => {
+  const h = world(); h.seed(p, "member"); h.seed(actor, "owner");
+  const before = [...h.db.items.values()];
+  expect(await h.invoke({ ...roleSet(p, "owner"), createdBy: actor })).toEqual(stepUp);
+  expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
+});
+it.each(["member", "admin"] as const)("FIX-4 operator promotes %s without step-up and audits owner override", async (role) => {
+  const h = world(); h.seed(p, role);
+  expect(await h.invoke(roleSet(p, "owner"))).toEqual({ ok: true });
+  expect(await h.store.membership(p)).toMatchObject({ role: "owner", updatedBy: "operator" });
+  assertMirror(h, p);
+  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([expect.objectContaining({
+    event: "company-member-role-set", companyId: A, personId: p, fromRole: role, toRole: "owner", createdBy: "operator", ownerOverride: true,
+  })]);
+  expect(h.db.refusals).toEqual([]);
+});
+it.each(["demoted", "revoked", "foreign"])("FIX-4 promotion fails atomically when owner actor becomes %s before commit", async (damage) => {
+  const h = world(); verifyStepUp(h); h.seed(p, "member"); h.seed(actor, "owner");
+  const target = h.db.get(membershipKey(p).pk, "COMPANY");
+  const mirror = h.db.get(mirrorKey(A, p).pk, mirrorKey(A, p).sk);
+  const send = h.db.send;
+  h.db.send = async (command) => {
+    if (command.constructor.name === "TransactWriteCommand") h.seed(actor, damage === "demoted" ? "admin" : "owner", damage === "foreign" ? B : A, damage === "revoked" ? { revokedAt: at } : {});
+    return send(command);
+  };
+  expect(await h.invoke({ ...roleSet(p, "owner"), createdBy: actor })).toEqual(unavailable);
+  expect(h.db.get(membershipKey(p).pk, "COMPANY")).toEqual(target);
+  expect(h.db.get(mirrorKey(A, p).pk, mirrorKey(A, p).sk)).toEqual(mirror);
+  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
+  expect(h.logs).toEqual([]); expect(h.db.refusals).toEqual([]);
 });

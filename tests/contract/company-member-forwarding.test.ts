@@ -41,6 +41,8 @@ it.each(["member", "revoked", "missing", "foreign", "malformed", "slack-unlinked
 });
 it("preserves step-up fixed response and rechecks actor when Lambda runs after broker authentication", async () => {
   const h = world();
+  expect(await h.forward(caller, { ...request, role: "owner" })).toEqual({ ok: false, error: "unavailable", message: "only an owner can change or remove an owner" });
+  h.seed(actor, "owner");
   expect(await h.forward(caller, { ...request, role: "owner" })).toEqual({ ok: false, error: "step_up_required", message: "this role change needs a fresh sign-in check; sign in again and retry" });
   const send = h.db.send; let reads = 0;
   h.db.send = async (command) => {

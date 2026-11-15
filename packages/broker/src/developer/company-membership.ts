@@ -181,7 +181,7 @@ export class CompanySignInStore {
     // A self-actor's target snapshot must itself still be authorized. The earlier
     // actor read alone can race with this read; the snapshot CAS then fences it.
     if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
-    const ownerChange = previous.role === "owner" && (next.role !== "owner" || next.revokedAt !== undefined);
+    const ownerChange = (previous.role === "owner" && (next.role !== "owner" || next.revokedAt !== undefined)) || (previous.role !== "owner" && next.role === "owner");
     if (ownerChange) await this.checkActor(previous.companyId, createdBy, true);
     // The target snapshot CAS includes its current role in this same transaction.
     // A concurrent promotion cannot turn a plain-member write into an elevated write.
