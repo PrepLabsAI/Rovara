@@ -324,6 +324,10 @@ describe("the owner's moves on a core task (send back, review findings, continue
     // A body the move would refuse tells someone who may not see the task nothing either: the task is read first.
     const stranger = remember(OTHER);
     for (const raw of ["[1]", "null", "not json"]) expect((await routes.route({ ...post(`/v1/dev/tasks/${taskId}/workflow/send-back`), body: raw }, stranger))?.statusCode, raw).toBe(404);
+    const tokenCaller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } };
+    for (const raw of ["[1]", "null", "not json"]) expect((await routes.route({ ...post(`/v1/dev/tasks/${taskId}/workflow/send-back`), body: raw }, tokenCaller))?.statusCode, `token ${raw}`).toBe(404);
+    // A same-company person who may READ the task (and so knows it exists) but is not its owner gets the move's own field words for a bad body, and "no such task" for a good one.
+    expect((await routes.route({ ...post(`/v1/dev/tasks/${taskId}/workflow/send-back`), body: "[1]" }, colleague))?.statusCode).toBe(400);
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 });
