@@ -69,7 +69,7 @@ export interface PersonEraseReceipt {
   personId: string;
   erasedAt: string;
   alreadyErased: boolean;
-  /** `done`: no evidence of the person's tasks in this company is left in any version. `owed`: the walk is recorded and continues (repeat the request, or the scheduled resume). */
+  /** `done`: no evidence of the person's tasks in this company is left in any version. `owed`: the walk is recorded; repeating the request continues it from where it stopped. */
   evidence: "done" | "owed";
   counts: PersonEraseCounts;
 }

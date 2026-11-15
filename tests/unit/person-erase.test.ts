@@ -111,6 +111,18 @@ describe("person erase: what it removes", () => {
     expect(fetched).toEqual([]);
   });
 
+  it("walks past more than a page of another company's index rows, uncounted, to the person's own task after them", async () => {
+    const w = world();
+    for (let i = 0; i < 105; i += 1) {
+      seq += 1;
+      await w.store.put({ item: { ...taskIndexKey(MALLORY, new Date(Date.parse("2026-10-01T00:00:00.000Z") + i * 1000).toISOString(), `00000000-0000-4000-9000-${String(i).padStart(12, "0")}`), entityType: "DEVELOPER_TASK_INDEX", orgId: B } });
+    }
+    const own = await task(w, MALLORY, A);
+    const receipt = await erase(w);
+    expect(receipt).toMatchObject({ evidence: "done", counts: { tasks: 1, erased: 1, skipped: 0 } });
+    expect(left(w, own.prefixes)).toBe(0);
+  });
+
   it("in the implicit company, a legacy task whose record and index row name no company is erased (the repo's company rule)", async () => {
     const w = world();
     const legacy = await task(w, MALLORY, IMPLICIT_COMPANY_ID);
