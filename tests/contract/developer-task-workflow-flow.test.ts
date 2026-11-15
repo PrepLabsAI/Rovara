@@ -4522,7 +4522,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     return { harness, ...setup, blocked, route, body };
   }
   /** DEC 236h: accepting a security finding is the web page's: the web app's full-access client, with a step-up made a few seconds ago. */
-  const asPage = (t: { harness: { client: (kind: "web" | "tool", who: typeof MAYA, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => Promise<{ status: number; body: Record<string, unknown> }> }; route: string }, body: unknown, stepUp: { ageSeconds: number; method?: string } | undefined = { ageSeconds: 5 }) =>
+  const asPage = (t: { harness: { client: (kind: "web" | "tool" | "fullTool", who: typeof MAYA, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => Promise<{ status: number; body: Record<string, unknown> }> }; route: string }, body: unknown, stepUp: { ageSeconds: number; method?: string } | undefined = { ageSeconds: 5 }) =>
     t.harness.client("web", MAYA, "POST", t.route, body, stepUp);
 
   it("moves to the pull request when every finding is accepted, and the pull request lists each with its reason, made inert", async () => {
@@ -4751,6 +4751,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     const attempts: Array<[string, { status: number; body: Record<string, unknown> }, string]> = [
       ["the CLI's token", await t.harness.dev(MAYA, "POST", t.route, request), "FORBIDDEN"],
       ["an AI tool's client with a fresh step-up", await t.harness.client("tool", MAYA, "POST", t.route, request, { ageSeconds: 5 }), "FORBIDDEN"],
+      ["a full-access AI tool's client (not the web app) with a fresh step-up", await t.harness.client("fullTool", MAYA, "POST", t.route, request, { ageSeconds: 5 }), "FORBIDDEN"],
       ["the web app with no step-up", await t.harness.client("web", MAYA, "POST", t.route, request), "REAUTH_REQUIRED"],
       ["the web app with a stale step-up", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: 601 }), "REAUTH_REQUIRED"],
       ["the web app with a step-up from the future", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: -3_600 }), "REAUTH_REQUIRED"],

@@ -184,8 +184,8 @@ export interface DeveloperRouteDependencies {
 /** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
 export interface DeveloperCaller {
   developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string;
-  /** DEC 236h: set only for a sign-in client registered with full access (a full-access web session), from its registration; never for the Rovara CLI's token or a scoped client's. */
-  fullAccess?: true;
+  /** DEC 236h: set only for the Rovara web app's own sign-in client (registered with full access AND marked `webApp` by the operator), from its registration; never for the Rovara CLI's token, a scoped client's, or another full-access client's. */
+  webApp?: true;
   /** DEC 236h: the person's last step-up as the VERIFIED access token states it (`stepUpOf`), for the acts that need a fresh sign-in; its age is checked where it is used. Never from a header, a query or a body. */
   stepUp?: { at: string; method: string };
 }
@@ -982,7 +982,7 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
     developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName, clientId: person.client.clientId,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
-    ...(person.client.fullAccess === true ? { fullAccess: true as const, ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }) } : {}),
+    ...(person.client.fullAccess === true && person.client.webApp === true ? { webApp: true as const, ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }) } : {}),
   };
 }
 

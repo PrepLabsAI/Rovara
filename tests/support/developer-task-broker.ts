@@ -88,6 +88,8 @@ async function clientBearer(who: Developer, client: { clientId: string; audience
 /** The two sign-in clients the page tests use: the web app (registered with full access, spec 066) and an AI tool's client (scoped to read and act on tasks, no full access). */
 export const WEB_CLIENT = { clientId: "web-app", audience: "web-app" } as const;
 export const TOOL_CLIENT = { clientId: "tool-app", audience: "tool-app", scope: "tasks:read tasks:act" } as const;
+/** An AI tool's client that an administrator registered WITH full access (spec 066), but which is not the web app (DEC 236h: no `webApp` marker). */
+export const FULL_TOOL_CLIENT = { clientId: "full-tool-app", audience: "full-tool-app" } as const;
 
 type DeveloperTaskBrokerHarness = ReturnType<typeof createBroker> & {
   actions: DeveloperTaskActions;
@@ -95,8 +97,8 @@ type DeveloperTaskBrokerHarness = ReturnType<typeof createBroker> & {
   channelMembers: Mock<(request: ChannelMembersRequest) => Promise<ChannelMembersResponse>>;
   channelInfo: Mock<(request: ChannelInfoRequest) => Promise<ChannelInfoResponse>>;
   dev: (who: Developer, method: string, path: string, body?: unknown) => Promise<{ status: number; body: Record<string, unknown> }>;
-  /** DEC 236h: the same request as a sign-in client's token, as the signed-in person. "web": the web app (full access); "tool": an AI tool's client (scoped, no full access). `stepUp`: the step-up the token carries (none by default). */
-  client: (kind: "web" | "tool", who: Developer, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => Promise<{ status: number; body: Record<string, unknown> }>;
+  /** DEC 236h: the same request as a sign-in client's token, as the signed-in person. "web": the web app (full access, marked `webApp` by the operator); "tool": an AI tool's client (scoped, no full access); "fullTool": an AI tool's client with full access but no `webApp` marker. `stepUp`: the step-up the token carries (none by default). */
+  client: (kind: "web" | "tool" | "fullTool", who: Developer, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => Promise<{ status: number; body: Record<string, unknown> }>;
   callback: (workspaceId: string, operationId: string, action: string, body: unknown) => Promise<Record<string, unknown>>;
   finish: (workspaceId: string, operationId: string, status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED", detail?: { result?: unknown; error?: string }) => Promise<Record<string, unknown>>;
   events: (workspaceId: string, operationId: string, events: Array<{ type: string; payload: unknown }>) => Promise<Record<string, unknown>>;
@@ -163,15 +165,16 @@ export async function createDeveloperTaskBroker(options: {
     return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
   };
   const at = new Date(Date.now() - 3_600_000).toISOString();
-  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, createdAt: at, updatedAt: at, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: at, updatedAt: at, updatedBy: "operator" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#full-tool-app", entityType: "SIGN_IN_CLIENT", clientId: "full-tool-app", name: "Full-access AI Tool", audience: "full-tool-app", redirectUris: ["https://full-tool.example.com/callback"], loopback: false, secretHash: "d".repeat(64), fullAccess: true, createdAt: at, updatedAt: at, updatedBy: "admin" });
   db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#tool-app", entityType: "SIGN_IN_CLIENT", clientId: "tool-app", name: "AI Tool", audience: "tool-app", redirectUris: ["https://tool.example.com/callback"], loopback: false, secretHash: "e".repeat(64), scopes: ["tasks:read", "tasks:act"], createdAt: at, updatedAt: at, updatedBy: "admin" });
   for (const who of [MAYA, OMAR]) {
-    for (const client of [WEB_CLIENT, TOOL_CLIENT]) {
+    for (const client of [WEB_CLIENT, TOOL_CLIENT, FULL_TOOL_CLIENT]) {
       db.set({ pk: `SESSION#${client.clientId}-${who.sessionId}`, sk: "META", sessionId: `${client.clientId}-${who.sessionId}`, developerId: who.developerId, amr: who.provider, clientId: client.clientId, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
     }
   }
-  const client = async (kind: "web" | "tool", who: Developer, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => {
-    const which = kind === "web" ? WEB_CLIENT : TOOL_CLIENT;
+  const client = async (kind: "web" | "tool" | "fullTool", who: Developer, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => {
+    const which = kind === "web" ? WEB_CLIENT : kind === "fullTool" ? FULL_TOOL_CLIENT : TOOL_CLIENT;
     const response = await handler({
       version: "2.0", rawPath: path.split("?")[0], rawQueryString: path.split("?")[1] ?? "",
       headers: { authorization: await clientBearer(who, which, `${which.clientId}-${who.sessionId}`, stepUp) },
