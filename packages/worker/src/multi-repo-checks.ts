@@ -3,12 +3,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readlink, readdir, opendir, rmdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { matchTestCommand, parseCommandLine, ProjectCommandSchema, type ProjectCommand } from "@agentx/contracts";
+import { matchTestCommand, MULTI_REPO_FALLBACK_NOTES, parseCommandLine, ProjectCommandSchema, type MultiRepoFallbackNote, type ProjectCommand } from "@agentx/contracts";
 import { createPartWorkingCopy } from "./parallel-parts-git.js";
 import { snapshotTree, withIsolatedGit, isSafeRefName } from "./isolated-git.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { runIsolatedGit } from "./isolated-repository.js";
 import { wireMultiRepoDependencies } from "./multi-repo-wiring.js";
+import { createDependencyMirror, DEPENDENCY_REFUSAL, dependencyFolders, excludeMirroredFolders, mirrorDependencyFolders, verifyMirroredLinks, type DependencyFolder } from "./multi-repo-dependencies.js";
 import { coverageSpecsOf } from "./verification/cobertura-lcov-coverage.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { currentWorkspaceSafety } from "./workspace-safety.js";
@@ -28,6 +29,32 @@ export interface MultiRepoChecks {
   coveragePaths?: ReadonlyArray<string | undefined> | undefined;
 }
 
+/**
+ * MR1-LIVE: a refusal that happened before any check ran (or a dependency wiring setup that failed), for a caller that asked to fall back. The round's
+ * checkout is already removed; the caller runs today's per-repository path and records `reason` (fixed words) in evidence.
+ */
+export class MultiRepoUnavailableError extends Error {
+  constructor(readonly reason: MultiRepoFallbackNote) {
+    super(reason);
+    this.name = "MultiRepoUnavailableError";
+  }
+}
+
+const [SUBMODULE, LIMITS, DEPENDENCY_LIMITS, LINK, LAYOUT, COMMIT, WIRING, COPY] = MULTI_REPO_FALLBACK_NOTES;
+const FALLBACK_BY_MESSAGE = new Map<string, MultiRepoFallbackNote>([
+  ["multi-repository checkout contains unsupported entries", SUBMODULE],
+  ["multi-repository checkout exceeds round limits", LIMITS], ["multi-repository input exceeds round limits", LIMITS],
+  [DEPENDENCY_REFUSAL.limits, DEPENDENCY_LIMITS], [DEPENDENCY_REFUSAL.link, LINK], [DEPENDENCY_REFUSAL.layout, LAYOUT],
+  ["multi-repository link leaves the check root", LINK], ["multi-repository link target is unavailable", LINK],
+  ["multi-repository checkout does not match the selected branch or base", COMMIT], ["multi-repository task branch is invalid", COMMIT],
+]);
+/** Only fixed words reach evidence: an unknown refusal is "could not be made", never its message. */
+function fallbackReason(error: unknown, wiring: boolean): MultiRepoFallbackNote {
+  if (wiring) return WIRING;
+  const message = error instanceof Error ? error.message : "";
+  return FALLBACK_BY_MESSAGE.get(message) ?? (/\bsubmodule\b/u.test(message) ? SUBMODULE : COPY);
+}
+
 function inside(root: string, path: string): string {
   const target = resolve(root, path);
   const from = relative(root, target);
@@ -36,7 +63,8 @@ function inside(root: string, path: string): string {
 }
 
 /** Every round is fresh. The AsyncLocalStorage carries only the old-code selection, never a wired tree or a candidate identity. */
-export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners): CheckRunners {
+export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners, options?: { fallBack?: boolean }): CheckRunners {
+  const fallBack = options?.fallBack === true;
   const phase = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
   let reports = join(resolve(typeof input?.rootPath === "string" ? input.rootPath : "."), ".agentx", "multi-repo-reports", randomUUID());
   return {
@@ -49,6 +77,10 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
       const workspace = await openDirectory(resolve(input.rootPath));
       let root: string | undefined;
       let unconfirmed = false;
+      // Fallback bookkeeping: checks have started (nothing after this may fall back), and the stage a refusal came from.
+      let started = false;
+      let wiringStage = false;
+      let wiringFailed = false;
       try {
         checkTime();
         const ids = new Set<string>();
@@ -70,6 +102,7 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
         root = await mkdtemp(join(workspace.path, ".agentx-check-"));
         activeRoots.add(root);
         const copies = new Map<string, string>();
+        const installed: Array<{ source: string; destination: string; folders: DependencyFolder[]; pnp: string[] }> = [];
         let copiedBytes = 0;
         let copiedFiles = 0;
         for (const repository of input.repositories) {
@@ -90,35 +123,51 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
             if (head !== selected) throw new Error("multi-repository checkout does not match the selected branch or base");
             // Measure the candidate tree once, with one shared limit across all repositories.
             const listing = await git.text(["ls-tree", "-r", "-l", "-z", tree], { signal, timeout: Math.max(1, remainingMs()), maxBuffer: 8 * 1024 * 1024 });
+            const paths: string[] = [];
             for (const entry of listing.split("\0").filter(Boolean)) {
-              const size = /^\d+ blob [a-f0-9]{40} +([0-9]+)\t/u.exec(entry)?.[1];
-              if (size === undefined) throw new Error("multi-repository checkout contains unsupported entries");
-              copiedBytes += Number(size);
+              const match = /^\d+ blob [a-f0-9]{40} +([0-9]+)\t(.+)$/su.exec(entry);
+              if (match === null) throw new Error("multi-repository checkout contains unsupported entries");
+              copiedBytes += Number(match[1]);
               if (++copiedFiles > 50_000 || copiedBytes > 512 * 1024 * 1024) throw new Error("multi-repository checkout exceeds round limits");
+              paths.push(match[2]!);
             }
             checkTime();
-            return tree;
+            return { tree, paths };
           });
           checkTime();
-          const copy = await createPartWorkingCopy({ rootPath: root, repositoryDirectory: source, repositoryId: `repo-${copies.size}`, itemId: randomUUID(), treeSha: tree });
+          const copy = await createPartWorkingCopy({ rootPath: root, repositoryDirectory: source, repositoryId: `repo-${copies.size}`, itemId: randomUUID(), treeSha: tree.tree });
           await mkdir(dirname(destination), { recursive: true });
           await rename(copy.directory, destination);
           copies.set(source, destination);
+          installed.push({ source, destination, ...dependencyFolders(tree.paths) });
           checkTime();
         }
+        // MR1-LIVE: the git-ignored installed dependencies (multi-repo-dependencies.ts), once every repository is copied so links between them re-point.
+        const mirror = createDependencyMirror({ workspace: workspace.path, checkRoot: root, copies, checkTime });
+        for (const repository of installed) {
+          for (const state of repository.pnp) if (await lstat(join(repository.source, ...state.split("/"))).then(() => true, () => false)) throw new Error(DEPENDENCY_REFUSAL.layout);
+          await excludeMirroredFolders(repository.destination, await mirrorDependencyFolders(mirror, repository.source, repository.destination, repository.folders));
+        }
+        await mirrorDependencyFolders(mirror, workspace.path, root, [{ kind: "node", path: "node_modules" }, { kind: "python", path: ".venv" }, { kind: "python", path: "venv" }]);
+        await verifyMirroredLinks(mirror);
+        checkTime();
         const old = phase.getStore();
         // Coverage overrides index the full candidate plan. Old-code test/SARIF subsets only carry their own command-declared reports.
         const coveragePaths = old === undefined ? input.coveragePaths : undefined;
         const execute = async () => {
           checkTime();
-          await remapLinks(root!, copies);
+          await remapLinks(root!, copies, mirror.mirrored);
           checkTime();
+          wiringStage = true;
           const wiring = await wireMultiRepoDependencies(input, root!, old !== undefined);
+          wiringStage = false;
           const mapped = (command: ProjectCommand): ProjectCommand => ({ ...wiring.command(command), cwd: relative(workspace.path, inside(root!, command.cwd)) });
           let snapshots: Map<string, string> | undefined;
           const scoped: CheckRunners = {
             ...base,
             async endRound() {
+              // A wiring failure that falls back: the fallback's own round closes the target, exactly once.
+              if (fallBack && wiringFailed) return;
               try { await base.endRound?.(); } catch { unconfirmed = true; }
             },
             runProjectCommand: (command, stop) => base.runProjectCommand(mapped(command), stop),
@@ -142,9 +191,13 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
                 checkTime();
                 return mapped({ ...command, timeoutSeconds: Math.min(command.timeoutSeconds, remainingMs() / 1_000) });
               };
+              // A wiring command that fails on its own (no setuptools, no python3, an unbuildable provider) is a fallback; a stop or the budget running out is not.
+              const failed = () => { if (!stop.aborted && !signal.aborted && remainingMs() > 0) wiringFailed = true; };
               for (const command of wiring.setup) {
-                const result = await base.runProjectCommand(setupCommand(command), stop);
-                if (result.exitCode !== 0 || result.timedOut) throw new Error("multi-repository setup failed");
+                const prepared = setupCommand(command);
+                let result: Awaited<ReturnType<CheckRunners["runProjectCommand"]>>;
+                try { result = await base.runProjectCommand(prepared, stop); } catch (error) { if (!isUnconfirmedStop(error)) failed(); throw error; }
+                if (result.exitCode !== 0 || result.timedOut) { failed(); throw new Error("multi-repository setup failed"); }
               }
               snapshots = await captureTrees(copies.values());
               for (const command of input.setup) {
@@ -158,9 +211,11 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
             },
           };
           delete scoped.scopeRound;
-          const started = Date.now();
+          const roundStarted = Date.now();
+          started = true;
           const result = await run(scoped);
           if (unconfirmed) throw new RunnerKillUnconfirmedError({ kind: base.kind ?? "local" });
+          if (fallBack && wiringFailed) throw new MultiRepoUnavailableError(WIRING);
           if (snapshots !== undefined && result.entries.some((entry) => entry.after === "passed" || entry.after === "failed")) await assertNoSourceDrift(copies.values(), snapshots, new Set([...reportPaths(plan, root!, coveragePaths), ...wiring.generated]));
           let reportDirectory: HeldDirectory | undefined;
           try {
@@ -173,7 +228,7 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
             reportLifetime.getStore()?.add(reports);
             await round.close();
           } catch { throw new Error("multi-repository report location is unavailable"); } finally { await reportDirectory?.close(); }
-          await preserveReports(plan, root!, reports, started, result.entries.some((entry) => entry.after === "passed" || entry.after === "failed"), coveragePaths);
+          await preserveReports(plan, root!, reports, roundStarted, result.entries.some((entry) => entry.after === "passed" || entry.after === "failed"), coveragePaths);
           return wiring.notes.length === 0 ? result : { ...result, entries: result.entries.map((entry) => ({ ...entry, output: entry.after === "not_run" ? entry.output : `${wiring.notes.join("\n")}\n${entry.output}` })) };
         };
         return old === undefined ? await execute() : await gitOriginalCode(old.map((repository) => {
@@ -183,6 +238,8 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
         })).run(execute);
       } catch (error) {
         unconfirmed ||= isUnconfirmedStop(error);
+        // Before any check ran, a structural refusal falls back to today's path for a caller that asked; a stop, the budget or an unconfirmed stop never does.
+        if (fallBack && !started && !unconfirmed && !signal.aborted && remainingMs() > 0 && !(error instanceof Error && error.message === "aborted")) throw new MultiRepoUnavailableError(fallbackReason(error, wiringStage));
         throw error;
       } finally {
         // runChecks joins every aborted command. If it could not confirm a stop, workspace quarantine owns recovery; never race a late writer.
@@ -196,11 +253,13 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners):
   };
 }
 
-async function remapLinks(root: string, copies: ReadonlyMap<string, string>, directory = root): Promise<void> {
+/** `skip`: mirrored dependency folders, whose links multi-repo-dependencies.ts already re-pointed and verified. */
+async function remapLinks(root: string, copies: ReadonlyMap<string, string>, skip: ReadonlySet<string>, directory = root): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     if (entry.name === ".git") continue;
     const path = join(directory, entry.name);
-    if (entry.isDirectory()) await remapLinks(root, copies, path);
+    if (skip.has(path)) continue;
+    if (entry.isDirectory()) await remapLinks(root, copies, skip, path);
     else if (entry.isSymbolicLink()) {
       const target = resolve(directory, await readlink(path));
       let mapped = target;
@@ -219,11 +278,14 @@ async function captureTrees(directories: Iterable<string>): Promise<Map<string, 
   return trees;
 }
 
+const PYTHON_BYTECODE = /(?:^|\/)__pycache__\/[^/]+\.pyc$/u;
+
 async function assertNoSourceDrift(directories: Iterable<string>, before: ReadonlyMap<string, string>, reports: ReadonlySet<string>): Promise<void> {
   for (const directory of directories) await withIsolatedGit(directory, "read", async (git) => {
     const after = await snapshotTree(git, await git.headCommit());
     const changed = (await git.text(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", before.get(directory)!, after])).split("\0").filter(Boolean);
-    if (changed.some((path) => !reports.has(join(directory, path)))) throw new Error("multi-repository check changed candidate source");
+    // Python's bytecode cache is the interpreter's own output, written by any check that imports the copy's code: not candidate source.
+    if (changed.some((path) => !reports.has(join(directory, path)) && !PYTHON_BYTECODE.test(path))) throw new Error("multi-repository check changed candidate source");
   });
 }
 

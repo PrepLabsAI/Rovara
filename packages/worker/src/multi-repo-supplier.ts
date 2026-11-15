@@ -1,17 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { deriveRepositoryEdges, type RepositoryEdges } from "./multi-repo-edges.js";
-import { withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
+import { MultiRepoUnavailableError, withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
+import type { MultiRepoFallbackNote } from "@agentx/contracts";
 import type { CheckRunners } from "./verification/checks.js";
 import { gitOriginalCode, type OriginalCodeRepository } from "./verification/original-code.js";
 
 /**
  * Whether a local multi-repository task with derived edges runs its check rounds in MR1's candidate-bound check root (multi-repo-checks.ts).
- * OFF (owner decision for #640, 2026-11-15): checks run exactly as before on every path, and the derived edges are only recorded in the evidence (for MR3).
- * The MR1-LIVE lane turns this on once the check root carries the workspace's installed dependency folders (node_modules, .venv) with link safety;
- * until then the copy has none of them and ordinary Node/Python checks would fail there.
+ * ON (MR1-LIVE): the check root carries the workspace's installed dependency folders (multi-repo-dependencies.ts), and any refusal before a check runs, or a
+ * failed dependency wiring setup, falls back to today's per-repository path with a fixed "multi-repo check not run: <reason>" note in the evidence.
+ * Off (tests only, `live: false`): checks run exactly as before on every path and the derived edges are only recorded in the evidence.
  */
-export const MULTI_REPO_CHECKS_LIVE: boolean = false;
+export const MULTI_REPO_CHECKS_LIVE: boolean = true;
 
 /** The most an evidence-time derivation may take, whatever the round has left (it is informational and never changes a check). */
 export const EVIDENCE_EDGES_MAX_MS = 15_000;
@@ -65,13 +66,22 @@ export function createRepositoryCheckSupplier(input: {
         return base;
       }
       let selected: CheckRunners | undefined;
-      const phase = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
+      // MR1-LIVE: once a round falls back (a refusal before any check, or a failed dependency wiring setup), every later round of this invocation takes today's
+      // per-repository path too, so a candidate round and its original-code rounds are never measured in two different places.
+      let fallback: MultiRepoFallbackNote | undefined;
+      // `pending`: an original-code phase nothing has applied yet (this round decides where). `inSelected`: one MR1's check root is applying in its copies;
+      // the workspace itself is still the candidate, so a fallback inside it must apply the original code itself.
+      const pending = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
+      const inSelected = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
+      const ordinaryOriginalCode = base.originalCode ?? gitOriginalCode;
+      const ordinaryReports = () => { if (base.reportRoot === undefined) delete wrapper.reportRoot; else wrapper.reportRoot = base.reportRoot.bind(base); };
       const wrapper: CheckRunners = {
         ...base,
         originalCode: repositories => ({ run: work => {
-          if (selected?.originalCode) return selected.originalCode(repositories).run(work);
-          if (facts?.edges.length === 0) return (base.originalCode ?? gitOriginalCode)(repositories).run(work);
-          return phase.run(repositories, work);
+          if (fallback !== undefined) return ordinaryOriginalCode(repositories).run(work);
+          if (selected?.originalCode) { const own = selected.originalCode(repositories); return inSelected.run(repositories, () => own.run(work)); }
+          if (facts?.edges.length === 0) return ordinaryOriginalCode(repositories).run(work);
+          return pending.run(repositories, work);
         } }),
         async scopeRound(plan, signal, run, remainingMs) {
           recorded = undefined;
@@ -80,13 +90,29 @@ export function createRepositoryCheckSupplier(input: {
           try { facts = await derivation; } catch (error) { derivation = undefined; throw error; }
           notes = facts.notes;
           if (signal.aborted || remainingMs() <= 0) throw new Error("aborted");
-          const old = phase.getStore();
-          if (facts.edges.length === 0) return old === undefined ? run(base) : (base.originalCode ?? gitOriginalCode)(old).run(() => run(base));
-          selected ??= withMultiRepoChecks({ rootPath: input.rootPath, repositories: input.repositories, dependencies: facts.edges, setup: [], coveragePaths: input.coveragePaths }, base);
-          if (selected.reportRoot !== undefined) wrapper.reportRoot = selected.reportRoot.bind(selected);
-          const execute = () => selected!.scopeRound!(plan, signal, run, remainingMs);
-          const result = old === undefined ? await execute() : await selected.originalCode!(old).run(execute);
-          recorded = facts;
+          const old = pending.getStore();
+          if (facts.edges.length === 0) return old === undefined ? run(base) : ordinaryOriginalCode(old).run(() => run(base));
+          if (fallback === undefined) {
+            selected ??= withMultiRepoChecks({ rootPath: input.rootPath, repositories: input.repositories, dependencies: facts.edges, setup: [], coveragePaths: input.coveragePaths }, base, { fallBack: true });
+            if (selected.reportRoot !== undefined) wrapper.reportRoot = selected.reportRoot.bind(selected);
+            const execute = () => selected!.scopeRound!(plan, signal, run, remainingMs);
+            try {
+              const result = old === undefined ? await execute() : await selected.originalCode!(old).run(execute);
+              recorded = facts;
+              return result;
+            } catch (error) {
+              if (!(error instanceof MultiRepoUnavailableError)) throw error;
+              fallback = error.reason;
+            }
+          }
+          // Today's path: the ordinary runners in the shared workspace, its ordinary reports, and the reason in the evidence and progress notes.
+          ordinaryReports();
+          const found = facts;
+          const fallbackNotes = [...new Set<RepositoryEdges["notes"][number]>([...found.notes, fallback])].slice(0, 8);
+          notes = fallbackNotes;
+          const selection = old ?? inSelected.getStore();
+          const result = selection === undefined ? await run(base) : await ordinaryOriginalCode(selection).run(() => run(base));
+          recorded = { edges: found.edges, notes: fallbackNotes };
           return result;
         },
       };
