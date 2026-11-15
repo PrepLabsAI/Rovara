@@ -24,6 +24,7 @@ export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
 export * from "./rovara-code.js";
+export * from "./person-erase.js";
 export * from "./project-playbook.js";
 export * from "./playbook-file.js";
 export * from "./design-review.js";
