@@ -763,10 +763,10 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | packages/broker/src/developer/store.ts:121 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/developer/task-people.ts:166 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/e2e/model-checks.ts:197 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/e2e/requalify-hold.ts:101 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/e2e/requalify-hold.ts:116 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/e2e/requalify-hold.ts:121 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/e2e/requalify-hold.ts:133 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
+| packages/broker/src/e2e/requalify-hold.ts:104 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
+| packages/broker/src/e2e/requalify-hold.ts:125 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
+| packages/broker/src/e2e/requalify-hold.ts:143 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
+| packages/broker/src/e2e/requalify-hold.ts:155 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/lessons/document-repo-file.ts:26 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/lessons/document-settings.ts:89 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/lessons/document-settings.ts:125 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
