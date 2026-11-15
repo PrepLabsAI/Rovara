@@ -5,12 +5,12 @@
 //   - the person is a LIVE member of the request's company (the deployed identity point, which reads membership: never a token claim);
 //   - the request's subject is a core task of that company, and the person is its own person (`developerId` on the task record read from the store, never the caller's word);
 //   - a fresh STEP-UP (#662, merged via #695): the person proved it was them with a factor Code owns (an emailed code, a passkey, a company re-authentication) no longer ago than the
-//     window (FRESH_SIGN_IN_SECONDS, ten minutes; the policy hook wrapper and the dev routes may only shorten it). A Slack, Google or GitHub round trip never counts.
+//     window (FRESH_SIGN_IN_SECONDS, ten minutes; the company's own "fresh sign-in" setting, the policy hook wrapper and the dev routes may only shorten it). A Slack, Google or GitHub round trip never counts.
 // Anything else (another subject type, another person, a company admin, a code host comment, a chat press) is refused: the install offers one method, `rovara-step-up`.
 //
 // The proof. The broker's dev route checks the step-up on the VERIFIED access token (`DeployedCaller.stepUp`, `freshStepUp` in dev-routes.ts); the deployment's decision performer
 // (lane L11) then asks `issueStepUpApproval` for a proof of that one act. The proof's token is signed with a key derived from the install's callback signing key (never stored or
-// logged), and binds: the company, the person, the step-up's time and factor, the decision's request id, the task, the revision and digest the person saw, the answer
+// logged), and binds: the company, the person, the step-up's time and factor, the decision's request id and kind, the task, the revision and digest the person saw, the answer
 // (approve / reject / request changes) and the decision card and its version (owner decision 211, gap G4). It lives two minutes. `verify` checks every part against the request the
 // gate built from STORED state, re-checks the step-up's age, and re-reads membership and the task's owner: the token is believed for nothing but its own signed words.
 //
@@ -27,6 +27,7 @@ import {
   type IdentityProvider, type Principal,
 } from "@agentx/contracts";
 import { decisionRequestIdOf } from "../core/decisions/approval-gate.js";
+import { readApprovalSignInRule } from "../core/decisions/sign-in-setting.js";
 import { STEP_UP_METHODS } from "../core/script-tokens/index.js";
 import { taskKey } from "../core/task-flow/keys.js";
 
@@ -46,6 +47,10 @@ const REQUEST_ID = /^[A-Za-z0-9_-]{8,128}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const NONCE = /^[A-Za-z0-9_-]{43}$/u;
+const KIND = /^[A-Za-z0-9_.-]{1,64}$/u;
+/** The token's two parts in canonical base64url only: a variant spelling of the same bytes is a different string to the gate's markers, so it is refused here. */
+const BODY = /^[A-Za-z0-9_-]{1,4000}$/u;
+const MAC = /^[A-Za-z0-9_-]{43}$/u;
 const CLAIM_ID = /^(org_[0-9a-z]{20})\.([a-f0-9]{64})\.([0-9a-f-]{36})$/u;
 const ANSWERS: ReadonlySet<unknown> = new Set<ApprovalAnswer>(["approve", "reject", "request_changes"]);
 const FACTORS: ReadonlySet<unknown> = new Set<unknown>(STEP_UP_METHODS);
@@ -62,6 +67,7 @@ interface ProofClaims {
   c: string; // company
   p: string; // person
   r: string; // the decision's request id
+  q: string; // the decision's kind (`ApprovalRequest.kind`)
   s: string; // the task
   v: number; // revision
   d: string; // artifact digest
@@ -84,6 +90,8 @@ export interface StepUpApprovalInput {
   stepUp: { at: string; method: string };
   /** The decision's request id (the one the decision gate is given). */
   requestId: string;
+  /** What is being decided (`ApprovalRequest.kind`: the subject's current document type for a plan). */
+  kind: string;
   /** The task the card is about. */
   taskId: string;
   revision: number;
@@ -98,12 +106,12 @@ export interface StepUpApprovalInput {
  */
 export function issueStepUpApproval(key: Buffer, input: StepUpApprovalInput, nowMs: number): { method: typeof STEP_UP_APPROVAL_METHOD; token: string } {
   if (!OrgIdSchema.safeParse(input.companyId).success || typeof input.personId !== "string" || input.personId === "" || input.personId.length > 256
-    || !REQUEST_ID.test(input.requestId) || !TASK_ID.test(input.taskId) || !Number.isSafeInteger(input.revision) || input.revision < 1 || !DIGEST.test(input.artifactDigest)
+    || !REQUEST_ID.test(input.requestId) || typeof input.kind !== "string" || !KIND.test(input.kind) || !TASK_ID.test(input.taskId) || !Number.isSafeInteger(input.revision) || input.revision < 1 || !DIGEST.test(input.artifactDigest)
     || !ANSWERS.has(input.outcome) || !isValidApprovalCardRef(input.card) || typeof input.stepUp?.at !== "string" || !ISO_INSTANT.test(input.stepUp.at) || !FACTORS.has(input.stepUp.method)) {
     throw new Error("a step-up approval cannot be issued for this input");
   }
   const claims: ProofClaims = {
-    c: input.companyId, p: input.personId, r: input.requestId, s: input.taskId, v: input.revision, d: input.artifactDigest, o: input.outcome,
+    c: input.companyId, p: input.personId, r: input.requestId, q: input.kind, s: input.taskId, v: input.revision, d: input.artifactDigest, o: input.outcome,
     k: [input.card.cardId, input.card.contentVersion], a: input.stepUp.at, m: input.stepUp.method, e: nowMs + STEP_UP_PROOF_LIFETIME_MS, n: b64(randomBytes(32)),
   };
   const body = b64(JSON.stringify(claims));
@@ -116,15 +124,19 @@ function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   const parts = token.slice(TOKEN_PREFIX.length).split(".");
   if (parts.length !== 2) return undefined;
   const [body, mac] = parts as [string, string];
+  if (!BODY.test(body) || !MAC.test(mac)) return undefined;
   const presented = Buffer.from(mac, "base64url");
+  if (b64(presented) !== mac) return undefined;
   const expected = sign(key, body);
   if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) return undefined;
   let value: unknown;
-  try { value = JSON.parse(Buffer.from(body, "base64url").toString("utf8")); } catch { return undefined; }
+  const decoded = Buffer.from(body, "base64url");
+  if (b64(decoded) !== body) return undefined;
+  try { value = JSON.parse(decoded.toString("utf8")); } catch { return undefined; }
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const c = value as Record<string, unknown>;
   const card = c["k"];
-  if (typeof c["c"] !== "string" || typeof c["p"] !== "string" || typeof c["r"] !== "string" || typeof c["s"] !== "string" || !Number.isSafeInteger(c["v"]) || typeof c["d"] !== "string"
+  if (typeof c["c"] !== "string" || typeof c["p"] !== "string" || typeof c["r"] !== "string" || typeof c["q"] !== "string" || typeof c["s"] !== "string" || !Number.isSafeInteger(c["v"]) || typeof c["d"] !== "string"
     || !ANSWERS.has(c["o"]) || !Array.isArray(card) || card.length !== 2 || typeof card[0] !== "string" || typeof card[1] !== "string" || typeof c["a"] !== "string"
     || typeof c["m"] !== "string" || !Number.isSafeInteger(c["e"]) || typeof c["n"] !== "string" || !NONCE.test(c["n"])) return undefined;
   return c as unknown as ProofClaims;
@@ -138,11 +150,11 @@ export function stepUpClaimKey(companyId: string, partHash: string): DocumentKey
 export interface HostedApproversOptions {
   /** The registry's store: the task records and the claim rows. */
   store: Pick<DocumentStore, "get" | "put" | "update" | "delete">;
-  /** The deployed identity point (membership): names a live member of a company, or nobody. */
-  identity: Pick<IdentityProvider, "getPrincipal">;
+  /** The deployed identity point (membership): names a live member of a company, or nobody. Its capabilities decide whether a stored `any-active` setting counts (it never does without the company's own sign-in). */
+  identity: Pick<IdentityProvider, "getPrincipal" | "capabilities">;
   /** The proof key (`stepUpApprovalKeyOf`). Absent (a host that decides nothing for a person, the dispatcher): every proof is refused. */
   key?: Buffer | undefined;
-  /** The step-up window in seconds. Default FRESH_SIGN_IN_SECONDS. Only ever shortened by the policy hook in front of this adapter. */
+  /** The install's step-up window in seconds. Default FRESH_SIGN_IN_SECONDS. Only ever shortened: by the company's own "fresh sign-in" setting (a shorter window), and by the policy hook in front of this adapter. */
   windowSeconds?: number;
   now: () => Date;
 }
@@ -163,13 +175,24 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
     return match === null ? undefined : { key: stepUpClaimKey(match[1]!, match[2]!), claimId };
   };
 
+  /**
+   * The window for this company: the install's, or the company's own "fresh sign-in" setting when that is a SHORTER window (lane P3, decision 62). A longer window, `any-active` (a step-up is
+   * always asked for here) or no setting keep the install's. A read that fails throws: the caller refuses, never falls back.
+   */
+  const windowFor = async (companyId: unknown): Promise<number> => {
+    if (typeof companyId !== "string" || !OrgIdSchema.safeParse(companyId).success) return windowSeconds;
+    const rule = await readApprovalSignInRule(store, companyId, identity);
+    return rule.mode === "window" && Number.isSafeInteger(rule.seconds) && rule.seconds > 0 ? Math.min(windowSeconds, rule.seconds) : windowSeconds;
+  };
+
   return {
-    async requirement(): Promise<ApprovalRequirement> {
+    async requirement(request: ApprovalRequest): Promise<ApprovalRequirement> {
       // One method for every answer: a fresh step-up. The sign-in rule says the same to the decision gate (it checks `authTime`, the step-up's time).
+      const seconds = await windowFor(request?.companyId);
       return {
         methods: [...method], minApprovers: 1, selfApprovalAllowed: true,
         strongMethods: [...method], rejectMethods: [...method], changesMethods: [...method],
-        signIn: { mode: "window", seconds: windowSeconds },
+        signIn: { mode: "window", seconds },
       };
     },
 
@@ -189,6 +212,7 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       if (claims === undefined) return refuse("not_a_valid_proof");
       if (claims.c !== companyId) return refuse("wrong_company");
       if (claims.r !== decisionRequestIdOf(request.requestId)) return refuse("other_request");
+      if (claims.q !== request.kind) return refuse("other_kind");
       if (claims.s !== subject.id) return refuse("other_subject");
       if (claims.v !== request.revision) return refuse("other_revision");
       if (claims.d !== request.artifactDigest) return refuse("other_content");
@@ -203,8 +227,10 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       if (!(at < claims.e) || claims.e - at > STEP_UP_PROOF_LIFETIME_MS) return refuse("proof_expired");
       if (request.expiresAt !== undefined && !(at < Date.parse(request.expiresAt))) return refuse("expired");
       // The step-up itself: a factor Code owns, no older than the window, and not from the future beyond the clock-skew allowance.
+      let window: number;
+      try { window = await windowFor(companyId); } catch { return refuse("company_rules_unreadable"); }
       const stepUpAt = ISO_INSTANT.test(claims.a) ? Date.parse(claims.a) : Number.NaN;
-      if (!FACTORS.has(claims.m) || !Number.isFinite(stepUpAt) || at - stepUpAt > windowSeconds * 1000 || stepUpAt - at > Math.min(APPROVAL_SIGN_IN_SKEW_SECONDS, windowSeconds) * 1000) return refuse("sign_in_not_fresh");
+      if (!FACTORS.has(claims.m) || !Number.isFinite(stepUpAt) || at - stepUpAt > window * 1000 || stepUpAt - at > Math.min(APPROVAL_SIGN_IN_SKEW_SECONDS, window) * 1000) return refuse("sign_in_not_fresh");
 
       // Who: a live member of the company, and the task's own person (both read now, never from the token alone).
       let person: Principal | undefined;
