@@ -59,10 +59,10 @@ export async function seedEvent(store: StoreLike, companyId: string, seed: Event
   const input = eventInput(companyId, seed);
   const row = workEventRow(input);
   if (partitionCompany !== undefined && partitionCompany !== (seed.orgId ?? companyId)) {
-    const key = workEventKey({ ...(input as { orgId: never; at: string; id: string; taskId: string }), orgId: partitionCompany });
+    const key = workEventKey({ orgId: partitionCompany, at: input.at, id: input.id, taskId: input.taskId });
     await store.put({ item: { ...row, ...key } });
   } else await store.put({ item: row });
-  return (input as { id: string }).id;
+  return input.id;
 }
 
 /** A store that counts the rows its queries hand back, and refuses every write (the reads are append-only from the API's side: they never write). */
