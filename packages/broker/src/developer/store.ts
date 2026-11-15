@@ -7,13 +7,19 @@ import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteComma
 import {
   DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_CODE_SECONDS,
+  DEVELOPER_PASSKEYS_MAX,
   DEVELOPER_SESSION_SECONDS,
+  DEVELOPER_STEP_UP_ATTEMPTS_MAX,
+  DEVELOPER_STEP_UP_EMAILS_MAX,
+  DEVELOPER_STEP_UP_PAGES_PER_HOUR,
+  DEVELOPER_STEP_UP_SECONDS,
   IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped,
   SIGN_IN_CLIENTS_PK,
   agentXError,
   SignInClientRecordSchema,
   signInClientKey,
   type DeveloperSignInMethod,
+  type DeveloperStepUpMethod,
   type SignInClientRecord,
   SignInClientIdSchema,
 } from "@agentx/contracts";
@@ -21,17 +27,56 @@ import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
 /** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
 /** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[]; companyId?: string }
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[]; companyId?: string;
+  /** Lane ID part 2: the client asked for a step-up (`acr_values=step-up`). The sign-in at the provider then only says who it is; Code's own factor follows. */
+  stepUp?: true }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
-  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
+  email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
+  /**
+   * ID-STEPUP-FOLLOWUPS (a): where step-up codes go. Captured once, from the verified email of the person's FIRST sign-in, or set by a company admin; a later sign-in never changes it,
+   * whatever the provider now says (`email` follows the provider; this does not). Absent: no email factor until an admin sets one.
+   */
+  factorEmail?: string; factorEmailSetAt?: string;
+  /** `first_sign_in`, or the developer id of the admin who set it. */
+  factorEmailSetBy?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; companyId?: string }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
 
-/** What a code carries into its session. */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; companyId?: string }
+/**
+ * What a code carries into its session. `stepUpAt` (epoch seconds) and `stepUpMethod` (lane ID part 2): when and how the person last proved it was them with a factor Code owns.
+ * Set only by a completed step-up; a refresh carries them over unchanged, so the step-up ages and is never renewed by a refresh.
+ */
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
+
+/**
+ * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
+ * is the SHA-256 of the last emailed code bound to this record. `emailsSent` and `attempts` count up to their limits and never reset.
+ */
+/** Lane ID part 2b: one passkey registered with Code. `publicKey` is the COSE public key, base64url. */
+export interface PasskeyRecord { credentialId: string; publicKey: string; counter: number; createdAt: string; transports?: string[]; lastUsedAt?: string }
+
+/** The most passkey rows one removal of all of a person's passkeys reads (registration keeps a person at DEVELOPER_PASSKEYS_MAX; more rows than this is an error, never a partial removal). */
+const PASSKEY_ROWS_REMOVE_MAX = 100;
+
+export interface StepUpRecord {
+  grant: CodeGrant & { codeChallenge: string; redirectUri: string };
+  clientState: string;
+  /** Where the code goes: the person's email as it stood before the sign-in that started this page. Absent: no email factor (a passkey only). */
+  email?: string;
+  /** Lane ID part 2b: the WebAuthn challenge handed out last on this page, and for which ceremony (`get` signs in with a passkey; `create` registers one). */
+  challenge?: string;
+  challengeKind?: "get" | "create";
+  /** Set when the emailed code was right and the person is offered a passkey before going back: the step-up's time (epoch seconds). */
+  verifiedAt?: number;
+  expiresAt: number;
+  emailsSent: number;
+  attempts: number;
+  emailCodeHash?: string;
+  consumedAt?: string;
+}
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
 export function methodSince(text: string | undefined): number | undefined {
@@ -264,6 +309,7 @@ export class DeveloperSignInStore {
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
     const at = this.iso();
+    const mark = randomUUID();
     const setClauses = [
       "entityType = :entityType",
       "provider = :provider",
@@ -271,6 +317,8 @@ export class DeveloperSignInStore {
       "subject = :subject",
       "lastSignInAt = :at",
       "firstSignInAt = if_not_exists(firstSignInAt, :at)",
+      // ID-STEPUP-FOLLOWUPS (a): a mark only the write that first sets it holds (two sign-ins in one millisecond have different marks).
+      "firstSignInMark = if_not_exists(firstSignInMark, :mark)",
       "revoked = if_not_exists(revoked, :false)",
     ];
     const removeClauses: string[] = [];
@@ -281,6 +329,7 @@ export class DeveloperSignInStore {
       ":subject": profile.subject,
       ":at": at,
       ":false": false,
+      ":mark": mark,
     };
     if (profile.email === undefined) removeClauses.push("email");
     else { setClauses.push("email = :email"); values[":email"] = profile.email; }
@@ -305,6 +354,18 @@ export class DeveloperSignInStore {
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
       await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+      // ID-STEPUP-FOLLOWUPS (a): the factor email is captured on the FIRST sign-in only. Both conditions hold only for the write that created the record: if_not_exists keeps an earlier
+      // first sign-in's time and mark (a record from before the mark has an older time), so a later sign-in, with whatever email the provider now says, never sets or moves it.
+      try {
+        await this.input.documentClient.send(new UpdateCommand({
+          TableName: this.input.tableName, Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
+          UpdateExpression: "SET factorEmail = :email, factorEmailSetAt = :at, factorEmailSetBy = :by",
+          ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(factorEmail) AND firstSignInAt = :at AND firstSignInMark = :mark",
+          ExpressionAttributeValues: { ":email": profile.email, ":at": at, ":by": "first_sign_in", ":mark": mark },
+        }));
+      } catch (error) {
+        if (!conditionFailed(error)) throw error;
+      }
     }
     const stored = await this.getDeveloper(profile.developerId);
     if (stored === undefined) throw new Error("developer upsert did not persist");
@@ -331,6 +392,25 @@ export class DeveloperSignInStore {
     const stored = await this.getDeveloper(developerId);
     if (stored === undefined) throw agentXError("NOT_FOUND", "your sign-in record was not found; sign in again");
     return stored;
+  }
+
+  /**
+   * ID-STEPUP-FOLLOWUPS (a): a company admin sets a person's factor email. Only while it is still `expected` (undefined: none), so two changes cannot cross. False: the person's record is
+   * gone, or the factor email changed meanwhile.
+   */
+  async setFactorEmail(developerId: string, email: string, expected: string | undefined, by: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `DEVELOPER#${developerId}`, sk: META },
+        UpdateExpression: "SET factorEmail = :email, factorEmailSetAt = :at, factorEmailSetBy = :by",
+        ConditionExpression: `attribute_exists(pk) AND ${expected === undefined ? "attribute_not_exists(factorEmail)" : "factorEmail = :expected"}`,
+        ExpressionAttributeValues: { ":email": email, ":at": this.iso(), ":by": by, ...(expected === undefined ? {} : { ":expected": expected }) },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
   }
 
   async getDeveloper(developerId: string): Promise<DeveloperRecord | undefined> {
@@ -368,8 +448,242 @@ export class DeveloperSignInStore {
       ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
       ...(record.administrator === true ? { administrator: true as const } : {}),
       ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
+      ...(record.stepUpAt === undefined || record.stepUpMethod === undefined ? {} : { stepUpAt: record.stepUpAt, stepUpMethod: record.stepUpMethod }),
       ...(record.companyId === undefined ? {} : { companyId: record.companyId }),
     };
+  }
+
+  // ---- Lane ID part 2: a step-up page in progress ----
+
+  /**
+   * Starts a step-up page for a person the provider just named. Answers the secret for the browser's cookie (only its hash is stored), or undefined when this person already started
+   * DEVELOPER_STEP_UP_PAGES_PER_HOUR pages in the current hour (one rolling counter row per person, changed only by conditional writes), which bounds the emails and the guesses.
+   */
+  async createStepUp(input: Pick<StepUpRecord, "grant" | "clientState" | "email">): Promise<string | undefined> {
+    if (!await this.takeStepUpRate(input.grant.developerId)) return undefined;
+    const secret = randomToken("");
+    const record: StepUpRecord = { ...input, expiresAt: this.seconds() + DEVELOPER_STEP_UP_SECONDS, emailsSent: 0, attempts: 0 };
+    await this.put({ pk: `STEPUP#${sha256Hex(secret)}`, sk: META, entityType: "STEP_UP", ...record }, "attribute_not_exists(pk)");
+    return secret;
+  }
+
+  private async takeStepUpRate(developerId: string): Promise<boolean> {
+    const key = { pk: `STEPUP_RATE#${developerId}`, sk: META };
+    const now = this.seconds();
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: key, UpdateExpression: "SET pages = pages + :one",
+        ConditionExpression: "attribute_exists(pk) AND windowStart > :cutoff AND pages < :max",
+        ExpressionAttributeValues: { ":one": 1, ":cutoff": now - 3600, ":max": DEVELOPER_STEP_UP_PAGES_PER_HOUR },
+      }));
+      return true;
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+    }
+    try {
+      // A new hour: only when there is no row, or its hour is over (a full current hour is never reset here).
+      await this.input.documentClient.send(new PutCommand({
+        TableName: this.input.tableName, Item: { ...key, entityType: "STEP_UP_RATE", windowStart: now, pages: 1, expiresAt: now + 7200 },
+        ConditionExpression: "attribute_not_exists(pk) OR windowStart <= :cutoff", ExpressionAttributeValues: { ":cutoff": now - 3600 },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Hands out a WebAuthn challenge on a live page (replacing any earlier one). False: the page is gone. */
+  async setStepUpChallenge(secret: string, challenge: string, kind: "get" | "create"): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET challenge = :challenge, challengeKind = :kind",
+        // A registration challenge only on a page whose code was proved; a sign-in challenge only on one whose code was not.
+        ConditionExpression: `attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND ${kind === "create" ? "attribute_exists(verifiedAt)" : "attribute_not_exists(verifiedAt)"}`,
+        ExpressionAttributeValues: { ":challenge": challenge, ":kind": kind, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Spends the page's WebAuthn challenge, once, before the answer to it is checked. False: it was spent already, replaced, or is for the other ceremony. */
+  async takeStepUpChallenge(secret: string, challenge: string, kind: "get" | "create"): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "REMOVE challenge, challengeKind",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND challenge = :challenge AND challengeKind = :kind",
+        ExpressionAttributeValues: { ":challenge": challenge, ":kind": kind, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Marks the emailed code as proved, once, at `at` (epoch seconds), and spends the code. False: already marked, or the page is gone. */
+  async markStepUpVerified(secret: string, at: number): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET verifiedAt = :at REMOVE emailCodeHash",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND attribute_not_exists(verifiedAt)",
+        ExpressionAttributeValues: { ":at": at, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  // ---- Lane ID part 2b: the passkeys a person registered with Code ----
+
+  /** The person's passkeys (at most DEVELOPER_PASSKEYS_MAX are ever read). Rows that do not read are left out. */
+  async listPasskeys(developerId: string): Promise<PasskeyRecord[]> {
+    const response = await this.input.documentClient.send(new QueryCommand({
+      TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: DEVELOPER_PASSKEYS_MAX,
+    })) as { Items?: Array<Record<string, unknown>> };
+    return (response.Items ?? []).flatMap((item) => {
+      const { credentialId, publicKey, counter, createdAt, transports, lastUsedAt } = item;
+      if (typeof credentialId !== "string" || typeof publicKey !== "string" || typeof counter !== "number" || !Number.isSafeInteger(counter) || counter < 0 || typeof createdAt !== "string") return [];
+      const listed = Array.isArray(transports) ? transports.filter((entry): entry is string => typeof entry === "string").slice(0, 8) : undefined;
+      return [{ credentialId, publicKey, counter, createdAt, ...(listed === undefined ? {} : { transports: listed }), ...(typeof lastUsedAt === "string" ? { lastUsedAt } : {}) }];
+    });
+  }
+
+  /** Registers a passkey; false when this credential is already registered (to anyone's row of this person). */
+  async addPasskey(developerId: string, passkey: PasskeyRecord): Promise<boolean> {
+    try {
+      await this.put({ pk: `PASSKEYS#${developerId}`, sk: passkey.credentialId, entityType: "PASSKEY", ...passkey }, "attribute_not_exists(pk)");
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** ID-STEPUP-FOLLOWUPS (b): removes one of a person's passkeys. False: they have no passkey with that id. */
+  async removePasskey(developerId: string, credentialId: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk: credentialId }, ConditionExpression: "attribute_exists(pk)" }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * ID-STEPUP-FOLLOWUPS (b): removes every passkey row of a person, readable or not, and answers how many. A person with more than PASSKEY_ROWS_REMOVE_MAX rows throws before anything is
+   * removed (never a partial removal), and the caller says it could not finish.
+   */
+  async removeAllPasskeys(developerId: string): Promise<number> {
+    // Counted first: more rows than one removal reads is refused before anything is deleted.
+    let counted = 0;
+    let start: Record<string, unknown> | undefined;
+    do {
+      const page = await this.input.documentClient.send(new QueryCommand({
+        TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: 25,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: unknown[]; LastEvaluatedKey?: Record<string, unknown> };
+      counted += (page.Items ?? []).length;
+      if (counted > PASSKEY_ROWS_REMOVE_MAX) throw new Error("more passkey rows than one removal reads");
+      start = page.LastEvaluatedKey;
+    } while (start !== undefined);
+    let removed = 0;
+    for (;;) {
+      const response = await this.input.documentClient.send(new QueryCommand({
+        TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": `PASSKEYS#${developerId}` }, ConsistentRead: true, Limit: 25,
+      })) as { Items?: Array<Record<string, unknown>> };
+      const rows = (response.Items ?? []).flatMap((item) => (typeof item.sk === "string" ? [item.sk] : []));
+      if (rows.length === 0) return removed;
+      for (const sk of rows) {
+        if (removed >= PASSKEY_ROWS_REMOVE_MAX) throw new Error("more passkey rows than one removal reads");
+        await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk } }));
+        removed += 1;
+      }
+    }
+  }
+
+  /** Moves a passkey's signature counter on, only from the value it was read at (two uses of one assertion cannot both pass). */
+  async setPasskeyCounter(developerId: string, credentialId: string, from: number, to: number): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `PASSKEYS#${developerId}`, sk: credentialId },
+        UpdateExpression: "SET #counter = :to, lastUsedAt = :at", ConditionExpression: "attribute_exists(pk) AND #counter = :from",
+        ExpressionAttributeNames: { "#counter": "counter" }, ExpressionAttributeValues: { ":to": to, ":from": from, ":at": this.iso() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** A live step-up page (not expired, not used), or undefined. */
+  async getStepUp(secret: string): Promise<StepUpRecord | undefined> {
+    if (secret === "") return undefined;
+    const item = await this.get<StepUpRecord>(`STEPUP#${sha256Hex(secret)}`);
+    return item === undefined || item.expiresAt <= this.seconds() || item.consumedAt !== undefined ? undefined : strip(item);
+  }
+
+  /** Binds a newly emailed code to the page, if it may send another (at most DEVELOPER_STEP_UP_EMAILS_MAX, and none once its tries are used up). False: it may not, or the page is gone. */
+  async recordStepUpEmail(secret: string, codeHash: string): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET emailCodeHash = :hash, emailsSent = emailsSent + :one",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND emailsSent < :max AND attempts < :tries",
+        ExpressionAttributeValues: { ":hash": codeHash, ":one": 1, ":now": this.seconds(), ":max": DEVELOPER_STEP_UP_EMAILS_MAX, ":tries": DEVELOPER_STEP_UP_ATTEMPTS_MAX },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Counts one try at a code BEFORE it is compared (at most DEVELOPER_STEP_UP_ATTEMPTS_MAX per page), and answers the page as it stands after the count. Undefined: no tries left, or the page is gone. */
+  async countStepUpAttempt(secret: string): Promise<StepUpRecord | undefined> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "SET attempts = attempts + :one",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND attempts < :max",
+        ExpressionAttributeValues: { ":one": 1, ":now": this.seconds(), ":max": DEVELOPER_STEP_UP_ATTEMPTS_MAX },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) return undefined;
+      throw error;
+    }
+    return this.getStepUp(secret);
+  }
+
+  /** Uses the page up, once. Undefined: it was already used, expired, or never existed. */
+  async consumeStepUp(secret: string): Promise<StepUpRecord | undefined> {
+    const pk = `STEPUP#${sha256Hex(secret)}`;
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk, sk: META },
+        UpdateExpression: "SET consumedAt = :at",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt)",
+        ExpressionAttributeValues: { ":at": this.iso(), ":now": this.seconds() },
+      }));
+    } catch (error) {
+      if (conditionFailed(error)) return undefined;
+      throw error;
+    }
+    const item = await this.get<StepUpRecord>(pk);
+    return item === undefined ? undefined : strip(item);
   }
 
   /** `endsAt` (epoch seconds) is for a browser review sign-in, which has its own fixed length; every other session lasts DEVELOPER_SESSION_SECONDS. The stored record's clean-up time follows `endsAt`. */
