@@ -99,7 +99,7 @@ export function createTeamRecord(input: { store: DocumentStore; companyId: OrgId
     const pk = pkOf(draft.project);
     const sk = `${ROW_PREFIX}${draft.occurredAt}#${id}`;
     // One expiry for the row, its pointer and its source mark, so the sweep never leaves a row its pointer no longer finds.
-    const expiry = { [expiryAttribute]: Math.floor(input.now() / 1000) + RECORD_KEEP_DAYS * 86_400 };
+    const expiry: Record<string, number> = Object.fromEntries([[expiryAttribute, Math.floor(input.now() / 1000) + RECORD_KEEP_DAYS * 86_400]]);
     const row: StoredDocument = {
       pk, sk, entityType: "TEAM_RECORD_ROW", id, kind: draft.kind, project: draft.project, text, taskId: draft.taskId, authorId: draft.authorId, sourceRef: draft.sourceRef.slice(0, 300),
       occurredAt: draft.occurredAt, ...(draft.url === undefined ? {} : { url: draft.url.slice(0, 500) }), ...expiry,
