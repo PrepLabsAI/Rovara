@@ -3,7 +3,8 @@
 // and the batch is acknowledged only once its usage is booked: a booking that fails fails the batch, the worker sends it again, and the ledger counts each usage once.
 //
 // Never $0 for unknown usage: a model no price table knows is charged the cautious price (hosted metering); a cost the provider reported that is higher than the table's is charged instead;
-// and a usage report that cannot be read (no model, token counts that are not whole numbers, or nothing at all to price) is booked as a usage with NO dollar figure, so the task's and
+// a report with no tokens and no cost is charged a small fixed amount (`EMPTY_REPORT_CHARGE_MICROS`); and a usage report that cannot be read (no model, token counts that are not whole
+// numbers, a cost that is not a number) is booked as a usage with NO dollar figure, so the task's and
 // the company's day figures say they are a floor and the admission refuses new spending for the rest of the day (`spend_unknown`).
 //
 // `bookUsageReport` is the one entry for any reporter: the worker's events here, and the Cloud gateway's usage report when it lands (it names the task and its own entry id).
@@ -18,6 +19,8 @@ export const USAGE_EVENT_TYPE = "usage";
 export const UNREADABLE_USAGE_PROVIDER = "rovara-unreadable-usage";
 /** A booking that loses a race on the task's total is tried this many times before the batch fails (the worker then sends it again). */
 const BOOKING_ATTEMPTS = 5;
+/** What a usage report with no tokens and no cost is charged ($0.25). */
+export const EMPTY_REPORT_CHARGE_MICROS = 250_000;
 export const NO_TASK_FOR_USAGE = "the usage of this operation names no task";
 
 const natural = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -45,8 +48,11 @@ export function readUsagePayload(payload: unknown): { usage: ModelUsage; reporte
   const cost = record["costUsd"];
   if (cost !== undefined && cost !== null && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)) return undefined;
   const reportedMicros = typeof cost === "number" && cost > 0 ? Math.ceil(cost * 1_000_000) : undefined;
-  // A report with no tokens and no cost is a call nobody can price, not a free one.
-  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined) return undefined;
+  // A report with no tokens and no cost (a session whose call failed before any token, or whose provider sent no usage) is charged a small fixed amount, never $0: the call may have been
+  // billed. It is not taken as unreadable, which would stop the whole company for the day.
+  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined) {
+    return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, reportedMicros: EMPTY_REPORT_CHARGE_MICROS };
+  }
   if (reportedMicros !== undefined && !Number.isSafeInteger(reportedMicros)) return undefined;
   return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, ...(reportedMicros === undefined ? {} : { reportedMicros }) };
 }

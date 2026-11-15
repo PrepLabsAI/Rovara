@@ -24,7 +24,8 @@ import {
   type TransactItem,
 } from "@agentx/contracts";
 import { companyDayKey, createCostLedger, costPartition, utcDayOf, type CostLedger } from "../core/cost/ledger.js";
-import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, holdExists, holdItems, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
+import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, holdItems, holdStateOf, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
+import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
@@ -140,14 +141,16 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
     }
     if (typeof request.idempotencyKey !== "string" || request.idempotencyKey === "") return { decision: refuse("spend_unknown", SPEND_UNKNOWN), items: [] };
     const asked = holdMicrosOf(request, estimate, settings);
-    // Within a cap: holding nothing needs the spend BELOW the cap; holding an amount needs spend plus the amount AT MOST the cap.
+    // Within a cap: spend plus what is held AT MOST the cap. A task's booked spend holding nothing more needs it BELOW the task cap; the day holding nothing more (a machine start of work
+    // already admitted, whose own hold may be what fills the day) needs it at most AT the day cap.
     const fits = (spent: number, cap: number): boolean => (asked === 0 ? spent < cap : spent + asked <= cap);
+    const dayFits = (spent: number): boolean => spent + asked <= settings.companyDayCapMicros;
     const holdOn = (path: string, cap: number) => (asked === 0 ? when.lt(path, cap) : when.lte(path, cap - asked));
     const at = options.now();
     const day = utcDayOf(at);
     const load = await readDayLoad(store, companyId, day);
     if (load === "unknown") return { decision: refuse("spend_unknown", SPEND_UNKNOWN), items: [] };
-    if (!fits(load, settings.companyDayCapMicros)) return { decision: refuse("company_day_cap", COMPANY_DAY_CAP_REACHED), items: [] };
+    if (!dayFits(load)) return { decision: refuse("company_day_cap", COMPANY_DAY_CAP_REACHED), items: [] };
     const taskId = request.subject?.type === "task" && typeof request.subject.id === "string" && request.subject.id !== "" ? request.subject.id : undefined;
     // A task start's hold is the task's own: the task's booked usage draws it down (the total names it).
     const ownsHold = asked > 0 && request.action === "task.start" && taskId !== undefined;
@@ -174,11 +177,16 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
     return { decision: reservationId === undefined ? { allowed: true } : { allowed: true, reservationId }, items };
   }
 
-  /** An earlier ask with the same key took its hold: the same decision, and nothing held again. */
-  const heldBefore = async (request: AdmissionRequest): Promise<string | undefined> => {
+  /**
+   * An earlier ask with the same key took its hold: while it is open, the same decision and nothing held again. Once it was settled or given back, the key's allowance is spent: the ask is
+   * refused (a new ask needs a new key), never answered "allowed" with nothing held.
+   */
+  const heldBefore = async (request: AdmissionRequest): Promise<AdmissionDecision | undefined> => {
     if (typeof request?.companyId !== "string" || !isAllowed(request.companyId) || typeof request.idempotencyKey !== "string" || request.idempotencyKey === "") return undefined;
     const reservationId = reservationIdOf(request.companyId, request.idempotencyKey);
-    return (await holdExists(store, reservationId)) ? reservationId : undefined;
+    const held = await holdStateOf(store, reservationId);
+    if (held === undefined) return undefined;
+    return held.state === "open" ? { allowed: true, reservationId } : refuse("reservation_closed", RESERVATION_CLOSED);
   };
 
   return {
@@ -187,7 +195,7 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
     async admit(request) {
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const earlier = await heldBefore(request);
-        if (earlier !== undefined) return { allowed: true, reservationId: earlier };
+        if (earlier !== undefined) return earlier;
         const { decision, items } = await decide(request);
         // A refusal, or a gate that holds nothing, writes nothing.
         if (!decision.allowed || decision.reservationId === undefined) return decision;
@@ -198,7 +206,7 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
     },
     async stage(request) {
       const earlier = await heldBefore(request);
-      if (earlier !== undefined) return { decision: { allowed: true, reservationId: earlier }, items: [] };
+      if (earlier !== undefined) return { decision: earlier, items: [] };
       const { decision, items } = await decide(request);
       return { decision, items: decision.allowed ? items : [] };
     },
@@ -209,16 +217,54 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
       await closeHold(store, reservationId, { kind: "settle", actualMicros }, options.now);
     },
     async release(reservationId) {
-      await closeHold(store, reservationId, { kind: "release" }, options.now);
+      await releaseOrKeep(store, reservationId, options.now);
     },
   };
+}
+
+export const RESERVATION_CLOSED = "This request's spending allowance was already used or given back. Ask again as a new request.";
+
+/** The most of a task's runs `runsOwed` reads the ledger for; a task with more unfinished or failed runs is taken as owing. */
+const OWED_RUNS_MAX = 50;
+
+/**
+ * Whether a run of the task may have spent without its usage being booked: a model run (any step but the checks) that did not succeed and has no booked usage entry. Its worker reports
+ * usage only at the end of a run, so a run stopped, closed, lost or still going has none yet. Anything that cannot be read is taken as owing.
+ */
+export async function runsOwed(store: DocumentStore, companyId: string, taskId: string): Promise<boolean> {
+  try {
+    const task = await readTask({ store }, taskId);
+    if (task === undefined) return false;
+    if (task.companyId !== companyId) return true;
+    const runs = (await workspaceOperations({ store, companyId }, task.workspaceId))
+      .filter((operation) => operation.kind === "task" && operation.workflowMode !== "CHECKS" && operation.status !== "SUCCEEDED");
+    if (runs.length > OWED_RUNS_MAX) return true;
+    for (const run of runs) {
+      const booked = await store.query({ pk: costPartition(companyId, taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage:${run.id}:` }, limit: 1 });
+      if (booked.items.length === 0) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Gives a hold back, except a task's own hold while a run of the task may have spent without its usage booked (`runsOwed`): that one is settled with the actual unknown, so it keeps what it
+ * still holds (never $0 for a run whose spend was not reported).
+ */
+export async function releaseOrKeep(store: DocumentStore, reservationId: unknown, now: () => Date): Promise<void> {
+  const held = await holdStateOf(store, reservationId);
+  if (held === undefined || held.state !== "open") return;
+  const keep = held.taskId !== undefined && await runsOwed(store, held.companyId, held.taskId);
+  await closeHold(store, reservationId, keep ? { kind: "settle", actualMicros: undefined } : { kind: "release" }, now);
 }
 
 /** The admission's own sweep (the `admission-hold-sweep` job): gives back the company's holds that are past their time. */
 export function createHostedHoldSweep(deps: { store: DocumentStore; companyId: OrgId; now: () => Date }): CoreService {
   return {
     async pass({ budgetMs }) {
-      return await sweepExpiredHolds(deps.store, deps.companyId, { budgetMs, now: deps.now });
+      return await sweepExpiredHolds(deps.store, deps.companyId, { budgetMs, now: deps.now, close: (reservationId) => releaseOrKeep(deps.store, reservationId, deps.now) });
     },
   };
 }

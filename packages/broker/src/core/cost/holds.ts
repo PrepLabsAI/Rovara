@@ -75,9 +75,10 @@ export async function readDayLoad(store: Pick<DocumentStore, "get">, companyId: 
   return loadMicros;
 }
 
-/** The condition that holds a day under its cap with `micros` more on it: no row yet, or a readable row whose load leaves room and that has no usage without a dollar figure. */
+/** The condition that holds a day within its cap with `micros` more on it: no row yet, or a readable row whose load leaves room and that has no usage without a dollar figure. */
 export function dayRoomCondition(capMicros: number, micros: number) {
-  const room = micros === 0 ? when.lt("loadMicros", capMicros) : when.lte("loadMicros", capMicros - micros);
+  // Holding nothing (a machine start of work already admitted, whose own hold may be what fills the day) needs the day at most AT its cap, not past it.
+  const room = when.lte("loadMicros", capMicros - micros);
   return when.or(when.absent(), when.and(room, when.eq("uncountedEntries", 0)));
 }
 
@@ -127,10 +128,15 @@ export function holdItems(request: HoldRequest): TransactItem[] {
   ];
 }
 
-/** Whether a hold was taken for this reservation id (by an earlier ask with the same key). */
-export async function holdExists(store: Pick<DocumentStore, "get">, reservationId: string): Promise<boolean> {
+/** The state of the hold taken for this reservation id (by an earlier ask with the same key), and the task it belongs to; undefined when there is none, or it does not read. */
+export async function holdStateOf(store: Pick<DocumentStore, "get">, reservationId: unknown): Promise<{ state: "open" | "settled" | "released"; companyId: string; taskId?: string } | undefined> {
   const companyId = companyOfReservation(reservationId);
-  return companyId !== undefined && holdOf(await store.get(holdKey(companyId, reservationId)), companyId, reservationId) !== undefined;
+  if (companyId === undefined) return undefined;
+  const row = await store.get(holdKey(companyId, reservationId as string));
+  const hold = holdOf(row, companyId, reservationId as string);
+  if (hold === undefined) return undefined;
+  const taskId = row?.["taskId"];
+  return { state: hold.state, companyId, ...(typeof taskId === "string" && taskId !== "" ? { taskId } : {}) };
 }
 
 // ---- closing a hold
@@ -194,7 +200,8 @@ export function createLedgerHolds(store: Pick<DocumentStore, "get">): LedgerHold
 export const HOLD_SWEEP_MAX = 200;
 
 /** Gives back the company's open holds past their time (a caller that crashed before it could close one), oldest first, within the time and count it is given. */
-export async function sweepExpiredHolds(store: DocumentStore, companyId: string, options: { budgetMs: number; now: () => Date }): Promise<{ released: number; failed: number; more: boolean }> {
+export async function sweepExpiredHolds(store: DocumentStore, companyId: string, options: { budgetMs: number; now: () => Date; close?: (reservationId: string) => Promise<void> }): Promise<{ released: number; failed: number; more: boolean }> {
+  const close = options.close ?? ((reservationId: string) => closeHold(store, reservationId, { kind: "release" }, options.now));
   if (!OrgIdSchema.safeParse(companyId).success) throw new Error("the hold sweep needs a company");
   const started = options.now().getTime();
   const nowSeconds = Math.floor(started / 1000);
@@ -209,13 +216,13 @@ export async function sweepExpiredHolds(store: DocumentStore, companyId: string,
       if (options.now().getTime() - started >= options.budgetMs) return { released, failed, more: true };
       const reservationId = row["reservationId"];
       const expiresAt = row["expiresAt"];
-      // An index row that does not read as one of this company's is left for its own expiry (it holds nothing: the day's figures live on the hold).
-      if (companyOfReservation(reservationId) !== companyId || !natural(expiresAt)) { failed += 1; continue; }
+      // An index row that does not read as one of this company's is left for its own expiry (it holds nothing: the day's figures live on the hold), and does not count against the pass.
+      if (companyOfReservation(reservationId) !== companyId || !natural(expiresAt)) continue;
       try {
         const hold = holdOf(await store.get(holdKey(companyId, reservationId as string)), companyId, reservationId as string);
         // A hold already closed (or one that does not read) keeps nothing open here; an open one is given back.
         if (hold === undefined || hold.state !== "open") await store.delete({ key: openHoldKey(companyId, expiresAt, reservationId as string) });
-        else await closeHold(store, reservationId, { kind: "release" }, options.now);
+        else await close(reservationId as string);
         released += 1;
       } catch {
         failed += 1;

@@ -154,14 +154,35 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   return { artifactId };
 }
 
-async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
+function parseEvents(body: Record<string, unknown>): Array<{ type: string; timestamp: string; payload: unknown }> {
   const events = body["events"];
   if (!Array.isArray(events) || events.length < 1 || events.length > EVENTS_MAX) throw agentXError("CONFIG_INVALID", `a batch holds 1 through ${EVENTS_MAX} events`);
-  const parsed = events.map((event) => {
+  return events.map((event) => {
     const record = event as Record<string, unknown>;
     if (record === null || typeof record !== "object" || typeof record["type"] !== "string" || typeof record["timestamp"] !== "string") throw agentXError("CONFIG_INVALID", "an event needs a type and a timestamp");
     return { type: record["type"], timestamp: record["timestamp"], payload: record["payload"] ?? null };
   });
+}
+
+/** The event type a worker reports a model session's spend with. */
+const USAGE_EVENT = "usage";
+
+/**
+ * A batch of an operation that has ended (stopped, closed, or ended by the broker): its usage is still booked, because the spend happened (lane L8). A batch of usage alone is then taken
+ * (nothing is stored); any other batch is refused as terminal output after its usage was booked, and booking it again when the worker resends it counts nothing more.
+ */
+async function bookTerminalUsage(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number } | undefined> {
+  if (deps.bookUsage === undefined) return undefined;
+  let parsed: Array<{ type: string; timestamp: string; payload: unknown }>;
+  // A batch that does not read is answered as any terminal output is.
+  try { parsed = parseEvents(body); } catch { return undefined; }
+  if (!parsed.some((event) => event.type === USAGE_EVENT)) return undefined;
+  await deps.bookUsage(operation, parsed);
+  return parsed.every((event) => event.type === USAGE_EVENT) ? { accepted: parsed.length } : undefined;
+}
+
+async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
+  const parsed = parseEvents(body);
   // The usage the batch reports is booked first: an acknowledged batch is a booked one.
   if (deps.bookUsage !== undefined) await deps.bookUsage(operation, parsed);
   // The work item checkpoints of an ordered run (spec 059) are judged against the approved run and written into the task's workflow BEFORE the batch is acknowledged: the worker goes on to the next item only
@@ -280,7 +301,11 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
-      if (action !== "result" && isTerminalStatus(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+      if (action !== "result" && isTerminalStatus(operation.status)) {
+        const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
+        if (booked !== undefined) return json(200, booked);
+        throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+      }
       if (isCodingRunUpload(action)) return json(200, await handleCodingRunUpload(action, uploadStores(deps), operation, bodyOf(request)));
       if (action === "e2e-admission" || action === "e2e-evidence") {
         if (deps.e2e === undefined) throw agentXError("NOT_FOUND", "this callback is not available on this install");

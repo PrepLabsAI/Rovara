@@ -13,7 +13,7 @@ import { SPEND_UNKNOWN, UNKNOWN_MODEL_PRICE, createHostedAdmission, createHosted
 import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { coreMoneyWiring } from "../../packages/broker/src/aws/core-engine-root.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { NO_TASK_FOR_USAGE, UNREADABLE_USAGE_PROVIDER, createUsageBooking, readUsagePayload, type UsageBooking } from "../../packages/broker/src/core-host/usage-booking.js";
+import { EMPTY_REPORT_CHARGE_MICROS, NO_TASK_FOR_USAGE, UNREADABLE_USAGE_PROVIDER, createUsageBooking, readUsagePayload, type UsageBooking } from "../../packages/broker/src/core-host/usage-booking.js";
 import { costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
 import { COMPANY_A_ID, COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -45,14 +45,16 @@ describe("reading a usage report", () => {
   it("reads the provider, the model, whole token counts and a reported dollar cost", () => {
     expect(readUsagePayload(telemetry("known", 10, 20, 0.0000015))).toEqual({ usage: { provider: "anthropic", modelId: "known", tokens: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 } }, reportedMicros: 2 });
     expect(readUsagePayload(telemetry("known", 10, 20, null))).toEqual({ usage: { provider: "anthropic", modelId: "known", tokens: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 } } });
-    // Only a cost reported with no tokens still prices.
+    // Only a cost reported with no tokens still prices; no tokens and no cost is charged the fixed amount, never $0.
     expect(readUsagePayload(telemetry("known", 0, 0, 0.5))).toMatchObject({ reportedMicros: 500_000 });
+    for (const empty of [telemetry("known", 0, 0, null), telemetry("known", 0, 0, 0)]) expect(readUsagePayload(empty)).toMatchObject({ reportedMicros: EMPTY_REPORT_CHARGE_MICROS });
+    expect(EMPTY_REPORT_CHARGE_MICROS).toBeGreaterThan(0);
   });
 
   it("reads nothing it cannot trust as a usage: no model, counts that are not whole numbers, a bad cost, or nothing at all to price", () => {
     for (const payload of [null, "usage", [], {}, { ...telemetry("known", 1, 1), provider: "" }, { ...telemetry("known", 1, 1), modelId: undefined }, { ...telemetry("known", 1, 1), tokens: { input: 1.5, output: 0, cacheRead: 0, cacheWrite: 0 } },
       { ...telemetry("known", 1, 1), tokens: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 } }, { ...telemetry("known", 1, 1), tokens: { input: 1, output: 0 } }, { ...telemetry("known", 1, 1), costUsd: -1 },
-      { ...telemetry("known", 1, 1), costUsd: "1" }, { ...telemetry("known", 1, 1), costUsd: Number.POSITIVE_INFINITY }, telemetry("known", 0, 0, null), telemetry("known", 0, 0, 0), { ...telemetry("known", 1, 1), costUsd: 1e300 }]) {
+      { ...telemetry("known", 1, 1), costUsd: "1" }, { ...telemetry("known", 1, 1), costUsd: Number.POSITIVE_INFINITY }, { ...telemetry("known", 1, 1), costUsd: 1e300 }]) {
       expect(readUsagePayload(payload), JSON.stringify(payload)).toBeUndefined();
     }
   });
@@ -84,13 +86,27 @@ describe("booking a core operation's usage events", () => {
   it("books an unreadable report as a usage with no dollar figure: the day's spend is then unknown and the admission refuses new spending", async () => {
     const w = world();
     await w.pointer();
-    expect(await w.booking.bookOperationEvents(w.operation, [event({ tokens: "lots" }), event(telemetry("known", 0, 0, null), "2026-11-15T10:00:01.000Z")])).toEqual({ booked: 2, unreadable: 2 });
+    expect(await w.booking.bookOperationEvents(w.operation, [event({ tokens: "lots" }), event({ ...telemetry("known", 1, 0), costUsd: "free" }, "2026-11-15T10:00:01.000Z")])).toEqual({ booked: 2, unreadable: 2 });
     expect(await w.ledger.taskCost(ORG, w.taskId)).toMatchObject({ micros: 0, entries: 2, unpricedEntries: 2 });
     expect(await w.store.get(companyDayKey(ORG, DAY))).toMatchObject({ usdMicros: 0, uncountedEntries: 2 });
     const entries = (await w.store.query({ pk: costPartition(ORG, w.taskId), sk: { op: "beginsWith", prefix: "ENTRY#" } })).items;
     expect(entries.map((e) => [e["provider"], e["micros"]])).toEqual([[UNREADABLE_USAGE_PROVIDER, undefined], [UNREADABLE_USAGE_PROVIDER, undefined]]);
     const admission = createHostedAdmission({ settings: { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 }, store: w.store, ledger: w.ledger, now: () => NOW });
     expect(await admission.admit({ companyId: ORG, idempotencyKey: "next", action: "task.start", subject: { type: "task", id: randomUUID() } })).toEqual({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
+  });
+
+  it("charges a report with no tokens and no cost the fixed amount, and the company may go on spending", async () => {
+    const w = world();
+    await w.pointer();
+    await w.booking.bookOperationEvents(w.operation, [event(telemetry("known", 0, 0, null))]);
+    expect(await w.store.get(companyDayKey(ORG, DAY))).toMatchObject({ usdMicros: EMPTY_REPORT_CHARGE_MICROS, uncountedEntries: 0 });
+  });
+
+  it("books two different usages reported at the same moment as two", async () => {
+    const w = world();
+    await w.pointer();
+    expect(await w.booking.bookOperationEvents(w.operation, [event(telemetry("known", 1_000_000, 0)), event(telemetry("known", 2_000_000, 0))])).toEqual({ booked: 2, unreadable: 0 });
+    expect((await w.ledger.taskCost(ORG, w.taskId)).micros).toBe(9_000_000);
   });
 
   it("fails, in fixed words, a batch with usage whose operation names no task; a batch with no usage reads nothing", async () => {
@@ -112,10 +128,10 @@ describe("booking a core operation's usage events", () => {
 
 describe("the callback layer books before it acknowledges", () => {
   const key = "k".repeat(40);
-  async function callbackWorld(bookUsage?: Parameters<typeof createCallbackHandler>[0]["bookUsage"]) {
+  async function callbackWorld(bookUsage?: Parameters<typeof createCallbackHandler>[0]["bookUsage"], status = "RUNNING") {
     const w = world();
     await w.pointer();
-    await w.store.put({ item: { ...operationKey(w.operation.workspaceId, w.operation.id), entityType: "OPERATION", id: w.operation.id, workspaceId: w.operation.workspaceId, companyId: ORG, kind: "task", status: "RUNNING", fence: 1, eventSequence: 0 } });
+    await w.store.put({ item: { ...operationKey(w.operation.workspaceId, w.operation.id), entityType: "OPERATION", id: w.operation.id, workspaceId: w.operation.workspaceId, companyId: ORG, kind: "task", status, fence: 1, eventSequence: 0 } });
     const flow = { store: w.store, companyId: ORG, callbackSigningKey: key, now: () => NOW, log: () => undefined } as unknown as TaskFlowDeps;
     const handler = createCallbackHandler({ flow, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } }, ...(bookUsage === undefined ? {} : { bookUsage }) });
     const token = new CallbackCapabilities(Buffer.from(key)).issue({ workspaceId: w.operation.workspaceId, operationId: w.operation.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
@@ -149,6 +165,31 @@ describe("the callback layer books before it acknowledges", () => {
   });
 });
 
+describe("the usage of an operation that already ended (stopped or closed) is still booked (review H1)", () => {
+  const key = "k".repeat(40);
+  it("books a usage batch of a terminal operation and takes it; any other batch is refused after its usage is booked; without booking nothing changes", async () => {
+    for (const status of ["CANCELLED", "INTERRUPTED"]) {
+      const w = world();
+      await w.pointer();
+      await w.store.put({ item: { ...operationKey(w.operation.workspaceId, w.operation.id), entityType: "OPERATION", id: w.operation.id, workspaceId: w.operation.workspaceId, companyId: ORG, kind: "task", status, fence: 1, eventSequence: 0 } });
+      const flow = { store: w.store, companyId: ORG, callbackSigningKey: key, now: () => NOW, log: () => undefined } as unknown as TaskFlowDeps;
+      const make = (withBooking: boolean) => createCallbackHandler({ flow, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } }, ...(withBooking ? { bookUsage: (operation, events) => w.booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId: ORG }, events) } : {}) });
+      const token = new CallbackCapabilities(Buffer.from(key)).issue({ workspaceId: w.operation.workspaceId, operationId: w.operation.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
+      const post = (handler: ReturnType<typeof make>, events: unknown[]) => handler({ method: "POST", path: `/v1/internal/workspaces/${w.operation.workspaceId}/operations/${w.operation.id}/events`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify({ events }) });
+      expect((await post(make(false), [event(telemetry("known", 1_000_000, 0))])).statusCode, status).toBe(409);
+      expect(await w.store.get(companyDayKey(ORG, DAY))).toBeUndefined();
+      const usageOnly = await post(make(true), [event(telemetry("known", 1_000_000, 0))]);
+      expect(usageOnly.statusCode).toBe(200);
+      expect(JSON.parse(usageOnly.body ?? "{}")).toEqual({ accepted: 1 });
+      const mixed = await post(make(true), [event(telemetry("known", 2_000_000, 0), "2026-11-15T10:00:05.000Z"), event({ note: "x" }, NOW.toISOString(), "progress")]);
+      expect(mixed.statusCode).toBe(409);
+      expect((await w.ledger.taskCost(ORG, w.taskId)).micros).toBe(9_000_000);
+      // Nothing of the terminal batches was stored as events.
+      expect((await w.store.query({ pk: `WORKSPACE#${w.operation.workspaceId}`, sk: { op: "beginsWith", prefix: `EVENT#${w.operation.id}#` } })).items).toEqual([]);
+    }
+  });
+});
+
 describe("the ledger without holds (the laptop) is unchanged", () => {
   it("writes the company's day row exactly as before: no load and no reservation", async () => {
     const store = new MemoryDocumentStore();
@@ -167,7 +208,7 @@ describe("the broker root's money wiring (one company's runtime)", () => {
     const store = new MemoryDocumentStore();
     const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } });
     const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), ...modules], context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [] });
-    const money = coreMoneyWiring(registry, COMPANY_A_ID as OrgId, () => NOW);
+    const money = coreMoneyWiring(registry, COMPANY_A_ID, () => NOW);
     const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: COMPANY_B_ID } as unknown as OperationRecord;
     const taskId = randomUUID();
     await store.put({ item: { ...taskPointerKey(operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
@@ -178,7 +219,7 @@ describe("the broker root's money wiring (one company's runtime)", () => {
     const admission = registry.require("admission");
     expect(admission.enforcesCost).toBe(true);
     await admission.admit({ companyId: COMPANY_A_ID, idempotencyKey: "call", action: "model.call" });
-    const later = coreMoneyWiring(registry, COMPANY_A_ID as OrgId, () => new Date(NOW.getTime() + 3 * 3_600_000));
+    const later = coreMoneyWiring(registry, COMPANY_A_ID, () => new Date(NOW.getTime() + 3 * 3_600_000));
     expect(await later.holdSweep.pass({ budgetMs: 10_000 })).toMatchObject({ released: 1 });
   });
 });

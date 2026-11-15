@@ -1,15 +1,17 @@
 // Switch-on lane L8: the deployed admission's caps are HELD. A start takes its path's planning allowance on the company's day in the start's own transaction, so concurrent starts see each
 // other; booked usage draws the task's own hold down so the day counts it once; settle keeps the actual (all of the hold when unknown, never $0); release gives the rest back; the sweep gives
 // back a hold nobody closed. Every money guard here has a mutant (see the lane notes).
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { AdmissionRequest, MeterEntry, OrgId, TransactItem } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
 import { HOLD_SWEEP_MAX, companyOfReservation, holdKey, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../../packages/broker/src/core/cost/holds.js";
 import {
-  COMPANY_DAY_CAP_REACHED, SPEND_UNKNOWN, UNKNOWN_CALL_HOLD_MICROS, createHostedAdmission, createHostedHoldSweep, createHostedLedger, type HostedAdmissionSettings,
+  COMPANY_DAY_CAP_REACHED, RESERVATION_CLOSED, SPEND_UNKNOWN, UNKNOWN_CALL_HOLD_MICROS, createHostedAdmission, createHostedHoldSweep, createHostedLedger, type HostedAdmissionSettings,
 } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { runAdmissionConformance } from "../support/ports/policy-conformance.js";
+import { operationKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY_A_ID as COMPANY_A, COMPANY_B_ID as COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
@@ -108,6 +110,17 @@ describe("a task start holds its path's planning allowance on the company's day"
     expect(again).toEqual({ decision: { allowed: true, reservationId: reservationOf(first.staged) }, items: [] });
     expect(await w.day()).toMatchObject({ loadMicros: 5_000_000 });
   });
+
+  it("refuses a key whose hold was already given back or settled: never allowed with nothing held", async () => {
+    const w = setup();
+    const call = await w.admission.admit({ ...dollar(1), idempotencyKey: "once" });
+    await w.admission.release((call as { reservationId: string }).reservationId);
+    expect(await w.admission.admit({ ...dollar(1), idempotencyKey: "once" })).toEqual({ allowed: false, code: "reservation_closed", message: RESERVATION_CLOSED });
+    expect(await w.admission.stage({ ...dollar(1), idempotencyKey: "once" })).toEqual({ decision: { allowed: false, code: "reservation_closed", message: RESERVATION_CLOSED }, items: [] });
+    const settled = await w.admission.admit({ ...dollar(1), idempotencyKey: "twice" });
+    await w.admission.settle((settled as { reservationId: string }).reservationId, {});
+    expect((await w.admission.admit({ ...dollar(1), idempotencyKey: "twice" })).allowed).toBe(false);
+  });
 });
 
 describe("booked usage draws the task's own hold down", () => {
@@ -198,7 +211,7 @@ describe("settle and release", () => {
 });
 
 describe("what the admission holds for other actions", () => {
-  it("a model call of unknown cost holds a fixed amount, never nothing; a machine start holds nothing and needs the day below its cap", async () => {
+  it("a model call of unknown cost holds a fixed amount, never nothing; a machine start holds nothing and needs the day at most at its cap (the holds that fill it are its own work's)", async () => {
     const w = setup({ ...SETTINGS, companyDayCapMicros: 2_000_000 });
     const call = await w.admission.admit({ companyId: ORG, idempotencyKey: "ask-1", action: "model.call" });
     expect(call.allowed && call.reservationId).toBeTruthy();
@@ -206,13 +219,28 @@ describe("what the admission holds for other actions", () => {
     expect(await w.admission.admit({ companyId: ORG, idempotencyKey: "m-1", action: "machine.start", subject: { type: "workspace", id: "w" } })).toEqual({ allowed: true });
     expect(await w.day()).toMatchObject({ loadMicros: UNKNOWN_CALL_HOLD_MICROS });
     await w.admission.admit({ companyId: ORG, idempotencyKey: "ask-2", action: "model.call" });
-    expect(await w.admission.admit({ companyId: ORG, idempotencyKey: "m-2", action: "machine.start" })).toEqual({ allowed: false, code: "company_day_cap", message: COMPANY_DAY_CAP_REACHED });
+    // The day is exactly full of holds: the machines of that admitted work still start; one more call does not.
+    expect(await w.admission.admit({ companyId: ORG, idempotencyKey: "m-2", action: "machine.start" })).toEqual({ allowed: true });
     expect((await w.admission.admit({ companyId: ORG, idempotencyKey: "ask-3", action: "model.call" })).allowed).toBe(false);
-    // A gate's staged check fails once a hold fills the day after it was decided.
-    const fresh = setup({ ...SETTINGS, companyDayCapMicros: 2_000_000 });
-    const gate = await fresh.admission.stage({ companyId: ORG, idempotencyKey: "m", action: "machine.start" });
-    await fresh.admission.admit({ ...dollar(2), idempotencyKey: "fill" });
-    expect((await fresh.store.transact([...gate.items as TransactItem[], { kind: "put", item: { pk: "X", sk: "Y" } }])).applied).toBe(false);
+    // Past the cap (booked spend beyond the holds), a machine start is refused, and a gate staged before that does not commit.
+    const gate = await w.admission.stage({ companyId: ORG, idempotencyKey: "m-3", action: "machine.start" });
+    await w.book("over", 1, { taskId: TASK_2 });
+    expect(await w.admission.admit({ companyId: ORG, idempotencyKey: "m-4", action: "machine.start" })).toEqual({ allowed: false, code: "company_day_cap", message: COMPANY_DAY_CAP_REACHED });
+    expect((await w.store.transact([...gate.items as TransactItem[], { kind: "put", item: { pk: "X", sk: "Y" } }])).applied).toBe(false);
+  });
+
+  it("a task start that fills the day can still start its machine", async () => {
+    const w = setup({ ...SETTINGS, companyDayCapMicros: 5_000_000 });
+    expect((await startTask(w, TASK)).applied).toBe(true);
+    expect(await w.day()).toMatchObject({ loadMicros: 5_000_000 });
+    expect(await w.admission.admit({ companyId: ORG, idempotencyKey: `machine.start:${TASK}:1`, action: "machine.start", subject: { type: "workspace", id: "w" } })).toEqual({ allowed: true });
+  });
+
+  it("a staged start does not commit once the day has usage with no dollar figure", async () => {
+    const w = setup();
+    const staged = await w.admission.stage(start());
+    await w.book("unpriced", 0, { taskId: TASK_2, usage: { provider: "x", modelId: "unpriced", tokens: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 } } });
+    expect((await w.store.transact(staged.items)).applied).toBe(false);
   });
 
   it("the task cap is checked on the task's booked spend, in the same transaction", async () => {
@@ -301,5 +329,101 @@ describe("two companies (isolation)", () => {
     expect(await store.get(companyDayKey(COMPANY_B, DAY))).toMatchObject({ reservedMicros: 5_000_000 });
     // The same key in two companies is two reservations.
     expect(reservationIdOf(COMPANY_A, "k")).not.toBe(reservationIdOf(COMPANY_B, "k"));
+  });
+});
+
+describe("races and edges (lane L8 review)", () => {
+  it("two releases at once give the hold back once", async () => {
+    const w = setup();
+    const { staged } = await startTask(w, TASK);
+    await Promise.all([w.admission.release(reservationOf(staged)!), w.admission.release(reservationOf(staged)!)]);
+    expect(await w.day()).toMatchObject({ reservedMicros: 0, loadMicros: 0 });
+  });
+
+  it("two bookings at once draw the hold once: the day counts both usages exactly", async () => {
+    const w = setup();
+    const { staged } = await startTask(w, TASK);
+    await Promise.all([w.book("a", 3_000_000), w.book("b", 3_000_000)]);
+    expect(await w.day()).toMatchObject({ usdMicros: 6_000_000, reservedMicros: 0, loadMicros: 6_000_000 });
+    expect(await w.store.get(holdKey(ORG, reservationOf(staged)!))).toMatchObject({ drawnMicros: 5_000_000 });
+  });
+
+  it("a booking after the hold was closed adds its whole cost", async () => {
+    const w = setup();
+    const { staged } = await startTask(w, TASK);
+    await w.admission.release(reservationOf(staged)!);
+    await w.book("late", 2_000_000);
+    expect(await w.day()).toMatchObject({ usdMicros: 2_000_000, reservedMicros: 0, loadMicros: 2_000_000 });
+  });
+
+  it("the sweep leaves an index row that names another company's hold alone, and does not count it", async () => {
+    const clock = { at: NOW };
+    const w = setup(SETTINGS, clock);
+    const foreign = reservationIdOf(COMPANY_B, "k");
+    await w.store.put({ item: { pk: `ORG#${ORG}#COST_HOLD_OPEN`, sk: `000000000001#${foreign}`, entityType: "COST_HOLD_OPEN", companyId: ORG, reservationId: foreign, expiresAt: 1 } });
+    expect(await sweepExpiredHolds(w.store, ORG, { budgetMs: 10_000, now: () => clock.at })).toEqual({ released: 0, failed: 0, more: false });
+    expect((await w.store.query({ pk: `ORG#${ORG}#COST_HOLD_OPEN` })).items).toHaveLength(1);
+  });
+});
+
+describe("a task's hold is kept while a run of it may have spent unbooked (review H1)", () => {
+  const WORKSPACE = "6a1c1d3e-0b6f-4a35-9a3c-1f2e3d4c5b6a";
+  async function withRun(w: ReturnType<typeof setup>, status: string, workflowMode = "IMPLEMENT") {
+    const opId = randomUUID();
+    await w.store.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK", taskId: TASK, companyId: ORG, workspaceId: WORKSPACE } });
+    await w.store.put({ item: { ...operationKey(WORKSPACE, opId), entityType: "OPERATION", id: opId, workspaceId: WORKSPACE, companyId: ORG, kind: "task", workflowMode, status, fence: 1, eventSequence: 0 } });
+    return opId;
+  }
+
+  it("close (release) of a task whose run was stopped or closed before its usage was booked keeps what the hold holds, never $0", async () => {
+    for (const status of ["CANCELLED", "INTERRUPTED", "FAILED", "RUNNING"]) {
+      const w = setup();
+      const { staged } = await startTask(w, TASK);
+      await withRun(w, status);
+      await w.admission.release(reservationOf(staged)!);
+      expect(await w.day(), status).toMatchObject({ reservedMicros: 0, settledMicros: 5_000_000, loadMicros: 5_000_000 });
+      expect(await w.store.get(holdKey(ORG, reservationOf(staged)!))).toMatchObject({ state: "settled" });
+    }
+  });
+
+  it("gives the hold back once every unfinished run's usage is booked, and for runs that succeeded or only ran checks", async () => {
+    const booked = setup();
+    const { staged } = await startTask(booked, TASK);
+    const opId = await withRun(booked, "CANCELLED");
+    await booked.book(`usage:${opId}:abc`, 1_000_000);
+    await booked.admission.release(reservationOf(staged)!);
+    expect(await booked.day()).toMatchObject({ usdMicros: 1_000_000, reservedMicros: 0, loadMicros: 1_000_000 });
+    for (const [status, mode] of [["SUCCEEDED", "IMPLEMENT"], ["CANCELLED", "CHECKS"]] as const) {
+      const w = setup();
+      const started = await startTask(w, TASK);
+      await withRun(w, status, mode);
+      await w.admission.release(reservationOf(started.staged)!);
+      expect(await w.day(), `${status} ${mode}`).toMatchObject({ reservedMicros: 0, loadMicros: 0 });
+    }
+  });
+
+  it("keeps the hold when the task's runs cannot be read, or the task names another company", async () => {
+    const unreadable = setup();
+    const first = await startTask(unreadable, TASK);
+    await withRun(unreadable, "SUCCEEDED");
+    const query = unreadable.store.query.bind(unreadable.store);
+    unreadable.store.query = async (request) => { if (request.pk.startsWith("WORKSPACE#")) throw new Error("store down"); return await query(request); };
+    await unreadable.admission.release(reservationOf(first.staged)!);
+    expect(await unreadable.day()).toMatchObject({ reservedMicros: 0, settledMicros: 5_000_000 });
+    const other = setup();
+    const second = await startTask(other, TASK);
+    await other.store.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK", taskId: TASK, companyId: COMPANY_B, workspaceId: WORKSPACE } });
+    await other.admission.release(reservationOf(second.staged)!);
+    expect(await other.day()).toMatchObject({ reservedMicros: 0, settledMicros: 5_000_000 });
+  });
+
+  it("the sweep keeps an expired task hold whose run is still going", async () => {
+    const clock = { at: NOW };
+    const w = setup(SETTINGS, clock);
+    await startTask(w, TASK);
+    await withRun(w, "RUNNING");
+    clock.at = new Date(NOW.getTime() + 25 * 3_600_000);
+    await createHostedHoldSweep({ store: w.store, companyId: ORG, now: () => clock.at }).pass({ budgetMs: 10_000 });
+    expect(await w.day()).toMatchObject({ reservedMicros: 0, loadMicros: 5_000_000, settledMicros: 5_000_000 });
   });
 });
