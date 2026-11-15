@@ -103,7 +103,7 @@ export function createTaskFlowRunStarter(options: { flow: Pick<TaskFlow, "start"
     async start(request: AutomatedRunRequest): Promise<AutomatedRunResult> {
       if (request.automatic !== undefined) throw agentXError("NOT_AVAILABLE_HERE", AUTOMATIC_JOB_NOT_HERE);
       if (request.agent.agentId !== ROVARA_CODE_AGENT_ID) throw agentXError("AGENT_UNAVAILABLE", CUSTOM_AGENT_RUN_NOT_HERE);
-      const started = await flow.start({ principal: owner, client: AUTOMATION_CLIENT }, {
+      const started = await flow.start({ principal: owner, origin: request.origin, client: AUTOMATION_CLIENT }, {
         requestId: request.requestId, project: request.project, instructions: instructionsOf(request), title: titleOf(request), client: AUTOMATION_CLIENT,
         // The human-gated workflow: the task stops at its plan until the owner approves it. A run started with no one present approves nothing.
         workflow: true,

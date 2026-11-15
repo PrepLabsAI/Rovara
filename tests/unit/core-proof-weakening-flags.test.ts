@@ -424,3 +424,28 @@ describe("N5: every check that was not compared is named, even when another was"
     expect(weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared] }), candidateDigest: DIGEST })).toEqual([]);
   });
 });
+
+
+describe("Round 2 M5: folded N4 and N8 classes", () => {
+  it.each(["nyc.config.js", ".c8rc", ".c8rc.json", ".c8rc.yaml", "ava.config.js", "ava.config.cjs", "ava.config.mjs", "ava.config.ts", "jasmine.json"])("flags configuration %s through the reader", (path) => {
+    expect(isTestConfigPath(path)).toBe(true);
+    expect(flagsOf(path).testConfigChanged).toBe(true);
+  });
+  it.each([".cursorrules", "GEMINI.md", ".claude/settings.json", ".claude/commands/test.md", ".cursor/rules/check.mdc"])("flags instructions %s through risk", (path) => {
+    expect(isInstructionFilePath(path)).toBe(true);
+    expect(isInstructionFilePath(`packages/app/${path}`)).toBe(true);
+    const risk = assessRisk({ changedFiles: read(hunk(path)), changedFilesComplete: true, report: { reviewOnly: false, passed: [], failed: [], notChecked: [], testsAdded: [] }, acceptedFindings: [], securityFindings: 0, candidateDigest: "d".repeat(64) });
+    expect(risk.reasons.join("\n")).toContain("instruction files");
+  });
+  it.each(["cypress/fixtures/data.json", "testing/fixtures/data.json", "tests_data/fixtures/data.json", "src/test/resources/data.json"])("flags fixture %s through the reader", (path) => {
+    expect(isFixturePath(path)).toBe(true);
+    expect(flagsOf(path).fixtureChanged).toBe(true);
+  });
+  it.each(["cypress/snapshots/page.png", "tests/__golden__/answer.txt"])("flags snapshot %s through the reader", (path) => {
+    expect(isSnapshotPath(path)).toBe(true);
+    expect(flagsOf(path).snapshotChanged).toBe(true);
+  });
+  it.each(["src/resources/data.json", "docs/__golden__/a.txt", "assets/fixtures/a.json", ".cursor/cache/file", ".claude-cache/a", "nyc.config.js.bak", "ava.configuration.js"])("keeps ordinary path %s unflagged", (path) => {
+    expect(isFixturePath(path) || isSnapshotPath(path) || isInstructionFilePath(path) || isTestConfigPath(path)).toBe(false);
+  });
+});

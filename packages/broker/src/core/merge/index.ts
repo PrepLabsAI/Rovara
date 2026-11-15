@@ -14,3 +14,4 @@ export * from "./merged-lines.js";
 export * from "./defaults.js";
 export * from "./resolver.js";
 export * from "./linked.js";
+export * from "./proof-hold.js";

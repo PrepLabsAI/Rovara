@@ -19,3 +19,5 @@ export * from "./record-source.js";
 export * from "./secret-error.js";
 export * from "./secret-stores.js";
 export * from "./transactional-outbox.js";
+
+export * from "./company-change-feed.js";
