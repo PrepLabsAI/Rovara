@@ -377,7 +377,8 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
   if (set === undefined) throw agentXError("NOT_FOUND", "choosing your own name is not set up in this deployment");
   const answer = await set({ kind: "set-display-name", developerId: caller.developerId, name: body.data.name });
   if (answer.ok) {
-    console.log(JSON.stringify({ component: "broker", event: "developer.display_name_chosen", developerId: caller.developerId }));
+    // This path has no company in scope (the caller is a person), so it uses the file's one company-less logger, already in the inventory, rather than a new console call.
+    logDeveloperEvent({ event: "developer.display_name_chosen", developerId: caller.developerId });
     return { name: answer.name, nameChosen: true };
   }
   if (answer.error === "not_found") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
