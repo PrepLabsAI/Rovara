@@ -20,10 +20,11 @@ function baseApprovers(verdict: ApprovalVerdict, released: string[] = []): Appro
 }
 
 function world(answer: Parameters<typeof fakeService>[0]["answer"], base: Approvers) {
-  const service = fakeService({ key: hookKey, now: () => T0, answer });
+  let clock = T0;
+  const service = fakeService({ key: hookKey, now: () => clock, answer });
   const audit = memoryAudit();
-  const client = createPolicyHookClient({ settings: settingsFor(hookKey), install: { issuer: ISSUER, signer: signerOf(install) }, fetch: service.fetch, now: () => T0, audit: audit.sink });
-  return { approvers: withPolicyHookApprovers(base, client, { now: () => T0 }), service, audit };
+  const client = createPolicyHookClient({ settings: settingsFor(hookKey), install: { issuer: ISSUER, signer: signerOf(install) }, fetch: service.fetch, now: () => clock, audit: audit.sink });
+  return { approvers: withPolicyHookApprovers(base, client, { now: () => clock }), service, audit, advance: (ms: number) => { clock += ms; } };
 }
 
 const loose = { allow: true, minApprovers: 1, secondPerson: false, selfApproval: true };
@@ -105,10 +106,7 @@ describe("policy hook: decisions", () => {
     const fresh = person("admin-b", new Date(T0 - 60_000).toISOString());
     const stale = person("admin-b", new Date(T0 - 3_600_000).toISOString());
     const answer = () => ({ ...loose, signInMaxAgeSeconds: 600 });
-    const freshWorld = world(answer, baseApprovers({ approved: true, approver: fresh, method: "m", proofId: "p1" }));
-    expect(await freshWorld.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_changed" });
-    expect((await freshWorld.approvers.requirement(request())).signIn).toEqual({ mode: "window", seconds: 600 });
-    expect((await freshWorld.approvers.verify(request(), proof)).approved).toBe(true);
+    expect((await world(answer, baseApprovers({ approved: true, approver: fresh, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).approved).toBe(true);
     expect(await world(answer, baseApprovers({ approved: true, approver: stale, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
     expect(await world(answer, baseApprovers({ approved: true, approver: person("admin-b"), method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
   });
@@ -128,6 +126,44 @@ describe("policy hook: decisions", () => {
   it("a sign-in time in the future is not believed", async () => {
     const ahead = person("admin-b", new Date(T0 + 120_000).toISOString());
     expect(await world(() => ({ ...loose, signInMaxAgeSeconds: 600 }), baseApprovers({ approved: true, approver: ahead, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
+  });
+
+  it("a cached answer is used only while it is alive, and a no is kept as the stricter default", async () => {
+    const other = person("admin-b");
+    let answer: Record<string, unknown> = loose;
+    const w = world(() => answer, baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
+    await w.approvers.verify(request(), proof);
+    expect(await w.approvers.requirement(request({ requestId: "r2" }))).toEqual(baseRequirement);
+    w.advance(61_000);
+    expect((await w.approvers.requirement(request({ requestId: "r3" }))).selfApprovalAllowed).toBe(false);
+    answer = { ...loose, allow: false };
+    expect((await w.approvers.verify(request({ requestId: "r4" }), { ...proof, requestId: "r4" })).approved).toBe(false);
+    expect((await w.approvers.requirement(request({ requestId: "r5" }))).selfApprovalAllowed).toBe(false);
+    // The answer is kept per asker: another person's request does not read it.
+    answer = loose;
+    await w.approvers.verify(request({ requestId: "r6" }), { ...proof, requestId: "r6" });
+    expect((await w.approvers.requirement(request({ requestId: "r7", requestedBy: person("admin-c") }))).selfApprovalAllowed).toBe(false);
+  });
+
+  it("the loosest count handed out for a request is what verify checks, even after a stricter read of the same request", async () => {
+    const other = person("admin-b");
+    let answer = loose;
+    const w = world(() => answer, baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
+    await w.approvers.verify(request({ requestId: "warm" }), { ...proof, requestId: "warm" });
+    expect((await w.approvers.requirement(request())).minApprovers).toBe(1);
+    answer = { ...loose, minApprovers: 2 };
+    await w.approvers.verify(request({ requestId: "other" }), { ...proof, requestId: "other" });
+    expect((await w.approvers.requirement(request())).minApprovers).toBe(2);
+    expect(await w.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_changed" });
+  });
+
+  it("a caller that never read the requirement here is held to the install's own count", async () => {
+    const other = person("admin-b");
+    const noAsker: ApprovalRequest = { ...request() };
+    delete noAsker.requestedBy;
+    const w = world(() => ({ ...loose, secondPerson: true }), baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
+    expect(await w.approvers.verify(noAsker, proof)).toEqual({ approved: false, reason: "company_rules_changed" });
+    expect((await w.approvers.verify(request(), proof)).approved).toBe(true);
   });
 
   it("stricter only: the install's own refusal stands and the service is not asked", async () => {

@@ -36,7 +36,8 @@ function startQuestion(request: AdmissionRequest): PolicyHookStartQuestion {
 }
 
 export function withPolicyHookAdmission(base: Admission, hook: PolicyHookClient, options: PolicyHookAdmissionOptions = {}): Admission {
-  const holdMs = Math.min(options.holdMs ?? POLICY_HOOK_START_HOLD_CAP_MS, POLICY_HOOK_START_HOLD_CAP_MS);
+  const asked = options.holdMs;
+  const holdMs = asked !== undefined && Number.isFinite(asked) && asked >= 0 ? Math.min(asked, POLICY_HOOK_START_HOLD_CAP_MS) : POLICY_HOOK_START_HOLD_CAP_MS;
   // Each attempt may take up to the request timeout; the next one starts only if it can end inside the hold.
   const attemptMs = POLICY_HOOK_TIMEOUT_SECONDS * 1000;
   const now = options.now ?? Date.now;
