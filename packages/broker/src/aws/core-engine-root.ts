@@ -13,6 +13,9 @@
 //   - the developer task routes' core entry (`coreTasks`): the core host's dev routes over the caller mapping (the broker's signed-in developer -> the principal the core knows, company
 //     from MEMBERSHIP, never a claim; the verified token's step-up rides along), with the session cap (hosted wiring (f)) and every audit event of a script token naming the caller it came
 //     through (hosted wiring (d)).
+//     Lane L11 adds, per company: the session levels (live membership role, the broker's project grant), the decision cards (the task's own person's waiting documents; an act goes
+//     through the approval gate with the approvers point's own proof, `decisionProofs`, lane L2a) and how we work (the code host, with the deployment's `codeSettings`). Each part the
+//     deployment does not give answers "not on the core yet".
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
 //
@@ -28,6 +31,8 @@ import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modul
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
+import { deployedDevWiringParts, type DecisionProofIssuer } from "../core-host/deployed-decisions.js";
+import type { CodeSettingsReader } from "../core/merge/seams.js";
 import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
@@ -81,6 +86,13 @@ export interface BrokerCoreRootInputs {
    * (lane L3 gives it with merge tracking).
    */
   ciReporting?: CiReporting;
+  /**
+   * Lane L11: the deployment's approvers point's proof for an act on a decision card (lane L2a issues and verifies it). Absent: the card routes answer "not on the core yet" (a card is never decided
+   * without the point's own proof).
+   */
+  decisionProofs?: DecisionProofIssuer;
+  /** Lane L11: the company's code settings (how a project merges and approves), for how we work. Absent: how we work answers "not on the core yet" (never the laptop's fixed settings). */
+  codeSettings?: CodeSettingsReader;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
   services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry) => Partial<Record<CoreServiceName, CoreService>>;
   /** The API's own address (a session's link). */
@@ -293,14 +305,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const companyOf = async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => membershipOf(caller.principal.personId);
     const routes = createCoreDevRoutes({
       app, companyOf, log,
-      wiring: () => ({
-        origin: inputs.origin,
-        sessionCapSeconds: hostedSessionCapSeconds(),
-        scriptTokens: {},
-        canReadProject: (personId, project) => projectGrant(personId, project),
-        auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
-        // Not wired yet (each answers "not on the core yet"): the session levels and the decision cards (lanes ID and T, #662), how we work (the company's code host).
-      }),
+      wiring: async (runtime) => {
+        // Lane L11: the session levels, the decision cards and how we work, from the company's own records (membership and the broker's project grants).
+        const registry = await app.registry();
+        return {
+          origin: inputs.origin,
+          sessionCapSeconds: hostedSessionCapSeconds(),
+          scriptTokens: {},
+          canReadProject: (personId, project) => projectGrant(personId, project),
+          auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
+          ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs: inputs.decisionProofs, codeSettings: inputs.codeSettings, log }),
+        };
+      },
     });
     const deployedCallerOf = async (caller: CoreEntryCaller): Promise<DeployedCaller | undefined> => {
       const membership = await membershipOf(caller.developerId);

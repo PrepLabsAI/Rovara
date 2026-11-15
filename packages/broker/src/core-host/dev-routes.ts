@@ -113,8 +113,8 @@ export interface CoreDevRoutesOptions {
   app: CoreHostApp;
   /** The caller's company and live role from membership, never a claim. Undefined: not a member (refused). */
   companyOf(caller: DeployedCaller): Promise<CompanyMembership | undefined>;
-  /** The company's wiring, built once per company. */
-  wiring(runtime: CoreRuntime): CoreDevWiring;
+  /** The company's wiring, built once per company (a build that fails is tried again on the next request, as the runtime is). */
+  wiring(runtime: CoreRuntime): CoreDevWiring | Promise<CoreDevWiring>;
   log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -189,7 +189,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
     let found = mounted.get(companyId);
     if (found === undefined) {
       found = options.app.runtimeFor(companyId).then(async (runtime) => {
-        const wiring = options.wiring(runtime);
+        const wiring = await options.wiring(runtime);
         const blobs = (await options.app.registry()).require("object-storage");
         return {
           runtime, wiring, blobs,
