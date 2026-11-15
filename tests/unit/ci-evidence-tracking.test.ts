@@ -10,7 +10,7 @@ import { readCi, registerMergeActionDecider, trackTask, type MergeTrackingDepend
 import { installCiFixDecider, readCiEvidence, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { LANDED_LINE_MAX, landedLine } from "../../packages/broker/src/core/ci-evidence/tracking.js";
 import { checkTimesKey, readCheckTimes } from "../../packages/broker/src/core/ci-evidence/history.js";
-import { CLOCK, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
+import { CLOCK, TASK_ID, mergeWorld, wrapStore, type MergeWorld } from "../support/merge-world.js";
 
 const MIN = 60_000;
 const ACTIONS = String(GITHUB_ACTIONS_APP_ID);
@@ -190,6 +190,65 @@ describe("a marked check that failed", () => {
     setChecks(w, [unit, e2e({ conclusion: "failure" })]);
     await trackTask(deps, TASK_ID);
     expect((await w.task()).workflow.stage).toBe("IMPLEMENT");
+  });
+});
+
+describe("review fixes (A3 review 1)", () => {
+  it("drops the marked entries when a project un-marks its checks, back to today's item", async () => {
+    const { w, deps } = await world(settings());
+    await trackTask(deps, TASK_ID);
+    expect((await item(w)).ciMarked).toBeDefined();
+    await trackTask({ ...deps, ciEvidence: () => undefined }, TASK_ID);
+    const stored = await item(w);
+    expect(stored.ciMarked).toBeUndefined();
+    expect(stored.ciMarkedSince).toBeUndefined();
+  });
+  it("does not run a pass on a settings read that failed: no round, no log, tried again", async () => {
+    const { w, deps } = await world(settings(), { facts: 0, main: { revision: "c".repeat(40), check: e2e() } });
+    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
+    await expect(trackTask({ ...deps, ciEvidence: () => { throw new Error("store down secret-value"); } }, TASK_ID)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect((await w.task()).workflow.stage).toBe("WAIT_FOR_MERGE");
+    expect((await w.task()).workflow.state).toBe("WAITING");
+  });
+  it("calls a port written as a class method with its own this", async () => {
+    class Port { constructor(private readonly value: CiEvidenceSettings) {} ciEvidence() { return this.value; } }
+    const port = new Port(settings());
+    const { w, deps } = await world(undefined);
+    await trackTask({ ...deps, ciEvidence: port.ciEvidence.bind(port) }, TASK_ID);
+    const holder = { ...deps, value: settings(), ciEvidence(this: { value: CiEvidenceSettings }) { return this.value; } };
+    await trackTask(holder, TASK_ID);
+    expect((await item(w)).ciMarked).toBeDefined();
+  });
+  it("never reads a skipped or neutral marked check as passing", async () => {
+    for (const conclusion of ["skipped", "neutral"] as const) {
+      const { w, deps } = await world(settings());
+      setChecks(w, [unit, e2e({ conclusion })]);
+      await trackTask(deps, TASK_ID);
+      const stored = await item(w);
+      expect(stored.ci).toBe("pending");
+      expect(stored.ciMarked?.[0]).toMatchObject({ state: "not_run", reason: conclusion });
+    }
+  });
+  it("tells a result once even when another pass committed first", async () => {
+    const { w, deps } = await world(settings());
+    setChecks(w, [unit, e2e()]);
+    // The racing pass: it reads the same (empty) item, then the other pass commits and tells the result before this one's first write.
+    let raced = false;
+    const racing: MergeTrackingDependencies = { ...deps, store: wrapStore(w.store, { transact: async (items: Parameters<typeof w.store.transact>[0]) => {
+      if (!raced) { raced = true; await trackTask(deps, TASK_ID); }
+      return w.store.transact(items);
+    } }) };
+    await trackTask(racing, TASK_ID);
+    expect(raced).toBe(true);
+    expect(comments(w)).toHaveLength(1);
+  });
+  it("counts a long check's round past its cap, after a Retry, as the person's extra round", async () => {
+    const { w, deps } = await world(settings({ shareLogs: true }), { facts: 0, main: { revision: "c".repeat(40), check: e2e() } });
+    await w.setWorkflow({ fixRounds: { ci: 2, conflict: 0, feedbackAuto: 0 }, ciFixApproved: [w.prs[0]!.head] });
+    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
+    await trackTask(deps, TASK_ID);
+    expect(w.milestones.written.some((entry) => entry.kind === "fixing" && entry.text.includes("trying once more because you asked"))).toBe(true);
+    expect((await w.task()).workflow.fixRounds?.ci).toBe(2);
   });
 });
 

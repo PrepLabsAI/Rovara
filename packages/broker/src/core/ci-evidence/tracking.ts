@@ -3,11 +3,11 @@
 // from past runs, never above the cap) and keeps one entry per marked check on the tracking item. Nothing here holds a machine: the pass is a poll, and the entry says when to look again.
 // When a marked check failed or timed out, the verdict (environment, ask, fix within the cap) is worked out here, with the main branch's latest run of the same check read once, for the CI slot to act on.
 import {
-  CI_FIX_ROUNDS_MAX, parseCiEvidenceSettings, realCheckLine,
+  CI_FIX_ROUNDS_MAX, MarkedCheckEntrySchema, parseCiEvidenceSettings, realCheckLine,
   type ChangeRequestRef, type ChangeRequestStatus, type CheckRunner, type CodeHost, type DocumentStore, type OrgId, type CheckTarget, type CiEvidenceSettings, type HostScope, type MarkedCheck, type MarkedCheckEntry, type MergeTrackingItem, type ReadBudget,
 } from "@agentx/contracts";
 import { currentRun, expectedWaitMs, waitCapMs, isMarked, markedCheckState, type MarkedRun, type MarkedState } from "./marked-checks.js";
-import { decideMarkedCheck, type MainRun, type MarkedVerdict } from "./fix-or-ask.js";
+import { LONG_CHECK_FIX_ROUNDS_MAX, decideMarkedCheck, type MainRun, type MarkedVerdict } from "./fix-or-ask.js";
 import { durationsOf, readCheckTimes, recordCheckTimes } from "./history.js";
 import type { FailingCheck } from "../branch-sync/merge-action.js";
 
@@ -65,9 +65,9 @@ export async function observeMarked(input: {
     const runs: MarkedRun[] = [];
     for (const check of input.status.checks.filter((entry) => isMarked(marked, entry))) {
       const finished = check.state === "completed";
-      const known = prior !== undefined && check.runId !== undefined && prior.runId === check.runId && prior.completedAt !== undefined;
+      const known = finished && prior !== undefined && check.runId !== undefined && prior.runId === check.runId && (prior.state === "passed" || prior.state === "failed");
       if (known) {
-        runs.push({ check, ...(prior.attempt === undefined ? {} : { attempt: prior.attempt }), ...(ms(prior.startedAt) === undefined ? {} : { startedAt: ms(prior.startedAt)! }), completedAt: ms(prior.completedAt)! });
+        runs.push({ check, ...(prior.attempt === undefined ? {} : { attempt: prior.attempt }), ...(ms(prior.startedAt) === undefined ? {} : { startedAt: ms(prior.startedAt)! }), ...(ms(prior.completedAt) === undefined ? {} : { completedAt: ms(prior.completedAt)! }) });
         continue;
       }
       if (!finished || check.runId === undefined || input.runner?.runFacts === undefined) { runs.push({ check }); continue; }
@@ -110,6 +110,8 @@ export interface MarkedDecision {
   name: string;
   calledAs: string;
   verdict: Exclude<MarkedVerdict, { kind: "none" } | { kind: "wait" }>;
+  /** The fix rounds Rovara may try on its own for this check (2 for a long or paid one, else today's 3): a round past it, after a person's Retry, is not counted as one of them. */
+  roundsMax: number;
   baseBranch: string;
   rerunUrl?: string | undefined;
 }
@@ -145,22 +147,28 @@ export async function markedDecision(input: {
       state, longOrPaid: marked.longOrPaid, testsRan: undefined, testsFailed: undefined, logShared: input.settings.shareLogs && input.logReadable(entry), mainRun, roundsUsed: input.roundsUsed, roundsMax: CI_FIX_ROUNDS_MAX,
     });
     if (verdict.kind === "none" || verdict.kind === "wait") continue;
-    return { name: marked.name, calledAs: marked.calledAs, verdict, baseBranch: input.baseBranch, ...(entry.url === undefined ? {} : { rerunUrl: entry.url }) };
+    return { name: marked.name, calledAs: marked.calledAs, verdict, roundsMax: marked.longOrPaid ? Math.min(LONG_CHECK_FIX_ROUNDS_MAX, CI_FIX_ROUNDS_MAX) : CI_FIX_ROUNDS_MAX, baseBranch: input.baseBranch, ...(entry.url === undefined ? {} : { rerunUrl: entry.url }) };
   }
   return undefined;
 }
 
 // ---- one tracking pass
 
-/** The settings for a task, read through the pass's port and parsed at run time. A port that is absent, answers nothing, throws or answers what does not parse gives undefined (nothing marked). */
-export async function readEvidenceSettings(deps: { ciEvidence?(task: never): unknown; log?(event: string, fields: Record<string, unknown>): void }, task: unknown): Promise<CiEvidenceSettings | undefined> {
+/** What a settings read that failed gives: not "nothing marked" (that would treat a marked check as an ordinary one, and hand its log to a model), but "not known", so the pass is tried again. */
+export const SETTINGS_UNKNOWN = "settings_unknown" as const;
+
+/**
+ * The settings for a task, read through the pass's port and parsed at run time. A port that is absent or answers nothing gives undefined (nothing marked), and so does an answer that does not parse (a
+ * project's settings that are wrong are not marks). A port that throws gives `SETTINGS_UNKNOWN`: the caller does not run the pass on a guess.
+ */
+export async function readEvidenceSettings(deps: { ciEvidence?(task: never): unknown; log?(event: string, fields: Record<string, unknown>): void }, task: unknown): Promise<CiEvidenceSettings | typeof SETTINGS_UNKNOWN | undefined> {
   if (deps.ciEvidence === undefined) return undefined;
   let answer: unknown;
   try {
-    answer = await (deps.ciEvidence as (task: unknown) => unknown)(task);
+    answer = await (deps as { ciEvidence(task: unknown): unknown }).ciEvidence(task);
   } catch {
     deps.log?.("ci_evidence.settings_unreadable", {});
-    return undefined;
+    return SETTINGS_UNKNOWN;
   }
   if (answer === undefined) return undefined;
   const parsed = parseCiEvidenceSettings(answer);
@@ -179,8 +187,13 @@ export interface CiEvidencePass {
   decision?: MarkedDecision | undefined;
   /** The failing checks as the CI slot sees them: a marked check's log is not offered unless the customer turned logs on. */
   failing(failing: readonly FailingCheck[]): FailingCheck[];
-  /** After the item is committed: each landed result told once on the pull request, and the finished runs' durations kept. Best effort, never throws. */
-  afterCommit(): Promise<void>;
+  /**
+   * The results to tell after a commit made on top of `current` (the item this commit attempt read): those landed on this pass that `current` does not already hold as told for the same run. A racing pass
+   * that committed first already told them, so a retry never tells them twice.
+   */
+  toTell(current: MergeTrackingItem | undefined): MarkedEntry[];
+  /** After the item is committed: the given results told once on the pull request, and their durations kept. Best effort; a host limit ends it quietly (the line is not retried: at most once). */
+  afterCommit(told: readonly MarkedEntry[]): Promise<void>;
 }
 
 /**
@@ -215,8 +228,15 @@ export async function ciEvidencePass(input: {
     settings: input.settings, status: input.status, prior: input.prior, waitStart, now: input.now, history: (check) => durationsOf(times, check), runner: input.runner,
     target: { kind: "change-request", ref: input.ref }, scope: input.scope, budget: input.budget, log: input.log,
   });
-  const landed = landedEntries(observed.entries);
-  const entries = observed.entries.map((entry) => (landed.includes(entry) ? { ...entry, announced: true as const } : entry));
+  // Every entry is checked against the item's schema before it is written: a value an adapter got wrong is left out, never stored where it would stop the next read.
+  const valid = observed.entries.map((entry) => {
+    if (MarkedCheckEntrySchema.safeParse(entry).success) return entry;
+    const { attempt: _attempt, startedAt: _started, completedAt: _completed, url: _url, ...rest } = entry;
+    void _attempt; void _started; void _completed; void _url;
+    return rest;
+  }).filter((entry) => MarkedCheckEntrySchema.safeParse(entry).success);
+  const landed = landedEntries(valid);
+  const entries = valid.map((entry) => (landed.includes(entry) ? { ...entry, announced: true as const } : entry));
   const logReadable = (entry: MarkedEntry): boolean => input.status.checks.some((check) => check.runId !== undefined && check.runId === entry.runId && check.logReadable === true);
   const decision = await markedDecision({
     settings: input.settings, entries, roundsUsed: input.roundsUsed, baseBranch: input.fields.baseBranch, runner: input.runner, repository: input.repository, scope: input.scope, budget: input.budget, logReadable,
@@ -232,8 +252,12 @@ export async function ciEvidencePass(input: {
       void _dropped;
       return rest;
     }),
-    async afterCommit() {
-      for (const entry of landed) {
+    toTell(current) {
+      const held = current?.headSha === head ? current.ciMarked ?? [] : [];
+      return landed.filter((entry) => !held.some((other) => other.announced === true && other.name === entry.name && other.source === entry.source && other.state === entry.state && other.runId === entry.runId));
+    },
+    async afterCommit(told) {
+      for (const entry of told) {
         const marked = input.settings.markedChecks.find((candidate) => candidate.name === entry.name && candidate.source === entry.source);
         if (marked === undefined || input.host.postComment === undefined) continue;
         try {
@@ -243,7 +267,7 @@ export async function ciEvidencePass(input: {
           input.log?.("ci_evidence.result_not_posted", { error: error instanceof Error ? error.name : "unknown" });
         }
       }
-      const finished = landed.flatMap((entry) => {
+      const finished = told.flatMap((entry) => {
         const started = ms(entry.startedAt);
         const completed = ms(entry.completedAt);
         return started === undefined || completed === undefined ? [] : [{ check: { name: entry.name, ...(entry.source === undefined ? {} : { source: entry.source }) }, durationMs: completed - started }];

@@ -43,7 +43,7 @@ import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } fro
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
 import { requireRepositoryKey } from "./repository-key.js";
-import { ciEvidencePass, readEvidenceSettings } from "../ci-evidence/tracking.js";
+import { SETTINGS_UNKNOWN, ciEvidencePass, readEvidenceSettings } from "../ci-evidence/tracking.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergePassHooks, MergeTask, SessionTimeline } from "./seams.js";
 import type { MergePeople } from "./people.js";
 import { prHeadItems, publicTrackingItem, readMergeTracking, readTrackingItem, recoveryRowKey, trackingItemOf, trackingWriteItem, workflowUpdateItem } from "./store.js";
@@ -304,6 +304,10 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
   }
   // A marked check that has not reported yet keeps CI pending: its own clock (the marked-check entries) says when to ask a person.
   if (markedUnreported) return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
+  // A marked check the pipeline skipped or called neutral did not run: it is never read as a pass (the marked entry says "Not run").
+  if (status.checks.some((check) => isMarkedCheck(check) && check.state === "completed" && (check.conclusion === "skipped" || check.conclusion === "neutral"))) {
+    return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
+  }
   // Checks are listed but none of them counts (the host says the base requires checks, yet no required check can be told from the list): the answer is not known, so it times out like unreadable checks.
   if (counted.length === 0) return unreadable();
   const waiting = counted.some((check) => check.state !== "completed" || check.conclusion === "action_required");
@@ -637,7 +641,10 @@ async function trackOne(
     await noteBranchHead(deps.store, { orgId: task.orgId, repositoryId: pullRequest.repositoryId, branch: details.sourceBranch }, { headIsRecordedRovaraPush: false, now: new Date(now).toISOString() });
   }
   // TE-E0 option A: the customer's marked checks, read once a pass. Settings that cannot be read are logged and treated as none (today's behaviour), never guessed.
-  const evidence = await readEvidenceSettings(deps, task);
+  const read = await readEvidenceSettings(deps, task);
+  // Settings that could not be read are not "nothing marked": the pass is tried again rather than run as if no check were the customer's real one.
+  if (read === SETTINGS_UNKNOWN) throw agentXError("RUNTIME_UNAVAILABLE", "the project's CI evidence settings could not be read");
+  const evidence = read;
   const marked = evidence === undefined || evidence.markedChecks.length === 0 ? undefined : evidence.markedChecks;
   const reviewsOf = (reviews: ReviewReading) => deriveTrackingFields({ task, pullRequest, status, prior, recordedHead, reviews, now, ...(marked === undefined ? {} : { marked }) });
   // What does not depend on the reviews comes first: whether to mark ready needs only the checks and the head. The effects come before the reviews' permission lookups so
@@ -772,6 +779,8 @@ async function trackOne(
   for (let attempt = 0; attempt < COMMIT_ATTEMPTS; attempt += 1) {
     const current = attempt === 0 ? prior : trackingItemOf(await readTrackingItem(deps.store, task.taskId, pullRequest.repositoryId, pullRequest.number), task.orgId, task.taskId);
     const stamp = new Date(now).toISOString();
+    // TE-E0 option A: the results this attempt will tell are the ones the item it read does not already hold as told (a racing pass may have told them first).
+    const told = pipeline?.toTell(current) ?? [];
     const base = { ...fields, ...(readyNow && current?.readyAt === undefined ? { readyAt: stamp } : current?.readyAt === undefined ? {} : { readyAt: current.readyAt }) };
     const nextFields = asked && base.reviewersRequestedAt === undefined ? { ...base, reviewersRequestedAt: stamp } : base;
     // What the item says about the parts only other tasks' writes change is whatever is stored now.
@@ -860,7 +869,7 @@ async function trackOne(
       await deps.milestones.deliver(task.taskId).catch(() => undefined);
     }
     // TE-E0 option A: the results that landed, told once on the pull request (the entries were written `announced` in this commit), and their durations kept for the next wait. Best effort.
-    if (pipeline !== undefined && !unchanged) await pipeline.afterCommit();
+    if (pipeline !== undefined && !unchanged) await pipeline.afterCommit(told);
     await observeOutcomes();
     if (capped) throw new TrackingRequestCapError();
     return { changed: true, notOpen: status.state !== "open", acted: action !== undefined, ...(ci.recheckAt === undefined ? {} : { recheckAt: ci.recheckAt }) };

@@ -61,7 +61,7 @@ export function publicTrackingItem(item: MergeTrackingItem): Omit<MergeTrackingI
   return rest;
 }
 
-const OPTIONAL_FIELDS = ["approval", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "ciUnreadableSince", "ciMissingChecks", "ciMissingSince"] as const;
+const OPTIONAL_FIELDS = ["approval", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "ciUnreadableSince", "ciMissingChecks", "ciMissingSince", "ciMarked", "ciMarkedSince"] as const;
 
 /** The write of the next tracking item: a create when there is no readable prior one, else an update conditioned on the version read. It never removes `mergeClaim`. */
 export function trackingWriteItem(prior: MergeTrackingItem | undefined, next: MergeTrackingItem): TransactItem {
