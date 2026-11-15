@@ -11,6 +11,7 @@ import { z } from "zod";
 import { AGENTX_NAME_PATTERN } from "../names.js";
 import { PluginKindSchema } from "../plugins/common.js";
 import { ExternalAccountRefSchema } from "../outside-account.js";
+import { PolicyHookSettingsSchema } from "../policy-hook.js";
 import type { ChannelCapabilities, ChannelCommand, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
 import type { CodeHost } from "../plugins/code-host.js";
@@ -336,6 +337,11 @@ export const PluginConfigSchema = z.object({
    * FIX-0518 (laptop only, owner-set): per-project settings, by project name, for example `{ "my-app": { "sandboxModelHosts": "allow" } }` for a project whose tests really call a model with the repository's own key. Absent: every project's sandbox is denied the model hosts.
    * A cloud install ignores it.
    */
+  /**
+   * Lane H (plan v3.2 section 7.5, owner-set): the company rules service this install asks before a task starts, on approvals and for company values, and the public key(s) its answers are signed with
+   * (two while one is rotated). The hook can only make things stricter, and no answer is a refusal. Absent: no hook, and the install behaves exactly as before.
+   */
+  policyHook: PolicyHookSettingsSchema.optional(),
   projectSettings: z.record(z.string().regex(AGENTX_NAME_PATTERN, "a project name is lower-case letters, digits and hyphens"), LocalProjectSettingsSchema).optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {

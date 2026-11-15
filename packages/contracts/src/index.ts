@@ -154,6 +154,7 @@ export * from "./record-trust.js";
 export * from "./open-ids.js";
 export * from "./standing-instructions.js";
 export * from "./signing-key.js";
+export * from "./policy-hook.js";
 export * from "./task-budget.js";
 export * from "./model-not-enabled.js";
 export * from "./org-scoped-keys.js";
