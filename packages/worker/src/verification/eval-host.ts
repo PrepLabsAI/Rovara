@@ -27,12 +27,12 @@ export interface EvalHostCapabilities {
   readonly meter?: EvalMeterOptions | undefined;
 }
 
-const fn = (value: unknown): boolean => typeof value === "function";
+const has = (owner: unknown, key: string): boolean => typeof owner === "object" && owner !== null && typeof (owner as Record<string, unknown>)[key] === "function";
 
 /** The ports for one CHECKS invocation, or undefined when any capability is missing or not what it must be. Never throws. */
 export function createEvalFinalCheckPorts(host: EvalHostCapabilities | undefined): EvalFinalCheckPorts | undefined {
   if (typeof host !== "object" || host === null) return undefined;
-  if (!fn(host.plan) || !fn(host.approval?.read) || !fn(host.cache?.read) || !fn(host.cache?.write) || !fn(host.baselines?.forTask) || !fn(host.modelAccess?.hold) || !fn(host.exec?.run)) return undefined;
+  if (typeof host.plan !== "function" || !has(host.approval, "read") || !has(host.cache, "read") || !has(host.cache, "write") || !has(host.baselines, "forTask") || !has(host.modelAccess, "hold") || !has(host.exec, "run")) return undefined;
   return {
     ...(host.roundKind === undefined ? {} : { roundKind: host.roundKind }),
     plan: host.plan,

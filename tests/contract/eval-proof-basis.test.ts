@@ -56,7 +56,8 @@ describe("eval proof basis", () => {
     expect(evalProofBasis(a)!.judge).toEqual({ pin: hash("b"), sameFamily: true });
   });
   it("gives an older artifact with no basis no invented baseline or judge", () => {
-    const { basis: _drop, ...older } = artifact([question("a", "ordinary", true, true)]);
+    const older: Record<string, unknown> = { ...artifact([question("a", "ordinary", true, true)]) };
+    delete older["basis"];
     const out = evalProofBasis(older)!;
     expect(out.baseline).toEqual({ oldRuns: 3, cache: "hit" });
     expect(out.judge).toBeUndefined();
@@ -66,6 +67,13 @@ describe("eval proof basis", () => {
     const out = evalProofBasis(a)!;
     expect(out).toMatchObject({ outcome: "not_run", label: "Not run", notRunReason: "rate_limit", cases: { total: 0, compared: 0, excluded: 0 }, slices: [], passed: { old: { passed: 0, of: 0 }, new: { passed: 0, of: 0 } } });
     expect(out.judge).toBeUndefined();
+  });
+  it("is Not run when the comparison cannot be judged, and shows no baseline basis for it", () => {
+    const qs = [question("a", "ordinary", true, true, { edited: true })];
+    const out = evalProofBasis(artifact(qs, { excluded: [{ id: "a", reason: "edited" }] }))!;
+    expect(out.outcome).toBe("not_run"); expect(out.label).toBe("Not run"); expect(out.notRunReason).toBeDefined();
+    expect(out.cases).toEqual({ total: 0, compared: 0, excluded: 0 }); expect(out.judge).toBeUndefined();
+    expect(out.baseline).toEqual({ oldRuns: 3, cache: "hit" });
   });
   it("gives a private-set round nothing to count", () => {
     expect(evalProofBasis({ schemaVersion: 1, candidateDigest: hash("a"), roundKind: "check_sealed", evalPass: 1, outcome: "done", privatePass: true })).toBeUndefined();

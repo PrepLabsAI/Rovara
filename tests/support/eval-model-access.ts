@@ -19,19 +19,21 @@ export interface ScriptedAccess {
   refuse(mode: "undefined" | "throw"): void;
   failRelease(): void;
   inFlight(): number;
+  /** The most calls the egress had open at once. */
+  peak(): number;
 }
 export function scriptedAccess(script: Script = () => answer()): ScriptedAccess {
   const holds: ScriptedAccess["holds"] = []; const forwarded: ModelEgressFrame[] = []; const scopes: ModelEgressScope[] = []; const released: ScriptedAccess["released"] = [];
-  let refuse: "undefined" | "throw" | undefined; let releaseFails = false; let inFlight = 0; let index = 0;
+  let refuse: "undefined" | "throw" | undefined; let releaseFails = false; let inFlight = 0; let index = 0; let peak = 0;
   const scope = Object.freeze({ opaque: "scope" }) as unknown as ModelEgressScope;
   const egress: ModelEgress = {
     capabilities: { schemes: [] },
     async *forward(s, f, options) {
-      scopes.push(s); forwarded.push(f); inFlight++;
+      scopes.push(s); forwarded.push(f); inFlight++; peak = Math.max(peak, inFlight);
       try {
         const out = await script(f, index++, options?.signal);
-        if (Symbol.asyncIterator in out) yield* out as AsyncIterable<ModelEgressEvent>;
-        else yield* out as readonly ModelEgressEvent[];
+        if (Symbol.asyncIterator in out) yield* out;
+        else yield* out;
       } finally { inFlight--; }
     },
   };
@@ -44,5 +46,5 @@ export function scriptedAccess(script: Script = () => answer()): ScriptedAccess 
       return hold;
     },
   };
-  return { access, holds, forwarded, scopes, released, refuse: m => { refuse = m; }, failRelease: () => { releaseFails = true; }, inFlight: () => inFlight };
+  return { access, holds, forwarded, scopes, released, refuse: m => { refuse = m; }, failRelease: () => { releaseFails = true; }, inFlight: () => inFlight, peak: () => peak };
 }

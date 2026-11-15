@@ -72,6 +72,19 @@ describe("createEvalRunner", () => {
     await expect(createEvalRunner(exec(async () => { started = true; return { report: location, changedPromptCalls: 1 }; }))(request({ signal: controller.signal }))).rejects.toThrow("eval stage stopped");
     expect(started).toBe(false);
   });
+  it("is not a result when the stage refused any call, even if the exec finished and wrote its report", async () => {
+    const runner = createEvalRunner(exec(async r => { await collect(r.egress.forward(r.scope, frame("q"))); return { report: location, changedPromptCalls: 1 }; }));
+    await expect(runner(request({ call: async () => { throw new Error("stage stopped"); } }))).rejects.toThrow("eval stage stopped");
+  });
+  it("is not a result when the stop signal fired while the exec ran", async () => {
+    const controller = new AbortController();
+    await expect(createEvalRunner(exec(async () => { controller.abort(); return { report: location, changedPromptCalls: 1 }; }))(request({ signal: controller.signal }))).rejects.toThrow("eval stage stopped");
+  });
+  it.each([0, 4, 1.5, "1"])("refuses %j runs before the exec starts", async runs => {
+    let started = false;
+    await expect(createEvalRunner(exec(async () => { started = true; return { report: location, changedPromptCalls: 1 }; }))(request({ runs }))).rejects.toThrow("eval run unreadable");
+    expect(started).toBe(false);
+  });
   it("turns an exec failure into one fixed error with no cause text", async () => {
     const error = await createEvalRunner(exec(async () => { throw new Error("docker stderr with key-CANARY"); }))(request()).then(() => undefined, (e: unknown) => e);
     expect(error).toBeInstanceOf(Error); expect((error as Error).message).toBe("eval run failed"); expect(JSON.stringify(error)).not.toContain("CANARY");

@@ -2,12 +2,12 @@
 // does. In production it is the gateway's product route reached with the task token Code mints (`/v1/internal/model-access`);
 // in tests it is a script. This file turns one hold plus an egress into the `MonthlyMeter` the final-check eval already consumes.
 //
-// Rules, each with a test: the WHOLE estimate is held before any call; a call beyond the held count or cost is refused before it
-// reaches the egress; every call is ONE attempt (no retry, a retry can double-spend); a fault, a malformed or over-long answer
+// Rules, each with a test: the WHOLE estimate is held before any call; a call beyond the held count, or once settled spend reached the
+// held cost, is refused before it reaches the egress, and at most four calls are open at once; every call is ONE attempt (no retry, a retry can double-spend); a fault, a malformed or over-long answer
 // or a deadline is "provider_error" with an UNKNOWN cost (NaN), so the stage stops and the spend is retained, never a pass;
 // close joins every call and releases only what is known to be unspent; no provider words, header, key or error text leaves here.
 import {
-  MODEL_EGRESS_CLASSES,
+  EVAL_MAX_IN_FLIGHT_CEILING, MODEL_EGRESS_CLASSES,
   type EvalMeterCall, type EvalMeterReservation, type EvalSpendGrant, type ModelEgress, type ModelEgressEvent, type ModelEgressFrame, type ModelEgressScope, type MonthlyMeter,
 } from "@agentx/contracts";
 
@@ -84,19 +84,34 @@ function reservation(hold: EvalModelHold, maxCalls: number, maxCost: number, tim
     if (settled.overrun === true) stop = true;
     return { class: settled.class, calls: 1, costMicros: settled.costMicros, ...(settled.class === "ok" ? { events } : {}) };
   }
+  // At most EVAL_MAX_IN_FLIGHT_CEILING calls are open at once; the rest wait their turn. Spend is only known when a call settles, so this bounds how far
+  // the held cost can be passed (by that many calls) before the next dispatch check sees it; the gateway enforces the hold itself.
+  let inFlight = 0;
+  const waiting: Array<() => void> = [];
+  const acquire = (): Promise<void> => (inFlight < EVAL_MAX_IN_FLIGHT_CEILING ? (inFlight++, Promise.resolve()) : new Promise<void>(resolve => { waiting.push(() => { inFlight++; resolve(); }); }));
+  const freeSlot = (): void => { inFlight--; waiting.shift()?.(); };
+  const refused = (): boolean => closed || stop || unknown || dispatched >= maxCalls || spent >= maxCost;
   const call: EvalMeterReservation["call"] = frame => {
-    if (closed || stop || unknown || dispatched >= maxCalls || spent >= maxCost) return Promise.reject(stopped());
-    dispatched++;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<EvalMeterCall>(resolve => { timer = setTimeout(() => { controller.abort(); resolve(unknownCall()); }, timeoutMs); });
-    // A fault of any kind, including one whose words hold a key, is the one fixed unknown outcome.
-    const work: Promise<EvalMeterCall> = Promise.race([read(frame, controller.signal).catch(unknownCall), deadline]).then(result => {
-      if (!whole(result.costMicros)) { unknown = true; return result; }
-      spent += result.costMicros;
-      if (!Number.isSafeInteger(spent)) unknown = true;
-      return result;
-    }).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+    if (refused()) return Promise.reject(stopped());
+    const work: Promise<EvalMeterCall> = (async () => {
+      await acquire();
+      try {
+        // Re-checked after waiting: the stage may have closed, stopped or spent up in the meantime.
+        if (refused()) throw stopped();
+        dispatched++;
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<EvalMeterCall>(resolve => { timer = setTimeout(() => { controller.abort(); resolve(unknownCall()); }, timeoutMs); });
+        try {
+          // A fault of any kind, including one whose words hold a key, is the one fixed unknown outcome.
+          const result = await Promise.race([read(frame, controller.signal).catch(unknownCall), deadline]);
+          if (!whole(result.costMicros)) { unknown = true; return result; }
+          spent += result.costMicros;
+          if (!Number.isSafeInteger(spent)) unknown = true;
+          return result;
+        } finally { if (timer !== undefined) clearTimeout(timer); }
+      } finally { freeSlot(); }
+    })();
     pending.add(work);
     void work.then(() => pending.delete(work), () => pending.delete(work));
     return work;
@@ -107,7 +122,7 @@ function reservation(hold: EvalModelHold, maxCalls: number, maxCost: number, tim
       closed = true;
       closing ??= (async () => {
         await Promise.allSettled([...pending]);
-        try { await hold.release({ calls: dispatched, costMicros: spent, unknown }); } catch { throw new Error("eval hold could not be released"); }
+        try { await hold.release({ calls: dispatched, costMicros: Number.isSafeInteger(spent) ? spent : Number.MAX_SAFE_INTEGER, unknown }); } catch { throw new Error("eval hold could not be released"); }
       })();
       return closing;
     },

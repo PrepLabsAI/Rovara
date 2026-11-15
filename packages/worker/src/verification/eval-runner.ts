@@ -59,17 +59,23 @@ const location = (value: unknown): value is EvalReportLocation => typeof value =
   && typeof (value as EvalReportLocation).root === "string" && (value as EvalReportLocation).root.length > 0 && typeof (value as EvalReportLocation).cwd === "string" && typeof (value as EvalReportLocation).argument === "string"
   && ((value as EvalReportLocation).notBeforeMs === undefined || Number.isFinite((value as EvalReportLocation).notBeforeMs));
 
+const isIds = (value: unknown): value is readonly string[] => Array.isArray(value) && value.length >= 1 && value.length <= EVAL_QUESTION_LIMIT && value.every(id => typeof id === "string");
+
 /** `EvalFinalCheckPorts["runner"]` over an exec. Runtime-checks both directions; the exec's own accounting is never used (the stage counts). */
 export function createEvalRunner(exec: EvalSandboxExec): EvalFinalCheckPorts["runner"] {
   return async request => {
-    if (typeof request !== "object" || request === null || !Array.isArray(request.ids) || request.ids.length < 1 || request.ids.length > EVAL_QUESTION_LIMIT || request.ids.some(id => typeof id !== "string")) throw new Error("eval run unreadable");
-    if (typeof exec?.run !== "function") throw new Error("eval run unreadable");
+    if (typeof request !== "object" || request === null || !isIds(request.ids)) throw new Error("eval run unreadable");
+    if (typeof exec?.run !== "function" || ![1, 2, 3].includes(request.runs)) throw new Error("eval run unreadable");
     if (request.signal.aborted) throw stopped();
     const ids = Object.freeze([...request.ids]);
     const scope = Object.freeze({}) as unknown as ModelEgressScope;
     let result: EvalSandboxResult;
-    try { result = await exec.run({ side: request.side, ids, runs: request.runs, egress: modelEgressFromEvalCall(request.call), scope, signal: request.signal }); }
+    // A call the stage refused or failed reached the eval process as a 503 it may have written down as a failed question. Whatever it wrote is not a result.
+    let refusedCall = false;
+    const call: typeof request.call = frame => request.call(frame).catch((error: unknown) => { refusedCall = true; throw error; });
+    try { result = await exec.run({ side: request.side, ids, runs: request.runs, egress: modelEgressFromEvalCall(call), scope, signal: request.signal }); }
     catch { throw new Error("eval run failed"); }
+    if (refusedCall || request.signal.aborted) throw stopped();
     if (typeof result !== "object" || result === null || !location(result.report) || !Number.isSafeInteger(result.changedPromptCalls) || result.changedPromptCalls < 0) throw new Error("eval run unreadable");
     return {
       report: result.report, facts: evalFactsAllRun(ids.length * request.runs), calls: 0, costMicros: 0, changedPromptCalls: result.changedPromptCalls,

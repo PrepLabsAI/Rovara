@@ -29,7 +29,7 @@ async function bound(options: { newPass?: boolean; script?: Script; exec?: (inne
       questions: r.ids.map(id => ({ id, samples: Array.from({ length: r.runs }, () => ({ pass: r.side === "old" || (options.newPass ?? true), answer: r.side === "old" ? "old" : "new" })) })) }));
     return { report: { root: w.root, cwd: ".", argument: file, notBeforeMs: Date.now() - 1000 }, changedPromptCalls: r.side === "new" ? r.ids.length : 0, attestation: attestRovaraOnlyBaseCheckout({ baseCommit: w.plan.key.baseCommit }) };
   } };
-  const capabilities: EvalHostCapabilities = { roundKind: "check_unsealed", plan: w.ports.plan, approval: w.ports.approval, cache: w.ports.cache, baselines: w.ports.baselines, modelAccess: access.access, exec: options.exec?.(inner) ?? inner };
+  const capabilities: EvalHostCapabilities = { roundKind: "check_unsealed", plan: () => w.ports.plan(), approval: w.ports.approval, cache: w.ports.cache, baselines: w.ports.baselines, modelAccess: access.access, exec: options.exec?.(inner) ?? inner };
   const ports = createEvalFinalCheckPorts(capabilities)!;
   const facts = (signal = new AbortController().signal) => ({ status: "verified", candidateDigest: "a".repeat(64), signal });
   return { w, access, stages, ports, capabilities, facts };
@@ -40,14 +40,14 @@ describe("createEvalFinalCheckPorts", () => {
   it("binds nothing for a missing set or any missing capability", async () => {
     const { capabilities } = await bound();
     expect(createEvalFinalCheckPorts(undefined)).toBeUndefined(); expect(createEvalFinalCheckPorts(null as never)).toBeUndefined();
-    for (const field of ["plan", "approval", "cache", "baselines", "modelAccess", "exec"] as const) expect(createEvalFinalCheckPorts({ ...capabilities, [field]: undefined } as never), field).toBeUndefined();
+    for (const field of ["plan", "approval", "cache", "baselines", "modelAccess", "exec"] as const) expect(createEvalFinalCheckPorts({ ...capabilities, [field]: undefined }), field).toBeUndefined();
     expect(createEvalFinalCheckPorts({ ...capabilities, modelAccess: {} as never })).toBeUndefined();
     expect(createEvalFinalCheckPorts({ ...capabilities, exec: {} as never })).toBeUndefined();
-    expect(createEvalFinalCheckPorts({ ...capabilities, cache: { read: capabilities.cache.read } as never })).toBeUndefined();
+    expect(createEvalFinalCheckPorts({ ...capabilities, cache: { read: async () => undefined } as never })).toBeUndefined();
   });
   it("passes the trusted capabilities through untouched and carries the round kind", async () => {
-    const { capabilities, ports } = await bound();
-    expect(ports.plan).toBe(capabilities.plan); expect(ports.approval).toBe(capabilities.approval); expect(ports.cache).toBe(capabilities.cache); expect(ports.baselines).toBe(capabilities.baselines);
+    const { w, capabilities, ports } = await bound();
+    expect(await ports.plan()).toBe(w.plan); expect(ports.approval).toBe(capabilities.approval); expect(ports.cache).toBe(capabilities.cache); expect(ports.baselines).toBe(capabilities.baselines);
     expect(ports.roundKind).toBe("check_unsealed");
     expect(createEvalFinalCheckPorts({ ...capabilities, roundKind: undefined })).not.toHaveProperty("roundKind");
   });
@@ -108,7 +108,7 @@ describe("a provider or gateway fault is Not run, never a pass and never Worse",
   const notRun = (artifact: unknown) => { const result = evalResultFromArtifact(artifact); expect(result.label).toBe("Not run"); expect(result.disposition).toMatchObject({ check: "neutral", retry: true, draft: false }); return result.notRun!.reason; };
   it.each([
     ["rate limit", classAnswer("rate_limit", 429), "rate_limit"], ["quota", classAnswer("quota", 429), "quota"], ["overloaded", classAnswer("overloaded", 503), "overloaded"],
-    ["refused key", classAnswer("key_refused", 401), "key_refused"], ["gateway cap", classAnswer("cap", 429), "cap"], ["provider error", classAnswer("provider_error", 502), "provider_error"],
+    ["refused key", classAnswer("key_refused", 401), "key_refused"], ["adapter refusal", classAnswer("refused", 403), "refused"], ["gateway cap", classAnswer("cap", 429), "cap"], ["provider error", classAnswer("provider_error", 502), "provider_error"],
   ])("%s on the second call", async (_name, bad, reason) => {
     const { access, ports, facts } = await bound({ newPass: false, script: (_f, i) => (i === 1 ? bad : answer()) });
     const artifact = await runFinalCheckEval(request, ports, facts());
@@ -147,6 +147,17 @@ describe("a provider or gateway fault is Not run, never a pass and never Worse",
     const { access, ports, facts } = await bound({ script: () => answer({ overrun: true }) });
     const artifact = await runFinalCheckEval(request, ports, facts());
     expect(notRun(artifact)).toBe("provider_error"); expect(access.forwarded.length).toBe(1);
+  });
+  it("an eval that makes more calls than its stage was held for is over budget, never graded on what it wrote", async () => {
+    const { access, ports, facts } = await bound({ newPass: false, exec: inner => ({ run: async r => { await collect(r.egress.forward(r.scope, frame("extra"))); for (let i = 0; i < r.ids.length * r.runs; i++) await collect(r.egress.forward(r.scope, frame("again"))); return inner.run(r); } }) });
+    const artifact = await runFinalCheckEval(request, ports, facts());
+    expect(notRun(artifact)).toBe("cap"); expect(JSON.stringify(artifact)).not.toContain("questions");
+    expect(access.released.every(r => !r.unknown)).toBe(true);
+  });
+  it("a stop that lands while the exec is still running is Not run, never Worse, whatever the report says", async () => {
+    const controller = new AbortController();
+    const { ports, facts } = await bound({ newPass: false, exec: inner => ({ run: async r => { controller.abort(); return inner.run(r); } }) });
+    expect(notRun(await runFinalCheckEval(request, ports, facts(controller.signal)))).toBe("stopped");
   });
   it("a stop during the first stage is Not run: stopped, and nothing is held after it", async () => {
     const controller = new AbortController();

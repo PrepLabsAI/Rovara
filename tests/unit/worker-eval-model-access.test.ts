@@ -101,6 +101,43 @@ describe("dispatch ceilings", () => {
   });
 });
 
+describe("calls in flight", () => {
+  it("never has more than four open at once, queues the rest and runs them all", async () => {
+    let open!: () => void; const gate = new Promise<void>(resolve => { open = resolve; });
+    const gated: Script = async function* () { await gate; yield* answer({ costMicros: 1 }); } as never;
+    const { world, reservation } = await ok(gated, undefined, { calls: 12, costMicros: 1000 });
+    const all = Array.from({ length: 10 }, () => reservation.call(frame()));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(world.peak()).toBe(4); expect(world.forwarded).toHaveLength(4);
+    open();
+    const results = await Promise.all(all);
+    expect(results.every(r => r.class === "ok")).toBe(true);
+    expect(world.forwarded).toHaveLength(10); expect(world.peak()).toBe(4);
+  });
+  it("re-checks the ceilings when a queued call gets its turn", async () => {
+    let open!: () => void; const gate = new Promise<void>(resolve => { open = resolve; });
+    const gated: Script = async function* () { await gate; yield* answer({ costMicros: 10 }); } as never;
+    const { world, reservation } = await ok(gated, undefined, { calls: 5, costMicros: 20 });
+    const all = Array.from({ length: 5 }, () => reservation.call(frame()).then(() => "ran", () => "refused"));
+    await new Promise(resolve => setTimeout(resolve, 20)); open();
+    const outcomes = await Promise.all(all);
+    expect(outcomes.filter(o => o === "ran").length).toBe(4);
+    expect(outcomes.filter(o => o === "refused").length).toBe(1);
+    expect(world.forwarded).toHaveLength(4);
+  });
+  it("refuses a queued call once the stage closed", async () => {
+    let open!: () => void; const gate = new Promise<void>(resolve => { open = resolve; });
+    const gated: Script = async function* () { await gate; yield* answer(); } as never;
+    const { world, reservation } = await ok(gated, undefined, { calls: 9, costMicros: 1000 });
+    const first = Array.from({ length: 4 }, () => reservation.call(frame()));
+    const queued = reservation.call(frame()).then(() => "ran", () => "refused");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const closing = reservation.close();
+    open(); await Promise.all(first); await closing;
+    expect(await queued).toBe("refused"); expect(world.forwarded).toHaveLength(4);
+  });
+});
+
 describe("a fault is Not run, never a pass", () => {
   const bad: Array<[string, Script]> = [
     ["the egress throws", () => Promise.reject(new Error("key-CANARY-123 provider words"))],
@@ -122,6 +159,12 @@ describe("a fault is Not run, never a pass", () => {
     expect(JSON.stringify(result)).not.toContain("CANARY"); expect(result.events).toBeUndefined();
     await reservation.close();
     expect(world.released).toEqual([{ calls: 1, costMicros: 0, unknown: true }]);
+  });
+  it("never hands the gateway an unsafe spend total: an overflowing sum is unknown and capped at the largest safe number", async () => {
+    const costs = [Number.MAX_SAFE_INTEGER - 2, 5]; let i = 0;
+    const { world, reservation } = await ok(() => answer({ costMicros: costs[i++]! }), undefined, { calls: 2, costMicros: Number.MAX_SAFE_INTEGER });
+    await reservation.call(frame()); await reservation.call(frame()); await reservation.close();
+    expect(world.released).toEqual([{ calls: 2, costMicros: Number.MAX_SAFE_INTEGER, unknown: true }]);
   });
   it("takes no further call after an unknown spend", async () => {
     const { world, reservation } = await ok(() => Promise.reject(new Error("boom")));
@@ -162,6 +205,7 @@ describe("close", () => {
     const slow: Script = async function* () { await gate; yield* answer(); } as never;
     const { world, reservation } = await ok(slow);
     const running = reservation.call(frame());
+    await new Promise(resolve => setTimeout(resolve, 5));
     const closing = reservation.close();
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(world.released).toEqual([]);

@@ -36,11 +36,12 @@ export function evalProofBasis(input: unknown): EvalProofBasis | undefined {
   const result = evalResultFromArtifact(a);
   const base = {
     outcome: result.outcome, label: result.label, bar: EVAL_PROOF_BAR,
-    baseline: { oldRuns: 3 as const, ...(a.cache === undefined ? {} : { cache: a.cache }), ...(a.basis === undefined ? {} : { evalSetHash: a.basis.evalSetHash, model: a.basis.model, modelVersion: a.basis.modelVersion }) },
+    baseline: { oldRuns: 3 as const, ...(a.cache === undefined ? {} : { cache: a.cache }) },
     ...(a.usage === undefined ? {} : { usage: a.usage }),
   };
-  if (a.outcome === "not_run") {
-    return { ...base, ...(a.notRunReason === undefined ? {} : { notRunReason: a.notRunReason }), cases: { total: 0, compared: 0, excluded: 0 }, passed: { old: { passed: 0, of: 0 }, new: { passed: 0, of: 0 } }, slices: [] };
+  // The derived result decides, not the stored outcome: a round whose comparison cannot be judged is Not run here too.
+  if (result.outcome === "not_run") {
+    return { ...base, ...(result.notRun === undefined ? {} : { notRunReason: result.notRun.reason }), cases: { total: 0, compared: 0, excluded: 0 }, passed: { old: { passed: 0, of: 0 }, new: { passed: 0, of: 0 } }, slices: [] };
   }
   const questions = a.questions ?? [];
   const compared = questions.filter(q => !q.edited);
@@ -54,6 +55,7 @@ export function evalProofBasis(input: unknown): EvalProofBasis | undefined {
   const sum = (key: "oldPassed" | "oldOf" | "newPassed" | "newOf"): number => slices.reduce((n, s) => n + s[key], 0);
   return {
     ...base,
+    baseline: { ...base.baseline, ...(a.basis === undefined ? {} : { evalSetHash: a.basis.evalSetHash, model: a.basis.model, modelVersion: a.basis.modelVersion }) },
     cases: { total: compared.length + excludedIds.size, compared: compared.length, excluded: excludedIds.size },
     passed: { old: { passed: sum("oldPassed"), of: sum("oldOf") }, new: { passed: sum("newPassed"), of: sum("newOf") } },
     slices,

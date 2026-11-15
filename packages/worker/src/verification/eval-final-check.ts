@@ -87,7 +87,7 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     if (facts.signal.aborted && output.result.label !== "Worse on eval") return refuse("stopped");
     if (closeFailed && output.result.label !== "Worse on eval") return refuse("provider_error");
     const artifact = { ...envelope, outcome: output.result.outcome === "ran" ? "done" as const : "not_run" as const, ...(output.result.notRun === undefined ? {} : { notRunReason: output.result.notRun.reason }), ...output.evidence, context: context(), usage: usage(), cache: output.cache, evalConfigured: p.evalConfigured,
-      ...(output.result.outcome === "ran" && p.evalConfigured ? basisOf(p) : {}) };
+      ...(output.result.outcome === "ran" && p.evalConfigured && output.evidence.questions !== undefined && output.evidence.privatePass === undefined && output.evidence.privateSet === undefined ? basisOf(p) : {}) };
     const checked = EvalRoundArtifactSchema.safeParse(artifact);
     if (!checked.success) return refuse("invalid_question_data");
     if (evalResultFromArtifact(checked.data).notRun?.reason === "invalid_question_data" && output.result.notRun?.reason !== "invalid_question_data") return refuse("invalid_question_data");
