@@ -99,6 +99,9 @@ export interface StepUpPagesOptions {
   issue: (grant: CodeGrant & { codeChallenge: string; redirectUri: string }, clientState: string) => Promise<StepUpHttpResult>;
 }
 
+/** The longest credential id kept (base64url characters); the row's sort key holds at most 1024 bytes. */
+const CREDENTIAL_ID_MAX = 512;
+
 /** The largest JSON body a passkey POST may carry (a WebAuthn response is a few kilobytes). */
 const PASSKEY_BODY_MAX = 16_384;
 
@@ -123,10 +126,15 @@ export const PASSKEY_TEXT = {
   notNow: "Not now",
   failed: "That passkey could not be checked. Try again, or use the email code.",
   notOffered: "No passkey can be used on this page.",
+  addedSubject: "A passkey was added to your AgentX sign-in",
 } as const;
 
 export function createStepUpPages(options: StepUpPagesOptions) {
   const issuerOrigin = new URL(options.issuer).origin;
+  const issuerHost = new URL(options.issuer).hostname;
+  const rpId = options.deps?.passkeys?.rpId;
+  // WebAuthn: the RP id is the origin's host or a registrable suffix of it. A wrong one would fail every ceremony, so it is refused when the server is built.
+  if (rpId !== undefined && rpId !== issuerHost && !(rpId.includes(".") && issuerHost.endsWith(`.${rpId}`))) throw new Error("the passkey RP id must be the sign-in issuer's host or a parent domain of it");
   const endpoint = (path: string) => `${options.issuer}${path}`;
   const setCookie = (secret: string) => `${STEP_UP_COOKIE}=${secret}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${DEVELOPER_STEP_UP_SECONDS}`;
   const clearCookie = `${STEP_UP_COOKIE}=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
@@ -337,6 +345,8 @@ export function createStepUpPages(options: StepUpPagesOptions) {
       };
       const response = jsonBody(body);
       if (response === undefined || typeof response.id !== "string" || counted.challenge === undefined || counted.challengeKind !== "get" || counted.verifiedAt !== undefined) return refuse("passkey_unreadable");
+      // The challenge is spent before the answer is checked: one challenge, one try.
+      if (!await options.store.takeStepUpChallenge(page.secret, counted.challenge, "get")) return refuse("passkey_challenge_spent");
       const key = (await passkeysOf(counted.grant.developerId)).find((candidate) => candidate.credentialId === response.id);
       if (key === undefined) return refuse("passkey_unknown");
       let checked: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
@@ -350,7 +360,8 @@ export function createStepUpPages(options: StepUpPagesOptions) {
         return refuse("passkey_invalid");
       }
       if (!checked.verified || !checked.authenticationInfo.userVerified) return refuse("passkey_invalid");
-      // The counter moves only from the value just read: one assertion cannot be used twice, even in parallel.
+      // The counter moves only from the value just read, so a counting passkey's assertion cannot win twice in parallel. (A passkey whose counter stays 0 is held to one use by the
+      // spent challenge and the single-use page.)
       if (!await options.store.setPasskeyCounter(counted.grant.developerId, key.credentialId, key.counter, checked.authenticationInfo.newCounter)) return refuse("passkey_replayed");
       const finished = await finish(page.secret, Math.floor(options.now() / 1000), "passkey");
       return finished === undefined ? jsonRefusal(400, STEP_UP_TEXT.expired, true) : followable(finished);
@@ -365,6 +376,8 @@ export function createStepUpPages(options: StepUpPagesOptions) {
       const response = jsonBody(body);
       if (record.verifiedAt === undefined || record.challenge === undefined || record.challengeKind !== "create" || response === undefined) return jsonRefusal(400, PASSKEY_TEXT.failed);
       if ((await passkeysOf(record.grant.developerId)).length >= DEVELOPER_PASSKEYS_MAX) return jsonRefusal(409, PASSKEY_TEXT.notOffered);
+      // Spent before the answer is checked: one registration per challenge, so parallel answers cannot add several passkeys from one page.
+      if (!await options.store.takeStepUpChallenge(page.secret, record.challenge, "create")) return jsonRefusal(400, PASSKEY_TEXT.failed);
       let checked: Awaited<ReturnType<typeof verifyRegistrationResponse>>;
       try {
         checked = await verifyRegistrationResponse({
@@ -378,12 +391,21 @@ export function createStepUpPages(options: StepUpPagesOptions) {
         return jsonRefusal(400, PASSKEY_TEXT.failed);
       }
       const credential = checked.registrationInfo.credential;
+      // The credential id becomes the row's sort key; an authenticator may choose up to 1023 bytes, more than a key holds.
+      if (credential.id.length > CREDENTIAL_ID_MAX) return jsonRefusal(400, PASSKEY_TEXT.failed);
       const added = await options.store.addPasskey(record.grant.developerId, {
         credentialId: credential.id, publicKey: Buffer.from(credential.publicKey).toString("base64url"), counter: credential.counter, createdAt: new Date(options.now()).toISOString(),
         ...(credential.transports === undefined ? {} : { transports: credential.transports.slice(0, 8) }),
       });
       if (!added) return jsonRefusal(409, PASSKEY_TEXT.failed);
       options.log({ event: "signin.passkey_registered", developerId: record.grant.developerId });
+      // Tell the person, at the address the code went to, so a passkey added by someone else is noticed. A failed notice does not undo the passkey.
+      if (record.email !== undefined && options.deps?.email !== undefined) {
+        await withDeadline(options.deps.email.send({
+          to: record.email, subject: PASSKEY_TEXT.addedSubject,
+          text: `A passkey was added to your AgentX sign-in (environment ${options.env}) at ${new Date(options.now()).toISOString()}.\n\nIf this was not you, tell an AgentX admin now.`,
+        }), SEND_DEADLINE_MS).catch((error: unknown) => options.log({ event: "signin.passkey_notice_failed", developerId: record.grant.developerId, error: errorName(error) }));
+      }
       const finished = await finish(page.secret, record.verifiedAt, "email_code");
       return finished === undefined ? jsonRefusal(400, STEP_UP_TEXT.expired, true) : followable(finished);
     },

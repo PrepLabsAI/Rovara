@@ -374,7 +374,24 @@ export class DeveloperSignInStore {
       await this.input.documentClient.send(new UpdateCommand({
         TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
         UpdateExpression: "SET challenge = :challenge, challengeKind = :kind",
-        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt)",
+        // A registration challenge only on a page whose code was proved; a sign-in challenge only on one whose code was not.
+        ConditionExpression: `attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND ${kind === "create" ? "attribute_exists(verifiedAt)" : "attribute_not_exists(verifiedAt)"}`,
+        ExpressionAttributeValues: { ":challenge": challenge, ":kind": kind, ":now": this.seconds() },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Spends the page's WebAuthn challenge, once, before the answer to it is checked. False: it was spent already, replaced, or is for the other ceremony. */
+  async takeStepUpChallenge(secret: string, challenge: string, kind: "get" | "create"): Promise<boolean> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: { pk: `STEPUP#${sha256Hex(secret)}`, sk: META },
+        UpdateExpression: "REMOVE challenge, challengeKind",
+        ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND attribute_not_exists(consumedAt) AND challenge = :challenge AND challengeKind = :kind",
         ExpressionAttributeValues: { ":challenge": challenge, ":kind": kind, ":now": this.seconds() },
       }));
       return true;

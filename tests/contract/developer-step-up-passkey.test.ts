@@ -118,8 +118,8 @@ describe("registering a passkey", () => {
     const early = fakePasskey().register({ challenge: "AAAA" }, ORIGIN, RP_ID);
     expect((await h.http(browser("POST", "/v1/auth/step-up/passkey/register", cookie, JSON.stringify(early)))).statusCode).toBe(400);
     await proveEmail(h, mail, cookie);
-    const created = await options(h, cookie);
     for (const tamper of [{ userVerified: false as const }, { origin: "https://evil.example.test" }, { rpId: "evil.example.test" }, { challenge: "Zm9yZ2Vk" }]) {
+      const created = await options(h, cookie);
       const answer = await h.http(browser("POST", "/v1/auth/step-up/passkey/register", cookie, JSON.stringify(fakePasskey().register(created, ORIGIN, RP_ID, tamper))));
       expect(answer.statusCode, JSON.stringify(tamper)).toBe(400);
       expect(body(answer).message).toBe(PASSKEY_TEXT.failed);
@@ -143,6 +143,43 @@ describe("registering on a page that only signed in", () => {
     const reused = await h.http(browser("POST", "/v1/auth/step-up/passkey/register", cookie, JSON.stringify(fakePasskey().register(asked, ORIGIN, RP_ID))));
     expect(reused.statusCode).toBe(400);
     expect(await h.deps.store.listPasskeys(ownerKeyForSubject("https://slack.com", "U0MAYA001"))).toHaveLength(1);
+  });
+});
+
+describe("passkey hardening", () => {
+  it("spends each challenge on its first answer: a second answer to the same challenge is refused even when it is good", async () => {
+    const { h, mail } = harness();
+    const key = await registered(h, mail);
+    const cookie = await stepUpPage(h);
+    const asked = await options(h, cookie);
+    expect((await h.http(browser("POST", "/v1/auth/step-up/passkey/verify", cookie, JSON.stringify(key.assert(asked, ORIGIN, RP_ID, { userVerified: false })))))).toMatchObject({ statusCode: 400 });
+    const again = await h.http(browser("POST", "/v1/auth/step-up/passkey/verify", cookie, JSON.stringify(key.assert(asked, ORIGIN, RP_ID))));
+    expect(again.statusCode).toBe(400);
+    expect((await h.http(browser("POST", "/v1/auth/step-up/passkey/verify", cookie, JSON.stringify(key.assert(await options(h, cookie), ORIGIN, RP_ID))))).statusCode).toBe(200);
+  });
+
+  it("tells the person by email when a passkey is added", async () => {
+    const { h, mail } = harness();
+    await registered(h, mail);
+    expect(mail.sent.at(-1)).toContain("A passkey was added to your AgentX sign-in");
+  });
+
+  it("adds one passkey from one registration challenge, even for parallel answers", async () => {
+    const { h, mail } = harness();
+    await plainSignIn(h, "U0MAYA001");
+    const cookie = await stepUpPage(h);
+    await proveEmail(h, mail, cookie);
+    const created = await options(h, cookie);
+    const answers = await Promise.all([fakePasskey(), fakePasskey()].map((key) => h.http(browser("POST", "/v1/auth/step-up/passkey/register", cookie, JSON.stringify(key.register(created, ORIGIN, RP_ID))))));
+    expect(answers.map((answer) => answer.statusCode).sort()).toEqual([200, 400]);
+    expect(await h.deps.store.listPasskeys(ownerKeyForSubject("https://slack.com", "U0MAYA001"))).toHaveLength(1);
+  });
+
+  it("refuses to start with an RP id that is not the issuer's host or a parent of it", () => {
+    for (const rpId of ["evil.example.test", "amazonaws.co", "com"]) {
+      expect(() => identityHarness({ stepUp: { email: sender(), passkeys: { rpId, rpName: "AgentX" } } })).toThrow("the passkey RP id must be the sign-in issuer's host or a parent domain of it");
+    }
+    expect(() => identityHarness({ stepUp: { email: sender(), passkeys: { rpId: "execute-api.us-east-1.amazonaws.com", rpName: "AgentX" } } })).not.toThrow();
   });
 });
 
@@ -178,15 +215,15 @@ describe("a passkey as the step-up", () => {
     const { h, mail } = harness();
     const key = await registered(h, mail);
     const cookie = await stepUpPage(h);
-    const asked = await options(h, cookie);
     const tampers = [{ origin: "https://evil.example.test" }, { rpId: "evil.example.test" }, { challenge: "Zm9yZ2Vk" }, { otherKey: generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey }];
     for (const tamper of tampers) {
-      const answer = await h.http(browser("POST", "/v1/auth/step-up/passkey/verify", cookie, JSON.stringify(key.assert(asked, ORIGIN, RP_ID, tamper))));
+      const answer = await h.http(browser("POST", "/v1/auth/step-up/passkey/verify", cookie, JSON.stringify(key.assert(await options(h, cookie), ORIGIN, RP_ID, tamper))));
       expect(answer.statusCode, Object.keys(tamper)[0]).toBe(400);
       expect(body(answer).message).toBe(PASSKEY_TEXT.failed);
       expect(body(answer)).not.toHaveProperty("location");
     }
     // The fifth try ends the page, even with a good answer.
+    const asked = await options(h, cookie);
     const last = await h.http(browser("POST", "/v1/auth/step-up/passkey/verify", cookie, JSON.stringify(key.assert(asked, ORIGIN, RP_ID, { userVerified: false }))));
     expect(body(last).message).toBe(STEP_UP_TEXT.tooManyTries);
     const late = await h.http(browser("POST", "/v1/auth/step-up/passkey/verify", cookie, JSON.stringify(key.assert(asked, ORIGIN, RP_ID))));

@@ -104,7 +104,8 @@ those can send a person straight back without asking anything. Instead Rovara as
 Passkeys: once the emailed code is right, the page offers to add a passkey (WebAuthn, owned by Rovara; it keeps
 only the public key). From then on a passkey tap is the step-up (`step_up_amr: passkey`), and the email code stays
 the fallback. A passkey is only ever added after the email code on the same page, never on the strength of the
-Slack, Google or GitHub sign-in alone.
+Slack, Google or GitHub sign-in alone, so passkeys need the email sender too; the person is emailed when one is
+added.
 
 A company sign-in counts by itself only when it signs the person in again and says when (`auth_time`) and that is
 inside the window and not before this sign-in request; Rovara asks it with `prompt=login` and `max_age`. Otherwise its people get the email code too.
