@@ -41,6 +41,8 @@ export const DEVELOPER_STEP_UP_WINDOW_SECONDS = FRESH_SIGN_IN_SECONDS;
 /** Codes emailed per step-up page, and wrong codes tried on it, before it must be started again. */
 export const DEVELOPER_STEP_UP_EMAILS_MAX = 3;
 export const DEVELOPER_STEP_UP_ATTEMPTS_MAX = 5;
+/** Step-up pages one person may start in an hour: bounds the emails (x3) and the guesses (x5) anyone holding their Slack session can cause. */
+export const DEVELOPER_STEP_UP_PAGES_PER_HOUR = 5;
 
 export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
 import { ExternalAccountRefSchema, SignInMethodIdSchema, readExternalAccount } from "./outside-account.js";

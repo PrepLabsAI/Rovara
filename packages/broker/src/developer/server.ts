@@ -15,6 +15,7 @@ import {
   TaskPeopleDisplayReadRequestSchema,
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
+  DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_STEP_UP_ACR,
   DEVELOPER_STEP_UP_WINDOW_SECONDS,
   EndDeveloperSessionsRequestSchema,
@@ -278,6 +279,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
     const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
+    // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
+    if (stepUp && deps.stepUp === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
     let request: AuthRequestRecord;
     try {
       request = await store.createAuthRequest({
@@ -457,14 +460,19 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       // Lane ID part 2: a company sign-in's own re-authentication counts when it says when it happened (auth_time) and that is inside the window. A Slack round trip never counts.
       const nowSeconds = Math.floor(deps.now() / 1000);
       const authTime = method === "oidc" ? identity.authTime : undefined;
-      if (authTime !== undefined && nowSeconds - authTime <= DEVELOPER_STEP_UP_WINDOW_SECONDS && authTime - nowSeconds <= AUTH_TIME_SKEW_SECONDS) {
+      // It must also be no earlier than this sign-in request (less the skew): an older company session that the issuer simply reused is not a re-authentication.
+      const requestedAt = request.expiresAt - DEVELOPER_AUTH_REQUEST_SECONDS;
+      if (authTime !== undefined && nowSeconds - authTime <= DEVELOPER_STEP_UP_WINDOW_SECONDS && authTime - nowSeconds <= AUTH_TIME_SKEW_SECONDS && authTime >= requestedAt - AUTH_TIME_SKEW_SECONDS) {
         deps.log({ event: "signin.step_up_succeeded", method, stepUpMethod: "company_reauth", developerId });
         return issueCode({ ...grant, stepUpAt: Math.min(authTime, nowSeconds), stepUpMethod: "company_reauth" }, request.clientState);
       }
-      const started = await stepUpPages.start(grant, request.clientState);
-      if (started !== undefined) return started;
-      deps.log({ event: "signin.step_up_refused", method, developerId, reason: "no_factor" });
-      return client({ error: "access_denied", error_description: STEP_UP_TEXT.noFactor });
+      // The code goes to the email the record held BEFORE this sign-in, and only while this sign-in still asserts the same one: the round trip that does not count must not choose the inbox.
+      const same = (a: string | undefined, b: string | undefined) => a !== undefined && b !== undefined && a.trim().toLowerCase() === b.trim().toLowerCase();
+      const factorEmail = same(existing?.email, identity.email) ? existing?.email : undefined;
+      const started = await stepUpPages.start(grant, request.clientState, factorEmail);
+      if (typeof started !== "string") return started;
+      deps.log({ event: "signin.step_up_refused", method, developerId, reason: started });
+      return client({ error: "access_denied", error_description: started === "limited" ? STEP_UP_TEXT.limited : STEP_UP_TEXT.noFactor });
     }
     return issueCode(grant, request.clientState);
   }

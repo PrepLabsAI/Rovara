@@ -2,7 +2,7 @@
 // code on Code's own page does; a company sign-in counts only with an auth_time inside the window. The step-up's time and method go into the token and a refresh never renews them.
 import { decodeJwt } from "jose";
 import { describe, expect, it } from "vitest";
-import { DEVELOPER_STEP_UP_ATTEMPTS_MAX, DEVELOPER_STEP_UP_EMAILS_MAX } from "@agentx/contracts";
+import { DEVELOPER_STEP_UP_ATTEMPTS_MAX, DEVELOPER_STEP_UP_EMAILS_MAX, DEVELOPER_STEP_UP_PAGES_PER_HOUR } from "@agentx/contracts";
 import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
 import type { HttpResult } from "../../packages/broker/src/developer/server.js";
 import { STEP_UP_COOKIE, STEP_UP_TEXT, maskedEmail, type StepUpEmailSender } from "../../packages/broker/src/developer/step-up.js";
@@ -38,11 +38,21 @@ const cookieOf = (response: HttpResult): string | undefined =>
 
 type Harness = ReturnType<typeof identityHarness>;
 
-/** Authorize (with a step-up asked for unless `plain`), go through Slack as `who`, and answer what the callback answered. */
-async function throughSlack(h: Harness, who: string, plain = false): Promise<HttpResult> {
+/**
+ * Authorize (with a step-up asked for unless `plain`), go through Slack as `who`, and answer what the callback answered. A step-up first signs `who` in once the ordinary way (unless
+ * `firstEver`), because the code goes only to the email their record held before the step-up's own sign-in.
+ */
+async function throughSlack(h: Harness, who: string, plain = false, firstEver = false): Promise<HttpResult> {
+  if (!plain && !firstEver) await plainSignIn(h, who);
   const start = await h.http(httpEvent("GET", authorizeQuery(plain ? {} : { acr_values: "step-up" })));
   expect(start.statusCode).toBe(302);
   return h.http(httpEvent("GET", h.slack.approve(start.headers.location!, who)));
+}
+
+async function plainSignIn(h: Harness, who: string): Promise<void> {
+  const start = await h.http(httpEvent("GET", authorizeQuery()));
+  const back = await h.http(httpEvent("GET", h.slack.approve(start.headers.location!, who)));
+  expect(new URL(back.headers.location!).searchParams.get("code")).toMatch(/^agxc_/);
 }
 
 async function stepUpWithEmail(h: Harness, sender: ReturnType<typeof fakeSender>, who = "U0MAYA001"): Promise<{ location: URL; response: HttpResult }> {
@@ -74,11 +84,14 @@ describe("asking for a step-up", () => {
 
   it("never issues a code for the Slack round trip alone: the browser goes to Code's own page, bound by a cookie", async () => {
     const h = identityHarness({ slackUsers: [maya], stepUp: { email: fakeSender() } });
-    const back = await throughSlack(h, "U0MAYA001");
+    await plainSignIn(h, "U0MAYA001");
+    const codes = () => [...h.db.items.values()].filter((item) => String(item.pk).startsWith("CODE#")).length;
+    const before = codes();
+    const back = await throughSlack(h, "U0MAYA001", false, true);
     expect(back.statusCode).toBe(302);
     expect(back.headers.location).toBe(`${ISSUER}/step-up`);
     expect(back.cookies?.[0]).toMatch(new RegExp(`^${STEP_UP_COOKIE}=[A-Za-z0-9_-]{43}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=600$`));
-    expect([...h.db.items.values()].filter((item) => String(item.pk).startsWith("CODE#"))).toEqual([]);
+    expect(codes()).toBe(before);
     // Only the cookie's hash is kept.
     expect(JSON.stringify([...h.db.items.values()])).not.toContain(cookieOf(back)!);
     const page = await h.http(browser("GET", "/v1/auth/step-up", cookieOf(back)));
@@ -140,17 +153,67 @@ describe("asking for a step-up", () => {
 });
 
 describe("refusals on the step-up page", () => {
-  it("tells the client there is no factor, and issues no code, when no sender is set up or the person has no email", async () => {
-    for (const [stepUp, who, users] of [[undefined, "U0MAYA001", [maya]], [{ email: fakeSender() }, "U0NOMAIL1", [noEmail]]] as const) {
-      const h = identityHarness({ slackUsers: [...users], ...(stepUp === undefined ? {} : { stepUp }) });
-      const back = await throughSlack(h, who);
+  it("tells the client there is no factor, and issues no new code, when the person has no email", async () => {
+    {
+      const h = identityHarness({ slackUsers: [noEmail], stepUp: { email: fakeSender() } });
+      await plainSignIn(h, "U0NOMAIL1");
+      const before = [...h.db.items.values()].filter((item) => String(item.pk).startsWith("CODE#")).length;
+      const back = await throughSlack(h, "U0NOMAIL1", false, true);
       const location = new URL(back.headers.location!);
       expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
       expect(location.searchParams.get("error")).toBe("access_denied");
       expect(location.searchParams.get("error_description")).toBe(STEP_UP_TEXT.noFactor);
       expect(location.searchParams.get("code")).toBeNull();
-      expect([...h.db.items.values()].filter((item) => String(item.pk).startsWith("CODE#"))).toEqual([]);
+      expect([...h.db.items.values()].filter((item) => String(item.pk).startsWith("CODE#"))).toHaveLength(before);
     }
+  });
+
+  it("refuses at once, with no trip to the provider, when the install has no factor at all", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const start = await h.http(httpEvent("GET", authorizeQuery({ acr_values: "step-up" })));
+    const location = new URL(start.headers.location!);
+    expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
+    expect(location.searchParams.get("error_description")).toBe(STEP_UP_TEXT.noFactor);
+    expect(h.fetch.calls).toEqual([]);
+  });
+
+  it("never lets the step-up's own sign-in choose the inbox: no factor on a first-ever sign-in, or when the provider now says another email", async () => {
+    const sender = fakeSender();
+    const first = identityHarness({ slackUsers: [maya], stepUp: { email: sender } });
+    expect(new URL((await throughSlack(first, "U0MAYA001", false, true)).headers.location!).searchParams.get("error_description")).toBe(STEP_UP_TEXT.noFactor);
+    const moved: FakeSlackUser = { ...maya };
+    const h = identityHarness({ slackUsers: [moved], stepUp: { email: sender } });
+    await plainSignIn(h, "U0MAYA001");
+    moved.email = "attacker@example.net";
+    const back = await throughSlack(h, "U0MAYA001", false, true);
+    expect(new URL(back.headers.location!).searchParams.get("error_description")).toBe(STEP_UP_TEXT.noFactor);
+    expect(sender.sent).toEqual([]);
+    // The same address in another case is the same inbox.
+    moved.email = "Maya@Example.com";
+    const h2 = identityHarness({ slackUsers: [moved], stepUp: { email: sender } });
+    moved.email = "maya@example.com";
+    await plainSignIn(h2, "U0MAYA001");
+    moved.email = "Maya@Example.com";
+    expect((await throughSlack(h2, "U0MAYA001", false, true)).headers.location).toBe(`${ISSUER}/step-up`);
+  });
+
+  it("starts at most five pages per person per hour, then refuses with no code, and allows more the next hour", async () => {
+    const sender = fakeSender();
+    const h = identityHarness({ slackUsers: [maya], stepUp: { email: sender } });
+    await plainSignIn(h, "U0MAYA001");
+    for (let page = 0; page < DEVELOPER_STEP_UP_PAGES_PER_HOUR; page += 1) expect((await throughSlack(h, "U0MAYA001", false, true)).headers.location).toBe(`${ISSUER}/step-up`);
+    const limited = new URL((await throughSlack(h, "U0MAYA001", false, true)).headers.location!);
+    expect(limited.searchParams.get("error_description")).toBe(STEP_UP_TEXT.limited);
+    expect(limited.searchParams.get("code")).toBeNull();
+    h.tick(3_600_000);
+    expect((await throughSlack(h, "U0MAYA001", false, true)).headers.location).toBe(`${ISSUER}/step-up`);
+  });
+
+  it("serves its pages with a referrer policy that keeps the real Origin on the page's own POSTs", async () => {
+    const h = identityHarness({ slackUsers: [maya], stepUp: { email: fakeSender() } });
+    const back = await throughSlack(h, "U0MAYA001");
+    expect(back.headers["referrer-policy"]).toBe("same-origin");
+    expect((await h.http(browser("GET", "/v1/auth/step-up", cookieOf(back)))).headers["referrer-policy"]).toBe("same-origin");
   });
 
   it("refuses a POST that is not from Code's own origin, and a page with no cookie or someone else's", async () => {
@@ -215,6 +278,16 @@ describe("refusals on the step-up page", () => {
     expect(again.body).toContain(STEP_UP_TEXT.expired);
   });
 
+  it("issues one code for two parallel right answers on one page", async () => {
+    const sender = fakeSender();
+    const h = identityHarness({ slackUsers: [maya], stepUp: { email: sender } });
+    const cookie = cookieOf(await throughSlack(h, "U0MAYA001"));
+    await h.http(browser("POST", "/v1/auth/step-up/email", cookie));
+    const code = codeIn(sender.sent[0]!.text);
+    const answers = await Promise.all([1, 2].map(() => h.http(browser("POST", "/v1/auth/step-up/verify", cookie, { code }))));
+    expect(answers.map((answer) => answer.statusCode).sort()).toEqual([303, 400]);
+  });
+
   it("expires the page after ten minutes", async () => {
     const sender = fakeSender();
     const h = identityHarness({ slackUsers: [maya], stepUp: { email: sender } });
@@ -255,13 +328,15 @@ describe("refusals on the step-up page", () => {
 describe("a company sign-in's own re-authentication", () => {
   const ana = { sub: "ana", name: "Ana", email: "ana@example.com", email_verified: true } satisfies FakeOidcUser;
   async function throughOidc(h: Harness, sub: string): Promise<{ authorize: URL; back: HttpResult }> {
+    const first = await h.http(httpEvent("GET", authorizeQuery()));
+    await h.http(httpEvent("GET", h.oidc.approve(first.headers.location!, sub)));
     const start = await h.http(httpEvent("GET", authorizeQuery({ acr_values: "step-up" })));
     const authorize = new URL(start.headers.location!);
     return { authorize, back: await h.http(httpEvent("GET", h.oidc.approve(authorize.toString(), sub))) };
   }
 
   it("asks the company's sign-in to authenticate again, and counts it when its auth_time is inside the window", async () => {
-    const h = identityHarness({ slack: false, oidc: {}, oidcUsers: [{ ...ana, auth_time: Math.floor(Date.parse("2026-09-27T11:58:00.000Z") / 1000) } as FakeOidcUser], stepUp: { email: fakeSender() } });
+    const h = identityHarness({ slack: false, oidc: {}, oidcUsers: [{ ...ana, auth_time: Math.floor(Date.parse("2026-09-27T12:00:00.000Z") / 1000) } as FakeOidcUser], stepUp: { email: fakeSender() } });
     const { authorize, back } = await throughOidc(h, "ana");
     expect(authorize.searchParams.get("prompt")).toBe("login");
     expect(authorize.searchParams.get("max_age")).toBe("600");
@@ -269,12 +344,12 @@ describe("a company sign-in's own re-authentication", () => {
     expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
     const claims = claimsOf((await h.exchange(location.searchParams.get("code")!)).body.access_token);
     expect(claims.step_up_amr).toBe("company_reauth");
-    expect(claims.step_up_at).toBe(Math.floor(Date.parse("2026-09-27T11:58:00.000Z") / 1000));
+    expect(claims.step_up_at).toBe(Math.floor(Date.parse("2026-09-27T12:00:00.000Z") / 1000));
   });
 
-  it("falls back to Code's own factor when the auth_time is missing, too old, in the future or not a number", async () => {
+  it("falls back to Code's own factor when the auth_time is missing, too old, older than this sign-in request (a reused company session), in the future or not a number", async () => {
     const t0 = Math.floor(Date.parse("2026-09-27T12:00:00.000Z") / 1000);
-    for (const authTime of [undefined, t0 - 601, t0 + 600, "1790000000"]) {
+    for (const authTime of [undefined, t0 - 601, t0 - 300, t0 + 600, "1790000000"]) {
       const user = { ...ana, ...(authTime === undefined ? {} : { auth_time: authTime }) } as FakeOidcUser;
       const h = identityHarness({ slack: false, oidc: {}, oidcUsers: [user], stepUp: { email: fakeSender() } });
       const { back } = await throughOidc(h, "ana");

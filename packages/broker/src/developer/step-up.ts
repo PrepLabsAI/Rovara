@@ -6,7 +6,8 @@
 // starts carries the step-up's time and method into every access token (`step_up_at`, `step_up_amr`). A refresh carries them over unchanged; the route checks the age.
 //
 // The page is bound to the browser that came back from the provider by a cookie (a random secret; only its hash is stored). Every POST must come from Code's own origin. Codes: six
-// digits, bound to the page's secret, at most DEVELOPER_STEP_UP_EMAILS_MAX sent and DEVELOPER_STEP_UP_ATTEMPTS_MAX tried per page; a try is counted before it is compared. Nothing here
+// digits, bound to the page's secret, at most DEVELOPER_STEP_UP_EMAILS_MAX sent and DEVELOPER_STEP_UP_ATTEMPTS_MAX tried per page, and at most DEVELOPER_STEP_UP_PAGES_PER_HOUR pages per
+// person; a try is counted before it is compared. A failed send still counts and replaces the bound code (fail closed: a send that may have half-happened is never re-bound). Nothing here
 // logs or shows a code, a secret, an email address in full, or a caught error's message.
 import { randomInt, timingSafeEqual } from "node:crypto";
 import { DEVELOPER_STEP_UP_ATTEMPTS_MAX, DEVELOPER_STEP_UP_EMAILS_MAX, DEVELOPER_STEP_UP_SECONDS } from "@agentx/contracts";
@@ -45,6 +46,7 @@ export const STEP_UP_TEXT = {
   expired: "This confirmation has expired. Start again from where you were.",
   wrongPlace: "This confirmation did not come from this page. Start again from where you were.",
   noFactor: "there is no way to confirm it's you set up for your account here (it needs an email on your sign-in record); ask an admin",
+  limited: "too many confirmations were started for your account in the last hour; try again later",
   subject: "Your AgentX confirmation code",
 } as const;
 
@@ -64,6 +66,19 @@ function cookieValue(header: string | undefined, name: string): string | undefin
     if (trimmed.startsWith(`${name}=`)) return trimmed.slice(name.length + 1);
   }
   return undefined;
+}
+
+/** How long one email send may take before it counts as not sent. */
+const SEND_DEADLINE_MS = 10_000;
+
+async function withDeadline(work: Promise<void>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error("send deadline passed"), { name: "SendDeadline" })), ms); });
+  try {
+    await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface StepUpPagesOptions {
@@ -98,7 +113,8 @@ export function createStepUpPages(options: StepUpPagesOptions) {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action ${issuerOrigin}${clientOrigin}; frame-ancestors 'none'; base-uri 'none'`,
-        "referrer-policy": "no-referrer",
+        // Not no-referrer: a form POST from a no-referrer page carries `Origin: null` (Fetch, "append a request Origin header"), and every POST here is checked for Code's own origin.
+        "referrer-policy": "same-origin",
         "x-content-type-options": "nosniff",
         "x-frame-options": "DENY",
       },
@@ -107,15 +123,13 @@ export function createStepUpPages(options: StepUpPagesOptions) {
   }
   const sendForm = (label: string) => `<form method="post" action="${escape(endpoint("/step-up/email"))}"><button type="submit">${escape(label)}</button></form>`;
   const codeForm = () => `<form method="post" action="${escape(endpoint("/step-up/verify"))}"><label>${escape(STEP_UP_TEXT.enter)} <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label> <button type="submit">${escape(STEP_UP_TEXT.confirm)}</button></form>`;
+  /** The whole minutes the page (and so its codes) still has, at least one. */
+  const minutesLeft = (record: Pick<StepUpRecord, "expiresAt">) => Math.max(1, Math.floor((record.expiresAt - Math.floor(options.now() / 1000)) / 60));
   const ended = (text: string) => ({ ...html(400, undefined, [text]), cookies: [clearCookie] });
 
-  async function emailOf(developerId: string): Promise<string | undefined> {
-    return (await options.store.getDeveloper(developerId))?.email;
-  }
-
   async function view(record: StepUpRecord, notes: string[] = [], statusCode = 200): Promise<StepUpHttpResult> {
-    const email = await emailOf(record.grant.developerId);
-    if (email === undefined || options.deps?.email === undefined) return ended(STEP_UP_TEXT.expired);
+    const email = record.email;
+    if (options.deps?.email === undefined) return ended(STEP_UP_TEXT.expired);
     if (record.emailsSent === 0) return html(statusCode, record, [STEP_UP_TEXT.why, ...notes], [sendForm(STEP_UP_TEXT.send)]);
     const forms = [codeForm(), ...(record.emailsSent < DEVELOPER_STEP_UP_EMAILS_MAX ? [sendForm(STEP_UP_TEXT.sendAgain)] : [])];
     return html(statusCode, record, [`${STEP_UP_TEXT.sent} ${maskedEmail(email)}.`, ...notes], forms);
@@ -132,14 +146,16 @@ export function createStepUpPages(options: StepUpPagesOptions) {
 
   return {
     /**
-     * After the provider said who the person is, for a step-up: start Code's own page. Undefined when the person has no factor Code can use here (no sender, or no email on their
-     * record); the caller then tells the client so, and no code is issued.
+     * After the provider said who the person is, for a step-up: start Code's own page. `factorEmail` is the address the code goes to, chosen by the caller from the record as it stood
+     * BEFORE this sign-in (the round trip that does not count must not choose the inbox either). "no_factor" when there is no sender or no such address; "limited" when this person
+     * started too many pages in the last hour. Either way the caller tells the client so, and no code is issued.
      */
-    async start(grant: StepUpRecord["grant"], clientState: string): Promise<StepUpHttpResult | undefined> {
-      if (options.deps?.email === undefined || (await emailOf(grant.developerId)) === undefined) return undefined;
-      const secret = await options.store.createStepUp({ grant, clientState });
+    async start(grant: StepUpRecord["grant"], clientState: string, factorEmail: string | undefined): Promise<StepUpHttpResult | "no_factor" | "limited"> {
+      if (options.deps?.email === undefined || factorEmail === undefined) return "no_factor";
+      const secret = await options.store.createStepUp({ grant, clientState, email: factorEmail });
+      if (secret === undefined) return "limited";
       options.log({ event: "signin.step_up_started", method: grant.amr, developerId: grant.developerId });
-      return { statusCode: 302, headers: { location: endpoint("/step-up"), "cache-control": "no-store", "referrer-policy": "no-referrer" }, body: "", cookies: [setCookie(secret)] };
+      return { statusCode: 302, headers: { location: endpoint("/step-up"), "cache-control": "no-store", "referrer-policy": "same-origin" }, body: "", cookies: [setCookie(secret)] };
     },
 
     async show(headers: Record<string, string | undefined>): Promise<StepUpHttpResult> {
@@ -151,17 +167,18 @@ export function createStepUpPages(options: StepUpPagesOptions) {
       const page = await pageOf(headers, true);
       if ("statusCode" in page) return page;
       const sender = options.deps?.email;
-      const email = await emailOf(page.record.grant.developerId);
-      if (sender === undefined || email === undefined) return ended(STEP_UP_TEXT.expired);
+      const email = page.record.email;
+      if (sender === undefined) return ended(STEP_UP_TEXT.expired);
       const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
       // Bound before it is sent: a code that reached the inbox always works on this page, and a page out of sends never sends.
       if (!await options.store.recordStepUpEmail(page.secret, codeHash(page.secret, code))) return view(page.record, [STEP_UP_TEXT.noMoreEmails], 429);
       try {
-        await sender.send({
+        // One deadline for the send: a sender that hangs is a send that failed (the code it may still deliver is the latest bound one, so it would still work on this page).
+        await withDeadline(sender.send({
           to: email, subject: STEP_UP_TEXT.subject,
-          text: `Your AgentX confirmation code is ${code}. It works for ${Math.round(DEVELOPER_STEP_UP_SECONDS / 60)} minutes, on the page that asked for it (environment ${options.env}).\n\n`
+          text: `Your AgentX confirmation code is ${code}. It works for ${minutesLeft(page.record)} more ${minutesLeft(page.record) === 1 ? "minute" : "minutes"}, on the page that asked for it (environment ${options.env}).\n\n`
             + "If you did not ask for it, do not share it with anyone: someone may be using your sign-in. Tell an AgentX admin.",
-        });
+        }), SEND_DEADLINE_MS);
       } catch (error) {
         options.log({ event: "signin.step_up_email_failed", developerId: page.record.grant.developerId, error: errorName(error) });
         const after = await options.store.getStepUp(page.secret);

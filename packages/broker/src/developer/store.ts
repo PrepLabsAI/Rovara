@@ -9,6 +9,7 @@ import {
   DEVELOPER_SESSION_SECONDS,
   DEVELOPER_STEP_UP_ATTEMPTS_MAX,
   DEVELOPER_STEP_UP_EMAILS_MAX,
+  DEVELOPER_STEP_UP_PAGES_PER_HOUR,
   DEVELOPER_STEP_UP_SECONDS,
   SIGN_IN_CLIENTS_PK,
   agentXError,
@@ -46,6 +47,8 @@ export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; sl
 export interface StepUpRecord {
   grant: CodeGrant & { codeChallenge: string; redirectUri: string };
   clientState: string;
+  /** Where the code goes: the person's email as it stood before the sign-in that started this page. */
+  email: string;
   expiresAt: number;
   emailsSent: number;
   attempts: number;
@@ -318,12 +321,42 @@ export class DeveloperSignInStore {
 
   // ---- Lane ID part 2: a step-up page in progress ----
 
-  /** Starts a step-up page for a person the provider just named. Answers the secret for the browser's cookie; only its hash is stored. */
-  async createStepUp(input: Pick<StepUpRecord, "grant" | "clientState">): Promise<string> {
+  /**
+   * Starts a step-up page for a person the provider just named. Answers the secret for the browser's cookie (only its hash is stored), or undefined when this person already started
+   * DEVELOPER_STEP_UP_PAGES_PER_HOUR pages in the current hour (one rolling counter row per person, changed only by conditional writes), which bounds the emails and the guesses.
+   */
+  async createStepUp(input: Pick<StepUpRecord, "grant" | "clientState" | "email">): Promise<string | undefined> {
+    if (!await this.takeStepUpRate(input.grant.developerId)) return undefined;
     const secret = randomToken("");
     const record: StepUpRecord = { ...input, expiresAt: this.seconds() + DEVELOPER_STEP_UP_SECONDS, emailsSent: 0, attempts: 0 };
     await this.put({ pk: `STEPUP#${sha256Hex(secret)}`, sk: META, entityType: "STEP_UP", ...record }, "attribute_not_exists(pk)");
     return secret;
+  }
+
+  private async takeStepUpRate(developerId: string): Promise<boolean> {
+    const key = { pk: `STEPUP_RATE#${developerId}`, sk: META };
+    const now = this.seconds();
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName, Key: key, UpdateExpression: "SET pages = pages + :one",
+        ConditionExpression: "attribute_exists(pk) AND windowStart > :cutoff AND pages < :max",
+        ExpressionAttributeValues: { ":one": 1, ":cutoff": now - 3600, ":max": DEVELOPER_STEP_UP_PAGES_PER_HOUR },
+      }));
+      return true;
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+    }
+    try {
+      // A new hour: only when there is no row, or its hour is over (a full current hour is never reset here).
+      await this.input.documentClient.send(new PutCommand({
+        TableName: this.input.tableName, Item: { ...key, entityType: "STEP_UP_RATE", windowStart: now, pages: 1, expiresAt: now + 7200 },
+        ConditionExpression: "attribute_not_exists(pk) OR windowStart <= :cutoff", ExpressionAttributeValues: { ":cutoff": now - 3600 },
+      }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
   }
 
   /** A live step-up page (not expired, not used), or undefined. */
