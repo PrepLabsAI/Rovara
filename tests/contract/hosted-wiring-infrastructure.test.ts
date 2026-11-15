@@ -9,6 +9,7 @@
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
+import { defaultBoundaryStatements } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { COMPANY_SECRET_USE_ACTIONS, COMPANY_TAG_VALUE_GLOB } from "../../infra/lib/company-secrets.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -73,6 +74,16 @@ describe("(a) step-up email through SES", () => {
     expect(others).toHaveLength(1);
     expect(JSON.stringify(legacy)).not.toContain("ses:");
     expect(JSON.stringify(legacy)).not.toContain("STEP_UP_EMAIL_FROM");
+  });
+});
+
+describe("(a) the default boundary's SES statement", () => {
+  it("allows only ses:SendEmail, only on this account's email identities in this region", () => {
+    const scope = { env: "staging", partition: "aws", region: "us-west-2", account: "111122223333", cloudFormationRoleName: "agentx-staging-cloudformation" };
+    const statements = defaultBoundaryStatements(scope);
+    expect(statements.filter((statement) => JSON.stringify(statement.Action).includes("ses:"))).toEqual([
+      { Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: "arn:aws:ses:us-west-2:111122223333:identity/*" },
+    ]);
   });
 });
 
@@ -174,6 +185,7 @@ describe("(h) the company-secrets role (T6)", () => {
     const companyArns = [arn("org-connectors"), arn("org-hooks")];
     expect(statements).toEqual([
       { Sid: "UseOwnCompanySecrets", Effect: "Allow", Action: [...COMPANY_SECRET_USE_ACTIONS], Resource: companyArns, Condition: { Null: { "aws:PrincipalTag/rovara:org": "false" } } },
+      { Sid: "DeleteOwnCompanySecretsRecoverably", Effect: "Allow", Action: "secretsmanager:DeleteSecret", Resource: companyArns, Condition: { Null: { "aws:PrincipalTag/rovara:org": "false" }, Bool: { "secretsmanager:ForceDeleteWithoutRecovery": "false" } } },
       {
         Sid: "CreateOwnCompanySecrets", Effect: "Allow", Action: "secretsmanager:CreateSecret", Resource: companyArns,
         Condition: { Null: { "aws:PrincipalTag/rovara:org": "false" }, StringEquals: { "aws:RequestTag/rovara:org": "${aws:PrincipalTag/rovara:org}" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["rovara:org"] } },

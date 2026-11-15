@@ -5014,7 +5014,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 "secretsmanager:GetSecretValue",
                 "secretsmanager:DescribeSecret",
                 "secretsmanager:PutSecretValue",
-                "secretsmanager:DeleteSecret",
               ],
               "Condition": {
                 "Null": {
@@ -5065,6 +5064,61 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 },
               ],
               "Sid": "UseOwnCompanySecrets",
+            },
+            {
+              "Action": "secretsmanager:DeleteSecret",
+              "Condition": {
+                "Bool": {
+                  "secretsmanager:ForceDeleteWithoutRecovery": "false",
+                },
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-connectors/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-hooks/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DeleteOwnCompanySecretsRecoverably",
             },
             {
               "Action": "secretsmanager:CreateSecret",
