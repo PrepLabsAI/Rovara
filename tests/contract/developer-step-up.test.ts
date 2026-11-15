@@ -169,12 +169,15 @@ describe("refusals on the step-up page", () => {
   });
 
   it("refuses at once, with no trip to the provider, when the install has no factor at all", async () => {
-    const h = identityHarness({ slackUsers: [maya] });
+    for (const stepUp of [undefined, {}]) {
+    const h = identityHarness({ slackUsers: [maya], ...(stepUp === undefined ? {} : { stepUp }) });
     const start = await h.http(httpEvent("GET", authorizeQuery({ acr_values: "step-up" })));
     const location = new URL(start.headers.location!);
     expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
     expect(location.searchParams.get("error_description")).toBe(STEP_UP_TEXT.noFactor);
     expect(h.fetch.calls).toEqual([]);
+    expect(JSON.parse((await h.http(httpEvent("GET", "/v1/auth/.well-known/openid-configuration"))).body)).not.toHaveProperty("acr_values_supported");
+    }
   });
 
   it("never lets the step-up's own sign-in choose the inbox: no factor on a first-ever sign-in, or when the provider now says another email", async () => {

@@ -280,7 +280,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
     const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
     // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
-    if (stepUp && deps.stepUp === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
+    if (stepUp && deps.stepUp?.email === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
     let request: AuthRequestRecord;
     try {
       request = await store.createAuthRequest({
@@ -621,7 +621,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     jwks_uri: endpoint("/.well-known/jwks.json"), response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS, revocation_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS,
     subject_types_supported: ["public"], id_token_signing_alg_values_supported: ["RS256"], scopes_supported: ["openid"],
-    ...(deps.stepUp === undefined ? {} : { acr_values_supported: [DEVELOPER_STEP_UP_ACR] }),
+    ...(deps.stepUp?.email === undefined ? {} : { acr_values_supported: [DEVELOPER_STEP_UP_ACR] }),
   });
 
   async function route(method: string, pathname: string, url: URL, body: string | undefined, headers: Record<string, string | undefined>): Promise<HttpResult> {
