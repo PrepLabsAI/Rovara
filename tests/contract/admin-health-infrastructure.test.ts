@@ -76,12 +76,18 @@ describe("the health route's grants (A13)", () => {
     }, 120_000);
 
   it("lets the broker read the attributes of exactly the five dead-letter queues", () => {
-    const queues = brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes");
-    expect(queues).toHaveLength(1);
-    expect(queues[0]?.Resource).toHaveLength(5);
+    expect(brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes")).toEqual([]);
+    const brokerRole = Object.keys(named.findResources("AWS::IAM::Role")).find((id) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id))!;
+    const policies = Object.values(named.findResources("AWS::SQS::QueuePolicy")) as Array<{ Properties: { PolicyDocument: { Statement: Array<Statement & { Effect: string; Principal: unknown }> } } }>;
+    const queues = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement).filter((s) => s.Action === "sqs:GetQueueAttributes");
+    expect(queues).toHaveLength(5);
+    for (const statement of queues) {
+      expect(statement.Effect).toBe("Allow");
+      expect(statement.Principal).toEqual({ AWS: { "Fn::GetAtt": [brokerRole, "Arn"] } });
+    }
     // Exactly the five queues' own ARNs, one each: no wildcard, no other queue. Spec 062 added the channel event one.
     const queueIds = [/^DispatchDeadLetterQueue[0-9A-F]{8}$/, /^SlackRequestDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierNoticeDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierStreamFailureQueue[0-9A-F]{8}$/, /^ChannelApiEventDeadLetters[0-9A-F]{8}$/];
-    const resources = queues[0]?.Resource as Array<{ "Fn::GetAtt"?: [string, string] }>;
+    const resources = queues.map((statement) => statement.Resource) as Array<{ "Fn::GetAtt"?: [string, string] }>;
     for (const resource of resources) {
       expect(resource).toEqual({ "Fn::GetAtt": [expect.any(String), "Arn"] });
       expect(Object.keys(named.findResources("AWS::SQS::Queue"))).toContain(resource["Fn::GetAtt"]?.[0]);

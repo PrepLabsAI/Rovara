@@ -2270,6 +2270,51 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 },
               ],
             },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -2666,33 +2711,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 "dynamodb:UpdateItem",
                 "dynamodb:DeleteItem",
                 "dynamodb:DescribeTable",
-              ],
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::GetAtt": [
-                    "State1C20CC9A",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      {
-                        "Fn::GetAtt": [
-                          "State1C20CC9A",
-                          "Arn",
-                        ],
-                      },
-                      "/index/*",
-                    ],
-                  ],
-                },
-              ],
-            },
-            {
-              "Action": [
                 "dynamodb:GetRecords",
                 "dynamodb:GetShardIterator",
               ],
@@ -2721,72 +2739,33 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               ],
             },
             {
-              "Action": [
-                "s3:GetObject*",
-                "s3:GetBucket*",
-                "s3:List*",
-                "s3:DeleteObject*",
-                "s3:PutObject",
-                "s3:PutObjectLegalHold",
-                "s3:PutObjectRetention",
-                "s3:PutObjectTagging",
-                "s3:PutObjectVersionTagging",
-                "s3:Abort*",
-              ],
+              "Action": "secretsmanager:GetSecretValue",
               "Effect": "Allow",
               "Resource": [
                 {
-                  "Fn::GetAtt": [
-                    "Artifacts82DD59A1",
-                    "Arn",
-                  ],
+                  "Ref": "GitHubAppPrivateKeySecretArn",
                 },
                 {
                   "Fn::Join": [
                     "",
                     [
+                      "arn:",
                       {
-                        "Fn::GetAtt": [
-                          "Artifacts82DD59A1",
-                          "Arn",
-                        ],
+                        "Ref": "AWS::Partition",
                       },
-                      "/*",
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/connectors/*",
                     ],
                   ],
                 },
               ],
-            },
-            {
-              "Action": "secretsmanager:GetSecretValue",
-              "Effect": "Allow",
-              "Resource": {
-                "Ref": "GitHubAppPrivateKeySecretArn",
-              },
-            },
-            {
-              "Action": "secretsmanager:GetSecretValue",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":secretsmanager:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":secret:agentx/staging/connectors/*",
-                  ],
-                ],
-              },
             },
             {
               "Action": "secretsmanager:PutSecretValue",
@@ -3181,20 +3160,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               ],
             },
             {
-              "Action": [
-                "sqs:SendMessage",
-                "sqs:GetQueueAttributes",
-                "sqs:GetQueueUrl",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "SlackRequestQueueCC82C864",
-                  "Arn",
-                ],
-              },
-            },
-            {
               "Action": "dynamodb:Query",
               "Effect": "Allow",
               "Resource": [
@@ -3353,19 +3318,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
-              "Action": [
-                "kms:Encrypt",
-                "kms:Decrypt",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "ChatGptConnectionKey03C49F9D",
-                  "Arn",
-                ],
-              },
-            },
-            {
               "Action": "cloudwatch:DescribeAlarms",
               "Effect": "Allow",
               "Resource": {
@@ -3386,56 +3338,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     },
                     ":alarm:agentx-staging-*",
                   ],
-                ],
-              },
-            },
-            {
-              "Action": "sqs:GetQueueAttributes",
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::GetAtt": [
-                    "DispatchDeadLetterQueue3E30F4B8",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "SlackRequestDeadLetterQueueBBBDDF4E",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "DeveloperTaskNotifierStreamFailureQueue58891933",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "ChannelApiEventDeadLettersE21C25D1",
-                    "Arn",
-                  ],
-                },
-              ],
-            },
-            {
-              "Action": [
-                "sqs:SendMessage",
-                "sqs:GetQueueAttributes",
-                "sqs:GetQueueUrl",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "SlackHandOffFailureQueue0ACCAF94",
-                  "Arn",
                 ],
               },
             },
@@ -3605,6 +3507,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Effect": "Deny",
               "Principal": {
                 "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEventDeadLettersE21C25D1",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
               },
               "Resource": {
                 "Fn::GetAtt": [
@@ -4915,6 +4835,22 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                       },
                       ":root",
                     ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
                   ],
                 },
               },
@@ -6237,6 +6173,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               },
             },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                  "Arn",
+                ],
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -6458,6 +6412,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               },
             },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierStreamFailureQueue58891933",
+                  "Arn",
+                ],
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -6520,6 +6492,39 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
+    },
+    "DispatchDeadLetterQueuePolicyDF5A20BA": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DispatchDeadLetterQueue3E30F4B8",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "DispatchDeadLetterQueue3E30F4B8",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
     },
     "DispatchQueue898EB017": {
       "DeletionPolicy": "Delete",
@@ -11773,6 +11778,43 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
     },
+    "SlackHandOffFailureQueuePolicyE68A1335": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackHandOffFailureQueue0ACCAF94",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "SlackHandOffFailureQueue0ACCAF94",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
     "SlackHandOffFailuresAlarm4D063F81": {
       "Properties": {
         "AlarmActions": [
@@ -12783,6 +12825,39 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
     },
+    "SlackRequestDeadLetterQueuePolicy4E7A0CFE": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestDeadLetterQueueBBBDDF4E",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "SlackRequestDeadLetterQueueBBBDDF4E",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
     "SlackRequestQueueCC82C864": {
       "DeletionPolicy": "Delete",
       "Properties": {
@@ -12809,6 +12884,43 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
+    },
+    "SlackRequestQueuePolicyCB6E200F": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestQueueCC82C864",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "SlackRequestQueueCC82C864",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
     },
     "SlackSecretEA96F13F": {
       "DeletionPolicy": "RetainExceptOnCreate",

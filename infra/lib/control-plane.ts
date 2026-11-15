@@ -179,16 +179,26 @@ export class ControlPlaneStack extends Stack {
       GITHUB_APP_ID: githubAppId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
     });
-    state.grantReadWriteData(broker);
-    artifacts.grantReadWrite(broker);
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["secretsmanager:GetSecretValue"],
-      resources: [githubAppPrivateKeySecretArn.valueAsString],
-    }));
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["secretsmanager:GetSecretValue"],
-      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
-    }));
+    const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
+    if (naming.env !== undefined) {
+      // Exactly the two grantReadWriteData statements' action/resource cross product.
+      broker.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:GetRecords", "dynamodb:GetShardIterator"],
+        resources: [state.tableArn, `${state.tableArn}/index/*`],
+      }));
+      // Keep the existing grantReadWrite action strings and both resources verbatim.
+      artifacts.addToResourcePolicy(new iam.PolicyStatement({
+        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+        actions: ["s3:GetObject*", "s3:GetBucket*", "s3:List*", "s3:DeleteObject*", "s3:PutObject", "s3:PutObjectLegalHold", "s3:PutObjectRetention", "s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:Abort*"],
+        resources: [artifacts.bucketArn, artifacts.arnForObjects("*")],
+      }));
+      broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString, connectorSecretsArn] }));
+    } else {
+      state.grantReadWriteData(broker);
+      artifacts.grantReadWrite(broker);
+      broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
+      broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [connectorSecretsArn] }));
+    }
     // A rotated OAuth refresh token is written back to its own secret. Only secrets that
     // `agentx admin credential authorize` tagged for it are writable, never other connector secrets.
     broker.addToRolePolicy(new iam.PolicyStatement({
@@ -435,7 +445,13 @@ export class ControlPlaneStack extends Stack {
     });
     slackRequestQueue.grantConsumeMessages(slackOrchestratorRole);
     // Spec 061 slice 2: "Ask AgentX to reply to this comment" on the task page queues the comment for the Slack service (send only).
-    slackRequestQueue.grantSendMessages(broker);
+    if (naming.env !== undefined) {
+      slackRequestQueue.addToResourcePolicy(new iam.PolicyStatement({
+        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+        actions: ["sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"],
+        resources: [slackRequestQueue.queueArn],
+      }));
+    } else slackRequestQueue.grantSendMessages(broker);
     broker.addEnvironment("SLACK_REQUEST_QUEUE_URL", slackRequestQueue.queueUrl);
     slackThreads.grantReadWriteData(slackOrchestratorRole);
     threadSessions.grantReadWrite(slackOrchestratorRole);
@@ -900,7 +916,10 @@ export class ControlPlaneStack extends Stack {
         pendingWindow: Duration.days(7),
         removalPolicy: RemovalPolicy.DESTROY,
       });
-      chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
+      chatGptConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
+        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+        actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
+      }));
       broker.addEnvironment("CHATGPT_CONNECTION_KEY_ARN", chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
@@ -925,16 +944,16 @@ export class ControlPlaneStack extends Stack {
       // Phase 7c2: the channel API's Slack router posts through the adapter too.
       channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
 
-      // The channel request dead-letter queue is reported by its alarm only: one more queue ARN here pushes the broker
-      // role's policy past IAM's inline size limit.
+      // Preserve the health probe's existing five-queue inventory. Channel request failures remain alarm-only.
       const deadLetterQueues = {
         dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures,
         "channel-events": channelAdapters.eventDeadLetters,
       };
       broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
-      broker.addToRolePolicy(new iam.PolicyStatement({
+      for (const queue of Object.values(deadLetterQueues)) queue.addToResourcePolicy(new iam.PolicyStatement({
+        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
         actions: ["sqs:GetQueueAttributes"],
-        resources: Object.values(deadLetterQueues).map((queue) => queue.queueArn),
+        resources: [queue.queueArn],
       }));
       // C10: the ingress reads shared thread records by key; its SLACK_BINDING# statement is unchanged.
       slackIngress.addEnvironment("SHARED_TASKS", "enabled");
@@ -971,7 +990,17 @@ export class ControlPlaneStack extends Stack {
         encryption: sqs.QueueEncryption.SQS_MANAGED,
         retentionPeriod: Duration.days(14),
       });
-      broker.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
+      broker.configureAsyncInvoke({ onFailure: {
+        bind: () => {
+          // CDK SqsDestination.bind only grants these actions and returns the queue ARN.
+          handOffFailures.addToResourcePolicy(new iam.PolicyStatement({
+            principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+            actions: ["sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"],
+            resources: [handOffFailures.queueArn],
+          }));
+          return { destination: handOffFailures.queueArn };
+        },
+      } });
       slackIngress.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
       new cloudwatch.Alarm(this, "SlackHandOffFailuresAlarm", {
         alarmName: naming.alarmName("SlackHandOffFailures"),

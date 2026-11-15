@@ -1,6 +1,6 @@
 // tests/contract/developer-signin-infrastructure.test.ts
 import { createHash } from "node:crypto";
-import { Stack, aws_iam as iam } from "aws-cdk-lib";
+import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
@@ -573,7 +573,8 @@ describe("task-token key and membership IAM", () => {
     }
     expect([reads, families]).toEqual([1, 1]);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    expect(createHash("sha256").update(text).digest("hex")).toBe("13e884c1a3523a029f84bf48ff1b44604604bcab4a09635f0af57a14386a7103");
+    // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("ca864b0d556f620d14c14bbf55b96d6c46c89dd768ff77e2a01cad962301046f");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -603,15 +604,7 @@ describe("task-token key and membership IAM", () => {
     expect(statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((s) => touches(s, "kms") && reaches(named, s, taskId, SAMPLE_KEY_ARN)).flatMap(actionsOf)).toEqual(["kms:GetPublicKey"]);
   });
 
-  it("pins broker inline size exactly and never spills into a managed policy", () => {
-    const message = `broker inline policy at ${brokerEstimate} of 10,000; the next statement makes CDK split it into a managed policy the deploy role can't create`;
-    const policies = ofType(named, "AWS::IAM::Policy").filter(([, r]) => JSON.stringify(r.Properties.Roles).includes("BrokerServiceRole"));
-    expect(policies, message).toHaveLength(1);
-    expect(ofType(named, "AWS::IAM::ManagedPolicy"), message).toHaveLength(0);
-    expect(Object.keys(named.Resources).filter((id) => id.includes("Overflow")), message).toEqual([]);
-    expect(brokerEstimate, message).toBe(9989);
-    expect(brokerEstimate, message).toBeLessThan(10000);
-    expect(JSON.stringify(policies[0]![1].Properties.PolicyDocument).length, message).toBe(7537);
+  it("keeps the R3R4 task-token grant out of broker identity policies", () => {
     expect(JSON.stringify(statementsOfRole(named, "BrokerServiceRole"))).not.toContain("TaskTokenKey");
   });
 
@@ -717,5 +710,858 @@ describe("task key deployment boundary coverage", () => {
         }
       }
     }
+  });
+});
+
+// IAM headroom: frozen data captured from d605c7b24b0ac3ce4c2b015d8a70d1195593391a.
+// Kept in this existing test because this lane cannot add files under the port guard.
+type AccessTuple = [principal: string, effect: string, action: string, resource: string, condition: string];
+const symbolicTypes: Record<string, string> = {
+  "AWS::S3::Bucket": "bucket", "AWS::SQS::Queue": "queue", "AWS::KMS::Key": "key",
+  "AWS::DynamoDB::Table": "table", "AWS::Lambda::Function": "function", "AWS::IAM::Role": "role",
+  "AWS::StepFunctions::StateMachine": "machine", "AWS::SNS::Topic": "topic", "AWS::SecretsManager::Secret": "secret",
+};
+function symbol(template: TemplateJson, value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("unsupported IAM symbol");
+  const node = value as Record<string, unknown>;
+  if (Object.keys(node).length !== 1) throw new Error("unsupported IAM symbol");
+  if (typeof node.Ref === "string") {
+    const resource = template.Resources[node.Ref];
+    return resource === undefined ? `parameter:${node.Ref}` : `${symbolicTypes[resource.Type] ?? resource.Type}:${withoutHash(node.Ref)}`;
+  }
+  if (Array.isArray(node["Fn::GetAtt"])) {
+    const [id, attribute] = node["Fn::GetAtt"] as unknown[];
+    if (typeof id !== "string" || typeof attribute !== "string" || template.Resources[id] === undefined) throw new Error("unsupported IAM symbol");
+    return `${symbolicTypes[template.Resources[id].Type] ?? template.Resources[id].Type}:${withoutHash(id)}${attribute === "Arn" ? "" : `/${attribute}`}`;
+  }
+  if (Array.isArray(node["Fn::Join"])) {
+    const [delimiter, parts] = node["Fn::Join"] as unknown[];
+    if (typeof delimiter !== "string" || !Array.isArray(parts)) throw new Error("unsupported IAM symbol");
+    return parts.map((part: unknown) => symbol(template, part)).join(delimiter);
+  }
+  // External worker role is derived from a parameter ARN: retain the entire opaque expression,
+  // never guess which role or resource it names.
+  if (Array.isArray(node["Fn::Select"]) || Array.isArray(node["Fn::Split"])) return `expression:${JSON.stringify(value)}`;
+  throw new Error("unsupported IAM symbol");
+}
+const conditionOperators = new Set(["ForAllValues:StringLike", "ForAllValues:StringEquals", "StringEquals", "StringEqualsIfExists", "Bool", "Null", "ArnNotEquals", "ArnEquals", "ArnLike"]);
+function conditionText(template: TemplateJson, value: unknown): string {
+  if (value === undefined) return "{}";
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("unsupported IAM condition");
+  const entries = Object.entries(value as Record<string, unknown>).sort().map(([operator, fields]) => {
+    if (!conditionOperators.has(operator) || fields === null || typeof fields !== "object" || Array.isArray(fields)) throw new Error("unsupported IAM condition");
+    return [operator, Object.fromEntries(Object.entries(fields).sort().map(([key, values]) => {
+      const items = [values].flat();
+      if (items.length === 0) throw new Error("unsupported IAM condition");
+      return [key, items.map((v) => symbol(template, v)).sort()];
+    }))];
+  });
+  return JSON.stringify(Object.fromEntries(entries));
+}
+function resourceStatements(template: TemplateJson): Array<{ owner: string; statement: Statement }> {
+  return Object.entries(template.Resources).flatMap(([id, r]) => {
+    const field = r.Type === "AWS::KMS::Key" ? "KeyPolicy" : ["AWS::SQS::QueuePolicy", "AWS::S3::BucketPolicy"].includes(r.Type) ? "PolicyDocument" : undefined;
+    return field === undefined ? [] : statementsIn(r.Properties[field]).map((statement) => ({ owner: id, statement }));
+  });
+}
+function accessTuples(template: TemplateJson): AccessTuple[] {
+  const tuples: AccessTuple[] = [];
+  const add = (principal: string, s: Statement, owner?: string) => {
+    if (!["Allow", "Deny"].includes(s.Effect ?? "") || s.Resource === undefined || !actionsOf(s).every((a) => typeof a === "string") || Object.keys(s).some((key) => !["Effect", "Sid", "Action", "Resource", "Principal", "Condition"].includes(key))) throw new Error("unsupported IAM statement");
+    const condition = conditionText(template, s.Condition);
+    for (const action of actionsOf(s)) for (const resource of [s.Resource].flat()) {
+      const resolved = owner !== undefined && template.Resources[owner]!.Type === "AWS::KMS::Key" && resource === "*" ? `key:${withoutHash(owner)}` : symbol(template, resource);
+      tuples.push([principal, s.Effect!, action, resolved, condition]);
+    }
+  };
+  for (const { role, statement } of grants(template)) add(`role:${withoutHash(role)}`, statement);
+  for (const { owner, statement } of resourceStatements(template)) {
+    const principal = statement.Principal;
+    if (principal === "*") { add("*", statement, owner); continue; }
+    if (principal === null || typeof principal !== "object" || Array.isArray(principal)) throw new Error("unsupported IAM principal");
+    const p = principal as Record<string, unknown>;
+    if (Object.keys(p).length !== 1 || p.AWS === undefined) throw new Error("unsupported IAM principal");
+    for (const aws of [p.AWS].flat() as unknown[]) {
+      const name = symbol(template, aws);
+      // Root delegation is not a direct grant to every role; compare it separately below.
+      if (name === "arn:parameter:AWS::Partition:iam::parameter:AWS::AccountId:root") continue;
+      if (name !== "*" && !name.startsWith("role:")) throw new Error("unsupported IAM principal");
+      add(name, statement, owner);
+    }
+  }
+  return [...new Map(tuples.map((tuple) => [JSON.stringify(tuple), tuple])).values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+}
+
+const beforeTuples: AccessTuple[] = [
+  ["*","Deny","kms:GetPublicKey","key:DeveloperSignInTaskTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\",\"role:DeveloperSignInFunctionServiceRole\"]}}"],
+  ["*","Deny","kms:GetPublicKey","key:DeveloperSignInTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:DeveloperSignInFunctionServiceRole\"]}}"],
+  ["*","Deny","kms:Sign","key:DeveloperSignInTaskTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"],
+  ["*","Deny","kms:Sign","key:DeveloperSignInTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:DeveloperSignInFunctionServiceRole\"]}}"],
+  ["*","Deny","kms:Sign","key:InvokeSigningKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:DispatcherServiceRole\"]}}"],
+  ["*","Deny","s3:*","bucket:Artifacts","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","s3:*","bucket:Artifacts/*","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","s3:*","bucket:SlackThreadSessions","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","s3:*","bucket:SlackThreadSessions/*","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:ChannelApiEventDeadLetters","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:ChannelApiEvents","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:ChannelApiRequestDeadLetters","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:ChannelApiRequests","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:DeveloperTaskNotifierNoticeDeadLetterQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:DeveloperTaskNotifierNoticeQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:DeveloperTaskNotifierStreamFailureQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["role:BrokerServiceRole","Allow","cloudwatch:DescribeAlarms","arn:parameter:AWS::Partition:cloudwatch:parameter:AWS::Region:parameter:AWS::AccountId:alarm:agentx-staging-*","{}"],
+  ["role:BrokerServiceRole","Allow","codebuild:BatchGetBuilds","arn:parameter:AWS::Partition:codebuild:parameter:AWS::Region:parameter:AWS::AccountId:project/agentx-*","{}"],
+  ["role:BrokerServiceRole","Allow","codebuild:StartBuild","arn:parameter:AWS::Partition:codebuild:parameter:AWS::Region:parameter:AWS::AccountId:project/agentx-*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:ConditionCheckItem","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVELOPER#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetItem","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"COMPANY_MEMBER#*\",\"DEVELOPER#*\",\"EMAIL#*\",\"SESSION#*\",\"SIGNIN_CLIENTS\"]}}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetItem","table:SlackThreads","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"THREAD#*\"]}}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetItem","table:TurnRecords","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHANGE#*\"]}}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:PutItem","table:TurnRecords","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHANGE#*\"]}}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:PutItem","table:TurnRecords","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"TASK#*\"]}}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:Query","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:Query","table:TurnRecords","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:Query","table:TurnRecords/index/byTime","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:Scan","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
+  ["role:BrokerServiceRole","Allow","dynamodb:UpdateItem","table:TurnRecords","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHANGE#*\"]}}"],
+  ["role:BrokerServiceRole","Allow","kms:Decrypt","key:ChatGptConnectionKey","{}"],
+  ["role:BrokerServiceRole","Allow","kms:Encrypt","key:ChatGptConnectionKey","{}"],
+  ["role:BrokerServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInTaskTokenKey","{}"],
+  ["role:BrokerServiceRole","Allow","kms:Sign","key:DeveloperSignInTaskTokenKey","{}"],
+  ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:DeveloperSignInFunction:*","{}"],
+  ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:DeveloperSignInFunction","{}"],
+  ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:PlanEvidence:*","{}"],
+  ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:PlanEvidence","{}"],
+  ["role:BrokerServiceRole","Allow","s3:Abort*","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:Abort*","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:DeleteObject*","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:DeleteObject*","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:GetBucket*","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:GetBucket*","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:GetObject*","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:GetObject*","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:List*","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:List*","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObject","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObject","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectLegalHold","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectLegalHold","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectRetention","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectRetention","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectTagging","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectTagging","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectVersionTagging","bucket:Artifacts","{}"],
+  ["role:BrokerServiceRole","Allow","s3:PutObjectVersionTagging","bucket:Artifacts/*","{}"],
+  ["role:BrokerServiceRole","Allow","secretsmanager:CreateSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/channel-adapter/*","{}"],
+  ["role:BrokerServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/connectors/*","{}"],
+  ["role:BrokerServiceRole","Allow","secretsmanager:GetSecretValue","parameter:GitHubAppPrivateKeySecretArn","{}"],
+  ["role:BrokerServiceRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/channel-adapter/*","{}"],
+  ["role:BrokerServiceRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/connectors/*","{\"StringEquals\":{\"secretsmanager:ResourceTag/agentx-writable\":[\"refresh-token\"]}}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiEventDeadLetters","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierNoticeDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierStreamFailureQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DispatchDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:SlackHandOffFailureQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:SlackRequestDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:SlackRequestQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueUrl","queue:SlackHandOffFailureQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueUrl","queue:SlackRequestQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackHandOffFailureQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackRequestQueue","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-features","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-image","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/settings","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-anthropic-secret-arn","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-e2e-agent-model","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-executor-image","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-image","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-fallback","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-id","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-provider","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openai-secret-arn","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-providers","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-secret-arn","{}"],
+  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-prompt-cache-retention","{}"],
+  ["role:BrokerServiceRole","Allow","states:StartExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:stateMachine:agentx-staging-swebench-eval","{}"],
+  ["role:BrokerServiceRole","Allow","states:StartExecution","machine:SessionsDeleter","{}"],
+  ["role:BrokerServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:BrokerServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHANNEL_ADAPTERS\"]}}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","dynamodb:PutItem","table:ChannelApiState","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"LAST_EVENT#*\"]}}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/channel-adapter/*","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","sqs:ChangeMessageVisibility","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","sqs:DeleteMessage","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","sqs:GetQueueUrl","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","sqs:ReceiveMessage","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:ChannelApiEventSenderServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:BatchGetItem","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:BatchWriteItem","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:ConditionCheckItem","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:DeleteItem","table:ChannelApiState","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:DeleteItem","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:DescribeTable","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetItem","table:ChannelApiState","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetItem","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"baseBranch\",\"createdAt\",\"createdByOperationId\",\"entityType\",\"expectedHeadCommit\",\"id\",\"kind\",\"number\",\"pk\",\"result\",\"sk\",\"state\",\"status\",\"updatedAt\",\"url\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"WORKSPACE#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"closedAt\",\"pk\",\"sk\",\"workspaceId\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"SLACK_THREAD#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"pk\",\"share\",\"sk\",\"slackUserId\",\"workflow\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"BINDING#*\",\"CHANNEL_ADAPTERS\",\"CHANNEL_LINK#*\",\"SHARED_TASK#*\",\"SLACK_BINDING#*\"]}}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetItem","table:TurnRecords","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"argumentsOmitted\",\"calls\",\"callsTruncated\",\"disposition\",\"durationMs\",\"emptyResponse\",\"error\",\"eventId\",\"expiresAt\",\"exportPk\",\"exportSk\",\"model\",\"offeredTools\",\"pk\",\"receivedAt\",\"recordingErrors\",\"requestedBy\",\"sk\",\"subject\",\"usage\",\"usageError\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"THREAD#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetRecords","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:GetShardIterator","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:PutItem","table:ChannelApiState","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:PutItem","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:PutItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHANNEL_LINK_CODE#*\"]}}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:Query","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:Query","table:State","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"baseBranch\",\"createdAt\",\"createdByOperationId\",\"entityType\",\"expectedHeadCommit\",\"id\",\"kind\",\"number\",\"pk\",\"result\",\"sk\",\"state\",\"status\",\"updatedAt\",\"url\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"WORKSPACE#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:Scan","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","dynamodb:UpdateItem","table:SlackThreads","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","lambda:InvokeFunction","function:Broker:*","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","lambda:InvokeFunction","function:ChannelApiIngress","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/channel-adapter/*","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiRequests","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","sqs:GetQueueUrl","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","sqs:GetQueueUrl","queue:ChannelApiRequests","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","sqs:SendMessage","queue:ChannelApiEvents","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","sqs:SendMessage","queue:ChannelApiRequests","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:ChannelApiIngressServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:DeleteItem","table:DeveloperSignInTable","{\"ForAllValues:StringEquals\":{\"dynamodb:LeadingKeys\":[\"SIGNIN_CLIENTS\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:GetItem","table:DeveloperSignInTable","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:PutItem","table:DeveloperSignInTable","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:Query","table:DeveloperSignInTable","{\"ForAllValues:StringEquals\":{\"dynamodb:LeadingKeys\":[\"SIGNIN_CLIENTS\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:UpdateItem","table:DeveloperSignInTable","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInTaskTokenKey","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInTokenKey","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","kms:Sign","key:DeveloperSignInTokenKey","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:DescribeSecret","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:DescribeSecret","secret:SlackSecret","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/developer-oidc-??????","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","secret:SlackSecret","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:DeveloperSignInFunctionServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:DescribeStream","table:State/StreamArn","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ADMIN_CHANGE#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHATGPT_NOTICE#*\",\"DEVTASK#*\",\"OPERATION#*\",\"WORKSPACE#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"WORKFLOW_DISPATCH\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:GetRecords","table:State/StreamArn","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:GetShardIterator","table:State/StreamArn","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:ListStreams","*","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:PutItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHATGPT_NOTICE#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:PutItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:PutItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"SHARED_TASK#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:Query","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"CHATGPT_NOTICE#*\",\"DEVTASK#*\",\"OPERATION#*\",\"WORKSPACE#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:UpdateItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ADMIN_CHANGE#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","dynamodb:UpdateItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\"]}}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","s3:GetObject","bucket:Artifacts/private/*/*/*/*","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","s3:GetObject","bucket:Artifacts/private/task-closeouts/*/*","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","s3:PutObject","bucket:Artifacts/private/task-closeouts/*/*","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","secretsmanager:DescribeSecret","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","secretsmanager:DescribeSecret","secret:SlackSecret","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","secretsmanager:GetSecretValue","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","secretsmanager:GetSecretValue","secret:SlackSecret","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:ChangeMessageVisibility","queue:DeveloperTaskNotifierNoticeQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:DeleteMessage","queue:DeveloperTaskNotifierNoticeQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierNoticeQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierStreamFailureQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:GetQueueUrl","queue:DeveloperTaskNotifierNoticeQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:GetQueueUrl","queue:DeveloperTaskNotifierStreamFailureQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:ReceiveMessage","queue:DeveloperTaskNotifierNoticeQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:SendMessage","queue:DeveloperTaskNotifierNoticeQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","sqs:SendMessage","queue:DeveloperTaskNotifierStreamFailureQueue","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:DeveloperTaskNotifierFunctionServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:Query","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:Scan","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
+  ["role:DispatcherServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
+  ["role:DispatcherServiceRole","Allow","kms:Sign","key:InvokeSigningKey","{}"],
+  ["role:DispatcherServiceRole","Allow","s3:GetObject","bucket:Artifacts/workflow-e2e-admissions/*","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:ChangeMessageVisibility","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:DeleteMessage","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:GetQueueAttributes","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:GetQueueUrl","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","sqs:ReceiveMessage","queue:DispatchQueue","{}"],
+  ["role:DispatcherServiceRole","Allow","states:StartExecution","machine:SessionsProvisioner","{}"],
+  ["role:DispatcherServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:DispatcherServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Query","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Scan","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"swebench-eval\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:EvalBatchTickServiceRole","Allow","s3:PutObject","bucket:Artifacts/evals/*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-features","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-image","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/settings","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-anthropic-secret-arn","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-executor-image","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-image","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-id","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-provider","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openai-secret-arn","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-providers","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-secret-arn","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-prompt-cache-retention","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","states:DescribeExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:agentx-staging-swebench-eval:*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","states:StartExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:stateMachine:agentx-staging-swebench-eval","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:EvalBatchTickServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:AnthropicSecretArn","{}"],
+  ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:OpenAISecretArn","{}"],
+  ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:OpenRouterSecretArn","{}"],
+  ["role:GithubWebhookRecoveryRole","Allow","lambda:InvokeFunction","function:Broker:*","{}"],
+  ["role:GithubWebhookRecoveryRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:DescribeStream","table:State/StreamArn","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetRecords","table:State/StreamArn","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:GetShardIterator","table:State/StreamArn","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:ListStreams","*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:Query","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:Scan","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","sqs:GetQueueAttributes","queue:DispatchQueue","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","sqs:GetQueueUrl","queue:DispatchQueue","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","sqs:SendMessage","queue:DispatchQueue","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:OutboxPublisherServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:PlanEvidenceServiceRole","Allow","dynamodb:DeleteItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PLAN_EVIDENCE\"]}}"],
+  ["role:PlanEvidenceServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\",\"PLAN_EVIDENCE\",\"PROJECT#*\"]}}"],
+  ["role:PlanEvidenceServiceRole","Allow","dynamodb:PutItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\"]}}"],
+  ["role:PlanEvidenceServiceRole","Allow","dynamodb:UpdateItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PLAN_EVIDENCE\"]}}"],
+  ["role:PlanEvidenceServiceRole","Allow","s3:GetObject","bucket:Artifacts/private/*","{}"],
+  ["role:PlanEvidenceServiceRole","Allow","s3:PutObject","bucket:Artifacts/private/*/plan-documents/*.evidence.*.json","{}"],
+  ["role:PlanEvidenceServiceRole","Allow","secretsmanager:GetSecretValue","parameter:GitHubAppPrivateKeySecretArn","{}"],
+  ["role:PlanEvidenceServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:PlanEvidenceServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:SchedulerRoleForTarget490aa1","Allow","lambda:InvokeFunction","function:EvalBatchTick:*","{}"],
+  ["role:SchedulerRoleForTarget490aa1","Allow","lambda:InvokeFunction","function:EvalBatchTick","{}"],
+  ["role:SchedulerRoleForTarget9cef70","Allow","lambda:InvokeFunction","function:SessionsReaper:*","{}"],
+  ["role:SchedulerRoleForTarget9cef70","Allow","lambda:InvokeFunction","function:SessionsReaper","{}"],
+  ["role:SchedulerRoleForTargetd4b209","Allow","lambda:InvokeFunction","function:SessionsReconciler:*","{}"],
+  ["role:SchedulerRoleForTargetd4b209","Allow","lambda:InvokeFunction","function:SessionsReconciler","{}"],
+  ["role:SessionsDeleterRole","Allow","ec2:DeleteVolume","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsDeleterRole","Allow","ec2:DeleteVolume","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsDeleterRole","Allow","ec2:DescribeInstances","*","{}"],
+  ["role:SessionsDeleterRole","Allow","ec2:DescribeVolumes","*","{}"],
+  ["role:SessionsDeleterRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsDeleterRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsDeleterRole","Allow","lambda:InvokeFunction","function:SessionsSteps:*","{}"],
+  ["role:SessionsDeleterRole","Allow","lambda:InvokeFunction","function:SessionsSteps","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:CreateLogDelivery","*","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:DeleteLogDelivery","*","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:DescribeLogGroups","*","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:DescribeResourcePolicies","*","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:GetLogDelivery","*","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:ListLogDeliveries","*","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:PutResourcePolicy","*","{}"],
+  ["role:SessionsDeleterRole","Allow","logs:UpdateLogDelivery","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:AttachVolume","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:AttachVolume","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:CreateTags","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"ec2:CreateAction\":[\"CreateVolume\",\"RunInstances\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:CreateTags","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"ec2:CreateAction\":[\"CreateVolume\",\"RunInstances\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:CreateVolume","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"aws:RequestTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:RequestTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:DescribeInstances","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:DescribeVolumes","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region::image/*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"ArnEquals\":{\"ec2:LaunchTemplate\":[\"arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:launch-template/parameter:Ec2WorkerLaunchTemplateId\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:launch-template/parameter:Ec2WorkerLaunchTemplateId","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:network-interface/*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:security-group/*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:subnet/*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:RunInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","iam:PassRole","parameter:Ec2WorkerInstanceRoleArn","{\"StringEquals\":{\"iam:PassedToService\":[\"ec2.amazonaws.com\"]}}"],
+  ["role:SessionsProvisionerRole","Allow","kms:CreateGrant","parameter:WorkspaceKmsKeyArn","{}"],
+  ["role:SessionsProvisionerRole","Allow","kms:Decrypt","parameter:WorkspaceKmsKeyArn","{}"],
+  ["role:SessionsProvisionerRole","Allow","kms:DescribeKey","parameter:WorkspaceKmsKeyArn","{}"],
+  ["role:SessionsProvisionerRole","Allow","kms:GenerateDataKeyWithoutPlaintext","parameter:WorkspaceKmsKeyArn","{}"],
+  ["role:SessionsProvisionerRole","Allow","kms:ReEncrypt*","parameter:WorkspaceKmsKeyArn","{}"],
+  ["role:SessionsProvisionerRole","Allow","lambda:InvokeFunction","function:SessionsSteps:*","{}"],
+  ["role:SessionsProvisionerRole","Allow","lambda:InvokeFunction","function:SessionsSteps","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:CreateLogDelivery","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:DeleteLogDelivery","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:DescribeLogGroups","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:DescribeResourcePolicies","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:GetLogDelivery","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:ListLogDeliveries","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:PutResourcePolicy","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","logs:UpdateLogDelivery","*","{}"],
+  ["role:SessionsProvisionerRole","Allow","ssm:GetParameter","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64","{}"],
+  ["role:SessionsProvisionerRole","Allow","ssm:GetParameter","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-qualified-ami","{}"],
+  ["role:SessionsProvisionerRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:Query","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:Scan","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
+  ["role:SessionsReaperServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","ec2:DescribeInstances","*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","ec2:DescribeVolumes","*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsReaperServiceRole","Allow","states:StartExecution","machine:SessionsProvisioner","{}"],
+  ["role:SessionsReaperServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:SessionsReaperServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:GetItem","table:SlackThreads","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"activeTurn\",\"pk\",\"sk\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"THREAD#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:Query","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:Scan","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ec2:CreateTags","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"ForAllValues:StringEquals\":{\"aws:TagKeys\":[\"agentx:quarantined\"]},\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ec2:DeleteVolume","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ec2:DeleteVolume","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ec2:DescribeInstances","*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ec2:DescribeVolumes","*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:volume/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"ec2-ebs\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
+  ["role:SessionsReconcilerServiceRole","Allow","secretsmanager:DescribeSecret","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","secretsmanager:GetSecretValue","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","secretsmanager:GetSecretValue","secret:SlackSecret","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","ssm:GetParameter","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-qualified-ami","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:DescribeActivity","*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:DescribeExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:expression:{\"Fn::Select\":[6,{\"Fn::Split\":[\":\",{\"Ref\":\"SessionsDeleterB48741EA\"}]}]}:*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:DescribeExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:expression:{\"Fn::Select\":[6,{\"Fn::Split\":[\":\",{\"Ref\":\"SessionsProvisioner9C44055B\"}]}]}:*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:DescribeStateMachine","*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:DescribeStateMachineForExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:expression:{\"Fn::Select\":[6,{\"Fn::Split\":[\":\",{\"Ref\":\"SessionsDeleterB48741EA\"}]}]}:*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:DescribeStateMachineForExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:expression:{\"Fn::Select\":[6,{\"Fn::Split\":[\":\",{\"Ref\":\"SessionsProvisioner9C44055B\"}]}]}:*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:GetExecutionHistory","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:expression:{\"Fn::Select\":[6,{\"Fn::Split\":[\":\",{\"Ref\":\"SessionsDeleterB48741EA\"}]}]}:*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:GetExecutionHistory","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:expression:{\"Fn::Select\":[6,{\"Fn::Split\":[\":\",{\"Ref\":\"SessionsProvisioner9C44055B\"}]}]}:*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:ListActivities","*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:ListExecutions","machine:SessionsDeleter","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:ListExecutions","machine:SessionsProvisioner","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:ListStateMachines","machine:SessionsDeleter","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:ListStateMachines","machine:SessionsProvisioner","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","states:StartExecution","machine:SessionsProvisioner","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:SessionsReconcilerServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:Query","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:Scan","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
+  ["role:SessionsStepsServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","kms:GetPublicKey","key:InvokeSigningKey","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-anthropic-secret-arn","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-e2e-agent-model","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-executor-image","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-image","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-fallback","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-id","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-provider","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openai-secret-arn","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-providers","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-secret-arn","{}"],
+  ["role:SessionsStepsServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-prompt-cache-retention","{}"],
+  ["role:SessionsStepsServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:SessionsStepsServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:BatchGetItem","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:BatchWriteItem","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:ConditionCheckItem","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:DeleteItem","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:DescribeTable","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetItem","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"pk\",\"share\",\"sk\",\"slackUserId\",\"workflow\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"pk\",\"sk\",\"traceId\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ADMIN_CHANGE#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"SHARED_TASK#*\"]}}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"SLACK_BINDING#*\"]}}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetItem","table:TurnRecords","{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"argumentsOmitted\",\"calls\",\"callsTruncated\",\"disposition\",\"durationMs\",\"emptyResponse\",\"error\",\"eventId\",\"expiresAt\",\"exportPk\",\"exportSk\",\"model\",\"offeredTools\",\"pk\",\"receivedAt\",\"recordingErrors\",\"requestedBy\",\"sk\",\"subject\",\"usage\",\"usageError\"]},\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"THREAD#*\"]},\"Null\":{\"dynamodb:Attributes\":[\"false\"]},\"StringEqualsIfExists\":{\"dynamodb:Select\":[\"SPECIFIC_ATTRIBUTES\"]}}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetRecords","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:GetShardIterator","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:PutItem","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:Query","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:Scan","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","dynamodb:UpdateItem","table:SlackThreads","{}"],
+  ["role:SlackIngressServiceRole","Allow","lambda:InvokeFunction","function:Broker:*","{}"],
+  ["role:SlackIngressServiceRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
+  ["role:SlackIngressServiceRole","Allow","lambda:InvokeFunction","function:SlackIngress","{}"],
+  ["role:SlackIngressServiceRole","Allow","secretsmanager:DescribeSecret","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:SlackIngressServiceRole","Allow","secretsmanager:DescribeSecret","secret:SlackSecret","{}"],
+  ["role:SlackIngressServiceRole","Allow","secretsmanager:GetSecretValue","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:SlackIngressServiceRole","Allow","secretsmanager:GetSecretValue","secret:SlackSecret","{}"],
+  ["role:SlackIngressServiceRole","Allow","sqs:GetQueueAttributes","queue:SlackHandOffFailureQueue","{}"],
+  ["role:SlackIngressServiceRole","Allow","sqs:GetQueueAttributes","queue:SlackRequestQueue","{}"],
+  ["role:SlackIngressServiceRole","Allow","sqs:GetQueueUrl","queue:SlackHandOffFailureQueue","{}"],
+  ["role:SlackIngressServiceRole","Allow","sqs:GetQueueUrl","queue:SlackRequestQueue","{}"],
+  ["role:SlackIngressServiceRole","Allow","sqs:SendMessage","queue:SlackHandOffFailureQueue","{}"],
+  ["role:SlackIngressServiceRole","Allow","sqs:SendMessage","queue:SlackRequestQueue","{}"],
+  ["role:SlackIngressServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
+  ["role:SlackIngressServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","bedrock:InvokeModel","arn:parameter:AWS::Partition:bedrock:*::foundation-model/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","bedrock:InvokeModel","arn:parameter:AWS::Partition:bedrock:parameter:AWS::Region:parameter:AWS::AccountId:inference-profile/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","bedrock:InvokeModelWithResponseStream","arn:parameter:AWS::Partition:bedrock:*::foundation-model/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","bedrock:InvokeModelWithResponseStream","arn:parameter:AWS::Partition:bedrock:parameter:AWS::Region:parameter:AWS::AccountId:inference-profile/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:BatchGetItem","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:BatchWriteItem","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:ConditionCheckItem","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:DeleteItem","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:DescribeTable","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:GetItem","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:GetRecords","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:GetShardIterator","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:PutItem","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:PutItem","table:TurnRecords","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:Query","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:Scan","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","dynamodb:UpdateItem","table:SlackThreads","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","execute-api:Invoke","arn:parameter:AWS::Partition:execute-api:parameter:AWS::Region:parameter:AWS::AccountId:AWS::ApiGatewayV2::Api:HttpApi/*/*/v1/service/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:Abort*","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:Abort*","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:DeleteObject*","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:DeleteObject*","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:GetBucket*","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:GetBucket*","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:GetObject*","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:GetObject*","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:List*","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:List*","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObject","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObject","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectLegalHold","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectLegalHold","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectRetention","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectRetention","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectTagging","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectTagging","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectVersionTagging","bucket:SlackThreadSessions","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","s3:PutObjectVersionTagging","bucket:SlackThreadSessions/*","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","secretsmanager:DescribeSecret","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","secretsmanager:DescribeSecret","secret:SlackSecret","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","secretsmanager:GetSecretValue","parameter:AnthropicSecretArn","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","secretsmanager:GetSecretValue","parameter:OpenAISecretArn","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","secretsmanager:GetSecretValue","parameter:OpenRouterSecretArn","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","secretsmanager:GetSecretValue","secret:ChannelApiSlackAdapterSecret","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","secretsmanager:GetSecretValue","secret:SlackSecret","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:ChangeMessageVisibility","queue:ChannelApiRequests","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:ChangeMessageVisibility","queue:SlackRequestQueue","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:DeleteMessage","queue:ChannelApiRequests","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:DeleteMessage","queue:SlackRequestQueue","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiEvents","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiRequests","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:GetQueueAttributes","queue:SlackRequestQueue","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:GetQueueUrl","queue:ChannelApiEvents","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:GetQueueUrl","queue:ChannelApiRequests","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:GetQueueUrl","queue:SlackRequestQueue","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:ReceiveMessage","queue:ChannelApiRequests","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:ReceiveMessage","queue:SlackRequestQueue","{}"],
+  ["role:SlackOrchestratorTaskRole","Allow","sqs:SendMessage","queue:ChannelApiEvents","{}"],
+  ["role:WorkflowDispatchRecoveryRole","Allow","lambda:InvokeFunction","function:Broker:*","{}"],
+  ["role:WorkflowDispatchRecoveryRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
+];
+
+function matchesConditions(text: string, context: Record<string, string[]>): boolean {
+  const condition = JSON.parse(text) as Record<string, Record<string, string[]>>;
+  return Object.entries(condition).every(([operator, fields]) => {
+    if (!conditionOperators.has(operator)) throw new Error("unsupported IAM condition");
+    return Object.entries(fields).every(([key, expected]) => {
+      const actual = context[key] ?? [];
+      if (operator === "Null") return expected.includes(String(actual.length === 0));
+      if (operator === "StringEqualsIfExists" && actual.length === 0) return true;
+      const like = operator.endsWith("Like");
+      const one = (v: string) => expected.some((p) => like ? globRegExp(p).test(v) : p === v);
+      if (operator === "ArnNotEquals") return !actual.some(one);
+      if (operator.startsWith("ForAllValues:")) return actual.every(one);
+      return actual.some(one);
+    });
+  });
+}
+function probe(tuples: AccessTuple[], principal: string, action: string, resource: string, context: Record<string, string[]>): boolean {
+  const applicable = tuples.filter(([p, , a, r, c]) => (p === principal || p === "*") && globRegExp(a, "i").test(action) && globRegExp(r).test(resource) && matchesConditions(c, { ...context, "aws:PrincipalArn": [principal] }));
+  return !applicable.some(([, e]) => e === "Deny") && applicable.some(([, e]) => e === "Allow") && policyAllows(defaultBoundaryStatements(policyScope), action, resource);
+}
+
+const BROKER_INLINE_ESTIMATE = 7450; // This replaces the R3R4 pin.
+const BROKER_INLINE_TARGET = 8500;
+const RESERVED = {
+  r2: 600, // State stream reads and callback-key read; EC2 belongs to the dispatcher.
+  t5: 250, // Optional State LeadingKeys-limited GitHub grant, pending T5 Q3.
+  t6: 150, // Company-session AssumeRole/TagSession, net of blanket-read removal.
+};
+function inlineEstimate(statements: Statement[]): number {
+  return statements.reduce((total, s) => total + `"Effect": "${s.Effect}",`.length + ["Action", "Resource"].reduce((size, key) => {
+    const values = [s[key as "Action" | "Resource"]].flat();
+    return size + key.length + 5 + values.reduce<number>((sum, v) => sum + (typeof v === "string" ? v.length : 150) + 3, 0);
+  }, 0) + JSON.stringify(s.Condition ?? {}).length, 0);
+}
+function checkHeadroom(template: TemplateJson): void {
+  const statements = statementsOfRole(template, "BrokerServiceRole");
+  const n = inlineEstimate(statements);
+  const reserveUnspent = Object.values(RESERVED).reduce((a, b) => a + b, 0);
+  const message = `broker inline policy estimate is ${n}, pinned ${BROKER_INLINE_ESTIMATE}. CDK splits at 10,000 into a managed policy the deploy role cannot create (the boundary denies iam:CreatePolicy*), so the deploy would fail. Before adding a statement here, move the grant to a resource policy or merge statements (see briefs/codex/infra-iam-headroom/BRIEF.md). Reserve left: ${8500 - n - reserveUnspent}.`;
+  expect(ofType(template, "AWS::IAM::Policy").filter(([, r]) => JSON.stringify(r.Properties.Roles).includes("BrokerServiceRole")), message).toHaveLength(1);
+  expect(ofType(template, "AWS::IAM::ManagedPolicy"), message).toHaveLength(0);
+  expect(Object.keys(template.Resources).filter((id) => id.includes("Overflow")), message).toEqual([]);
+  expect(n, message).toBe(BROKER_INLINE_ESTIMATE);
+}
+const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRequestQueue", "queue:SlackHandOffFailureQueue", "queue:DispatchDeadLetterQueue", "queue:SlackRequestDeadLetterQueue", "queue:DeveloperTaskNotifierNoticeDeadLetterQueue", "queue:DeveloperTaskNotifierStreamFailureQueue", "queue:ChannelApiEventDeadLetters", "key:ChatGptConnectionKey"];
+
+describe("broker IAM headroom", () => {
+  it("preserves every role's effective tuples exactly", () => {
+    expect(accessTuples(named)).toEqual(beforeTuples);
+  });
+
+  it("has the same semantic results for every role, resource, condition and sibling", () => {
+    const after = accessTuples(named);
+    const roles = [...new Set([...beforeTuples, ...after].map(([p]) => p).filter((p) => p !== "*")), "role:agentx-other-env"];
+    const extras = { s3: ["GetObject", "PutObject", "DeleteObject", "GetBucketPolicy", "PutBucketPolicy", "ListBucket", "GetObjectVersion"], sqs: ["SendMessage", "ReceiveMessage", "DeleteMessage", "PurgeQueue", "SetQueueAttributes", "GetQueueAttributes"], kms: ["Encrypt", "Decrypt", "GenerateDataKey", "Sign", "ScheduleKeyDeletion"], dynamodb: ["GetItem", "PutItem", "DeleteItem", "Scan", "Query"] };
+    const actions = [...new Set([...beforeTuples, ...after].filter(([p]) => p === "role:BrokerServiceRole").map(([, , a]) => a).concat(Object.entries(extras).flatMap(([service, names]) => names.map((name) => `${service}:${name}`))))];
+    const resources = [...new Set([...beforeTuples, ...after].map(([, , , r]) => r).concat(Object.entries(named.Resources).filter(([, r]) => Object.hasOwn(symbolicTypes, r.Type)).map(([id]) => symbol(named, { "Fn::GetAtt": [id, "Arn"] })), ["bucket:Sibling", "bucket:Sibling/object", "queue:Sibling", "key:Sibling", "table:Sibling"]))];
+    // Index role-specific tuples once; this is a finite synthesized template, not customer input.
+    for (const role of roles) {
+      const b = beforeTuples.filter(([p]) => p === role || p === "*");
+      const a = after.filter(([p]) => p === role || p === "*");
+      const beforeResults: boolean[] = []; const afterResults: boolean[] = [];
+      for (const action of actions) for (const resource of resources) for (const key of ["TASK#1", "COMPANY_MEMBER#1", undefined]) {
+        const context = { "aws:SecureTransport": ["true"], "secretsmanager:ResourceTag/agentx-writable": ["refresh-token"], ...(key === undefined ? {} : { "dynamodb:LeadingKeys": [key] }) };
+        beforeResults.push(probe(b, role, action, resource, context));
+        afterResults.push(probe(a, role, action, resource, context));
+      }
+      expect(afterResults, role).toEqual(beforeResults);
+    }
+  }, 120_000);
+
+  it("moves each exact grant to a broker-only resource policy with no duplicate identity grant", () => {
+    const broker = ofType(named, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "BrokerServiceRole")![0];
+    const resourceOnly = structuredClone(named);
+    for (const [id, r] of Object.entries(resourceOnly.Resources)) if (["AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"].includes(r.Type)) delete resourceOnly.Resources[id];
+    for (const [, r] of ofType(resourceOnly, "AWS::IAM::Role")) delete r.Properties.Policies;
+    const moved = accessTuples(resourceOnly).filter(([, e, , r]) => e === "Allow" && movedResources.includes(r));
+    expect(moved).toEqual(beforeTuples.filter(([p, e, , r]) => p === "role:BrokerServiceRole" && e === "Allow" && movedResources.includes(r)));
+    for (const { statement } of resourceStatements(named).filter(({ statement }) => statement.Effect === "Allow" && JSON.stringify(statement.Principal).includes(broker))) {
+      expect(statement.Principal).toEqual({ AWS: roleArn(broker) });
+    }
+    for (const s of statementsOfRole(named, "BrokerServiceRole")) for (const r of [s.Resource].flat()) expect(movedResources).not.toContain(symbol(named, r));
+    for (const principal of ["role:DispatcherServiceRole", "role:DeveloperSignInFunctionServiceRole", "role:SlackIngressServiceRole", "role:agentx-other-env"]) {
+      for (const [, , action, resource] of moved) expect(probe(moved, principal, action, resource, {})).toBe(false);
+    }
+    const [, key] = ofType(named, "AWS::KMS::Key").find(([id]) => withoutHash(id) === "ChatGptConnectionKey")!;
+    expect(statementsIn(key.Properties.KeyPolicy).filter((s) => allows(s, "kms:PutKeyPolicy"))).toEqual([{
+      Action: "kms:*", Effect: "Allow", Principal: { AWS: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":iam::", { Ref: "AWS::AccountId" }, ":root"]] } }, Resource: "*",
+    }]);
+  });
+
+  it("pins headroom and preserves the unspent reserve", () => { checkHeadroom(named); expect(inlineEstimate(statementsOfRole(named, "BrokerServiceRole"))).toBe(brokerEstimate); });
+
+  it("enforces the 8500 ceiling including the complete reserve ledger", () => {
+    const n = inlineEstimate(statementsOfRole(named, "BrokerServiceRole"));
+    expect(n + Object.values(RESERVED).reduce((a, b) => a + b, 0), `broker inline ceiling ${BROKER_INLINE_TARGET}; RESERVED ledger ${JSON.stringify(RESERVED)}`).toBeLessThanOrEqual(BROKER_INLINE_TARGET);
+  });
+
+  it("calibrates the estimator against CDK at its actual split threshold", () => {
+    for (const expected of [9999, 10001]) {
+      const stack = new Stack(new App(), `Calibration${expected}`);
+      const role = new iam.Role(stack, "Role", { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") });
+      const arn = new CfnParameter(stack, "ResourceArn").valueAsString;
+      const tokenStatement: Statement = { Effect: "Allow", Action: "s3:GetObject", Resource: { Ref: "ResourceArn" } };
+      const fixed: Statement = { Effect: "Allow", Action: "s3:PutObject", Resource: "x" };
+      const length = expected - inlineEstimate([tokenStatement, fixed]) + 1;
+      role.addToPolicy(new iam.PolicyStatement({ actions: ["s3:GetObject"], resources: [arn] }));
+      role.addToPolicy(new iam.PolicyStatement({ actions: ["s3:PutObject"], resources: ["x".repeat(length)] }));
+      const template = Template.fromStack(stack).toJSON() as TemplateJson;
+      expect(inlineEstimate([tokenStatement, { ...fixed, Resource: "x".repeat(length) }])).toBe(expected);
+      expect(ofType(template, "AWS::IAM::ManagedPolicy").length > 0, `CDK split at ${expected}`).toBe(expected > 10000);
+    }
+  });
+
+  it("sanity-checks JSON with every ARN token expanded to 150 characters", () => {
+    const statements = statementsOfRole(named, "BrokerServiceRole").map((s) => ({ ...s, Resource: ([s.Resource].flat()).map((r) => typeof r === "string" ? r : "x".repeat(150)) }));
+    expect(JSON.stringify({ Version: "2012-10-17", Statement: statements }).replace(/\s/g, "").length).toBeLessThan(10240 - 1000);
+  });
+
+  it("rejects unsupported conditions and statements with fixed errors", () => {
+    const bad = structuredClone(named);
+    const [, policy] = ofType(bad, "AWS::IAM::Policy")[0]!;
+    for (const patch of [{ Condition: { Unsupported: { secret: "do-not-echo" } } }, { Effect: "do-not-echo" }, { Action: 123 }, { Resource: null }]) {
+      const original = statementsIn(policy.Properties.PolicyDocument)[0]!;
+      const copy = { ...original, ...patch };
+      statementsIn(policy.Properties.PolicyDocument)[0] = copy as Statement;
+      expect(() => accessTuples(bad)).toThrow(/^unsupported IAM (condition|statement|symbol)$/);
+      statementsIn(policy.Properties.PolicyDocument)[0] = original;
+    }
+    expect(() => matchesConditions('{"Unsupported":{"secret":["do-not-echo"]}}', {})).toThrow("unsupported IAM condition");
+  });
+});
+
+describe("projected broker additions", () => {
+  it("fits concrete R2, T5 and T6 statements without assuming a future read removal", () => {
+    const state = ofType(named, "AWS::DynamoDB::Table").find(([id]) => withoutHash(id) === "State")![0];
+    const PROJECTED: Record<string, Statement[]> = {
+      r2: [
+        { Effect: "Allow", Action: "dynamodb:ListStreams", Resource: "*" },
+        { Effect: "Allow", Action: ["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"], Resource: { "Fn::GetAtt": [state, "StreamArn"] } },
+      ],
+      t5: [{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: roleArn(state), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["GITHUB#*"] } } }],
+      t6: [{ Effect: "Allow", Action: ["sts:AssumeRole", "sts:TagSession"], Resource: { "Fn::GetAtt": ["CompanySessionRole", "Arn"] } }],
+    };
+    const projected = structuredClone(statementsOfRole(named, "BrokerServiceRole"));
+    const secrets = projected.find((s) => s.Action === "secretsmanager:GetSecretValue" && s.Condition === undefined)!;
+    secrets.Resource = [...[secrets.Resource].flat(), { Ref: "CallbackKeyArn" }];
+    projected.push(...Object.values(PROJECTED).flat());
+    // T6's blanket company-read grant is not on this base. Count its full new statement;
+    // never claim a saving by removing an unrelated existing install-wide secret grant.
+    expect(inlineEstimate(projected), "R2/T5/T6 projected statements exceed the broker ceiling").toBeLessThanOrEqual(BROKER_INLINE_TARGET);
+  });
+});
+
+describe("headroom evaluator positive and negative controls", () => {
+  it("distinguishes moved grants, siblings, explicit denies and LeadingKeys contexts", () => {
+    const tuples = accessTuples(named);
+    const broker = "role:BrokerServiceRole";
+    const secure = { "aws:SecureTransport": ["true"] };
+    for (const [action, resource, allowed] of [
+      ["s3:GetObject", "bucket:Artifacts/file", true], ["s3:GetObject", "bucket:Sibling/file", false],
+      ["s3:PutBucketPolicy", "bucket:Artifacts", false], ["sqs:SendMessage", "queue:SlackRequestQueue", true],
+      ["sqs:ReceiveMessage", "queue:SlackRequestQueue", false], ["sqs:DeleteMessage", "queue:SlackRequestQueue", false],
+      ["sqs:PurgeQueue", "queue:SlackRequestQueue", false], ["sqs:SendMessage", "queue:DispatchDeadLetterQueue", false],
+      ["kms:Encrypt", "key:ChatGptConnectionKey", true], ["kms:Decrypt", "key:ChatGptConnectionKey", true],
+      ["kms:GenerateDataKey", "key:ChatGptConnectionKey", false], ["kms:ScheduleKeyDeletion", "key:ChatGptConnectionKey", false],
+    ] as const) expect(probe(tuples, broker, action, resource, secure), `${action} ${resource}`).toBe(allowed);
+    expect(probe(tuples, broker, "s3:GetObject", "bucket:Artifacts/file", { "aws:SecureTransport": ["false"] })).toBe(false);
+    expect(probe(tuples, broker, "dynamodb:UpdateItem", "table:TurnRecords", { "dynamodb:LeadingKeys": ["TASK#1"] })).toBe(false);
+    expect(probe(tuples, broker, "dynamodb:UpdateItem", "table:TurnRecords", { "dynamodb:LeadingKeys": ["CHANGE#1"] })).toBe(true);
+    expect(probe(tuples, broker, "dynamodb:ConditionCheckItem", "table:DeveloperSignInTable", {})).toBe(false);
   });
 });
