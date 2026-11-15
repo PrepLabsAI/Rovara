@@ -139,6 +139,7 @@ export interface OutboxMessage {
   id: string;
   queue: string;
   body: JsonValue;
+  /** At most seven caller attributes; companyId and outboxId are reserved and stamped by the relay. */
   attributes?: Record<string, string>;
   groupId?: string;
 }

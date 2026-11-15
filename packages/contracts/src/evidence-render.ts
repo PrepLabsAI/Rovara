@@ -226,7 +226,9 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const isolation = pack.producer.isolation as string;
   const weakest = pack.level.weakest;
   const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
-  let firstLine = evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words });
+  // TE-B5 (O30): keep the override on the first line in both the full and compact forms, also when the AI evidence supplies the first line.
+  const withOverride = (text: string) => line([text, ...(pack.proof?.override === undefined ? [] : ["marked ready anyway"])].join(" · "));
+  let firstLine = withOverride(evidenceFirstLine({ result: pack.result, reached: pack.level.reached, isolation, scripted, weakestWords: weakest?.words }));
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
   const newer = options.newer ?? noNewerEvidence();
@@ -234,7 +236,7 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const flagged = weakeningPart(pack);
   if (options.compact === true) {
     const ai = renderAiEvidence(pack.ai, options.questionLimit ?? 0);
-    firstLine = ai.firstLine ?? firstLine;
+    firstLine = ai.firstLine === undefined ? firstLine : withOverride(ai.firstLine);
     const short = [...ai.lines, producerLine, ...flagged.flags, ...slot(options.rovaraProblemLine), ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
     return { firstLine, producerLine, body: short, text: [firstLine, ...short].join("\n") };
   }
@@ -256,7 +258,7 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
     ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []),
   ];
   const ai = renderAiEvidence(pack.ai, options.questionLimit, Math.max(1000, EVIDENCE_RENDER_LIMITS.textMax - [firstLine, ...body].join("\n").length - 1));
-  firstLine = ai.firstLine ?? firstLine;
+  firstLine = ai.firstLine === undefined ? firstLine : withOverride(ai.firstLine);
   body.unshift(...ai.lines);
   // Keep verdicts and weakening flags; the existing compact pointer records omitted detail.
   if (pack.ai !== undefined && [firstLine, ...body].join("\n").length > EVIDENCE_RENDER_LIMITS.textMax) return renderEvidence(pack, { ...options, compact: true });

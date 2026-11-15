@@ -39,8 +39,8 @@ describe("the scheduler point", () => {
     const scheduler = createFakeScheduler({ maxAttempts: 2 });
     let attempts = 0;
     scheduler.subscribe(async () => { attempts += 1; throw new Error("no"); });
-    await scheduler.put({ companyId: "c", scheduleId: "a", when: { kind: "every", minutes: 5 }, enabled: true, target: { kind: "x", ref: {} } });
-    expect(await scheduler.fireForTest("c", "a", "2026-11-10T02:30:00Z")).toBe(false);
+    await scheduler.put({ companyId: "org_00000000000000000000", scheduleId: "a", when: { kind: "every", minutes: 5 }, enabled: true, target: { kind: "x", ref: {} } });
+    expect(await scheduler.fireForTest("org_00000000000000000000", "a", "2026-11-10T02:30:00Z")).toBe(false);
     expect(attempts).toBe(2);
   });
 });

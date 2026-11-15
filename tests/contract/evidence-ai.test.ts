@@ -111,6 +111,13 @@ describe("AI text goldens", () => {
     expect(out.text).toContain("Eval counts: 1 question");
     expect(JSON.stringify(publicEvidenceView(p)) + out.text).not.toContain("CANARY");
   });
+  // Merge of TE-B5 (O30) with this lane: an AI first line must not drop "marked ready anyway".
+  it("keeps the marked-ready-anyway override on an AI first line, full and compact", () => {
+    const base = pack(artifact());
+    const marked = EvidencePackV2Schema.parse({ ...base, proof: { verdicts: [], provenCount: 0, loadFailureOnOld: 0, heldDraft: true, override: { actorId: "person-1", at: "2026-11-13T10:00:00.000Z" } } });
+    for (const out of [renderEvidence(marked), renderEvidence(marked, { compact: true })]) expect(out.firstLine).toBe("Worse on eval: 1 question broke \u00b7 marked ready anyway");
+    expect(renderEvidence(base).firstLine).toBe("Worse on eval: 1 question broke");
+  });
 });
 
 it("records omitted details and rejects over-budget seam inputs as a whole", () => {
