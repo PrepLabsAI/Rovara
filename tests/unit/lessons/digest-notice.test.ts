@@ -239,4 +239,44 @@ describe("the weekly lessons summary", () => {
     expect([...digestNoticeText("payments", { waiting: 1, wentLive: 0, retired: 0, expiring: many, fading: many }, 300)!].length).toBeLessThanOrEqual(300);
     expect(DIGEST_PEOPLE_MAX).toBe(50);
   });
+  it("a setting that cannot be read is off; a list of deciders that is not complete is nobody (retried later)", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    const slack = adapter();
+    const base = deps(w, A, slack);
+    const get = base.documents.get.bind(base.documents);
+    const broken = Object.assign(Object.create(Object.getPrototypeOf(base.documents) as object) as typeof base.documents, base.documents, {
+      get: async (key: Parameters<typeof get>[0]) => { if (key.sk === "SETTING") throw new Error("down"); return await get(key); },
+    });
+    expect(await run({ ...base, documents: broken })).toMatchObject({ projects: 0, sent: 0 });
+    const eligibility = base.directory.eligibility.bind(base.directory);
+    const partial = { ...base.directory, identity: base.directory.identity.bind(base.directory), eligibility: async (companyId: string, project: string) => ({ ...(await eligibility(companyId, project)), complete: false }) };
+    expect(await run({ ...base, directory: partial })).toMatchObject({ projects: 0, sent: 0 });
+    expect(slack.events).toEqual([]);
+    expect(await run(base)).toMatchObject({ sent: 1 });
+  });
+
+  it("a warned lesson from a source the person may not read is never named to them", async () => {
+    const w = await busyWorld();
+    const restricted = { ...draft().provenance, supportTasks: [], authors: ["ann"], audience: { kind: "restricted" as const, acl: { source: "slack" as const, scope: "slack:T/C9", principals: ["U1"], capturedAt: "x", liveCheck: "none" as const } } };
+    await put(w, A, lesson(A, "les_secret01", { status: "active", expiresAt: w.world.clock.now + 3 * DAY, title: "Secret fading", provenance: restricted }));
+    await chooseSlack(w, A, "a-admin");
+    const slack = adapter();
+    const base = deps(w, A, slack);
+    const access = { taskVisibility: base.access.taskVisibility, mayRead: async (_orgId: string, _viewer: unknown, places: ReadonlyArray<{ restrictedScopes: readonly string[] }>) => places.map((place) => place.restrictedScopes.length === 0) };
+    expect(await run({ ...base, access: access as unknown as DigestNoticeDeps["access"] })).toMatchObject({ sent: 1 });
+    const text = (slack.events[0] as { data: { text: string } }).data.text;
+    expect(text).toContain('"Fading soon"');
+    expect(text).not.toContain("Secret fading");
+  });
+
+  it("two passes at once tell each person once (the week's row is claimed before the send)", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    await chooseSlack(w, A, "a-maint");
+    const slack = adapter();
+    const [one, two] = await Promise.all([run(deps(w, A, slack)), run(deps(w, A, slack))]);
+    expect(one.sent + two.sent).toBe(2);
+    expect(slack.events).toHaveLength(2);
+  });
 });
