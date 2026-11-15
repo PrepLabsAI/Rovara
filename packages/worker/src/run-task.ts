@@ -96,7 +96,8 @@ import { createSourceTextGuard, guardArtifactSink, guardEventSink, type SourceTe
 import { isContextSourceStage, type ContextToolCatalog } from "@agentx/contracts";
 import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import { localBashOperations, taskSandboxFor, taskShellSelection, type TaskSandbox, type TaskShellSelection } from "./task-sandbox.js";
-import { withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
+import { withMultiRepoReportLifetime, type MultiRepoChecks } from "./multi-repo-checks.js";
+import { createRepositoryCheckSupplier } from "./multi-repo-supplier.js";
 import { startTaskTestServices, withTestServices, type TestServicesConfig } from "./test-services-run.js";
 import type { FixtureSetCallback } from "./fixture-delivery.js";
 
@@ -235,7 +236,7 @@ export async function runTaskInvocation(
   return withWorkspaceGuard(dependencies.rootPath, async (safety) => {
     safety.quarantinables.push(sandboxes);
     try {
-      return await runTask(untrustedInvocation, dependencies, sandboxes);
+      return await withMultiRepoReportLifetime(() => runTask(untrustedInvocation, dependencies, sandboxes));
     } finally {
       await safety.pending;
       for (const sandbox of sandboxes) {
@@ -394,12 +395,13 @@ async function runTask(
   const testServices = await startTaskTestServices({ plan: step?.kind === "agent" ? undefined : invocation.payload.testEnvironment, mode, sandbox, devcontainer: devcontainer !== undefined, nightly: invocation.payload.nightlyRun !== undefined, operationId: invocation.operationId, rootPath: canonicalRoot,
     repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), config: dependencies.testServices, artifactSink: dependencies.artifactSink, cancellation: dependencies.cancellationController, fixtureSet: dependencies.fixtureSet })
     .catch((error: unknown) => reportFeedbackReviewStartFailure(error));
-  const scopeChecks = (runners: CheckRunners): CheckRunners => {
-    const multi = dependencies.multiRepoChecks;
-    if (multi === undefined) return runners;
-    if (multi.repositories.length !== manifest.repositories.length || manifest.repositories.some((repository) => !multi.repositories.some((selected) => selected.repositoryId === repository.name && selected.path === repository.path && selected.baseCommit === repository.resolvedCommit))) throw new Error("multi-repository selection does not cover the prepared repositories");
-    return withMultiRepoChecks({ ...multi, rootPath: canonicalRoot, coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath) ?? multi.coveragePaths }, runners);
-  };
+  const repositoryBases = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+  const repositoryChecks = createRepositoryCheckSupplier({
+    rootPath: canonicalRoot, explicit: dependencies.multiRepoChecks, nightly: invocation.payload.nightlyRun !== undefined,
+    repositories: manifest.repositories.map((repository, index) => ({ repositoryId: repository.name, path: repository.path, baseCommit: repositoryBases[index]?.baseCommitSha ?? "" })),
+    coveragePaths: invocation.payload.testEnvironment?.checks.map(check => check.coveragePath),
+  });
+  const scopeChecks = (runners: CheckRunners) => repositoryChecks.scope(runners);
   // R56: the agent's file tools run in the same container as its shell, never in the worker (sandbox-file-tools.ts), for every
   // Pi session of this task: the main ones, the feedback review and the critic and security reviews.
   const fileToolsDocker = dependencies.docker ?? (dependencies.taskShell?.kind === "sandbox" ? dependencies.taskShell.docker : undefined) ?? createDockerCli();
@@ -564,6 +566,7 @@ async function runTask(
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
       assertWorkspaceSafe();
+      for (const message of repositoryChecks.notes()) await events.append("progress", { message });
       const roundSpentMs = Date.now() - roundStarted;
       const status = round.stopped ? "not_verified" : reportStatus(round.entries);
       const checks: CheckReport = {
@@ -607,7 +610,7 @@ async function runTask(
       if (invocation.payload.evidenceCapture === true && !stop.signal.aborted) {
         // Test services: the rounds' usage record rides in the raw file (the broker labels it; nothing of it was reaching the evidence). Read before the services stop.
         const servicesRecord = await testServices?.usageRecord().catch(() => undefined);
-        await saveEvidenceRaw({ sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
+        await saveEvidenceRaw({ repositoryEdges: repositoryChecks.evidence(), sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
           baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
       }
       const evidenceSpentMs = Date.now() - evidenceStarted;
@@ -791,6 +794,7 @@ async function runTask(
     recorder,
     ...(workflowDependencies === undefined ? {} : { shouldRun: () => graphFinalItemReady }),
     onReport: async (report) => {
+      for (const message of repositoryChecks.notes()) await events.append("progress", { message });
       reportedChecks = report;
       reportedChecksCandidate = undefined;
       if (candidateCheckDrift) return;
