@@ -48,7 +48,8 @@ export const ATTENTION_SEND_TIMEOUT_MS = 2500;
 const PENDING_PAGE = 100;
 export const ATTENTION_READ_MAX = 2000;
 
-const sentKey = (orgId: string, developerId: string) => ({ pk: `NOTIFY_SENT#${orgId}`, sk: `DEV#${developerId}` });
+/** The row of what was last sent to a person (exported for the person erase). */
+export const notifySentKey = (orgId: string, developerId: string) => ({ pk: `NOTIFY_SENT#${orgId}`, sk: `DEV#${developerId}` });
 const pendingKey = (orgId: string, developerId: string, sessionId: string, kind: AttentionKind) => ({ pk: PENDING_PK, sk: `${orgId}#${developerId}#${sessionId}#${kind}` });
 
 /** The kind of message a status calls for, or undefined for a status nobody is told about. */
@@ -301,7 +302,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
   for (const rows of byPerson.values()) {
     if (late()) break;
     const { orgId, developerId } = rows[0]!;
-    const marker = markerOf(await deps.store.get(sentKey(orgId, developerId)));
+    const marker = markerOf(await deps.store.get(notifySentKey(orgId, developerId)));
     if (nowMs - marker.lastAt < NOTIFY_BATCH_MINUTES * 60_000) continue;
     // Someone whose every owed target is waiting for a retry is not due either, so they never take a place from someone who can be told now.
     if ((marker.waitUntil ?? 0) > nowMs) continue;
@@ -460,7 +461,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     }
     await deps.store.put({
       item: {
-        ...sentKey(orgId, developerId), entityType: "NOTIFY_SENT", orgId, developerId, lastAt: next.lastAt, failures: next.failures, retryAt: next.retryAt,
+        ...notifySentKey(orgId, developerId), entityType: "NOTIFY_SENT", orgId, developerId, lastAt: next.lastAt, failures: next.failures, retryAt: next.retryAt,
         ...(next.waitUntil === undefined ? {} : { waitUntil: next.waitUntil }), ...(next.digestDay === undefined ? {} : { digestDay: next.digestDay }),
         // The digest day must outlive a day, or tomorrow's slot would be served twice.
         [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + (next.digestDay === undefined ? SENT_KEEP_SECONDS : 3 * SENT_KEEP_SECONDS),
