@@ -11,7 +11,7 @@
 //        - deletes it when it is the company's: a partition `ORG#<company>#...` or `WS#<company>#...` (the team record and lessons), another item of `ORG#<company>`, an item whose `companyId` /
 //          `orgId` is the company (and neither names another), an item of an install-wide list whose key names the company as one `#` part, or an item outside any company partition whose `taskId`
 //          or `workspaceId` names a task or workspace this purge proved the company's;
-//        - proves a task (`DEVTASK#<id>`) or workspace (`WORKSPACE#<id>`) partition the company's by its META (`companyId`), records it, and later empties it: the stored files first (every version
+//        - proves a task or workspace partition (legacy or company-scoped) the company's by its META (`companyId`), records it, and later empties it: the stored files first (every version
 //          under the workspace's `private/<owner>/<workspace>/` and the task's evidence prefixes, DEC 212), then every row, the META last and only while it still names the company;
 //        - tombstones the company's audit rows (`ORG#<company>#AUDIT`): the row stays with its event id, time and company, and loses its actor, action, subject, details and digest, so the chain
 //          keeps a place for it (the audit-retention rule). Known gap: the event id itself (also the sort key) can carry an action name and ids, and the laptop's append-only copy keeps whole events. The purge's own events (`company.purge_*`, `company.purged`) are kept whole: they are the record of the purge.
@@ -28,6 +28,7 @@
 import { randomUUID } from "node:crypto";
 import { AgentXError, OrgIdSchema, agentXError, when, change, type AuditSink, type DocumentKey, type DocumentStore, type QueryPage, type StoredDocument, type TransactItem } from "@agentx/contracts";
 import { evidencePrefixesOf } from "../proof/evidence-erase.js";
+import { workspaceKey } from "../task-flow/keys.js";
 
 // ---- ports ----
 
@@ -400,6 +401,11 @@ function verdictOf(item: StoredDocument, companyId: string): Verdict {
     return { act: "tombstone" };
   }
   if (pk === `ORG#${companyId}#AUDIT_COPY`) return { act: "keep" };
+  // Preserve the scoped workspace META until its file prefix has been recorded and drained.
+  if (sk === "META") {
+    const id = pk.slice(pk.lastIndexOf("#") + 1);
+    if (PLAIN.test(id) && pk === workspaceKey(companyId, id).pk) return { act: "prove", what: "ws", id, kind: "WORKSPACE" };
+  }
   if (pk.startsWith(`ORG#${companyId}#`) || pk.startsWith(`WS#${companyId}#`)) return { act: "delete", kind: kindOf(pk, companyId) };
   // Another company's partitions are never touched, whatever their rows say.
   if (pk.startsWith("ORG#") || pk.startsWith("WS#")) return { act: "keep" };

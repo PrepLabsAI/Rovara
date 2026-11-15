@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 import { DocumentStoreError, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
+import { workspaceKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { legacyOperationRequestKey } from "../../packages/broker/src/core/task-flow/legacy-keys.js";
+import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
+import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import {
   COMPANY_PURGE_COOLING_OFF_MIN_MS, COMPANY_PURGE_COOLING_OFF_MS, PURGE_COMPANY_OPEN, PURGE_NOT_CANCELLABLE, PURGE_OPERATOR_ONLY, cancelCompanyPurge, companyPurgeKey, companyPurgeState,
   dryRunCompanyPurge, requestCompanyPurge, resumeCompanyPurges, runCompanyPurge, unversionedPurgeObjects, PURGE_CLOSED_UNKNOWN, PURGE_EARLIER_CLOSE, COMPANY_PURGE_BUDGET_MAX_MS, PURGE_DRY_RUN_HANDLE, PURGE_NEW_REQUEST_ID, type CompanyClosure, type CompanyPurgeDeps, type CompanyPurgeOperator,
@@ -37,8 +42,7 @@ class Versions {
 
 interface World { store: MemoryDocumentStore; files: Versions; clock: { now: number }; closed: Map<string, string>; deps: CompanyPurgeDeps; logs: Record<string, unknown>[]; audit: DocumentAuditSink }
 
-function world(overrides: Partial<CompanyPurgeDeps> = {}): World {
-  const store = new MemoryDocumentStore();
+function world(overrides: Partial<CompanyPurgeDeps> = {}, store = new MemoryDocumentStore()): World {
   const files = new Versions();
   const clock = { now: Date.parse("2026-11-15T10:00:00.000Z") };
   // Each closed company and the id of its current close.
@@ -120,6 +124,59 @@ async function scheduledAndDue(w: World, company: OrgId = A): Promise<void> {
   await requestCompanyPurge(w.deps, { companyId: company, by: OP, requestId: REQ });
   w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
 }
+
+/** Use the CORE writer so the regression follows the current workspace key format. */
+async function startCoreWorkspace(w: World, companyId: OrgId) {
+  const h = createHarness({ companyId, backend: () => ({ store: w.store, queues: new MemoryQueueService() }) });
+  await h.registerProject();
+  const { task } = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a health endpoint" });
+  const key = workspaceKey(companyId, task.workspaceId);
+  const meta = await w.store.get(key);
+  expect(meta).toMatchObject({ companyId, orgId: companyId, id: task.workspaceId });
+  if (typeof meta?.["ownerKey"] !== "string") throw new Error("workspace owner missing");
+  const prefix = `private/${meta["ownerKey"]}/${task.workspaceId}/`;
+  for (const path of ["plan-documents/plan.json", "op1/output.txt", "workflow-e2e-artifacts/run.json", `evidence/${task.taskId}/blob`]) w.files.put(`${prefix}${path}`);
+  return { key, prefix, taskId: task.taskId, workspaceId: task.workspaceId, ownerKey: meta["ownerKey"] };
+}
+
+describe("company purge: CORE company-scoped workspaces", () => {
+  it("proves the scoped META before deleting it and removes the rows and every workspace file", async () => {
+    const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+    const started = await startCoreWorkspace(w, A);
+    // The offline backfill currently retains this legacy side partition after moving META.
+    const legacyRequest = legacyOperationRequestKey(started.ownerKey, started.workspaceId, "old-request");
+    await w.store.put({ item: { ...legacyRequest, operationId: "old-operation", payloadHash: "old-payload" } });
+    const metaAtFileDeletion: Array<StoredDocument | undefined> = [];
+    w.deps.objects = { deleteEveryVersion: async (prefix) => {
+      if (prefix === started.prefix) metaAtFileDeletion.push(await w.store.get(started.key));
+      return w.files.port.deleteEveryVersion(prefix);
+    } };
+    await scheduledAndDue(w);
+    await purgeToEnd(w, A);
+    expect(w.files.under(started.prefix)).toEqual([]);
+    expect(metaAtFileDeletion).toHaveLength(1);
+    expect(metaAtFileDeletion[0]).toMatchObject({ companyId: A });
+    expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+    expect(await w.store.get(taskKey(started.taskId))).toBeUndefined();
+    expect(await w.store.get(legacyRequest)).toBeUndefined();
+  });
+
+  it("purges A's scoped workspace files while leaving B's scoped rows and file versions unchanged", async () => {
+    const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+    const a = await startCoreWorkspace(w, A);
+    const b = await startCoreWorkspace(w, B);
+    const beforeRows = ofCompany(await all(w.store), b.key.pk, B);
+    const beforeFiles = [...w.files.objects].filter(([key]) => key.startsWith(b.prefix));
+    expect(beforeFiles).toHaveLength(4);
+    await scheduledAndDue(w);
+    await purgeToEnd(w, A);
+    expect(w.files.under(a.prefix)).toEqual([]);
+    expect((await w.store.query({ pk: a.key.pk })).items).toEqual([]);
+    expect(ofCompany(await all(w.store), b.key.pk, B)).toEqual(beforeRows);
+    expect([...w.files.objects].filter(([key]) => key.startsWith(b.prefix))).toEqual(beforeFiles);
+    expect(w.files.deleted).not.toContain(b.prefix);
+  });
+});
 
 describe("company purge: who may ask, and when", () => {
   it("refuses anyone but an operator, with fixed words and nothing written", async () => {
