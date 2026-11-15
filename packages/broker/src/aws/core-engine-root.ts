@@ -14,7 +14,7 @@
 //     from MEMBERSHIP, never a claim; the verified token's step-up rides along), with the session cap (hosted wiring (f)) and every audit event of a script token naming the caller it came
 //     through (hosted wiring (d)).
 //     Lane L11 adds, per company: the session levels (live membership role, the broker's project grant), the decision cards (the task's own person's waiting documents; an act goes
-//     through the approval gate with the approvers point's own proof, `decisionProofs`, lane L2a) and how we work (the code host, with the deployment's `codeSettings`). Each part the
+//     through the approval gate with the approvers point's own signed step-up proof, lane L2a) and how we work (the code host, with the deployment's `codeSettings`). Each part the
 //     deployment does not give answers "not on the core yet".
 //   - `handleEvent`: a schedule's `agentx.core-job` event runs its job (with the function's time left), and a State table stream batch relays the outbox of the companies whose outbox rows
 //     it inserted. Anything else is not the core's (`undefined`).
@@ -31,7 +31,8 @@ import { codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modul
 import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
-import { deployedDevWiringParts, type DecisionProofIssuer } from "../core-host/deployed-decisions.js";
+import { deployedDevWiringParts, stepUpDecisionProofs } from "../core-host/deployed-decisions.js";
+import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
 import { HOSTED_IDENTITY_PROVIDER, hostedSecurityModules, type HostedIdentityOptions } from "../core-host/hosted-modules.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
@@ -86,11 +87,6 @@ export interface BrokerCoreRootInputs {
    * (lane L3 gives it with merge tracking).
    */
   ciReporting?: CiReporting;
-  /**
-   * Lane L11: the deployment's approvers point's proof for an act on a decision card (lane L2a issues and verifies it). Absent: the card routes answer "not on the core yet" (a card is never decided
-   * without the point's own proof).
-   */
-  decisionProofs?: DecisionProofIssuer;
   /** Lane L11: the company's code settings (how a project merges and approves), for how we work. Absent: how we work answers "not on the core yet" (never the laptop's fixed settings). */
   codeSettings?: CodeSettingsReader;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
@@ -303,6 +299,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     // The library's install-wide learning gate follows the lessons switch.
     setCoreLessonsGate(env);
     const companyOf = async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => membershipOf(caller.principal.personId);
+    // Lane L11: an act on a decision card carries the approvers point's own proof (lane L2a), signed with the key the point verifies with.
+    const decisionProofs = stepUpDecisionProofs(stepUpApprovalKeyOf(inputs.callbackSigningKey), () => now().getTime());
     const routes = createCoreDevRoutes({
       app, companyOf, log,
       wiring: async (runtime) => {
@@ -314,7 +312,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           scriptTokens: {},
           canReadProject: (personId, project) => projectGrant(personId, project),
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
-          ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs: inputs.decisionProofs, codeSettings: inputs.codeSettings, log }),
+          ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
         };
       },
     });

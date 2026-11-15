@@ -41,6 +41,7 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import type { CoreRuntime } from "./core-runtime.js";
 import type { CoreDevWiring, DeployedDecisionCaller } from "./dev-routes.js";
+import { STEP_UP_APPROVAL_METHOD, issueStepUpApproval, type StepUpApprovalInput } from "./hosted-approvers.js";
 
 /** The company's own records of its people, as the broker keeps them. A read that fails throws (the caller refuses); `undefined` is "none". */
 export interface DeployedPeople {
@@ -118,22 +119,20 @@ export interface DecisionProofIssuer {
   issue(act: DecisionAct): Credential | Promise<Credential>;
 }
 
-/** What one act on a card is, as the route and the performer checked it. Everything here is the server's own reading; nothing comes from the request body but the request id the card route validated. */
-export interface DecisionAct {
-  companyId: OrgId;
-  personId: string;
-  provider: string;
-  /** The step-up the route checked against the company's window (the verified access token's time and factor). */
-  stepUp: { at: string; method: string };
-  outcome: DecisionOutcome;
-  taskId: string;
-  requestId: string;
-  /** What the person was shown: the card, its content version, and the revision and document digest it was drawn at. */
-  cardId: string;
-  contentVersion: string;
-  revision: number;
-  artifactDigest: string;
+/**
+ * What one act on a card is, as the route and the performer checked it (lane L2a's `StepUpApprovalInput`): the company, the person the sign-in vouched for, the step-up the route checked, the
+ * decision's request id and kind (the `ApprovalRequest.kind` the gate will ask about: the waiting document's type), the task, the revision and digest the card was drawn at, the answer, and
+ * the card at that document version. Nothing here comes from the request body but the request id the card route validated.
+ */
+export type DecisionAct = StepUpApprovalInput;
+
+/** The deployed issuer: lane L2a's signed, card-bound, one-time step-up proof (`issueStepUpApproval`), under the install's proof key. */
+export function stepUpDecisionProofs(key: Buffer, nowMs: () => number): DecisionProofIssuer {
+  return { method: STEP_UP_APPROVAL_METHOD, issue: (act) => issueStepUpApproval(key, act, nowMs()) };
 }
+
+/** The `ApprovalRequest.kind` the workflow decision asks about for each document card (the subject's `currentDocumentType`), never the gate's subject kind. */
+const APPROVAL_KIND_OF: Readonly<Partial<Record<string, "plan" | "requirements" | "design">>> = { approve_plan: "plan", approve_requirements: "requirements", approve_design: "design" };
 
 /** Most task index rows one listing reads (five pages of a hundred, as the laptop's pending list), and how many tasks it reads at once. */
 export const DECISION_SOURCE_TASKS_MAX = 500;
@@ -266,11 +265,15 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     if (task === undefined) return { kind: "refused", reason: "forbidden" };
     const binding = input.item.binding;
     if (binding === undefined) return { kind: "refused", reason: "stale" };
+    const kind = APPROVAL_KIND_OF[input.item.kind];
+    if (kind === undefined) return { kind: "refused", reason: "unsupported" };
     let credential: Credential;
     try {
       credential = await proofs.issue({
-        companyId, personId, provider: caller.principal.provider, stepUp: { at: stepUp.at, method: stepUp.method }, outcome, taskId: task.taskId, requestId: input.requestId,
-        cardId: input.card.id, contentVersion: input.item.contentVersion, revision: binding.revision, artifactDigest: binding.artifactDigest,
+        companyId, personId, stepUp: { at: stepUp.at, method: stepUp.method }, requestId: input.requestId, kind, taskId: task.taskId,
+        revision: binding.revision, artifactDigest: binding.artifactDigest, outcome,
+        // The card at the document version the gate is given (`workflowDocumentHandler`): the same card the gate names to the point.
+        card: { cardId: input.card.id, contentVersion: binding.artifactDigest },
       });
     } catch {
       log({ event: "core_engine.decision_proof_unavailable", companyId });

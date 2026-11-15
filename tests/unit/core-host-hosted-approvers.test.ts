@@ -368,20 +368,37 @@ describe("registration", () => {
   });
 });
 
-describe("the decision gate today", () => {
-  it("is refused whole until its caller settles claims and names the card (lane L11 switches that in): fail closed, nothing decided", async () => {
+describe("the decision gate as this point's caller (lane L11: it settles claims and names the card)", () => {
+  const setup = () => {
     const { approvers, store } = world();
-    let applied = false;
+    const applied: string[] = [];
     const subject: DecisionSubject = {
       kind: "plan-doc",
       async load() { return { key: taskKey(TASK_A), guard: { op: "exists", path: ["pk"] }, waiting: true, request: { kind: "plan", subject: { type: "task", id: TASK_A }, projectName: "demo", revision: 3, artifactDigest: DIGEST, risk: "high" }, state: {} }; },
-      apply() { applied = true; return { ops: [] }; },
+      apply(_loaded, attempt) { applied.push(attempt.requestId); return { ops: [{ op: "set", path: ["decided"], value: true }] }; },
     };
     const gate = createDecisionGate({ store, approvers, audit: { stage: () => [], record: async () => undefined }, subjects: [subject], now: () => new Date(NOW) });
+    const claims = async () => (await store.query({ pk: stepUpClaimKey(A, "x").pk })).items;
     const outcome: ApprovalAnswer = "approve";
-    const result = await gate.decide({ companyId: A, kind: "plan-doc", subjectId: TASK_A, requestId: "decision-request-0001", outcome, seen: { revision: 3, artifactDigest: DIGEST }, credentials: [{ method: STEP_UP_APPROVAL_METHOD, token: issued() }] });
-    expect(result).toEqual({ status: "refused", reason: "not_approved", detail: `Not approved: ${NEEDS_SETTLING_CALLER}.` });
-    expect(applied).toBe(false);
+    const attempt = (token: string, extra: Record<string, unknown> = {}) => ({ companyId: A, kind: "plan-doc", subjectId: TASK_A, requestId: "decision-request-0001", outcome, seen: { revision: 3, artifactDigest: DIGEST }, credentials: [{ method: STEP_UP_APPROVAL_METHOD, token }], ...extra });
+    return { gate, applied, claims, attempt };
+  };
+
+  it("is refused whole when the attempt names no card: fail closed, nothing decided, nothing claimed", async () => {
+    const t = setup();
+    expect(await t.gate.decide(t.attempt(issued()))).toEqual({ status: "refused", reason: "not_approved", detail: "Not approved: card_not_named." });
+    expect(t.applied).toEqual([]);
+    expect(await t.claims()).toEqual([]);
+  });
+
+  it("decides with the card, spends the one-time part, and answers a repeat as the same decision", async () => {
+    const t = setup();
+    const token = issued();
+    expect(await t.gate.decide(t.attempt(token, { card: cardOf(TASK_A) }))).toMatchObject({ status: "decided" });
+    expect(t.applied).toEqual(["decision-request-0001"]);
+    expect(await t.claims()).toEqual([expect.objectContaining({ state: "spent" })]);
+    expect(await t.gate.decide(t.attempt(token, { card: cardOf(TASK_A) }))).toMatchObject({ status: "replayed" });
+    expect(t.applied).toEqual(["decision-request-0001"]);
   });
 });
 

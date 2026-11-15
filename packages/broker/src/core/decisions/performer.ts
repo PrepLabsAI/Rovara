@@ -90,6 +90,9 @@ export function workflowDocumentHandler<C extends ProvingCaller>(gate: DecisionG
     const result = await gate.decide({
       companyId: caller.orgId, kind: WORKFLOW_DOCUMENT_KIND, subjectId: taskId, requestId: input.requestId, outcome,
       seen: { revision: binding.revision, artifactDigest }, credentials: caller.credentials,
+      // The card the person answered on (gap G4), at the document version it shows: a reviewed design's card adds the review's facts to its own version, which the route's shown digest
+      // already binds; the Approvers seam is given the document's digest, which it cross-checks against the request.
+      card: { cardId: input.card.id, contentVersion: artifactDigest },
       ...((input.reason ?? plan?.note) === undefined ? {} : { reason: (input.reason ?? plan?.note) as string }), details,
     });
     if (result.status === "refused") return { kind: "refused", reason: CARD_REFUSAL_OF_GATE[result.reason] };

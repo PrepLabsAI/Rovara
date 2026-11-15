@@ -11,11 +11,12 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type DeployedDecisionCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  DECISION_SOURCE_TASKS_MAX, deployedDecisionCards, deployedDevWiringParts, deployedSessionMembers,
+  DECISION_SOURCE_TASKS_MAX, deployedDecisionCards, deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs,
   type DecisionAct, type DecisionProofIssuer, type DeployedPeople,
 } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import type { CoreRuntime } from "../../packages/broker/src/core-host/core-runtime.js";
-import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
 import { routeDecisionCards } from "../../packages/broker/src/core/decisions/routes.js";
 import { decisionCardPath, projectDecisionCards } from "../../packages/broker/src/core/decisions/project.js";
@@ -51,9 +52,8 @@ function records() {
   return { memberships, grants, people };
 }
 
-/** Lane L2a's stand-in: the issuer and the approvers point share the issued acts; `verify` vouches for the act's own person, of the act's own company, for the request it names (the gate asks under
- * `<card request id>.<uuid>`), its outcome, revision, digest and task. */
-function stepUpPoint() {
+/** A permissive stand-in for the approvers point: vouches for whoever the act names (to test the gate's own owner-only rule behind a point that says yes). */
+function permissivePoint() {
   const issued = new Map<string, DecisionAct>();
   const acts: DecisionAct[] = [];
   const proofs: DecisionProofIssuer = {
@@ -62,13 +62,12 @@ function stepUpPoint() {
   };
   const approvers: Approvers = {
     async requirement() { return { methods: [METHOD], minApprovers: 1, selfApprovalAllowed: true, strongMethods: [METHOD], rejectMethods: [METHOD], changesMethods: [METHOD] }; },
-    async verify(request: ApprovalRequest, proof: ApprovalProof) {
+    async verify(_request: ApprovalRequest, proof: ApprovalProof) {
       const act = issued.get(proof.token);
-      if (act === undefined || !request.requestId.startsWith(`${act.requestId}.`) || request.outcome !== act.outcome || act.revision !== request.revision || act.artifactDigest !== request.artifactDigest || request.subject.id !== act.taskId) return { approved: false, reason: "invalid_proof" };
-      return { approved: true, approver: { ...principalOf(act.personId, act.companyId), authTime: act.stepUp.at }, method: proof.method, proofId: proof.proofId };
+      return act === undefined ? { approved: false, reason: "invalid_proof" } : { approved: true, approver: { ...principalOf(act.personId, act.companyId), authTime: act.stepUp.at }, method: proof.method, proofId: proof.proofId };
     },
   };
-  return { proofs, approvers, acts, issued };
+  return { proofs, approvers, acts };
 }
 
 async function registerProject(world: FakeWorld, companyId: string): Promise<void> {
@@ -76,13 +75,24 @@ async function registerProject(world: FakeWorld, companyId: string): Promise<voi
   await world.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
 }
 
-async function setup() {
-  const point = stepUpPoint();
-  const world = createFakeWorld({ without: ["approvers"] });
-  world.modules.push(coreAdapter({ point: "approvers", name: "deployed", owner: "fake", create: () => point.approvers }));
+/** The world, with lane L2a's real approvers point (the deployed identity over the company's memberships, the proof key) unless `permissive`. */
+async function setup(options: { permissive?: boolean } = {}) {
+  const world = createFakeWorld({ without: ["approvers", "identity"] });
+  const { memberships, grants, people } = records();
+  const identity = createHostedIdentity({ membershipOf: people.membershipOf, displayNameOf: async (personId) => personId });
+  const key = stepUpApprovalKeyOf("k".repeat(32));
+  const acts: DecisionAct[] = [];
+  const hosted = stepUpDecisionProofs(key, () => world.clock.now);
+  const fake = permissivePoint();
+  const proofs: DecisionProofIssuer = options.permissive === true ? fake.proofs : { method: hosted.method, issue: vi.fn((act: DecisionAct) => { acts.push(act); return hosted.issue(act); }) };
+  const point = { proofs, acts: options.permissive === true ? fake.acts : acts };
+  world.modules.push(coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: "fake", create: () => identity }));
+  world.modules.push(coreAdapter({
+    point: "approvers", name: "deployed", owner: "fake",
+    create: () => (options.permissive === true ? fake.approvers : createHostedApprovers({ store: world.store, identity, key, now: () => new Date(world.clock.now) })),
+  }));
   await registerProject(world, ORG);
   await registerProject(world, OTHER);
-  const { memberships, grants, people } = records();
   const app: CoreHostApp = createCoreHostApp({
     env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: (_registry, companyId) => ({
@@ -270,7 +280,7 @@ describe("the deployed decision cards: acting", () => {
     expect(reply?.body).toMatchObject({ cardId: cardOf(taskId), outcome: "approved" });
     expect((await t.stored(taskId)).stage).toBe("IMPLEMENT");
     expect(t.point.acts).toEqual([expect.objectContaining({
-      companyId: ORG, personId: "dev-a", provider: HOSTED_IDENTITY_PROVIDER, stepUp: STEP_UP, outcome: "approve", taskId, cardId: cardOf(taskId),
+      companyId: ORG, personId: "dev-a", stepUp: STEP_UP, outcome: "approve", taskId, kind: "plan", card: { cardId: cardOf(taskId), contentVersion: before.artifacts.at(-1)!.sha256 },
       revision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256,
     })]);
     // The decision is recorded under the task's owner.
@@ -315,7 +325,7 @@ describe("the deployed decision cards: acting", () => {
   });
 
   it("records nothing when the point vouches for someone other than the task's owner (the gate's subject accepts only the owner)", async () => {
-    const t = await setup();
+    const t = await setup({ permissive: true });
     const taskId = await t.waitingTask("dev-a");
     const original = t.point.proofs.issue;
     t.point.proofs.issue = vi.fn(async (act: DecisionAct) => original.call(t.point.proofs, { ...act, personId: "dev-b" }));
