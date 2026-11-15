@@ -359,8 +359,9 @@ describe("callers", () => {
     ];
     expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText"))).toEqual(writerFiles);
     for (const name of proofOnly) expect(callers([name])).toEqual(["packages/broker/src/core/proof/proof-table.ts"]);
+    // setup-prove.ts (DEC 185 / TE-C5 part A) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
     expect(callers(["inertEvidenceText"])).toEqual([
-      "packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
+      "packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/setup-prove.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
     ].sort());
   });
 });
