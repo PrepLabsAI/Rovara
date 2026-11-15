@@ -43,7 +43,7 @@ export interface CompanyPurgeObjects {
 }
 
 export interface CompanyPurgeDeps {
-  store: Pick<DocumentStore, "get" | "getMany" | "query" | "put" | "update" | "delete" | "transact"> & StoreScan;
+  store: Pick<DocumentStore, "get" | "getMany" | "query" | "put" | "update" | "delete" | "transact" | "ttlAttribute"> & StoreScan;
   objects: CompanyPurgeObjects;
   /** The company's audit sink: the purge's own events commit with its state changes. */
   audit: Pick<AuditSink, "stage">;
@@ -73,6 +73,10 @@ export const COMPANY_PURGE_COOLING_OFF_MIN_MS = 24 * 3_600_000;
 export const COMPANY_PURGE_COOLING_OFF_MAX_MS = 90 * 24 * 3_600_000;
 /** The most milliseconds one call works by default. */
 export const COMPANY_PURGE_BUDGET_MS = 4_000;
+/** The most milliseconds any one call may be given, whatever its caller asks (a file delete is bounded only by time). */
+export const COMPANY_PURGE_BUDGET_MAX_MS = 15 * 60_000;
+/** A caller's budget within [0, COMPANY_PURGE_BUDGET_MAX_MS]; anything that is not a finite number is the default. */
+const budgetOf = (asked: unknown): number => (typeof asked === "number" && Number.isFinite(asked) ? Math.min(COMPANY_PURGE_BUDGET_MAX_MS, Math.max(0, asked)) : COMPANY_PURGE_BUDGET_MS);
 /** The most items one call reads (scanned rows plus partition rows), whatever its time. */
 export const COMPANY_PURGE_ITEMS_PER_CALL = 5_000;
 /** Rows read at a time (the store's `getMany` takes at most 100 keys). */
@@ -84,6 +88,8 @@ const LEASE_GRACE_MS = 60_000;
 
 export const PURGE_OPERATOR_ONLY = "Only an operator of this install can purge a company.";
 export const PURGE_COMPANY_OPEN = "The company is not closed. Close it first; its data is purged only after it is closed.";
+export const PURGE_CLOSED_UNKNOWN = "Whether the company is closed could not be read just now. Nothing was scheduled; try again.";
+export const PURGE_EARLIER_CLOSE = "A purge is scheduled for an earlier close of this company and will cancel itself when it is due. Cancel it, then ask again.";
 export const PURGE_NOT_CANCELLABLE = "The purge can no longer be cancelled: its cooling-off time is over or it has started.";
 export const PURGE_NOT_FOUND = "There is no purge scheduled for that company.";
 const PURGE_NOT_RECORDED = "The purge could not be recorded just now. Send the same request again.";
@@ -260,12 +266,20 @@ export async function requestCompanyPurge(deps: CompanyPurgeDeps, input: Company
   const existing = await readRow(deps, companyId);
   // A scheduled or running purge is kept; a cancelled one, or one that is done (the company was closed again), gives way to a new request.
   const replaceable = (row: Row | undefined): boolean => row === undefined || row.status === "cancelled" || row.status === "done";
-  if (!replaceable(existing)) return { ...publicState(existing!), alreadyRequested: true };
+  if (!replaceable(existing)) {
+    // A scheduled purge tied to an earlier close would cancel itself when due: the operator is told, rather than answered "already requested".
+    if (existing!.status === "scheduled") {
+      const now = await closureOf(deps, companyId);
+      if (now === "open" || (typeof now === "object" && now.closeId !== existing!.closeId)) throw agentXError("FORBIDDEN", PURGE_EARLIER_CLOSE);
+    }
+    return { ...publicState(existing!), alreadyRequested: true };
+  }
   // A new purge needs a new request id (its audit event is named by it).
   if (existing !== undefined && existing.requestId === input.requestId) throw agentXError("CONFIG_INVALID", PURGE_NEW_REQUEST_ID);
   const closure = await closureOf(deps, companyId);
-  if (typeof closure === "string") throw agentXError("FORBIDDEN", PURGE_COMPANY_OPEN);
-  // Marks an earlier purge of this company could not clear never carry into this one.
+  if (closure === "unknown") throw agentXError("RUNTIME_UNAVAILABLE", PURGE_CLOSED_UNKNOWN);
+  if (closure === "open") throw agentXError("FORBIDDEN", PURGE_COMPANY_OPEN);
+  // Marks, recorded partitions and dry-run handles an earlier purge of this company could not clear never carry into this one.
   if (existing !== undefined && !(await clearMarks(deps, companyId, COMPANY_PURGE_ITEMS_PER_CALL))) throw agentXError("RUNTIME_UNAVAILABLE", PURGE_NOT_RECORDED);
   const nowMs = deps.now();
   const at = new Date(nowMs).toISOString();
@@ -466,12 +480,13 @@ export async function dryRunCompanyPurge(deps: Pick<CompanyPurgeDeps, "store" | 
   let storeCursor: string | undefined;
   if (input.cursor !== undefined) {
     const key = { pk: dryRunPk(companyId), sk: input.cursor };
-    const saved = await deps.store.get(key);
-    await deps.store.delete({ key });
+    // Read and removed in one conditional step: of two calls with the same handle, only one gets it.
+    const used = await deps.store.delete({ key, condition: when.present(), return: "old" });
+    const saved = used.applied ? used.item : undefined;
     if (saved === undefined || typeof saved["cursor"] !== "string" || typeof saved["expiresAtMs"] !== "number" || saved["expiresAtMs"] <= deps.now()) throw agentXError("CONFIG_INVALID", PURGE_DRY_RUN_HANDLE);
     storeCursor = saved["cursor"];
   }
-  const stopAt = deps.now() + Math.max(0, input.budgetMs ?? COMPANY_PURGE_BUDGET_MS);
+  const stopAt = deps.now() + budgetOf(input.budgetMs);
   const report: CompanyPurgeDryRun = { rows: {}, tombstones: 0, partitions: { task: 0, ws: 0 }, prefixes: input.cursor === undefined ? companyPrefixesOf(companyId).length : 0, refused: 0, conflicting: 0, references: 0, complete: false };
   const proved = new Set<string>();
   let cursor = storeCursor;
@@ -509,7 +524,10 @@ export async function dryRunCompanyPurge(deps: Pick<CompanyPurgeDeps, "store" | 
   }
   if (cursor === undefined) return report;
   const handle = randomUUID();
-  await deps.store.put({ item: { pk: dryRunPk(companyId), sk: handle, entityType: "COMPANY_PURGE_DRYRUN", cursor, expiresAtMs: deps.now() + DRY_RUN_HANDLE_MS } });
+  const expiresAtMs = deps.now() + DRY_RUN_HANDLE_MS;
+  // The store's own expiry removes a handle nobody came back for (seconds since the epoch); the time is checked on use as well.
+  const ttl = deps.store.ttlAttribute;
+  await deps.store.put({ item: { pk: dryRunPk(companyId), sk: handle, entityType: "COMPANY_PURGE_DRYRUN", cursor, expiresAtMs, ...(ttl === undefined || ["pk", "sk", "cursor", "expiresAtMs", "entityType"].includes(ttl) ? {} : { [ttl]: Math.ceil(expiresAtMs / 1_000) }) } });
   return { ...report, cursor: handle };
   });
 }
@@ -571,13 +589,30 @@ async function prove(run: Run, verdict: Extract<Verdict, { act: "prove" }>, meta
 }
 
 /** Deletes every row of a partition; `meta` (the proving row) last and only while it still names the company. True when the partition is empty. */
-async function emptyPartition(run: Run, pk: string, proven: boolean): Promise<boolean> {
-  // Walks the partition page by page (a page may be empty and still carry a cursor), and walks it again while a walk deleted anything.
+/** The META of a proved partition still names this company and no other (`companyId` this company and `orgId` absent or the same, or no `companyId` and `orgId` this company). */
+const stillOursCondition = (companyId: string) => when.or(
+  when.and(when.eq("companyId", companyId), when.or(when.notExists("orgId"), when.eq("orgId", companyId))),
+  when.and(when.notExists("companyId"), when.eq("orgId", companyId)),
+);
+/** The same test on a META read: `ours`, `gone` (deleted already, by this purge's last step), or `foreign` (it names another company now). */
+function metaStatus(meta: StoredDocument | undefined, companyId: string): "ours" | "gone" | "foreign" {
+  if (meta === undefined) return "gone";
+  const companyField = meta["companyId"];
+  const orgField = meta["orgId"];
+  if (companyField === companyId && (orgField === undefined || orgField === companyId)) return "ours";
+  if (companyField === undefined && orgField === companyId) return "ours";
+  return "foreign";
+}
+
+async function emptyPartition(run: Run, pk: string, proven: boolean): Promise<boolean | "foreign"> {
+  // Walks the partition page by page (a page may be empty and still carry a cursor), and walks it again while a walk deleted anything. A proved partition's META is read before every page:
+  // a partition whose META has come to name another company is left as it is from then on.
   for (;;) {
     let cursor: string | undefined;
     let deleted = 0;
     do {
       if (outOfTime(run)) return false;
+      if (proven && metaStatus(await run.deps.store.get({ pk, sk: "META" }), run.companyId) === "foreign") return "foreign";
       const page = await run.deps.store.query({ pk, limit: PAGE, ...(cursor === undefined ? {} : { cursor }) });
       run.read += Math.max(1, page.items.length);
       for (const row of page.items.filter((each) => !(proven && each.sk === "META"))) {
@@ -591,7 +626,7 @@ async function emptyPartition(run: Run, pk: string, proven: boolean): Promise<bo
     if (deleted === 0) break;
   }
   if (!proven) return true;
-  const removed = await run.deps.store.delete({ key: { pk, sk: "META" }, condition: when.or(when.eq("companyId", run.companyId), when.and(when.notExists("companyId"), when.eq("orgId", run.companyId))) });
+  const removed = await run.deps.store.delete({ key: { pk, sk: "META" }, condition: stillOursCondition(run.companyId) });
   if (removed.applied) { run.row.counts.deleted += 1; run.row.acted = true; }
   return true;
 }
@@ -607,14 +642,27 @@ async function drainParts(run: Run): Promise<boolean> {
       if (outOfTime(run)) return false;
       const prefixes = Array.isArray(part["prefixes"]) ? part["prefixes"].filter((value): value is string => typeof value === "string") : [];
       const sides = Array.isArray(part["sides"]) ? part["sides"].filter((value): value is string => typeof value === "string") : [];
+      // The META is checked BEFORE any file or row of the partition goes: one that names another company now drops the record and touches nothing.
+      if (metaStatus(await run.deps.store.get({ pk: part.sk, sk: "META" }), run.companyId) === "foreign") {
+        run.log({ event: "company_purge.partition_foreign" });
+        await run.deps.store.delete({ key: { pk: part.pk, sk: part.sk } });
+        continue;
+      }
       for (const prefix of prefixes) {
         let outcome: boolean | "out_of_time";
         try { outcome = await run.deps.objects.deleteEveryVersion(prefix, { stopAt: run.stopAt }); } catch (error) { run.log({ event: "company_purge.files_failed", error: errorName(error) }); return false; }
         if (outcome === "out_of_time") return false;
         if (outcome !== true) { run.log({ event: "company_purge.files_left" }); return false; }
       }
-      for (const side of sides) if (!(await emptyPartition(run, side, false))) return false;
-      if (!(await emptyPartition(run, part.sk, true))) return false;
+      for (const side of sides) if ((await emptyPartition(run, side, false)) !== true) return false;
+      const emptied = await emptyPartition(run, part.sk, true);
+      if (emptied === "foreign") {
+        // Its META names another company now: nothing more of it is touched, and the record goes.
+        run.log({ event: "company_purge.partition_foreign" });
+        await run.deps.store.delete({ key: { pk: part.pk, sk: part.sk } });
+        continue;
+      }
+      if (!emptied) return false;
       run.row.counts.prefixes += prefixes.length;
       await run.deps.store.delete({ key: { pk: part.pk, sk: part.sk } });
       run.row.acted = true;
@@ -662,6 +710,12 @@ async function actOnPage(run: Run, items: readonly StoredDocument[]): Promise<vo
     const found = await run.deps.store.getMany(slice.map((sk) => ({ pk: marksPk(run.companyId), sk })));
     slice.forEach((sk, index) => { if (found[index] !== undefined) marked.add(sk); });
   }
+  // A marked task or workspace whose META has come to name another company no longer counts: rows that name it are left.
+  for (const ref of [...marked]) {
+    const [what, id] = ref.split("#") as [string, string];
+    const metaPk = what === "task" ? `DEVTASK#${id}` : `WORKSPACE#${id}`;
+    if (metaStatus(await run.deps.store.get({ pk: metaPk, sk: "META" }), run.companyId) === "foreign") marked.delete(ref);
+  }
   for (const entry of refs) {
     if (!entry.refs.some((ref) => marked.has(ref))) continue;
     await run.deps.store.delete({ key: { pk: entry.item.pk, sk: entry.item.sk } });
@@ -670,10 +724,10 @@ async function actOnPage(run: Run, items: readonly StoredDocument[]): Promise<vo
   }
 }
 
-/** Deletes the purge's marks and any dry-run handles of the company, at most `limit` rows. True when none is left. */
+/** Deletes the purge's marks, recorded partitions and dry-run handles of the company, at most `limit` rows. True when none is left. A new request clears them first: what they named is proved again. */
 async function clearMarks(deps: Pick<CompanyPurgeDeps, "store">, companyId: string, limit: number): Promise<boolean> {
   let removed = 0;
-  for (const pk of [marksPk(companyId), dryRunPk(companyId)]) {
+  for (const pk of [marksPk(companyId), partsPk(companyId), dryRunPk(companyId)]) {
     for (;;) {
       const page = await deps.store.query({ pk, limit: PAGE });
       if (page.items.length === 0) break;
@@ -717,7 +771,7 @@ export async function runCompanyPurge(deps: CompanyPurgeDeps, companyId: string,
       ]);
       return { companyId: company, outcome: cancelled.applied ? "cancelled" : "waiting" };
     }
-    stopAt = startMs + Math.max(0, budgetMs);
+    stopAt = startMs + budgetOf(budgetMs);
     runId = randomUUID();
     const leaseUntil = stopAt + LEASE_GRACE_MS;
     // Take the purge: a scheduled one starts (with its audit event); a running one is taken only when no other run holds it. Either way the run works from the row AS TAKEN (re-read after the
@@ -809,7 +863,7 @@ export async function runCompanyPurge(deps: CompanyPurgeDeps, companyId: string,
 
 /** The scheduled run: goes through the purges that are due or running (the oldest due first), each isolated, within one budget. */
 export async function resumeCompanyPurges(deps: CompanyPurgeDeps, budgetMs: number): Promise<CompanyPurgeProgress[]> {
-  const ends = deps.now() + Math.max(0, budgetMs);
+  const ends = deps.now() + budgetOf(budgetMs);
   const rows: Row[] = [];
   let cursor: string | undefined;
   do {

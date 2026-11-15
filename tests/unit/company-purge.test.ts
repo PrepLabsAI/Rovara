@@ -6,7 +6,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
 import {
   COMPANY_PURGE_COOLING_OFF_MIN_MS, COMPANY_PURGE_COOLING_OFF_MS, PURGE_COMPANY_OPEN, PURGE_NOT_CANCELLABLE, PURGE_OPERATOR_ONLY, cancelCompanyPurge, companyPurgeKey, companyPurgeState,
-  dryRunCompanyPurge, requestCompanyPurge, resumeCompanyPurges, runCompanyPurge, unversionedPurgeObjects, PURGE_DRY_RUN_HANDLE, PURGE_NEW_REQUEST_ID, type CompanyClosure, type CompanyPurgeDeps, type CompanyPurgeOperator,
+  dryRunCompanyPurge, requestCompanyPurge, resumeCompanyPurges, runCompanyPurge, unversionedPurgeObjects, PURGE_CLOSED_UNKNOWN, PURGE_EARLIER_CLOSE, COMPANY_PURGE_BUDGET_MAX_MS, PURGE_DRY_RUN_HANDLE, PURGE_NEW_REQUEST_ID, type CompanyClosure, type CompanyPurgeDeps, type CompanyPurgeOperator,
 } from "../../packages/broker/src/core/company/purge.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -136,12 +136,14 @@ describe("company purge: who may ask, and when", () => {
     const w = world();
     w.closed.delete(A);
     await expect(requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow(PURGE_COMPANY_OPEN);
+    // A closed state that cannot be read is said so (and nothing is scheduled), not called "open".
     const throwing = world({ companyClosure: async () => { throw new Error("down"); } });
-    await expect(requestCompanyPurge(throwing.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow(PURGE_COMPANY_OPEN);
+    await expect(requestCompanyPurge(throwing.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow(PURGE_CLOSED_UNKNOWN);
     const truthy = world({ companyClosure: async () => ({ closed: "yes" }) as unknown as CompanyClosure });
     const noClose = world({ companyClosure: async () => ({ closed: true, closeId: "has space" }) });
-    await expect(requestCompanyPurge(noClose.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow(PURGE_COMPANY_OPEN);
-    await expect(requestCompanyPurge(truthy.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow(PURGE_COMPANY_OPEN);
+    await expect(requestCompanyPurge(noClose.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow(PURGE_CLOSED_UNKNOWN);
+    await expect(requestCompanyPurge(truthy.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow(PURGE_CLOSED_UNKNOWN);
+    for (const other of [throwing, truthy, noClose]) expect(await other.store.get(companyPurgeKey(A))).toBeUndefined();
     const unwired = world({ companyClosure: undefined as unknown as CompanyPurgeDeps["companyClosure"] });
     await expect(requestCompanyPurge(unwired.deps, { companyId: A, by: OP, requestId: REQ })).rejects.toThrow("not wired");
     expect(await w.store.get(companyPurgeKey(A))).toBeUndefined();
@@ -278,6 +280,33 @@ describe("company purge: who may ask, and when", () => {
     expect((await companyPurgeState(w.deps, A))!.status).toBe("scheduled");
     flaky = false;
     await purgeToEnd({ ...w, deps }, A);
+  });
+
+  it("tells the operator, rather than 'already requested', when the scheduled purge is tied to an earlier close", async () => {
+    const w = world();
+    await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ });
+    expect((await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 })).alreadyRequested).toBe(true);
+    w.closed.set(A, "close-2");
+    await expect(requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 })).rejects.toThrow(PURGE_EARLIER_CLOSE);
+    w.closed.delete(A);
+    await expect(requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 })).rejects.toThrow(PURGE_EARLIER_CLOSE);
+    expect((await companyPurgeState(w.deps, A))!.requestId).toBe(REQ);
+  });
+
+  it("caps any one call's time at 15 minutes, whatever its caller asks", async () => {
+    const w = world();
+    await seed(w, A, "a");
+    await scheduledAndDue(w);
+    const s = w.store;
+    let lease: number | undefined;
+    const deps: CompanyPurgeDeps = { ...w.deps, store: {
+      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), query: (request) => s.query(request), put: (request) => s.put(request), delete: (request) => s.delete(request),
+      transact: async (items) => { for (const item of items) if (item.kind === "update") for (const op of item.ops) if (op.op === "set" && op.path[0] === "leaseUntil") lease = op.value as number; return await s.transact(items); },
+      update: (request) => s.update(request), scanPage: (request) => s.scanPage(request),
+    } };
+    const start = w.clock.now;
+    await runCompanyPurge(deps, A, 10 * 24 * 3_600_000);
+    expect(lease).toBe(start + COMPANY_PURGE_BUDGET_MAX_MS + 60_000);
   });
 
   it("cancels a due purge whose company was reopened and closed again inside the window (another close)", async () => {
@@ -454,15 +483,84 @@ describe("company purge: what goes and what stays", () => {
   it("leaves a proved partition's META when it no longer names the company", async () => {
     const w = world();
     await w.store.put({ item: { pk: "DEVTASK#task-x", sk: "META", companyId: A, ownerKey: "owner-x", workspaceId: "ws-x" } });
+    w.files.put("private/owner-x/ws-x/evidence/task-x/f");
     await scheduledAndDue(w);
-    // Prove it (one tiny step), then change its company before the partition is emptied.
+    // Prove it (one tiny step), then change its company before the partition is emptied: no file and no row of it goes, not only its META.
     for (let call = 0; call < 50 && (await w.store.get({ pk: `COMPANY_PURGE_PART#${A}`, sk: "DEVTASK#task-x" })) === undefined; call += 1) {
       await runCompanyPurge(w.deps, A, 0);
       w.clock.now += 70_000;
     }
     await w.store.put({ item: { pk: "DEVTASK#task-x", sk: "META", companyId: B, ownerKey: "owner-x", workspaceId: "ws-x" } });
+    // A row of the partition written by its new company, and one elsewhere that names the task: neither goes.
+    await w.store.put({ item: { pk: "DEVTASK#task-x", sk: "NOTE#1", text: "x" } });
+    await w.store.put({ item: { pk: "GITHUB_PR#repo-x", sk: "PR#1", taskId: "task-x" } });
     await purgeToEnd(w, A);
+    expect(await w.store.get({ pk: "GITHUB_PR#repo-x", sk: "PR#1" })).toBeDefined();
     expect(await w.store.get({ pk: "DEVTASK#task-x", sk: "META" })).toMatchObject({ companyId: B });
+    expect(await w.store.get({ pk: "DEVTASK#task-x", sk: "NOTE#1" })).toBeDefined();
+    expect(w.files.under("private/owner-x/")).toEqual(["private/owner-x/ws-x/evidence/task-x/f"]);
+    expect(w.logs.some((entry) => entry["event"] === "company_purge.partition_foreign")).toBe(true);
+  });
+
+  it("stops emptying a partition as soon as its META comes to name another company mid-way", async () => {
+    const w = world();
+    await w.store.put({ item: { pk: "DEVTASK#task-z", sk: "META", companyId: A, ownerKey: "owner-z", workspaceId: "ws-z" } });
+    // Rows that sort before META: the walk meets them before the task is proved, so only the partition's emptying reaches them.
+    for (let i = 0; i < 350; i += 1) await w.store.put({ item: { pk: "DEVTASK#task-z", sk: `ACT#${String(i).padStart(3, "0")}` } });
+    const s = w.store;
+    let pages = 0;
+    const deps: CompanyPurgeDeps = { ...w.deps, store: {
+      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), put: (request) => s.put(request), update: (request) => s.update(request), delete: (request) => s.delete(request),
+      transact: (items) => s.transact(items), scanPage: (request) => s.scanPage(request),
+      query: async (request) => {
+        const page = await s.query(request);
+        if (request.pk === "DEVTASK#task-z" && ++pages === 1) await s.put({ item: { pk: "DEVTASK#task-z", sk: "META", companyId: B, ownerKey: "owner-z", workspaceId: "ws-z" } });
+        return page;
+      },
+    } };
+    await requestCompanyPurge(deps, { companyId: A, by: OP, requestId: REQ });
+    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
+    for (let call = 0; call < 50 && (await runCompanyPurge(deps, A)).outcome !== "done"; call += 1) w.clock.now += 1_000;
+    expect(pages).toBeGreaterThan(0);
+    const left = (await w.store.query({ pk: "DEVTASK#task-z" })).items;
+    expect(left.length).toBeGreaterThanOrEqual(101);
+    expect(left.find((row) => row.sk === "META")).toMatchObject({ companyId: B });
+  });
+
+  it("never deletes a META whose orgId came to name another company just before its delete", async () => {
+    const w = world();
+    await w.store.put({ item: { pk: "DEVTASK#task-y", sk: "META", companyId: A, orgId: A, ownerKey: "owner-y", workspaceId: "ws-y" } });
+    const s = w.store;
+    const deps: CompanyPurgeDeps = { ...w.deps, store: {
+      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), query: (request) => s.query(request), put: (request) => s.put(request), update: (request) => s.update(request),
+      transact: (items) => s.transact(items), scanPage: (request) => s.scanPage(request),
+      delete: async (request) => {
+        // Between the partition's last page and its META delete, the META's orgId moves to another company.
+        if (request.key.pk === "DEVTASK#task-y" && request.key.sk === "META") await s.update({ key: request.key, ops: [{ op: "set", path: ["orgId"], value: B }] });
+        return await s.delete(request);
+      },
+    } };
+    await requestCompanyPurge(deps, { companyId: A, by: OP, requestId: REQ });
+    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
+    for (let call = 0; call < 50 && (await runCompanyPurge(deps, A)).outcome !== "done"; call += 1) w.clock.now += 1_000;
+    expect(await w.store.get({ pk: "DEVTASK#task-y", sk: "META" })).toMatchObject({ companyId: A, orgId: B });
+  });
+
+  it("clears an earlier purge's recorded partitions on a new request, so nothing it named is acted on without being proved again", async () => {
+    const w = world();
+    await seed(w, A, "a");
+    await scheduledAndDue(w);
+    // Run until a partition is recorded, then the company reopens; the held purge is cancelled.
+    for (let call = 0; call < 50 && (await w.store.query({ pk: `COMPANY_PURGE_PART#${A}` })).items.length === 0; call += 1) {
+      await runCompanyPurge(w.deps, A, 0);
+      w.clock.now += 1_000;
+    }
+    expect((await w.store.query({ pk: `COMPANY_PURGE_PART#${A}` })).items.length).toBeGreaterThan(0);
+    w.closed.delete(A);
+    await cancelCompanyPurge(w.deps, { companyId: A, by: OP });
+    w.closed.set(A, "close-2");
+    await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 });
+    for (const pk of [`COMPANY_PURGE_PART#${A}`, `COMPANY_PURGE_MARK#${A}`, `COMPANY_PURGE_DRYRUN#${A}`]) expect((await w.store.query({ pk })).items).toEqual([]);
   });
 });
 
@@ -706,6 +804,19 @@ describe("company purge: dry run", () => {
     expect(partial.cursor).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u);
     expect(Buffer.from(partial.cursor!, "base64url").toString("latin1")).not.toContain("secret-task");
     expect(JSON.stringify(partial)).not.toContain("secret-task");
+    // The handle row expires in the store too, when the store has an expiry attribute.
+    const ttlStore = world();
+    const deps = { ...ttlStore.deps, store: Object.assign(Object.create(null) as object, {
+      get: (key: Parameters<MemoryDocumentStore["get"]>[0]) => ttlStore.store.get(key), put: (request: Parameters<MemoryDocumentStore["put"]>[0]) => ttlStore.store.put(request),
+      delete: (request: Parameters<MemoryDocumentStore["delete"]>[0]) => ttlStore.store.delete(request), scanPage: (request: Parameters<MemoryDocumentStore["scanPage"]>[0]) => ttlStore.store.scanPage(request), ttlAttribute: "expiresAt",
+    }) as unknown as CompanyPurgeDeps["store"] };
+    for (let i = 0; i < 150; i += 1) await ttlStore.store.put({ item: { pk: `X#${String(i)}`, sk: "R" } });
+    const withTtl = await dryRunCompanyPurge(deps, { companyId: A, by: OP, budgetMs: 0 });
+    expect((await ttlStore.store.get({ pk: `COMPANY_PURGE_DRYRUN#${A}`, sk: withTtl.cursor! }))!["expiresAt"]).toBe(Math.ceil((ttlStore.clock.now + 3_600_000) / 1_000));
+    // Two calls with the same handle at once: only one gets it.
+    const twin = await dryRunCompanyPurge(w.deps, { companyId: A, by: OP, budgetMs: 0 });
+    const both = await Promise.allSettled([dryRunCompanyPurge(w.deps, { companyId: A, by: OP, cursor: twin.cursor!, budgetMs: 0 }), dryRunCompanyPurge(w.deps, { companyId: A, by: OP, cursor: twin.cursor!, budgetMs: 0 })]);
+    expect(both.filter((each) => each.status === "fulfilled")).toHaveLength(1);
     // Another company cannot use it; a used one cannot be used again; an expired one is refused.
     await expect(dryRunCompanyPurge(w.deps, { companyId: B, by: OP, cursor: partial.cursor! })).rejects.toThrow(PURGE_DRY_RUN_HANDLE);
     const next = await dryRunCompanyPurge(w.deps, { companyId: A, by: OP, cursor: partial.cursor!, budgetMs: 0 });
