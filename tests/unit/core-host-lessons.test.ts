@@ -1,0 +1,298 @@
+// Lessons on the core engine of a deployed install (lanes LM1, LM2, LM3, LM5; DEC 225/226). Off by default and fail closed; for a company the switch covers: a step is given that company's lessons and
+// never another company's, a merged task is queued for reflection under its own company, the shared reflection queue hands each message to its own company, people come from the deployment's port for
+// that company only, an erased or outside person's words never teach, and learning model calls go only through the injected port and only while the switch covers the company.
+import { randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it } from "vitest";
+import { LEARNED_CONTEXT_FEATURE, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
+import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { buildCoreRegistry, createCoreRuntime, CORE_ENGINE_OFF, readCoreEngineFlags, type CoreRuntime } from "../../packages/broker/src/core-host/index.js";
+import { createCoreLessons, erasePersonLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
+import { createHostedLessonParts, OtherCompanyError, type HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
+import { learnedLessonsSwitchOn, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
+import { pumpReflectQueue, reflectMessageCompany } from "../../packages/broker/src/lessons/host-glue.js";
+import { reflectQueueOf } from "../../packages/broker/src/lessons/reflect-queue.js";
+import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
+import { createLessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
+import type { PipelineModel } from "../../packages/broker/src/lessons/ports.js";
+import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
+import { lessonRecord, draft } from "./lessons/lesson-helpers.js";
+
+afterEach(() => setLearnedLessonsGate(undefined));
+
+const A = FAKE_COMPANY as OrgId;
+const B = "org_corehost00000000000b" as OrgId;
+const PROJECT: ProjectDefinition = {
+  name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
+  repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
+};
+
+async function registerProject(world: FakeWorld, companyId: string): Promise<void> {
+  await world.store.put({ item: { ...projectRevisionKey(companyId, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
+  await world.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
+}
+
+/** The deployment's people port over fixed lists: `members[company]` are on every project's roster; `erased` are gone. Records every company it was asked about. */
+function peopleOf(members: Record<string, string[]>, erased: string[] = []): HostedLessonPeople & { asked: string[] } {
+  const asked: string[] = [];
+  const note = (companyId: string): void => { asked.push(companyId); };
+  return {
+    asked,
+    async approvers(companyId) { note(companyId); const list = members[companyId] ?? []; return { complete: true, membershipVersion: 1, ownerIds: list.slice(0, 1), eligibleIds: list, lastEligibleLossAtMs: null }; },
+    async onProjectRoster(companyId, _project, personId) { note(companyId); return (members[companyId] ?? []).includes(personId); },
+    async linkedAccounts(companyId) { note(companyId); return []; },
+    async displayName(companyId, personId) { note(companyId); return (members[companyId] ?? []).includes(personId) ? `Person ${personId}` : undefined; },
+    async isErased(companyId, personId) { note(companyId); return erased.includes(personId); },
+  };
+}
+
+/** A learning model that records every call (the gateway's stand-in). */
+function recordingModel(): PipelineModel & { calls: string[] } {
+  const calls: string[] = [];
+  return { calls, async complete(request) { calls.push(`${request.purpose}:${request.workspaceId}`); return { text: JSON.stringify({ candidates: [] }), costUsd: 0.001, model: "fake" }; } };
+}
+
+interface Company { runtime: CoreRuntime; lessons: CoreLessons | undefined; personId: string; taskId: string; workspaceId: string }
+
+async function companyWorld(world: FakeWorld, env: NodeJS.ProcessEnv, people: HostedLessonPeople, hosts: Map<string, CoreLessons>, model?: PipelineModel): Promise<Map<string, Company>> {
+  setCoreLessonsGate(env);
+  const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
+  const lessonsSwitch = readCoreLessonsSwitch(env).value;
+  const out = new Map<string, Company>();
+  for (const companyId of [A, B]) {
+    await registerProject(world, companyId);
+    const runtime = createCoreRuntime({
+      registry, companyId, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
+    });
+    const lessons = createCoreLessons({
+      flow: runtime.flow, registry, companyId, lessonsSwitch, people, hostFor: async (id) => hosts.get(id)?.host, now: () => world.clock.now,
+      ...(model === undefined ? {} : { learning: { model, spend: { admit: async () => true } } }),
+    });
+    lessons?.attach();
+    if (lessons !== undefined) hosts.set(companyId, lessons);
+    const principal = localOwnerPrincipal({ companyId });
+    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
+    out.set(companyId, { runtime, lessons, personId: principal.personId, taskId: task.taskId, workspaceId: task.workspaceId });
+  }
+  return out;
+}
+
+/** An active lesson of `companyId`'s payments project, approved by a person. */
+const activeLesson = (companyId: string, id: string, title: string) => lessonRecord({
+  id, workspaceId: companyId, project: "payments", tier: 1, tierReasons: [], approvals: [{ approvalId: "a1", by: "person-1", at: 1, mode: "one" }], scope: {}, citations: [], citationChecks: [],
+  stages: ["UNDERSTAND", "PLAN", "IMPLEMENT", "REVIEW"], provenance: { ...draft().provenance, supportTasks: [] }, title, description: "Retries go through withRetry.", body: "Wrap network calls in withRetry instead of looping by hand.",
+});
+
+async function putLesson(lessons: CoreLessons, lesson: ReturnType<typeof lessonRecord>): Promise<void> {
+  const key = { workspaceId: lesson.workspaceId, project: lesson.project };
+  await lessons.runtime.store.commit(key, await lessons.runtime.store.setVersion(key), [lesson], 1);
+}
+
+describe("the switch", () => {
+  it("is off by default and fails closed: anything but off, on or on:<company ids> is off, with a problem that never echoes the value", () => {
+    expect(readCoreLessonsSwitch({})).toEqual({ value: { mode: "off" } });
+    expect(readCoreLessonsSwitch({ [CORE_LESSONS_VARIABLE]: `on:${A}` })).toEqual({ value: { mode: "on-for", companies: [A] } });
+    for (const bad of ["1", "true", "ON", "drain", `on:${A},${B}`]) {
+      const read = readCoreLessonsSwitch({ [CORE_LESSONS_VARIABLE]: bad });
+      expect(read.value, bad).toEqual({ mode: "off" });
+      expect(read.problem, bad).toBeDefined();
+      expect(read.problem, bad).not.toContain(bad);
+    }
+  });
+
+  it("with it off nothing is built, the task flow's lessons slots stay empty, and the install gate refuses every learning call", async () => {
+    const world = createFakeWorld();
+    const model = recordingModel();
+    const companies = await companyWorld(world, {}, peopleOf({ [A]: [], [B]: [] }), new Map(), model);
+    for (const company of companies.values()) {
+      expect(company.lessons).toBeUndefined();
+      expect(company.runtime.flow.deps.learned).toBeUndefined();
+      expect(company.runtime.flow.deps.lessonsUsed).toBeUndefined();
+      expect(company.runtime.flow.deps.milestones).toBeUndefined();
+    }
+    expect(learnedLessonsSwitchOn()).toBe(false);
+    expect(model.calls).toEqual([]);
+    // The core engine's own switch being off changes nothing here either.
+    expect(CORE_ENGINE_OFF.combined.mode).toBe("off");
+  });
+
+  it("on:<company> builds lessons for that company only", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: `on:${A}` }, peopleOf({ [A]: [], [B]: [] }), new Map());
+    expect(companies.get(A)!.lessons).toBeDefined();
+    expect(companies.get(A)!.runtime.flow.deps.learned).toBeTypeOf("function");
+    expect(companies.get(B)!.lessons).toBeUndefined();
+    expect(companies.get(B)!.runtime.flow.deps.learned).toBeUndefined();
+    expect(learnedLessonsSwitchOn()).toBe(true);
+  });
+});
+
+describe("delivery: a step gets its own company's lessons, never another's", () => {
+  it("a lesson of company A loads into A's step, and B's step (same project name) gets none of A's", async () => {
+    const world = createFakeWorld();
+    const people = peopleOf({ [A]: [], [B]: [] });
+    const hosts = new Map<string, CoreLessons>();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, people, hosts);
+    const a = companies.get(A)!;
+    const b = companies.get(B)!;
+    await putLesson(a.lessons!, activeLesson(A, "les_aaaa1111", "Use the retry helper"));
+    for (const company of [a, b]) {
+      const record = await world.store.get(taskKey(company.taskId));
+      expect(record?.["companyId"]).toBe(company === a ? A : B);
+    }
+    const loadedA = await a.runtime.flow.deps.learned!({ workspaceId: a.workspaceId, operationId: "op-a", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
+    expect(loadedA.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+    const loadedB = await b.runtime.flow.deps.learned!({ workspaceId: b.workspaceId, operationId: "op-b", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
+    expect(loadedB).toEqual({});
+    // A's lessons asked about B's task (a wrong routing, an attack) answer nothing.
+    expect(await a.runtime.flow.deps.learned!({ workspaceId: b.workspaceId, operationId: "op-x", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
+    // A worker that does not take lessons, or a mode that carries none, gets none.
+    expect(await a.runtime.flow.deps.learned!({ workspaceId: a.workspaceId, operationId: "op-c", workflowMode: "PLAN", features: [] })).toEqual({});
+    expect(await a.runtime.flow.deps.learned!({ workspaceId: a.workspaceId, operationId: "op-d", workflowMode: "CHECKS", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
+    // The people port was never asked about another company than the one each lessons runtime serves.
+    expect(people.asked.every((id) => id === A || id === B)).toBe(true);
+  });
+
+  it("the pull request names the section: none used, or switched off for a company the switch stopped covering", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map());
+    const a = companies.get(A)!;
+    expect(await a.runtime.flow.deps.lessonsUsed!({ taskId: a.taskId, project: "payments", startingRevision: 1 }, "demo")).toMatchObject({ count: 0, none: true });
+  });
+});
+
+describe("capture: a merged task is queued under its own company", () => {
+  it("A's milestone handler queues A's merged task, and ignores B's task", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map());
+    const a = companies.get(A)!;
+    const b = companies.get(B)!;
+    const at = new Date(world.clock.now).toISOString();
+    await a.lessons!.host.milestone.on({ kind: "merged", orgId: A, taskId: b.taskId, at, text: "merged" });
+    const queue = await reflectQueueOf(world.queues);
+    expect(await queue.receive()).toEqual([]);
+    await a.lessons!.host.milestone.on({ kind: "merged", orgId: A, taskId: a.taskId, at, text: "merged" });
+    const received = await queue.receive();
+    expect(received.map((message) => reflectMessageCompany(message.body))).toEqual([A]);
+    expect(received[0]!.body).toMatchObject({ taskId: a.taskId, outcome: "merged" });
+  });
+});
+
+describe("the shared reflection queue", () => {
+  it("hands each message to its own company, removes a message for a company with lessons off, and keeps one whose company cannot be reached for a retry", async () => {
+    const world = createFakeWorld();
+    const queue = await reflectQueueOf(world.queues);
+    for (const orgId of [A, B, "org_corehost00000000000c"]) await queue.enqueue({ body: { orgId, taskId: randomUUID(), outcome: "merged", requestId: randomUUID() }, dedupeId: randomUUID() });
+    const seen: string[] = [];
+    const host = (id: string) => ({ reflectOne: async (body: string) => { seen.push(`${id}:${String((JSON.parse(body) as { orgId: string }).orgId)}`); return { result: "done" as const, retry: false } as never; } });
+    const report = await pumpReflectQueue({
+      queues: world.queues, perPass: 10, now: () => world.clock.now, log: () => undefined,
+      hostFor: async (id) => { if (id === A) return host(A); if (id === B) throw new Error("not now"); return undefined; },
+    });
+    expect(seen).toEqual([`${A}:${A}`]);
+    expect(report).toMatchObject({ received: 3, reflected: 1, dropped: 1, retried: 1 });
+  });
+});
+
+describe("people come from the deployment's port, for this company only", () => {
+  const readTask = async (taskId: string) => (taskId === "task-a" ? { companyId: A, project: "payments", developerId: "ann" } : taskId === "task-b" ? { companyId: B, project: "payments", developerId: "bob" } : undefined);
+
+  it("refuses any question about another company", async () => {
+    const parts = createHostedLessonParts({ companyId: A, people: peopleOf({ [A]: ["ann"], [B]: ["bob"] }), readTask });
+    await expect(parts.directory.eligibility(B, "payments")).rejects.toBeInstanceOf(OtherCompanyError);
+    await expect(parts.directory.identity(B, "bob")).rejects.toBeInstanceOf(OtherCompanyError);
+    await expect(parts.names.memberName(B, "bob")).rejects.toBeInstanceOf(OtherCompanyError);
+    await expect(parts.access.mayRead(B, undefined, [])).rejects.toBeInstanceOf(OtherCompanyError);
+    await expect(parts.tier0Authority.eligibility({ kind: "company", workspaceId: B }, { proposerId: "bob", approverId: "bob" })).rejects.toBeInstanceOf(OtherCompanyError);
+    expect(await parts.audiences.read(B, ["task-b"])).toEqual(new Map());
+    expect([...(await parts.access.taskVisibility.read(B, ["task-b"])).values()]).toEqual([undefined]);
+  });
+
+  it("a task's audience is its project's roster plus its person; another company's task is unknown; a restricted place is denied to everyone", async () => {
+    const people = peopleOf({ [A]: ["ann", "amy"] });
+    const parts = createHostedLessonParts({ companyId: A, people, readTask });
+    const audiences = await parts.audiences.read(A, ["task-a", "task-b", "task-x"]);
+    expect(audiences.get("task-b")).toBeUndefined();
+    expect(audiences.get("task-x")).toBeUndefined();
+    const audience = audiences.get("task-a")!;
+    expect(audience.project).toBe("payments");
+    expect([...audience.extras]).toEqual(["ann"]);
+    expect(await audience.onRoster("amy")).toBe(true);
+    expect(await audience.onRoster("bob")).toBe(false);
+    expect(await parts.access.mayRead(A, { principals: ["gh-ann"], groups: [] }, [{ scopes: ["slack:C1"], restrictedScopes: ["slack:C1"] }, { scopes: ["project"], restrictedScopes: [] }])).toEqual([false, true]);
+    expect((await parts.directory.eligibility(A, "payments")).eligibleIds).toEqual(["ann", "amy"]);
+  });
+});
+
+describe("what a finished task teaches, per person", () => {
+  async function sourcesFor(world: FakeWorld, members: string[], erased: string[] = []) {
+    const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
+    await registerProject(world, A);
+    const runtime = createCoreRuntime({
+      registry, companyId: A, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
+    });
+    const principal = localOwnerPrincipal({ companyId: A });
+    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    const repos = createLessonRepositories({ flow: runtime.flow.deps, registry, companyId: A, now: () => world.clock.now });
+    const sources = createLocalLessonSources({ flow: runtime.flow.deps, companyId: A, ownerId: "rovara-system", repos, now: () => world.clock.now, hosted: { people: peopleOf({ [A]: members }, erased) } });
+    return { sources, task, personId: principal.personId };
+  }
+
+  it("the request is its person's: a member's words are a member's, a person off the roster is an outsider, and an erased person's task teaches nothing", async () => {
+    const memberWorld = createFakeWorld();
+    const member = await sourcesFor(memberWorld, []);
+    // The person is not on the roster: their words are an outsider's (removed before any model call).
+    const outsider = await member.sources.source.read({ workspaceId: A, taskId: member.task.taskId });
+    expect(outsider?.facts.rest.initiatorTrust).toBe("outsider");
+    expect(outsider?.facts.task.developerId).toBe(member.personId);
+
+    const onRoster = createFakeWorld();
+    const listed = await sourcesFor(onRoster, [localOwnerPrincipal({ companyId: A }).personId]);
+    const read = await listed.sources.source.read({ workspaceId: A, taskId: listed.task.taskId });
+    expect(read?.facts.rest.initiatorTrust).toBe("member");
+    expect(read?.facts.rest.spans?.find((span) => span.kind === "intent")).toMatchObject({ trust: "member", authorId: listed.personId });
+
+    const erasedWorld = createFakeWorld();
+    const gone = await sourcesFor(erasedWorld, [localOwnerPrincipal({ companyId: A }).personId], [localOwnerPrincipal({ companyId: A }).personId]);
+    expect(await gone.sources.source.read({ workspaceId: A, taskId: gone.task.taskId })).toBeUndefined();
+    // Another company's workspace never reads A's task.
+    expect(await listed.sources.source.read({ workspaceId: B, taskId: listed.task.taskId })).toBeUndefined();
+  });
+});
+
+describe("the daily upkeep", () => {
+  it("runs once a day per company, however many passes run", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map());
+    const service = companies.get(A)!.lessons!.service;
+    expect(await service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
+    expect(await service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: false });
+    world.clock.advance(86_400);
+    expect(await service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
+    // B's day is its own.
+    expect(await companies.get(B)!.lessons!.service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
+  });
+});
+
+describe("erasing a person's lessons", () => {
+  it("hard-deletes the lessons the person wrote in their company, whatever the switch says, and leaves another company's lessons alone", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: ["ann"], [B]: ["ann"] }), new Map());
+    const a = companies.get(A)!.lessons!;
+    const b = companies.get(B)!.lessons!;
+    // Both lessons were written by "ann" (the helper's author); the same id exists in both companies (ids are only unique per company).
+    await putLesson(a, activeLesson(A, "les_aaaa1111", "Use the retry helper"));
+    await putLesson(b, activeLesson(B, "les_aaaa1111", "Use the retry helper"));
+    // The switch is off now: erasing must still work.
+    setLearnedLessonsGate(() => false);
+    const report = await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now });
+    expect(report).toMatchObject({ complete: true, projects: 1, purged: 1 });
+    expect(await a.runtime.store.get({ workspaceId: A, project: "payments" }, "les_aaaa1111")).toBeUndefined();
+    expect(await b.runtime.store.get({ workspaceId: B, project: "payments" }, "les_aaaa1111")).toBeDefined();
+    // Idempotent: a second call finds nothing more to do.
+    expect(await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now })).toMatchObject({ complete: true, purged: 0 });
+  });
+});

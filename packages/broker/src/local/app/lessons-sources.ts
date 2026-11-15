@@ -25,6 +25,7 @@ import type { TaskSubjectBase, TaskSubjectSource } from "../../lessons/task-end.
 import type { SendBackFact } from "../../lessons/task-subject.js";
 import { narrowestAudience, type Audience, type TrustClass } from "../../lessons/types.js";
 import type { LessonRepositories, LessonRepository } from "./lessons-repos.js";
+import type { HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { queryAll } from "@agentx/contracts";
 
 const PLAN_MAX_BYTES = 70_000;
@@ -79,6 +80,12 @@ export interface LocalSubjectSourceOptions {
   readObject?: ((objectKey: string, maxBytes: number) => Promise<string | undefined>) | undefined;
   now: () => number;
   log?: ((event: string, fields: Record<string, string | number>) => void) | undefined;
+  /**
+   * An install of many people (the core engine on a deployed install). Each person's words are THEIRS: the request is the task's person's, a send-back's reason and a close reason are the deciding person's,
+   * and each person's class is read NOW: a person on the project's roster is a member, anyone else an outsider (removed before any model call). An erased person's words are dropped, and a task whose person
+   * is erased (or whose standing cannot be read) teaches nothing. A code host account is the person the port links it to, or a host account name. `ownerId` is then unused. Any read that fails throws.
+   */
+  hosted?: { people: HostedLessonPeople; personOfAccount?: (companyId: OrgId, provider: string, login: string) => Promise<string | undefined> } | undefined;
 }
 
 export interface LocalLessonSources { source: TaskSubjectSource; rows: OutcomeRowReader; reverts: RevertedTasksReader }
@@ -88,6 +95,16 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
   const company = (workspaceId: string): OrgId | undefined => { const parsed = OrgIdSchema.safeParse(workspaceId); return parsed.success && parsed.data === options.companyId ? parsed.data : undefined; };
   const teaches = (task: TaskRecord | undefined, workspaceId: string): task is TaskRecord =>
     task !== undefined && company(workspaceId) !== undefined && task.companyId === workspaceId && task.workflow !== undefined && !isEvalRunMark((task as { evalRun?: unknown }).evalRun);
+
+  const hosted = options.hosted;
+  /** A person's class now, or undefined when the person is erased (their words are not used). Local: the owner is the one member. */
+  const standingOf = async (personId: string, project: string): Promise<TrustClass | undefined> => {
+    if (hosted === undefined) return "member";
+    if (await hosted.people.isErased(options.companyId, personId)) return undefined;
+    return (await hosted.people.onProjectRoster(options.companyId, project, personId)) ? "member" : "outsider";
+  };
+  /** Who a decision of the workflow was made by: its actor on a hosted install, the owner on a laptop. */
+  const deciderOf = (decision: { actorId?: string | undefined }): string | undefined => (hosted === undefined ? ownerId : decision.actorId);
 
   /** The comments of one merged pull request, as spans, and the change request they make up. */
   async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<{ spans: EvidenceSpan[]; change?: RepoChangeRequest }> {
@@ -114,8 +131,15 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
     for (const comment of feedback.comments.slice(0, MAX_PULL_REQUEST_COMMENTS)) {
       if (comment.body.trim() === "" || isRovareReplyComment(comment.body)) continue;
       const trust = await trustOf(comment.author);
-      const mine = options.ownerAccounts?.has(comment.author) === true;
-      const person = mine ? ownerId : accountPerson(provider, { login: comment.author });
+      let person: string;
+      if (hosted !== undefined) {
+        const linked = await hosted.personOfAccount?.(options.companyId, provider, comment.author);
+        // A comment by a person who was erased is not read.
+        if (linked !== undefined && await hosted.people.isErased(options.companyId, linked)) continue;
+        person = linked ?? accountPerson(provider, { login: comment.author });
+      } else {
+        person = options.ownerAccounts?.has(comment.author) === true ? ownerId : accountPerson(provider, { login: comment.author });
+      }
       const place = comment.path === undefined ? undefined : cleanForLearning(comment.path, COMMENT_PATH_MAX);
       spans.push({
         kind: "pr_comment", text: place === undefined || place === "" ? comment.body : `On ${place}: ${comment.body}`, trust, authorId: person,
@@ -150,9 +174,13 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       const repositories = base === undefined ? allRepositories : [base.repository];
 
       const spans: EvidenceSpan[] = [];
+      // The person the task is for. An erased one (or one whose record cannot be read: the read throws) teaches nothing.
+      const requester = hosted === undefined ? ownerId : task.developerId;
+      const requesterTrust = await standingOf(requester, project);
+      if (requesterTrust === undefined) return undefined;
       const requestText = (task as { requestText?: string }).requestText;
       const intentText = present(requestText) ? requestText : task.title;
-      if (present(intentText)) spans.push({ kind: "intent", text: intentText, trust: "member", authorId: ownerId });
+      if (present(intentText)) spans.push({ kind: "intent", text: intentText, trust: requesterTrust, authorId: requester });
 
       if (workflow !== undefined && options.readObject !== undefined) {
         const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").sort((a, b) => a.version - b.version).at(-1);
@@ -171,7 +199,9 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       }
       if (workflow?.fixSource === "ci") for (const problem of (workflow.fixProblems ?? []).slice(0, MAX_CI_PROBLEMS)) spans.push({ kind: "ci_failure", text: `${CI_FAILURE_PREFIX}${problem}`, trust: AGENT_TEXT_TRUST, sourceKey: "ci" });
       const closer = [...(workflow?.decisions ?? [])].reverse().find((decision) => decision.decision === "REJECT" && decision.actorRole === "TASK_OWNER");
-      if (closer !== undefined) spans.push({ kind: "close_reason", text: closer.reason, trust: "member", authorId: ownerId });
+      const closerId = closer === undefined ? undefined : deciderOf(closer);
+      const closerTrust = closerId === undefined ? undefined : await standingOf(closerId, project);
+      if (closer !== undefined && closerId !== undefined && closerTrust !== undefined) spans.push({ kind: "close_reason", text: closer.reason, trust: closerTrust, authorId: closerId });
 
       const repoChanges: RepoChangeRequest[] = [];
       if (input.context !== "human_edit") {
@@ -199,10 +229,10 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         facts: {
           workspaceId, project, taskId: task.taskId, repositories,
           ...(base === undefined ? {} : { baseCommit: base.commit }), ...(mergedCommit === undefined ? {} : { mergedCommit }), ...(outcome === undefined ? {} : { outcome }),
-          // The owner started the task. (An automatic run has no start fields, and nobody is named for it.)
-          task: { developerId: ownerId, startedBy: { developerId: ownerId } },
+          // The task's person started it (on a laptop, the owner). (An automatic run has no start fields, and nobody is named for it.)
+          task: { developerId: requester, startedBy: { developerId: requester } },
           rest: {
-            initiatorTrust: "member", steeringTrust: ["member"], intentTrust: "member", ...(links.length === 0 ? {} : { links }),
+            initiatorTrust: requesterTrust, steeringTrust: [requesterTrust], intentTrust: requesterTrust, ...(links.length === 0 ? {} : { links }),
             // The owner is the one reader of this machine's tasks, and they are open to the whole project.
             audience: { kind: "project" }, sharedTask: true, spans,
           },
@@ -219,7 +249,12 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       const decision = (task.workflow?.decisions ?? []).find((entry) => entry.requestId === input.requestId);
       if (decision === undefined) return undefined;
       const human = isHumanSendBack(decision);
-      const fact: SendBackFact = { id: `task:${input.taskId}:sendback:${input.requestId}`, origin: human ? "human" : "automatic", ...(human ? { actorDeveloperId: ownerId, actorTrust: "member" as const, reasonText: decision.reason } : {}) };
+      if (!human) return { id: `task:${input.taskId}:sendback:${input.requestId}`, origin: "automatic" };
+      // A send-back is its decider's: an erased decider's send-back is not a measured outcome, and their reason is not read.
+      const actor = deciderOf(decision);
+      const actorTrust = actor === undefined ? undefined : await standingOf(actor, task.project);
+      if (actor === undefined || actorTrust === undefined) return undefined;
+      const fact: SendBackFact = { id: `task:${input.taskId}:sendback:${input.requestId}`, origin: "human", actorDeveloperId: actor, actorTrust, reasonText: decision.reason };
       return fact;
     },
     async revertedBy(input) {
