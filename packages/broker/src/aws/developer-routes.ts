@@ -77,6 +77,7 @@ import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
+import { renameTaskOwner } from "../developer/task-owner-name.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -178,7 +179,7 @@ export interface DeveloperCaller { developerId: string; sessionId: string; amr: 
 export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
 
 /** One structured log line. Only event names, reasons and error names: never payloads or secrets. */
-function logDeveloperEvent(entry: Record<string, string>): void {
+function logDeveloperEvent(entry: Record<string, string | number>): void {
   console.log(JSON.stringify({ component: "broker", ...entry }));
 }
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
@@ -377,6 +378,13 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
   if (answer.ok) {
     // This path has no company in scope (the caller is a person), so it uses the file's one company-less logger, already in the inventory, rather than a new console call.
     logDeveloperEvent({ event: "developer.display_name_chosen", developerId: caller.developerId });
+    // #661: the person's tasks take the new name. Best effort: the name is already theirs, so a failure here is logged, not answered.
+    try {
+      const renamed = await renameTaskOwner(deps.documentClient, deps.tableName, caller.developerId, answer.name);
+      logDeveloperEvent({ event: "developer.tasks_renamed", developerId: caller.developerId, ...renamed });
+    } catch (error) {
+      logDeveloperEvent({ event: "developer.tasks_rename_failed", developerId: caller.developerId, error: errorName(error) });
+    }
     return { name: answer.name, nameChosen: true };
   }
   if (answer.error === "not_found") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
