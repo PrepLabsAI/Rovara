@@ -32,10 +32,26 @@ const execFile = promisify(execFileCallback);
 
 /** A base object that is missing, does not match its id, or could not be read. It carries no detail: nothing of the store reaches a message. */
 export class BaseObjectsUnverified extends Error {
-  constructor() {
+  /**
+   * @param reason fixed words naming the step that failed and an error code, never a path or a file's contents (#569)
+   * @param transient the failure could pass on a second try: a process that could not start, or a step that ran out of time
+   */
+  constructor(readonly reason = "unverified", readonly transient = false) {
     super("base objects could not be verified");
     this.name = "BaseObjectsUnverified";
   }
+}
+
+/** Error codes of a process or file the system could not start or open right now (load, limits), which a second try may pass. */
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(["EAGAIN", "EMFILE", "ENFILE", "ENOMEM", "EBUSY", "ETIMEDOUT"]);
+
+/** The failure as BaseObjectsUnverified, keeping only its step and code (#569). */
+export function unverifiedFrom(error: unknown, step: string): BaseObjectsUnverified {
+  if (error instanceof BaseObjectsUnverified) return error;
+  const detail = error as { code?: unknown; killed?: unknown; signal?: unknown } | undefined;
+  if (detail?.killed === true || detail?.code === "ABORT_ERR") return new BaseObjectsUnverified(`${step}: timed out`, true);
+  const code = typeof detail?.code === "string" && /^[A-Z][A-Z0-9_]{1,31}$/u.test(detail.code) ? detail.code : typeof detail?.code === "number" ? `exit ${String(detail.code)}` : "error";
+  return new BaseObjectsUnverified(`${step}: ${code}`, TRANSIENT_CODES.has(code));
 }
 
 export type BaseRuleFile =
@@ -433,7 +449,12 @@ export async function openVerifiedBaseObjects(directory: string, baseCommit: str
         if (placed) looseTarget = target;
       }
       const attempt = async (): Promise<{ size: number; bytes: Buffer | undefined }> => {
-        const sizeText = (await execFile("git", ["cat-file", "-s", oid], { cwd: scratchDirectory, env, timeout: GIT_TIMEOUT_MS, signal, encoding: "utf8", maxBuffer: 64 })).stdout.trim();
+        let sizeText: string;
+        try {
+          sizeText = (await execFile("git", ["cat-file", "-s", oid], { cwd: scratchDirectory, env, timeout: GIT_TIMEOUT_MS, signal, encoding: "utf8", maxBuffer: 64 })).stdout.trim();
+        } catch (error) {
+          throw unverifiedFrom(error, `git cat-file -s ${type}`);
+        }
         if (!/^\d{1,15}$/u.test(sizeText)) throw new BaseObjectsUnverified();
         const size = Number(sizeText);
         if (size > maximum) throw new BaseObjectsUnverified();
@@ -459,7 +480,7 @@ export async function openVerifiedBaseObjects(directory: string, baseCommit: str
         try {
           return await fetch(type, oid, maximum, keep, each.signal);
         } catch (error) {
-          throw error instanceof BaseObjectsUnverified ? error : new BaseObjectsUnverified();
+          throw unverifiedFrom(error, `read ${type}`);
         } finally {
           clearTimeout(timer);
         }
@@ -473,7 +494,7 @@ export async function openVerifiedBaseObjects(directory: string, baseCommit: str
     return { rootTreeId, hashBytes, fetchObject, close: cleanUp };
   } catch (error) {
     await cleanUp();
-    throw error instanceof BaseObjectsUnverified ? error : new BaseObjectsUnverified();
+    throw unverifiedFrom(error, "open the base commit");
   }
 }
 
@@ -501,7 +522,7 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
     }
     return { kind: "absent" };
   } catch (error) {
-    throw error instanceof BaseObjectsUnverified ? error : new BaseObjectsUnverified();
+    throw unverifiedFrom(error, "read the rule file");
   } finally {
     await objects.close();
   }
@@ -524,8 +545,8 @@ function streamVerified(cwd: string, env: NodeJS.ProcessEnv, algorithm: Algorith
     const kept: Buffer[] = [];
     let received = 0;
     let settled = false;
-    const timer = setTimeout(() => finish(new BaseObjectsUnverified()), GIT_TIMEOUT_MS);
-    const onAbort = () => finish(new BaseObjectsUnverified());
+    const timer = setTimeout(() => finish(new BaseObjectsUnverified(`git cat-file ${type}: timed out`, true)), GIT_TIMEOUT_MS);
+    const onAbort = () => finish(new BaseObjectsUnverified(`git cat-file ${type}: deadline`, true));
     function finish(error?: BaseObjectsUnverified, bytes?: Buffer): void {
       if (settled) return;
       settled = true;
@@ -538,7 +559,7 @@ function streamVerified(cwd: string, env: NodeJS.ProcessEnv, algorithm: Algorith
     }
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
-    child.on("error", () => finish(new BaseObjectsUnverified()));
+    child.on("error", (error) => finish(unverifiedFrom(error, `git cat-file ${type}: start`)));
     child.stdout.on("data", (chunk: Buffer) => {
       received += chunk.length;
       if (received > size) return finish(new BaseObjectsUnverified());
@@ -548,7 +569,8 @@ function streamVerified(cwd: string, env: NodeJS.ProcessEnv, algorithm: Algorith
     });
     child.on("close", (code) => {
       if (settled) return;
-      if (code !== 0 || received !== size || hash.digest("hex") !== oid) return finish(new BaseObjectsUnverified());
+      if (code !== 0) return finish(new BaseObjectsUnverified(`git cat-file ${type}: exit ${String(code)}`));
+      if (received !== size || hash.digest("hex") !== oid) return finish(new BaseObjectsUnverified(`git cat-file ${type}: did not verify`));
       return finish(undefined, size <= keep ? Buffer.concat(kept) : undefined);
     });
   });

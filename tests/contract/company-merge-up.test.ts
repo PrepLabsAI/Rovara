@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { AgentXError, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
+import { LEGACY_KEY_SCOPE, scopedProjectPk } from "../../packages/broker/src/e2e/legacy-key-scope.js";
 import { routeLinkingRequest } from "../../packages/broker/src/aws/developer-routes.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyRouteHarness, PERSON, TASK, TIME } from "../support/company-route-harness.js";
@@ -124,7 +125,7 @@ describe("merge-up membership-resolved reads", () => {
     for (const company of [undefined, IMPLICIT_COMPANY_ID]) {
       const h = harness(company); h.project(); h.task();
       expect((await h.call()).body).toBe('{"name":"shared-project","latestRevision":1,"access":"granted","repositories":[{"name":"api","url":"https://github.com/example/api.git","defaultBranch":"main","fullName":"example/api"}],"requestId":"company-test"}');
-      expect((await h.call("/v1/dev/access", "POST")).body).toBe(`{"developerId":"${PERSON}","displayName":"Test Person","administrator":true,"projects":[{"name":"shared-project","access":"granted"}],"notices":[],"requestId":"company-test"}`);
+      expect((await h.call("/v1/dev/access", "POST")).body).toBe(`{"developerId":"${PERSON}","displayName":"Test Person","nameChosen":false,"administrator":true,"projects":[{"name":"shared-project","access":"granted"}],"notices":[],"requestId":"company-test"}`);
       expect((await h.call(taskPaths[0])).body).toBe('{"messages":[],"requestId":"company-test"}');
       expect((await h.call(taskPaths[1])).body).toBe('{"comments":[],"requestId":"company-test"}');
     }
@@ -167,4 +168,139 @@ describe("named T-lane known gaps (not isolation claims)", () => {
     expect(response.body).not.toContain("membership-canary");
     expect(companyOf).not.toHaveBeenCalled();
   });
+});
+
+describe("merge-up 2 membership-resolved reads", () => {
+  const path = `/v1/dev/tasks/${TASK}`;
+  const reader = (company: string | undefined = COMPANY_A.orgId) => {
+    const h = harness(company); h.project(company);
+    h.db.set({ ...h.task(TASK, company), developerId: "e".repeat(64) });
+    h.db.set({ pk: `DEVTASK#${TASK}`, sk: `READER#${PERSON}`, schemaVersion: 1, developerId: PERSON, role: "viewer", grantedBy: "e".repeat(64), grantedAt: TIME });
+    return h;
+  };
+  it.each(["", "/events", "/readers"])("keeps the task company check on the shared-reader fallback %s", async (suffix) => {
+    const h = reader();
+    const own = await h.call(path + suffix);
+    expect(own.statusCode).toBe(suffix === "/readers" ? 403 : 200);
+    h.deps.companies = { companyOf: async () => COMPANY_B.orgId };
+    const foreign = await h.call(path + suffix);
+    h.db.delete(`DEVTASK#${TASK}`, "META");
+    expect(foreign).toEqual(await h.call(path + suffix));
+    expect(foreign.statusCode).toBe(404);
+    expect(foreign.body).not.toContain(COMPANY_A.orgId);
+  });
+  it.each(["/events", "/readers"])("checks the owner's new read path %s", async (suffix) => {
+    const h = harness(COMPANY_A.orgId); h.task(TASK, COMPANY_A.orgId);
+    expect((await h.call(path + suffix)).statusCode).toBe(200);
+    h.deps.companies = { companyOf: async () => COMPANY_B.orgId };
+    expect((await h.call(path + suffix)).statusCode).toBe(404);
+    h.deps.companies = { companyOf: async () => { throw new Error(COMPANY_A.canary); } };
+    const failed = await h.call(path + suffix);
+    expect(failed.statusCode).toBe(401); expect(failed.body).not.toContain(COMPANY_A.canary);
+  });
+  it.each([undefined, null, {}, 1, "bad-company"])("fails closed on invalid membership for the new reads %j", async (company) => {
+    const h = reader(); h.deps.companies = { companyOf: async () => company as string | undefined };
+    for (const suffix of ["/events", "/readers"]) expect((await h.call(path + suffix)).statusCode).toBe(401);
+  });
+  it("checks the linking project catalog and preserves the chosen-name access answer", async () => {
+    const h = harness(COMPANY_B.orgId); h.project(COMPANY_A.orgId, true);
+    h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
+    h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, displayNameChosen: true });
+    const request = { method: "GET", path: "/v1/dev/projects", headers: { authorization: h.bearer }, requestId: "test" };
+    const url = new URL(request.path, "https://broker.example.test");
+    expect(await routeLinkingRequest(h.deps, request, url)).toMatchObject({ projects: [] });
+    h.project(COMPANY_B.orgId, true);
+    expect(await routeLinkingRequest(h.deps, request, url)).toMatchObject({ projects: [{ name: "shared-project" }] });
+    expect(JSON.parse((await h.call("/v1/dev/access", "POST")).body)).toMatchObject({ nameChosen: true, projects: [{ name: "shared-project", access: "administrator" }] });
+    h.deps.companies = { companyOf: async () => { throw new Error(COMPANY_A.canary); } };
+    await expect(routeLinkingRequest(h.deps, request, url)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+  });
+  it("full-access tokens retain the original project/task company gates", async () => {
+    const h = harness(COMPANY_B.orgId); h.project(COMPANY_A.orgId, true); h.task(TASK, COMPANY_A.orgId);
+    h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
+    const get = (url: string) => h.read(url, { headers: { authorization: h.bearer } });
+    expect(parsed(await get("/v1/dev/projects")).projects).toEqual([]);
+    expect((await get(path)).statusCode).toBe(404);
+    h.deps.companies = { companyOf: async () => COMPANY_A.orgId };
+    expect(parsed(await get("/v1/dev/projects")).projects).toHaveLength(1);
+    expect((await get(path)).statusCode).toBe(200);
+  });
+  it("legacy shared-reader event and reader-list bytes stay unchanged with companies absent", async () => {
+    const h = reader(undefined); delete h.deps.companies;
+    expect((await h.call(path + "/events")).body).toBe('{"events":[],"requestId":"company-test"}');
+    const owner = harness(); owner.task();
+    expect((await owner.call(path + "/readers")).body).toBe('{"readers":[],"requestId":"company-test"}');
+  });
+});
+
+describe("merge-up 2 named T-lane known gaps (not isolation claims)", () => {
+  it.each(["PUT", "DELETE"])("T2/T3 task-reader %s writer still has no membership/writer fence", async (method) => {
+    const h = harness(COMPANY_B.orgId); h.project(COMPANY_A.orgId); h.task(TASK, COMPANY_A.orgId);
+    const id = "e".repeat(64);
+    h.db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, displayName: "Reader" });
+    h.db.set({ pk: `MEMBER#${id}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
+    expect((await h.call(`/v1/dev/tasks/${TASK}/readers/${id}`, method, { requestId: TASK, role: "viewer" })).statusCode).toBe(200);
+    expect(h.companyOf).not.toHaveBeenCalled();
+  });
+  it("T2/T3 linking workspace catalog is still bound to person rather than company", async () => {
+    const h = harness(COMPANY_B.orgId);
+    h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
+    h.project(COMPANY_A.orgId);
+    const request = { method: "GET", path: "/v1/dev/workspaces", headers: { authorization: h.bearer }, requestId: "test" };
+    expect(await routeLinkingRequest(h.deps, request, new URL(request.path, "https://broker.example.test"))).toMatchObject({ projects: [{ name: "shared-project" }], workspaces: [] });
+    expect(h.companyOf).not.toHaveBeenCalled();
+  });
+});
+
+// These helper/metadata limitations are deliberately conservative inventory entries, not isolation passes.
+it("known gap T1: scopedProjectPk legacy selector relies on its caller for company admission", () => {
+  expect(scopedProjectPk(COMPANY_A.orgId, "shared-project")).not.toBe(scopedProjectPk(COMPANY_B.orgId, "shared-project"));
+  expect(scopedProjectPk(LEGACY_KEY_SCOPE, "shared-project")).toBe("PROJECT#shared-project");
+});
+
+it("known gap T2/T3: reader list returns person/project grants without recipient company membership", async () => {
+  const h = harness(COMPANY_A.orgId); h.task(TASK, COMPANY_A.orgId);
+  const other = "e".repeat(64);
+  const companyOf = vi.fn(async (personId: string) => personId === PERSON ? COMPANY_A.orgId : COMPANY_B.orgId);
+  h.deps.companies = { companyOf };
+  h.db.set({ pk: `DEVELOPER#${other}`, sk: "META", displayName: "Foreign reader" });
+  h.db.set({ pk: `MEMBER#${other}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
+  h.db.set({ pk: `DEVTASK#${TASK}`, sk: `READER#${other}`, schemaVersion: 1, developerId: other, role: "viewer", grantedBy: PERSON, grantedAt: TIME });
+  expect(JSON.parse((await h.call(`/v1/dev/tasks/${TASK}/readers`)).body)).toMatchObject({ readers: [{ name: "Foreign reader", projectMember: true }] });
+  expect(companyOf).toHaveBeenCalledExactlyOnceWith(PERSON);
+});
+
+it("merge-up 2 bounds the linking catalog and reader list as whole calls", async () => {
+  const h = harness(COMPANY_A.orgId); h.project(COMPANY_A.orgId); h.task(TASK, COMPANY_A.orgId);
+  h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
+  for (let i = 0; i < 2_001; i++) {
+    h.db.set({ pk: `MEMBER#${PERSON}`, sk: `PROJECT#p-${i}`, projectName: `p-${i}`, role: "developer" });
+    const developerId = i.toString(16).padStart(64, "0");
+    h.db.set({ pk: `DEVTASK#${TASK}`, sk: `READER#${developerId}`, developerId, role: "viewer", grantedAt: TIME });
+  }
+  const request = { method: "GET", path: "/v1/dev/projects", headers: { authorization: h.bearer }, requestId: "test" };
+  await expect(routeLinkingRequest(h.deps, request, new URL(request.path, "https://broker.example.test"))).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: company read limit exceeded" });
+  // Native caller for the reader list; no full-access session is substituted by the helper.
+  h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: false });
+  const response = await h.call(`/v1/dev/tasks/${TASK}/readers`);
+  expect(response.statusCode).toBe(400);
+  expect(response.body).toContain('"message":"company read limit exceeded"');
+  expect(response.body).not.toContain('"readers"');
+});
+
+it("merge-up 2 checks the linking deadline after the last provider read", async () => {
+  const h = harness(COMPANY_A.orgId); h.project(COMPANY_A.orgId);
+  h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
+  h.db.set({ pk: "SLACK_BINDING#T0SHARED", sk: "CHANNEL#C0SHARED", teamId: "T0SHARED", channelId: "C0SHARED", projectName: "shared-project", updatedAt: TIME });
+  let elapsed = 0; let slow = false;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => elapsed);
+  h.deps.developer.channelInfo = vi.fn(async () => { if (slow) elapsed = 10_001; return { ok: true as const, channels: [] }; });
+  const request = { method: "GET", path: "/v1/dev/projects", headers: { authorization: h.bearer }, requestId: "test" };
+  const call = () => routeLinkingRequest(h.deps, request, new URL(request.path, "https://broker.example.test"));
+  try {
+    expect(await call()).toMatchObject({ projects: [{ name: "shared-project" }] });
+    slow = true;
+    await expect(call()).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: company read limit exceeded" });
+    expect(h.deps.developer.channelInfo).toHaveBeenCalledTimes(2);
+  } finally { clock.mockRestore(); }
 });

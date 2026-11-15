@@ -117,9 +117,9 @@ export class ControlPlaneStack extends Stack {
       type: "String",
       description: "Complete Secrets Manager ARN containing the GitHub App private key PEM",
     });
-    // Spec 025 phase 25a: declared on the stack itself so the names are exact. Spec 064: the legacy deployment gets the
-    // sign-in ones only, for account linking; the developer task settings stay in named environments (R3).
-    const signInParameters = developerSignInParameters(this, { tasks: naming.env !== undefined });
+    // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
+    // the developer task settings too, so it runs tasks as named environments do.
+    const signInParameters = developerSignInParameters(this, { tasks: true });
     const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
       type: "String",
       default: "false",
@@ -853,24 +853,11 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "SlackAdapterSecretName", { value: `agentx/${naming.env ?? "production"}/channel-adapter/slack` });
     new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
-    // Spec 064: the legacy deployment's sign-in, for account linking only. Its broker serves the link page, the access
-    // check and a person's own links; developer tasks, sharing and admin changes stay in named environments.
-    if (naming.env === undefined) {
-      const linkingSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
-      });
-      linkingSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
-      linkingSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
-      linkingSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
-      // Spec 062 Phase 7d: the channel API's Slack router posts through the adapter while SlackViaChannel is on, as in
-      // named environments. The legacy deployment names no Slack team, so it posts as each message's own team.
-      channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
-    }
-    // Spec 025 phase 25a: developer sign-in, named environments only (R3).
+    // Spec 025 phase 25a: developer sign-in and tasks, in every deployment; the legacy one is named production.
     const taskParameters = signInParameters.tasks;
-    if (naming.env !== undefined && taskParameters !== undefined) {
+    if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
+        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
       // Spec 063 FR-005: the admin client's own rule for who is an administrator, read at company sign-in.
       developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);

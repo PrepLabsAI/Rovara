@@ -189,11 +189,11 @@ describe("the named TEST proof-only installation gate", () => {
       const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
       expect(variables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
     }
-    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy has no workflow gate parameter").toBeUndefined();
+    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
     expect(legacyBrokers, "legacy has its Broker Lambda").toHaveLength(1);
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy has no workflow flag").toBeUndefined();
+    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
     const digestCases = [
       {
@@ -211,15 +211,13 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "legacy",
         template: legacy,
-        withRoute: "e0ec4d2d7acd8e4776b8f2ec3e1dc408aada6f7cb8eca067837dded962b531e9",
-        withoutRoute: "976b5e91de5a9e2e767057f9cd6e00f1bd61f0ef6db1ab973f7d0b8f44f5e9e5",
+        withRoute: "c9cd4a7890c9d0502fa0df7e5e06a28f87c0dba8de4fa439db39c7099874c201",
+        withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
       },
     ] as const;
     for (const { label, template, withRoute, withoutRoute } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
-      if (label === "legacy") {
-        expect(creatorChecks, "legacy has no new sign-in creator identity fence").toHaveLength(0);
-      } else {
+      {
         expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);
         expect(creatorChecks[0]!.statement, `${label} checks only the exact sign-in table key namespace`).toEqual({
           Action: "dynamodb:ConditionCheckItem",
