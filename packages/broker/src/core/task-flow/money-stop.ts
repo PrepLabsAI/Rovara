@@ -15,15 +15,15 @@ import { createHash } from "node:crypto";
 import { AGENTX_PROTOCOL_VERSION, change, when, type WorkerInvocation } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, taskPointerKey, workspaceKey } from "./keys.js";
+import { operationKey, taskPointerKey } from "./keys.js";
 import { readTask } from "./reads.js";
 import type { OperationRecord, WorkspaceRecord } from "./records.js";
-import { iso, log } from "./support.js";
+import { dispatchQueueName, iso, log } from "./support.js";
 
 /** The admission action asked before each model run is handed to a worker (it holds nothing). */
 export const RUN_START_ACTION = "run.start";
-/** How long a Stop waits for the worker to send its usage and end, by default. */
-export const USAGE_FLUSH_WAIT_MS = 20_000;
+/** How long a Stop waits for the worker to send its usage and end, by default (a Stop runs inside one HTTP request, which API Gateway ends at about 29 s). */
+export const USAGE_FLUSH_WAIT_MS = 15_000;
 const FLUSH_POLL_MS = 250;
 /** A cancel capability for no callback at all: the cancel is answered on its own request. */
 const CANCEL_CAPABILITY_SECONDS = 120;
@@ -53,33 +53,47 @@ export interface MoneyStop {
 const ENDED: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 const elapsedSince = (deps: Pick<TaskFlowDeps, "now">, started: number): number => (deps.now?.() ?? new Date()).getTime() - started;
 
-/** The cancel invocation of one target: one id per target, so a Stop pressed twice is one cancel at the worker. */
-function cancelInvocation(deps: Pick<TaskFlowDeps, "callbackSigningKey">, workspace: Pick<WorkspaceRecord, "id" | "projectRevision">, operation: Pick<OperationRecord, "id" | "fence">): WorkerInvocation {
-  const hex = createHash("sha256").update(`cancel\n${operation.id}`).digest("hex");
-  const operationId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/** The id of one cancel of `operation`, asked at `at` (a uuid): each Stop, close or spend stop is its own cancel at the worker. */
+function cancelIdOf(operation: Pick<OperationRecord, "id">, at: string): string {
+  const hex = createHash("sha256").update(`cancel\n${operation.id}\n${at}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** The worker's cancel invocation of `operation`: no callback right (it is answered on its own request). Built by the dispatcher, which holds the worker's address. */
+export function cancelInvocation(deps: Pick<TaskFlowDeps, "callbackSigningKey">, workspace: Pick<WorkspaceRecord, "id" | "projectRevision">, operation: Pick<OperationRecord, "id" | "fence">, cancelId: string): WorkerInvocation {
   return {
-    protocolVersion: AGENTX_PROTOCOL_VERSION, kind: "cancel", operationId, workspaceId: workspace.id, fence: operation.fence, projectRevision: workspace.projectRevision,
-    callbackCapability: new CallbackCapabilities(Buffer.from(deps.callbackSigningKey)).issue({ workspaceId: workspace.id, operationId, fence: operation.fence, actions: [], expiresInSeconds: CANCEL_CAPABILITY_SECONDS }),
+    protocolVersion: AGENTX_PROTOCOL_VERSION, kind: "cancel", operationId: cancelId, workspaceId: workspace.id, fence: operation.fence, projectRevision: workspace.projectRevision,
+    callbackCapability: new CallbackCapabilities(Buffer.from(deps.callbackSigningKey)).issue({ workspaceId: workspace.id, operationId: cancelId, fence: operation.fence, actions: [], expiresInSeconds: CANCEL_CAPABILITY_SECONDS }),
     payload: { targetOperationId: operation.id },
   };
 }
 
-/** Sends the worker the cancel of `operation`, giving up after `maxMs`. True when the worker took it. */
-async function deliverCancel(deps: TaskFlowDeps, workspace: Pick<WorkspaceRecord, "id" | "projectRevision">, operation: OperationRecord, maxMs: number): Promise<boolean> {
-  const machineId = operation.machineId;
-  if (machineId === undefined) return false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+/** The cancel a dispatch message carries (`cancel`: the cancel's own id), or undefined for an ordinary dispatch message. */
+export function queuedCancelOf(body: unknown): string | undefined {
+  const cancel = (body as { cancel?: unknown } | null | undefined)?.cancel;
+  return typeof cancel === "string" && UUID.test(cancel) ? cancel : undefined;
+}
+
+/**
+ * Queues the worker's cancel of `operation` (the broker never reaches a worker itself: the dispatcher, which does, delivers it). The message is staged in the outbox and relayed at once;
+ * a relay that fails here is left to the outbox's own relay (the State stream with lane L9, else the 1-minute backstop). True when the message was staged.
+ */
+async function queueCancel(deps: TaskFlowDeps, operation: OperationRecord): Promise<boolean> {
+  const cancelId = cancelIdOf(operation, iso(deps));
   try {
-    return await Promise.race([
-      deps.machines.deliver(machineId, cancelInvocation(deps, workspace, operation)).then(() => true),
-      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), Math.max(0, maxMs)); timer.unref?.(); }),
-    ]);
+    const staged = await deps.store.transact([deps.outbox.stage({
+      id: cancelId, companyId: deps.companyId, queue: dispatchQueueName(deps), attributes: { kind: "cancel" },
+      body: { v: 1, companyId: deps.companyId, workspaceId: operation.workspaceId, operationId: operation.id, cancel: cancelId },
+    })]);
+    if (!staged.applied) return false;
   } catch (error) {
-    log(deps, { event: "task_flow.cancel_not_delivered", error: error instanceof Error ? error.name : "unknown" });
+    log(deps, { event: "task_flow.cancel_not_queued", error: error instanceof Error ? error.name : "unknown" });
     return false;
-  } finally {
-    clearTimeout(timer);
   }
+  await deps.outbox.relay({ companyId: deps.companyId, ids: [cancelId] }).catch((error: unknown) => log(deps, { event: "task_flow.relay_failed", error: error instanceof Error ? error.name : "unknown" }));
+  return true;
 }
 
 /** Whether an operation is a model run whose usage only its worker can report (a task run handed to a machine). */
@@ -92,16 +106,17 @@ export const reportsUsage = (operation: Pick<OperationRecord, "kind" | "machineI
 export async function askWorkerToFlush(deps: TaskFlowDeps, workspace: Pick<WorkspaceRecord, "id" | "projectRevision">, operation: OperationRecord): Promise<"flushed" | "not_flushed" | "nothing_to_flush"> {
   const stop = deps.moneyStop;
   if (stop === undefined || !reportsUsage(operation) || ENDED.has(operation.status)) return "nothing_to_flush";
+  void workspace;
   const waitMs = stop.flushWaitMs ?? USAGE_FLUSH_WAIT_MS;
   const sleep = stop.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
   const started = (deps.now?.() ?? new Date()).getTime();
-  if (!(await deliverCancel(deps, workspace, operation, waitMs))) return "not_flushed";
-  for (;;) {
-    const current = await deps.store.get(operationKey(operation.workspaceId, operation.id));
+  const queued = await queueCancel(deps, operation);
+  for (let current = await deps.store.get(operationKey(operation.workspaceId, operation.id)); ; current = await deps.store.get(operationKey(operation.workspaceId, operation.id))) {
     const status = current?.["status"];
     if (typeof status === "string" && ENDED.has(status)) return "flushed";
     const left = waitMs - elapsedSince(deps, started);
-    if (left <= 0) return "not_flushed";
+    // Not ended in time: taken as not flushed, even for a run that never reported an event (its worker may have spent while its sends failed; over-counting is the safe side).
+    if (!queued || left <= 0) return "not_flushed";
     await sleep(Math.min(stop.pollMs ?? FLUSH_POLL_MS, left));
   }
 }
@@ -134,7 +149,9 @@ async function taskOfOperation(deps: TaskFlowDeps, operation: Pick<OperationReco
 export async function endUnflushed(deps: TaskFlowDeps, operation: OperationRecord): Promise<void> {
   if (deps.moneyStop === undefined || !reportsUsage(operation)) return;
   try {
-    await deps.store.update({ key: operationKey(operation.workspaceId, operation.id), ops: [change.set("usageUnflushed", true)], condition: when.present() });
+    // Once per run: a run already taken as unflushed has kept its hold or its estimate.
+    const marked = await deps.store.update({ key: operationKey(operation.workspaceId, operation.id), ops: [change.set("usageUnflushed", true)], condition: when.and(when.present(), when.notExists("usageUnflushed")) });
+    if (!marked.applied) return;
     const task = await taskOfOperation(deps, operation);
     if (task === undefined || task.companyId !== deps.companyId) return;
     await deps.moneyStop.keepWholeHold(task.admissionReservationId, { operationId: operation.id, taskId: task.taskId });
@@ -158,9 +175,7 @@ export async function requestSpendStop(deps: TaskFlowDeps, operation: OperationR
   });
   if (!asked.applied) return false;
   log(deps, { event: "task_flow.spend_stop_requested", code });
-  const workspace = await deps.store.get(workspaceKey(operation.workspaceId));
-  const projectRevision = workspace?.["projectRevision"];
-  if (typeof projectRevision === "number") await deliverCancel(deps, { id: operation.workspaceId, projectRevision }, operation, 5_000);
+  await queueCancel(deps, operation);
   return true;
 }
 

@@ -24,7 +24,7 @@ import {
   type TransactItem,
 } from "@agentx/contracts";
 import { companyDayKey, createCostLedger, costPartition, utcDayOf, type CostLedger } from "../core/cost/ledger.js";
-import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, holdItems, holdStateOf, openHoldRoom, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
+import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, companyOfReservation, holdItems, holdStateOf, openHoldRoom, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
 import { RUN_START_ACTION, type MoneyStop, type SpendStopCode } from "../core/task-flow/money-stop.js";
 import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
@@ -261,8 +261,10 @@ export async function runSpendState(deps: { store: DocumentStore; ledger: Pick<C
     const load = await readDayLoad(deps.store, companyId, utcDayOf(deps.now()));
     if (load === "unknown") return "spend_unknown";
     if (load < deps.settings.companyDayCapMicros) return "within";
+    // The task's own hold counts only when it is this company's and on today (a hold of an earlier day promised nothing on this one).
     const total = await deps.store.get({ pk: costPartition(companyId, taskId), sk: "TOTAL" });
-    return (await openHoldRoom(deps.store, total?.["holdId"])) > 0 ? "within" : "company_day_cap";
+    const holdId = total?.["holdId"];
+    return companyOfReservation(holdId) === companyId && (await openHoldRoom(deps.store, holdId, utcDayOf(deps.now()))) > 0 ? "within" : "company_day_cap";
   } catch {
     return "spend_unknown";
   }
@@ -272,16 +274,55 @@ export async function runSpendState(deps: { store: DocumentStore; ledger: Pick<C
 const runStopRefusal = (state: SpendStopCode): AdmissionDecision =>
   state === "task_cap" ? refuse("task_cap", TASK_CAP_REACHED) : state === "company_day_cap" ? refuse("company_day_cap", COMPANY_DAY_CAP_REACHED) : refuse("spend_unknown", SPEND_UNKNOWN);
 
+/** The provider an estimate of a stopped run's unreported usage is booked under (its own meter charges the estimate itself). */
+export const UNFLUSHED_ESTIMATE_PROVIDER = "rovara-unflushed-estimate";
+/** The entry id of that estimate: one per run, so a second try books nothing more, and the run then counts as booked (`runsOwed`). */
+export const unflushedEntryId = (operationId: string): string => `usage:${operationId}:unflushed`;
+
+/** What a stopped run's unreported usage is estimated at when no open hold is left to keep: a full start's planning allowance, never more than the task cap. */
+export function unflushedEstimateMicros(settings: HostedAdmissionSettings | undefined): number {
+  const full = DEFAULT_PLANNING_LIMIT_USD.FULL * 1_000_000;
+  return settings === undefined ? full : Math.min(full, settings.taskCapMicros);
+}
+
 /**
- * The flow's money stop on a deployed install: a run stopped before its usage arrived keeps its task's whole start hold as spent, marked estimated (core/cost/holds.ts `closeHold`).
+ * The flow's money stop on a deployed install, for one company: a run stopped before its usage arrived keeps its task's whole start hold as spent, marked estimated (core/cost/holds.ts
+ * `closeHold`). When no hold with room is left (it was closed by an earlier stop, released, swept, or used up), a fixed estimate is booked on the task instead
+ * (`usage:<operation>:unflushed`, `unflushedEstimateMicros`), so unknown spend is never $0. A hold of another company is never touched; the estimate is booked under this company.
  */
-export function createHostedMoneyStop(deps: { store: DocumentStore; now: () => Date }, timing: Pick<MoneyStop, "flushWaitMs" | "pollMs" | "sleep"> = {}): MoneyStop {
+export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: string; settings?: HostedAdmissionSettings | undefined; now: () => Date }, timing: Pick<MoneyStop, "flushWaitMs" | "pollMs" | "sleep"> = {}): MoneyStop {
+  // The estimate's own meter: it charges the figure the estimate carries, and nothing draws a hold (the run's hold is closed first).
+  const estimates = createCostLedger({
+    store: deps.store, now: deps.now, holds: createLedgerHolds(deps.store),
+    metering: { async price() { return null; }, async record(entry) { return { cost: entry.usage.provider === UNFLUSHED_ESTIMATE_PROVIDER ? entry.reportedCost ?? null : null, source: "unknown" }; } },
+  });
   return {
     ...timing,
     async keepWholeHold(reservationId, mark) {
-      await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
+      const ours = companyOfReservation(reservationId) === deps.companyId;
+      if (ours && await openHoldRoom(deps.store, reservationId) > 0) {
+        await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
+        return;
+      }
+      // An open hold with no room left is closed as estimated too (it keeps nothing more); then the estimate.
+      if (ours) await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
+      await estimates.recordUsage({
+        companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
+        usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        reportedCost: { micros: unflushedEstimateMicros(deps.settings), currency: "USD" },
+      });
     },
   };
+}
+
+/** Whether the queue cancel path's fast relay (lane L9, the State table stream to the outbox relay) is deployed: the infra sets this variable to `on` with it. */
+export const CORE_OUTBOX_STREAM_RELAY_VARIABLE = "ROVARA_CORE_OUTBOX_STREAM_RELAY";
+/**
+ * Whether the per-run stop is wired on this function: the queue cancel path is (this code), so it is the fast relay that decides. Until L9 lands this is false, so `automation.run` stays
+ * refused (`run_stop_not_wired`); Stop and close still keep the whole hold as estimated spend when the worker's end is late (over-counts, never under).
+ */
+export function runStopWiredFrom(env: NodeJS.ProcessEnv): boolean {
+  return env[CORE_OUTBOX_STREAM_RELAY_VARIABLE]?.trim() === "on";
 }
 
 /** The most of a task's runs `runsOwed` reads the ledger for; a task with more unfinished or failed runs is taken as owing. */
@@ -300,6 +341,11 @@ export async function runsOwed(store: DocumentStore, companyId: string, taskId: 
       .filter((operation) => operation.kind === "task" && operation.workflowMode !== "CHECKS" && operation.status !== "SUCCEEDED");
     if (runs.length > OWED_RUNS_MAX) return true;
     for (const run of runs) {
+      // A run whose usage never arrived (`usageUnflushed`) is booked only by its estimate; any other by an end report or an estimate (a checkpoint is not an end: `usage-checkpoint:`).
+      if (run.usageUnflushed === true) {
+        if (await store.get({ pk: costPartition(companyId, taskId), sk: `ENTRY#${unflushedEntryId(run.id)}` }) === undefined) return true;
+        continue;
+      }
       const booked = await store.query({ pk: costPartition(companyId, taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage:${run.id}:` }, limit: 1 });
       if (booked.items.length === 0) return true;
     }

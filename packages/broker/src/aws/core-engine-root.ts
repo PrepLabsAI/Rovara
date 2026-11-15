@@ -30,7 +30,7 @@ import type { CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-h
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import {
-  HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, readHostedAdmissionSettings, runSpendState, type HostedAdmissionSettings, type HostedIdentityOptions,
+  HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, readHostedAdmissionSettings, runSpendState, runStopWiredFrom, type HostedAdmissionSettings, type HostedIdentityOptions,
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
@@ -273,7 +273,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, runStopWired: true }), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, runStopWired: runStopWiredFrom(env) }), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -284,7 +284,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
-      flowOptions: { moneyStop: createHostedMoneyStop({ store: registry.require("storage"), now }) },
+      flowOptions: { moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,

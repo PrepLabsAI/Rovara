@@ -63,7 +63,7 @@ export interface CoreDispatchRouting {
 export function withCoreDispatch<R extends DispatcherRecord, E extends DispatcherEvent<R>, C>(inner: DispatcherHandler<E, C>, routing: CoreDispatchRouting): DispatcherHandler<E, C> {
   const coreQueueArn = routing.coreQueueArn?.trim();
   if (coreQueueArn === undefined || coreQueueArn === "") return inner;
-  const log = routing.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "dispatcher", ...entry })));
+  const log = routing.log ?? ((entry: Record<string, unknown>) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); });
   return async (event, context) => {
     const records = event.Records ?? [];
     const core = records.filter((record) => record.eventSourceARN === coreQueueArn);
@@ -191,7 +191,7 @@ export interface DispatcherCoreInputs {
    * The per-run dollar stop's dispatch side (core/task-flow/money-stop.ts): each model run is admitted (`run.start`) before it is handed over, goes only to a worker that reports its usage
    * while it runs, and is told to. Built over the registry's store. Absent: dispatch as before.
    */
-  moneyStop?: (registry: AdapterRegistry) => MoneyStop;
+  moneyStop?: (registry: AdapterRegistry, companyId: OrgId) => MoneyStop;
   log: (entry: Record<string, unknown>) => void;
   now?: () => Date;
 }
@@ -244,7 +244,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     // The dispatcher runs no scheduled job and relays no outbox (the broker does): its runtimes are built for the dispatch consumer alone.
     dispatchOnly: true,
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
-    runtime: (registry) => {
+    runtime: (registry, companyId) => {
       const flow = inputs.flow;
       // Declared means present AND `null` (an explicit none) or a value: a key that is there with `undefined` in it is not a declaration.
       if (flow === undefined || flow === null || DISPATCHER_FLOW_DECLARATIONS.some((name) => !Object.hasOwn(flow, name) || flow[name] === undefined)) throw Object.assign(new Error(DISPATCHER_FLOW_NOT_DECLARED), { name: "DispatcherFlowNotDeclared" });
@@ -253,7 +253,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
         ...(learned === null || learned === undefined ? {} : { learned }),
-        ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry) }),
+        ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
       };
       return {
       callbackSigningKey,

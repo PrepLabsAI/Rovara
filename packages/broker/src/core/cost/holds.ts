@@ -139,12 +139,12 @@ export async function holdStateOf(store: Pick<DocumentStore, "get">, reservation
   return { state: hold.state, companyId, ...(typeof taskId === "string" && taskId !== "" ? { taskId } : {}) };
 }
 
-/** What an open hold still holds (held less drawn), in micros; 0 for a hold that is closed, missing, unreadable or not ours. */
-export async function openHoldRoom(store: Pick<DocumentStore, "get">, reservationId: unknown): Promise<number> {
+/** What an open hold still holds (held less drawn), in micros; 0 for a hold that is closed, missing, unreadable, not ours, or (with `day`) on another UTC day. */
+export async function openHoldRoom(store: Pick<DocumentStore, "get">, reservationId: unknown, day?: string): Promise<number> {
   const companyId = companyOfReservation(reservationId);
   if (companyId === undefined) return 0;
   const hold = holdOf(await store.get(holdKey(companyId, reservationId as string)), companyId, reservationId as string);
-  return hold === undefined || hold.state !== "open" ? 0 : hold.heldMicros - hold.drawnMicros;
+  return hold === undefined || hold.state !== "open" || (day !== undefined && hold.day !== day) ? 0 : hold.heldMicros - hold.drawnMicros;
 }
 
 // ---- closing a hold

@@ -6,16 +6,17 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type MeterEntry, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
-import { holdKey } from "../../packages/broker/src/core/cost/holds.js";
+import { holdKey, openHoldRoom } from "../../packages/broker/src/core/cost/holds.js";
 import {
-  COMPANY_DAY_CAP_REACHED, RUN_STOP_NOT_WIRED, SPEND_UNKNOWN, TASK_CAP_REACHED, createHostedAdmission, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, runSpendState,
-  type HostedAdmissionSettings,
+  COMPANY_DAY_CAP_REACHED, CORE_OUTBOX_STREAM_RELAY_VARIABLE, RUN_STOP_NOT_WIRED, SPEND_UNKNOWN, TASK_CAP_REACHED, createHostedAdmission, createHostedLedger, createHostedMoneyStop, hostedSecurityModules,
+  runSpendState, runStopWiredFrom, runsOwed, unflushedEntryId, unflushedEstimateMicros, type HostedAdmissionSettings,
 } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { coreMoneyWiring } from "../../packages/broker/src/aws/core-engine-root.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
-import { operationKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { CHECKPOINT_ENTRY_PREFIX, EMPTY_REPORT_CHARGE_MICROS } from "../../packages/broker/src/core-host/usage-booking.js";
 import { RUN_START_ACTION, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
@@ -32,7 +33,8 @@ const exactMeter = {
   async price() { return null; },
   async record(e: MeterEntry) {
     if (e.usage.modelId === "unpriced") return { cost: null, source: "unknown" as const };
-    return { cost: { micros: e.usage.tokens.input, currency: "USD" }, source: "price-table" as const };
+    // A reported cost higher than the tokens' price wins, as the hosted meter's does.
+    return { cost: { micros: Math.max(e.usage.tokens.input, e.reportedCost?.micros ?? 0), currency: "USD" }, source: "price-table" as const };
   },
 };
 
@@ -158,16 +160,38 @@ describe("a stopped run's usage that never arrived: the whole hold is kept, mark
     const task = randomUUID();
     const hold = await w.start(A, task);
     await w.book(A, task, 1_500_000);
-    const stop = createHostedMoneyStop({ store: w.store, now: () => NOW });
+    const stop = createHostedMoneyStop({ store: w.store, companyId: A, settings: SETTINGS, now: () => NOW });
     const operationId = randomUUID();
     await stop.keepWholeHold(hold, { operationId, taskId: task });
     expect(await w.store.get(holdKey(A, hold))).toMatchObject({ state: "settled", keptMicros: 3_500_000, drawnMicros: 1_500_000, estimated: true, estimatedFor: operationId });
     // The day counts the whole $5 hold: $1.50 booked plus $3.50 kept as an estimate.
     expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 1_500_000, settledMicros: 3_500_000, estimatedMicros: 3_500_000, reservedMicros: 0, loadMicros: 5_000_000 });
-    // Again (a Stop and then a close): the hold is closed, nothing moves.
-    const day = await w.store.get(companyDayKey(A, DAY));
-    await stop.keepWholeHold(hold, { operationId, taskId: task });
-    expect(await w.store.get(companyDayKey(A, DAY))).toEqual(day);
+    // The next run of the task stopped without its usage (after a Retry): its hold is closed now, so a fixed estimate is booked on the task, never $0; once per run.
+    const next = randomUUID();
+    await stop.keepWholeHold(hold, { operationId: next, taskId: task });
+    expect(await w.store.get({ pk: costPartition(A, task), sk: `ENTRY#${unflushedEntryId(next)}` })).toBeDefined();
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(1_500_000 + unflushedEstimateMicros(SETTINGS));
+    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 1_500_000 + 5_000_000, loadMicros: 10_000_000 });
+    await stop.keepWholeHold(hold, { operationId: next, taskId: task });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(1_500_000 + unflushedEstimateMicros(SETTINGS));
+    expect(unflushedEstimateMicros(SETTINGS)).toBe(5_000_000);
+    expect(unflushedEstimateMicros(undefined)).toBe(6_000_000);
+  });
+
+  it("a hold its usage used up keeps nothing more, so the estimate is booked; a hold of an earlier day leaves no room on this one", async () => {
+    const w = setup();
+    const task = randomUUID();
+    const hold = await w.start(A, task);
+    await w.book(A, task, 5_000_000);
+    const stop = createHostedMoneyStop({ store: w.store, companyId: A, settings: SETTINGS, now: () => NOW });
+    await stop.keepWholeHold(hold, { operationId: "o1", taskId: task });
+    expect(await w.store.get(holdKey(A, hold))).toMatchObject({ state: "settled", keptMicros: 0, estimated: true });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(10_000_000);
+    const other = setup();
+    const t2 = randomUUID();
+    const h2 = await other.start(A, t2);
+    expect(await openHoldRoom(other.store, h2, DAY)).toBe(5_000_000);
+    expect(await openHoldRoom(other.store, h2, "2026-11-16")).toBe(0);
   });
 
   it("touches only the hold's own company, and does nothing for no hold or an id that is not one", async () => {
@@ -175,13 +199,46 @@ describe("a stopped run's usage that never arrived: the whole hold is kept, mark
     const task = randomUUID();
     const holdA = await w.start(A, task);
     const holdB = await w.start(B, task);
-    const stop = createHostedMoneyStop({ store: w.store, now: () => NOW });
+    const stop = createHostedMoneyStop({ store: w.store, companyId: A, settings: SETTINGS, now: () => NOW });
     const dayB = await w.store.get(companyDayKey(B, DAY));
     await stop.keepWholeHold(holdA, { operationId: randomUUID(), taskId: task });
     expect(await w.store.get(companyDayKey(B, DAY))).toEqual(dayB);
     expect(await w.store.get(holdKey(B, holdB))).toMatchObject({ state: "open" });
-    for (const id of [undefined, "", "hold:org_x:abc", holdA.replace(A, B)]) await stop.keepWholeHold(id, { operationId: "o", taskId: task });
+    for (const id of [undefined, "", "hold:org_x:abc", holdA.replace(A, B), holdB]) await stop.keepWholeHold(id, { operationId: randomUUID(), taskId: task });
+    // B's own hold through A's money stop: untouched; what is kept is A's estimate, on A's task.
     expect(await w.store.get(companyDayKey(B, DAY))).toEqual(dayB);
+    expect(await w.store.get(holdKey(B, holdB))).toMatchObject({ state: "open" });
+    expect((await w.ledger.taskCost(B, task)).micros).toBe(0);
+  });
+
+  it("a run taken as unflushed is owed until its estimate is booked (closing the task then keeps the hold); checkpoints alone never make a run booked", async () => {
+    const store = new MemoryDocumentStore();
+    const taskId = randomUUID();
+    const workspaceId = randomUUID();
+    await store.put({ item: { ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, workspaceId, companyId: A } });
+    const run = (id: string, extra: Record<string, unknown> = {}) => store.put({ item: { ...operationKey(workspaceId, id), entityType: "OPERATION", id, workspaceId, companyId: A, kind: "task", status: "CANCELLED", fence: 1, eventSequence: 3, dispatch: { kind: "task", payload: {} }, createdAt: NOW.toISOString(), ...extra } });
+    const entry = (entryId: string) => store.put({ item: { pk: costPartition(A, taskId), sk: `ENTRY#${entryId}`, entityType: "COST_ENTRY" } });
+    const op = randomUUID();
+    await run(op);
+    await entry(`${CHECKPOINT_ENTRY_PREFIX}:${op}:abc`);
+    expect(await runsOwed(store, A, taskId)).toBe(true);
+    await entry(`usage:${op}:def`);
+    expect(await runsOwed(store, A, taskId)).toBe(false);
+    const lost = randomUUID();
+    await run(lost, { usageUnflushed: true });
+    await entry(`usage:${lost}:xyz`);
+    expect(await runsOwed(store, A, taskId)).toBe(true);
+    await entry(unflushedEntryId(lost));
+    expect(await runsOwed(store, A, taskId)).toBe(false);
+  });
+});
+
+describe("the per-run stop is wired only with the fast relay (lane L9)", () => {
+  it("reads the relay's variable: on only for exactly on", () => {
+    expect(runStopWiredFrom({})).toBe(false);
+    expect(runStopWiredFrom({ [CORE_OUTBOX_STREAM_RELAY_VARIABLE]: "off" })).toBe(false);
+    expect(runStopWiredFrom({ [CORE_OUTBOX_STREAM_RELAY_VARIABLE]: "true" })).toBe(false);
+    expect(runStopWiredFrom({ [CORE_OUTBOX_STREAM_RELAY_VARIABLE]: " on " })).toBe(true);
   });
 });
 
@@ -212,14 +269,39 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     expect(await bare.bookUsage(operation, [{ type: "usage", timestamp: at(4), payload: telemetry(1) }])).toEqual({ booked: 1, unreadable: 0 });
   });
 
+  it("books a checkpoint under its own entry kind, and a session's final zero after checkpoints at $0 (an ordinary zero report is still charged)", async () => {
+    const { store, money } = await root(A);
+    const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: A } as unknown as OperationRecord;
+    const taskId = randomUUID();
+    await store.put({ item: { ...taskPointerKey(operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
+    const zero = { ...telemetry(0), checkpoint: undefined };
+    await money.bookUsage(operation, [
+      { type: "usage", timestamp: `${DAY}T10:00:01.000Z`, payload: telemetry(1_000) },
+      { type: "usage", timestamp: `${DAY}T10:00:02.000Z`, payload: { ...zero, final: true } },
+    ]);
+    const entries = (await store.query({ pk: costPartition(A, taskId), sk: { op: "beginsWith", prefix: "ENTRY#" } })).items.map((item) => String(item["sk"]));
+    expect(entries.filter((sk) => sk.startsWith(`ENTRY#${CHECKPOINT_ENTRY_PREFIX}:${operation.id}:`))).toHaveLength(1);
+    expect(entries.filter((sk) => sk.startsWith(`ENTRY#usage:${operation.id}:`))).toHaveLength(1);
+    expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 });
+    await money.bookUsage(operation, [{ type: "usage", timestamp: `${DAY}T10:00:03.000Z`, payload: zero }]);
+    expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 + EMPTY_REPORT_CHARGE_MICROS });
+  });
+
   it("the callback layer acks the batch and asks the run to stop (CANCEL_REQUESTED, the code, a cancel to its worker); another company's run is never touched", async () => {
     const store = new MemoryDocumentStore();
     const signingKey = Buffer.alloc(32, 7);
-    const delivered: Array<{ machineId: string; kind: string; target: string | undefined }> = [];
+    // The broker never reaches a worker: the cancel is staged in the outbox for the dispatcher and relayed at once.
+    const queued: Array<{ companyId: string; body: Record<string, unknown> }> = [];
+    const relayed: unknown[] = [];
+    const delivered: unknown[] = [];
     const stop: MoneyStop = { async keepWholeHold() {} };
     const flowFor = (companyId: OrgId) => ({
       companyId, store, callbackSigningKey: signingKey, now: () => NOW, moneyStop: stop,
-      machines: { async deliver(machineId: string, invocation: { kind: string; payload: { targetOperationId?: string } }) { delivered.push({ machineId, kind: invocation.kind, target: invocation.payload.targetOperationId }); return { duplicate: false }; } },
+      outbox: {
+        stage: (message: { id: string; companyId: string; body: Record<string, unknown> }) => { queued.push(message); return { kind: "put", item: { pk: `OUTBOX#${message.companyId}`, sk: message.id } }; },
+        relay: async (options: unknown) => { relayed.push(options); return { relayed: 1 }; },
+      },
+      machines: { async deliver(...args: unknown[]) { delivered.push(args); return { duplicate: false }; } },
     }) as unknown as TaskFlowDeps;
     const operationOf = async (companyId: OrgId) => {
       const workspaceId = randomUUID();
@@ -239,7 +321,9 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const answer = await handler({ method: "POST", path: `/v1/internal/workspaces/${a.workspaceId}/operations/${a.id}/events`, headers: { [CAPABILITY_HEADER]: capability }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) });
     expect(answer.statusCode).toBe(200);
     expect(await store.get(operationKey(a.workspaceId, a.id))).toMatchObject({ status: "CANCEL_REQUESTED", stopReason: "company_day_cap", stopRequestedAt: NOW.toISOString() });
-    expect(delivered).toEqual([{ machineId: `m-${A}`, kind: "cancel", target: a.id }]);
+    expect(queued).toEqual([expect.objectContaining({ companyId: A, body: expect.objectContaining({ v: 1, companyId: A, workspaceId: a.workspaceId, operationId: a.id, cancel: expect.any(String) }) })]);
+    expect(relayed).toEqual([{ companyId: A, ids: [queued[0]!.body["cancel"]] }]);
+    expect(delivered).toEqual([]);
     expect(await store.get(operationKey(b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });
     expect(await store.get(operationKey(b.workspaceId, b.id))).not.toHaveProperty("stopReason");
     // B's operation through A's callback layer: refused as not found, nothing stopped.
@@ -247,7 +331,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const refused = await handler({ method: "POST", path: `/v1/internal/workspaces/${b.workspaceId}/operations/${b.id}/events`, headers: { [CAPABILITY_HEADER]: foreign }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) });
     expect(refused.statusCode).toBe(404);
     expect(await store.get(operationKey(b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });
-    expect(delivered).toHaveLength(1);
+    expect(queued).toHaveLength(1);
     expect(costPartition(A, "t")).not.toEqual(costPartition(B, "t"));
   });
 });

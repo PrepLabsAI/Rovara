@@ -22,6 +22,9 @@ const BOOKING_ATTEMPTS = 5;
 /** What a usage report with no tokens and no cost is charged ($0.25). */
 export const EMPTY_REPORT_CHARGE_MICROS = 250_000;
 export const NO_TASK_FOR_USAGE = "the usage of this operation names no task";
+/** The entry id kind of a usage checkpoint (`usage-checkpoint:<operation>:<digest>`); a session's end report and an estimate are `usage:<operation>:...`. */
+export const CHECKPOINT_ENTRY_PREFIX = "usage-checkpoint";
+
 
 const natural = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length > 0 && value.length <= max;
@@ -49,8 +52,9 @@ export function readUsagePayload(payload: unknown): { usage: ModelUsage; reporte
   if (cost !== undefined && cost !== null && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)) return undefined;
   const reportedMicros = typeof cost === "number" && cost > 0 ? Math.ceil(cost * 1_000_000) : undefined;
   // A report with no tokens and no cost (a session whose call failed before any token, or whose provider sent no usage) is charged a small fixed amount, never $0: the call may have been
-  // billed. It is not taken as unreadable, which would stop the whole company for the day.
-  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined) {
+  // billed. It is not taken as unreadable, which would stop the whole company for the day. The one exception is a session's `final` report after its checkpoints (per-run dollar stop):
+  // the checkpoints told what it spent, and a zero end says only that nothing is left.
+  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined && record["final"] !== true) {
     return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, reportedMicros: EMPTY_REPORT_CHARGE_MICROS };
   }
   if (reportedMicros !== undefined && !Number.isSafeInteger(reportedMicros)) return undefined;
@@ -107,7 +111,9 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
         const digest = createHash("sha256").update(`${event.timestamp}\n${JSON.stringify(event.payload) ?? "null"}`).digest("hex").slice(0, 40);
         const at = typeof event.timestamp === "string" && !Number.isNaN(Date.parse(event.timestamp)) ? new Date(Date.parse(event.timestamp)).toISOString() : (deps.now?.() ?? new Date()).toISOString();
         if (readUsagePayload(event.payload) === undefined) unreadable += 1;
-        if (await bookUsageReport({ companyId: operation.companyId, taskId, entryId: `usage:${operation.id}:${digest}`, at, payload: event.payload })) booked += 1;
+        // A checkpoint (the spend so far of a session still going) has an entry id of its own kind, so a run is never taken as reported in full by its checkpoints alone (`runsOwed`).
+        const checkpoint = (event.payload as { checkpoint?: unknown } | null)?.checkpoint === true;
+        if (await bookUsageReport({ companyId: operation.companyId, taskId, entryId: `${checkpoint ? CHECKPOINT_ENTRY_PREFIX : "usage"}:${operation.id}:${digest}`, at, payload: event.payload })) booked += 1;
       }
       return { booked, unreadable };
     },

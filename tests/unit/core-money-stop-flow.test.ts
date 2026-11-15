@@ -24,6 +24,7 @@ interface StopWorld {
 function world(options: { moneyStop?: boolean; features?: string[]; admission?: Admission } = {}): StopWorld {
   const kept: StopWorld["kept"] = [];
   const onWait: StopWorld["onWait"] = {};
+  const dispatcher: { run?: () => Promise<unknown> } = {};
   const harness: HarnessOptions = {
     machines: { features: options.features ?? FEATURES },
     ...(options.admission === undefined ? {} : { admission: options.admission }),
@@ -31,13 +32,15 @@ function world(options: { moneyStop?: boolean; features?: string[]; admission?: 
       extra: (clock) => ({
         moneyStop: {
           pollMs: 1_000,
-          sleep: async (ms: number) => { clock.advance(ms / 1_000); const run = onWait.run; onWait.run = undefined; await run?.(); },
+          // Each wait: the dispatcher hands over what was queued (the cancel), then the worker may answer.
+          sleep: async (ms: number) => { clock.advance(ms / 1_000); await dispatcher.run?.(); const run = onWait.run; onWait.run = undefined; await run?.(); },
           async keepWholeHold(reservationId, mark) { kept.push({ reservationId, ...mark }); },
         } satisfies MoneyStop,
       }),
     }),
   };
   const h = createHarness(harness);
+  dispatcher.run = () => h.flow.dispatchOnce({ maxMessages: 10 });
   // Every invocation handed to a machine, kept (the fake forgets a stopped machine's jobs).
   const deliver = h.machines.deliver.bind(h.machines);
   const cancels: WorkerInvocation[] = [];
@@ -110,15 +113,36 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED" });
   });
 
-  it("does not wait when the worker cannot be told (its machine is gone), and keeps the hold", async () => {
+  it("keeps the hold when the cancel cannot reach the worker (its machine is gone): the dispatcher drops it and the wait runs out", async () => {
     const w = world(); const { h, kept } = w;
     const run = await runningPlan(h);
     await h.machines.terminate(run.machineId);
-    const started = h.clock.now;
     await cancelTask(h.deps, run.taskId);
-    expect(h.clock.now).toBe(started);
+    // The dispatcher tried it once (the machine answers "not found", which is not retried).
+    expect(cancelsTo(w, run)).toHaveLength(1);
     expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED", usageUnflushed: true });
     expect(kept).toHaveLength(1);
+  });
+
+  it("the broker never reaches the worker itself: the cancel is a dispatch message the dispatcher delivers, and only while the run is being stopped", async () => {
+    const w = world(); const { h } = w;
+    const run = await runningPlan(h);
+    const sent: string[] = [];
+    const deliver = h.machines.deliver.bind(h.machines);
+    h.machines.deliver = async (machineId, invocation) => { sent.push(invocation.kind); return deliver(machineId, invocation); };
+    // The run already ended: a queued cancel of it is dropped, not delivered.
+    expect(await requestSpendStop(h.deps, await operationOf(h, run), "task_cap")).toBe(true);
+    expect(sent).toEqual([]);
+    await h.flow.recordResult({ workspaceId: run.workspaceId, operationId: run.operationId, fence: run.fence, status: "CANCELLED" });
+    expect(await h.flow.dispatchOnce({ maxMessages: 10 })).toMatchObject({ dropped: 1, delivered: 0 });
+    expect(sent).toEqual([]);
+    // One that is still being stopped gets its cancel, with no callback right.
+    const other = world();
+    const second = await runningPlan(other.h);
+    await requestSpendStop(other.h.deps, await operationOf(other.h, second), "task_cap");
+    expect(cancelsTo(other, second)).toEqual([]);
+    expect(await other.h.flow.dispatchOnce({ maxMessages: 10 })).toMatchObject({ delivered: 1 });
+    expect(cancelsTo(other, second)).toHaveLength(1);
   });
 
   it("without the money stop (the laptop): no cancel is sent, nothing waits, nothing is kept", async () => {
@@ -172,9 +196,11 @@ describe("the per-run stop", () => {
     const run = await runningPlan(h);
     expect(await requestSpendStop(h.deps, await operationOf(h, run), "task_cap")).toBe(true);
     expect(await operationOf(h, run)).toMatchObject({ status: "CANCEL_REQUESTED", stopReason: "task_cap" });
+    await h.flow.dispatchOnce({ maxMessages: 10 });
     expect(cancelsTo(w, run)).toHaveLength(1);
     // Asked again (the next booking): nothing more.
     expect(await requestSpendStop(h.deps, await operationOf(h, run), "task_cap")).toBe(false);
+    await h.flow.dispatchOnce({ maxMessages: 10 });
     expect(cancelsTo(w, run)).toHaveLength(1);
     await h.flow.recordResult({ workspaceId: run.workspaceId, operationId: run.operationId, fence: run.fence, status: "CANCELLED" });
     expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: SPEND_STOP_REASON });
@@ -253,11 +279,11 @@ describe("dispatching a model run on a deployed install", () => {
     await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED", outcome: { kind: "prepared" } });
     for (let round = 0; round < 12; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) break; h.clock.advance(70); }
     expect(h.machines.delivered(workspace.machine!.machineId).filter((invocation) => invocation.kind === "task")).toEqual([]);
-    const after = (await h.store.get(workspaceKey(workspace.id))) as unknown as WorkspaceRecord;
-    void after;
     const view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.workflow?.state).toBe("BLOCKED");
-    expect(view.workflow?.blockReason).toContain(SPEND_STOP_REASON);
+    // Ended as a spend stop (CANCELLED with the reason), not as a failure a retry policy would repeat.
+    expect(view.workflow).toMatchObject({ state: "BLOCKED", blockReason: SPEND_STOP_REASON });
+    const operations = (await h.store.query({ pk: `WORKSPACE#${workspace.id}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items as unknown as OperationRecord[];
+    expect(operations.filter((operation) => operation.kind === "task")).toEqual([expect.objectContaining({ status: "CANCELLED", stopReason: "task_cap", error: SPEND_STOP_REASON })]);
   });
 
   it("refuses a model run to a worker that does not report usage while it runs", async () => {

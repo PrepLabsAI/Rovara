@@ -10,6 +10,8 @@ import { WorkerCancellationController, WorkerOperationCancelledError } from "../
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { runAgentStep, type RunAgentStepInput } from "../../packages/worker/src/agent-run/run-agent-step.js";
+import { createUsageCheckpointer } from "../../packages/worker/src/usage.js";
 
 type Tokens = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
 const tokens = (input: number, output: number): Tokens => ({ input, output, cacheRead: 0, cacheWrite: 0, total: input + output });
@@ -79,11 +81,13 @@ describe("usage checkpoints", () => {
       eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined, modelCallLimits: { usageCheckpointMs: 0 },
     });
     const usage = usageEvents(events);
-    // One report per model call (the checkpoint wait is 0 here), and the end has nothing left to send.
+    // One report per model call (the checkpoint wait is 0 here), and the end tells that nothing is left (a zero, marked final).
     expect(usage.filter((payload) => payload.checkpoint === true)).toHaveLength(3);
-    expect(usage.map((payload) => payload.tokens.input)).toEqual([100, 100, 100]);
+    expect(usage.map((payload) => payload.tokens.input)).toEqual([100, 100, 100, 0]);
+    expect(usage.at(-1)).toMatchObject({ final: true, outcome: "SUCCEEDED" });
+    expect(usage.at(-1)).not.toHaveProperty("checkpoint");
     expect(sum(usage)).toBe(300);
-    expect(usage.every((payload) => payload.costUsd !== null && Math.abs(payload.costUsd - 0.01) < 1e-9)).toBe(true);
+    expect(usage.filter((payload) => payload.checkpoint === true).every((payload) => payload.costUsd !== null && Math.abs(payload.costUsd - 0.01) < 1e-9)).toBe(true);
   });
 
   it("sends what is left since the last checkpoint at the end, when the wait between checkpoints holds some back", async () => {
@@ -112,6 +116,79 @@ describe("usage checkpoints", () => {
       eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined, modelCallLimits: { usageCheckpointMs: 0 },
     })).rejects.toBeInstanceOf(WorkerOperationCancelledError);
     expect(sum(usageEvents(events))).toBe(100);
+  });
+
+  it("a stop sends what was spent at once, before the ending's other work, even between checkpoints", async () => {
+    const rootPath = await preparedRoot();
+    const invocation = taskInvocation(true);
+    const controller = new WorkerCancellationController();
+    const events: WorkerEvent[] = [];
+    await expect(runTaskInvocation(invocation, {
+      rootPath, model: { provider: "fixture", modelId: "fixture-model" }, cancellationController: controller,
+      piAdapter: checkpointAdapter(rootPath, 2, { input: 50, output: 5, cost: 0.005 }, { cancel: { controller, operationId: invocation.operationId } }),
+      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined, modelCallLimits: { usageCheckpointMs: 60_000 },
+    })).rejects.toBeInstanceOf(WorkerOperationCancelledError);
+    const usage = usageEvents(events);
+    expect(usage[0]).toMatchObject({ checkpoint: true, tokens: tokens(100, 10) });
+    expect(usage.at(-1)).toMatchObject({ final: true, outcome: "CANCELLED", tokens: tokens(0, 0) });
+    expect(sum(usage)).toBe(100);
+  });
+
+  it("an agent step reports as it goes too, and its end tells what is left", async () => {
+    const rootPath = await preparedRoot();
+    const events: WorkerEvent[] = [];
+    const operationId = randomUUID();
+    await runAgentStep({
+      payload: { kind: "agent", agentId: "agt_aaaaaaaaaaaaaaaaaaaa", version: 1, stepId: "triage", instructions: "Triage.", workspace: "none", inputs: "Request" },
+      operationId, workspaceId: randomUUID(), conversationId: randomUUID(), capability: "c".repeat(64), brokerUrl: "http://broker.invalid",
+      workspace: { rootPath, localFileTools: true }, modelAccess: { model: { provider: "fixture", modelId: "fixture-model" }, piAdapter: checkpointAdapter(rootPath, 2, { input: 40, output: 4, cost: 0.004 }) },
+      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined, catalogs: async () => [], call: async () => ({ status: "SUCCEEDED", text: "ok" }),
+      usageCheckpoints: { intervalMs: 0 },
+    } as unknown as RunAgentStepInput).catch(() => undefined);
+    const usage = usageEvents(events);
+    expect(usage.filter((payload) => payload.checkpoint === true).map((payload) => payload.tokens.input)).toEqual([40, 40]);
+    expect(usage.at(-1)).toMatchObject({ final: true });
+    expect(sum(usage)).toBe(80);
+  });
+
+  it("an agent step not asked reports once, at its end", async () => {
+    const rootPath = await preparedRoot();
+    const events: WorkerEvent[] = [];
+    await runAgentStep({
+      payload: { kind: "agent", agentId: "agt_aaaaaaaaaaaaaaaaaaaa", version: 1, stepId: "triage", instructions: "Triage.", workspace: "none", inputs: "Request" },
+      operationId: randomUUID(), workspaceId: randomUUID(), conversationId: randomUUID(), capability: "c".repeat(64), brokerUrl: "http://broker.invalid",
+      workspace: { rootPath, localFileTools: true }, modelAccess: { model: { provider: "fixture", modelId: "fixture-model" }, piAdapter: checkpointAdapter(rootPath, 2, { input: 40, output: 4, cost: 0.004 }) },
+      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined, catalogs: async () => [], call: async () => ({ status: "SUCCEEDED", text: "ok" }),
+    } as unknown as RunAgentStepInput).catch(() => undefined);
+    const usage = usageEvents(events);
+    expect(usage).toHaveLength(1);
+    expect(usage[0]).not.toHaveProperty("checkpoint");
+    expect(usage[0]).not.toHaveProperty("final");
+    expect(sum(usage)).toBe(80);
+  });
+
+  it("the checkpointer of any session (parts, reviewers): one report per due model call, the end is what is left", () => {
+    let made = 0;
+    let clock = 0;
+    const sent: Array<Record<string, unknown>> = [];
+    const stats = () => ({ tokens: tokens(10 * made, 0), cost: 0.001 * made });
+    const checkpoints = createUsageCheckpointer({ enabled: true, intervalMs: 5, baseline: undefined, stats, model: () => ({ provider: "p", modelId: "m" }), requested: {}, send: (payload) => sent.push(payload), now: () => clock });
+    const end = { type: "message_end", message: { role: "assistant", stopReason: "stop" } };
+    made = 1; checkpoints.observe(end);
+    expect(sent).toEqual([]);
+    clock = 5; checkpoints.observe({ type: "message_end", message: { role: "user" } });
+    expect(sent).toEqual([]);
+    checkpoints.observe(end);
+    expect(sent).toEqual([expect.objectContaining({ checkpoint: true, tokens: tokens(10, 0) })]);
+    made = 3; clock = 6; checkpoints.observe(end);
+    expect(sent).toHaveLength(1);
+    expect(checkpoints.endReport(stats(), { provider: "p", modelId: "m" }, "FAILED", {})).toMatchObject({ final: true, tokens: tokens(20, 0), outcome: "FAILED" });
+    const off = createUsageCheckpointer({ enabled: false, intervalMs: 0, baseline: undefined, stats, model: () => ({ provider: "p", modelId: "m" }), requested: {}, send: (payload) => sent.push(payload) });
+    off.observe(end); off.checkpointNow();
+    expect(sent).toHaveLength(1);
+    expect(off.endReport(stats(), { provider: "p", modelId: "m" }, "SUCCEEDED", {})).not.toHaveProperty("final");
+    made = 0;
+    expect(off.endReport(stats(), { provider: "p", modelId: "m" }, "SUCCEEDED", {})).toBeUndefined();
   });
 
   it("a run not asked for checkpoints reports once, at its end (unchanged)", async () => {

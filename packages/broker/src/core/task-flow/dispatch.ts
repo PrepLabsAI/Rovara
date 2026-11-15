@@ -35,7 +35,7 @@ import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, taskPointerKey, workspaceKey } from "./keys.js";
-import { RUN_START_ACTION, isSpendStopCode, spendStopReason } from "./money-stop.js";
+import { RUN_START_ACTION, cancelInvocation, isSpendStopCode, queuedCancelOf, spendStopReason } from "./money-stop.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { readWorkspace } from "./stage-machine.js";
 import { dispatchQueueName, iso, log } from "./support.js";
@@ -45,6 +45,8 @@ import { chooseStepModel, heldStepModel, type OperationModelChoice, type StepMod
 
 /** How long a capability the worker is given lives: nine hours, as Cloud's. */
 const CAPABILITY_SECONDS = 32_400;
+/** A queued cancel is tried this many times on a machine that is not ready. */
+const CANCEL_DELIVERY_ATTEMPTS = 5;
 /** After this many deliveries of one message the operation is given up on: the machine never became usable. */
 export const DISPATCH_ATTEMPTS_MAX = 20;
 /** The reason a run is ended with when its machine never became usable (merge of "the start was tried until its budget ran out"). */
@@ -112,6 +114,23 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     await queue.deadLetter(message.receiptHandle, "operation_missing");
     return "dropped";
   }
+  // A queued cancel (money-stop.ts: a Stop, a close or a spend stop on a deployed install, whose broker never reaches a worker itself): handed to the worker that runs the operation, while it
+  // is still being stopped. A machine not ready is tried again a few times; anything else drops the message (the broker's wait then ends the run, keeping its hold).
+  const cancelId = queuedCancelOf(message.body);
+  if (cancelId !== undefined) {
+    const workspace = operation.status === "CANCEL_REQUESTED" && operation.machineId !== undefined ? await readWorkspace(deps, operation.workspaceId) : undefined;
+    if (workspace === undefined || operation.machineId === undefined) { await queue.ack(message.receiptHandle); return "dropped"; }
+    try {
+      await deps.machines.deliver(operation.machineId, cancelInvocation(deps, workspace, operation, cancelId));
+    } catch (error) {
+      if (error instanceof MachineError && error.retryable && message.receiveCount < CANCEL_DELIVERY_ATTEMPTS) { await queue.changeVisibility(message.receiptHandle, 1); return "retried"; }
+      log(deps, { event: "task_flow.cancel_not_delivered", error: error instanceof MachineError ? error.code : error instanceof Error ? error.name : "unknown" });
+      await queue.ack(message.receiptHandle);
+      return "failed";
+    }
+    await queue.ack(message.receiptHandle);
+    return "delivered";
+  }
   // Already ended, or a cancel is in flight: nothing to deliver.
   // A redelivered message for a job the worker already reports running is a repeat: the worker has it.
   if (isTerminalStatus(operation.status) || operation.status === "CANCEL_REQUESTED" || operation.status === "RUNNING") {
@@ -161,7 +180,24 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     const gate = typeof taskId === "string" && taskId !== ""
       ? await deps.admission.admit({ companyId: deps.companyId, idempotencyKey: `${RUN_START_ACTION}:${operation.id}`, action: RUN_START_ACTION, projectName: workspace.projectName, subject: { type: "task", id: taskId } })
       : { allowed: false as const, code: "spend_unknown", message: "" };
-    if (!gate.allowed) return endAndAck("FAILED", isSpendStopCode(gate.code) ? spendStopReason(gate.code) : gate.message);
+    if (!gate.allowed) {
+      if (!isSpendStopCode(gate.code)) return endAndAck("FAILED", gate.message);
+      // A run its task's or the day's cap refuses ends as a spend stop (CANCELLED with its reason, which blocks the step with the fixed words), not as a failure a retry policy would repeat.
+      const now = iso(deps);
+      await deps.store.update({
+        key: operationKey(operation.workspaceId, operation.id),
+        ops: [change.set("status", "CANCEL_REQUESTED"), change.set("stopReason", gate.code), change.set("stopRequestedAt", now), change.set("updatedAt", now)],
+        condition: when.and(when.eq("fence", operation.fence), when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING"))),
+      });
+      try {
+        await recordOperationResult(deps, { workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: "CANCELLED", error: spendStopReason(gate.code) });
+      } catch (error) {
+        if (!(error instanceof AgentXError)) throw error;
+        return retryLater();
+      }
+      await queue.ack(message.receiptHandle);
+      return "failed";
+    }
   }
 
   let reservationId: string | undefined;
