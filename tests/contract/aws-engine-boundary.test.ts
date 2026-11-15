@@ -26,6 +26,8 @@ const PROJECT: ProjectDefinition = {
   name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
+// Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
+const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const STAMP = (areas: EngineStamp["areas"]): EngineStamp => ({ engine: areas.flow, areas, flags: "cc=on", stampedAt: "2026-11-15T00:00:00.000Z" });
 const CORE = STAMP({ merge: "core", build: "core", flow: "core" });
@@ -129,7 +131,7 @@ async function registerProject(world: FakeWorld, companyId: string): Promise<voi
 function appOver(world: FakeWorld): CoreHostApp {
   return createCoreHostApp({
     env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES }),
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
 

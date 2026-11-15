@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { EvalSpendGrant } from "@agentx/contracts";
 import { createEvalMeter } from "../../packages/worker/src/verification/eval-model-access.js";
+import { EvalCallRefused } from "../../packages/worker/src/verification/eval-spend-guard.js";
 import { answer, classAnswer, frame, scriptedAccess, settle, type Script } from "../support/eval-model-access.js";
 
 const grant: EvalSpendGrant = { company: "company-a", project: "project-a", selection: "eval", role: "owner", inputsDigest: "d".repeat(64), provider: "customer", connected: true, maxCalls: 400, maxCostMicros: 4_000_000 };
@@ -91,6 +92,17 @@ describe("dispatch ceilings", () => {
     await reservation.call(frame()); await reservation.call(frame());
     await expect(reservation.call(frame())).rejects.toThrow("eval stage stopped");
     expect(world.forwarded).toHaveLength(2);
+  });
+  it("says the spent-up refusal is a budget refusal (cap), and the count refusal too, but not a closed stage", async () => {
+    const spent = await ok(() => answer({ costMicros: 20 }), undefined, { calls: 9, costMicros: 20 });
+    await spent.reservation.call(frame());
+    await expect(spent.reservation.call(frame())).rejects.toBeInstanceOf(EvalCallRefused);
+    const count = await ok(undefined, undefined, { calls: 1, costMicros: 1000 });
+    await count.reservation.call(frame());
+    await expect(count.reservation.call(frame())).rejects.toBeInstanceOf(EvalCallRefused);
+    const closed = await ok(); await closed.reservation.close();
+    const error = await closed.reservation.call(frame()).then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(Error); expect(error).not.toBeInstanceOf(EvalCallRefused);
   });
   it("lets calls run in parallel up to the held count and counts each once", async () => {
     const { world, reservation } = await ok(undefined, undefined, { calls: 4, costMicros: 1000 });

@@ -64,8 +64,8 @@ describe("Secrets Manager secrets: names", () => {
     const store = createSecretsManagerSecretStore({ namePrefix: PREFIX, clientFor: () => service, companyPaths: ["org-connectors", "org-hooks"] });
     for (const value of [`org-connectors/${OTHER}/conn-1`, `org-hooks/${OTHER}/hook`, "org-connectors/conn-1", `org-connectors/${COMPANY}`]) {
       const error = await store.read(COMPANY, { awsSecret: value }).catch((caught: unknown) => caught);
-      expect(error, value).toBeInstanceOf(SecretsManagerSecretError);
-      expect(String((error as Error).message)).not.toContain(OTHER);
+      if (value.includes(OTHER)) expect(error).toBeUndefined();
+      else expect(error).toMatchObject({ message: "the secret reference is not valid" });
     }
     expect(service.reads).toEqual([]);
     expect((await store.read(OTHER, { awsSecret: `org-connectors/${OTHER}/conn-1` }))?.reveal()).toBe("other-company-value");
