@@ -60,6 +60,7 @@ describe("the latest run of a named check", () => {
     ["a run that is not an object", { check_runs: [5] }],
     ["an unknown conclusion", { check_runs: [run({ conclusion: "maybe" })] }],
     ["a bad head", { check_runs: [run({ head_sha: "x" })] }],
+    ["a list cut at a page (the check could be on the next)", { total_count: 140, check_runs: [run({ name: "other" })] }],
   ])("throws on %s (not known, never passed)", (_label, list) => {
     expect(() => latestCheckRunOf(list, { name: "e2e-real" })).toThrow();
   });
@@ -77,11 +78,14 @@ describe("the latest run of a named check", () => {
 describe("check names for setup", () => {
   it("collects distinct names by app, skips what does not parse, and stops at the cap", () => {
     const seen = new Map<string, SeenCheckName>();
-    addSeenCheckNames(seen, { check_runs: [run(), run(), run({ app: { id: 5 } }), { name: 7 }, "x"] }, { statuses: [{ context: "jenkins/e2e" }, { context: "" }] });
+    expect(addSeenCheckNames(seen, { check_runs: [run(), run(), run({ app: { id: 5 } }), { name: 7 }, "x"] }, { statuses: [{ context: "jenkins/e2e" }, { context: "" }] })).toBe(false);
     expect([...seen.values()]).toEqual([{ name: "e2e-real", source: String(GITHUB_ACTIONS_APP_ID) }, { name: "e2e-real", source: "5" }, { name: "jenkins/e2e" }]);
     const many = new Map<string, SeenCheckName>();
-    addSeenCheckNames(many, { check_runs: Array.from({ length: 100 }, (_, index) => run({ name: `c${String(index)}` })) }, { statuses: Array.from({ length: 100 }, (_, index) => ({ context: `s${String(index)}` })) });
+    expect(addSeenCheckNames(many, { check_runs: Array.from({ length: 100 }, (_, index) => run({ name: `c${String(index)}` })) }, { statuses: Array.from({ length: 100 }, (_, index) => ({ context: `s${String(index)}` })) })).toBe(false);
     expect(many.size).toBe(SEEN_CHECKS_MAX);
+    expect(addSeenCheckNames(new Map(), { total_count: 1, check_runs: [run()] }, { statuses: [] })).toBe(true);
+    expect(addSeenCheckNames(new Map(), { total_count: 150, check_runs: [run()] }, { statuses: [] })).toBe(false);
+    expect(addSeenCheckNames(new Map(), undefined, { statuses: [] })).toBe(false);
   });
   it("takes full-sha heads only, distinct, bounded", () => {
     expect(recentPullRequestHeads([{ head: { sha: SHA_A } }, { head: { sha: SHA_A } }, { head: { sha: "short" } }, { head: { sha: SHA_B } }, { head: { sha: "c".repeat(40) } }], 4)).toEqual([SHA_A, SHA_B]);
@@ -158,10 +162,23 @@ describe("the client's reads", () => {
     expect(await named.client.getLatestCheckRun(REPO, { revision: SHA_A }, { name: "jenkins/e2e", appId: 5 }, ORG)).toBeUndefined();
     expect(named.requests.some((request) => request.path.endsWith("/status"))).toBe(false);
   });
-  it("reads a branch's head, encoding each part of its name", async () => {
-    const { client, requests } = fakeClient({ "/repos/acme/svc/commits/release/2026/check-runs": json({ check_runs: [run({ head_sha: SHA_B })] }) });
+  it("reads a branch at one commit: its head once, then that commit's runs and statuses", async () => {
+    const { client, requests } = fakeClient({
+      "/repos/acme/svc/branches/release/2026": json({ name: "release/2026", commit: { sha: SHA_B } }),
+      [`/repos/acme/svc/commits/${SHA_B}/check-runs`]: json({ check_runs: [run({ head_sha: SHA_B })] }),
+    });
     expect((await client.getLatestCheckRun(REPO, { branch: "release/2026" }, { name: "e2e-real" }, ORG))?.headSha).toBe(SHA_B);
-    expect(requests[0]?.path).toBe("/repos/acme/svc/commits/release/2026/check-runs");
+    expect(requests.map((request) => request.path)).toEqual(["/repos/acme/svc/branches/release/2026", `/repos/acme/svc/commits/${SHA_B}/check-runs`]);
+    const gone = fakeClient({});
+    expect(await gone.client.getLatestCheckRun(REPO, { branch: "main" }, { name: "e2e-real" }, ORG)).toBeUndefined();
+    const odd = fakeClient({ "/repos/acme/svc/branches/main": json({ commit: { sha: "nope" } }) });
+    await expect(odd.client.getLatestCheckRun(REPO, { branch: "main" }, { name: "e2e-real" }, ORG)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  });
+  it("reads each answer to a byte cap: a larger one is not known, never cut", async () => {
+    const huge = () => new Response(JSON.stringify({ check_runs: [run({ output: { text: "x".repeat(3 * 1024 * 1024) } })] }), { status: 200 });
+    const { client } = fakeClient({ [`/repos/acme/svc/commits/${SHA_A}/check-runs`]: huge, "/repos/acme/svc/check-runs/7": huge });
+    await expect(client.getLatestCheckRun(REPO, { revision: SHA_A }, { name: "e2e-real" }, ORG)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(client.getCheckRunFacts(REPO, "7", ORG)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
   it("refuses bad inputs before any request, and an unreadable answer as not known", async () => {
     const { client, requests } = fakeClient({ [`/repos/acme/svc/commits/${SHA_A}/check-runs`]: json({ check_runs: [run({ conclusion: "maybe" })] }) });
@@ -183,9 +200,17 @@ describe("the client's reads", () => {
     }
     const { client, requests } = fakeClient(routes);
     const listed = await client.listSeenCheckNames(REPO, ORG);
-    expect(listed.map((entry) => entry.name)).toEqual(["jenkins/e2e", "job-a", "job-b", "job-c", "job-d", "job-e"]);
+    expect(listed.complete).toBe(true);
+    expect(listed.checks.map((entry) => entry.name)).toEqual(["jenkins/e2e", "job-a", "job-b", "job-c", "job-d", "job-e"]);
     expect(requests.length).toBeLessThanOrEqual(11);
     expect(requests[0]?.search).toContain("per_page=5");
+  });
+});
+
+describe("an incomplete setup listing says so", () => {
+  it("is incomplete, not empty-and-sure, when every head's checks fail to read", async () => {
+    const { client } = fakeClient({ "/repos/acme/svc/pulls": json([{ head: { sha: SHA_A } }, { head: { sha: SHA_B } }]) });
+    expect(await client.listSeenCheckNames(REPO, ORG)).toEqual({ checks: [], complete: false });
   });
 });
 
@@ -218,8 +243,8 @@ describe("the GitHub Actions check runner's reads", () => {
     await expect(runner.latestCheck!({ url: REPO }, { revision: SHA_A, branch: "main" }, { name: "e2e-real" }, ORG)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
   it("refuses a call with no valid scope", async () => {
-    const runner = githubActionsCheckRunner({ ...base, listSeenCheckNames: async () => [{ name: "e2e-real" }] });
+    const runner = githubActionsCheckRunner({ ...base, listSeenCheckNames: async () => ({ checks: [{ name: "e2e-real" }, { name: "" }], complete: true }) });
     await expect(runner.seenChecks!({ url: REPO }, {} as never)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect(await runner.seenChecks!({ url: REPO }, ORG)).toEqual([{ name: "e2e-real" }]);
+    expect(await runner.seenChecks!({ url: REPO }, ORG)).toEqual({ checks: [{ name: "e2e-real" }], complete: false });
   });
 });

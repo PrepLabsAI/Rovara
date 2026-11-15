@@ -75,6 +75,9 @@ export interface LatestCheckRun {
 export function latestCheckRunOf(list: unknown, input: { name: string; appId?: number | undefined; expectedSha?: string | undefined }): LatestCheckRun | undefined {
   const runs = record(list)?.["check_runs"];
   if (!Array.isArray(runs)) throw new Error("check runs list unreadable");
+  // A list past one page is not the whole answer: the named check could be on the next page, so nothing is read from it.
+  const total = record(list)?.["total_count"];
+  if (runs.length > 100 || (typeof total === "number" && total > runs.length)) throw new Error("check runs list cut");
   const found: LatestCheckRun[] = [];
   for (const value of runs.slice(0, 100)) {
     const run = record(value);
@@ -126,27 +129,44 @@ export function latestStatusOf(combined: unknown, input: { name: string; appId?:
 /** A check name seen on recent pull requests, with the app that reported it (absent for a commit status). */
 export interface SeenCheckName { name: string; source?: string }
 
-/** The names in one commit's check runs and combined status, added to `into` (distinct by name and app), at most `SEEN_CHECKS_MAX` in all. Entries that do not parse are skipped: a listing for a person, never a decision. */
-export function addSeenCheckNames(into: Map<string, SeenCheckName>, checkRuns: unknown, combined: unknown): void {
+/**
+ * The names in one commit's check runs and combined status, added to `into` (distinct by name and app), at most `SEEN_CHECKS_MAX` in all. Returns false when anything was left out (an entry that does not
+ * parse, a list past one page, the cap reached, or a part not given): the listing is then incomplete, and the caller says so.
+ */
+export function addSeenCheckNames(into: Map<string, SeenCheckName>, checkRuns: unknown, combined: unknown): boolean {
+  let whole = true;
   const add = (name: unknown, source: string | undefined): void => {
-    if (into.size >= SEEN_CHECKS_MAX || typeof name !== "string") return;
+    if (typeof name !== "string") { whole = false; return; }
     let clean: string;
     try {
       clean = cleanName(name);
     } catch {
+      whole = false;
       return;
     }
+    if (into.size >= SEEN_CHECKS_MAX && !into.has(`${clean}\u0000${source ?? ""}`)) { whole = false; return; }
     const key = `${clean}\u0000${source ?? ""}`;
     if (!into.has(key)) into.set(key, { name: clean, ...(source === undefined ? {} : { source }) });
   };
-  const runs = record(checkRuns)?.["check_runs"];
-  if (Array.isArray(runs)) for (const value of runs.slice(0, 100)) {
-    const run = record(value);
-    const appId = positiveId(record(run?.["app"])?.["id"]);
-    add(run?.["name"], appId === undefined ? undefined : String(appId));
+  const runsBody = record(checkRuns);
+  const runs = runsBody?.["check_runs"];
+  if (!Array.isArray(runs)) whole = false;
+  else {
+    const total = runsBody?.["total_count"];
+    if (runs.length > 100 || (typeof total === "number" && total > runs.length)) whole = false;
+    for (const value of runs.slice(0, 100)) {
+      const run = record(value);
+      const appId = positiveId(record(run?.["app"])?.["id"]);
+      add(run?.["name"], appId === undefined ? undefined : String(appId));
+    }
   }
   const statuses = record(combined)?.["statuses"];
-  if (Array.isArray(statuses)) for (const value of statuses.slice(0, 100)) add(record(value)?.["context"], undefined);
+  if (!Array.isArray(statuses)) whole = false;
+  else {
+    if (statuses.length > 100) whole = false;
+    for (const value of statuses.slice(0, 100)) add(record(value)?.["context"], undefined);
+  }
+  return whole;
 }
 
 /** The head commits of `GET pulls?state=all` (recent first), at most `max`, each a full sha. */

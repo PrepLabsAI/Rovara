@@ -70,12 +70,15 @@ export function githubActionsCheckRunner(provider: GitHubActionsProvider): Check
       },
     }),
     ...(provider.listSeenCheckNames === undefined ? {} : {
-      async seenChecks(repository: RepositoryRef, scope: HostScope, budget?: ReadBudget): Promise<SeenCheck[]> {
+      async seenChecks(repository: RepositoryRef, scope: HostScope, budget?: ReadBudget): Promise<{ checks: SeenCheck[]; complete: boolean }> {
         const listed = await provider.listSeenCheckNames!(repository.url, checkedScope(scope), budget);
-        return listed.flatMap((entry) => {
+        let complete = listed.complete === true;
+        const checks = listed.checks.flatMap((entry) => {
           const parsed = SeenCheckSchema.safeParse(entry);
+          if (!parsed.success) complete = false;
           return parsed.success ? [parsed.data] : [];
         });
+        return { checks, complete };
       },
     }),
   };

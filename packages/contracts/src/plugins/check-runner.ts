@@ -80,6 +80,6 @@ export interface CheckRunner {
   runFacts?(target: CheckTarget, check: Check, scope: HostScope, budget?: ReadBudget): Promise<CheckRunFacts | undefined>;
   /** TE-E0 option A: the latest run of a named check (and app, when `source` is given) at a commit or a branch's head. Undefined when there is none; a read that fails throws. */
   latestCheck?(repository: RepositoryRef, at: CheckLookup, check: { name: string; source?: string | undefined }, scope: HostScope, budget?: ReadBudget): Promise<LatestCheck | undefined>;
-  /** TE-E0 option A, setup: the check names seen on recent change requests, for a customer to mark. */
-  seenChecks?(repository: RepositoryRef, scope: HostScope, budget?: ReadBudget): Promise<SeenCheck[]>;
+  /** TE-E0 option A, setup: the check names seen on recent change requests, for a customer to mark. `complete` is false when part could not be read: the list is then not everything seen. */
+  seenChecks?(repository: RepositoryRef, scope: HostScope, budget?: ReadBudget): Promise<{ checks: SeenCheck[]; complete: boolean }>;
 }
