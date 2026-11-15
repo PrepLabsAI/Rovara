@@ -619,8 +619,11 @@ async function runTask(
       if (invocation.payload.evidenceCapture === true && !stop.signal.aborted) {
         // Test services: the rounds' usage record rides in the raw file (the broker labels it; nothing of it was reaching the evidence). Read before the services stop.
         const servicesRecord = await testServices?.usageRecord().catch(() => undefined);
-        await saveEvidenceRaw({ repositoryEdges: repositoryChecks.evidence(), sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
-          baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
+        const edgesStarted = Date.now();
+        const repositoryEdges = await repositoryChecks.evidence({ kind: runners.kind, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs });
+        const edgesSpentMs = Date.now() - edgesStarted;
+        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
+          baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs - edgesSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
       }
       const evidenceSpentMs = Date.now() - evidenceStarted;
       // TESTPROOF: informational only. It changes no check result and no artifact above; only a failure to put the agent's files back stops the task.

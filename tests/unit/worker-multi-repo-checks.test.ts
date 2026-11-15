@@ -31,6 +31,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const roots: string[] = [];
+const LIVE_ROUND = { kind: "local" as const, signal: new AbortController().signal, budgetMs: 0 };
 afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const git = (directory: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Codex", "-c", "user.email=noreply@openai.com", ...args], { cwd: directory, env: { ...isolatedGitEnvironment(directory), GIT_ALLOW_PROTOCOL: "file" }, encoding: "utf8" }).trim();
 const put = async (root: string, path: string, text: string) => { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), text); };
@@ -852,8 +853,8 @@ describe("MR2 report pruning", () => {
   });
 });
 
-describe("MR2 automatic invocation", () => {
-  it.each(["removed edge", "provider edited"])("CHECKS uses workflow bases, records %s and preserves publication identity", async variant => {
+describe("MR2 automatic invocation (MR1 off: edges recorded, checks unchanged)", () => {
+  it.each(["removed edge", "provider edited"])("CHECKS runs in the shared workspace as today, records %s from workflow bases and preserves publication identity", async variant => {
     const f = await fixture();
     for (const repo of f.input.repositories) {
       const directory = join(f.root, repo.path);
@@ -864,7 +865,7 @@ describe("MR2 automatic invocation", () => {
     const bases = f.input.repositories.map(repo => ({ repositoryId: repo.repositoryId, baseCommitSha: git(join(f.root, repo.path), "rev-parse", "HEAD") }));
     if (variant === "removed edge") await put(f.root, "app/package.json", '{"name":"app"}');
     else await put(f.root, "lib/code.cjs", "module.exports = 'provider candidate';\n");
-    const check = command("const value=require('lib/code.cjs'); console.log(value); require('fs').writeFileSync('report.json',JSON.stringify({testResults:[{name:'wired.test.cjs',assertionResults:[{fullName:'wired provider',status:'passed',failureMessages:[]}]}]}));");
+    const check = command("console.log(process.cwd()); console.log(require('fs').existsSync('node_modules/lib')); require('fs').writeFileSync('report.json',JSON.stringify({testResults:[{name:'wired.test.cjs',assertionResults:[{fullName:'wired provider',status:'passed',failureMessages:[]}]}]}));");
     check.args.push("--", "--outputFile=report.json", "--reporter=json");
     const before = await readCandidateRepositories(f.input.repositories.map(repo => ({ repositoryId: repo.repositoryId, directory: join(f.root, repo.path), baseCommitSha: bases.find(b => b.repositoryId === repo.repositoryId)!.baseCommitSha })));
     await put(f.root, ".agentx/preparation-manifest.json", JSON.stringify({ schemaVersion: 2, projectName: "mr2", projectRevision: 1, repositories: f.input.repositories.map(repo => ({ name: repo.repositoryId, path: repo.path, defaultBranch: "main", resolvedCommit: repo.baseCommit })), completedSetupSteps: [], readinessResults: [], readinessCommandKeys: [], complete: true, updatedAt: new Date().toISOString() }));
@@ -873,7 +874,10 @@ describe("MR2 automatic invocation", () => {
       rootPath: f.root, model: FAUX_MODEL, taskShell: { kind: "local" }, stopBeforeReading: { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) }, eventSink: async () => undefined, artifactSink: async artifact => { artifacts.set(artifact.name, String(artifact.content)); },
     });
     expect(result.checks?.checks[0]?.after).toBe("passed");
-    expect(result.checks?.checks[0]?.output).toContain(variant === "removed edge" ? "base\n" : "provider candidate\n");
+    // Today's path: the check ran in the task's own repository folder, with no MR1 wiring, and no check root or report folder was made.
+    expect(result.checks?.checks[0]?.output).toBe(`${join(f.root, "app")}\nfalse\n`);
+    expect((await readdir(f.root)).some(name => name.startsWith(".agentx-check-"))).toBe(false);
+    await expect(stat(join(f.root, ".agentx/multi-repo-reports"))).rejects.toMatchObject({ code: "ENOENT" });
     expect((JSON.parse(artifacts.get("evidence-raw.json")!) as { repositoryEdges: unknown }).repositoryEdges).toEqual({ edges: [{ consumer: "app", provider: "lib", language: "node", source: variant === "removed edge" ? "base" : "both" }], notes: [] });
     expect(result.workflowCheckCandidateRepositories).toEqual(before);
     expect(await readFile(join(f.root, "app/package.json"), "utf8")).toBe(variant === "removed edge" ? '{"name":"app"}' : '{"name":"app","dependencies":{"lib":"*"}}');
@@ -921,9 +925,9 @@ describe("MR2 ordinary-path goldens", () => {
       return JSON.stringify({ evidence, proof });
     };
     const golden = await capture(base);
-    const supplier = createRepositoryCheckSupplier({ rootPath: f.root, repositories: f.input.repositories });
+    const supplier = createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories: f.input.repositories });
     expect(await capture(supplier.scope(base))).toBe(golden);
-    expect(supplier.evidence()).toBeUndefined();
+    expect((await supplier.evidence(LIVE_ROUND))).toBeUndefined();
     expect((await readdir(f.root)).some(name => name.startsWith(".agentx-check-"))).toBe(false);
     await expect(stat(join(f.root, ".agentx/multi-repo-reports"))).rejects.toMatchObject({ code: "ENOENT" });
   });

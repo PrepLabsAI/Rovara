@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as candidateFs from "../../packages/worker/src/candidate-fs.js";
@@ -9,6 +9,7 @@ import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { wireMultiRepoDependencies } from "../../packages/worker/src/multi-repo-wiring.js";
 
 const roots: string[] = [];
+const LIVE_ROUND = { kind: "local" as const, signal: new AbortController().signal, budgetMs: 0 };
 afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Codex", "-c", "user.email=noreply@openai.com", ...args], { cwd, env: isolatedGitEnvironment(cwd), encoding: "utf8" }).trim();
 async function fixture(manifests: Array<Record<string, string>>) {
@@ -121,6 +122,46 @@ describe("repository edge facts", () => {
   });
 });
 
+describe("MR1 off (MULTI_REPO_CHECKS_LIVE false): edges recorded, checks unchanged", () => {
+  it("ships switched off", async () => {
+    const { MULTI_REPO_CHECKS_LIVE } = await import("../../packages/worker/src/multi-repo-supplier.js");
+    expect(MULTI_REPO_CHECKS_LIVE).toBe(false);
+  });
+  it("with an edge present, every path keeps the exact runners and the round's bytes; evidence derives the edges after the round", async () => {
+    const f = await fixture([pkg("app", { dependencies: { lib: "*" } }), pkg("lib")]);
+    const { createRepositoryCheckSupplier } = await import("../../packages/worker/src/multi-repo-supplier.js");
+    const { createCheckRunners, runChecks } = await import("../../packages/worker/src/verification/checks.js");
+    const repositories = f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit }));
+    const base = createCheckRunners({ rootPath: f.root, local: true });
+    const supplier = createRepositoryCheckSupplier({ rootPath: f.root, repositories });
+    expect(supplier.scope(base)).toBe(base);
+    const plan = { source: "project" as const, readiness: [{ executable: process.execPath, args: ["-e", "console.log(process.cwd())"], cwd: "repo0", timeoutSeconds: 10 }] };
+    const options = { signal: new AbortController().signal, budgetMs: 30_000, now: () => 0 };
+    const control = await runChecks(plan, base, options);
+    expect(JSON.stringify(await runChecks(plan, supplier.scope(base), options))).toBe(JSON.stringify(control));
+    expect(control.entries[0]?.output).toBe(`${join(f.root, "repo0")}\n`);
+    expect(await readdir(f.root)).toEqual(["repo0", "repo1"]);
+    expect(supplier.notes()).toEqual([]);
+    const round = { kind: "local" as const, signal: new AbortController().signal, budgetMs: 30_000 };
+    expect(await supplier.evidence(round)).toEqual({ edges: [edge()], notes: [] });
+    // Nothing to record: single repository, nightly, non-local, no budget left, an aborted round.
+    expect(await createRepositoryCheckSupplier({ rootPath: f.root, repositories: repositories.slice(0, 1) }).evidence(round)).toBeUndefined();
+    expect(await createRepositoryCheckSupplier({ rootPath: f.root, repositories, nightly: true }).evidence(round)).toBeUndefined();
+    expect(await supplier.evidence({ ...round, kind: "sandbox" })).toBeUndefined();
+    expect(await supplier.evidence({ ...round, budgetMs: 0 })).toBeUndefined();
+    const stopped = new AbortController(); stopped.abort();
+    expect(await supplier.evidence({ ...round, signal: stopped.signal })).toBeUndefined();
+  });
+  it("no edge or a refused derivation records nothing", async () => {
+    const { createRepositoryCheckSupplier } = await import("../../packages/worker/src/multi-repo-supplier.js");
+    const round = { kind: "local" as const, signal: new AbortController().signal, budgetMs: 30_000 };
+    for (const manifests of [[pkg("app"), pkg("lib")], [{ "package.json": "{" }, pkg("lib")]]) {
+      const f = await fixture(manifests);
+      expect(await createRepositoryCheckSupplier({ rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) }).evidence(round)).toBeUndefined();
+    }
+  });
+});
+
 describe("lazy repository check supplier", () => {
   it("single repo, nightly, and non-local keep the exact runners", async () => {
     const f = await fixture([pkg("app"), pkg("lib")]);
@@ -128,37 +169,36 @@ describe("lazy repository check supplier", () => {
     const { createCheckRunners } = await import("../../packages/worker/src/verification/checks.js");
     const repositories = f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit }));
     const base = createCheckRunners({ rootPath: f.root, local: true });
-    expect(createRepositoryCheckSupplier({ rootPath: f.root, repositories: repositories.slice(0, 1) }).scope(base)).toBe(base);
-    expect(createRepositoryCheckSupplier({ rootPath: f.root, repositories, nightly: true }).scope(base)).toBe(base);
-    for (const kind of ["sandbox", "sealed", "devcontainer"] as const) { const runner = { ...base, kind }; expect(createRepositoryCheckSupplier({ rootPath: f.root, repositories }).scope(runner)).toBe(runner); }
+    expect(createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories: repositories.slice(0, 1) }).scope(base)).toBe(base);
+    expect(createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories, nightly: true }).scope(base)).toBe(base);
+    for (const kind of ["sandbox", "sealed", "devcontainer"] as const) { const runner = { ...base, kind }; expect(createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories }).scope(runner)).toBe(runner); }
   });
   it("derives after construction once; candidate added edge wires detached repositories", async () => {
     const f = await fixture([pkg("app"), pkg("lib")]);
     const { createRepositoryCheckSupplier } = await import("../../packages/worker/src/multi-repo-supplier.js");
     const { createCheckRunners, runChecks } = await import("../../packages/worker/src/verification/checks.js");
-    const supplier = createRepositoryCheckSupplier({ rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
+    const supplier = createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
     const runner = supplier.scope(createCheckRunners({ rootPath: f.root, local: true }));
     await f.put(0, "package.json", JSON.stringify({ name: "app", dependencies: { lib: "*" } }));
     const plan = { source: "project" as const, readiness: [{ executable: process.execPath, args: ["-e", "console.log(require('lib/package.json').name)"], cwd: "repo0", timeoutSeconds: 10 }] };
     const result = await runChecks(plan, runner, { signal: new AbortController().signal, budgetMs: 30_000 });
     expect(result.entries[0]).toMatchObject({ after: "passed", output: "lib\n" });
-    expect(supplier.evidence()).toEqual({ edges: [edge("candidate")], notes: [] });
+    expect((await supplier.evidence(LIVE_ROUND))).toEqual({ edges: [edge("candidate")], notes: [] });
     await f.put(0, "package.json", JSON.stringify({ name: "app" }));
     expect((await runChecks(plan, runner, { signal: new AbortController().signal, budgetMs: 30_000 })).entries[0]?.after).toBe("passed");
-    expect(supplier.evidence()?.edges).toEqual([edge("candidate")]);
+    expect((await supplier.evidence(LIVE_ROUND))?.edges).toEqual([edge("candidate")]);
   });
   it("no edge: unchanged output, no reports or roots, no evidence field", async () => {
     const f = await fixture([pkg("app"), pkg("lib")]);
     const { createRepositoryCheckSupplier } = await import("../../packages/worker/src/multi-repo-supplier.js");
     const { createCheckRunners, runChecks } = await import("../../packages/worker/src/verification/checks.js");
-    const { readdir } = await import("node:fs/promises");
-    const supplier = createRepositoryCheckSupplier({ rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
+    const supplier = createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
     const base = createCheckRunners({ rootPath: f.root, local: true });
     const plan = { source: "project" as const, readiness: [{ executable: process.execPath, args: ["-e", "console.log('same')"], cwd: "repo0", timeoutSeconds: 10 }] };
     const options = { signal: new AbortController().signal, budgetMs: 30_000, now: () => 0 };
     const control = await runChecks(plan, base, options); expect(control.entries[0]?.after).toBe("passed");
     expect(JSON.stringify(await runChecks(plan, supplier.scope(base), options))).toBe(JSON.stringify(control));
-    expect(supplier.evidence()).toBeUndefined(); expect(await readdir(f.root)).toEqual(["repo0", "repo1"]);
+    expect((await supplier.evidence(LIVE_ROUND))).toBeUndefined(); expect(await readdir(f.root)).toEqual(["repo0", "repo1"]);
   });
 });
 
@@ -176,12 +216,12 @@ describe("MR2 deadline and syntax guards", () => {
       if (!charged && args[1] === "package.json") { charged = true; await vi.advanceTimersByTimeAsync(1_000); }
       return result;
     });
-    const supplier = createRepositoryCheckSupplier({ rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
+    const supplier = createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
     const plan = { source: "project" as const, readiness: [{ executable: process.execPath, args: ["-e", "throw Error('must not run')"], cwd: "repo0", timeoutSeconds: 10 }] };
     const result = await runChecks(plan, supplier.scope(createCheckRunners({ rootPath: f.root, local: true })), { signal: new AbortController().signal, budgetMs: 1_000 });
     expect(charged).toBe(true);
     expect(result.entries[0]).toMatchObject({ after: "not_run", output: "AgentX did not run this check: the time budget for checks ran out." });
-    expect(supplier.evidence()).toBeUndefined();
+    expect((await supplier.evidence(LIVE_ROUND))).toBeUndefined();
   });
   it("a derivation that ran out of one round's budget is derived again by the next round", async () => {
     const f = await fixture([pkg("app", { dependencies: { lib: "*" } }), pkg("lib")]);
@@ -195,7 +235,7 @@ describe("MR2 deadline and syntax guards", () => {
       if (!charged && args[1] === "package.json") { charged = true; await vi.advanceTimersByTimeAsync(1_000); }
       return result;
     });
-    const supplier = createRepositoryCheckSupplier({ rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
+    const supplier = createRepositoryCheckSupplier({ live: true, rootPath: f.root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: r.name, baseCommit: r.baseCommit })) });
     const runners = supplier.scope(createCheckRunners({ rootPath: f.root, local: true }));
     const first = await runChecks({ source: "project", readiness: [{ executable: process.execPath, args: ["-e", "throw Error('must not run')"], cwd: "repo0", timeoutSeconds: 10 }] }, runners, { signal: new AbortController().signal, budgetMs: 1_000 });
     expect(charged).toBe(true);
@@ -203,7 +243,7 @@ describe("MR2 deadline and syntax guards", () => {
     spy.mockRestore(); vi.useRealTimers();
     const second = await runChecks({ source: "project", readiness: [{ executable: process.execPath, args: ["-e", "console.log('second round')"], cwd: "repo0", timeoutSeconds: 10 }] }, runners, { signal: new AbortController().signal, budgetMs: 30_000 });
     expect(second.entries[0]).toMatchObject({ after: "passed", output: "second round\n" });
-    expect(supplier.evidence()?.edges).toEqual([{ consumer: "repo0", provider: "repo1", language: "node", source: "both" }]);
+    expect((await supplier.evidence(LIVE_ROUND))?.edges).toEqual([{ consumer: "repo0", provider: "repo1", language: "node", source: "both" }]);
   });
   it("rejects malformed project headers instead of silently ignoring a dependency", async () => {
     const f = await fixture([{ "pyproject.toml": '[project\nname="app"\ndependencies=["lib"]\n' }, { "setup.cfg": "[metadata]\nname=lib\n" }]);
@@ -264,11 +304,11 @@ describe("MR2 prepared-path boundary", () => {
     const { createRepositoryCheckSupplier } = await import("../../packages/worker/src/multi-repo-supplier.js");
     const { createCheckRunners, runChecks } = await import("../../packages/worker/src/verification/checks.js");
     const root = join(f.root, "nested"); await mkdir(root);
-    const supplier = createRepositoryCheckSupplier({ rootPath: root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: `../${r.name}`, baseCommit: r.baseCommit })) });
+    const supplier = createRepositoryCheckSupplier({ live: true, rootPath: root, repositories: f.repos.map(r => ({ repositoryId: r.name, path: `../${r.name}`, baseCommit: r.baseCommit })) });
     const base = createCheckRunners({ rootPath: root, local: true });
     const result = await runChecks({ source: "project", readiness: [{ executable: process.execPath, args: ["-e", "console.log('ordinary'); process.exitCode=1"], cwd: ".", timeoutSeconds: 10 }] }, supplier.scope(base), { signal: new AbortController().signal, budgetMs: 30_000 });
     expect(result.entries[0]).toMatchObject({ after: "failed", output: "ordinary\n" });
-    expect(supplier.evidence()).toBeUndefined(); expect(supplier.notes()).toEqual(["dependency manifest unreadable"]);
+    expect((await supplier.evidence(LIVE_ROUND))).toBeUndefined(); expect(supplier.notes()).toEqual(["dependency manifest unreadable"]);
   });
 });
 
