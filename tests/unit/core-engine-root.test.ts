@@ -119,9 +119,10 @@ describe("the deployed task access", () => {
     expect(await access.checkStart(principal("dev-a", OTHER), "payments")).toEqual({ allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE });
   });
 
-  it("lets a task's own person, or a company owner or admin, act on it", async () => {
+  it("lets only a task's own person, still a member, act on it (a company owner or admin gets no reach into another person's task, as on the broker)", async () => {
     expect(await access.canAct(principal("dev-a"), { developerId: "dev-a", project: "payments" })).toBe(true);
-    expect(await access.canAct(principal("dev-o"), { developerId: "dev-a", project: "payments" })).toBe(true);
+    expect(await access.canAct(principal("dev-o"), { developerId: "dev-a", project: "payments" })).toBe(false);
+    expect(await access.canAct(principal("dev-gone"), { developerId: "dev-gone", project: "payments" })).toBe(false);
     expect(await access.canAct(principal("dev-a"), { developerId: "dev-o", project: "payments" })).toBe(false);
     expect(await access.canAct(principal("dev-x"), { developerId: "dev-x", project: "payments" })).toBe(false);
   });

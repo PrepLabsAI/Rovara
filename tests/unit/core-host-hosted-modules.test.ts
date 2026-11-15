@@ -67,8 +67,8 @@ describe("the cost ledger's company day", () => {
 });
 
 describe("the staging admission", () => {
-  it("declares a real dollar cap", () => {
-    expect(setup().admission.enforcesCost).toBe(true);
+  it("does not declare a held dollar cap: nothing is reserved and nothing on AWS books usage yet, so no unattended paid work starts on it", () => {
+    expect(setup().admission.enforcesCost).toBe(false);
   });
 
   it("refuses any company not on the list, in fixed words, before reading any spend", async () => {

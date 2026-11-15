@@ -124,8 +124,9 @@ export const NO_PROJECT_GRANT = "You do not have access to this project.";
 
 /**
  * Who may start work and act on a core task on a deployed install. Every answer re-reads the person's LIVE membership (never the principal's word): the person must be a member of the
- * principal's company now. A start needs the project grant the broker already keeps (no weakening of today's rule). A task may be driven by its own person, or by a company owner or admin;
- * anyone else gets "not found" from the flow. A step the system starts on its own needs its person to be a member still, with the grant.
+ * principal's company now. A start needs the project grant the broker already keeps (no weakening of today's rule). A task may be read and driven only by its own person, as on the
+ * broker today (a company role gives no reach into another person's task); anyone else gets "not found" from the flow. A step the system starts on its own needs its person to be a
+ * member still, with the grant.
  */
 export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId }): TaskAccess {
   const liveMember = async (personId: string) => {
@@ -139,9 +140,8 @@ export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => P
     },
     async canAct(principal, task) {
       if (principal.companyId !== inputs.companyId) return false;
-      const membership = await liveMember(principal.personId);
-      if (membership === undefined) return false;
-      return principal.personId === task.developerId || membership.role === "owner" || membership.role === "admin";
+      if (principal.personId !== task.developerId) return false;
+      return (await liveMember(principal.personId)) !== undefined;
     },
     async checkStep(task) {
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };

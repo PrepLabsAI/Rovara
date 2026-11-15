@@ -3,8 +3,9 @@
 //
 //   admission   An allow-list of company ids (the founders' test company on staging) and two dollar caps, per task and per company per UTC day, read from the core's own cost ledger
 //               (core/cost/ledger.ts: the task's total and the company's day row) until the Cloud gateway holds money. Any other company is refused with fixed words. `stage()` puts a
-//               condition on the company's day row (and the task's total, for a task) into the caller's transaction, so a start commits only while the day is still under its cap: the
-//               adapter declares `enforcesCost: true` on that basis. It holds no reservation (settle and release do nothing); a usage is counted when the ledger records it.
+//               condition on the company's day row (and the task's total, for a task) into the caller's transaction, so a start commits only while the day is still under its cap.
+//               The caps are START GATES, not a held allowance: nothing is reserved (concurrent starts do not see each other), and nothing on AWS books a usage into the ledger yet,
+//               so the adapter declares `enforcesCost: false` (Rovara then starts no unattended paid work on it). Declaring `true` needs both a reservation and the usage booking.
 //   metering    The price table over the catalog's list prices (the capped price for a reservation). A model no table prices is charged a cautious fixed price, never $0
 //               (`UNKNOWN_MODEL_PRICE`, DEC 172/216). No call is made on Rovara's account here: metering only prices usage the company's own provider reported.
 //   identity    Code's own sign-in decides who the caller is (the broker verifies the token); this point only names a person of a company, from MEMBERSHIP (R4's reader), never from a claim.
@@ -111,7 +112,8 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
   }
 
   return {
-    enforcesCost: true,
+    // Not a held cap (see the file comment): no reservation, and no usage booking on AWS yet.
+    enforcesCost: false,
     async admit(request) {
       return (await decide(request)).decision;
     },
@@ -128,8 +130,8 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
 // ---- metering
 
 /**
- * What a model no table prices is charged, per million tokens (USD micros): the highest list price of the catalog's models today (Claude Opus class). Never $0: an unknown model is assumed
- * expensive, so a cap holds back rather than letting it run free (DEC 172/216).
+ * What a model no table prices is charged, per million tokens (USD micros): a cautious fixed price (a top-tier frontier model's list price; not the catalog's maximum). Never $0: an
+ * unknown model is assumed expensive, so a cap holds back rather than letting it run free (DEC 172/216).
  */
 export const UNKNOWN_MODEL_PRICE: ModelPrice = Object.freeze({
   inputMicrosPerMillionTokens: 15_000_000,
