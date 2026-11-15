@@ -1139,6 +1139,31 @@ The new loadReadableTask viewer fallback rechecks recordInCompany before consult
 
 All incoming source identities are classified without changing the scanner; forwarding expressions are identical and only source locations moved. No new API Gateway path appeared. The inventory's method column remains manual, and optional-company read checks do not claim isolation for unchecked writers, recipient metadata or workspace providers.
 
+## T6 secret records and entry points
+
+T6 uses R4's `CompanyMembershipReader` from `packages/broker/src/aws/company-check.ts`. Each bound operation resolves membership afresh; missing, malformed or throwing membership refuses with the existing fixed sentence. A valid foreign connector, hook, MCP or test-account name reads as missing before secret-client selection or any Secrets Manager call. The adapter's absent-options byte goldens and R4's absent-`deps.companies` route goldens remain the compatibility controls. This type-only reader swap changes no runtime guard or default.
+
+The counted rows above retain **needs-company** for mixed or incompletely wired record/route families. The rows below classify secret storage and entry points outside the scanner's record/dispatch grammar; they are **not extra counted identities**. A company-scoped secret adapter does not establish end-to-end route isolation. Local routes are outside the scanner's `aws/` dispatch set; contract-only hook paths and worker references must not be presented as scanned, checked routes.
+
+| Surface / record kind | Class | Storage / route | Evidence and remaining owner |
+|---|---|---|---|
+| Connector secret values | company-scoped | other: `agentx/<env>/org-connectors/<company>/<id>` | `company-secrets.ts`, `secrets-manager/index.ts`, `connection-secrets.ts`; `secrets-company-member`, `aws-secrets-manager-company`, `secrets-tagged-session` tests. Membership-bound composition is opt-in; R2 wires hosted callers. |
+| Connection metadata and directory | needs-company | State: `ORG_CONNECTION`, `ORG_CONNECTION_DIRECTORY`, `connectionKey`, `connectionsKey` (counted above) | Keys include company; records store only presence/version. `connections-store.test.ts` covers versions and cross-company refusal. Caller membership is still an R2/T2 obligation. |
+| Hook secret values | company-scoped | other: `agentx/<env>/org-hooks/<company>/<id>` | Same T6 reader/writer guards; create uses `rovara:use=hook`. `secrets-company-names`, `aws-secrets-manager-company`, `secrets-tagged-session` tests. |
+| Hook record, directory, replay and rate; hook lookup | needs-company | State: contract constructors `hookKey`, `hookDirectoryKey`, `hookEventKey`, `hookRateKey`; global `hookLookupKey` | `contracts/src/event-hooks.ts` scopes the first four; lookup is deliberately global before signature verification. No corresponding hook dispatcher/store is present in this Code tree. T2/T8 must prove signature, lookup, replay and membership authority; T6 does not promote them. |
+| Registered MCP token / stdio secret document | company-scoped | other: `orgMcpServerSecretName` uses `org-connectors/<company>/<serverId>` | `context-sources/wiring.ts` uses the connection secret port; T6 name and adapter tests include this shared family. Hosted membership wiring remains R2. |
+| Registered MCP metadata | needs-company | State: `orgScoped(orgId, "MCPSRV")` / `SRV#<serverId>` (partition builder counted above) | `context-sources/mcp-servers.ts` scopes keys; local caller authority alone does not prove all callers. R2/T2 integration remains. |
+| Test-account secret values | company-scoped | other: `agentx/<env>/org-test-accounts/<company>/<account>` | `contracts/src/test-account.ts` builds names/tags; T6 reader same-answer tests cover this family. T6 connection writer accepts connector/hook names only. T7 owns worker dynamic-reference authorization; this lane does not supply a test-account writer. |
+| Account definitions / latest pointers | needs-company | State: `E2E_ACCOUNT`, `E2E_ACCOUNT_LATEST` (counted above) | Company/project keys hold references; T7 must bind worker execution and secret resolution to the approved account. |
+| Connector execution and discovery | needs-company | POST `/v1/workspaces/{id}/connectors/{id}/call`; GET `/v1/workspaces/{id}/connectors/{id}/tools` (counted above, checked=no) | T6 helpers do not add `deps.companies` at these routes; R2/T2/T7 retain wiring and execution proof. |
+| Local connection and MCP reads / page writes | needs-company | GET `/v1/dev/connections`, GET `/v1/dev/connections/{id}`, GET `/v1/dev/mcp-servers`; owner page actions | `local/app/connections.ts` compares the caller principal with the install company and gates writes on a fresh page. It does not resolve R4 membership; other HTTP methods refuse. R2/T2 multi-company binding remains; these local paths are outside the scanned AWS route set. |
+| Hook delivery | needs-company | Contract-only POST `/v1/hooks/{source}/{hookId}` | Described by `contracts/src/event-hooks.ts`; no matching Code dispatcher in this tree. T2/T8 must prove delivery authority, with T6 secret guard as one layer. |
+| Test-account dynamic reference | needs-company | Worker `test-account-secret.ts`, no dedicated scanned secret HTTP route | T7 owns worker authority and role cutover; T6 cannot claim the worker path is membership-checked. |
+| GitHub App key/webhook and Slack install secrets | install-wide | other: configured install secret names/ARNs | T4/T5; outside T6 company-name families. |
+| Model provider keys | install-wide | other: model-key port and model-runtime environment ARNs | lane G; no model-key family is admitted by T6. |
+
+Old unscoped names belong only to the explicitly configured implicit company in hosted mode; `companyPaths` without an owner refuses them. GitHub App/Slack install secrets remain T4/T5; model keys remain lane G. Real IAM/TagSession policies, backfill, role split and staging evidence remain in `T6-SECRETS-IAM-20261114-v2`; fake tests do not establish deployed IAM behavior. No checked=yes row is added by T6.
+
 ## Merge-up 3: proof holds and mark-ready overrides
 
 | kind | identity | class | table | checked | methods | reason |
