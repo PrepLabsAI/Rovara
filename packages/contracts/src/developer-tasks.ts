@@ -160,6 +160,15 @@ export const DeveloperTaskViewSchema = z.object({
   /** Plan 3, Task 34: what the coding plan under review is expected to cost and the run limit approving it accepts. */
   runEstimate: RunEstimateSchema.optional(),
   /**
+   * #651: what the task's runs have cost so far, from their usage records: dollars (of the records the provider priced), tokens, and how many model runs
+   * (usage records: one operation, such as a review, can make several). `unpricedRuns` counts records with no cost, so `usd` is then a lower bound. Absent
+   * before the first is recorded.
+   */
+  spent: z.object({
+    usd: z.number().nonnegative(), inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),
+    runs: z.number().int().nonnegative(), unpricedRuns: z.number().int().nonnegative(), updatedAt: z.string(),
+  }).strict().optional(),
+  /**
    * 0.5.11 (QA6-12b): while the coding plan waits for approval, what approving does to the run limit: the limit now, the one approving sets and whether that raises it. A raise is approved only with `proposedUsd`
    * acknowledged (the tool's `acknowledged_run_limit_usd`, the API's `acknowledgedRunLimitUsd`). Absent unless the coding plan waits and the task carries an estimate.
    */
