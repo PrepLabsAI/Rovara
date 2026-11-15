@@ -844,8 +844,9 @@ function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord
 /**
  * A developer API caller: the Rovara CLI's token, with all the person's rights; or a registered sign-in client's, as its
  * signed-in person, within the route's scope (plan v3.2 lane ID) or, for a `full` route, only with full access (spec
- * 066). The unverified azp only picks the path; each then verifies the token in full. The client's registration is
- * read at every request, so removing a scope or full access takes effect at once.
+ * 066). A client registered with no scope and no full access is refused with 401, as before. The unverified azp only
+ * picks the path; each then verifies the token in full. The client's registration is read at every request, so
+ * removing a scope or full access takes effect at once.
  */
 async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<DeveloperCaller> {
   let azp: unknown;
@@ -854,7 +855,9 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
   } catch {
     azp = undefined;
   }
-  if (typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID || (await signInClientOf(deps, azp)) === undefined) {
+  // A client with neither a scope nor full access is refused as before: its tokens are never Rovara's (401).
+  const client = typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID ? undefined : await signInClientOf(deps, azp);
+  if (client === undefined || (client.fullAccess !== true && (client.scopes ?? []).length === 0)) {
     return authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization));
   }
   const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));

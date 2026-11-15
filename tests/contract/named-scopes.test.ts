@@ -220,6 +220,8 @@ describe("the developer API with a scoped client's token (a named environment)",
   });
 
   it("refuses a token with no scope on every gated route, and a scope the registration no longer allows", async () => {
+    cloudClient([]);
+    expect((await call("GET", "/v1/dev/projects", await scoped())).status, "a client with no scope at all is refused as before").toBe(401);
     cloudClient(NAMED);
     const none = await scoped();
     for (const route of gated) expect((await call(route.method, sample(route.path), none)).body.error?.message, `${route.method} ${route.path}`).toBe(scopeRefusal(route));

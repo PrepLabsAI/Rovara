@@ -148,7 +148,7 @@ no row is refused with 404 before anyone is signed in, so a new route can't be r
 | `decisions:decide` | Approve a plan or request changes, and decide on a feedback proposal |
 
 The rest (workspaces, the person's links, Sign in with ChatGPT, and two routes only the CLI uses) need
-[full access](#full-access). A token without the scope a route needs gets 403, naming the missing scope. A scope only
+[full access](#full-access). A token without the scope a route needs gets 403, naming the missing scope; a service registered with no scope and no full access gets 401, as before. A scope only
 narrows what the person may do; it never adds a right. The Rovara CLI's own token reaches every route, as before.
 
 ## Full access
