@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { OrgIdSchema } from "@agentx/contracts";
 import { COMPANY_SECRET_TAG_KEY } from "./company-names.js";
 import { SecretsManagerSecretError } from "./index.js";
@@ -30,7 +31,7 @@ export function createCompanyClientFactory<Client>(options: {
     if (active !== undefined) return active;
     const task = (async () => {
       try {
-        const session = await options.assumeRole({ sessionName: "rovara-company-secrets", tags: [{ Key: COMPANY_SECRET_TAG_KEY, Value: companyId }], durationSeconds: 900 });
+        const session = await options.assumeRole({ sessionName: `rovara-secrets-${companyId}-${randomBytes(8).toString("hex")}`, tags: [{ Key: COMPANY_SECRET_TAG_KEY, Value: companyId }], durationSeconds: 900 });
         if (!Number.isFinite(session.expiresAt) || session.expiresAt <= now() + 60_000) throw new Error("expired session");
         for (const value of [session.credentials.accessKeyId, session.credentials.secretAccessKey, session.credentials.sessionToken]) {
           if (typeof value !== "string" || value.length === 0) throw new Error("invalid credentials");

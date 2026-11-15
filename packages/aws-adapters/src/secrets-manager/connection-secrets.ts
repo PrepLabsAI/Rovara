@@ -45,6 +45,7 @@ export function createSecretsManagerConnectionSecrets(options: { env: string; cl
     },
     async put(company: string, name: string, value: string): Promise<string> {
       admit(company, name);
+      const parsed = companyOfSecretName(name.slice(prefix.length));
       if (typeof value !== "string") throw invalid();
       if (Buffer.byteLength(value, "utf8") > 16_384) throw new SecretsManagerSecretError("secret: that is too long to be a key or a token");
       try {
@@ -52,7 +53,7 @@ export function createSecretsManagerConnectionSecrets(options: { env: string; cl
         let result;
         try {
           result = await client.send(new CreateSecretCommand({ Name: name, SecretString: value, Tags: [
-            { Key: COMPANY_SECRET_TAG_KEY, Value: company }, { Key: TEST_ACCOUNT_SECRET_TAG_KEYS.use, Value: "connector" },
+            { Key: COMPANY_SECRET_TAG_KEY, Value: company }, { Key: TEST_ACCOUNT_SECRET_TAG_KEYS.use, Value: parsed?.path === "org-hooks" ? "hook" : "connector" },
           ] }));
         } catch (error) {
           if (errorName(error) !== "ResourceExistsException") throw error;

@@ -38,6 +38,18 @@ describe("company adapter", () => {
     expect(service.reads).toEqual([]);
     expect((await store.read(IMPLICIT_COMPANY_ID, {awsSecret:"legacy"}))?.reveal()).toBe("old");
   });
+  it("refuses every unscoped read when companyPaths has no explicit owner, including plugin settings without hosted", async () => {
+    const service = new FakeSecretsManager(); service.set(`${PREFIX}legacy`, "old");
+    for (const companyPaths of [COMPANY_SECRET_PATHS, []]) {
+      const direct = createSecretsManagerSecretStore({namePrefix:PREFIX,companyPaths,clientFor:()=>service});
+      const registry = createAdapterRegistry();
+      await loadAdapters(parsePluginConfig({version:1,plugins:[{point:"secrets",name:"aws-secrets-manager",module:"test",settings:{region:"us-west-2",profile:"test",namePrefix:PREFIX,companyPaths}}]}), {registry,importModule:async()=>({plugin:secretsManagerSecretsPlugin({clientFor:()=>service})})});
+      for (const store of [direct, registry.require("secrets")]) {
+        for (const company of [A,B,IMPLICIT_COMPANY_ID]) expect(await store.read(company,{awsSecret:"legacy"})).toBeUndefined();
+      }
+    }
+    expect(service.reads).toEqual([]);
+  });
   it("refuses malformed companies, lookalikes and runtime references without leaking or reading", async () => {
     const {service, store} = world();
     for (const company of [null, {}, "bad", `${A}a`]) await expect(store.read(company as string, {awsSecret:`org-connectors/${A}/own`})).rejects.toThrow(/^the secret reference is not valid$/u);

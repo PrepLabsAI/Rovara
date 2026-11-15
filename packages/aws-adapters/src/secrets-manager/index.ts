@@ -42,7 +42,7 @@ export interface SecretsManagerSecretStoreOptions {
   clientFor: (companyId: string) => SecretsManagerClientLike | Promise<SecretsManagerClientLike>;
   /** First parts that name a company's own secrets (`org-connectors`): the next part must be the company of the call. */
   companyPaths?: readonly string[];
-  /** Legacy names outside companyPaths belong only to this company. */
+  /** Legacy names outside companyPaths belong only to this company; with companyPaths set and no owner, refuse them. */
   unscopedNamesBelongTo?: string;
 }
 
@@ -72,7 +72,7 @@ export function createSecretsManagerSecretStore(options: SecretsManagerSecretSto
         if (companyPaths.has(parts[0]!)) {
           if (parts.length < 3 || !OrgIdSchema.safeParse(parts[1]).success) throw invalid();
           if (parts[1] !== companyId) return undefined;
-        } else if (options.unscopedNamesBelongTo !== undefined && companyId !== options.unscopedNamesBelongTo) return undefined;
+        } else if (companyId !== options.unscopedNamesBelongTo) return undefined;
       }
       let found: { SecretString?: string | undefined; SecretBinary?: Uint8Array | undefined };
       try {
