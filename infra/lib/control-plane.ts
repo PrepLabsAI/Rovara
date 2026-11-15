@@ -117,8 +117,9 @@ export class ControlPlaneStack extends Stack {
       type: "String",
       description: "Complete Secrets Manager ARN containing the GitHub App private key PEM",
     });
-    // Spec 025 phase 25a: declared on the stack itself so the names are exact; named environments only (R3).
-    const signInParameters = naming.env === undefined ? undefined : developerSignInParameters(this);
+    // Spec 025 phase 25a: declared on the stack itself so the names are exact. Spec 064: the legacy deployment gets the
+    // sign-in ones only, for account linking; the developer task settings stay in named environments (R3).
+    const signInParameters = developerSignInParameters(this, { tasks: naming.env !== undefined });
     const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
       type: "String",
       default: "false",
@@ -845,15 +846,29 @@ export class ControlPlaneStack extends Stack {
     const channelAdapters = new ChannelAdapters(this, "ChannelApi", {
       naming, env: naming.env ?? "production", api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator,
       slack: { ingress: slackIngress, integration: slackIntegration, threads: slackThreads, appPostedMessages: appPostedMessages.valueAsString, threadTurnsPerMinute: threadTurnsPerMinute.valueAsString },
-      registry: naming.env !== undefined, sharedTasks: naming.env !== undefined,
+      registry: true, sharedTasks: naming.env !== undefined,
       turnRecords: { table: turnRecords, detailsAttributes: TURN_DETAILS_READ_ATTRIBUTES },
     });
     new CfnOutput(this, "SlackAdapterCommandsUrl", { value: `${api.attrApiEndpoint}/v1/slack/channel-commands` });
     new CfnOutput(this, "SlackAdapterSecretName", { value: `agentx/${naming.env ?? "production"}/channel-adapter/slack` });
     new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
+    // Spec 064: the legacy deployment's sign-in, for account linking only. Its broker serves the link page, the access
+    // check and a person's own links; developer tasks, sharing and admin changes stay in named environments.
+    if (naming.env === undefined) {
+      const linkingSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
+        naming, env: "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
+      });
+      linkingSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
+      linkingSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
+      linkingSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
+      // Spec 062 Phase 7d: the channel API's Slack router posts through the adapter while SlackViaChannel is on, as in
+      // named environments. The legacy deployment names no Slack team, so it posts as each message's own team.
+      channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
+    }
     // Spec 025 phase 25a: developer sign-in, named environments only (R3).
-    if (naming.env !== undefined && signInParameters !== undefined) {
+    const taskParameters = signInParameters.tasks;
+    if (naming.env !== undefined && taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
@@ -871,10 +886,10 @@ export class ControlPlaneStack extends Stack {
           dispatcher,
         });
       }
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_CHANGES_ENABLED", signInParameters.taskPeopleChangesEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED", signInParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", signInParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", signInParameters.workflowDependenciesEnabled.valueAsString);
+      broker.addEnvironment("AGENTX_TASK_PEOPLE_CHANGES_ENABLED", taskParameters.taskPeopleChangesEnabled.valueAsString);
+      broker.addEnvironment("AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
+      broker.addEnvironment("AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
+      broker.addEnvironment("AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", taskParameters.workflowDependenciesEnabled.valueAsString);
       // Sign in with ChatGPT (#338): seals each developer's ChatGPT tokens in the State table. A
       // connection belongs to a signed-in developer, so it exists only where developer sign-in
       // does. Only the broker encrypts and decrypts with it, always under an encryption context
@@ -888,7 +903,7 @@ export class ControlPlaneStack extends Stack {
       chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       broker.addEnvironment("CHATGPT_CONNECTION_KEY_ARN", chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: signInParameters.taskPeopleChangesEnabled, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
@@ -999,6 +1014,11 @@ export class ControlPlaneStack extends Stack {
     }
 
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
+    // Spec 065b: a project a sign-in client creates runs on the foundation's workers: the broker builds its binding from
+    // the zone=subnet pairs and the launch template, with no AWS call.
+    const foundationParameter = (name: string) => (this.node.findChild(name) as CfnParameter).valueAsString;
+    broker.addEnvironment("EC2_WORKER_SUBNETS", foundationParameter("Ec2WorkerSubnets"));
+    broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
     if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
     // Issue 195: the alarm for stuck cancels. Named environments only: the legacy template is
@@ -1008,7 +1028,7 @@ export class ControlPlaneStack extends Stack {
     // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
     // legacy template is unchanged.
     if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
-    if (naming.env !== undefined && signInParameters !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
+    if (naming.env !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
