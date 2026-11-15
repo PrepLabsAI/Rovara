@@ -45,6 +45,11 @@ import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService } from "../services/index.js";
+import { createTaskTokenDescriber } from "../core/model-gateway/describer.js";
+import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
+import { CallbackCapabilities } from "../callbacks.js";
+import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
+import { gatewayForCallbacks, gatewayModelAccessFromEnvironment, gatewayModelKeysModules, gatewayModelRoute } from "../core-host/gateway-model-access.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
@@ -83,6 +88,12 @@ export interface BrokerCoreRootInputs {
   ciReporting?: CiReporting;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
   services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry) => Partial<Record<CoreServiceName, CoreService>>;
+  /**
+   * Lane L2b (DEC 236): the task-token signer (the KMS task key, TASK_TOKEN_KEY_ARN) and the token issuer (the install's sign-in issuer, whose JWKS the gateway
+   * pins). Asked for only where the model gateway is configured (ROVARA_CORE_MODEL_GATEWAY_URL): a worker's model-access request is then answered with a task token
+   * for the gateway. Configured without these: the core callback layer refuses to build (never a worker that cannot reach its model, silently).
+   */
+  taskTokens?: () => { signer: TokenSigner; issuer: string } | undefined;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -115,6 +126,7 @@ export interface BrokerCoreRoot {
   callback(request: BrokerRequest): Promise<BrokerResponse | undefined>;
 }
 
+const WORKSPACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const CORE_CALLBACK = /^\/v1\/internal\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/operations\/[0-9a-f-]{36}\/[a-z-]+$/u;
 const callbackAnswer = (statusCode: number, code: string, message: string): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code, message } }) });
 
@@ -233,6 +245,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     return row === undefined || row["revoked"] === true || typeof row["displayName"] !== "string" ? undefined : row["displayName"];
   };
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
+  // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
+  const modelGateway = () => gatewayModelAccessFromEnvironment(env);
   const lessonsSwitch = readCoreLessonsSwitch(env);
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
@@ -240,7 +254,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity }), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity }), ...gatewayModelKeysModules(env), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -250,6 +264,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
+      // L2b: every core step on the gateway's agent model (the token's description reads the same route).
+      ...(modelGateway() === undefined ? {} : { flowOptions: { modelAccess: gatewayModelRoute(modelGateway()!) } }),
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
@@ -333,6 +349,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   }
 
   const table = { documentClient: inputs.documentClient, tableName: inputs.stateTableName };
+  let capabilities: CallbackCapabilities | undefined;
+  /** The workspace of a GET /v1/internal/model-access whose capability verifies (signature, expiry, the `model-access` action); undefined for anything else. */
+  const modelAccessWorkspaceOf = (request: BrokerRequest): string | undefined => {
+    if (request.method !== "GET" || (request.path.split("?")[0] ?? "") !== MODEL_ACCESS_PATH) return undefined;
+    const token = request.headers["x-agentx-callback-capability"];
+    if (typeof token !== "string" || token === "" || token.length > 4096) return undefined;
+    try {
+      capabilities ??= new CallbackCapabilities(Buffer.from(inputs.callbackSigningKey));
+      const workspaceId = capabilities.verify(token, "model-access").workspaceId;
+      return typeof workspaceId === "string" && WORKSPACE_ID.test(workspaceId) ? workspaceId : undefined;
+    } catch { return undefined; }
+  };
   const companyOfWorkspace = workspaceCompanyReader(inputs.documentClient, inputs.stateTableName);
   const callbackHandlers = new Map<string, Promise<(request: BrokerRequest) => Promise<BrokerResponse>>>();
   const callbackHandlerFor = (companyId: OrgId): Promise<(request: BrokerRequest) => Promise<BrokerResponse>> => {
@@ -342,7 +370,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const runtime = await app.runtimeFor(companyId);
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
+        // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
+        const gatewaySettings = modelGateway();
+        let gateway: ReturnType<typeof gatewayForCallbacks> | undefined;
+        if (gatewaySettings !== undefined) {
+          const tokens = inputs.taskTokens?.();
+          if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "") throw Object.assign(new Error("the core engine's model gateway is configured without the task-token signer"), { name: "GatewayTaskTokensMissing" });
+          gateway = gatewayForCallbacks(gatewaySettings, { issuer: tokens.issuer, signer: tokens.signer, describer: createTaskTokenDescriber(runtime.flow.deps) });
+        }
         return createCallbackService({
+          ...(gateway === undefined ? {} : { modelGateway: gateway }),
           flow: runtime.flow.deps,
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
@@ -392,10 +429,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     async callback(request) {
       if (coreTasks === undefined) return undefined;
-      const match = CORE_CALLBACK.exec(request.path.split("?")[0] ?? "");
-      if (match === null || await ownerOfWorkspace(table, match[1]!) !== "core") return undefined;
+      // L2b: a worker's model-access request names its workspace only inside its signed capability (checked here before any read; the handler checks it again).
+      const workspaceId = modelAccessWorkspaceOf(request) ?? CORE_CALLBACK.exec(request.path.split("?")[0] ?? "")?.[1];
+      if (workspaceId === undefined || await ownerOfWorkspace(table, workspaceId) !== "core") return undefined;
       // A core workspace is never the old routes' (engine-boundary.ts): any refusal here is the core's, in fixed words.
-      const companyId = await companyOfWorkspace(match[1]!);
+      const companyId = await companyOfWorkspace(workspaceId);
       if (companyId === undefined) return callbackAnswer(404, "NOT_FOUND", "workspace not found");
       let handler: (request: BrokerRequest) => Promise<BrokerResponse>;
       try {
@@ -413,6 +451,19 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       return undefined;
     },
   };
+}
+
+/** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */
+export const CORE_MODEL_ACCESS_PATH = MODEL_ACCESS_PATH;
+
+/**
+ * L2b (DEC 236): the task-token signer and issuer from the broker's environment: the install's KMS task key (TASK_TOKEN_KEY_ARN; only the broker may sign with it, by its key policy)
+ * and the sign-in issuer (DEVELOPER_TOKEN_ISSUER, whose JWKS publishes that key with purpose `task`). Either absent: undefined.
+ */
+export function taskTokensFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameters<typeof kmsTokenSigner>[0]["kms"]): { signer: TokenSigner; issuer: string } | undefined {
+  const keyId = env.TASK_TOKEN_KEY_ARN ?? "";
+  const issuer = env.DEVELOPER_TOKEN_ISSUER ?? "";
+  return keyId === "" || issuer === "" ? undefined : { signer: kmsTokenSigner({ kms, keyId }), issuer };
 }
 
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */

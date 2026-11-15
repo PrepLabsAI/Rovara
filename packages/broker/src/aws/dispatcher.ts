@@ -22,7 +22,7 @@ import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js";
-import { hostedSecurityModules } from "../core-host/hosted-modules.js";
+import { gatewayModelKeysModules, hostedSecurityModules } from "../core-host/hosted-modules.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
@@ -754,7 +754,7 @@ export const handler = withCoreDispatch(workflowHandler, {
         // Lane E2 step 6: the declared flow inputs (none while lessons are switched on anywhere: then nothing is declared and every core record comes back) and the step 5 points.
         // A dispatch decides nothing for a person, so the identity point names nobody here.
         ...(flow === undefined ? {} : { flow }),
-        extraModules: hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } }),
+        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } }), ...gatewayModelKeysModules(process.env)],
         log: (entry) => console.log(JSON.stringify({ component: "dispatcher", ...entry })),
       }).host;
     }).catch((error: unknown) => {

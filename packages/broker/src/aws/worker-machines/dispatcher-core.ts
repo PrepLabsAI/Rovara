@@ -35,6 +35,7 @@ import type { SessionWorkerMachinesDependencies } from "./session-worker-machine
 import { workspaceCompanyReader } from "./workspace-company.js";
 import { workerBindingFromPairs } from "../worker-binding.js";
 import type { RegistryTaskFlowOptions } from "../../core/task-flow/flow.js";
+import { gatewayModelAccessFromEnvironment, gatewayModelRoute } from "../../core-host/gateway-model-access.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
 export interface DispatcherRecord extends CoreDispatchRecord {
@@ -123,7 +124,11 @@ export const DISPATCHER_FLOW_NOT_DECLARED = "the dispatcher's flow inputs are no
  */
 export function hostedDispatcherFlow(env: NodeJS.ProcessEnv): DispatcherFlowWiring | undefined {
   if (readCoreLessonsSwitch(env).value.mode !== "off") return undefined;
-  return { standingInstructions: null, modelAccess: null, learned: null };
+  // L2b (DEC 236): where the model gateway is configured, every core step goes to the gateway's agent model with a task token (the model-access capability).
+  // A broken gateway setting declares nothing (every core record comes back) rather than a job without its model.
+  let gateway: ReturnType<typeof gatewayModelAccessFromEnvironment>;
+  try { gateway = gatewayModelAccessFromEnvironment(env); } catch { return undefined; }
+  return { standingInstructions: null, modelAccess: gateway === undefined ? null : gatewayModelRoute(gateway), learned: null };
 }
 
 /** The words a code host call says on the dispatcher. */

@@ -314,7 +314,7 @@ import {
 } from "./channel-conversation.js";
 import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, type BrokerCoreRoot } from "./core-engine-root.js";
+import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
@@ -1244,8 +1244,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (setupArtifact?.[1] && setupArtifact[2] === "evidence/finalize" && request.method === "POST") {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
-      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off.
-      if (core !== undefined && request.method === "POST") {
+      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off. L2b: also its model-access GET.
+      if (core !== undefined && (request.method === "POST" || (request.method === "GET" && url.pathname === CORE_MODEL_ACCESS_PATH))) {
         const answer = await core.callback(request);
         if (answer !== undefined) return answer;
       }
@@ -15197,7 +15197,7 @@ const coreRoot = createBrokerCoreRoot({
   repositoryGrantKey: repositoryGrantSigningKey,
   repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
   codeModules: () => brokerCoreModuleDeps(process.env),
-  policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
+  policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
   origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
   log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
 });
