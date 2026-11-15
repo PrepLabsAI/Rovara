@@ -30,6 +30,7 @@ export function budgetScopeOfProxyBody(status: number, body: string): ModelBudge
   if (type !== "budget_exceeded" || typeof message !== "string") return undefined;
   if (/^Budget has been exceeded! Team=/u.test(message)) return "org";
   if (/^ExceededBudget: User=/u.test(message)) return "member";
+  if (/^Budget has been exceeded! Project=/u.test(message)) return "project";
   if (/^Budget has been exceeded! Key=/u.test(message)) return "task";
   return undefined;
 }

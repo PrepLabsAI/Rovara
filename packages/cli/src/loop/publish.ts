@@ -1,6 +1,7 @@
 // rovara loop (#356): publishing, which the loop does itself, never the agent: push the item's branch, then open
 // its pull request (or, when it has one, say the update is pushed). It runs only after the plan was approved and
 // the checks passed. A push that would overwrite anything is refused by git, and so is ours.
+import { ROVARA_NEVER_COMMIT, neverCommitRefusal } from "@agentx/contracts";
 import { run, type Exec } from "./exec.js";
 
 export interface PublishInput {
@@ -85,8 +86,24 @@ export function describe(input: PublishInput): string {
   ].join("\n");
 }
 
+/**
+ * TE-B9 (O38, L3): Rovara's own working files (`ROVARA_NEVER_COMMIT`) are never pushed by the loop either. Looks at what the branch introduces since it left the pull request's base (`origin/<base>...HEAD`, the merge base), so a file the
+ * repository already held is not refused. `--no-literal-pathspecs` keeps a user's GIT_LITERAL_PATHSPECS from changing what the list means. A diff that cannot be read stops the push, as a found path does.
+ */
+export async function assertNoRovaraWorkingFilesPushed(exec: Exec, worktree: string, defaultBranch: string): Promise<void> {
+  let listed: string;
+  try {
+    listed = await run(exec, "git", ["-C", worktree, "--no-literal-pathspecs", "diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", "--diff-filter=d", `origin/${defaultBranch}...HEAD`, "--", ...ROVARA_NEVER_COMMIT]);
+  } catch {
+    throw new Error("Rovara could not read the list of files this change touches, so it did not push");
+  }
+  const first = listed.split("\0").find((name) => name !== "");
+  if (first !== undefined) throw new Error(neverCommitRefusal(first));
+}
+
 export async function publish(exec: Exec, input: PublishInput): Promise<Published> {
   await input.beforePush();
+  await assertNoRovaraWorkingFilesPushed(exec, input.worktree, input.defaultBranch);
   await run(exec, "git", ["-C", input.worktree, "push", "--quiet", "--set-upstream", "origin", input.branch]);
   // A pull request opened before a restart lost it from the state is found, never opened twice.
   let existing = input.pullRequest;

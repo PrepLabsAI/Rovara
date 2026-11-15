@@ -46,6 +46,7 @@ describe("a reader of a v1 pack", () => {
     expect(EvidencePackReadSchema.safeParse({ ...(pack() as object), extra: 1 }).success).toBe(false);
   });
   it("round-trips the real B3 writer output through the tolerant reader", () => {
+    expect(EvidencePackSchema.safeParse(pack({ absentOnNew: ["a"], absentOnNewCount: 1 })).success).toBe(true);
     const written = EvidencePackSchema.parse(pack({ absentOnNew: ["a"], absentOnNewCount: 1 }));
     expect(EvidencePackReadSchema.parse(JSON.parse(JSON.stringify(written)))).toEqual(written);
   });

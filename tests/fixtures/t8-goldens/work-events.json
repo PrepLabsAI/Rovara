@@ -1,0 +1,35 @@
+{
+  "row": {
+    "pk": "ORG#org_00000000000000000000#WORK_EVENTS#2026-11#2",
+    "sk": "2026-11-10T00:00:00.000Z#wev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "entityType": "WORK_EVENT",
+    "version": 1,
+    "id": "wev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "at": "2026-11-10T00:00:00.000Z",
+    "orgId": "org_00000000000000000000",
+    "project": "golden",
+    "taskId": "12579b4b-eaa7-4bf2-87bc-6da86b97c9e6",
+    "actor": {
+      "kind": "system"
+    },
+    "kind": "task_started",
+    "indexExpiresAt": 1830297600
+  },
+  "result": {
+    "events": [
+      {
+        "version": 1,
+        "id": "wev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-11-10T00:00:00.000Z",
+        "orgId": "org_00000000000000000000",
+        "project": "golden",
+        "taskId": "12579b4b-eaa7-4bf2-87bc-6da86b97c9e6",
+        "actor": {
+          "kind": "system"
+        },
+        "kind": "task_started"
+      }
+    ],
+    "unreadable": 0
+  }
+}

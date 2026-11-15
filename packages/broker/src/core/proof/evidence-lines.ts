@@ -4,14 +4,20 @@
 //
 // What stays at every shrink level: the Environment line, the not-run line and the mocked or not-tested bullets (a reader must not miss what was not proved), and the link. The counts per kind and the
 // changed-line coverage go first, from level 2.
-import { baselineWords, evidenceIsFor, type EvidenceBaseline, type EvidenceMode, type EvidencePack } from "@agentx/contracts";
+import { baselineWords, evidenceIsFor, type EvidenceBaseline, type EvidenceMode, type EvidencePack, type EvidencePackRead } from "@agentx/contracts";
 import { AWS_PERMISSIONS_ITEM_ID } from "./dependency-evidence.js";
 import { packDependencyLines } from "./dependency-lines.js";
 import { inertLine } from "./inert-text.js";
+import type { testProofQualifier } from "./proof-table.js";
 
 /** The evidence's part of the Proof context: the pack the broker built, how much of it the pull request shows, and the Rovara page that has the rest. */
 export interface ProofEvidenceContext {
   pack?: EvidencePack | undefined;
+  /**
+   * TE-A2b: the same pack as `readEvidencePack` read it (`loadEvidenceRead`): a v2 pack with what this build did not know reported. Used only by a description whose writer is version 2 (`evidenceWriter`), and only when it
+   * is a v2 pack for this very code. `pack` stays the v1 form for the lines that read v1 (`loadEvidencePack` gives it for both versions).
+   */
+  read?: EvidencePackRead | undefined;
   /** The mode after `resolveEvidenceMode` (a public or unknown repository never gets `embed`). */
   mode: EvidenceMode;
   /** The task page's address. Used only when it starts with `origin` and is an https address with no spaces, quotes or angle brackets. */
@@ -52,7 +58,7 @@ export function boundEvidence(context: ProofEvidenceContext | undefined, candida
 }
 
 /** The counts-per-kind line (dropped from shrink level 2): one entry per check, in the pack's order, joined with a middle dot. */
-export function testsLine(pack: EvidencePack, proven?: ProvenTestNames): string | undefined {
+export function testsLine(pack: EvidencePack, proven?: ProvenTestNames, proofQualifier: ReturnType<typeof testProofQualifier> = ""): string | undefined {
   const parts: string[] = [];
   for (const check of pack.checks) {
     const label = inertLine(check.label, 60);
@@ -87,7 +93,7 @@ export function testsLine(pack: EvidencePack, proven?: ProvenTestNames): string 
     }
   }
   if (pack.selection.selected < pack.selection.total) parts.push(`${number(pack.selection.selected)} of ${number(pack.selection.total)} tests selected (${SELECTION_WORDS[pack.selection.method]})`);
-  return parts.length === 0 ? undefined : cutLine(`Checks by kind: ${parts.slice(0, 12).join(" · ")}${parts.length > 12 ? ` · and ${parts.length - 12} more` : ""}`);
+  return parts.length === 0 ? undefined : cutLine(`${proofQualifier}Checks by kind: ${parts.slice(0, 12).join(" · ")}${parts.length > 12 ? ` · and ${parts.length - 12} more` : ""}`);
 }
 
 /**
@@ -166,14 +172,14 @@ export function evidenceNotTestedLines(pack: EvidencePack, level: number, exclud
  * The evidence lines of the Proof section at a shrink level (0..4): counts per kind and coverage at levels 0 and 1, then the Environment line, the not-run line and the link at every level. The not-tested
  * bullets are returned apart (`notTested`) because the Proof section puts them under "What wasn't tested". Without a pack bound to this code there is nothing: stale evidence is never shown as current.
  */
-export function evidenceLines(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined, level: number, extra: { proven?: ProvenTestNames; alreadyListed?: ReadonlySet<string> } = {}): { lines: string[]; notTested: string[] } {
+export function evidenceLines(context: ProofEvidenceContext | undefined, candidateDigest: string | undefined, level: number, extra: { proven?: ProvenTestNames; testProofQualifier?: ReturnType<typeof testProofQualifier>; alreadyListed?: ReadonlySet<string> } = {}): { lines: string[]; notTested: string[] } {
   const pack = boundEvidence(context, candidateDigest);
   if (context === undefined || pack === undefined) return { lines: [], notTested: [] };
   const full = level <= 1;
   // Test services: what backed each dependency, in the fixed words of the honesty labels (nothing for a pack without dependencies, so such a pull request reads as it did).
   const dependencies = packDependencyLines(pack, level);
   const lines = [
-    ...(full ? [testsLine(pack, extra.proven), coverageLine(pack)] : []),
+    ...(full ? [testsLine(pack, extra.proven, extra.testProofQualifier), coverageLine(pack)] : []),
     environmentLine(pack, level),
     ...dependencies.lines,
     notRunLine(pack),

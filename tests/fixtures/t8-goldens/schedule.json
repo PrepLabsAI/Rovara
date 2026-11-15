@@ -1,0 +1,39 @@
+{
+  "stored": {
+    "pk": "ORG#org_00000000000000000000#SCHEDULER",
+    "sk": "SCHEDULE#golden",
+    "entityType": "SCHEDULER_ENTRY",
+    "entry": {
+      "companyId": "org_00000000000000000000",
+      "scheduleId": "golden",
+      "when": {
+        "kind": "every",
+        "minutes": 1
+      },
+      "enabled": true,
+      "target": {
+        "kind": "nightly",
+        "ref": {
+          "project": "golden"
+        }
+      }
+    },
+    "anchorMs": 1794268800000,
+    "handledMs": 1794268800000
+  },
+  "due": [
+    {
+      "companyId": "org_00000000000000000000",
+      "scheduleId": "golden",
+      "scheduledAt": "2026-11-10T00:01:00.000Z",
+      "slotId": "5229ade65665cca36f7229eb9373bffbd819d3b6f1922280d208b7da12a4ff4e",
+      "attempt": 1,
+      "target": {
+        "kind": "nightly",
+        "ref": {
+          "project": "golden"
+        }
+      }
+    }
+  ]
+}

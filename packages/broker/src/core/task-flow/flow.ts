@@ -11,7 +11,7 @@ import { createTransactionalOutbox } from "../../ports/transactional-outbox.js";
 import { createBuildSteps } from "../build-step/index.js";
 import { createOwnerTaskAccess } from "./access.js";
 import { closeTask } from "./close.js";
-import type { TaskCaller, TaskFlowDeps } from "./deps.js";
+import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "./deps.js";
 import { WORKFLOW_DISPATCH_INDEX } from "./dispatch-rows.js";
 import { runDispatchOnce, type DispatchReport } from "./dispatch.js";
 import { getTask, listTasks } from "./reads.js";
@@ -31,7 +31,7 @@ export const TASK_FLOW_INDEXES: readonly IndexDefinition[] = [
 
 export interface TaskFlow {
   readonly deps: TaskFlowDeps;
-  start(caller: TaskCaller, request: unknown): ReturnType<typeof startTask>;
+  start(caller: TaskStartCaller, request: unknown): ReturnType<typeof startTask>;
   get(caller: TaskCaller, taskId: string): ReturnType<typeof getTask>;
   list(caller: TaskCaller, options?: { limit?: number; cursor?: string }): ReturnType<typeof listTasks>;
   close(caller: TaskCaller, taskId: string): ReturnType<typeof closeTask>;
@@ -55,6 +55,8 @@ export function createTaskFlow(deps: TaskFlowDeps): TaskFlow {
     if (kept === undefined || kept.partitionAttribute !== index.partitionAttribute || kept.sortAttribute !== index.sortAttribute) throw new Error(`the document store must keep the ${index.name} index`);
   }
   if (Buffer.byteLength(deps.callbackSigningKey) < 32) throw new Error("the callback signing key must be at least 32 bytes");
+  // The lighter flow skips planning steps only where the reviewer that stands in for them can run: never on without one.
+  if (deps.lighterFlow === true && deps.tierReviewCall === undefined) throw new Error("the lighter flow needs the reviewer call (tierReviewCall): a small change never skips its planning steps without a review");
   return {
     deps,
     start: (caller, request) => startTask(deps, caller, request),

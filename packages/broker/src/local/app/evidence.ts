@@ -6,11 +6,13 @@
 //     re-check of the same code replaces, with the documented opt-in (`overwrite: true` in `evidence-keep.ts`: one pack per task and candidate digest).
 // It is informational: a fault or a slow store only means there is no evidence for this code. It never changes a verdict and never holds a callback longer than `EVIDENCE_KEEP_MAX_MS`.
 import { scanText } from "@agentx/verifier";
-import { TestEnvTaskPlanSchema, workflowSelectedChecks, type CheckEntry, type EvidenceBaseline, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
+import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, SANDBOX_MODEL_HOSTS_ITEM_ID, TestEnvTaskPlanSchema, workflowSelectedChecks, type CheckEntry, type EvidenceBaseline, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
 import { keepEvidence, loadEvidenceBaseline, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { taskBaselineOf } from "../../core/test-env/baseline-task.js";
+import { baselineCacheEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
+import { workspaceKey } from "../../core/task-flow/keys.js";
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
 import { readVerifiedText } from "./documents.js";
 
@@ -26,9 +28,36 @@ export interface LocalEvidence {
   baselineOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidenceBaseline | undefined>;
 }
 
-export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">; blobs: ObjectStorage; testEnv?: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined }): LocalEvidence {
+/** FIX-0518: the pack's line when the owner let a project's sandboxes reach the model hosts: the fixed sentence, and the setting named (a name, never a value from the repository). */
+export const MODEL_HOSTS_ALLOWED_ITEM: EvidenceNotTested = { kind: "environment", id: SANDBOX_MODEL_HOSTS_ITEM_ID, text: MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, reason: "sandboxModelHosts is allow in the Rovara config" };
+
+export function createLocalEvidence(options: {
+  flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">;
+  blobs: ObjectStorage;
+  /** TE-C1: the engine's own store and clock, to look a baseline row up. Absent: no baseline is ever looked at. */
+  testEnv?: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined;
+  /** FIX-0518: whether the owner let this project's sandboxes reach the model hosts. Absent: the deny stands and the pack says nothing about it. */
+  sandboxModelHostsAllowed?: ((project: string) => boolean) | undefined;
+  /** FIX-0518 (L2): the state the task's worker machine was created with. Read first; the config setting above is only the answer when the machine cannot say (gone, Docker not answering, no machine on the record). */
+  sandboxModelHostsOf?: ((machineId: string) => Promise<"denied" | "allowed" | undefined>) | undefined;
+}): LocalEvidence {
   const { flow, blobs } = options;
   const log = (event: string, fields: Record<string, unknown>): void => flow.log?.({ component: "evidence", event, ...fields });
+  // What applied to this task's sandboxes: the state its MACHINE was created with (a setting changed since then has not reached it). Only when the machine cannot say does the owner's setting for the task's project stand in, so the line is never left
+  // out on a guess that it was denied; anything unreadable and no setting says nothing.
+  const modelHostsAllowed = async (workspaceId: string): Promise<boolean> => {
+    try {
+      const record = await flow.store.get(workspaceKey(workspaceId));
+      const machine = record?.["machine"];
+      const machineId = typeof machine === "object" && machine !== null && typeof (machine as Record<string, unknown>)["machineId"] === "string" ? (machine as Record<string, string>)["machineId"] : undefined;
+      if (machineId !== undefined && options.sandboxModelHostsOf !== undefined) {
+        const state = await options.sandboxModelHostsOf(machineId).catch(() => undefined);
+        if (state === "allowed") return true;
+        if (state === "denied") return false;
+      }
+      return options.sandboxModelHostsAllowed !== undefined && typeof record?.["projectName"] === "string" && options.sandboxModelHostsAllowed(record["projectName"]) === true;
+    } catch { return false; }
+  };
   return {
     async keepAfterChecks(input) {
       const { task, operation } = input;
@@ -61,8 +90,9 @@ export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" 
       }, {
         orgId: flow.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),
+        ...(await modelHostsAllowed(task.workspaceId) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
         // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), when the switch is on.
-        ...baselineInput(options.testEnv, flow.companyId, task.project, operation.dispatch.payload["testEnvironment"]),
+        ...baselineInput(options.testEnv, flow.companyId, task.project, task.taskId, () => operation.dispatch.payload["testEnvironment"]),
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => { late = true; resolve(undefined); }, EVIDENCE_KEEP_MAX_MS); timer.unref(); });
@@ -73,11 +103,12 @@ export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" 
   };
 }
 
-/** The keeper's baseline input for an operation whose stored plan offered candidates; nothing (so the keeper looks at no claim) when the switch is off, the plan is not readable or it offered none. */
-function baselineInput(testEnv: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined, companyId: string, project: string, storedPlan: unknown): { baseline?: ReturnType<typeof taskBaselineOf> } {
-  const plan = testEnv === undefined ? undefined : TestEnvTaskPlanSchema.safeParse(storedPlan);
-  if (testEnv === undefined || plan === undefined || !plan.success) return {};
-  const baseline = taskBaselineOf(testEnv, { orgId: companyId, project, plan: plan.data });
+/** The keeper's baseline input for an operation whose stored plan offered candidates; nothing (so the keeper looks at no claim, and the operation's plan is not even read) when the switch is off, the plan is not readable or it offered none. */
+function baselineInput(testEnv: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined, companyId: string, project: string, taskId: string, storedPlan: () => unknown): { baseline?: ReturnType<typeof taskBaselineOf> } {
+  if (testEnv === undefined || !baselineCacheEnabled(testEnv.env ?? process.env)) return {};
+  const plan = TestEnvTaskPlanSchema.safeParse(storedPlan());
+  if (!plan.success) return {};
+  const baseline = taskBaselineOf(testEnv, { orgId: companyId, project, taskId, plan: plan.data });
   return baseline === undefined ? {} : { baseline };
 }
 

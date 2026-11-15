@@ -32,7 +32,8 @@ async function world(env: NodeJS.ProcessEnv) {
     recordedAt: new Date(harness.clock.now - HOUR).toISOString(), envRevision: 1, branch: "main", headSha: sha(1), finishedAt: new Date(harness.clock.now - 2 * HOUR).toISOString(), writer: "nightly",
     tests: { total: 4, passed: 3, failed: 1, skipped: 0 }, failed: ["a.test.ts::x"], flaky: [], ...over }) }));
   const plan = (mode: "CHECKS" | "IMPLEMENT" = "CHECKS") => harness.deps.testEnvironment!.stepPlan({ project: PROJECT, taskId: started.task.taskId, mode, ...(mode === "CHECKS" ? { readiness: [cmd("npm", ["test"])] } : {}) });
-  return { keep, plan, store: deps.store };
+  const track = (n: number, baseBranch: string, state = "open") => deps.store.put({ item: { pk: `DEVTASK#${started.task.taskId}`, sk: `MERGE_TRACKING#${n}`, state, baseBranch } });
+  return { keep, plan, track, store: deps.store };
 }
 
 describe("baseline candidates in the task plan", () => {
@@ -68,6 +69,29 @@ describe("baseline candidates in the task plan", () => {
     expect([...planned!.requires].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_BASELINE_FEATURE].sort());
     // A coding run is never told: candidates are for the verification run.
     expect(await on.plan("IMPLEMENT")).toBeUndefined();
+  });
+
+  it("the branch is the task's own base branch: another branch, or two different ones, offers nothing from the default branch's rows; the same branch (or its own rows) still works", async () => {
+    const reference = JSON.stringify((await (await world({})).plan())?.plan);
+    const release = await world({ ROVARA_BASELINE_CACHE: "1" });
+    await release.keep({ headSha: sha(1) });
+    await release.track(1, "release/1.2");
+    expect(JSON.stringify((await release.plan())?.plan)).toBe(reference);
+    expect((await release.plan())?.requires).toEqual(["task.testEnvironment.v1"]);
+    const split = await world({ ROVARA_BASELINE_CACHE: "1" });
+    await split.keep({ headSha: sha(1) });
+    await split.track(1, "main"); await split.track(2, "release/1.2");
+    expect(JSON.stringify((await split.plan())?.plan)).toBe(reference);
+    const same = await world({ ROVARA_BASELINE_CACHE: "1" });
+    await same.keep({ headSha: sha(1) });
+    await same.track(1, "main"); await same.track(2, "release/1.2", "merged");
+    expect((await same.plan())?.plan.baselineCandidates).toEqual([{ sha: sha(1) }]);
+    // A row of the task's own (non-default) branch is a candidate for that branch's tasks.
+    const own = await world({ ROVARA_BASELINE_CACHE: "1" });
+    await own.keep({ headSha: sha(2), branch: "release/1.2" });
+    await own.keep({ headSha: sha(1) });
+    await own.track(1, "release/1.2");
+    expect((await own.plan())?.plan.baselineCandidates).toEqual([{ sha: sha(2) }]);
   });
 
   it("names the feature only for a plan that carries candidates", () => {

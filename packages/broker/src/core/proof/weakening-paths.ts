@@ -7,14 +7,17 @@
  * `.rovara/playbook.*`). A task that changes them changes what every later task is told, so a person should read the change.
  */
 const INSTRUCTION_PATH_PATTERNS: readonly RegExp[] = [
-  /(^|\/)(agents(\.override)?|claude)\.md$/,
+  /(^|\/)(agents(\.override)?|claude|gemini)\.md$/,
+  /(^|\/)\.cursorrules$/,
+  /(^|\/)\.claude(\/|$)/,
+  /(^|\/)\.cursor\/rules(\/|$)/,
   /(^|\/)\.github\/copilot-instructions\.md$/,
   /(^|\/)\.rovara\/rules(\/|$)/,
   /(^|\/)\.rovara\/(playbook|project)(\.[\w-]+)?$/,
 ];
 
 /**
- * Test configuration and the other files a CI run executes besides its workflow files: the test runners' configuration (vitest, jest, playwright, karma, cypress, mocha, pytest, tox, nox, coverage, nyc, rspec, phpunit),
+ * Test configuration and the other files a CI run executes besides its workflow files: the test runners' configuration (vitest, jest, playwright, karma, cypress, mocha, pytest, tox, nox, coverage, nyc, c8, ava, jasmine, rspec, phpunit),
  * `Makefile`, `conftest.py` and the files a test runner loads before the tests (`jest.setup.*`, `setupTests.*`). Package scripts are not paths: the changed-files reader flags a package.json whose scripts changed.
  */
 export const TEST_CONFIG_PATH_PATTERNS: readonly RegExp[] = [
@@ -23,13 +26,15 @@ export const TEST_CONFIG_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)(jest|vitest)\.setup\.[cm]?[jt]s$/,
   /(^|\/)setup-?tests\.[cm]?[jt]sx?$/,
   /(^|\/)(pytest\.ini|tox\.ini|conftest\.py|noxfile\.py|\.coveragerc|\.nycrc(\.[\w]+)?|\.rspec|phpunit(\.dist)?\.xml|\.mocharc(\.[\w]+)?|karma\.conf\.[cm]?js|codecov\.ya?ml|\.codecov\.ya?ml)$/,
+  /(^|\/)(nyc|ava)\.config\.[\w-]+$/,
+  /(^|\/)(\.c8rc(\.[\w-]+)?|jasmine\.json)$/,
   // Only the top-level Makefile and turbo.json: a Makefile deeper in the tree is not what CI runs (the owner's earlier tier table says low).
   /^(makefile|turbo\.json)$/,
 ];
 
 /** A folder that holds tests: a test, tests, __tests__, spec, e2e or test-data folder, somewhere above the file. `snapshots/`, `golden/` and `fixtures/` mean snapshots and fixtures only under one (an app's `fixtures/seed.json`, a docs `snapshots/` page or an asset `golden/` image are not tests'). */
-const TEST_FOLDERS: ReadonlySet<string> = new Set(["test", "tests", "__tests__", "spec", "specs", "e2e", "testdata", "test-data", "test_data"]);
-const SNAPSHOT_FOLDERS: ReadonlySet<string> = new Set(["snapshot", "snapshots", "golden"]);
+const TEST_FOLDERS: ReadonlySet<string> = new Set(["test", "tests", "__tests__", "spec", "specs", "e2e", "testdata", "test-data", "test_data", "tests_data", "testing", "cypress"]);
+const SNAPSHOT_FOLDERS: ReadonlySet<string> = new Set(["snapshot", "snapshots", "golden", "__golden__"]);
 const FIXTURE_FOLDERS: ReadonlySet<string> = new Set(["fixture", "fixtures"]);
 
 /** Whether a folder of `folders` (a set of names) lies below a test folder, among the folders above the file: checked on the path's segments in one pass, so the cost is the length of the path whatever it holds. */
@@ -60,6 +65,7 @@ const SNAPSHOT_PATH_PATTERNS: readonly RegExp[] = [
 
 /** Fixture and recorded-answer files that tests read: test data folders, mocks and recorded HTTP cassettes, and a `fixtures/` folder under a test folder. */
 const FIXTURE_PATH_PATTERNS: readonly RegExp[] = [
+  /(^|\/)src\/test\/resources(\/|$)/,
   /(^|\/)(__fixtures__|testdata|test-data|test_data|__mocks__|cassettes)(\/|$)/,
   /\.cassette\.[\w]+$/,
 ];

@@ -11,7 +11,7 @@ import { agentXError, testEnvDigest, type OrgId, type ProjectCommand, type TestE
 import { DEPENDENCY_PLAN_REFUSAL_WORDS, taskDependencyPlansOf, type ServiceCatalogSource } from "./dependency-plan.js";
 import { lastNightlyFailures } from "./nightly.js";
 import { baselineCandidatesOf } from "./baseline-cache.js";
-import { projectBaseBranch } from "./nightly-usable.js";
+import { taskBaselineBranch } from "./nightly-usable.js";
 import { baselineCacheEnabled } from "./switch.js";
 import type { TestEnvDeps } from "./deps.js";
 import { readApprovedSeedFiles } from "./environment.js";
@@ -82,7 +82,7 @@ async function planOf(
   }
   const failures = readiness === undefined ? [] : await lastNightlyFailures(deps, input.orgId, input.project).catch(() => []);
   // TE-C1 (switch `ROVARA_BASELINE_CACHE`): the newest trusted baseline commits on the task's base branch, for the worker to find the nearest ancestor of the task's base commit. Shas only; none (or off) leaves the plan as it was.
-  const baseBranch = readiness !== undefined && baselineCacheEnabled(env) ? await projectBaseBranch(deps, input.orgId, input.project) : undefined;
+  const baseBranch = readiness !== undefined && baselineCacheEnabled(env) ? await taskBaselineBranch(deps, input.orgId, input.project, input.taskId) : undefined;
   const candidates = baseBranch === undefined ? [] : await baselineCandidatesOf(deps, { orgId: input.orgId, project: input.project, envRevision: found.environment.revision, branch: baseBranch });
   return {
     revision: found.environment.revision, digest: pin.digest, roundBudgetMin: body.roundBudgetMin,

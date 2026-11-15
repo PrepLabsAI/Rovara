@@ -41,7 +41,7 @@ async function world(rawText: string | undefined) {
   const plan = (candidates: string[] | undefined) => ({ revision: 1, ...(candidates === undefined ? {} : { baselineCandidates: candidates.map((value) => ({ sha: value })) }) });
   // The default branch of the project, as the nightly's usability rule reads it.
   await documents.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition: { name: PROJECT, revision: 1, repositories: [{ name: "r", url: "https://example.invalid/r.git", path: "r", defaultBranch: "main", credentialRef: "c" }] } } });
-  const baseline = (candidates: string[] | undefined, env: NodeJS.ProcessEnv = { ROVARA_BASELINE_CACHE: "1" }) => taskBaselineOf({ ...testEnv, env }, { orgId: ORG, project: PROJECT, plan: plan(candidates) });
+  const baseline = (candidates: string[] | undefined, env: NodeJS.ProcessEnv = { ROVARA_BASELINE_CACHE: "1" }) => taskBaselineOf({ ...testEnv, env }, { orgId: ORG, project: PROJECT, taskId: TASK.taskId, plan: plan(candidates) });
   const keep = (candidates: string[] | undefined, env?: NodeJS.ProcessEnv) => keepEvidence(deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: baseline(candidates, env) });
   return { deps, documents, blobs, keep, baseline };
 }
@@ -115,16 +115,33 @@ describe("the claim is used only for a commit this task's plan offered", () => {
     await w.keep([sha(9)]);
     expect(await kept(w)).toBeUndefined();
     const other = await world(raw({ sha: sha(1), commitsBack: 1 }));
-    const wrongRevision = taskBaselineOf({ store: other.documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } }, { orgId: ORG, project: PROJECT, plan: { revision: 2, baselineCandidates: [{ sha: sha(1) }] } });
+    const wrongRevision = taskBaselineOf({ store: other.documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } }, { orgId: ORG, project: PROJECT, taskId: TASK.taskId, plan: { revision: 2, baselineCandidates: [{ sha: sha(1) }] } });
     await keepEvidence(other.deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: wrongRevision });
     expect(await kept(other)).toBeUndefined();
   });
 
   it("a claim for the candidate of another company's task finds nothing (the company is the task's)", async () => {
     const w = await world(raw({ sha: sha(1), commitsBack: 1 }));
-    const stranger = taskBaselineOf({ store: w.documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } }, { orgId: `org_${"b".repeat(20)}` as never, project: PROJECT, plan: { revision: 1, baselineCandidates: [{ sha: sha(1) }] } });
+    const stranger = taskBaselineOf({ store: w.documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } }, { orgId: `org_${"b".repeat(20)}` as never, project: PROJECT, taskId: TASK.taskId, plan: { revision: 1, baselineCandidates: [{ sha: sha(1) }] } });
     await keepEvidence(w.deps, { orgId: "org-b", task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: stranger });
     expect(await kept(w)).toBeUndefined();
+  });
+
+  it("the branch is the task's own base branch: a task whose open pull request targets another branch, or two different ones, gets no words from a row of the default branch", async () => {
+    const track = (w: Awaited<ReturnType<typeof world>>, n: number, baseBranch: string, state = "open") => w.documents.put({ item: { pk: `DEVTASK#${TASK.taskId}`, sk: `MERGE_TRACKING#${n}`, state, baseBranch } });
+    const release = await world(raw({ sha: sha(1), commitsBack: 2 }));
+    await track(release, 1, "release/1.2");
+    expect(await release.keep([sha(1)])).toMatchObject({ kept: true });
+    expect(await kept(release)).toBeUndefined();
+    const split = await world(raw({ sha: sha(1), commitsBack: 2 }));
+    await track(split, 1, "main"); await track(split, 2, "release/1.2");
+    await split.keep([sha(1)]);
+    expect(await kept(split)).toBeUndefined();
+    // The same branch as the default (and a closed pull request to elsewhere) still gets its words.
+    const same = await world(raw({ sha: sha(1), commitsBack: 2 }));
+    await track(same, 1, "main"); await track(same, 2, "release/1.2", "merged");
+    await same.keep([sha(1)]);
+    expect(await kept(same)).toMatchObject({ sha: sha(1), branch: "main" });
   });
 
   it("never writes a baseline row: a whole task round of keeping adds no row to the store", async () => {

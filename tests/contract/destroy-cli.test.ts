@@ -1,7 +1,9 @@
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import { STSClient } from "@aws-sdk/client-sts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectDefinition } from "@agentx/contracts";
 import { lineReader } from "../../packages/cli/src/destroy/cli.js";
@@ -18,7 +20,31 @@ import { memoryTokenStore } from "../support/setup-fakes.js";
 const ADMIN = "arn:aws:sts::123456789012:assumed-role/Admin/alice";
 const OPERATOR = "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice";
 const dirs: string[] = [];
-afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+const servers: Server[] = [];
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
+  vi.unstubAllEnvs();
+  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+/** Neither the runner's AWS files/env nor its instance metadata may supply a region. */
+async function isolatedAwsHome(): Promise<string> {
+  const home = await mkdtemp(join(process.env["TMPDIR"]!, "destroy-cli-home-"));
+  dirs.push(home);
+  for (const name of Object.keys(process.env)) {
+    if (name.startsWith("AWS_")) vi.stubEnv(name, undefined);
+  }
+  vi.stubEnv("HOME", home);
+  const config = join(home, "config");
+  const credentials = join(home, "credentials");
+  await Promise.all([writeFile(config, ""), writeFile(credentials, "")]);
+  vi.stubEnv("AWS_CONFIG_FILE", config);
+  vi.stubEnv("AWS_SHARED_CREDENTIALS_FILE", credentials);
+  // The SDK now falls back to IMDS for region discovery, with a 60-second negative cache.
+  // Scrubbing AWS_REGION and the INI files alone is therefore order/runner dependent.
+  vi.stubEnv("AWS_EC2_METADATA_DISABLED", "true");
+  return home;
+}
 
 function capture() {
   const out: string[] = [];
@@ -172,13 +198,34 @@ describe("agentx destroy in the wrong region", () => {
   });
 
   it("refuses when no region is configured anywhere", async () => {
-    for (const name of ["AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"]) vi.stubEnv(name, undefined);
-    vi.stubEnv("AWS_CONFIG_FILE", "/dev/null");
-    vi.stubEnv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null");
-    const { destroy, account } = await destroyDeps();
+    await isolatedAwsHome();
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      response.end(request.method === "PUT" ? "test-metadata-token" : "eu-west-1");
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+    vi.stubEnv("AWS_EC2_METADATA_SERVICE_ENDPOINT", `http://127.0.0.1:${port}`);
+    vi.stubEnv("AWS_EC2_METADATA_DISABLED", undefined);
+    // Positive control: the real SDK can read this synthetic metadata service.
+    const client = new STSClient({});
+    try { expect(await client.config.region()).toBe("eu-west-1"); } finally { client.destroy(); }
+    expect(requests).toEqual(["PUT /latest/api/token", "GET /latest/meta-data/placement/region"]);
+    requests.length = 0;
+    // Exercise inherited environment pollution as well as a reachable metadata service.
+    vi.stubEnv("AWS_REGION", "eu-west-1");
+    vi.stubEnv("AWS_DEFAULT_REGION", "eu-west-1");
+    vi.stubEnv("AWS_PROFILE", "inherited-profile");
+    const home = await isolatedAwsHome();
+    // Keep the fake reachable: removing the IMDS guard must fail, never contact real AWS.
+    vi.stubEnv("AWS_EC2_METADATA_SERVICE_ENDPOINT", `http://127.0.0.1:${port}`);
+    const { destroy, account } = await destroyDeps({ home });
     const io = capture();
-    expect(await executeCli(["--env", "staging", "destroy"], { ...io, destroy })).toBe(2);
+    expect(await executeCli(["--env", "staging", "--config-dir", home, "destroy"], { ...io, destroy, environments: { home } })).toBe(2);
     expect(io.err.join("")).toContain("agentx destroy could not find an AWS region in your configuration; pass --region <the environment's region>");
     expect(account.calls).toEqual([]);
+    expect(requests).toEqual([]);
   });
 });

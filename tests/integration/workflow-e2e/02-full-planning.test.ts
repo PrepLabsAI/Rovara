@@ -195,7 +195,7 @@ describe("Suite 2: Full planning", () => {
     expect(page.body).toContain(`Not found at ${e2e.baseCommit.slice(0, 7)}`);
     await e2e.click("agentx_workflow_approve");
     await e2e.settle();
-    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(e2e.workflow(), whyStopped(e2e)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
   }, 120_000);
 
   it("2.9b says an excerpt couldn't be loaded when GitHub fails, never shows the model's copy, and Slack approval still works", async () => {
@@ -266,9 +266,15 @@ describe("Suite 2: Full planning", () => {
     await e2e.click("agentx_workflow_approve");
     expect(e2e.slack.views).toEqual([]);
     await e2e.settle();
-    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(e2e.workflow(), whyStopped(e2e)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
   }, 120_000);
 });
+
+/** If the workflow stops anywhere but where a test expects, say why: the block reason and each review's reason are the whole story of a stage that did not pass (a bare stage/state diff once hid it). */
+function whyStopped(e2e: WorkflowE2E): string {
+  const workflow = e2e.workflow();
+  return `${workflow.stage}/${workflow.state}; blockReason=${workflow.blockReason ?? "none"}; reviews=${JSON.stringify((workflow.reviews ?? []).map((review) => ({ role: review.role, status: review.status, failureReason: review.failureReason })))}`;
+}
 
 /** Submits the approval modal when the press opened one (a Full phase may; Quick with no optional checks does not). */
 async function approveModal(e2e: WorkflowE2E): Promise<void> {
