@@ -36,7 +36,7 @@ function jsonClaimsReport(text: string): boolean {
     const value = JSON.parse(text) as unknown;
     if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
     const keys = value as Record<string, unknown>;
-    return "testResults" in keys || "numTotalTests" in keys || ("results" in keys && typeof keys["results"] === "object" && keys["results"] !== null && "tests" in (keys["results"] as object));
+    return "testResults" in keys || "numTotalTests" in keys || ("results" in keys && typeof keys["results"] === "object" && keys["results"] !== null && "tests" in (keys["results"]));
   } catch {
     // Go's test2json writes one event per line; such a stream that did not parse whole still claims to be a report.
     try {
