@@ -1,3 +1,4 @@
+import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
@@ -561,7 +562,7 @@ async function refuse(deps: DeveloperTaskRouteDependencies, turns: string, party
 /** The developer's own task, or TASK_NOT_FOUND for anyone else and for a malformed ID (FR-036). */
 export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<DeveloperTaskRecord> {
   const task = TASK_ID.test(taskId) ? await get<DeveloperTaskRecord>(deps, taskKey(taskId)) : undefined;
-  if (task === undefined || task.developerId !== caller.developerId) {
+  if (task === undefined || task.developerId !== caller.developerId || !recordInCompany(task, deps.companyId)) {
     // A malformed ID is never echoed back: it could be long or carry markup.
     throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
@@ -578,7 +579,7 @@ async function loadReadableTask(deps: DeveloperTaskRouteDependencies, caller: De
   } catch (error) {
     if (!TASK_ID.test(taskId) || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (task !== undefined && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
+    if (task !== undefined && recordInCompany(task, deps.companyId) && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
     throw error;
   }
 }
@@ -1718,44 +1719,64 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
   const tasks: DeveloperTaskListItem[] = [];
   let start: Record<string, unknown> | undefined = after === undefined ? undefined : { pk, sk: after };
   let scanned = 0;
-  do {
-    const response = await deps.documentClient.send(new QueryCommand({
-      TableName: deps.tableName,
-      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-      ExpressionAttributeValues: { ":pk": pk, ":prefix": "TASK#" },
-      ScanIndexForward: false,
-      Limit: 50,
-      ConsistentRead: true,
-      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
-    })) as { Items?: DeveloperTaskIndexRecord[]; LastEvaluatedKey?: Record<string, unknown> };
-    const rows = response.Items ?? [];
-    for (const [position, row] of rows.entries()) {
-      scanned += 1;
-      let current: DeveloperTaskStatus = row.status;
-      let updatedAt = row.updatedAt;
-      // A closed task never changes again, so only open rows are derived afresh.
-      if (row.status !== "CLOSED") {
-        const task = await get<DeveloperTaskRecord>(deps, taskKey(row.taskId));
-        if (task !== undefined && task.developerId === caller.developerId) {
-          const view = await taskView(deps, task, { events: 0, details: false });
-          current = view.status;
-          if (current !== row.status) {
-            updatedAt = view.updatedAt;
-            await syncIndex(deps, task, current, updatedAt);
+  const scanMax = deps.companyId === undefined ? LIST_SCAN_MAX : limit;
+  let completed = after;
+  try {
+    do {
+      const response = await deps.documentClient.send(new QueryCommand({
+        TableName: deps.tableName,
+        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+        ExpressionAttributeValues: { ":pk": pk, ":prefix": "TASK#" },
+        ScanIndexForward: false,
+        Limit: 50,
+        ConsistentRead: true,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: DeveloperTaskIndexRecord[]; LastEvaluatedKey?: Record<string, unknown> };
+      const rows = response.Items ?? [];
+      for (const [position, row] of rows.entries()) {
+        scanned += 1;
+        let current: DeveloperTaskStatus = row.status;
+        let updatedAt = row.updatedAt;
+        // With membership enabled, even closed index rows need the canonical task's company.
+        // At most the requested page size is loaded; a filtered page retains its continuation.
+        const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
+        const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
+        if ((row.status !== "CLOSED" || deps.companyId !== undefined) && visible) {
+          if (task !== undefined && task.developerId === caller.developerId) {
+            // Checked lists finish each read before starting the next, so a budget
+            // continuation leaves no unfinished reads or partially rendered task.
+            const loaded = deps.companyId === undefined ? undefined : {
+              workspace: await deps.actions.workspace(task.workspaceId),
+              operations: await deps.actions.operations(task.workspaceId),
+            };
+            const view = await taskView(deps, task, { events: 0, details: false, ...(loaded === undefined ? {} : { loaded }) });
+            current = view.status;
+            if (deps.companyId !== undefined) updatedAt = view.updatedAt;
+            if (current !== row.status) {
+              updatedAt = view.updatedAt;
+              await syncIndex(deps, task, current, updatedAt);
+            }
           }
         }
+        completed = row.sk;
+        const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
+        const data = deps.companyId === undefined ? row : task;
+        const matches = visible && data !== undefined && (project === null || data.project === project) && (status === undefined || !status.success || current === status.data);
+        if (matches && data !== undefined) {
+          tasks.push({ taskId: data.taskId, title: data.title, project: data.project, status: current, shared: data.shared, createdAt: data.createdAt, updatedAt });
+          if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
+        }
+        // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.
+        if (scanned >= scanMax) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
       }
-      const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
-      const matches = (project === null || row.project === project) && (status === undefined || !status.success || current === status.data);
-      if (matches) {
-        tasks.push({ taskId: row.taskId, title: row.title, project: row.project, status: current, shared: row.shared, createdAt: row.createdAt, updatedAt });
-        if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
-      }
-      // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.
-      if (scanned >= LIST_SCAN_MAX) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
-    }
-    start = response.LastEvaluatedKey;
-  } while (start !== undefined);
+      start = response.LastEvaluatedKey;
+    } while (start !== undefined);
+  } catch (error) {
+    // Exclusive-start cursor stays at the last fully examined row, including
+    // filtered rows. An individual oversized task still refuses with fixed words.
+    if (error instanceof CompanyReadItemLimit && completed !== after && completed !== undefined) return { tasks, nextCursor: encodeCursor(completed) };
+    throw error;
+  }
   return { tasks };
 }
 
