@@ -192,8 +192,8 @@ export interface DeveloperRouteDependencies {
 }
 /** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
 /**
- * `stepUp` (lane ID part 2, hosted wiring (g)): the person's last step-up as the VERIFIED access token states it (`stepUpOf`); set only by the token sign-in (`authenticateDeveloper`), never
- * from a header, a query or a body. Only the core's routes read it, and they check its age themselves.
+ * `stepUp` (lane ID part 2, hosted wiring (g)): the person's last step-up as the VERIFIED access token states it (`stepUpOf`); set only by the token sign-in (`authenticateDeveloper`, and
+ * `authenticateClientToken` for a sign-in client's token), never from a header, a query or a body. Only the core's routes read it, and they check its age themselves.
  */
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string; stepUp?: { at: string; method: string } }
 
@@ -912,7 +912,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; stepUp?: { at: string; method: string } }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -944,7 +944,13 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
     // access has the person's rights, so every scope.
     const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
-    return { client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt };
+    // Lane ID part 2 for a sign-in client (switch-on L11): the step-up the VERIFIED token states (`stepUpOf`; the sign-in server writes it only into the token of a session that began with a
+    // step-up on Code's own page, `acr_values=step-up`), never anything else the request sends. The route checks its age.
+    const stepUp = stepUpOf(claims);
+    return {
+      client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt,
+      ...(stepUp === undefined ? {} : { stepUp }),
+    };
   } catch (error) {
     if (deps.companies !== undefined && amr === "oidc") throw refused();
     throw error;
@@ -972,7 +978,8 @@ function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord
  * picks the path; each then verifies the token in full. The client's registration is read at every request, so
  * removing a scope or full access takes effect at once.
  */
-async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<DeveloperCaller> {
+/** The caller of a developer route: the Rovara CLI's token, or a sign-in client's with the route's scope (or full access). Exported for its tests. */
+export async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<DeveloperCaller> {
   let azp: unknown;
   try {
     azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
@@ -990,6 +997,7 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
   requireRouteScope(route, person);
   return {
     developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName, clientId: person.client.clientId,
+    ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }),
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
   };
