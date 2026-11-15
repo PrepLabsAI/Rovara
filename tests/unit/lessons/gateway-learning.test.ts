@@ -9,7 +9,7 @@ const TOKEN = "learning-token-for-one-call";
 const answer = (status: number, body: unknown, headers: Record<string, string> = {}) => new Response(typeof body === "string" ? body : JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
 function model(reply: () => Response | Promise<Response>, token: () => Promise<{ token: string; model: string } | undefined> = async () => ({ token: TOKEN, model: "claude-sonnet" })) {
-  const fetch = vi.fn(async (_url: URL | string, _init?: RequestInit) => await reply());
+  const fetch = vi.fn<(url: URL | string, init?: RequestInit) => Promise<Response>>(async () => await reply());
   return { fetch, model: createGatewayLearningModel({ gatewayUrl: "https://gateway.example", token, fetch: fetch as unknown as typeof globalThis.fetch }) };
 }
 
@@ -21,7 +21,7 @@ describe("the learning call through the gateway", () => {
     expect(String(url)).toBe("https://gateway.example/v1/learning/messages");
     expect(init?.method).toBe("POST");
     expect((init?.headers as Record<string, string>)["x-api-key"]).toBe(TOKEN);
-    expect(JSON.parse(String(init?.body))).toEqual({ model: "claude-sonnet", max_tokens: 800, system: CALL.system, messages: [{ role: "user", content: CALL.user }] });
+    expect(JSON.parse(init?.body as string)).toEqual({ model: "claude-sonnet", max_tokens: 800, system: CALL.system, messages: [{ role: "user", content: CALL.user }] });
     expect(LEARNING_CALL_STEP).toBe("rovara-lessons-learning-call");
   });
 
