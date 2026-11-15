@@ -2,6 +2,7 @@ import { createLocalJWKSet, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
 import {
   developerIdentityConfigFromEnvironment,
+  taskPublicKeysFromEnvironment,
   parseOidcClientSecret,
   parseSlackSignInSecret,
   remoteJwksCache,
@@ -13,7 +14,7 @@ import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/
 import type { HttpResult } from "../../packages/broker/src/developer/server.js";
 import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import {
-  BOT_TOKEN, CLI_REDIRECT, ISSUER, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, authorizeQuery, httpEvent, identityHarness,
+  BOT_TOKEN, CLI_REDIRECT, ISSUER, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, fakeKms, authorizeQuery, httpEvent, identityHarness,
   type FakeSlackUser,
 } from "../support/developer-fakes.js";
 
@@ -805,5 +806,49 @@ describe("task People metered display invoke contract", () => {
       operation: "directory", admission: { version: 1, slackCallsUsed: 2 }, result: { ok: true, users: [{ id: maya.userId }] },
     });
     expect(await h.handler({ ...request, admission: undefined } as never)).toEqual({ ok: false, error: "invalid_request" });
+  });
+});
+
+
+describe("task public key publication", () => {
+  it("keeps absent and empty task-key configuration byte-identical", async () => {
+    for (const env of [{}, { TASK_TOKEN_KEY_ARN: "" }]) {
+      const h = identityHarness();
+      const kms = { send: () => { throw new Error("unexpected KMS call"); } };
+      h.deps.extraPublicKeys = taskPublicKeysFromEnvironment(env, kms);
+      expect(h.deps.extraPublicKeys).toEqual([]);
+      expect((await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"))).body).toBe(JSON.stringify(await h.signer.jwks()));
+    }
+  });
+
+  it("publishes distinct developer and task purposes using the configured KMS key", async () => {
+    const h = identityHarness();
+    const kms = fakeKms();
+    h.deps.extraPublicKeys = taskPublicKeysFromEnvironment({ TASK_TOKEN_KEY_ARN: KEY_ARN }, kms);
+    const extra = await h.deps.extraPublicKeys[0]!.publicJwk();
+    const developer = await h.signer.publicJwk();
+    expect(extra.kid).not.toBe(developer.kid);
+    const response = await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"));
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(JSON.stringify({ keys: [
+      { ...developer, rovara_purpose: "developer" }, { ...extra, rovara_purpose: "task" },
+    ] }));
+    expect(kms.calls).toEqual([{ name: "GetPublicKeyCommand", input: { KeyId: KEY_ARN } }]);
+    expect(response.body).not.toContain(KEY_ARN);
+    expect(h.logs).toEqual([]);
+  });
+
+  it("omits a failed task key and logs fixed words without taking down developer sign-in", async () => {
+    const h = identityHarness();
+    const secret = "planted-task-key-failure-secret";
+    h.deps.extraPublicKeys = taskPublicKeysFromEnvironment({ TASK_TOKEN_KEY_ARN: KEY_ARN }, {
+      send: () => Promise.reject(new Error(secret)),
+    });
+    const response = await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"));
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe(JSON.stringify({ keys: [{ ...await h.signer.publicJwk(), rovara_purpose: "developer" }] }));
+    expect(h.logs).toEqual([{ event: "developer.jwks_task_key_failed" }]);
+    expect(JSON.stringify([response, h.logs])).not.toContain(secret);
+    expect(JSON.stringify([response, h.logs])).not.toContain(KEY_ARN);
   });
 });

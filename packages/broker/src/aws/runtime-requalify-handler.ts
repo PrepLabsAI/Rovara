@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
-import { DescribeSubnetsCommand, EC2Client } from "@aws-sdk/client-ec2";
+import { EC2Client } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { IAMClient } from "@aws-sdk/client-iam";
 import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
@@ -10,7 +10,8 @@ import { SFNClient } from "@aws-sdk/client-sfn";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { Ec2RuntimeBindingSchema, type Ec2RuntimeBinding } from "@agentx/contracts";
+import type { Ec2RuntimeBinding } from "@agentx/contracts";
+import { foundationWorkerBinding } from "./worker-binding.js";
 import { requiredEnvironment } from "./lambda.js";
 import { requalifyDrainCount } from "../e2e/requalify-hold.js";
 import { ec2RequalifyInstanceReader } from "./runtime-requalify.js";
@@ -28,16 +29,9 @@ const ec2 = new EC2Client(region);
 let publicKey: Promise<string> | undefined;
 let binding: Promise<Ec2RuntimeBinding> | undefined;
 
-/** The foundation's worker binding: the launch template and one subnet per zone, in the order of the PrivateSubnetIds the stack was given (as the foundation's Ec2WorkerSubnets lists them). */
+/** The foundation's worker binding (worker-binding.ts). */
 async function workerBinding(): Promise<Ec2RuntimeBinding> {
-  const ids = requiredEnvironment("PRIVATE_SUBNET_IDS").split(",").map((id) => id.trim()).filter((id) => id !== "");
-  const described = (await ec2.send(new DescribeSubnetsCommand({ SubnetIds: ids }))).Subnets ?? [];
-  const subnets = ids.map((subnetId) => {
-    const availabilityZone = described.find((subnet) => subnet.SubnetId === subnetId)?.AvailabilityZone;
-    if (availabilityZone === undefined) throw new Error("a worker subnet was not found");
-    return { availabilityZone, subnetId };
-  });
-  return Ec2RuntimeBindingSchema.parse({ deploymentMode: "ec2-ebs", launchTemplateId: requiredEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID"), subnets, volumeSizeGiB: 20, volumeType: "gp3" });
+  return foundationWorkerBinding(ec2, { privateSubnetIds: requiredEnvironment("PRIVATE_SUBNET_IDS"), launchTemplateId: requiredEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID") });
 }
 
 // The count of rounds and setup runs still running on the old machine (AR-3): the dispatchers defer new work while the hold stands, so this only falls.

@@ -77,6 +77,8 @@ const WorkspaceRecordSchema = z
     preparationManifest: z.string().max(1_024).optional(),
     closeOperationId: z.string().uuid().optional(),
     closedAt: z.string().datetime().optional(),
+    /** The status a workspace had when the setup check closed it (core/setup-agent/check.ts); only on a closed workspace, never CLOSED itself. */
+    closedFrom: WorkspaceStatusSchema.exclude(["CLOSED"]).optional(),
     closedBy: z
       .object({
         teamId: z.string().regex(/^[TE][A-Z0-9]{2,31}$/),
@@ -137,6 +139,10 @@ export const WorkspaceInstanceSchema = z.preprocess((value) => {
     }
     if (workspace.status === "CLOSED" && !workspace.closedAt) {
       context.addIssue({ code: "custom", path: ["closedAt"], message: "closed workspaces require closedAt" });
+    }
+    // A path that ever reopens a closed workspace must remove closedFrom, or the row stops parsing (and drops out of the developer and admin listings).
+    if (workspace.closedFrom !== undefined && workspace.status !== "CLOSED") {
+      context.addIssue({ code: "custom", path: ["closedFrom"], message: "only a closed workspace has closedFrom" });
     }
   })
   // The refinement above guarantees the per-mode shape that WorkspaceInstance describes.
