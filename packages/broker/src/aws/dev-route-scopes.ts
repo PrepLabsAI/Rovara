@@ -31,6 +31,10 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Spec 065b: a project from a repository the GitHub App can reach.
   { method: "POST", path: "/v1/dev/client/projects", requires: "projects:create" },
   { method: "GET", path: "/v1/dev/client/repositories", requires: "projects:create" },
+  // Lanes AU and EV (#649): the company's audit records and events, for a company administrator. No named scope reads them yet, so only a client with full
+  // access does (off unless an administrator turns it on); a named company-read scope is a follow-up.
+  { method: "GET", path: "/v1/dev/client/company/audit/records", requires: "full" },
+  { method: "GET", path: "/v1/dev/client/company/events", requires: "full" },
   // Spec 065: one project the person may use; it shows only what they may use, so it needs no scope.
   { method: "GET", path: "/v1/dev/client/projects/{project}", requires: "none" },
   // Spec 065a: a project's members.
