@@ -181,6 +181,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
       // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
       "packages/broker/src/core/work-events/work-events.ts",
+      // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item core/sessions/notes.ts writes, with the same 400-day expiry; it reads that item back too.
+      "packages/broker/src/developer/task-code-routes.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

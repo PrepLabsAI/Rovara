@@ -220,6 +220,7 @@ import { readTaskPlanDocument, type TaskPlanDocumentView } from "./task-plan-doc
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
 import { loadPlanSelfCheck } from "../developer/plan-self-check.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
+import { createPlanComment, listPlanComments, listTaskMessages, readTaskDiff, sendTaskMessage } from "../developer/task-code-routes.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { getTaskPeoplePresentation, resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities, type TaskPersonCheck } from "../developer/task-people.js";
@@ -260,6 +261,10 @@ export interface DeveloperTaskRouteDependencies {
   actions: DeveloperTaskActions;
   /** Recollects every linked PR from GitHub; required before feedback decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
+  /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
+  companyId?: string;
+  /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
+  readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string };
   checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
@@ -6303,11 +6308,16 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
   if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "plan") return getTaskPlan(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "messages") return listTaskMessages(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "messages") return sendTaskMessage(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "diff") return readTaskDiff(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "comments") return listPlanComments(deps, caller, taskId);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "comments") return createPlanComment(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return { view: await getTaskPeople(deps, caller, taskId) };
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
     const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
