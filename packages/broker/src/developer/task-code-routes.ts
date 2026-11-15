@@ -19,12 +19,17 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { isConditional } from "../aws/broker-shared.js";
 import { plainName } from "../aws/task-web.js";
-import { NOTE_KEEP_SECONDS, NOTE_SK_PREFIX, noteKey } from "../core/sessions/notes.js";
 import { rowCompany, rowInCompany } from "./company-rows.js";
 import { createTaskComment, currentStepDocument, listTaskComments, pageRefusal, takeRate, type PageActor } from "./page-comments.js";
 import { resolveTaskAccess, taskOpen, type TaskAccess } from "./task-access.js";
 import { taskAccessFence, } from "./task-people.js";
 import { taskKey } from "./task-records.js";
+
+// A task's note keys, as code/next's core/sessions/notes.ts defines them. Mainline doesn't carry the core engine yet (#691), so the three values
+// live here until it does; the workflow reads these same `NOTE#` items (AppNoteSchema) for the task's next step.
+const NOTE_KEEP_SECONDS = 400 * 86_400;
+const NOTE_SK_PREFIX = "NOTE#";
+const noteKey = (taskId: string, messageId: string): { pk: string; sk: string } => ({ pk: `DEVTASK#${taskId}`, sk: `${NOTE_SK_PREFIX}${messageId}` });
 
 // ---- the shapes (they mirror the web app's contract, version 0, by hand; the route tests pin them)
 
