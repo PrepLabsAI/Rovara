@@ -423,6 +423,8 @@ describe("no callers", () => {
       "packages/broker/src/core/proof/evidence-pack.ts", "packages/broker/src/core/proof/evidence-v2-lines.ts", "packages/broker/src/core/proof/proof-table.ts",
       "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts",
       "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
+      // setup-prove.ts (DEC 185 / #629) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
+      "packages/worker/src/setup-prove.ts",
     ]);
     expect(hits.filter((file) => !file.startsWith("packages/contracts/") && !approved.has(file))).toEqual([]);
   });
