@@ -1,7 +1,7 @@
 // MR1-LIVE: installed dependency folders mirrored into MR1's check root, the fallback to today's path, and the switch.
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,8 +9,17 @@ import { EvidenceRawSchema, MULTI_REPO_FALLBACK_NOTES } from "@agentx/contracts"
 import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import * as isolatedCopies from "../../packages/worker/src/isolated-git.js";
 import * as partCopies from "../../packages/worker/src/parallel-parts-git.js";
-import { createDependencyMirror, DEPENDENCY_MIRROR_LIMITS, DEPENDENCY_REFUSAL, dependencyFolders, mirrorDependencyFolders, verifyMirroredLinks } from "../../packages/worker/src/multi-repo-dependencies.js";
+import { createDependencyMirror, DEPENDENCY_MIRROR_LIMITS, DEPENDENCY_REFUSAL, finishMirror, ignoredEntries, mirrorEntries, verifyMirroredLinks } from "../../packages/worker/src/multi-repo-dependencies.js";
 import { createRepositoryCheckSupplier, MULTI_REPO_CHECKS_LIVE } from "../../packages/worker/src/multi-repo-supplier.js";
+import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
+import { randomUUID } from "node:crypto";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
+import type { WorkerEvent } from "../../packages/worker/src/events.js";
+import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
+import { runTestProof } from "../../packages/worker/src/verification/test-proof.js";
 import { createCheckRunners, runChecks, type CheckPlan, type CheckRound, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 
 const roots: string[] = [];
@@ -158,6 +167,22 @@ describe("MR1-LIVE: ordinary single-edge tasks pass identically to today's path"
     expect([[], [WIRING]]).toContainEqual(notes);
   });
 
+  it("ignored build output and env files, and files at the workspace root: the provider's main is an ignored dist/index.js", async () => {
+    const w = await nodeWorkspace();
+    for (const repo of ["app", "lib"]) await put(w.root, `${repo}/.gitignore`, "node_modules/\ndist/\n.env\n");
+    await put(w.root, "lib/package.json", JSON.stringify({ name: "lib", main: "dist/index.js" }));
+    for (const repo of ["app", "lib"]) { git(join(w.root, repo), "add", "-A"); git(join(w.root, repo), "commit", "-qm", "build output"); }
+    for (const repo of w.repositories) repo.baseCommit = git(join(w.root, repo.path), "rev-parse", "HEAD");
+    await put(w.root, "lib/dist/index.js", "module.exports = require('pad-lib')('built');\n");
+    await put(w.root, "app/.env", "GREETING=from-env\n");
+    await put(w.root, "shared.json", JSON.stringify({ root: "workspace" }));
+    const plan: CheckPlan = { source: "project", readiness: [{ executable: process.execPath, args: ["-e", "const fs = require('fs'); console.log(require('lib'), fs.readFileSync('.env','utf8').trim(), require('../shared.json').root)"], cwd: "app", timeoutSeconds: 20 }] };
+    const { today, result, live } = await bothPaths(w, plan);
+    expect(today.entries.map((entry) => [entry.after, entry.output])).toEqual([["passed", "[built] GREETING=from-env workspace\n"]]);
+    expect(comparable(result)).toEqual(comparable(today));
+    expect(live.notes()).toEqual([]);
+  });
+
   it("an ignored folder named only in the source's .git/info/exclude stays out of MR1's tree snapshots", async () => {
     const w = await nodeWorkspace("");
     await writeFile(join(w.root, "app/.git/info/exclude"), "node_modules/\n");
@@ -189,12 +214,12 @@ describe("MR1-LIVE: the switch", () => {
 describe("MR1-LIVE: link safety", () => {
   const mirrorOf = async (w: { root: string }, checkRoot: string) => createDependencyMirror({ workspace: w.root, checkRoot, copies: new Map([[join(w.root, "app"), join(checkRoot, "app")], [join(w.root, "lib"), join(checkRoot, "lib")]]), checkTime: () => undefined });
   const fresh = async (w: { root: string }) => { const checkRoot = await mkdtemp(join(w.root, ".agentx-check-")); await mkdir(join(checkRoot, "app")); await mkdir(join(checkRoot, "lib")); return { checkRoot, mirror: await mirrorOf(w, checkRoot) }; };
-  const node = [{ kind: "node" as const, path: "node_modules" }];
+  const node = ["node_modules"];
 
   it("re-points links into a repository at the copy and keeps links inside the folder relative", async () => {
     const w = await nodeWorkspace();
     const { checkRoot, mirror } = await fresh(w);
-    expect(await mirrorDependencyFolders(mirror, join(w.root, "app"), join(checkRoot, "app"), node)).toEqual(["node_modules"]);
+    expect(await mirrorEntries(mirror, join(w.root, "app"), join(checkRoot, "app"), node)).toEqual(["node_modules"]);
     await verifyMirroredLinks(mirror);
     expect(await readlink(join(checkRoot, "app/node_modules/lib"))).toBe("../../lib");
     expect(await readlink(join(checkRoot, "app/node_modules/.bin/fmt-cli"))).toBe("../fmt-app/cli.js");
@@ -212,7 +237,7 @@ describe("MR1-LIVE: link safety", () => {
     const outside = await temporary("mr1-outside-");
     await plant(w, outside);
     const { checkRoot, mirror } = await fresh(w);
-    const mirrored = mirrorDependencyFolders(mirror, join(w.root, "app"), join(checkRoot, "app"), node).then(() => verifyMirroredLinks(mirror));
+    const mirrored = mirrorEntries(mirror, join(w.root, "app"), join(checkRoot, "app"), node).then(() => verifyMirroredLinks(mirror));
     await expect(mirrored).rejects.toThrow(DEPENDENCY_REFUSAL.link);
   });
 
@@ -221,7 +246,7 @@ describe("MR1-LIVE: link safety", () => {
     const outside = await temporary("mr1-outside-");
     await symlink(outside, join(w.root, "app/node_modules/evil"));
     const { checkRoot, mirror } = await fresh(w);
-    await expect(mirrorDependencyFolders(mirror, join(w.root, "app"), join(checkRoot, "app"), node)).rejects.toThrow(DEPENDENCY_REFUSAL.link);
+    await expect(mirrorEntries(mirror, join(w.root, "app"), join(checkRoot, "app"), node)).rejects.toThrow(DEPENDENCY_REFUSAL.link);
   });
 
   it("the final verification refuses a mirrored link that resolves out of the check root", async () => {
@@ -240,8 +265,8 @@ describe("MR1-LIVE: link safety", () => {
   it("a venv's interpreter link may name the base interpreter outside the workspace, recreated to that exact file", async () => {
     const w = await pythonWorkspace();
     const { checkRoot, mirror } = await fresh(w);
-    expect(await mirrorDependencyFolders(mirror, join(w.root, "app"), join(checkRoot, "app"), [{ kind: "python", path: ".venv" }])).toEqual([".venv"]);
-    await verifyMirroredLinks(mirror);
+    expect(await mirrorEntries(mirror, join(w.root, "app"), join(checkRoot, "app"), [".venv"])).toEqual([".venv"]);
+    await finishMirror(mirror);
     expect(await readlink(join(checkRoot, "app/.venv/bin/python"))).toBe(pythonInfo().executable);
     expect(await readlink(join(checkRoot, "app/.venv/bin/python3"))).toBe("python");
     // The copy's script and .pth name the copy; the workspace's are untouched.
@@ -261,14 +286,27 @@ describe("MR1-LIVE: link safety", () => {
     const w = await pythonWorkspace();
     await plant(w);
     const { checkRoot, mirror } = await fresh(w);
-    await expect(mirrorDependencyFolders(mirror, join(w.root, "app"), join(checkRoot, "app"), [{ kind: "python", path: ".venv" }]).then(() => verifyMirroredLinks(mirror))).rejects.toThrow(DEPENDENCY_REFUSAL.link);
+    await expect(mirrorEntries(mirror, join(w.root, "app"), join(checkRoot, "app"), [".venv"]).then(() => finishMirror(mirror))).rejects.toThrow(DEPENDENCY_REFUSAL.link);
   });
 
-  it("finds node_modules beside every tracked package.json (workspaces), venvs beside Python manifests, never a folder the tree tracks content in", () => {
-    expect(dependencyFolders(["package.json", "packages/a/package.json", "packages/a/node_modules/x/index.js", "py/pyproject.toml", "node_modules/y/package.json", "vendor/.venv"])).toEqual({
-      folders: [{ kind: "python", path: ".venv" }, { kind: "python", path: "py/.venv" }, { kind: "python", path: "py/venv" }, { kind: "python", path: "venv" }],
-      pnp: [".pnp.cjs", ".pnp.js", "packages/a/.pnp.cjs", "packages/a/.pnp.js"],
-    });
+  it("reads Git's ignored listing: directories without their slash, never worker state, a newline or dot segment refused", () => {
+    expect(ignoredEntries("node_modules/\0packages/a/node_modules/\0.env\0dist/\0.agentx/\0.agentx-check-x/\0.agentx-python/\0sub/.Rovara/\0")).toEqual([".env", "dist", "node_modules", "packages/a/node_modules"]);
+    expect(() => ignoredEntries("a\nb\0")).toThrow(DEPENDENCY_REFUSAL.layout);
+    expect(() => ignoredEntries("../x\0")).toThrow(DEPENDENCY_REFUSAL.layout);
+  });
+
+  it("a venv whose bin is a link through a tracked link to the live workspace: refused before any file is rewritten", async () => {
+    const w = await pythonWorkspace();
+    const live = join(w.root, "app/.venv/bin");
+    await rename(live, join(w.root, "app/realbin"));
+    // A candidate link points (absolutely) at the live scripts folder; the venv's own bin goes through it, so only the final check can see where it leads.
+    await symlink(join(w.root, "app/realbin"), join(w.root, "app/binlink"));
+    await symlink("../binlink", live);
+    const show = await readFile(join(w.root, "app/realbin/show"), "utf8");
+    const { checkRoot, mirror } = await fresh(w);
+    await cp(join(w.root, "app/binlink"), join(checkRoot, "app/binlink"), { verbatimSymlinks: true });
+    await expect(mirrorEntries(mirror, join(w.root, "app"), join(checkRoot, "app"), [".venv"]).then(() => finishMirror(mirror))).rejects.toThrow(DEPENDENCY_REFUSAL.link);
+    expect(await readFile(join(w.root, "app/realbin/show"), "utf8")).toBe(show);
   });
 });
 
@@ -319,10 +357,16 @@ describe("MR1-LIVE: every refusal falls back to today's path with its reason rec
     await fallsBack(w, LINK);
   });
 
+  it("an ignored node_modules that is itself a link to a workspace folder outside every repository", async () => {
+    const w = await nodeWorkspace("node_modules\n");
+    await cp(join(w.root, "app/node_modules"), join(w.root, "shared/nm"), { recursive: true, verbatimSymlinks: true });
+    await rm(join(w.root, "app/node_modules"), { recursive: true });
+    await symlink("../shared/nm", join(w.root, "app/node_modules"));
+    await fallsBack(w, LINK);
+  });
+
   it.each([
-    ["node_modules is itself a link", async (w: { root: string }) => { await cp(join(w.root, "app/node_modules"), join(w.root, "elsewhere"), { recursive: true }); await rm(join(w.root, "app/node_modules"), { recursive: true }); await symlink("../elsewhere", join(w.root, "app/node_modules")); }],
     ["a FIFO in node_modules", async (w: { root: string }) => { execFileSync("mkfifo", [join(w.root, "app/node_modules/pipe")]); }],
-    ["Yarn Plug'n'Play state outside node_modules", async (w: { root: string }) => put(w.root, "app/.pnp.cjs", "module.exports = {};\n")],
   ])("an unsupported layout: %s", async (_label, plant) => {
     // Ignored as installers' own .gitignore lines do (no trailing slash, so a linked node_modules is ignored too).
     const w = await nodeWorkspace("node_modules\n.pnp.cjs\n");
@@ -350,7 +394,7 @@ describe("MR1-LIVE: every refusal falls back to today's path with its reason rec
 });
 
 describe("MR1-LIVE: fallback rules", () => {
-  it("is sticky for the invocation and applies the original code in the workspace in every phase", async () => {
+  it("original-code phases run in the workspace; a candidate fallback is sticky for the invocation", async () => {
     const w = await nodeWorkspace();
     await put(w.root, "lib/index.js", "module.exports = require('pad-lib')('candidate');\n");
     const base = createCheckRunners({ rootPath: w.root, local: true });
@@ -358,28 +402,47 @@ describe("MR1-LIVE: fallback rules", () => {
     const original = w.repositories.map((repo) => ({ directory: join(w.root, repo.path), commit: repo.baseCommit }));
     const output = (round: CheckRound) => round.entries.map((entry) => `${entry.after}:${entry.output}`);
     const copies = vi.spyOn(partCopies, "createPartWorkingCopy");
-
-    // 1. MR1 runs the candidate round; 2. its copy then fails inside an original-code phase MR1 was applying: the workspace shows the original code itself.
     const live = createRepositoryCheckSupplier({ live: true, rootPath: w.root, repositories: w.repositories });
     const runners = live.scope(base);
+    // 1. The candidate round runs in MR1's check root.
     expect(output(await runChecks(plan, runners, options()))).toEqual(["passed:fmt:[candidate]\n"]);
     expect(live.notes()).toEqual([]);
+    const candidateReports = runners.reportRoot!();
+    // 2. An original-code phase runs in the workspace (no copy is made) and sees the original code; the report root is the phase's own, then restored.
+    let calls = copies.mock.calls.length;
+    let phaseReports = "";
+    expect(output(await runners.originalCode!(original).run(async () => { const round = await runChecks(plan, runners, options()); phaseReports = runners.reportRoot!(); return round; }))).toEqual(["passed:fmt:[lib]\n"]);
+    expect(copies.mock.calls.length).toBe(calls);
+    expect(phaseReports).not.toBe(candidateReports);
+    expect(runners.reportRoot!()).toBe(candidateReports);
+    // 3. A candidate round whose copy fails falls back; 4. later rounds stay on today's path without trying MR1 again.
     copies.mockRejectedValueOnce(new Error("copy failed"));
-    expect(output(await runners.originalCode!(original).run(() => runChecks(plan, runners, options())))).toEqual(["passed:fmt:[lib]\n"]);
+    expect(output(await runChecks(plan, runners, options()))).toEqual(["passed:fmt:[candidate]\n"]);
     expect(live.notes()).toEqual([COPY]);
-    const calls = copies.mock.calls.length;
-    // 3. Sticky: later candidate and original-code rounds take today's path without trying MR1 again.
+    calls = copies.mock.calls.length;
     expect(output(await runChecks(plan, runners, options()))).toEqual(["passed:fmt:[candidate]\n"]);
     expect(output(await runners.originalCode!(original).run(() => runChecks(plan, runners, options())))).toEqual(["passed:fmt:[lib]\n"]);
     expect(copies.mock.calls.length).toBe(calls);
     expect(await readFile(join(w.root, "lib/index.js"), "utf8")).toContain("candidate");
+  });
 
-    // An original-code phase that is the invocation's first round (nothing applied yet) falls back to the original code too.
-    const first = createRepositoryCheckSupplier({ live: true, rootPath: w.root, repositories: w.repositories });
-    const firstRunners = first.scope(base);
-    copies.mockRejectedValueOnce(new Error("copy failed"));
-    expect(output(await firstRunners.originalCode!(original).run(() => runChecks(plan, firstRunners, options())))).toEqual(["passed:fmt:[lib]\n"]);
-    expect(first.notes()).toEqual([COPY]);
+  it("TESTPROOF after an MR1 candidate round reads each phase's own report", async () => {
+    const w = await nodeWorkspace();
+    await put(w.root, "lib/index.js", "module.exports = require('pad-lib')('candidate');\n");
+    await put(w.root, "app/change.test.js", "const passed = require('lib') === '[candidate]'; console.log('change.test.js'); require('fs').writeFileSync('report.json', JSON.stringify({ testResults: [{ name: 'change.test.js', assertionResults: [{ fullName: 'lib is the candidate', status: passed ? 'passed' : 'failed', failureMessages: passed ? [] : ['AssertionError'] }] }] })); if (!passed) process.exitCode = 1;\n");
+    await put(w.root, "app/.gitignore", "node_modules/\nreport.json\n");
+    const check = { executable: process.execPath, args: ["-e", "eval(require('fs').readFileSync('change.test.js','utf8'))", "--", "--outputFile=report.json", "--reporter=json"], cwd: "app", timeoutSeconds: 20 };
+    const plan: CheckPlan = { source: "project", readiness: [check] };
+    const identity = await readCandidateRepositories(w.repositories.map((repo) => ({ repositoryId: repo.repositoryId, directory: join(w.root, repo.path), baseCommitSha: repo.baseCommit })));
+    const live = createRepositoryCheckSupplier({ live: true, rootPath: w.root, repositories: w.repositories });
+    const runners = live.scope(createCheckRunners({ rootPath: w.root, local: true }));
+    const round = await runChecks(plan, runners, options());
+    expect(round.entries[0]?.after).toBe("passed");
+    expect(live.notes()).toEqual([]);
+    const repositories = w.repositories.map((repo, index) => ({ repositoryId: repo.repositoryId, directory: join(w.root, repo.path), startCommit: repo.baseCommit, candidateTreeSha: identity[index]!.treeSha }));
+    const proof = await runTestProof({ rootPath: w.root, plan, newEntries: round.entries, runners, repositories, now: () => 0, candidateDigest: "a".repeat(64), signal: new AbortController().signal, budgetMs: 120_000 });
+    expect(proof?.items[0]?.verdict).toBe("proves_change");
+    expect(await readFile(join(w.root, "lib/index.js"), "utf8")).toContain("candidate");
   });
 
   it("never falls back after a check ran: a check that changes the candidate source still fails the round", async () => {
@@ -395,11 +458,51 @@ describe("MR1-LIVE: fallback rules", () => {
     const stop = new AbortController();
     vi.spyOn(partCopies, "createPartWorkingCopy").mockImplementation(async () => { stop.abort(); throw new Error("copy failed"); });
     const live = createRepositoryCheckSupplier({ live: true, rootPath: w.root, repositories: w.repositories });
-    const round = await runChecks(nodePlan, live.scope(createCheckRunners({ rootPath: w.root, local: true })), { signal: stop.signal, budgetMs: 60_000 }).catch((error: unknown) => error);
-    expect(round instanceof Error ? round.message : (round as CheckRound).stopped).not.toBe(false);
+    const round = await runChecks(nodePlan, live.scope(createCheckRunners({ rootPath: w.root, local: true })), { signal: stop.signal, budgetMs: 60_000 }).then((value) => value, (error: unknown) => error);
+    // Stopped: either the round reports stopped with nothing run, or it rethrows; never today's passing result.
+    if (round instanceof Error) expect(["copy failed", "aborted"]).toContain(round.message);
+    else expect({ stopped: (round as CheckRound).stopped, ran: (round as CheckRound).entries.some((entry) => entry.after !== "not_run") }).toEqual({ stopped: true, ran: false });
     expect(live.notes()).toEqual([]);
     expect(await live.evidence({ kind: "local", signal: new AbortController().signal, budgetMs: 0 })).toBeUndefined();
   });
 });
 
 
+
+describe("MR1-LIVE through run-task (production switch)", () => {
+  async function prepared(w: { root: string; repositories: Repositories }) {
+    await put(w.root, ".agentx/preparation-manifest.json", JSON.stringify({ schemaVersion: 2, projectName: "mr1-live", projectRevision: 1, repositories: w.repositories.map((repo) => ({ name: repo.repositoryId, path: repo.path, defaultBranch: "main", resolvedCommit: repo.baseCommit })), completedSetupSteps: [], readinessResults: [], readinessCommandKeys: [projectCheckKey(check)], complete: true, updatedAt: new Date().toISOString() }));
+    return w.repositories.map((repo) => ({ repositoryId: repo.repositoryId, baseCommitSha: repo.baseCommit }));
+  }
+  const check = { executable: process.execPath, args: ["-e", "const out = require('fmt-app')(require('lib')); console.log(out, process.cwd().includes('.agentx-check-') ? 'mr1' : 'workspace'); if (out !== 'fmt:[lib]') process.exitCode = 1;"], cwd: "app", timeoutSeconds: 20 };
+
+  it("IMPLEMENT multi-round: round 1 runs in MR1's check root; the extra try reverts the provider (new commit, base tree) while app keeps its change, and falls back with its reason", async () => {
+    const w = await nodeWorkspace();
+    const workflowBase = await prepared(w);
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const toolUse = (path: string, content: string, id: string) => fauxAssistantMessage([fauxToolCall("write", { path, content }, { id })], { stopReason: "toolUse" });
+    faux.setResponses([
+      toolUse("lib/index.js", "module.exports = require('pad-lib')('broken');\n", "w1"),
+      toolUse("app/NOTES.md", "app change kept\n", "w0"),
+      fauxAssistantMessage("AgentX result: done"),
+      toolUse("lib/index.js", "module.exports = require('pad-lib')('lib');\n", "w2"),
+      fauxAssistantMessage("AgentX result: done"),
+      fauxAssistantMessage("AgentX result: done"),
+    ]);
+    const events: WorkerEvent[] = [];
+    const result = await runTaskInvocation({ protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64), payload: { workflowMode: "IMPLEMENT", workflowBase, conversationId: randomUUID(), prompt: "change lib", readiness: [check] } }, {
+      rootPath: w.root, model: FAUX_MODEL, taskShell: { kind: "local" }, piAdapter: createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) }),
+      stopBeforeReading: { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) },
+      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined,
+    });
+    const outputs = events.flatMap((event) => JSON.stringify(event.payload).match(/fmt:\[[a-z]+\] (?:mr1|workspace)/gu) ?? []);
+    // Round 1 failed in MR1's check root; the final round passed on today's path, in the workspace.
+    expect(outputs).toContain("fmt:[broken] mr1");
+    expect(result.checks?.checks[0]).toMatchObject({ after: "passed" });
+    expect(result.checks?.checks[0]?.output).toBe("fmt:[lib] workspace\n");
+    const progress = events.filter((event) => event.type === "progress").map((event) => (event.payload as { message?: string }).message);
+    expect(progress).toContain(COMMIT);
+    expect(await readFile(join(w.root, "app/NOTES.md"), "utf8")).toBe("app change kept\n");
+    expect(await checkRoots(w.root)).toEqual([]);
+  });
+});

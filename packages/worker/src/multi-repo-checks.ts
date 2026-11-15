@@ -9,7 +9,7 @@ import { snapshotTree, withIsolatedGit, isSafeRefName } from "./isolated-git.js"
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { runIsolatedGit } from "./isolated-repository.js";
 import { wireMultiRepoDependencies } from "./multi-repo-wiring.js";
-import { createDependencyMirror, DEPENDENCY_REFUSAL, dependencyFolders, excludeMirroredFolders, mirrorDependencyFolders, verifyMirroredLinks, type DependencyFolder } from "./multi-repo-dependencies.js";
+import { createDependencyMirror, DEPENDENCY_REFUSAL, excludeMirrored, finishMirror, ignoredEntries, mirrorEntries, workspaceRootEntries } from "./multi-repo-dependencies.js";
 import { coverageSpecsOf } from "./verification/cobertura-lcov-coverage.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { currentWorkspaceSafety } from "./workspace-safety.js";
@@ -102,7 +102,7 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners, 
         root = await mkdtemp(join(workspace.path, ".agentx-check-"));
         activeRoots.add(root);
         const copies = new Map<string, string>();
-        const installed: Array<{ source: string; destination: string; folders: DependencyFolder[]; pnp: string[] }> = [];
+        const installed: Array<{ source: string; destination: string; ignored: string[] }> = [];
         let copiedBytes = 0;
         let copiedFiles = 0;
         for (const repository of input.repositories) {
@@ -123,33 +123,35 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners, 
             if (head !== selected) throw new Error("multi-repository checkout does not match the selected branch or base");
             // Measure the candidate tree once, with one shared limit across all repositories.
             const listing = await git.text(["ls-tree", "-r", "-l", "-z", tree], { signal, timeout: Math.max(1, remainingMs()), maxBuffer: 8 * 1024 * 1024 });
-            const paths: string[] = [];
             for (const entry of listing.split("\0").filter(Boolean)) {
-              const match = /^\d+ blob [a-f0-9]{40} +([0-9]+)\t(.+)$/su.exec(entry);
-              if (match === null) throw new Error("multi-repository checkout contains unsupported entries");
-              copiedBytes += Number(match[1]);
+              const size = /^\d+ blob [a-f0-9]{40} +([0-9]+)\t/u.exec(entry)?.[1];
+              if (size === undefined) throw new Error("multi-repository checkout contains unsupported entries");
+              copiedBytes += Number(size);
               if (++copiedFiles > 50_000 || copiedBytes > 512 * 1024 * 1024) throw new Error("multi-repository checkout exceeds round limits");
-              paths.push(match[2]!);
             }
             checkTime();
-            return { tree, paths };
+            // MR1-LIVE: what the snapshot left out because it is ignored (installed dependencies, build output), listed against the snapshot's own index.
+            if (!fallBack) return { tree, ignored: [] };
+            const ignored = await git.text(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], { signal, timeout: Math.max(1, remainingMs()), maxBuffer: 8 * 1024 * 1024 });
+            checkTime();
+            return { tree, ignored: ignoredEntries(ignored) };
           });
           checkTime();
           const copy = await createPartWorkingCopy({ rootPath: root, repositoryDirectory: source, repositoryId: `repo-${copies.size}`, itemId: randomUUID(), treeSha: tree.tree });
           await mkdir(dirname(destination), { recursive: true });
           await rename(copy.directory, destination);
           copies.set(source, destination);
-          installed.push({ source, destination, ...dependencyFolders(tree.paths) });
+          installed.push({ source, destination, ignored: tree.ignored });
           checkTime();
         }
         // MR1-LIVE: the git-ignored installed dependencies (multi-repo-dependencies.ts), once every repository is copied so links between them re-point.
         const mirror = createDependencyMirror({ workspace: workspace.path, checkRoot: root, copies, checkTime });
-        for (const repository of installed) {
-          for (const state of repository.pnp) if (await lstat(join(repository.source, ...state.split("/"))).then(() => true, () => false)) throw new Error(DEPENDENCY_REFUSAL.layout);
-          await excludeMirroredFolders(repository.destination, await mirrorDependencyFolders(mirror, repository.source, repository.destination, repository.folders));
+        // The automatic (falling-back) path only: an explicit injection keeps MR1's original copy exactly.
+        if (fallBack) {
+          for (const repository of installed) await excludeMirrored(repository.destination, await mirrorEntries(mirror, repository.source, repository.destination, repository.ignored));
+          await mirrorEntries(mirror, workspace.path, root, await workspaceRootEntries(workspace, input.repositories.map((repository) => repository.path)));
+          await finishMirror(mirror);
         }
-        await mirrorDependencyFolders(mirror, workspace.path, root, [{ kind: "node", path: "node_modules" }, { kind: "python", path: ".venv" }, { kind: "python", path: "venv" }]);
-        await verifyMirroredLinks(mirror);
         checkTime();
         const old = phase.getStore();
         // Coverage overrides index the full candidate plan. Old-code test/SARIF subsets only carry their own command-declared reports.
@@ -217,17 +219,7 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners, 
           if (unconfirmed) throw new RunnerKillUnconfirmedError({ kind: base.kind ?? "local" });
           if (fallBack && wiringFailed) throw new MultiRepoUnavailableError(WIRING);
           if (snapshots !== undefined && result.entries.some((entry) => entry.after === "passed" || entry.after === "failed")) await assertNoSourceDrift(copies.values(), snapshots, new Set([...reportPaths(plan, root!, coveragePaths), ...wiring.generated]));
-          let reportDirectory: HeldDirectory | undefined;
-          try {
-            reportDirectory = await workspace.subdirectory(".agentx", true);
-            const parent = (await reportDirectory!.subdirectory("multi-repo-reports", true))!;
-            await reportDirectory!.close(); reportDirectory = parent;
-            const round = (await reportDirectory.subdirectory(randomUUID(), true))!;
-            reports = round.path;
-            activeReports.add(reports);
-            reportLifetime.getStore()?.add(reports);
-            await round.close();
-          } catch { throw new Error("multi-repository report location is unavailable"); } finally { await reportDirectory?.close(); }
+          reports = await newReportDirectory(workspace);
           await preserveReports(plan, root!, reports, roundStarted, result.entries.some((entry) => entry.after === "passed" || entry.after === "failed"), coveragePaths);
           return wiring.notes.length === 0 ? result : { ...result, entries: result.entries.map((entry) => ({ ...entry, output: entry.after === "not_run" ? entry.output : `${wiring.notes.join("\n")}\n${entry.output}` })) };
         };
@@ -251,6 +243,35 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners, 
       }
     },
   };
+}
+
+async function newReportDirectory(workspace: HeldDirectory): Promise<string> {
+  let reportDirectory: HeldDirectory | undefined;
+  try {
+    reportDirectory = await workspace.subdirectory(".agentx", true);
+    const parent = (await reportDirectory!.subdirectory("multi-repo-reports", true))!;
+    await reportDirectory!.close(); reportDirectory = parent;
+    const round = (await reportDirectory.subdirectory(randomUUID(), true))!;
+    const path = round.path;
+    activeReports.add(path);
+    reportLifetime.getStore()?.add(path);
+    await round.close();
+    return path;
+  } catch { throw new Error("multi-repository report location is unavailable"); } finally { await reportDirectory?.close(); }
+}
+
+/**
+ * MR1-LIVE: a round that ran on today's path in the workspace, while the invocation's report root is a worker-owned folder (an earlier round ran in MR1's
+ * check root). Its fresh reports (written at or after `started`) are copied, bounded and validated as MR1's own are, into a new report folder, whose path is
+ * returned: readers of that round see its own reports and never an earlier round's.
+ */
+export async function forwardWorkspaceReports(rootPath: string, plan: CheckPlan, started: number, checked: boolean, coveragePaths?: ReadonlyArray<string | undefined>): Promise<string> {
+  const workspace = await openDirectory(resolve(rootPath));
+  try {
+    const destination = await newReportDirectory(workspace);
+    await preserveReports(plan, workspace.path, destination, started, checked, coveragePaths);
+    return destination;
+  } finally { await workspace.close(); }
 }
 
 /** `skip`: mirrored dependency folders, whose links multi-repo-dependencies.ts already re-pointed and verified. */

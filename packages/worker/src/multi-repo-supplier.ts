@@ -1,10 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { deriveRepositoryEdges, type RepositoryEdges } from "./multi-repo-edges.js";
-import { MultiRepoUnavailableError, withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
+import { forwardWorkspaceReports, MultiRepoUnavailableError, withMultiRepoChecks, type MultiRepoChecks } from "./multi-repo-checks.js";
 import type { MultiRepoFallbackNote } from "@agentx/contracts";
-import type { CheckRunners } from "./verification/checks.js";
-import { gitOriginalCode, type OriginalCodeRepository } from "./verification/original-code.js";
+import type { CheckPlan, CheckRound, CheckRunners } from "./verification/checks.js";
+import { gitOriginalCode } from "./verification/original-code.js";
 
 /**
  * Whether a local multi-repository task with derived edges runs its check rounds in MR1's candidate-bound check root (multi-repo-checks.ts).
@@ -66,38 +66,45 @@ export function createRepositoryCheckSupplier(input: {
         return base;
       }
       let selected: CheckRunners | undefined;
-      // MR1-LIVE: once a round falls back (a refusal before any check, or a failed dependency wiring setup), every later round of this invocation takes today's
-      // per-repository path too, so a candidate round and its original-code rounds are never measured in two different places.
+      // MR1-LIVE: once a candidate round falls back (a refusal before any check, or a failed dependency wiring setup), every later round of this invocation takes
+      // today's per-repository path too.
       let fallback: MultiRepoFallbackNote | undefined;
-      // `pending`: an original-code phase nothing has applied yet (this round decides where). `inSelected`: one MR1's check root is applying in its copies;
-      // the workspace itself is still the candidate, so a fallback inside it must apply the original code itself.
-      const pending = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
-      const inSelected = new AsyncLocalStorage<readonly OriginalCodeRepository[]>();
+      // The invocation's worker-owned report folder, once a round ran in MR1's check root: reportRoot() is then always defined and names the latest round's reports.
+      let reports: string | undefined;
+      // Original-code phases (TESTPROOF, SARIF baselines, measured befores) always run on today's path: the workspace itself shows the original code. MR1's check
+      // root cannot show it faithfully when installed code outside the workspace (a Poetry or pyenv venv's editable install) points at the live candidate.
+      const original = new AsyncLocalStorage<true>();
       const ordinaryOriginalCode = base.originalCode ?? gitOriginalCode;
-      const ordinaryReports = () => { if (base.reportRoot === undefined) delete wrapper.reportRoot; else wrapper.reportRoot = base.reportRoot.bind(base); };
+      // A round on today's path while the report root is worker-owned: forward that round's own fresh reports, so no reader takes an earlier round's for it.
+      const today = async (plan: CheckPlan, run: (runners: CheckRunners) => Promise<CheckRound>): Promise<CheckRound> => {
+        if (reports === undefined) return run(base);
+        const started = Date.now();
+        const result = await run(base);
+        reports = await forwardWorkspaceReports(input.rootPath, plan, started, result.entries.some(entry => entry.after === "passed" || entry.after === "failed"), input.coveragePaths);
+        return result;
+      };
       const wrapper: CheckRunners = {
         ...base,
-        originalCode: repositories => ({ run: work => {
-          if (fallback !== undefined) return ordinaryOriginalCode(repositories).run(work);
-          if (selected?.originalCode) { const own = selected.originalCode(repositories); return inSelected.run(repositories, () => own.run(work)); }
-          if (facts?.edges.length === 0) return ordinaryOriginalCode(repositories).run(work);
-          return pending.run(repositories, work);
-        } }),
+        originalCode: repositories => ({ run: work => ordinaryOriginalCode(repositories).run(async () => {
+          // The phase's report root is restored when it ends: later readers see the candidate's reports again.
+          const candidateReports = reports;
+          try { return await original.run(true, work); } finally { reports = candidateReports; }
+        }) }),
         async scopeRound(plan, signal, run, remainingMs) {
+          if (original.getStore() === true) return today(plan, run);
           recorded = undefined;
           derivation ??= derive(signal, remainingMs);
           // Only a finished derivation is kept: one that ran out of this round's budget is derived again by the next round, under its own budget.
           try { facts = await derivation; } catch (error) { derivation = undefined; throw error; }
           notes = facts.notes;
           if (signal.aborted || remainingMs() <= 0) throw new Error("aborted");
-          const old = pending.getStore();
-          if (facts.edges.length === 0) return old === undefined ? run(base) : ordinaryOriginalCode(old).run(() => run(base));
+          if (facts.edges.length === 0) return today(plan, run);
           if (fallback === undefined) {
             selected ??= withMultiRepoChecks({ rootPath: input.rootPath, repositories: input.repositories, dependencies: facts.edges, setup: [], coveragePaths: input.coveragePaths }, base, { fallBack: true });
-            if (selected.reportRoot !== undefined) wrapper.reportRoot = selected.reportRoot.bind(selected);
-            const execute = () => selected!.scopeRound!(plan, signal, run, remainingMs);
             try {
-              const result = old === undefined ? await execute() : await selected.originalCode!(old).run(execute);
+              const result = await selected.scopeRound!(plan, signal, run, remainingMs);
+              reports = selected.reportRoot!();
+              wrapper.reportRoot = () => reports!;
               recorded = facts;
               return result;
             } catch (error) {
@@ -105,13 +112,11 @@ export function createRepositoryCheckSupplier(input: {
               fallback = error.reason;
             }
           }
-          // Today's path: the ordinary runners in the shared workspace, its ordinary reports, and the reason in the evidence and progress notes.
-          ordinaryReports();
+          // Today's path: the ordinary runners in the shared workspace, and the reason in the evidence and progress notes.
           const found = facts;
           const fallbackNotes = [...new Set<RepositoryEdges["notes"][number]>([...found.notes, fallback])].slice(0, 8);
           notes = fallbackNotes;
-          const selection = old ?? inSelected.getStore();
-          const result = selection === undefined ? await run(base) : await ordinaryOriginalCode(selection).run(() => run(base));
+          const result = await today(plan, run);
           recorded = { edges: found.edges, notes: fallbackNotes };
           return result;
         },
