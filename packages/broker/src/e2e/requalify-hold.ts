@@ -1,4 +1,6 @@
 import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { OrgIdSchema, companyScoped } from "@agentx/contracts";
+import { CORE_IN_USE_PARTITION } from "../core-host/engine-stamp.js";
 import { STALE_RUN_SWEEP_AGE_MS } from "@agentx/verifier";
 import {
   INDEX_EXPIRY_ATTRIBUTE, REQUALIFY_PROFILE_ID, RequalifyHoldSchema, TERMINAL_OPERATION_STATUSES, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKSPACE_SESSION_STATE_INDEX,
@@ -87,7 +89,8 @@ export function requalifySetupWorkRow(setupExecutionId: string, deadlineAt: stri
   return { ...setupWorkKey(setupExecutionId), entityType: "RUNTIME_REQUALIFY_SETUP_WORK", setupExecutionId, until, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(until) / 1000) + 86_400 };
 }
 
-export interface RequalifyDrainStatus { drained: boolean; applicationRounds: number; setupRuns: number }
+/** `coreOperations` is there only when one is running (a workflow-only install's status keeps its shape). */
+export interface RequalifyDrainStatus { drained: boolean; applicationRounds: number; setupRuns: number; coreOperations?: number }
 
 /**
  * One paged query that names the attributes it reads (`read`, see REQUALIFY_DRAIN_READS): the renewal role may only read those, and only by naming them. A page that fails throws; nothing
@@ -113,11 +116,30 @@ async function queryAll(store: RequalifyHoldStore, read: RequalifyDrainRead, inp
  * counts until its record is terminal or its marker ends. Reads only.
  */
 export async function requalifyDrainStatus(store: RequalifyHoldStore, now: number): Promise<RequalifyDrainStatus> {
+  // Lane E2: the companies whose operations may sit under company keys (`ORG#<company>#WORKSPACE#<id>`), from the core's own in-use marks: state the core host writes, never anything a
+  // request carries. A mark that cannot be read fails the drain (it throws), so a core operation is never missed silently.
+  const marks = await queryAll(store, "coreCompanies", { KeyConditionExpression: "pk = :pk", ConsistentRead: true, ExpressionAttributeValues: { ":pk": CORE_IN_USE_PARTITION } });
+  const coreCompanies = marks.map((mark) => mark.orgId);
+  if (coreCompanies.some((companyId) => !OrgIdSchema.safeParse(companyId).success)) throw new Error("a core company mark could not be read");
+  let coreOperations = 0;
   const sessions = await queryAll(store, "sessions", { IndexName: WORKSPACE_SESSION_STATE_INDEX.name, KeyConditionExpression: "#index = :state",
     ExpressionAttributeNames: { "#index": WORKSPACE_SESSION_STATE_INDEX.partitionKey }, ExpressionAttributeValues: { ":state": "READY" } });
   let applicationRounds = 0;
   for (const session of sessions) {
     if (typeof session.workspaceId !== "string") continue;
+    // The session's own company (server-written) and every company the core holds tasks for: their operations of this workspace are under company keys.
+    if (session.companyId !== undefined && !OrgIdSchema.safeParse(session.companyId).success) throw new Error("a session's company could not be read");
+    for (const companyId of new Set([...(coreCompanies as string[]), ...(session.companyId === undefined ? [] : [session.companyId as string])])) {
+      const scoped = await queryAll(store, "operations", { KeyConditionExpression: "pk = :pk AND begins_with(sk, :operation)", ConsistentRead: true,
+        ExpressionAttributeValues: { ":pk": companyScoped(companyId, `WORKSPACE#${session.workspaceId}`), ":operation": "OPERATION#" } });
+      for (const operation of scoped) {
+        // Fail closed: any operation under a company key that has not ended counts (whatever its kind or mode), unless it is older than the stale-run sweep.
+        if ((TERMINAL_OPERATION_STATUSES as ReadonlySet<unknown>).has(operation.status)) continue;
+        const touched = Date.parse(typeof operation.updatedAt === "string" ? operation.updatedAt : typeof operation.createdAt === "string" ? operation.createdAt : "");
+        if (Number.isFinite(touched) && now - touched > STALE_RUN_SWEEP_AGE_MS) continue;
+        coreOperations += 1;
+      }
+    }
     const operations = await queryAll(store, "operations", { KeyConditionExpression: "pk = :pk AND begins_with(sk, :operation)", ConsistentRead: true,
       ExpressionAttributeValues: { ":pk": `WORKSPACE#${session.workspaceId}`, ":operation": "OPERATION#" } });
     for (const operation of operations) {
@@ -137,13 +159,13 @@ export async function requalifyDrainStatus(store: RequalifyHoldStore, now: numbe
     const execution = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: projectSetupExecutionKey(marker.setupExecutionId), ConsistentRead: true, ...requalifyDrainProjection("setupExecution") })) as { Item?: { state?: unknown } };
     if (execution.Item === undefined || execution.Item.state === "ACCEPTED" || execution.Item.state === "DISPATCHING") setupRuns += 1;
   }
-  return { drained: applicationRounds === 0 && setupRuns === 0, applicationRounds, setupRuns };
+  return { drained: applicationRounds === 0 && setupRuns === 0 && coreOperations === 0, applicationRounds, setupRuns, ...(coreOperations === 0 ? {} : { coreOperations }) };
 }
 
 /** What the renewal's drain step asks (AR-2's `RequalifyDrainPort`): how many rounds and setup runs that began on the old machine are still running. A read that fails throws, and the step's own retry applies; it never answers "none" for what it could not read. */
 export async function requalifyDrainCount(store: RequalifyHoldStore, now: number): Promise<number> {
   const status = await requalifyDrainStatus(store, now);
-  return status.applicationRounds + status.setupRuns;
+  return status.applicationRounds + status.setupRuns + (status.coreOperations ?? 0);
 }
 
 // ---- a renewal is not any other change of the selection ----------------------------------------------------------------------------------------------------------------------
