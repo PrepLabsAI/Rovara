@@ -288,10 +288,10 @@ describe("does the customer's CI skip drafts", () => {
     expect(draftVerdictOf(`${head}${jobWith("t", "github.event['pull_request']['draft'] == false")}`)).toBe("unknown");
     expect(draftVerdictOf(`${head}${jobWith("t", "\"github.event_name == 'push' || !github.event.pull_request.draft\"")}`)).toBe("unknown");
     expect(draftVerdictOf(`${head}${jobWith("t", "github.repository == 'a/b' && !github.event.pull_request.draft")}`)).toBe("skips");
-    expect(draftVerdictOf(`${head}${jobWith("a", "\${{ github.event.pull_request.draft != true }}")}${jobWith("b", "'!github.event.pull_request.draft'")}`)).toBe("skips");
+    expect(draftVerdictOf(`${head}${jobWith("a", "${{ github.event.pull_request.draft != true }}")}${jobWith("b", "'!github.event.pull_request.draft'")}`)).toBe("skips");
     expect(draftVerdictOf(`${head}${jobWith("t", "github.repository == 'a/b'")}`)).toBe("runs");
     expect(draftVerdictOf(`${head}${jobWith("t", "\"!github.event.pull_request.draft && (github.actor == 'a' || github.actor == 'b')\"")}`)).toBe("skips");
-    expect(draftVerdictOf(`${head}${jobWith("t", "\${{ github.event.pull_request.draft == false }} && \${{ true }}")}`)).toBe("unknown");
+    expect(draftVerdictOf(`${head}${jobWith("t", "${{ github.event.pull_request.draft == false }} && ${{ true }}")}`)).toBe("unknown");
     expect(draftVerdictOf(`on:\n  pull_request:\n    types: []\n${head.slice(17)}${jobWith("t")}`)).toBe("unknown");
   });
   it("finds a trigger that runs only when a draft is marked ready", async () => {

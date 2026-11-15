@@ -32,7 +32,6 @@ function jobVerdict(condition: unknown): "skips" | "runs" | "unknown" {
   if (typeof condition !== "string") return "unknown";
   if (!MENTIONS_DRAFT.test(condition)) return "runs";
   const plain = condition.trim().replace(/^\$\{\{([\s\S]*)\}\}$/u, "$1").replace(/\s+/gu, "");
-  if (plain.includes("${{")) return "unknown";
   const parts = plain.split("&&");
   const draftParts = parts.filter((part) => MENTIONS_DRAFT.test(part));
   return draftParts.length === 1 && NOT_DRAFT.has(draftParts[0]!) ? "skips" : "unknown";
