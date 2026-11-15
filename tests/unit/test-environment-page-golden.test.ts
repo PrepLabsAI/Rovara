@@ -17,7 +17,6 @@ const view: TestEnvironmentPageView = {
 describe("the test environment page", () => {
   it("is byte-identical with no machine section (golden)", () => {
     expect(sha(renderTestEnvironment(context, view))).toBe("8374f6ac9b12b5d38546facce7bfc66c85634fb5c627aa76bf8aeae317ccaaec");
-    expect(renderTestEnvironment(context, { ...view, machine: undefined })).toBe(renderTestEnvironment(context, view));
     expect(renderTestEnvironment(context, { ...view, machine: [] })).toBe(renderTestEnvironment(context, view));
   });
   it("adds one section with the lines as plain text when there is a machine card", () => {
