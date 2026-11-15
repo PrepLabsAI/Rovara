@@ -1,3 +1,4 @@
+import { boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -147,6 +148,7 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
+  companies?: CompanyMembershipReader;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   developer: DeveloperApiConfiguration;
@@ -566,24 +568,25 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
 }
 
 /** The latest revision's number and task policy: the only fields read, so only they are fetched. */
-async function latestDefinition(deps: DeveloperRouteDependencies, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+async function latestDefinition(deps: DeveloperRouteDependencies, project: string, companyId?: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
   const response = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
-    ProjectionExpression: "#definition.#revision, #definition.#developerTasks",
-    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
+    ProjectionExpression: "#definition.#revision, #definition.#developerTasks" + (companyId === undefined ? "" : ", #companyId"),
+    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks", ...(companyId === undefined ? {} : { "#companyId": "companyId" }) },
     ScanIndexForward: false,
     Limit: 1,
     ConsistentRead: true,
   })) as { Items?: Array<{ definition: { revision: number; developerTasks?: unknown } }> };
-  return response.Items?.[0]?.definition;
+  const row = response.Items?.[0];
+  return recordInCompany(row, companyId) ? row?.definition : undefined;
 }
 
 /** Each named project's latest revision and task policy; projects with no revision are left out. */
-export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names: readonly string[]): Promise<Map<string, { revision: number; policy: DeveloperTaskPolicy }>> {
+export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names: readonly string[], companyId?: string): Promise<Map<string, { revision: number; policy: DeveloperTaskPolicy }>> {
   const unique = [...new Set(names)].sort();
-  const definitions = await mapLimit(unique, REVISION_READS_AT_ONCE, (name) => latestDefinition(deps, name));
+  const definitions = await mapLimit(unique, REVISION_READS_AT_ONCE, (name) => latestDefinition(deps, name, companyId));
   const found = new Map<string, { revision: number; policy: DeveloperTaskPolicy }>();
   unique.forEach((name, index) => {
     const definition = definitions[index];
@@ -727,7 +730,10 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     clientId = authenticated.client.clientId;
     sessionFacts = { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator };
   }
-  const access = await projectsAPersonUses(deps, developerId);
+  const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
+  const companyId = await resolveCompany(deps.companies, developerId);
+  const access = await projectsAPersonUses(scope === undefined ? deps : { ...deps, documentClient: scope.client }, developerId, companyId);
+  scope?.check();
   if (access === undefined) throw refused();
   const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices };
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
@@ -743,18 +749,18 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
  * The projects a person may use now, as the access check answers them: task access (developer grants and channels),
  * then (spec 065) the registered projects they administer. Undefined for an unknown or revoked developer.
  */
-async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId: string): Promise<{ displayName: string; nameChosen: boolean; projects: AccessCheckResponse["projects"]; notices: string[] } | undefined> {
+async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId: string, companyId?: string): Promise<{ displayName: string; nameChosen: boolean; projects: AccessCheckResponse["projects"]; notices: string[] } | undefined> {
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "displayNameChosen" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
   if (developer === undefined || developer.revoked) return undefined;
   const listed = await listProjects(deps, {
     developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
-  });
+  }, companyId);
   // An administrator row also gives task access (#630), but this answer keeps naming it `administrator`, after the rest.
   const administered = (await queryAll<{ projectName?: unknown; role?: unknown }>(deps, `MEMBER#${developerId}`, "PROJECT#"))
     .filter((membership) => membership.role === "administrator" && typeof membership.projectName === "string")
     .map((membership) => membership.projectName as string);
-  const registered = await projectsWithPolicy(deps, administered);
+  const registered = await projectsWithPolicy(deps, administered, companyId);
   return {
     displayName: developer.displayName,
     nameChosen: developer.displayNameChosen === true,
@@ -773,7 +779,10 @@ function githubFullName(url: string): string | undefined {
 
 /** Spec 065: `GET /v1/dev/client/projects/{project}`, for a person who may use it (no scope: it shows only what they may use). */
 async function readClientProject(deps: DeveloperRouteDependencies, developerId: string, project: string): Promise<ClientProjectResponse> {
-  const access = await projectsAPersonUses(deps, developerId);
+  const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
+  const companyId = await resolveCompany(deps.companies, developerId);
+  if (scope !== undefined) deps = { ...deps, documentClient: scope.client };
+  const access = await projectsAPersonUses(deps, developerId, companyId);
   if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   const mine = access.projects.find((entry) => entry.name === project);
   if (mine === undefined) throw agentXError("NOT_FOUND", "project not found");
@@ -781,7 +790,10 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
     TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
   })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
-  const definition = response.Items?.[0]?.definition;
+  const row = response.Items?.[0];
+  if (!recordInCompany(row, companyId)) throw agentXError("NOT_FOUND", "project not found");
+  scope?.check();
+  const definition = row?.definition;
   if (definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
   const repositories = (Array.isArray(definition.repositories) ? definition.repositories : []).flatMap((entry: unknown) => {
     const repository = entry as { name?: unknown; url?: unknown; defaultBranch?: unknown };
@@ -960,13 +972,13 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   return { project, developerId: target.developerId, outcome: revoked.revoked ? "revoked" : "not_member" } satisfies ClientProjectMemberChangeResponse;
 }
 
-async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
+async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
   const grants = await grantsOf(deps, caller);
   const bindings = await bindingsOf(deps);
-  const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)]);
+  const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)], companyId);
   const access = await resolveDeveloperAccess({
-    grants,
-    bindings,
+    grants: companyId === undefined ? grants : grants.filter((name) => policies.has(name)),
+    bindings: companyId === undefined ? bindings : bindings.filter((binding) => policies.has(binding.projectName)),
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
     // FR-013 with FR-014: a project's own switch decides whether channel members may use it.
     channelMembersMayUse: (project) => policies.get(project)?.policy.channelMembersMayUse === true,
@@ -1310,12 +1322,27 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
-  if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
+  if (request.method === "GET" && url.pathname === "/v1/dev/projects") {
+    const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
+    const companyId = await resolveCompany(deps.companies, caller.developerId);
+    const result = await listProjects(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller, companyId);
+    scope?.check();
+    return result;
+  }
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
   if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
-    return routeDeveloperTaskRequest(developerTaskRouteDependencies(deps, caller), caller, request, url);
+    const checked = request.method === "GET" && (url.pathname === "/v1/dev/tasks" || /^\/v1\/dev\/tasks\/[^/]+(?:\/(messages|diff|comments|events|readers))?$/.test(url.pathname));
+    const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
+    const companyId = checked ? await resolveCompany(deps.companies, caller.developerId) : undefined;
+    const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
+    const checkedDeps = scope === undefined ? taskDeps : { ...taskDeps, actions: companyReadActions(taskDeps.actions, scope),
+      ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }) };
+    const result = await routeDeveloperTaskRequest({ ...checkedDeps, ...(companyId === undefined ? {} : { companyId }) }, caller, request, url);
+    // Only a completed list page with an explicit continuation may consume an item-bound signal.
+    scope?.check(url.pathname === "/v1/dev/tasks" && result !== null && typeof result === "object" && "nextCursor" in result);
+    return result;
   }
   if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) {
     return routeChatGptConnection(deps, caller, request, url);
@@ -1344,7 +1371,13 @@ export async function routeLinkingRequest(deps: DeveloperRouteDependencies, requ
   const name = request.method === "PUT" && url.pathname === "/v1/dev/me/name";
   if (!projects && !workspaces && !links && !name) throw agentXError("NOT_FOUND", "route not found");
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
-  if (projects) return listProjects(deps, caller);
+  if (projects) {
+    const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
+    const companyId = await resolveCompany(deps.companies, caller.developerId);
+    const result = await listProjects(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller, companyId);
+    scope?.check();
+    return result;
+  }
   if (name) return setMyName(deps, caller, request);
   if (workspaces) return listWorkspaces(deps, caller);
   return routeOwnChannelLinks(deps, caller, request, url);
