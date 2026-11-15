@@ -6,13 +6,14 @@ import { describe, expect, it } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { TASK_KEY_PURPOSE, type OrgId } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { brokerCoreModuleDeps, createBrokerCoreRoot, type BrokerCoreRootInputs } from "../../packages/broker/src/aws/core-engine-root.js";
+import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
+import { brokerCoreModuleDeps, createBrokerCoreRoot, taskTokensFromEnvironment, type BrokerCoreRootInputs } from "../../packages/broker/src/aws/core-engine-root.js";
 import { hostedDispatcherFlow } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { mintTaskToken } from "../../packages/broker/src/core/model-gateway/token.js";
 import { MODEL_ACCESS_PATH } from "../../packages/broker/src/core/model-gateway/route.js";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import {
-  AGENT_MODEL_INVALID, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, GATEWAY_MODEL_KEYS, GATEWAY_SETTINGS_PARTIAL, GATEWAY_URL_INVALID,
+  AGENT_MODEL_INVALID, CORE_AGENT_MODEL_VARIABLE, GATEWAY_TASK_TOKENS_MISSING, coreModelGatewayWiring, CORE_MODEL_GATEWAY_URL_VARIABLE, GATEWAY_MODEL_KEYS, GATEWAY_SETTINGS_PARTIAL, GATEWAY_URL_INVALID,
   gatewayForCallbacks, gatewayModelAccessFromEnvironment, gatewayModelKeyStore, gatewayModelKeysModules, gatewayModelRoute, readGatewayModelAccess, taskKeySigner,
 } from "../../packages/broker/src/core-host/gateway-model-access.js";
 
@@ -108,16 +109,43 @@ const claimsOf = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!,
 describe("the broker's model gateway for core callbacks", () => {
   it("mints a task token for the company's own operation and the agent model, signed by the task key with purpose `task`", async () => {
     const settings = gatewayModelAccessFromEnvironment(ENV)!;
-    const gateway = gatewayForCallbacks(settings, { issuer: "https://api.staging.example/v1/auth", signer: kmsLike, describer: describer(ORG_A) });
+    const gateway = gatewayForCallbacks(settings, { issuer: "https://api.staging.example/v1/auth", signer: taskKeySigner(kmsLike), describer: describer(ORG_A) });
     expect(gateway.gatewayUrl).toBe(URL_);
     expect((await gateway.signer.publicJwk()).rovara_purpose).toBe(TASK_KEY_PURPOSE);
     const minted = await mintTaskToken({ ...gateway, now: () => 1_800_000_000_000 }, operation);
     const claims = claimsOf(minted.token);
     expect(claims).toMatchObject({ iss: "https://api.staging.example/v1/auth", aud: "rovara-model-gateway", cid: ORG_A, pid: "web", mdl: [MODEL], ws: operation.workspaceId, op: operation.operationId });
-    // Two companies: each token names only its own company.
-    const other = await mintTaskToken({ ...gatewayForCallbacks(settings, { issuer: "https://api.staging.example/v1/auth", signer: kmsLike, describer: describer(ORG_B) }), now: () => 1_800_000_000_000 }, operation);
+    // The token's company is the describer's (the checked records'), never a setting of the gateway wiring.
+    const other = await mintTaskToken({ ...gatewayForCallbacks(settings, { issuer: "https://api.staging.example/v1/auth", signer: taskKeySigner(kmsLike), describer: describer(ORG_B) }), now: () => 1_800_000_000_000 }, operation);
     expect(claimsOf(other.token).cid).toBe(ORG_B);
-    expect(minted.token).not.toContain(".".repeat(2));
+  });
+  it("the broker's wiring: none without settings; configured without the task-token key or issuer, refused (so no task starts)", async () => {
+    expect(coreModelGatewayWiring({}, undefined)).toBeUndefined();
+    expect(coreModelGatewayWiring({}, () => { throw new Error("not asked"); })).toBeUndefined();
+    for (const tokens of [undefined, () => undefined, () => ({ signer: taskKeySigner(kmsLike), issuer: "" }), () => ({ signer: {} as TokenSigner, issuer: "https://api.example/v1/auth" })]) {
+      expect(() => coreModelGatewayWiring(ENV, tokens)).toThrow(GATEWAY_TASK_TOKENS_MISSING);
+    }
+    expect(() => coreModelGatewayWiring({ [CORE_AGENT_MODEL_VARIABLE]: MODEL }, () => ({ signer: taskKeySigner(kmsLike), issuer: "https://api.example/v1/auth" }))).toThrow(GATEWAY_SETTINGS_PARTIAL);
+    const wiring = coreModelGatewayWiring(ENV, () => ({ signer: taskKeySigner(kmsLike), issuer: "https://api.staging.example/v1/auth" }))!;
+    expect(await wiring.flowOptions.modelAccess.route()).toEqual({ alias: MODEL, api: "anthropic-messages", catalog: MODEL });
+    const gateway = wiring.callbackGateway(describer(ORG_A));
+    expect(gateway.gatewayUrl).toBe(URL_);
+    expect(claimsOf((await mintTaskToken({ ...gateway, now: () => 1_800_000_000_000 }, operation)).token)).toMatchObject({ cid: ORG_A, mdl: [MODEL], iss: "https://api.staging.example/v1/auth" });
+  });
+  it("the broker's task tokens from its environment: the KMS task key stamped with purpose `task`, or nothing without the key or the issuer", async () => {
+    const kms = { send: async (command: unknown) => {
+      if (command instanceof GetPublicKeyCommand) return { PublicKey: new Uint8Array(der), KeyUsage: "SIGN_VERIFY" };
+      if (command instanceof SignCommand) return { Signature: new Uint8Array(sign("sha256", Buffer.from(command.input.Message!), pair.privateKey)) };
+      throw new Error("unexpected");
+    } };
+    expect(taskTokensFromEnvironment({}, kms)).toBeUndefined();
+    expect(taskTokensFromEnvironment({ TASK_TOKEN_KEY_ARN: "arn:aws:kms:us-west-2:111122223333:key/k" }, kms)).toBeUndefined();
+    expect(taskTokensFromEnvironment({ DEVELOPER_TOKEN_ISSUER: "https://api.example/v1/auth" }, kms)).toBeUndefined();
+    const tokens = taskTokensFromEnvironment({ TASK_TOKEN_KEY_ARN: "arn:aws:kms:us-west-2:111122223333:key/k", DEVELOPER_TOKEN_ISSUER: "https://api.example/v1/auth" }, kms)!;
+    expect(tokens.issuer).toBe("https://api.example/v1/auth");
+    expect((await tokens.signer.publicJwk()).rovara_purpose).toBe(TASK_KEY_PURPOSE);
+    const minted = await mintTaskToken({ ...coreModelGatewayWiring(ENV, () => tokens)!.callbackGateway(describer(ORG_A)), now: () => 1_800_000_000_000 }, operation);
+    expect(claimsOf(minted.token).cid).toBe(ORG_A);
   });
   it("the bare KMS key (no purpose) is refused by the minter: the purpose is what the wrapper adds", async () => {
     await expect(mintTaskToken({ signer: kmsLike, issuer: "https://api.staging.example/v1/auth", describer: describer(ORG_A), now: () => 1_800_000_000_000 }, operation)).rejects.toThrow();
@@ -130,7 +158,7 @@ describe("the broker's model gateway for core callbacks", () => {
 const SIGNING = "k".repeat(32);
 function tables() {
   const reads: string[] = [];
-  return { reads, client: { async send(command: unknown) { if (!(command instanceof GetCommand)) throw new Error("only reads"); reads.push((command.input as { Key: { pk: string } }).Key.pk); return { Item: undefined }; } } };
+  return { reads, client: { async send(command: unknown) { if (!(command instanceof GetCommand)) throw new Error("only reads"); reads.push(String((command.input.Key as { pk?: unknown } | undefined)?.pk)); return { Item: undefined }; } } };
 }
 function root(env: NodeJS.ProcessEnv, client: BrokerCoreRootInputs["documentClient"]) {
   return createBrokerCoreRoot({
@@ -155,6 +183,9 @@ describe("the broker's core root: a worker's model-access request", () => {
     expect(await get(capability(workspaceId), MODEL_ACCESS_PATH, "POST")).toBeUndefined();
     expect(await get(capability(workspaceId), "/v1/internal/model-accessx")).toBeUndefined();
     expect(await get(undefined)).toBeUndefined();
+    const expired = `${Buffer.from(JSON.stringify({ workspaceId, operationId: randomUUID(), fence: 1, actions: ["model-access"], expiresAt: 1 })).toString("base64url")}`;
+    const { createHmac } = await import("node:crypto");
+    expect(await get(`${expired}.${createHmac("sha256", Buffer.from(SIGNING)).update(expired).digest("base64url")}`)).toBeUndefined();
     expect(t.reads).toEqual([]);
     // A verified one: its workspace is looked up (a workspace with no core task is the old routes').
     expect(await get(capability(workspaceId))).toBeUndefined();

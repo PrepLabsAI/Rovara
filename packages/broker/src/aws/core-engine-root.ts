@@ -49,7 +49,7 @@ import { createTaskTokenDescriber } from "../core/model-gateway/describer.js";
 import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
-import { gatewayForCallbacks, gatewayModelAccessFromEnvironment, gatewayModelKeysModules, gatewayModelRoute } from "../core-host/gateway-model-access.js";
+import { coreModelGatewayWiring, gatewayModelKeysModules, taskKeySigner } from "../core-host/gateway-model-access.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
@@ -246,7 +246,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   };
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
-  const modelGateway = () => gatewayModelAccessFromEnvironment(env);
+  const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
   const lessonsSwitch = readCoreLessonsSwitch(env);
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
@@ -265,7 +265,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
-      ...(modelGateway() === undefined ? {} : { flowOptions: { modelAccess: gatewayModelRoute(modelGateway()!) } }),
+      // Configured without the task-token signer: refused here, so no task starts.
+      ...(modelGateway() === undefined ? {} : { flowOptions: modelGateway()!.flowOptions }),
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
@@ -371,13 +372,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const registry = await app.registry();
         const lessons = lessonsByCompany.get(companyId);
         // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
-        const gatewaySettings = modelGateway();
-        let gateway: ReturnType<typeof gatewayForCallbacks> | undefined;
-        if (gatewaySettings !== undefined) {
-          const tokens = inputs.taskTokens?.();
-          if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "") throw Object.assign(new Error("the core engine's model gateway is configured without the task-token signer"), { name: "GatewayTaskTokensMissing" });
-          gateway = gatewayForCallbacks(gatewaySettings, { issuer: tokens.issuer, signer: tokens.signer, describer: createTaskTokenDescriber(runtime.flow.deps) });
-        }
+        const wiring = modelGateway();
+        const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps));
         return createCallbackService({
           ...(gateway === undefined ? {} : { modelGateway: gateway }),
           flow: runtime.flow.deps,
@@ -463,7 +459,8 @@ export const CORE_MODEL_ACCESS_PATH = MODEL_ACCESS_PATH;
 export function taskTokensFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameters<typeof kmsTokenSigner>[0]["kms"]): { signer: TokenSigner; issuer: string } | undefined {
   const keyId = env.TASK_TOKEN_KEY_ARN ?? "";
   const issuer = env.DEVELOPER_TOKEN_ISSUER ?? "";
-  return keyId === "" || issuer === "" ? undefined : { signer: kmsTokenSigner({ kms, keyId }), issuer };
+  // Published with purpose `task` by the JWKS (developer-identity.ts); stamped here, where the key is known to be the task key.
+  return keyId === "" || issuer === "" ? undefined : { signer: taskKeySigner(kmsTokenSigner({ kms, keyId })), issuer };
 }
 
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */

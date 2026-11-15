@@ -95,7 +95,36 @@ export function taskKeySigner(signer: TokenSigner): TokenSigner {
   };
 }
 
-/** The broker's core callback layer's model gateway: its address, the token issuer (the install's sign-in issuer, whose JWKS the gateway pins), the signer and the describer. */
+/**
+ * The broker's core callback layer's model gateway: its address, the token issuer (the install's sign-in issuer, whose JWKS the gateway pins), the TASK signer (already
+ * `taskKeySigner`, so the minter's own purpose check still means something) and the describer.
+ */
 export function gatewayForCallbacks(settings: GatewayModelAccessSettings, inputs: { issuer: string; signer: TokenSigner; describer: TaskTokenDescriber }): ModelGateway {
-  return { gatewayUrl: settings.gatewayUrl, issuer: inputs.issuer, signer: taskKeySigner(inputs.signer), describer: inputs.describer };
+  return { gatewayUrl: settings.gatewayUrl, issuer: inputs.issuer, signer: inputs.signer, describer: inputs.describer };
+}
+
+/** Fixed words: the gateway is configured but the broker cannot mint task tokens (no task key or no issuer). */
+export const GATEWAY_TASK_TOKENS_MISSING = "the core engine's model gateway is configured, but the broker has no task-token key or issuer (TASK_TOKEN_KEY_ARN, DEVELOPER_TOKEN_ISSUER)";
+
+/** What the broker's core runtime takes from the gateway settings: the flow's model route and, per company, the callback layer's model gateway. */
+export interface CoreModelGatewayWiring {
+  flowOptions: { modelAccess: { route(): Promise<InvocationModelRoute> } };
+  callbackGateway(describer: TaskTokenDescriber): ModelGateway;
+}
+
+/**
+ * The broker's wiring, read when a company's runtime is built. Neither setting: undefined (no route, no model gateway, as before). Configured without the task-token
+ * signer and issuer: throws GATEWAY_TASK_TOKENS_MISSING, so the runtime is refused and no task starts (no paid worker that could never reach its model).
+ */
+export function coreModelGatewayWiring(env: NodeJS.ProcessEnv, taskTokens: (() => { signer: TokenSigner; issuer: string } | undefined) | undefined): CoreModelGatewayWiring | undefined {
+  const settings = gatewayModelAccessFromEnvironment(env);
+  if (settings === undefined) return undefined;
+  const tokens = taskTokens?.();
+  if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "" || typeof tokens.signer?.sign !== "function" || typeof tokens.signer.publicJwk !== "function") {
+    throw Object.assign(new Error(GATEWAY_TASK_TOKENS_MISSING), { name: "GatewayTaskTokensMissing" });
+  }
+  return {
+    flowOptions: { modelAccess: gatewayModelRoute(settings) },
+    callbackGateway: (describer) => gatewayForCallbacks(settings, { issuer: tokens.issuer, signer: tokens.signer, describer }),
+  };
 }
