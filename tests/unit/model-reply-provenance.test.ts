@@ -37,8 +37,8 @@ describe("replyCountsTowardProof", () => {
 });
 
 describe("fixed labels", () => {
-  it("task_made and independent use the words DECISIONS 161 fixes", () => {
-    expect(REPLY_PROVENANCE_LABELS.task_made).toBe("scripted replies added in this task (not counted)");
+  it("task_made uses DEC 192a words and independent retains DEC 161 words", () => {
+    expect(REPLY_PROVENANCE_LABELS.task_made).toBe("scripted replies written in this task");
     expect(REPLY_PROVENANCE_LABELS.independent).toBe("scripted replies written independently in this task");
   });
   it("nothing scripted is ever called Real, and every class has a label", () => {
@@ -49,7 +49,7 @@ describe("fixed labels", () => {
     }
     expect(REPLY_PROVENANCE_LABELS.failure_pack).toMatch(/never proof|not counted/iu);
   });
-  it("replyLabelOf gives the not-counted label to anything unknown", () => {
+  it("replyLabelOf gives the task-made label to anything unknown", () => {
     expect(replyLabelOf("before_task")).toBe(REPLY_PROVENANCE_LABELS.before_task);
     for (const value of [undefined, "nope", 3, null, {}]) expect(replyLabelOf(value)).toBe(REPLY_PROVENANCE_LABELS.task_made);
   });

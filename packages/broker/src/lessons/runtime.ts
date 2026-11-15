@@ -32,6 +32,7 @@ import { projectRepoScopesOf, withProjectRepoScopes, type ProjectRepoScopesPort 
 import type { RepoFileRuntime } from "./repo-file-job.js";
 import type { LessonStore } from "./store.js";
 import { localLessonAudiencePort, withLessonAudiences } from "./task-audience.js";
+import { createHostedLessonParts, type HostedLessonPeople, type HostedTaskReader } from "./hosted-people.js";
 import type { TaskVisibilityPort } from "./access-port.js";
 import type { LessonViewDeps } from "./view.js";
 
@@ -61,6 +62,11 @@ export interface LessonsRuntimeInput {
   learning?: LearningAdapter | undefined;
   /** Whether a recorded pause reason still holds (`LessonViewDeps.pauseStillApplies`). */
   pauseStillApplies?: LessonViewDeps["pauseStillApplies"];
+  /**
+   * An install of many people (the core engine on a deployed install): who approves, who reads and who is named come from this port, read live, for `companyId` only (`hosted-people.ts`). `owner` is then only
+   * the name of the system actor. Absent: the laptop's one person (`owner`) is every role.
+   */
+  hosted?: { people: HostedLessonPeople; readTask: HostedTaskReader };
 }
 
 /** The route-side lesson dependencies: everything the pages, commands and routes need to read and decide lessons. */
@@ -108,12 +114,23 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   const tier0 = new DocumentTier0Settings(input.store);
   const settings = documentLearningSettings(input.store, tier0);
   const owner = input.owner;
-  const audiences = localLessonAudiencePort({ ownerId: owner.id, projectOf: (orgId, taskId) => input.taskProject(orgId, taskId) });
-  const baseVisibility: TaskVisibilityPort = { async read(_orgId, taskIds) { return new Map(taskIds.map((id) => [id, { kind: "shared" as const }])); } };
-  const withAudiences = withLessonAudiences(baseVisibility, audiences);
-  const taskVisibility = input.projectRepoScopes === undefined ? withAudiences : withProjectRepoScopes(withAudiences, input.projectRepoScopes);
-  const access = createLocalAccessCheck({ taskVisibility });
-  const directory = createLocalApproverDirectory({ ownerId: owner.id, ...(input.linkedAccounts === undefined ? {} : { linkedAccounts: input.linkedAccounts }) });
+  const repoScopes = input.projectRepoScopes;
+  const withRepoScopes = (port: TaskVisibilityPort): TaskVisibilityPort => (repoScopes === undefined ? port : withProjectRepoScopes(port, repoScopes));
+  const hosted = input.hosted === undefined ? undefined : createHostedLessonParts({ companyId: input.companyId, people: input.hosted.people, readTask: input.hosted.readTask, taskVisibility: withRepoScopes });
+  let taskVisibility: TaskVisibilityPort;
+  let access: AccessCheckPort;
+  let directory: ApproveDeps["directory"];
+  if (hosted !== undefined) {
+    access = hosted.access;
+    taskVisibility = access.taskVisibility;
+    directory = hosted.directory;
+  } else {
+    const audiences = localLessonAudiencePort({ ownerId: owner.id, projectOf: (orgId, taskId) => input.taskProject(orgId, taskId) });
+    const baseVisibility: TaskVisibilityPort = { async read(_orgId, taskIds) { return new Map(taskIds.map((id) => [id, { kind: "shared" as const }])); } };
+    taskVisibility = withRepoScopes(withLessonAudiences(baseVisibility, audiences));
+    access = createLocalAccessCheck({ taskVisibility });
+    directory = createLocalApproverDirectory({ ownerId: owner.id, ...(input.linkedAccounts === undefined ? {} : { linkedAccounts: input.linkedAccounts }) });
+  }
   const audit = lessonAuditSink(input.audit, input.now, input.companyId);
   const base = { now: input.now, audit, ...(input.log === undefined ? {} : { log: input.log }) };
   const facts = createCodeFacts({ reader: input.reader, repositoriesOf: async (workspaceId, project) => input.repositoriesOf(workspaceId, project) });
@@ -137,7 +154,7 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
       try { return await port.read(key.workspaceId, key.project); } catch { return undefined; }
     },
   } satisfies CurateDeps & Partial<ProcessDeps>;
-  const names: AttributionReader = {
+  const names: AttributionReader = hosted?.names ?? {
     async memberName(_orgId, developerId) { return developerId === owner.id ? owner.name : undefined; },
     async isErased() { return false; },
   };
@@ -147,7 +164,7 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   const routes: LessonRouteDeps = {
     ...base, ...view, store, directory, settings, access, vectors, embedder, judgeModel, spend, edition, pause, verifier, facts, projectRepos: process.projectRepos,
     judge: outcomeJudge,
-    presets: { settings: presetStore, changes: presetStore, audit, now: input.now, authority: createLocalTier0Authority(owner.id), soleOwnerLoosening: (workspaceId) => soleOwner.read(workspaceId) },
+    presets: { settings: presetStore, changes: presetStore, audit, now: input.now, authority: hosted?.tier0Authority ?? createLocalTier0Authority(owner.id), soleOwnerLoosening: (workspaceId) => soleOwner.read(workspaceId) },
   } as LessonRouteDeps;
   const deletion = lessonDeletionPort({ store, vectors, audit, now: input.now });
   const localTools = new DocumentLocalToolsSettings(input.store);

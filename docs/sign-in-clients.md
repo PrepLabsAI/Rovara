@@ -2,8 +2,8 @@
 
 A service built on Rovara (a dashboard, or a scheduler that acts as a channel adapter) can let Rovara users sign in
 with Rovara rather than with an identity system of its own. An administrator registers it as a **sign-in client**.
-Its tokens carry its own audience, so Rovara's API refuses them, unless the service has
-[full access](#full-access).
+Its tokens carry its own audience, so Rovara's API refuses them, except on the routes its
+[scopes](#named-scopes-on-the-developer-api) open, or everywhere with [full access](#full-access).
 
 Developer sign-in must be set up (`agentx signin enable`). Every change is an admin change: the CLI shows what it will
 do and asks before applying it, and `agentx admin changes` records it.
@@ -75,11 +75,48 @@ The service uses Rovara's sign-in server as an OAuth 2.0 authorization server. I
    client.
 4. Sign out with `<api>/v1/auth/revoke`.
 
-Rovara's own API refuses these tokens.
+Rovara's own API refuses these tokens, except on the routes the client's scopes open (see
+[Named scopes on the developer API](#named-scopes-on-the-developer-api)).
 
 A session records whether the person is a Rovara administrator. Only a company sign-in counts, and only when it uses
 the same identity provider as the admin client and its ID token carries the administrator claim (`AdminClaim`,
 `AdminValues`). A Slack sign-in never counts.
+
+## Ask for a fresh sign-in (step-up)
+
+Some presses need the person to prove, a few minutes ago, that it is really them: a high-risk approval, making a
+script token, and later the other sensitive presses. Signing in again through Slack, Google or GitHub does not count:
+those can send a person straight back without asking anything. Instead Rovara asks with a factor of its own.
+
+1. Send the person to `<api>/v1/auth/authorize` as above, adding `acr_values=step-up`. The discovery document lists
+   `acr_values_supported: ["step-up"]` when the install has a factor set up.
+2. They sign in with Slack or company login as usual; that only says who they are. Rovara then shows its own page and
+   emails a six-digit code to their confirmation email (their "factor email"). It is taken from the verified email of
+   their first sign-in, or set by a company admin; a later change of email at Slack, Google or GitHub never moves it.
+   The page lasts ten minutes, sends at most three codes and allows five tries; a person
+   can start at most five pages an hour.
+3. Once the code is right, the browser goes back to your `redirect_uri` (HTTP 303) with the code. Redeem it as usual.
+   It starts a new session: revoke the old one with `<api>/v1/auth/revoke`.
+4. The access token carries `step_up_at` (when, in seconds since 1970) and `step_up_amr` (`email_code`, `passkey`
+   or `company_reauth`). A refresh keeps the original time; it never makes a step-up fresh again. The route that needs a
+   fresh sign-in checks the time itself, against the company's window (ten minutes unless the company sets a shorter
+   one), whatever the calling service says.
+
+Passkeys: once the emailed code is right, the page offers to add a passkey (WebAuthn, owned by Rovara; it keeps
+only the public key). From then on a passkey tap is the step-up (`step_up_amr: passkey`), and the email code stays
+the fallback. A passkey is only ever added after the email code on the same page, never on the strength of the
+Slack, Google or GitHub sign-in alone, so passkeys need the email sender too; the person is emailed when one is
+added.
+
+A company sign-in counts by itself only when it signs the person in again and says when (`auth_time`) and that is
+inside the window and not before this sign-in request; Rovara asks it with `prompt=login` and `max_age`. Otherwise its people get the email code too.
+If there is no factor for the person (no factor email and no passkey, or no email sender on the install), the service
+gets `error=access_denied` and no code; a company admin can set their factor email.
+
+Managing factors (through the sign-in service, by the caller's own verified session): a person lists their passkeys
+(a live session is enough) and removes one (a fresh step-up is needed). A company admin, with their own fresh step-up,
+can set a person's factor email (the old address is told first; if it cannot be told, nothing changes) and remove all
+of a person's passkeys (the person is told). Ending a person's sessions does not remove their passkeys.
 
 ## Check what a person can do
 
@@ -129,9 +166,31 @@ The member list shows grants made once this release is in. A grant made before i
 See the specs: [sign-in clients](../specs/063-sign-in-clients/spec.md) and
 [scoped actions](../specs/065-client-scopes/spec.md).
 
+## Named scopes on the developer API
+
+Every developer API route (`/v1/dev/*`) has one row in the broker's route table
+(`packages/broker/src/aws/dev-route-scopes.ts`) naming what a service's token needs to use it. A method and path with
+no row is refused with 404 before anyone is signed in, so a new route can't be reached until it has a row.
+
+| Scope | What it opens |
+| --- | --- |
+| `profile:name` | `PUT /v1/dev/me/name`: the person chooses their own name |
+| `projects:members` | A project's members (above) |
+| `projects:create` | Creating a project, and the repositories to create it from |
+| `tasks:read` | The person's projects, their tasks, one task, its events, plan, people, a pending people change, the feedback review, its messages, a pull request's diff, plan comments |
+| `tasks:start` | `POST /v1/dev/tasks`: start a task |
+| `tasks:act` | Add a message or steer the running step, comment on a plan document, cancel, close, continue, open pull requests, propose a role change or taking a task over, retry, review again, send back, resolve findings, publish again, keep pull requests, retry a feedback review |
+| `tasks:share` | Share a task, and list, add and remove its readers |
+| `decisions:decide` | Approve a plan or request changes, and decide on a feedback proposal |
+
+The rest (workspaces, the person's links, Sign in with ChatGPT, and two routes only the CLI uses) need
+[full access](#full-access). A token without the scope a route needs gets 403, naming the missing scope; a service registered with no scope and no full access gets 401, as before. A scope only
+narrows what the person may do; it never adds a right. The Rovara CLI's own token reaches every route, as before.
+
 ## Full access
 
-A service you trust as much as the Rovara CLI, such as a web app, can act as the signed-in person on Rovara's whole
+Full access is off for every service unless an administrator turns it on; a web app needs only the named scopes
+above. A service you trust as much as the Rovara CLI can act as the signed-in person on Rovara's whole
 developer API (`/v1/dev/*`): their projects, workspaces, links and, where the deployment runs them, tasks. Its people
 then use Rovara through it with exactly their own rights.
 

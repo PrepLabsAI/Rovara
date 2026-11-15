@@ -87,8 +87,8 @@ function notServed(answer: ModelAnswer, state: ServeState, base: Base = NO_BASE,
 }
 
 /** The first tool name, the stream kind and the rest of what a failure answer needs. */
-function failureContext(route: FamilyRouteOk, model: string, toolName: string | undefined, options: ServeRepliesOptions): FailureContext {
-  return { wire: route.wire, operation: route.operation, model, stream: route.stream, seed: options.seed, lineEnding: options.lineEnding ?? "lf", created: options.created ?? 1_700_000_000, enumEncoding: route.enumEncoding, toolName };
+function failureContext(route: FamilyRouteOk, model: string, toolName: string | undefined, includeUsage: boolean, options: ServeRepliesOptions): FailureContext {
+  return { wire: route.wire, operation: route.operation, model, stream: route.stream, seed: options.seed, lineEnding: options.lineEnding ?? "lf", created: options.created ?? 1_700_000_000, enumEncoding: route.enumEncoding, includeUsage, toolName };
 }
 
 /**
@@ -117,7 +117,7 @@ export function serveModelRequestWithReplies(rows: readonly ServableRow[], reply
 
   const failure = options.failure;
   if (failure !== undefined && state.callCount >= (failure.afterCalls ?? 0)) {
-    const answer = shape.failure(failure, failureContext(route, model, facts.toolName, options));
+    const answer = shape.failure(failure, failureContext(route, model, facts.toolName, facts.includeUsage, options));
     return { answer, kind: "failure_pack", resultClass: FAILURE_PACK_CLASS, countsTowardProof: false, ...base, replyId: undefined, provenance: undefined, replySha256: undefined, failureMode: failure.mode, evidenceSentence: undefined, nextState: callState(state.matchCounts) };
   }
 

@@ -5,7 +5,8 @@ import { claimValues } from "../aws/lambda.js";
 import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod } from "@agentx/contracts";
 
 /** `administrator` (spec 063 FR-005): the company sign-in's ID token carried the administrator claim. Slack never sets it. */
-export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; administrator?: true }
+/** `authTime` (lane ID part 2, company sign-in only): the ID token's `auth_time`, epoch seconds, when it carried a whole number. Slack's is never read: a Slack round trip never counts as a step-up. */
+export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; administrator?: true; authTime?: number }
 /** `wrongAccount`: the person signed in fine but is not one AgentX accepts (another Slack workspace,
  * or without the required claim), so signing in as someone else may help. */
 export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string; wrongAccount?: true };
@@ -16,7 +17,8 @@ export class ProviderNotConfiguredError extends Error { override name = "Provide
 
 export interface SignInProvider {
   readonly method: DeveloperSignInMethod;
-  authorizeUrl(input: { state: string; nonce: string; redirectUri: string }): Promise<string>;
+  /** `reauthenticate` (lane ID part 2): a step-up; a company sign-in is asked to sign the person in again (`prompt=login`, `max_age`). Slack ignores it. */
+  authorizeUrl(input: { state: string; nonce: string; redirectUri: string; reauthenticate?: { maxAgeSeconds: number } }): Promise<string>;
   complete(input: { code: string; nonce: string; redirectUri: string }): Promise<ProviderResult>;
 }
 
@@ -156,10 +158,15 @@ export function oidcSignInProvider(input: {
   };
   return {
     method: "oidc",
-    async authorizeUrl({ state, nonce, redirectUri }) {
+    async authorizeUrl({ state, nonce, redirectUri, reauthenticate }) {
       const doc = await discover();
       const url = new URL(doc.authorization_endpoint);
       for (const [key, value] of Object.entries({ response_type: "code", scope: SCOPES, client_id: input.clientId, state, nonce, redirect_uri: redirectUri })) url.searchParams.set(key, value);
+      // OpenID Connect Core 3.1.2.1: ask the company's sign-in to authenticate again and to say when (auth_time).
+      if (reauthenticate !== undefined) {
+        url.searchParams.set("prompt", "login");
+        url.searchParams.set("max_age", String(reauthenticate.maxAgeSeconds));
+      }
       return url.toString();
     },
     async complete({ code, nonce, redirectUri }) {
@@ -194,6 +201,7 @@ export function oidcSignInProvider(input: {
           displayName: (name === undefined ? undefined : cleanDisplayName(name)) ?? payload.sub,
           ...(email === undefined ? {} : { email }),
           ...(isAdministrator(payload, input.administrator) ? { administrator: true as const } : {}),
+          ...(typeof payload.auth_time === "number" && Number.isSafeInteger(payload.auth_time) && payload.auth_time > 0 ? { authTime: payload.auth_time } : {}),
         },
       };
     },

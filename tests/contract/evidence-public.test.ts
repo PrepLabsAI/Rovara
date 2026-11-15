@@ -514,10 +514,10 @@ describe("review fixes (Opus review of B12)", () => {
 });
 
 describe("callers", () => {
-  it("nothing outside the contracts package and the tests calls the public renderer yet", () => {
+  it("only the evidence body seam calls the public renderer outside contracts", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const found = spawnSync("git", ["grep", "--untracked", "-lwE", "renderEvidencePublic|renderPublicView|publicEvidenceView", "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
     expect([0, 1]).toContain(found.status);
-    expect(found.stdout.split("\n").filter((entry) => entry !== "" && !entry.startsWith("packages/contracts/"))).toEqual([]);
+    expect(found.stdout.split("\n").filter((entry) => entry !== "" && !entry.startsWith("packages/contracts/"))).toEqual(["packages/broker/src/core/proof/evidence-v2-lines.ts"]);
   });
 });
