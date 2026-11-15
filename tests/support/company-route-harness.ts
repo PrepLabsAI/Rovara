@@ -5,10 +5,12 @@ import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 
 export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/dev/tasks", "GET /v1/dev/projects",
+  "GET /v1/dev/client/repositories", "POST /v1/dev/client/projects",
   "GET /v1/dev/client/projects/{id}", "POST /v1/dev/access",
   "GET /v1/dev/tasks/{taskId}/events", "GET /v1/dev/tasks/{taskId}/readers",
   "GET /v1/dev/tasks/{taskId}/messages", "GET /v1/dev/tasks/{taskId}/comments", "GET /v1/dev/tasks/{taskId}/diff",
   "GET /v1/admin/sign-in-clients", "POST /v1/dev/company/preapprovals", "DELETE /v1/dev/company/preapprovals/", "DELETE /v1/dev/company/preapprovals/{id}",
+  "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
 ] as const;
 export const PERSON = "d".repeat(64);
 export const TASK = "11111111-1111-4111-8111-111111111111";
