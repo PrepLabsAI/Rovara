@@ -135,7 +135,7 @@ describe("the merge route on the developer API", () => {
     const h = companyRouteHarness();
     const { loadTask } = wired(h);
     // A full-access sign-in client and its session (spec 066), so the person's token goes through the client path.
-    h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-01T00:00:00.000Z", updatedBy: "admin" });
+    h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-01T00:00:00.000Z", updatedBy: "admin" });
     h.db.set({ pk: "SESSION#web", sk: "META", sessionId: "web", developerId: PERSON, amr: "slack", clientId: "web-app", startedAt: TIME, endsAt: Date.parse(TIME) / 1000 + 3600 });
     Object.assign(h.claims, { azp: "web-app", sid: "web" });
     const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");

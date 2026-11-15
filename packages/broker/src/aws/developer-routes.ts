@@ -1008,7 +1008,6 @@ async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: s
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
 const CLIENT_CODE_SETTINGS = /^\/v1\/dev\/client\/projects\/([^/]+)\/code-settings$/;
-export const CODE_SETTINGS_CLIENT_REFUSED = "this sign-in client may not read or change a project's merge rules";
 
 /**
  * Lane W: `GET|PUT /v1/dev/client/projects/{project}/code-settings`. Read by a person who may use the project (in their company, from membership); changed by its administrator or a
@@ -1017,7 +1016,6 @@ export const CODE_SETTINGS_CLIENT_REFUSED = "this sign-in client may not read or
 async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, route: DevRoute): Promise<unknown> {
   const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
   requireRouteScope(route, person);
-  if (person.client.fullAccess !== true) throw agentXError("FORBIDDEN", CODE_SETTINGS_CLIENT_REFUSED);
   const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let project: string;
@@ -1035,7 +1033,8 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
   const own = await projectGrant(memberActions(deps), project, person.developerId);
   const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
   const companyAdmin = companyId === undefined ? person.administrator : membership?.companyId === companyId && (membership.role === "admin" || membership.role === "owner");
-  return putCodeSettings({ ...store, now: deps.now, log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })) }, {
+  return putCodeSettings({ ...store, now: deps.now, // The file's one company-less logger (already in the log-site inventory), with the company added when there is one.
+    log: (entry) => logDeveloperEvent({ ...entry, ...(companyId === undefined ? {} : { companyId }) }) }, {
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
   });
 }
