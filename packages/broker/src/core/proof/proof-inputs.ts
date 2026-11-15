@@ -59,13 +59,22 @@ export async function loadProofContext(
   };
   const [loadedProof, scenarioRows, evidence, design, realModelRun] = await Promise.all([checked ? loadTestProof(deps.actions, task, digest, operations) : Promise.resolve(undefined), scenarios(), evidenceOf(), designOf(), realRunOf()]);
   let testProof = loadedProof;
-  const checkDependencies = new Map<string, readonly { dependencyId: string; trust: "simulated"; replies: "task_made" }[]>();
+  const checkDependencies = new Map<string, readonly ({ dependencyId: string; trust: "simulated"; replies: "task_made" } | { dependencyId: string; trust: "made_by_rovara" })[]>();
   if (testProof?.scriptedReplies !== undefined) {
     const recorded = recordedCheckIdsOf(workflow);
     for (const facts of testProof.scriptedReplies) {
       const checkId = checkIdOfProofItem(facts.checkId, recorded);
       if (checkId === undefined) { testProof = undefined; checkDependencies.clear(); break; }
       if (facts.taskMade > 0) checkDependencies.set(checkId, [{ dependencyId: "scripted_replies", trust: "simulated", replies: "task_made" }]);
+    }
+  }
+  // General fakes (DEC 234): a check a Rovara-made fake answered depends on a Rovara-made mock, so the proof table never counts it as Proven. A fact that names no recorded check drops the whole proof (fail closed).
+  if (testProof?.madeByRovara !== undefined) {
+    const recorded = recordedCheckIdsOf(workflow);
+    for (const facts of testProof.madeByRovara) {
+      const checkId = checkIdOfProofItem(facts.checkId, recorded);
+      if (checkId === undefined) { testProof = undefined; checkDependencies.clear(); break; }
+      checkDependencies.set(checkId, [...(checkDependencies.get(checkId) ?? []), { dependencyId: "general_fake", trust: "made_by_rovara" }]);
     }
   }
   return { plan, ...(checkDependencies.size === 0 ? {} : { checkDependencies }), ...(realModelRun === undefined ? {} : { realModelRun }), ...(scenarioRows === undefined ? {} : { scenarioRows }), ...(testProof === undefined ? {} : { testProof }), ...(evidence === undefined ? {} : { evidence }), ...(design === undefined ? {} : { design }) };

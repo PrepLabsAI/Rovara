@@ -52,6 +52,7 @@ orchestratorInstructions: Delegate every repository read, edit, build, and test 
 | `integrations` | no | Connector tools the orchestrator may use (below). |
 | `actionPolicy` | no | Rules that tighten or loosen which tool calls ask for confirmation (below). |
 | `developerTasks` | no | How the project treats tasks started from an AI tool (below). |
+| `generalFakes` | no | Rovara-made fakes for outside services your checks call (below). Absent: off. |
 
 A file that still has `schemaVersion`, `controlPlaneUrl`, `auth` or `environment` is refused, and
 the error names those fields. The first three moved to the deployment file; the release pins the
@@ -440,6 +441,31 @@ Tracked in [#325](https://github.com/PrepLabsAI/Rovara/issues/325):
 2. Dev-container-only Docker: only AgentX's own launcher reaches Docker; projects without a dev
    container run in the task sandbox, which has none.
 3. Apply the same process and container stop before the credential of a pull request update.
+
+### General fakes (Rovara-made fakes for outside services)
+
+When your tests call an outside HTTP service that the check round cannot reach, and you have no fake of your own,
+Rovara can make one from the service's OpenAPI 3 description in your repository and answer your tests with it.
+Off by default.
+
+```yaml
+generalFakes:
+  enabled: true
+  services:
+    - variable: PAYMENTS_API_URL          # the base-URL variable your code reads for this service
+      spec: repo/payments/openapi.yaml    # optional; absent: the one OpenAPI 3 file in your repositories
+```
+
+- During a verification run of the checks, each listed variable points at Rovara's fake for that service. Each
+  operation answers with a typical body built from its 2xx JSON answer schema (no example values are copied).
+- Every check a fake answered is labelled **Made by Rovara** and **never counts as change proof**: the Proof
+  section shows it as "with a Rovara-made mock; not Proven".
+- A check that fails after a call the fake could not answer reads **Not run** with the reason (no description found,
+  more than one found, unreadable, an operation it does not list, or OpenAPI parts Rovara cannot fake yet), never
+  "failed".
+- For now fakes are served only when checks run on the machine's local shell; in a task sandbox or dev container the
+  run says "Rovara-made fakes were not used" and the checks run as without the setting.
+- Turn it off with `enabled: false`, or remove a service from the list.
 
 ## Checks: how Rovara verifies the agent's work (spec 051)
 

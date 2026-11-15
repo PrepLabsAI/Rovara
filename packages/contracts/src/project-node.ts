@@ -12,6 +12,7 @@ import { ConnectorsSchema, StoredConnectorsSchema, type GitHubConnectorConfig } 
 import { E2E_PROJECT_CHECK_ID } from "./e2e.js";
 import { SettingOriginSchema, type SettingOrigin } from "./provenance.js";
 import { SpecTargetSchema } from "./spec-target.js";
+import { GeneralFakesSettingSchema } from "./general-fakes.js";
 import { ExternalIdSchema, PluginKindSchema } from "./plugins/common.js";
 import { ProjectRegistriesSchema } from "./project-registries.js";
 
@@ -368,6 +369,8 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       e2e: E2EPolicySchema.optional(),
       /** K1 lane D: where this project's specs are written (spec-target.ts). Absent: no spec is written. */
       specTarget: SpecTargetSchema.optional(),
+      /** General fakes (DEC 234, general-fakes.ts): Rovara-made fakes from the project's OpenAPI descriptions for outside services its checks call. Absent: off. Control-plane only (`workerProjectDefinition`); a CHECKS run gets `generalFakes` in its payload instead. */
+      generalFakes: GeneralFakesSettingSchema.optional(),
       origins: ProjectOriginsSchema.optional(),
     })
     .strict();
@@ -521,7 +524,7 @@ export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
  * alone (the DNS firewall enforces `network`, the broker's start check the pins).
  * `includeMeta` keeps a meta repository that is not also code, for the one run that reads it whole (the setup draft).
  */
-export function workerProjectDefinition<Definition extends object>(definition: Definition, options: { includeMeta?: boolean } = {}): Omit<Definition, "network" | "origins" | "specTarget" | "registries"> {
+export function workerProjectDefinition<Definition extends object>(definition: Definition, options: { includeMeta?: boolean } = {}): Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes"> {
   const rest: Record<string, unknown> = { ...(definition as Record<string, unknown>) };
   delete rest.network;
   // N9: the registries reach a worker as the prepare payload's `registries` (where, never how), only if it lists `prepare.registries.v1`; an earlier worker's strict schema does not know the field.
@@ -530,6 +533,8 @@ export function workerProjectDefinition<Definition extends object>(definition: D
   delete rest.origins;
   // Lane D: where specs are written is the control plane's (the broker renders and publishes them); an earlier worker's strict schema does not know it.
   delete rest.specTarget;
+  // General fakes: the setting is the control plane's; a CHECKS run that may use them is sent `generalFakes` in its payload, only to a worker that lists the feature.
+  delete rest.generalFakes;
   // The same for the repository pins (`installationId`, `githubRepositoryId`) and the meta role: the repository entry of an earlier worker is strict too.
   if (Array.isArray(rest.repositories)) {
     rest.repositories = rest.repositories
@@ -554,7 +559,7 @@ export function workerProjectDefinition<Definition extends object>(definition: D
         return repository;
       });
   }
-  return rest as Omit<Definition, "network" | "origins" | "specTarget" | "registries">;
+  return rest as Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes">;
 }
 
 function isPureMetaRepository(entry: unknown): boolean {

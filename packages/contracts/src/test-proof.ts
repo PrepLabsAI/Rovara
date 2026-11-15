@@ -81,6 +81,13 @@ const boundedReplies = z.unknown().refine((items) => Array.isArray(items) && ite
 const uniqueReplies = (items: { checkId: string }[]) => new Set(items.map((item) => item.checkId)).size === items.length;
 const repliesWrite = boundedReplies.pipe(z.array(z.object(replyShape).strict()).refine(uniqueReplies, "unsupported"));
 const repliesRead = boundedReplies.pipe(z.array(z.object(replyShape)).refine(uniqueReplies, "unsupported"));
+// General fakes (DEC 234): how many calls a Rovara-made fake answered in each check. A check with served > 0 is NEVER change proof (the broker maps it to a `made_by_rovara` dependency).
+const fakeShape = {
+  checkId: z.string().min(1).max(64),
+  served: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+};
+const fakesWrite = boundedReplies.pipe(z.array(z.object(fakeShape).strict()).refine(uniqueReplies, "unsupported"));
+const fakesRead = boundedReplies.pipe(z.array(z.object(fakeShape)).refine(uniqueReplies, "unsupported"));
 const proofShape = {
   schemaVersion: z.literal(1),
   /** The candidate digest of the code the checks passed on. A proof for any other digest is ignored. */
@@ -97,6 +104,7 @@ const proofShape = {
 export const TestProofWriteSchema = z.object({
   ...proofShape,
   scriptedReplies: repliesWrite.optional(),
+  madeByRovara: fakesWrite.optional(),
   /** TE-B3: per compared check, what the original code's run shows about tests the change did not touch. */
   weakening: z.array(TestProofWeakeningSchema).max(64).optional(),
   /** TE-B3: the checks that were run on the original code and could not be compared, with the fixed reason. */
@@ -108,6 +116,8 @@ export const TestProofSchema = z.object({
   ...proofShape,
   // A present unreadable provenance part invalidates the WHOLE proof. Never catch-and-drop it.
   scriptedReplies: repliesRead.optional(),
+  // Like the reply facts: a present unreadable part invalidates the whole proof, so a fake-answered check can never be read as proof.
+  madeByRovara: fakesRead.optional(),
   weakening: z.array(TestProofWeakeningReadSchema).max(64).optional().catch(undefined),
   weakeningNotCompared: z.array(z.object(notComparedShape)).max(64).optional().catch(undefined),
 });
@@ -219,7 +229,8 @@ function proofForHold(raw: TestProof | undefined): { proof?: TestProof; invalid:
       || (raw.weakening !== undefined && (!Array.isArray(raw.weakening) || raw.weakening.length > 64
         || raw.weakening.some((row) => !Array.isArray(row.absentOnNew) || row.absentOnNew.length > ABSENT_ON_NEW_MAX)))
       || (raw.weakeningNotCompared !== undefined && (!Array.isArray(raw.weakeningNotCompared) || raw.weakeningNotCompared.length > 64))
-      || (raw.scriptedReplies !== undefined && (!Array.isArray(raw.scriptedReplies) || raw.scriptedReplies.length > 200))) return { invalid: true };
+      || (raw.scriptedReplies !== undefined && (!Array.isArray(raw.scriptedReplies) || raw.scriptedReplies.length > 200))
+      || (raw.madeByRovara !== undefined && (!Array.isArray(raw.madeByRovara) || raw.madeByRovara.length > 200))) return { invalid: true };
     const parsed = TestProofSchema.safeParse(raw);
     if (!parsed.success
       || (raw.weakening !== undefined && parsed.data.weakening === undefined)
@@ -244,7 +255,10 @@ export function proofHolds(input: { facts: ProofHoldFacts; mode: ProofHoldMode; 
   let scriptedProof = false;
   const { proof, invalid } = proofForHold(facts.proof);
   if (proof !== undefined && proof.status === "checked") {
+    // General fakes (DEC 234): a check a Rovara-made fake answered never proves a change, so it is never counted here (as #588 keeps it out of Proven).
+    const fakeAnswered = new Set((proof.madeByRovara ?? []).map((facts) => facts.checkId));
     for (const entry of proof.items) {
+      if (fakeAnswered.has(entry.checkId)) continue;
       if (entry.verdict === "not_applicable" || entry.verdict === "not_checked") continue;
       const kind = OWN(facts.checkKinds, entry.checkId);
       // A check whose kind is registered and does not count toward the proof (a lint), or one this build does not know, never proves a change.
