@@ -1,6 +1,6 @@
 // Only trusted worker wiring supplies these ports. Nothing here binds a production model or payer.
 import {
-  EvalRequestSchema, EvalSpendInputsSchema, EvalRoundArtifactSchema, EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS,
+  EVAL_NOT_RUN_CLASSES, EvalRequestSchema, EvalSpendInputsSchema, EvalRoundArtifactSchema, EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS,
   EVAL_QUESTION_LIMIT, evalSpendInputsDigest, evalBaseCacheKey, evalResultFromArtifact,
   type EvalRequest, type EvalSpendInputs, type EvalSpendGrant, type EvalSpendApproval, type MonthlyMeter, type EvalMeterReservation,
   type EvalRoundArtifact, type EvalRoundKind, type EvalNotRunReason, type BaseScoreCache, type EvalRoundFacts,
@@ -51,7 +51,12 @@ function validPlan(input: unknown): EvalFinalCheckPlan | undefined {
   evalBaseCacheKey({ ...p.key, evalSetHash: p.baseEvalSetHash ?? p.evalSetHash, hiddenSetHash: "none", settingsFingerprint: p.inputs.settingsFingerprint });
   return p;
 }
-const failedFacts = (count: number, reason: EvalNotRunReason): EvalRoundFacts => ({ total: count, run: 0, notRun: count, byClass: { [reason === "cap" ? "cap" : "provider_error"]: count }, overrunStop: reason === "cap" });
+/** What a finished comparison was measured against, from Rovara's own plan (never the repository). Omitted rather than refused when a name is out of bounds. */
+const basisOf = (p: EvalFinalCheckPlan): { basis?: { evalSetHash: string; judgePin: string; model: string; modelVersion: string; oldRuns: 3 } } => {
+  const fits = (text: string): boolean => text.length >= 1 && text.length <= 128;
+  return fits(p.key.model) && fits(p.key.modelVersion) ? { basis: { evalSetHash: p.evalSetHash, judgePin: p.judgePin, model: p.key.model, modelVersion: p.key.modelVersion, oldRuns: 3 } } : {};
+};
+const failedFacts = (count: number, reason: EvalNotRunReason): EvalRoundFacts => ({ total: count, run: 0, notRun: count, byClass: { [(EVAL_NOT_RUN_CLASSES as readonly string[]).includes(reason) ? reason : "provider_error"]: count }, overrunStop: reason === "cap" });
 
 /** All pre-reservation gates spend zero. Cancellation is joined by the injected runner; no work is
  * detached on a timer. The CHECKS host supplies its existing round stop signal and deadline. */
@@ -81,7 +86,8 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     if (output.status !== "done" || output.evidence === undefined) return refuse("invalid_question_data");
     if (facts.signal.aborted && output.result.label !== "Worse on eval") return refuse("stopped");
     if (closeFailed && output.result.label !== "Worse on eval") return refuse("provider_error");
-    const artifact = { ...envelope, outcome: output.result.outcome === "ran" ? "done" as const : "not_run" as const, ...(output.result.notRun === undefined ? {} : { notRunReason: output.result.notRun.reason }), ...output.evidence, context: context(), usage: usage(), cache: output.cache, evalConfigured: p.evalConfigured };
+    const artifact = { ...envelope, outcome: output.result.outcome === "ran" ? "done" as const : "not_run" as const, ...(output.result.notRun === undefined ? {} : { notRunReason: output.result.notRun.reason }), ...output.evidence, context: context(), usage: usage(), cache: output.cache, evalConfigured: p.evalConfigured,
+      ...(output.result.outcome === "ran" && p.evalConfigured ? basisOf(p) : {}) };
     const checked = EvalRoundArtifactSchema.safeParse(artifact);
     if (!checked.success) return refuse("invalid_question_data");
     if (evalResultFromArtifact(checked.data).notRun?.reason === "invalid_question_data" && output.result.notRun?.reason !== "invalid_question_data") return refuse("invalid_question_data");
