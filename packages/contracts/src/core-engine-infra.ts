@@ -49,3 +49,13 @@ export const CORE_DISPATCH_MAX_RECEIVES = CORE_DISPATCH_ATTEMPTS_MAX + 1;
 /** The core's dispatch queue and its dead letters, by fixed per-environment names (named environments only). */
 export const coreDispatchQueueName = (env: string): string => `agentx-${env}-core-dispatch`;
 export const coreDispatchDeadLetterName = (env: string): string => `agentx-${env}-core-dispatch-dead`;
+
+/**
+ * Engine host step 4: the dispatcher is the core dispatch queue's consumer (its own event source mapping, apart from the spec 056 DispatchQueue's). The CDK app sets these on the dispatcher
+ * (named environments only); the dispatcher's core router (packages/broker/src/aws/worker-machines/dispatcher-core.ts) reads them. Absent (the legacy template): the router is not installed.
+ */
+export const CORE_DISPATCH_QUEUE_ARN_VARIABLE = "CORE_DISPATCH_QUEUE_ARN";
+export const CORE_DISPATCH_QUEUE_URL_VARIABLE = "CORE_DISPATCH_QUEUE_URL";
+export const CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE = "CORE_DISPATCH_DEAD_LETTER_URL";
+/** One core record per dispatcher invocation, so a slow EC2 start of one message never runs another past the function's timeout. */
+export const CORE_DISPATCH_BATCH_SIZE = 1;

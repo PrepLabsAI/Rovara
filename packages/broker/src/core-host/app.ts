@@ -34,6 +34,11 @@ export interface CoreHostAppOptions {
   /** The time budget of one scheduled run. Default 50 s. Never more than the function's own time left (`handleScheduledJob`'s `remainingMs`) less `JOB_EXIT_MARGIN_MS`. */
   jobBudgetMs?: number;
   nowMs?: () => number;
+  /**
+   * A root that only dispatches (the dispatcher Lambda, aws/worker-machines/dispatcher-core.ts): it runs no scheduled job and relays no outbox, so a company's runtime is not refused for
+   * the job services it lacks (those run on the broker), and `handleScheduledJob` / `relayOutbox` do nothing here. Default false.
+   */
+  dispatchOnly?: boolean;
 }
 
 export interface CoreHostApp {
@@ -49,7 +54,7 @@ export interface CoreHostApp {
   /** The core for one company (built once). Rejects when the root does not serve, or when the flow is not on for the company and it holds no core task. */
   runtimeFor(companyId: string): Promise<CoreRuntime>;
   /** A schedule's event: `undefined` when it is not a core job's; `{ skipped: "off" }` while off. `remainingMs`: the function's time left, which caps the budget. */
-  handleScheduledJob(event: unknown, options?: { remainingMs?: number | undefined }): Promise<undefined | { skipped: "off" | "unknown_job" } | { job: string; companies: CompanyRunReport[] }>;
+  handleScheduledJob(event: unknown, options?: { remainingMs?: number | undefined }): Promise<undefined | { skipped: "off" | "unknown_job" | "dispatch_only" } | { job: string; companies: CompanyRunReport[] }>;
   /** The stream reader's hook: relay the outbox of these companies (those not served are skipped). */
   relayOutbox(companies: readonly string[]): Promise<CompanyRunReport[]>;
 }
@@ -102,7 +107,7 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
         const runtime = createCoreRuntime({ ...options.runtime(built, companyId, flags), registry: built, companyId, flags });
         // Only an area the switch has ON for this company must have its services: a gap in an area that is off costs that area its jobs (`service_not_wired`), never the company's whole runtime.
         const areas = CORE_AREAS.filter((area) => coreAreaOn(flags, area, companyId));
-        const gaps = serviceGaps(runtime.services, areas);
+        const gaps = options.dispatchOnly === true ? [] : serviceGaps(runtime.services, areas);
         if (gaps.length > 0) throw new Error(`the core runtime lacks services for the areas switched on: ${gaps.join(", ")}`);
         return runtime;
       })();
@@ -131,6 +136,7 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
     async handleScheduledJob(event, run) {
       if (!isCoreJobEvent(event)) return undefined;
       if (!serving) return { skipped: "off" };
+      if (options.dispatchOnly === true) return { skipped: "dispatch_only" };
       const job = jobs.find((entry) => entry.name === event.job);
       if (job === undefined) return { skipped: "unknown_job" };
       const configured = options.jobBudgetMs ?? 50_000;
@@ -144,7 +150,7 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
       return { job: job.name, companies };
     },
     async relayOutbox(companies) {
-      if (!serving) return [];
+      if (!serving || options.dispatchOnly === true) return [];
       const relay = jobs.find((entry) => entry.trigger.kind === "stream");
       if (relay === undefined) return [];
       const held = await servedCompanies();

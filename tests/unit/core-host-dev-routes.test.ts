@@ -104,7 +104,7 @@ describe("the core's handlers on the deployed API", () => {
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const own = remember(FAKE_COMPANY);
     const runtime = await app.runtimeFor(FAKE_COMPANY);
-    const { task } = await runtime.flow.start({ principal: own.principal, client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    const { task } = await runtime.flow.start({ principal: own.principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     const read = await routes.route(get(`/v1/dev/tasks/${task.taskId}`), own);
     expect(read?.statusCode).toBe(200);
     expect(JSON.parse(read!.body)).toMatchObject({ task: { taskId: task.taskId } });

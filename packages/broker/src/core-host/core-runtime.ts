@@ -66,6 +66,30 @@ export function withStartFence<T>(items: readonly TransactItem[], run: () => Pro
   return startFences.run(items, run);
 }
 
+/** A `worker-machines` adapter that serves every company only through a per-company adapter (aws/worker-machines/session-worker-machines.ts `SessionWorkerFleet`). */
+interface CompanyBoundMachines {
+  forCompany(companyId: string): unknown;
+}
+
+const bindsCompanies = (value: unknown): value is CompanyBoundMachines => typeof value === "object" && value !== null && typeof (value as { forCompany?: unknown }).forCompany === "function";
+
+/**
+ * The registry as one company's runtime sees it: a `worker-machines` adapter that serves companies only through `forCompany` is handed out bound to this company, so every machine call
+ * of this runtime is held to this company's workspaces. Any other adapter (the laptop's, which reads the company from each spec) and every other point is the registry's own.
+ */
+export function withCompanyMachines<R extends { require(point: never, name?: never): unknown }>(registry: R, companyId: OrgId): R {
+  return new Proxy(registry, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target) as unknown;
+      if (property === "require" || property === "get") return (point: string, name?: string) => {
+        const found = (value as (point: string, name?: string) => unknown).call(target, point, name);
+        return point === "worker-machines" && bindsCompanies(found) ? found.forCompany(companyId) : found;
+      };
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
+
 /** What a start on a runtime that serves a company only for the tasks it already holds (drain, or a narrowed switch) answers. Fixed words. */
 export const CORE_START_REFUSED_WORDS = "the core engine starts no new task for this company";
 
@@ -83,7 +107,7 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     const own = given?.(input);
     return { ...(own ?? {}), items: [...(own?.items ?? []), ...(startFences.getStore() ?? []), stampItem(companyId, input.taskId, stamped)] };
   };
-  const base = createTaskFlowFromRegistry(withStepFenceRetry(registry), {
+  const base = createTaskFlowFromRegistry(withStepFenceRetry(withCompanyMachines(registry, companyId)), {
     ...options.flowOptions,
     companyId,
     projects: options.flowOptions?.projects ?? createStoreProjectSource(store, companyId),
