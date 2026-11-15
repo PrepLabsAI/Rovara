@@ -1,0 +1,248 @@
+// Engine host (migration plan v3.2 lane E2): the core engine switch's deployment half, on the synthesised templates. Ported from the monolith's core-engine infrastructure test.
+// What must hold:
+//   1. the switch: a stack parameter CoreEngine, off by default, plain text only, a plain variable on the broker, set by `agentx config set coreEngine.switch`, kept by an upgrade;
+//   2. the core dispatch queue: its own queue and dead letters, a redrive limit above the core's 20 attempts, the existing dispatch queue unchanged, granted to the broker only, on the queues' own
+//      policies (the broker role's inline policy is at its size limit);
+//   3. the job schedules: one per scheduled row of the core's job table, enabled only while the switch is not off, through a role that can invoke the broker and nothing else;
+//   4. no new deploy-role service: CloudFormation's actions for these resource types are within the deploy role's and the boundary's services, and the new role has no fixed name.
+// Dropped from the monolith's test, with reason: the packed-settings and Slack-ingress cases (Code's broker does not pack settings; the ingress wiring comes with the Slack step), the dispatcher's
+// mapping and grants (a later R2 step: nothing consumes the queue yet), the catalog repositories (another lane's), and the IAM simulation (Code has no simulator support; the services check stands in).
+import { App, Stack } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import { describe, expect, it } from "vitest";
+import {
+  BOUNDARY_SERVICES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES,
+  SERVICE_ROLE_SERVICES, coreDispatchDeadLetterName, coreDispatchQueueName,
+} from "@agentx/contracts";
+import { buildAgentXApp } from "../../infra/lib/app.js";
+import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
+import { CORE_BROKER_QUEUE_ACTIONS, CORE_DISPATCH_DEAD_LETTERS_ALARM } from "../../infra/lib/core-engine.js";
+import { environmentNaming } from "../../infra/lib/naming.js";
+import { DISPATCH_ATTEMPTS_MAX } from "../../packages/broker/src/core/task-flow/dispatch.js";
+import { CORE_ENGINE_VARIABLE as BROKER_SWITCH_VARIABLE, CORE_JOBS, CORE_SCHEDULE_SOURCE, parseCoreSwitch, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
+import { CORE_ENGINE_NOT_WIRED_WORDS, configKey, coreEngineValueWhenWired } from "../../packages/cli/src/config/keys.js";
+import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
+
+type Resource = { Type: string; Condition?: string; Properties: Record<string, unknown> };
+type Json = { Parameters: Record<string, { Default?: string; AllowedPattern?: string; MaxLength?: number }>; Conditions?: Record<string, unknown>; Resources: Record<string, Resource> };
+type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Principal?: unknown };
+
+const named = Template.fromStack(new ControlPlaneStack(new App(), "R2NamedControlPlane", { naming: environmentNaming("staging") }));
+const legacy = Template.fromStack(new ControlPlaneStack(new App(), "R2LegacyControlPlane"));
+const json = named.toJSON() as Json;
+// The role path and the permissions boundary are put on by the app's aspects, so those facts are read from the app's own control plane stack.
+const inApp = (() => {
+  const stack = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child)).find((candidate) => candidate.stackName === "agentx-staging-control-plane")!;
+  return Template.fromStack(stack).toJSON() as Json;
+})();
+const resources = (template: Template, type: string): Array<[string, Resource]> => Object.entries((template.toJSON() as Json).Resources).filter(([, resource]) => resource.Type === type);
+const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
+const broker = resources(named, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/u.test(id))!;
+const brokerVariables = (broker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+const brokerRoleId = ((broker[1].Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
+
+const ORG_A = `org_${"a1".repeat(10)}`;
+const ORG_B = `org_${"z9".repeat(10)}`;
+
+describe("the switch (stack parameter CoreEngine)", () => {
+  const parameter = json.Parameters.CoreEngine!;
+
+  it("is a stack parameter in a named environment: off by default, at most 64 characters", () => {
+    expect(parameter).toMatchObject({ Default: "off", MaxLength: 64, AllowedPattern: CORE_ENGINE_PARAMETER_PATTERN });
+  });
+
+  it("takes off, on, drain, or one or two company ids, and nothing that could carry a separator", () => {
+    const allowed = new RegExp(parameter.AllowedPattern!, "u");
+    for (const value of ["off", "on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) expect(allowed.test(value), value).toBe(true);
+    for (const value of ["", "OFF", "On", "0", "1", "true", "on:", "on:org_x", `on:${ORG_A}:`, `on:${ORG_A}:${ORG_B}:${ORG_A}`, `on:${ORG_A},${ORG_B}`, `on:${ORG_A}=1`, `on: ${ORG_A}`, `on:${ORG_A.toUpperCase()}`, `on:${ORG_A}/x`, "off\n", `on:${ORG_A}"`, `drain:${ORG_A}`, "on:org_" + "a".repeat(21)]) {
+      expect(allowed.test(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it("is read by the broker's own parser as the value it names: every value the parameter takes is a clean switch, never a reported problem", () => {
+    expect(BROKER_SWITCH_VARIABLE).toBe(CORE_ENGINE_VARIABLE);
+    for (const value of ["off", "on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) {
+      expect(parseCoreSwitch(value).problem, value).toBeUndefined();
+      expect(readCoreEngineFlags({ [CORE_ENGINE_VARIABLE]: value }).problems).toEqual([]);
+    }
+    expect(readCoreEngineFlags({ [CORE_ENGINE_VARIABLE]: `on:${ORG_A}:${ORG_B}` }).combined).toEqual({ mode: "on-for", companies: [ORG_A, ORG_B] });
+  });
+
+  it("reaches the broker as a plain variable", () => {
+    expect(brokerVariables[CORE_ENGINE_VARIABLE]).toEqual({ Ref: "CoreEngine" });
+  });
+
+  it("is missing from the legacy (production) template, which has no parameter, queue or schedule for it", () => {
+    const text = JSON.stringify(legacy.toJSON());
+    for (const word of ["CoreEngine", CORE_ENGINE_VARIABLE, "core-dispatch", CORE_JOB_EVENT_SOURCE]) expect(text, word).not.toContain(word);
+  });
+
+  it("is set with `agentx config set coreEngine.switch`, refused before anything changes when it is not a clean value, and an upgrade keeps it", () => {
+    const entry = configKey("coreEngine.switch");
+    expect(entry.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "CoreEngine" });
+    expect(entry.defaultValue).toBe("off");
+    // Until the broker runs the core engine, only off is accepted (the parameter's pattern still takes every value, so turning it on later needs no template change).
+    expect(CORE_ENGINE_BROKER_WIRED).toBe(false);
+    expect(entry.parse(" off ")).toBe("off");
+    for (const value of ["on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) {
+      expect(() => entry.parse(value), value).toThrow(CORE_ENGINE_NOT_WIRED_WORDS);
+      expect(new RegExp(CORE_ENGINE_PARAMETER_PATTERN, "u").test(value), value).toBe(true);
+      expect(coreEngineValueWhenWired(value)).toBe(value);
+    }
+    expect(coreEngineValueWhenWired(" on ")).toBe("on");
+    for (const value of ["", "1", "true", "on:", "drained", `drain:${ORG_A}`, `on:${ORG_A},${ORG_B}`, `on:${ORG_A}:${ORG_B}:${ORG_A}`]) {
+      expect(() => entry.parse(value), value).toThrow("coreEngine.switch must be off, on, drain, or on:<company id>");
+    }
+    // The refusal never echoes the value it was given.
+    expect(() => entry.parse("on:secret-looking-text")).toThrow(expect.objectContaining({ message: expect.not.stringContaining("secret-looking-text") as string }) as Error);
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("CoreEngine");
+  });
+});
+
+describe("the core dispatch queue", () => {
+  const queues = resources(named, "AWS::SQS::Queue");
+  const byName = (name: string) => queues.find(([, resource]) => resource.Properties.QueueName === name);
+  const queue = byName(coreDispatchQueueName("staging"))!;
+  const deadLetters = byName(coreDispatchDeadLetterName("staging"))!;
+
+  it("is a queue of its own with fixed per-environment names, plus dead letters", () => {
+    expect(queue).toBeDefined();
+    expect(deadLetters).toBeDefined();
+    expect(coreDispatchQueueName("staging")).toBe("agentx-staging-core-dispatch");
+    expect(coreDispatchDeadLetterName("staging")).toBe("agentx-staging-core-dispatch-dead");
+    expect(queues.filter(([, resource]) => /core-dispatch/u.test(String(resource.Properties.QueueName)))).toHaveLength(2);
+  });
+
+  it("redrives to its dead letters only after more receives than the core's own attempts", () => {
+    expect(CORE_DISPATCH_ATTEMPTS_MAX).toBe(DISPATCH_ATTEMPTS_MAX);
+    const policy = queue[1].Properties.RedrivePolicy as { maxReceiveCount: number; deadLetterTargetArn: { "Fn::GetAtt": [string, string] } };
+    expect(policy.maxReceiveCount).toBe(CORE_DISPATCH_MAX_RECEIVES);
+    expect(policy.maxReceiveCount).toBeGreaterThan(DISPATCH_ATTEMPTS_MAX);
+    expect(policy.deadLetterTargetArn["Fn::GetAtt"]).toEqual([deadLetters[0], "Arn"]);
+    expect(deadLetters[1].Properties).not.toHaveProperty("RedrivePolicy");
+  });
+
+  it("is encrypted with SQS-managed keys, holds a message two minutes while a step starts, and keeps dead letters 14 days", () => {
+    expect(queue[1].Properties).toMatchObject({ SqsManagedSseEnabled: true, VisibilityTimeout: 120 });
+    expect(deadLetters[1].Properties).toMatchObject({ SqsManagedSseEnabled: true, MessageRetentionPeriod: 14 * 24 * 60 * 60 });
+  });
+
+  it("leaves the existing dispatch queue as it was (positive control: that one keeps its own lower limit)", () => {
+    const existing = queues.find(([id]) => id.startsWith("DispatchQueue"))!;
+    expect((existing[1].Properties.RedrivePolicy as { maxReceiveCount: number }).maxReceiveCount).toBeLessThan(CORE_DISPATCH_MAX_RECEIVES);
+    expect(existing[0]).not.toBe(queue[0]);
+  });
+
+  it("is granted to the broker alone, on each queue's own policy, never on the broker's role (whose inline policy is at IAM's size limit)", () => {
+    const policies = resources(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes(queue[0]) || JSON.stringify(policy.Properties.Queues).includes(deadLetters[0]));
+    expect(policies).toHaveLength(2);
+    for (const [target, [, policy]] of [[queue[0], policies.find(([, p]) => JSON.stringify(p.Properties.Queues) === JSON.stringify([{ Ref: queue[0] }]))!], [deadLetters[0], policies.find(([, p]) => JSON.stringify(p.Properties.Queues) === JSON.stringify([{ Ref: deadLetters[0] }]))!]] as const) {
+      const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+      expect(statements).toHaveLength(1);
+      expect(statements[0]!.Effect).toBe("Allow");
+      expect(statements[0]!.Principal).toEqual({ AWS: { "Fn::GetAtt": [brokerRoleId, "Arn"] } });
+      expect(list(statements[0]!.Action).sort()).toEqual([...CORE_BROKER_QUEUE_ACTIONS].sort());
+      expect(statements[0]!.Resource).toEqual({ "Fn::GetAtt": [target, "Arn"] });
+    }
+    // No identity policy in the stack names either queue: the broker role is unchanged and nothing else is granted them.
+    for (const [, policy] of resources(named, "AWS::IAM::Policy")) {
+      const text = JSON.stringify(policy.Properties.PolicyDocument);
+      expect(text).not.toContain(queue[0]);
+      expect(text).not.toContain(deadLetters[0]);
+    }
+    // No mapping reads either queue yet: the dispatcher's consumer comes with a later step.
+    for (const [, mapping] of resources(named, "AWS::Lambda::EventSourceMapping")) {
+      expect(JSON.stringify(mapping.Properties.EventSourceArn)).not.toContain(queue[0]);
+      expect(JSON.stringify(mapping.Properties.EventSourceArn)).not.toContain(deadLetters[0]);
+    }
+  });
+
+  it("has an alarm on its dead letters, which tells the operator and is one the health route reads", () => {
+    const alarm = resources(named, "AWS::CloudWatch::Alarm").find(([id]) => id.includes("CoreEngine") && id.includes("DeadLettersAlarm"))!;
+    expect(alarm[1].Properties).toMatchObject({ AlarmName: "agentx-staging-CoreDispatchDeadLetters", MetricName: "ApproximateNumberOfMessagesVisible", Namespace: "AWS/SQS", Threshold: 1, ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching" });
+    expect(JSON.stringify(alarm[1].Properties.Dimensions)).toContain(deadLetters[0]);
+    expect(list(alarm[1].Properties.AlarmActions)).toHaveLength(1);
+    expect(HEALTH_ALARM_SUFFIXES).toContain(CORE_DISPATCH_DEAD_LETTERS_ALARM);
+  });
+});
+
+describe("the core job schedules", () => {
+  const schedules = resources(named, "AWS::Scheduler::Schedule").filter(([id]) => id.includes("CoreEngine"));
+  const group = resources(named, "AWS::Scheduler::ScheduleGroup").find(([id]) => id.includes("CoreEngine"))!;
+  const role = resources(named, "AWS::IAM::Role").find(([id]) => id.includes("CoreEngine") && id.includes("InvokeRole"))!;
+
+  it("are one per scheduled row of the core's job table, with its rate, and the stream row has none", () => {
+    expect(CORE_JOB_SCHEDULES.length).toBe(CORE_JOBS.filter((job) => job.trigger.kind === "schedule").length);
+    for (const job of CORE_JOBS) {
+      const scheduled = CORE_JOB_SCHEDULES.find((entry) => entry.job === job.name);
+      if (job.trigger.kind === "schedule") expect(scheduled, job.name).toEqual({ job: job.name, rate: job.trigger.rate });
+      else expect(scheduled, job.name).toBeUndefined();
+    }
+    expect(schedules).toHaveLength(CORE_JOB_SCHEDULES.length);
+    expect(schedules.map(([, resource]) => (JSON.parse(String((resource.Properties.Target as { Input: string }).Input)) as { job: string }).job).sort()).toEqual(CORE_JOB_SCHEDULES.map((entry) => entry.job).sort());
+  });
+
+  it("send the event the broker's job entry reads: `{ source: agentx.core-job, job }`, to the broker, through the schedules' role", () => {
+    expect(CORE_SCHEDULE_SOURCE).toBe(CORE_JOB_EVENT_SOURCE);
+    for (const [, schedule] of schedules) {
+      const target = schedule.Properties.Target as { Arn: unknown; RoleArn: unknown; Input: string; RetryPolicy: Record<string, number> };
+      const event = JSON.parse(target.Input) as { source: string; job: string };
+      expect(event.source).toBe("agentx.core-job");
+      expect(Object.keys(event).sort()).toEqual(["job", "source"]);
+      expect(CORE_JOB_SCHEDULES.some((entry) => entry.job === event.job && entry.rate === schedule.Properties.ScheduleExpression)).toBe(true);
+      expect(target.Arn).toEqual({ "Fn::GetAtt": [broker[0], "Arn"] });
+      expect(target.RoleArn).toEqual({ "Fn::GetAtt": [role[0], "Arn"] });
+      expect(schedule.Properties.FlexibleTimeWindow).toEqual({ Mode: "OFF" });
+      expect(schedule.Properties.GroupName).toEqual({ Ref: group[0] });
+      expect(target.RetryPolicy).toEqual({ MaximumRetryAttempts: 1, MaximumEventAgeInSeconds: 120 });
+    }
+  });
+
+  it("run only while the switch is not off: the state is a condition on the parameter, and the resources are always there", () => {
+    const conditions = json.Conditions!;
+    const conditionId = Object.keys(conditions).find((id) => id.includes("CoreEngineIsOn"))!;
+    expect(conditions[conditionId]).toEqual({ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreEngine" }, "off"] }] });
+    for (const [id, schedule] of schedules) {
+      expect(schedule.Properties.State, id).toEqual({ "Fn::If": [conditionId, "ENABLED", "DISABLED"] });
+      expect(schedule.Condition, id).toBeUndefined();
+    }
+    expect(group[1].Condition).toBeUndefined();
+  });
+
+  it("use a role that only the scheduler can assume, for this group, that can invoke the broker and nothing else", () => {
+    const trust = (role[1].Properties.AssumeRolePolicyDocument as { Statement: Array<{ Principal: { Service: string }; Condition: { StringEquals: Record<string, unknown> } }> }).Statement;
+    expect(trust).toHaveLength(1);
+    expect(trust[0]!.Principal).toEqual({ Service: "scheduler.amazonaws.com" });
+    expect(trust[0]!.Condition.StringEquals["aws:SourceArn"]).toEqual({ "Fn::GetAtt": [group[0], "Arn"] });
+    expect(trust[0]!.Condition.StringEquals).toHaveProperty("aws:SourceAccount");
+    const policies = resources(named, "AWS::IAM::Policy").filter(([, policy]) => ((policy.Properties.Roles ?? []) as unknown[]).some((ref) => (ref as { Ref?: string }).Ref === role[0]));
+    const statements = policies.flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement);
+    expect(statements).toEqual([{ Effect: "Allow", Action: "lambda:InvokeFunction", Resource: { "Fn::GetAtt": [broker[0], "Arn"] } }]);
+  });
+
+  it("make a role with a generated name under the environment's path and with the permissions boundary: no fixed-name role, so no new line in either boundary", () => {
+    const inAppRole = Object.entries(inApp.Resources).find(([id, resource]) => resource.Type === "AWS::IAM::Role" && id.includes("CoreEngineJobs") && id.includes("InvokeRole"))![1];
+    expect(inAppRole.Properties).not.toHaveProperty("RoleName");
+    expect(inAppRole.Properties.Path).toBe("/agentx/staging/");
+    expect(inAppRole.Properties.PermissionsBoundary).toBeDefined();
+    expect(group[1].Properties ?? {}).not.toHaveProperty("Name");
+  });
+});
+
+describe("no new deploy-role service", () => {
+  it("every resource type the construct adds is one whose service the deploy role and the default boundary already allow, and the stack makes no managed policy", () => {
+    const added = Object.entries(inApp.Resources).filter(([id]) => id.startsWith("CoreEngineJobs")).map(([, resource]) => resource.Type);
+    const services = new Set(added.map((type) => type.split("::")[1]!.toLowerCase()));
+    expect([...services].sort()).toEqual(["cloudwatch", "iam", "scheduler", "sqs"]);
+    for (const service of ["cloudwatch", "scheduler", "sqs"]) {
+      expect(SERVICE_ROLE_SERVICES, service).toContain(service);
+      expect(BOUNDARY_SERVICES, service).toContain(service);
+    }
+    // IAM: only a role under the environment's path and its inline policy (the deploy role's IamRoles grant); a managed policy would be refused by both.
+    expect(added.filter((type) => type.startsWith("AWS::IAM::")).sort()).toEqual(["AWS::IAM::Policy", "AWS::IAM::Role"]);
+    expect(Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::ManagedPolicy")).toEqual([]);
+  });
+});

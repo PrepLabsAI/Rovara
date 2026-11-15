@@ -1332,3 +1332,34 @@ describe("repository URL refusals say github.com only when the host is another h
     expect(refusal("github.com:org/repo").message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL");
   });
 });
+
+it("binding discovery reads one bounded installation page without repository tokens and validates whole responses", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const row = { id: 77, account: { login: "example", type: "Organization" }, repository_selection: "selected" };
+  let body: unknown = [row];
+  const fetchImplementation = vi.fn(async () => new Response(JSON.stringify(body)));
+  const provider = new GitHubAppCredentialProvider({ credentialRef: "test", appId: "123", getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(), fetchImplementation });
+  const api = provider as unknown as { bindingInstallations(page: number): Promise<unknown>; bindingInstallation(id: number): Promise<unknown> };
+  expect(await api.bindingInstallations(2)).toEqual({ installations: [{ installationId: 77, accountLogin: "example" }], more: false });
+  expect(fetchImplementation).toHaveBeenCalledExactlyOnceWith("https://api.github.com/app/installations?per_page=25&page=2", expect.objectContaining({ signal: expect.any(AbortSignal) as unknown, redirect: "error" }));
+  body = Array.from({ length: 25 }, (_, i) => ({ ...row, id: i + 1 }));
+  expect(await api.bindingInstallations(1)).toMatchObject({ more: true });
+  for (body of [[row, { ...row, id: -1 }], [row, row], Array.from({ length: 26 }, (_, i) => ({ ...row, id: i + 1 })), [{ ...row, account: { login: "", type: "Organization" } }]]) {
+    await expect(api.bindingInstallations(1)).rejects.toThrow("the GitHub installation is not connected");
+  }
+  body = row;
+  expect(await api.bindingInstallation(77)).toEqual({ installationId: 77, accountLogin: "example" });
+  await expect(api.bindingInstallation(78)).rejects.toThrow("the GitHub installation is not connected");
+  for (const id of [0, -1, 1.2, Number.MAX_SAFE_INTEGER + 1]) await expect(api.bindingInstallation(id)).rejects.toThrow("the GitHub installation is not connected");
+});
+
+it("binding discovery bounds response bytes and gives fixed refusals for HTTP and malformed input", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  let response = () => new Response(JSON.stringify([{ id: 77, account: { login: "example", type: "Organization" }, repository_selection: "selected", padding: "x".repeat(1_000_001) }]));
+  const provider = new GitHubAppCredentialProvider({ credentialRef: "test", appId: "123", getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(), fetchImplementation: async () => response() });
+  for (const reply of [response, () => new Response("private-canary", { status: 404 }), () => new Response("private-canary"), () => { throw new Error("private-canary"); }]) {
+    response = reply;
+    await expect(provider.bindingInstallations(1)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED", message: "GITHUB_NOT_CONNECTED: the GitHub installation is not connected" });
+  }
+  for (const page of [0, -1, 1.2, 1_000_001]) await expect(provider.bindingInstallations(page)).rejects.toThrow("the GitHub installation is not connected");
+});
