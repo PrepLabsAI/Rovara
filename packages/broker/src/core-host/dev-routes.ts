@@ -28,7 +28,7 @@ import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies
 import type { SessionMembers } from "../core/sessions/access.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
-import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
+import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
@@ -138,7 +138,7 @@ function bodyOf(request: BrokerRequest): Record<string, unknown> {
 }
 
 /** The factors Code owns (the sign-in server's DEVELOPER_STEP_UP_METHODS). A Slack, Google or GitHub round trip is none of them, whatever a wiring maps into the caller. */
-const STEP_UP_FACTORS: ReadonlySet<unknown> = new Set(["email_code", "passkey", "company_reauth"]);
+const STEP_UP_FACTORS: ReadonlySet<unknown> = new Set<unknown>(STEP_UP_METHODS);
 /** The one time form the broker's sign-in writes (`toISOString`); a looser string that Date.parse would still read is refused. */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
@@ -146,7 +146,7 @@ const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
  * Lane ID part 2: the caller's step-up, if it is fresh enough for this company now; otherwise the refusal. The window is the company's (through the hook) and may only be shorter than
  * the default; a missing, unreadable, too-old or future step-up time is refused (`checkApprovalSignIn`'s window rule, with its clock-skew allowance).
  */
-async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs: number, refusal: string): Promise<{ at: string; method: string }> {
+async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs: number, refusal: string): Promise<{ at: string; method: ScriptTokenSignIn["amr"] }> {
   // The step-up is read first: a caller without one is refused without asking the company rules service.
   const stepUp = caller.stepUp;
   if (stepUp === undefined || stepUp === null || typeof stepUp !== "object" || typeof stepUp.at !== "string" || !ISO_INSTANT.test(stepUp.at) || !STEP_UP_FACTORS.has(stepUp.method)) throw agentXError("REAUTH_REQUIRED", refusal);
@@ -164,7 +164,7 @@ async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs:
   // Below a minute, checkApprovalSignIn's floor would be looser than the company asked: the exact age is checked too, and the clock-skew allowance never exceeds the window.
   const age = nowMs - Date.parse(stepUp.at);
   if (age > seconds * 1000 || -age > Math.min(APPROVAL_SIGN_IN_SKEW_SECONDS, seconds) * 1000) throw agentXError("REAUTH_REQUIRED", refusal);
-  return { at: stepUp.at, method: stepUp.method };
+  return { at: stepUp.at, method: stepUp.method as ScriptTokenSignIn["amr"] };
 }
 
 const nowOf = (target: Mounted): number => (target.runtime.flow.deps.now?.() ?? new Date()).getTime();
@@ -281,7 +281,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
             // The record keeps how the maker proved it was them (the step-up's factor as its amr, and its time), and the token never outlives the install's session cap.
             const made = await createScriptToken(deps, scriptCaller, bodyOf(request), async (project) => {
               if (!(await canRead(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-            }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), signIn: { amr: stepUp.method as ScriptTokenSignIn["amr"], authTime: stepUp.at } });
+            }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), signIn: { amr: stepUp.method, authTime: stepUp.at } });
             return json(201, made);
           }
           if (tokens[1] === undefined && request.method === "GET") return json(200, { tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });

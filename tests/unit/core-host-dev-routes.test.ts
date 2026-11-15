@@ -274,6 +274,9 @@ describe("a fresh step-up opens making a script token and acting on a decision c
       expect(refused?.statusCode, String(cap)).toBe(503);
       expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: SESSION_CAP_UNREADABLE });
     }
+    // The step-up comes first: a stale one is refused for that, whatever the cap.
+    const stale = await routesFor({ sessionCapSeconds: 0 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-stale" }), { ...caller, stepUp: { at: minutesAgo(world, 11), method: "passkey" } });
+    expect(errorOf(stale)).toEqual({ code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE });
     const listed = JSON.parse((await routesFor({}).route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ name: string }> };
     expect(listed.tokens.map((token) => token.name).sort()).toEqual(["ci", "ci-open"]);
   });

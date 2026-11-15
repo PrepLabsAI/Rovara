@@ -4,7 +4,7 @@
 // look: the record decides.
 //
 // The keys and the record are Cloud's (decision 45.6). Differences, all additive or wider: a record also keeps `personId` (the identity port is asked for the creator by Rovara id; Cloud's reader strips
-// the field), and `amr` may also be `local` (the sign-in method of a laptop's owner). Cloud also refuses to make or use a token without its audit ledger; here the audit sink is a port whose
+// the field), `amr` may also be `local` (the sign-in method of a laptop's owner) or a step-up factor (`email_code`, `passkey`, `company_reauth`, with the step-up's time as `authTime`). Cloud also refuses to make or use a token without its audit ledger; here the audit sink is a port whose
 // default writes nothing, but `rovara up` registers the document audit sink (the events are kept in the install's own audit trail), and the audit steps are staged whatever the sink is.
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -78,7 +78,7 @@ const REVOKE_TRIES = 3;
  * The sign-in methods a stored record may name: Cloud's, `local` for the owner of a laptop, and (ID-STEPUP-FOLLOWUPS d) the step-up factor a deployed install's maker proved it was them
  * with just before making the token (`email_code`, `passkey`, `company_reauth`).
  */
-const STEP_UP_METHODS = ["email_code", "passkey", "company_reauth"] as const;
+export const STEP_UP_METHODS = ["email_code", "passkey", "company_reauth"] as const;
 const METHODS = ["slack", "oidc", "cloud", "github", "saml", "local", ...STEP_UP_METHODS] as const satisfies readonly (DeveloperSignInMethod | "local" | (typeof STEP_UP_METHODS)[number])[];
 /** How the maker proved it was them just before making the token: the step-up's factor and time, which the record keeps as its `amr` and `authTime`. */
 export interface ScriptTokenSignIn { amr: (typeof STEP_UP_METHODS)[number]; authTime: string }
