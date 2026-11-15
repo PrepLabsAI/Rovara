@@ -195,19 +195,19 @@ describe("the named TEST proof-only installation gate", () => {
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
     expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy has no workflow flag").toBeUndefined();
 
-    // Named/foreign pins include the reviewed IAM headroom resource-policy move; legacy pins are unchanged.
+    // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "a39e1fea520c8b13f374b3a5d3997be9ea713e5346490f0cb029ccfc4f791f0c",
-        withoutRoute: "bae0d2dd107499d373f24328022e6a86e38fc9a9513a795c1bad61ebfe481c6f",
+        withRoute: "937f39e337701ecc8fa3fe612d801307303ced6bd589cec07f3c7833b4b584eb",
+        withoutRoute: "75541acd8c1e0e584837fc76df3d3e0dd14b1c0bdb6590e88baf4dfa1d66c23d",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "33c74e47fb8f518b93cc786196f10c02c3a442ba2e079b23a855e6bcec704b67",
-        withoutRoute: "1908f004b0546ae057f2a1945054bbea753aa5819dfcde3f3d66a4864ced0b16",
+        withRoute: "9ad290085328a9a8f8450e579b26caa1247b62383253217cb9fed95e41c5ee11",
+        withoutRoute: "c223ec7c2fca6cf7f3d9ead8cd5b76f958229bab4957a808fe5c752b2d6258dd",
       },
       {
         label: "legacy",

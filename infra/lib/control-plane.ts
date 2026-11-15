@@ -81,6 +81,10 @@ export class ControlPlaneStack extends Stack {
   constructor(scope: Construct, id: string, props?: ControlPlaneStackProps) {
     super(scope, id, props);
     const naming = props?.naming ?? legacyNaming();
+    // Approved headroom fallback: 144 is the largest integer ARN estimate that keeps
+    // the broker's 1,000-character reserve under 8,500 after restoring its destination grant.
+    // The longest-environment resolved aggregate is pinned separately against IAM's quota.
+    if (naming.env !== undefined) this.node.setContext("@aws-cdk/aws-iam.arnSizeEstimate", 144);
     const projectSetupRuntimeCatalogId = `${naming.resourcePrefix}-project-setup-runtime-v1`;
     const e2eFeatureRuntimeCatalogId = `${naming.resourcePrefix}-e2e-mock-runtime-v1`;
 
@@ -990,17 +994,15 @@ export class ControlPlaneStack extends Stack {
         encryption: sqs.QueueEncryption.SQS_MANAGED,
         retentionPeriod: Duration.days(14),
       });
-      broker.configureAsyncInvoke({ onFailure: {
-        bind: () => {
-          // CDK SqsDestination.bind only grants these actions and returns the queue ARN.
-          handOffFailures.addToResourcePolicy(new iam.PolicyStatement({
-            principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
-            actions: ["sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"],
-            resources: [handOffFailures.queueArn],
-          }));
-          return { destination: handOffFailures.queueArn };
-        },
-      } });
+      // Lambda validates destination permissions when creating EventInvokeConfig. Keep this
+      // grant on the execution role, and explicitly order both grant and any queue policy first.
+      // SqsDestination repeats the identical grant; CDK deduplicates it in DefaultPolicy.
+      const handOffGrant = handOffFailures.grantSendMessages(broker);
+      broker.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
+      const brokerInvokeConfig = broker.node.findChild("EventInvokeConfig");
+      handOffGrant.applyBefore(brokerInvokeConfig);
+      const handOffQueuePolicy = handOffFailures.node.tryFindChild("Policy");
+      if (handOffQueuePolicy) brokerInvokeConfig.node.addDependency(handOffQueuePolicy);
       slackIngress.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
       new cloudwatch.Alarm(this, "SlackHandOffFailuresAlarm", {
         alarmName: naming.alarmName("SlackHandOffFailures"),

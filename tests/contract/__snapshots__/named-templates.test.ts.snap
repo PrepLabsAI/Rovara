@@ -2561,6 +2561,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::Lambda::Function",
     },
     "BrokerEventInvokeConfig7F5E47E2": {
+      "DependsOn": [
+        "BrokerServiceRoleDefaultPolicyDDFD9E7E",
+      ],
       "Properties": {
         "DestinationConfig": {
           "OnFailure": {
@@ -3338,6 +3341,20 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     },
                     ":alarm:agentx-staging-*",
                   ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackHandOffFailureQueue0ACCAF94",
+                  "Arn",
                 ],
               },
             },
@@ -11777,43 +11794,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
-    },
-    "SlackHandOffFailureQueuePolicyE68A1335": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "sqs:SendMessage",
-                "sqs:GetQueueAttributes",
-                "sqs:GetQueueUrl",
-              ],
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "BrokerServiceRole1938BCC9",
-                    "Arn",
-                  ],
-                },
-              },
-              "Resource": {
-                "Fn::GetAtt": [
-                  "SlackHandOffFailureQueue0ACCAF94",
-                  "Arn",
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "Queues": [
-          {
-            "Ref": "SlackHandOffFailureQueue0ACCAF94",
-          },
-        ],
-      },
-      "Type": "AWS::SQS::QueuePolicy",
     },
     "SlackHandOffFailuresAlarm4D063F81": {
       "Properties": {

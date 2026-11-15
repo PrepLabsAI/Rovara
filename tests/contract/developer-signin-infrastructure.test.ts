@@ -29,6 +29,10 @@ function leadingKeysOf(statement: Statement): string[] {
 let named: TemplateJson;
 let legacy: TemplateJson;
 let brokerEstimate: number;
+let brokerArnEstimate: number;
+let longestNamed: TemplateJson;
+const LONGEST_ENV = "headroom-longest-env"; // 20 characters: the contract maximum.
+const ARN_ESTIMATE_CONTEXT = "@aws-cdk/aws-iam.arnSizeEstimate";
 let foundation: TemplateJson;
 
 const controlPlane = (app: ReturnType<typeof buildAgentXApp>, name: string) =>
@@ -109,7 +113,9 @@ beforeAll(() => {
   const policy = app.node.findAll().find((node) => node instanceof iam.Policy && node.node.path.endsWith("/Broker/ServiceRole/DefaultPolicy")) as iam.Policy;
   // CDK's splitter uses these estimates on unresolved tokens, not serialized template length.
   const document = policy.document as unknown as { statements: Array<{ _estimateSize(options: { actionEstimate: number; arnEstimate: number }): number }> };
-  brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: 150 }), 0);
+  brokerArnEstimate = (policy.node.tryGetContext(ARN_ESTIMATE_CONTEXT) as number | undefined) ?? 150;
+  brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: brokerArnEstimate }), 0);
+  longestNamed = controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`);
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
@@ -574,7 +580,7 @@ describe("task-token key and membership IAM", () => {
     expect([reads, families]).toEqual([1, 1]);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("ca864b0d556f620d14c14bbf55b96d6c46c89dd768ff77e2a01cad962301046f");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("a1dd557411883920332ddf90e23cec2c6c20be9bc3e178fcd378f4dfad9bfc7b");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1413,17 +1419,19 @@ function probe(tuples: AccessTuple[], principal: string, action: string, resourc
   return !applicable.some(([, e]) => e === "Deny") && applicable.some(([, e]) => e === "Allow") && policyAllows(defaultBoundaryStatements(policyScope), action, resource);
 }
 
-const BROKER_INLINE_ESTIMATE = 7450; // This replaces the R3R4 pin.
+const BROKER_ARN_ESTIMATE = 144;
+const BROKER_RESOLVED_INLINE_SIZE = 6114; // All inline documents after realistic ARN expansion.
+const BROKER_INLINE_ESTIMATE = 7492; // This replaces the R3R4 pin.
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
   r2: 600, // State stream reads and callback-key read; EC2 belongs to the dispatcher.
   t5: 250, // Optional State LeadingKeys-limited GitHub grant, pending T5 Q3.
   t6: 150, // Company-session AssumeRole/TagSession, net of blanket-read removal.
 };
-function inlineEstimate(statements: Statement[]): number {
+function inlineEstimate(statements: Statement[], arnEstimate = BROKER_ARN_ESTIMATE): number {
   return statements.reduce((total, s) => total + `"Effect": "${s.Effect}",`.length + ["Action", "Resource"].reduce((size, key) => {
     const values = [s[key as "Action" | "Resource"]].flat();
-    return size + key.length + 5 + values.reduce<number>((sum, v) => sum + (typeof v === "string" ? v.length : 150) + 3, 0);
+    return size + key.length + 5 + values.reduce<number>((sum, v) => sum + (typeof v === "string" ? v.length : arnEstimate) + 3, 0);
   }, 0) + JSON.stringify(s.Condition ?? {}).length, 0);
 }
 function checkHeadroom(template: TemplateJson): void {
@@ -1436,7 +1444,68 @@ function checkHeadroom(template: TemplateJson): void {
   expect(Object.keys(template.Resources).filter((id) => id.includes("Overflow")), message).toEqual([]);
   expect(n, message).toBe(BROKER_INLINE_ESTIMATE);
 }
-const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRequestQueue", "queue:SlackHandOffFailureQueue", "queue:DispatchDeadLetterQueue", "queue:SlackRequestDeadLetterQueue", "queue:DeveloperTaskNotifierNoticeDeadLetterQueue", "queue:DeveloperTaskNotifierStreamFailureQueue", "queue:ChannelApiEventDeadLetters", "key:ChatGptConnectionKey"];
+/** Resolve only intrinsics present in the broker's policies; unknown forms fail the whole check.
+ * Fixture: aws/us-west-2/12-digit account, maximum 20-character environment, and generated
+ * stack-logicalID-13-character-suffix names (truncated only to the service's name limit).
+ * Explicit physical names and ARN parameters are expanded, never replaced by a size estimate.
+ */
+function resolvedInlineSize(template: TemplateJson): number {
+  const prefix = "arn:aws:";
+  const regionAccount = "us-west-2:111122223333:";
+  const stackName = `agentx-${LONGEST_ENV}-control-plane`;
+  const resolve = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(resolve);
+    if (value === null || typeof value !== "object") return value;
+    const node = value as Record<string, unknown>;
+    if (Object.hasOwn(node, "Ref")) {
+      const refs: Record<string, string> = {
+        "AWS::Partition": "aws", "AWS::Region": "us-west-2", "AWS::AccountId": "111122223333",
+        GitHubAppPrivateKeySecretArn: `${prefix}secretsmanager:${regionAccount}secret:agentx/${LONGEST_ENV}/github-app-private-key-AbCdEf`,
+      };
+      if (typeof node.Ref !== "string") throw new Error("unsupported resolved inline reference");
+      if (Object.hasOwn(refs, node.Ref)) return refs[node.Ref]!;
+      if (template.Resources[node.Ref]?.Type === "AWS::StepFunctions::StateMachine") return resourceArn(node.Ref);
+      throw new Error("unsupported resolved inline reference");
+    }
+    if (Object.hasOwn(node, "Fn::GetAtt")) {
+      const attr = node["Fn::GetAtt"];
+      if (!Array.isArray(attr) || attr.length !== 2 || typeof attr[0] !== "string" || attr[1] !== "Arn") throw new Error("unsupported resolved inline attribute");
+      return resourceArn(attr[0]);
+    }
+    if (Object.hasOwn(node, "Fn::Join")) {
+      const join = node["Fn::Join"];
+      if (!Array.isArray(join) || join.length !== 2 || typeof join[0] !== "string" || !Array.isArray(join[1])) throw new Error("unsupported resolved inline join");
+      const parts = join[1].map(resolve);
+      if (!parts.every((part): part is string => typeof part === "string")) throw new Error("unsupported resolved inline join");
+      return parts.join(join[0]);
+    }
+    if (Object.keys(node).some((key) => key.startsWith("Fn::"))) throw new Error("unsupported resolved inline intrinsic");
+    return Object.fromEntries(Object.entries(node).map(([key, child]) => [key, resolve(child)]));
+  };
+  const resourceArn = (id: string): string => {
+    const resource = template.Resources[id];
+    const formats: Record<string, { property: string; limit: number; service: string; kind: string }> = {
+      "AWS::DynamoDB::Table": { property: "TableName", limit: 255, service: "dynamodb", kind: "table/" },
+      "AWS::Lambda::Function": { property: "FunctionName", limit: 64, service: "lambda", kind: "function:" },
+      "AWS::SQS::Queue": { property: "QueueName", limit: 80, service: "sqs", kind: "" },
+      "AWS::StepFunctions::StateMachine": { property: "StateMachineName", limit: 80, service: "states", kind: "stateMachine:" },
+    };
+    const format = resource && formats[resource.Type];
+    if (!resource || !format) throw new Error("unsupported resolved inline resource");
+    const physical = resource.Properties[format.property];
+    const name = physical === undefined ? `${`${stackName}-${id}`.slice(0, format.limit - 14)}-A1B2C3D4E5F6G` : resolve(physical);
+    if (typeof name !== "string") throw new Error("unsupported resolved inline name");
+    return `${prefix}${format.service}:${regionAccount}${format.kind}${name}`;
+  };
+  const broker = ofType(template, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "BrokerServiceRole")!;
+  const documents = ofType(template, "AWS::IAM::Policy")
+    .filter(([, policy]) => (policy.Properties.Roles as Ref[] | undefined)?.some((role) => role.Ref === broker[0]))
+    .map(([, policy]) => policy.Properties.PolicyDocument);
+  documents.push(...((broker[1].Properties.Policies ?? []) as Array<{ PolicyDocument: unknown }>).map((policy) => policy.PolicyDocument));
+  return documents.reduce<number>((total, document) => total + JSON.stringify(resolve(document)).replace(/\s/g, "").length, 0);
+}
+
+const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRequestQueue", "queue:DispatchDeadLetterQueue", "queue:SlackRequestDeadLetterQueue", "queue:DeveloperTaskNotifierNoticeDeadLetterQueue", "queue:DeveloperTaskNotifierStreamFailureQueue", "queue:ChannelApiEventDeadLetters", "key:ChatGptConnectionKey"];
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {
@@ -1483,7 +1552,7 @@ describe("broker IAM headroom", () => {
     }]);
   });
 
-  it("pins headroom and preserves the unspent reserve", () => { checkHeadroom(named); expect(inlineEstimate(statementsOfRole(named, "BrokerServiceRole"))).toBe(brokerEstimate); });
+  it("pins headroom and preserves the unspent reserve", () => { expect(brokerArnEstimate, "named broker ARN estimate fallback").toBe(BROKER_ARN_ESTIMATE); checkHeadroom(named); expect(inlineEstimate(statementsOfRole(named, "BrokerServiceRole"))).toBe(brokerEstimate); });
 
   it("enforces the 8500 ceiling including the complete reserve ledger", () => {
     const n = inlineEstimate(statementsOfRole(named, "BrokerServiceRole"));
@@ -1492,7 +1561,7 @@ describe("broker IAM headroom", () => {
 
   it("calibrates the estimator against CDK at its actual split threshold", () => {
     for (const expected of [9999, 10001]) {
-      const stack = new Stack(new App(), `Calibration${expected}`);
+      const stack = new Stack(new App({ context: { [ARN_ESTIMATE_CONTEXT]: BROKER_ARN_ESTIMATE } }), `Calibration${expected}`);
       const role = new iam.Role(stack, "Role", { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") });
       const arn = new CfnParameter(stack, "ResourceArn").valueAsString;
       const tokenStatement: Statement = { Effect: "Allow", Action: "s3:GetObject", Resource: { Ref: "ResourceArn" } };
@@ -1503,6 +1572,27 @@ describe("broker IAM headroom", () => {
       const template = Template.fromStack(stack).toJSON() as TemplateJson;
       expect(inlineEstimate([tokenStatement, { ...fixed, Resource: "x".repeat(length) }])).toBe(expected);
       expect(ofType(template, "AWS::IAM::ManagedPolicy").length > 0, `CDK split at ${expected}`).toBe(expected > 10000);
+    }
+  });
+
+  it("pins the longest-environment resolved aggregate with at least 1500 characters spare", () => {
+    const size = resolvedInlineSize(longestNamed);
+    const message = `broker resolved inline total ${size}; pinned ${BROKER_RESOLVED_INLINE_SIZE}; AWS aggregate quota 10240 requires at least 1500 spare (maximum 8740). Count every inline policy after ARN expansion.`;
+    expect(LONGEST_ENV).toHaveLength(20);
+    expect.soft(size, message).toBe(BROKER_RESOLVED_INLINE_SIZE);
+    expect(size, message).toBeLessThanOrEqual(10240 - 1500);
+  });
+
+  it("counts separate and embedded inline policies and refuses unresolved forms", () => {
+    const extra = structuredClone(longestNamed);
+    const [broker, role] = ofType(extra, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "BrokerServiceRole")!;
+    const document = { Version: "2012-10-17", Statement: [{ Condition: { StringEquals: { "aws:PrincipalTag/label": "White space" } }, Effect: "Allow", Action: "s3:GetObject", Resource: "arn:aws:s3:::headroom-probe/object" }] };
+    extra.Resources.ExtraInline = { Type: "AWS::IAM::Policy", Properties: { Roles: [{ Ref: broker }], PolicyDocument: document } };
+    role.Properties.Policies = [{ PolicyName: "Embedded", PolicyDocument: document }];
+    expect(resolvedInlineSize(extra) - resolvedInlineSize(longestNamed)).toBe(2 * JSON.stringify(document).replace(/\s/g, "").length);
+    for (const unsupported of [{ Ref: "do-not-echo" }, { "Fn::GetAtt": ["do-not-echo", "Arn"] }, { "Fn::Sub": "do-not-echo" }]) {
+      extra.Resources.ExtraInline.Properties.PolicyDocument = { ...document, Statement: [{ ...document.Statement[0], Resource: unsupported }] };
+      expect(() => resolvedInlineSize(extra)).toThrow(/^unsupported resolved inline (reference|resource|intrinsic)$/);
     }
   });
 
