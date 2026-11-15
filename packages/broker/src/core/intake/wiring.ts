@@ -8,7 +8,7 @@ import {
 import type { CodeIntentRequest } from "@agentx/contracts";
 import { developerIdOf, taskSessionId } from "../sessions/create.js";
 import { bindSessionSurface, sessionForSurface, unbindSessionSurface } from "../sessions/bindings.js";
-import type { TaskCaller, TaskAccess } from "../task-flow/deps.js";
+import type { TaskStartCaller, TaskAccess } from "../task-flow/deps.js";
 import type { TaskFlow } from "../task-flow/flow.js";
 import { noteTicketTaskStarted, type MomentTable } from "../ticket-updates/moments.js";
 import type { IntakePorts } from "./engine.js";
@@ -83,7 +83,7 @@ export function intakePortsOf(wiring: IntakeWiring): IntakePorts {
       if (principal === undefined) throw agentXError("FORBIDDEN", "The person this run is for isn't a member of the company.");
       if (request.input.text === undefined || request.binding?.kind !== "tracker_item") throw agentXError("CONFIG_INVALID", "A ticket's task needs the ticket's words and its link.");
       // `ticket` is how the task says its request is the ticket's: the plan credits the words to the ticket, not to the owner who started it.
-      const caller: TaskCaller = { principal, origin: "tracker", client: cleanClientName(request.source), ticket: { system: request.binding.system, id: request.binding.id, url: request.binding.url } };
+      const caller: TaskStartCaller = { principal, origin: "tracker", client: cleanClientName(request.source), ticket: { system: request.binding.system, id: request.binding.id, url: request.binding.url } };
       const title = request.input.context?.[0]?.title;
       // The same start as any other: the task flow's own, so admission, run limits and the project's rules apply. The ticket's words ride in the request under their "information only" line; the task
       // starts as a workflow, so its plan waits for the owner's approval like every plan.

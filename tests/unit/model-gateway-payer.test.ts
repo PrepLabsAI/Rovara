@@ -110,3 +110,7 @@ it("prefers a trigger's chain over its agent and project", () => {
 it.each([null, {}, { origin: "unknown", project: "payments", projectPays: true }, { origin: "app", project: "payments", projectPays: "yes" }, { origin: "app", project: "payments" }])("refuses malformed or unavailable facts with fixed words", (value) => {
   expect(() => resolvePayer(value as ResolvePayerInput)).toThrow("could not work out who pays for this task");
 });
+
+it.each(["app", "cli", "mcp", "slack", "tracker", "jira", "github_issue"] as const)("a missing project payer setting means false for %s", origin => {
+  expect(resolvePayer({ origin, project: "payments", startedBy: { developerId: MAYA } })).toEqual({ kind: "member", developerId: MAYA });
+});

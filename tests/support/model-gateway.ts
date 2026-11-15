@@ -10,7 +10,7 @@ export function signingWorld() {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const jwk = publicKey.export({ format: "jwk" });
   const kid = createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("base64url").slice(0, 16);
-  const published: PublicSigningJwk = { kty: "RSA", n: jwk.n!, e: jwk.e!, alg: "RS256", use: "sig", kid };
+  const published: PublicSigningJwk = { kty: "RSA", n: jwk.n!, e: jwk.e!, alg: "RS256", use: "sig", kid, rovara_purpose: "task" };
   let signs = 0;
   const signer: TokenSigner = { publicJwk: async () => published, sign: async input => { signs++; return sign("RSA-SHA256", input, privateKey); } };
   const signed = async (claims: unknown, header: unknown = { alg: "RS256", typ: "rovara-task+jwt", kid }) => {

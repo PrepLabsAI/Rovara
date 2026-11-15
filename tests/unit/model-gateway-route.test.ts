@@ -5,7 +5,7 @@ import { createDocumentObjectStorage } from "../../packages/broker/src/core/proo
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { operationKey, workspaceKey, taskPointerKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createHarness } from "../support/task-flow-harness.js";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, ROVARA_CODE_AGENT_ID } from "@agentx/contracts";
 import { modelAccessSource } from "../../packages/worker/src/model-access.js";
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
 import { claimVector, signingWorld } from "../support/model-gateway.js";
@@ -234,16 +234,32 @@ it("checks elapsed time before signing even when the timer has not run", async (
   } finally { clock.mockRestore(); }
 });
 
-it.each(["nightly", "app", undefined])("the default describer reads once and mints only with resolved payer facts (%s)", async origin => {
+it.each(["nightly", "app", "cli", "mcp", "slack", "tracker", "jira", "github_issue", "event", "schedule", "test_run", "automatic", "chain", "linear", "offer", undefined])("the default describer reads once and mints only with resolved payer facts (%s)", async origin => {
   const w = await world();
   const ok = operationKey(v.ws, v.op); const tk = taskKey(v.tid);
-  await w.h.store.put({ item: { ...(await w.h.store.get(ok))!, kind: "task" } });
+  await w.h.store.put({ item: { ...(await w.h.store.get(ok))!, kind: "task", requester: { personId: v.per!, provider: "test" } } });
   await w.h.store.put({ item: { ...(await w.h.store.get(tk))!, ...(origin === undefined ? {} : { origin }) } });
   w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
   w.deps.modelGateway!.describer = createTaskTokenDescriber(w.h.deps);
   const get = w.h.store.get.bind(w.h.store); let reads = 0;
   w.h.deps.store.get = async key => { reads += 1; return get(key); };
   const answer = await w.call(); expect(reads).toBe(4);
-  if (origin === "nightly") expect(answer.statusCode).toBe(200);
+  if (origin !== undefined && !["chain", "linear", "offer"].includes(origin)) {
+    expect(answer.statusCode).toBe(200);
+    const body = JSON.parse(answer.body) as { apiKey: string };
+    const payer = ["nightly", "automatic", "test_run"].includes(origin) ? { kind: "project", project: v.pid }
+      : ["event", "schedule"].includes(origin) ? { kind: "agent", agentId: ROVARA_CODE_AGENT_ID }
+      : { kind: "member", developerId: v.per };
+    expect(w.w.reference(body.apiKey, Math.floor(w.h.clock.now / 1000))).toMatchObject({ pay: payer, src: origin });
+  }
   else { expect(answer).toMatchObject({ statusCode: 409, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"could not work out who pays for this task"}}' }); expect(w.w.signs()).toBe(0); }
+});
+
+it("refuses a developer-purpose signer with the fixed HTTP error and no leaked metadata", async () => {
+  const w = await world();
+  w.gateway.signer.publicJwk = async () => ({ ...w.w.published, rovara_purpose: "developer" });
+  const answer = await w.call();
+  expect(answer).toMatchObject({ statusCode: 401, body: '{"error":{"type":"authentication_error","message":"invalid or expired model access"}}' });
+  expect(w.w.signs()).toBe(0); expect(w.logs).toEqual([]);
+  expect(JSON.stringify([answer, w.logs, w.h.audit])).not.toContain(w.w.published.n);
 });

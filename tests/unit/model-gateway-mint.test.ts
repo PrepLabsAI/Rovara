@@ -85,3 +85,10 @@ it("rejects an issuer larger than the whole byte budget before a key read", asyn
   await expect(mintTaskToken({ ...w.deps, issuer: "a".repeat(1000000) }, operation)).rejects.toThrow("invalid or expired model access");
   expect(performance.now() - start).toBeLessThan(1000); expect(keys).toBe(0); expect(w.signs()).toBe(0);
 });
+
+it.each(["developer", undefined, "untrusted-purpose-marker", null, 3])("refuses a signer without task purpose (%s), without a token or key diagnostics", async purpose => {
+  const w = setup();
+  w.deps.signer.publicJwk = async () => ({ ...w.published, rovara_purpose: purpose }) as typeof w.published;
+  await expect(mintTaskToken(w.deps, operation)).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: "AUTH_REQUIRED: invalid or expired model access" });
+  expect(w.signs()).toBe(0);
+});

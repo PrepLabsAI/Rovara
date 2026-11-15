@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { ROVARA_CODE_AGENT_ID, type Payer, type WorkOrigin } from "@agentx/contracts";
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -26,7 +27,7 @@ it("uses the stored model choice and omits a non-developer person", async () => 
   w.h.deps.modelAccess = { route: async () => { throw new Error("fallback must not be read"); } };
   const answer = await w.describe.describe(w.scope); expect(answer?.models).toEqual(["chosen-model"]); expect(answer).not.toHaveProperty("person");
 });
-it.each([undefined, "app", "cli", "mcp", "slack", "linear", "chain", "event", "schedule", "unrecognized"])("refuses unavailable payer facts for %s without a guessed payer", async origin => {
+it.each([undefined, "linear", "chain", "offer", "unrecognized"])("refuses unavailable payer facts for %s without a guessed payer", async origin => {
   const w = await world(); const task = (await w.h.store.get(w.tk))!;
   const copy = { ...task }; delete copy["origin"];
   await w.h.store.put({ item: { ...copy, ...(origin === undefined ? {} : { origin }), client: "nightly" } });
@@ -35,4 +36,24 @@ it.each([undefined, "app", "cli", "mcp", "slack", "linear", "chain", "event", "s
 it.each([{ designReview: {} }, { kind: "prepare" }, { modelChoice: { route: { alias: "bad model" } } }, { modelChoice: { route: { alias: "bad model", api: "openai-responses", catalog: "test" } } }, { workflowMode: "unknown" }, { programStepId: "Bad" }, { dispatch: { kind: "task", payload: { workflowSecondReviewer: {} } } }])("refuses unsupported model descriptions as a whole", async patch => {
   const w = await world(); const op = (await w.h.store.get(w.key))!; await w.h.store.put({ item: { ...op, ...patch } });
   expect(await w.describe.describe(w.scope)).toBeUndefined();
+});
+
+const payerCases: Array<[WorkOrigin, Payer]> = [
+  ["app", { kind: "member", developerId: "a".repeat(64) }],
+  ["cli", { kind: "member", developerId: "a".repeat(64) }],
+  ["mcp", { kind: "member", developerId: "a".repeat(64) }],
+  ["slack", { kind: "member", developerId: "a".repeat(64) }],
+  ["jira", { kind: "member", developerId: "a".repeat(64) }],
+  ["github_issue", { kind: "member", developerId: "a".repeat(64) }],
+  ["tracker", { kind: "member", developerId: "a".repeat(64) }],
+  ["event", { kind: "agent", agentId: ROVARA_CODE_AGENT_ID }],
+  ["schedule", { kind: "agent", agentId: ROVARA_CODE_AGENT_ID }],
+  ["test_run", { kind: "project", project: "payments" }],
+  ["nightly", { kind: "project", project: "payments" }],
+  ["automatic", { kind: "project", project: "payments" }],
+];
+it.each(payerCases)("resolves %s with no project payer setting to its exact payer", async (origin, payer) => {
+  const w = await world(); const task = (await w.h.store.get(w.tk))!;
+  await w.h.store.put({ item: { ...task, origin, client: "untrusted-payer-marker" } });
+  expect(await w.describe.describe(w.scope)).toMatchObject({ origin, payer });
 });

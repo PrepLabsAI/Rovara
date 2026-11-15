@@ -36,7 +36,7 @@ it("a forged origin in the HTTP body creates no task", async () => {
   const answer = await handleTaskRoute(h.flow, { method: "POST", path: "/v1/dev/tasks", caller: h.owner, body: JSON.stringify({ ...request(), origin: "nightly" }) });
   expect(answer?.status).toBe(400); expect((await h.flow.list(h.owner)).tasks).toHaveLength(0);
 });
-it.each(["untrusted-marker", null, 3])("an invalid internal origin is refused with fixed words (%s)", async origin => {
+it.each([undefined, "untrusted-marker", null, 3])("an invalid internal origin is refused with fixed words (%s)", async origin => {
   const h = createHarness(); await h.registerProject();
   await expect(h.flow.start({ ...h.owner, origin: origin as never }, request())).rejects.toThrow("invalid task origin");
   expect((await h.flow.list(h.owner)).tasks).toHaveLength(0);
@@ -70,3 +70,10 @@ it("the setup-agent route writes app origin on its new task", async () => {
   expect(answer?.statusCode).toBe(202); const taskId = (JSON.parse(answer!.body) as { taskId: string }).taskId;
   expect((await h.store.get(taskKey(taskId)))?.["origin"]).toBe("app");
 });
+
+// Checked by the strict test typecheck: new start paths must name their trusted surface.
+function missingOriginMustNotCompile(h: ReturnType<typeof createHarness>) {
+  // @ts-expect-error task starts require an explicit origin
+  void h.flow.start({ principal: h.owner.principal }, request());
+}
+void missingOriginMustNotCompile;

@@ -13,7 +13,7 @@ import type { ApprovalOffer, LocalActionResult, SetupHostAskView, SetupItemView,
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { listProjects } from "./projects.js";
 import { startTask } from "../../core/task-flow/start.js";
-import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
+import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readState, startSetupAgent, stopSetupAgent, verifiedView, getSetupAgent, type SetupAgentView } from "../../core/setup-agent/agent.js";
 import { createEvalSpendSubject, EVAL_SPEND_KIND, readEvalSpendItem } from "../../core/setup-agent/eval-spend.js";
 import { SETUP_APPLY_KIND, confirmSetupAgent, createSetupProposalSubject, discardSetupApply, readSetupApply, type SetupApplyDeps } from "../../core/setup-agent/apply.js";
@@ -97,7 +97,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
   const store = flow.store;
   const ownerDeveloperId = developerIdOf(options.owner);
   const control = createSessionControlHost(flow);
-  const callerOf = (principal: Principal = options.owner): TaskCaller => ({ principal, client: "app", origin: "app" });
+  const callerOf = (principal: Principal = options.owner): TaskStartCaller => ({ principal, client: "app", origin: "app" });
 
   const depsFor = async (principal: Principal = options.owner): Promise<SetupApplyDeps> => ({
     store, companyId, now: options.now, flow, modelAccessConfigured: await options.modelAccessConfigured(),

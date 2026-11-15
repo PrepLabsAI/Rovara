@@ -4,7 +4,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual }
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
 import { DEVELOPER_ACCESS_TOKEN_SECONDS, DEVELOPER_TOKEN_AUDIENCE, type DeveloperSignInMethod } from "@agentx/contracts";
 
-export interface PublicSigningJwk { kty: "RSA"; n: string; e: string; kid: string; alg: "RS256"; use: "sig" }
+export interface PublicSigningJwk { kty: "RSA"; n: string; e: string; kid: string; alg: "RS256"; use: "sig"; rovara_purpose?: "task" | "developer" }
 
 export interface TokenSigner {
   publicJwk(): Promise<PublicSigningJwk>;

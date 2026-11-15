@@ -10,7 +10,7 @@ export interface NamedPerson { developerId: string }
 export interface ResolvePayerInput {
   origin: WorkOrigin;
   project: string;
-  /** Absent means unavailable, never false. */
+  /** A missing project AI payer setting means false. */
   projectPays?: boolean;
   agentId?: AgentId;
   chainId?: string;
@@ -49,7 +49,6 @@ export function resolvePayer(value: ResolvePayerInput): Payer {
       return input.chainPayer;
     default: break;
   }
-  if (input.projectPays === undefined) throw needs();
   if (input.projectPays) return { kind: "project", project: input.project };
   if (input.origin === "linear") {
     const assigner = input.assignedBy;

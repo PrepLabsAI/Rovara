@@ -1,4 +1,4 @@
-import { ModelRouteSchema, WorkOriginSchema, OperationSchema, PAYER_UNRESOLVED, resolvePayer, agentXError } from "@agentx/contracts";
+import { ROVARA_CODE_AGENT_ID, ModelRouteSchema, WorkOriginSchema, OperationSchema, PAYER_UNRESOLVED, resolvePayer, agentXError } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import type { TaskTokenDescriber } from "./token.js";
 import { readTaskTokenRecords } from "./records.js";
@@ -17,11 +17,12 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps): TaskTokenDescriber
       if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(step)) return undefined;
       const person = typeof operation.requester?.personId === "string" && /^[a-f0-9]{64}$/u.test(operation.requester.personId) ? operation.requester.personId : undefined;
       const origin = WorkOriginSchema.safeParse(task.origin);
-      if (!origin.success) throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED);
-      // This base has no project AI payer setting, chain payer or assigner facts. Missing
-      // is unavailable, never projectPays=false or a session's assumed member payer.
+      if (!origin.success || origin.data === "linear") throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED);
+      // No project AI setting means projectPays=false. This core runs only Rovara Code
+      // (createTaskFlowRunStarter rejects other agents). Chain payer and Linear
+      // assigner facts remain unavailable; never infer them from the session.
       let payer;
-      try { payer = resolvePayer({ origin: origin.data, project: workspace.projectName, ...(person === undefined ? {} : { startedBy: { developerId: person } }) }); }
+      try { payer = resolvePayer({ origin: origin.data, project: workspace.projectName, projectPays: false, agentId: ROVARA_CODE_AGENT_ID, ...(person === undefined ? {} : { startedBy: { developerId: person } }) }); }
       catch { throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED); }
       return { companyId: operation.companyId, project: workspace.projectName, ...(person === undefined ? {} : { person }), payer, taskId: task.taskId, step, origin: origin.data, models: [model.data.alias] };
     },

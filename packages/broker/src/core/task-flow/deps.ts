@@ -59,6 +59,9 @@ export interface TaskCaller {
   scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
 }
 
+/** Starting work always names the trusted server surface; other task actions need no origin. */
+export interface TaskStartCaller extends TaskCaller { origin: WorkOrigin }
+
 /** A registered project revision, as the flow needs it. */
 export interface ProjectRevision {
   definition: ProjectDefinition;

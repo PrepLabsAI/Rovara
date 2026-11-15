@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { agentXError, taskTokenClaimsFor, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES, TASK_TOKEN_TYP, type Payer, type WorkOrigin } from "@agentx/contracts";
+import { agentXError, taskTokenClaimsFor, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES, TASK_TOKEN_TYP, TASK_KEY_PURPOSE, type Payer, type WorkOrigin } from "@agentx/contracts";
 import type { TokenSigner } from "../../developer/tokens.js";
 import type { TaskTokenRecords } from "./records.js";
 import type { TaskTokenDeadline } from "./deadline.js";
@@ -36,7 +36,7 @@ export async function mintTaskToken(deps: TaskTokenDeps, operation: TaskTokenOpe
     if (claims === undefined) throw invalidModelAccess();
     const key = await deps.signer.publicJwk();
     deadline?.check();
-    if (key.kty !== "RSA" || key.alg !== "RS256" || key.use !== "sig" || typeof key.kid !== "string" || !/^[A-Za-z0-9_-]{16}$/u.test(key.kid)) throw invalidModelAccess();
+    if (key.rovara_purpose !== TASK_KEY_PURPOSE || key.kty !== "RSA" || key.alg !== "RS256" || key.use !== "sig" || typeof key.kid !== "string" || !/^[A-Za-z0-9_-]{16}$/u.test(key.kid)) throw invalidModelAccess();
     const header = { alg: TASK_TOKEN_ALGORITHM, typ: TASK_TOKEN_TYP, kid: key.kid };
     const input = Buffer.from(`${base64url(header)}.${base64url(claims)}`);
     if (input.byteLength > TASK_TOKEN_SIGNING_INPUT_MAX_BYTES) throw invalidModelAccess();
