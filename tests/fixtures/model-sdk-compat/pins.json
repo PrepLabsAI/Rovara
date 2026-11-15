@@ -1,0 +1,21 @@
+{
+  "python": {
+    "openai": "3.50.0",
+    "anthropic": "2.8.0",
+    "google-genai": "3.3.0",
+    "google-generativeai": "0.8.6",
+    "cohere": "7.3.1",
+    "langchain-openai": "1.7.4",
+    "langchain-google-genai": "4.5.0"
+  },
+  "node": {
+    "openai": "7.56.0",
+    "@anthropic-ai/sdk": "1.8.0",
+    "@google/genai": "3.3.0",
+    "@google/generative-ai": "0.24.1",
+    "ai": "7.0.172",
+    "@ai-sdk/openai": "4.0.117",
+    "@ai-sdk/google": "4.0.120",
+    "cohere-ai": "8.3.1"
+  }
+}

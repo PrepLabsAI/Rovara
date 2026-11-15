@@ -1,0 +1,1 @@
+{"statusCode":200,"headers":{"content-type":"application/json","cache-control":"no-store"},"body":"{\"name\":\"demo\",\"latestRevision\":1,\"access\":\"administrator\",\"repositories\":[{\"name\":\"demo\",\"url\":\"https://github.com/example/demo.git\",\"defaultBranch\":\"main\",\"fullName\":\"example/demo\"}],\"requestId\":\"golden\"}"}

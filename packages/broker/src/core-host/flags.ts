@@ -11,7 +11,9 @@
 //
 // A switch decides only where a NEW task starts. A task records its engine when it starts (engine-stamp.ts) and keeps it to the end, so turning the switch off never
 // moves a running task. Ported from the monolith's host root (its flags.ts); the variable names are Code's own.
-import { OrgIdSchema, type OrgId } from "@agentx/contracts";
+import { CORE_ENGINE_VARIABLE, OrgIdSchema, type OrgId } from "@agentx/contracts";
+
+export { CORE_ENGINE_VARIABLE };
 
 /** The step groups the combined switch moves. `decide`, `sessions` and `notify` ride with `flow` until a lane splits them. */
 export const CORE_AREAS = ["merge", "build", "flow"] as const;
@@ -19,7 +21,6 @@ export type CoreArea = (typeof CORE_AREAS)[number];
 
 export type CoreSwitch = { mode: "off" } | { mode: "on" } | { mode: "on-for"; companies: readonly OrgId[] };
 
-export const CORE_ENGINE_VARIABLE = "ROVARA_CORE_ENGINE";
 export const CORE_AREA_VARIABLES: Readonly<Record<CoreArea, string>> = {
   merge: "ROVARA_CORE_ENGINE_MERGE",
   build: "ROVARA_CORE_ENGINE_BUILD",
