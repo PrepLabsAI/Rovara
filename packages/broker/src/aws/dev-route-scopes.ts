@@ -77,6 +77,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Decisions: approve a plan or request changes; decide on the pull-request feedback proposal.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/decision", requires: "decisions:decide" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-decision", requires: "decisions:decide" },
+  // T3: invite administration is full-access only; live company admin/owner membership is still required.
+  { method: "POST", path: "/v1/dev/company/preapprovals", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/preapprovals/{emailHash}", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },

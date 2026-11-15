@@ -15,6 +15,8 @@ const tuple3 = z.array(z.boolean()).length(3);
 const tuple2 = z.array(z.boolean()).length(2);
 const contextSchema = z.object({ aiChange: z.boolean(), discovery: z.enum(["configured", "not_configured", "unknown"]), previousPasses: z.union([z.literal(0), z.literal(1)]) }).strict();
 const optionsSchema = z.object({ changedPromptCalls: integer, hiddenSetUsed: z.literal(false), subsetSupported: z.boolean(), sameJudgeFamily: z.boolean() }).strict();
+/** What this round was measured against, recorded so the proof row can show it. The hashes and the model come from Rovara's own setup records, never from the repository. */
+const basisSchema = z.object({ evalSetHash: hash, judgePin: hash, model: z.string().min(1).max(128), modelVersion: z.string().min(1).max(128), oldRuns: z.literal(3) }).strict();
 const noticeSchema = z.discriminatedUnion("code", [
   z.object({ code: z.literal("stage_estimate"), stage: z.enum(["first run", "re-asks", "second look"]), calls: integer, costMicros: integer }).strict(),
   z.object({ code: z.enum(["baseline_measuring", "no_eval_configured"]) }).strict(),
@@ -31,6 +33,7 @@ const evidenceShape = {
   context: contextSchema.optional(), questions: z.array(questionSchema).max(EVAL_QUESTION_LIMIT).optional(), options: optionsSchema.optional(),
   excluded: z.array(z.object({ id, reason: z.enum(["edited", "suspect_limit"]) }).strict()).max(2 * EVAL_QUESTION_LIMIT).optional(),
   notices: z.array(noticeSchema).max(4).optional(), privatePass: z.boolean().optional(), privateSet: z.literal(true).optional(),
+  basis: basisSchema.optional(),
 };
 export type EvalRoundEvidence = z.infer<z.ZodObject<typeof evidenceShape>>;
 export interface EvalEvidenceCaptureInput {
@@ -101,7 +104,7 @@ const consistent = (a: ArtifactFields): boolean => {
   if ((a.outcome === "not_run") !== (a.notRunReason !== undefined)) return false;
   if (a.outcome === "done" && (a.roundKind === "working" || a.evalConfigured === false || a.context?.discovery === "not_configured")) return false;
   const hidden = a.privatePass !== undefined || a.privateSet === true;
-  if (hidden) return a.context === undefined && a.questions === undefined && a.options === undefined && a.excluded === undefined && a.notices === undefined && a.usage === undefined && a.cache === undefined && a.evalConfigured === undefined && a.label === undefined && a.summary === undefined && a.feedback === undefined && a.fixRequested === undefined && (a.outcome === "done" ? a.privatePass !== undefined && a.roundKind === "check_sealed" : a.privatePass === undefined);
+  if (hidden) return a.context === undefined && a.questions === undefined && a.options === undefined && a.excluded === undefined && a.notices === undefined && a.basis === undefined && a.usage === undefined && a.cache === undefined && a.evalConfigured === undefined && a.label === undefined && a.summary === undefined && a.feedback === undefined && a.fixRequested === undefined && (a.outcome === "done" ? a.privatePass !== undefined && a.roundKind === "check_sealed" : a.privatePass === undefined);
   if (a.context === undefined || a.context.previousPasses !== a.evalPass - 1 || a.usage === undefined || a.cache === undefined || a.excluded === undefined || a.notices === undefined) return false;
   if (a.evalConfigured !== undefined && a.context.discovery !== (a.evalConfigured ? "configured" : "not_configured")) return false;
   if ((a.questions !== undefined) !== (a.options !== undefined) || (a.outcome === "done" && (a.questions?.length ?? 0) === 0)) return false;

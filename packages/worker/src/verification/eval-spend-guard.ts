@@ -10,6 +10,10 @@ export interface MeteredEvalStage {
 }
 const whole = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const stopped = (): Error => new Error("eval stage stopped");
+/** A reservation's own refusal to start a call because the stage's held budget is used up. Nothing was dispatched and nothing was spent: the stage is over budget with its cost still known. */
+export class EvalCallRefused extends Error {
+  constructor(readonly reason: "cap") { super("eval stage stopped"); this.name = "EvalCallRefused"; }
+}
 export async function openMeteredStage(input: { grant: EvalSpendGrant; meter: MonthlyMeter; calls: number; costMicros: number }): Promise<MeteredEvalStage | undefined> {
   if (typeof input !== "object" || input === null) return undefined;
   const { grant, meter, calls, costMicros } = input;
@@ -24,7 +28,9 @@ export async function openMeteredStage(input: { grant: EvalSpendGrant; meter: Mo
   let callFailure: EvalNotRunReason | undefined;
   const pending = new Set<Promise<unknown>>();
   const call: EvalMeterReservation["call"] = frame => {
-    if (closed || failure !== undefined || dispatched >= calls) return Promise.reject(stopped());
+    if (closed || failure !== undefined) return Promise.reject(stopped());
+    // More calls than the stage was held for: the eval is bigger than its estimate, so the round is over budget, never a comparison of what was answered.
+    if (dispatched >= calls) { failure = "cap"; callFailure = "cap"; return Promise.reject(stopped()); }
     dispatched++;
     const work = (async () => {
       try {
@@ -38,7 +44,9 @@ export async function openMeteredStage(input: { grant: EvalSpendGrant; meter: Mo
           throw stopped();
         }
         return result;
-      } catch {
+      } catch (error) {
+        // A budget refusal dispatched nothing: not counted, not an unknown spend.
+        if (error instanceof EvalCallRefused) { dispatched--; failure ??= error.reason; callFailure = failure; throw stopped(); }
         if (failure === undefined) { failure = "provider_error"; costKnown = false; }
         callFailure = failure;
         throw stopped();
