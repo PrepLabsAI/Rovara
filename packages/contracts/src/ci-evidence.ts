@@ -48,7 +48,7 @@ export type CiEvidenceSettings = z.infer<typeof CiEvidenceSettingsSchema>;
 /** A project with no settings: nothing marked, so every check is treated exactly as today. */
 export const DEFAULT_CI_EVIDENCE_SETTINGS: CiEvidenceSettings = Object.freeze({
   version: 1, markedChecks: [], waitCapMinutes: CI_EVIDENCE_LIMITS.waitCapMinutesDefault, perTestReports: true, shareLogs: false,
-}) as CiEvidenceSettings;
+});
 
 /** The one refusal a bad settings value gets. It never echoes the value. */
 export const CI_EVIDENCE_SETTINGS_INVALID = "The CI evidence settings could not be read.";

@@ -19,7 +19,7 @@ const HEAD = "4f2a9c1".padEnd(40, "0");
 const BASE = "b".repeat(40);
 const T0 = Date.parse("2026-11-15T10:00:00.000Z");
 
-const check = (over: Partial<Check> = {}): Check => ({ name: "e2e-real", state: "completed", conclusion: "success", required: false, url: "https://github.com/acme/svc/runs/1", ...over } as Check);
+const check = (over: Partial<Check> = {}): Check => ({ name: "e2e-real", state: "completed", conclusion: "success", required: false, url: "https://github.com/acme/svc/runs/1", ...over });
 const run = (over: Partial<Check> = {}, extra: Omit<MarkedRun, "check"> = {}): MarkedRun => ({ check: check(over), ...extra });
 const marked = { name: "e2e-real", calledAs: "real model in our account", longOrPaid: true };
 const settings = (over: Record<string, unknown> = {}) => ({ ...DEFAULT_CI_EVIDENCE_SETTINGS, markedChecks: [marked], ...over });
@@ -105,6 +105,7 @@ describe("the marked check's clock", () => {
   });
   it("ignores durations that cannot be a run", () => {
     expect(expectedWaitMs({ durationsMs: [Number.NaN, -1, 0, 9e15, 40 * MIN, 40 * MIN], capMinutes: 120 })).toBe(120 * MIN);
+    expect(expectedWaitMs({ durationsMs: [-5, -5, -5, 30 * MIN], capMinutes: 120 })).toBe(120 * MIN);
   });
   it("takes the customer's own expected time, still capped", () => {
     expect(expectedWaitMs({ durationsMs: [MIN, MIN, MIN], expectedMinutes: 45, capMinutes: 120 })).toBe(45 * MIN);
@@ -150,7 +151,7 @@ describe("the marked check's clock", () => {
   it("picks the run that speaks for the head: running first, then the highest attempt, then the latest, and a failure on a tie", () => {
     const first = run({ conclusion: "failure" }, { attempt: 1, completedAt: T0 });
     const second = run({ conclusion: "success" }, { attempt: 2, completedAt: T0 + MIN });
-    const rerun = run({ state: "pending", conclusion: undefined }, { attempt: 3 });
+    const rerun = run({ state: "pending", conclusion: undefined });
     expect(currentRun(marked, [first, second])).toBe(second);
     expect(currentRun(marked, [second, first, rerun])).toBe(rerun);
     const later = run({ conclusion: "success" }, { completedAt: T0 + 5 * MIN });
@@ -250,7 +251,7 @@ describe("does the customer's CI skip drafts", () => {
     read: async (path) => {
       const name = path.slice(".github/workflows/".length);
       if (options.tooLarge?.includes(name) === true) return { tooLarge: true };
-      return files[name] === undefined ? undefined : { text: files[name]! };
+      return files[name] === undefined ? undefined : { text: files[name] };
     },
   });
   const job = "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
