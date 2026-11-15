@@ -46,6 +46,10 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/tasks/{taskId}/people", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/people/requests/{requestId}", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/workflow/feedback", requires: "tasks:read" },
+  // #644: comments and steering notes, a pull request's diff, plan-document comments.
+  { method: "GET", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:read" },
+  { method: "GET", path: "/v1/dev/tasks/{taskId}/diff", requires: "tasks:read" },
+  { method: "GET", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:read" },
   // Tasks: start.
   { method: "POST", path: "/v1/dev/tasks", requires: "tasks:start" },
   // Tasks: act on a task the person may act on.
@@ -62,6 +66,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/send-back", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/review-findings", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-retry", requires: "tasks:act" },
+  // #644: a comment, or steering the running step (which the route itself keeps to the task's owner).
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:act" },
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:act" },
   // Tasks: share (spec 067 readers, and the Slack share).
   { method: "POST", path: "/v1/dev/tasks/{taskId}/share", requires: "tasks:share" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/readers", requires: "tasks:share" },

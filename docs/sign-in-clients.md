@@ -141,9 +141,9 @@ no row is refused with 404 before anyone is signed in, so a new route can't be r
 | `profile:name` | `PUT /v1/dev/me/name`: the person chooses their own name |
 | `projects:members` | A project's members (above) |
 | `projects:create` | Creating a project, and the repositories to create it from |
-| `tasks:read` | The person's projects, their tasks, one task, its events, plan, people, a pending people change, the feedback review |
+| `tasks:read` | The person's projects, their tasks, one task, its events, plan, people, a pending people change, the feedback review, its messages, a pull request's diff, plan comments |
 | `tasks:start` | `POST /v1/dev/tasks`: start a task |
-| `tasks:act` | Cancel, close, continue, open pull requests, propose a role change or taking a task over, retry, review again, send back, resolve findings, publish again, keep pull requests, retry a feedback review |
+| `tasks:act` | Add a message or steer the running step, comment on a plan document, cancel, close, continue, open pull requests, propose a role change or taking a task over, retry, review again, send back, resolve findings, publish again, keep pull requests, retry a feedback review |
 | `tasks:share` | Share a task, and list, add and remove its readers |
 | `decisions:decide` | Approve a plan or request changes, and decide on a feedback proposal |
 
