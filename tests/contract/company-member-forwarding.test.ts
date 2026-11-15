@@ -95,3 +95,23 @@ it("Lane W selects actions without constructing a member kind outside the helper
   }
   expect(sent).toHaveLength(3);
 });
+
+it("FIX-2 accepts optional positive epoch-seconds authTime without forwarding it", async () => {
+  const h = world(); const authenticated = { ...caller, authTime: 1_794_700_800 };
+  expect(await h.forward(authenticated, request)).toEqual({ ok: true });
+  expect(h.forwarded).toEqual([{ ...request, createdBy: actor }]);
+});
+it.each([0, -1, 1.5, "private-canary", null, Infinity, NaN])("FIX-2 refuses malformed authTime: %s", async (authTime) => {
+  const h = world(); const authenticated = { ...caller, authTime };
+  expect(await h.forward(authenticated, request)).toEqual({ ok: false, error: "not_found" });
+  expect(h.forwarded).toEqual([]); expect(h.db.commandNames()).toEqual([]);
+});
+it.each(["private-canary", Buffer.from(JSON.stringify({ v: 1, companyId: B, personId: actor })).toString("base64url")])("FIX-2 malformed request cursor is invalid_request: %s", async (cursor) => {
+  const h = world();
+  expect(await h.forward(caller, { kind: "company-member-list", companyId: A, cursor })).toEqual({ ok: false, error: "invalid_request" });
+  expect(h.forwarded).toEqual([]);
+});
+it.each(["company-member-role-set", "company-member-revoke"])("FIX-2 forwards the fixed owner refusal: %s", async (kind) => {
+  const h = world(); h.seed(target, "owner");
+  expect(await h.forward(caller, kind === "company-member-role-set" ? request : { kind, companyId: A, personId: target })).toEqual({ ok: false, error: "unavailable", message: "only an owner can change or remove an owner" });
+});

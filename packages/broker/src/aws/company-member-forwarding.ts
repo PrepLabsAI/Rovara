@@ -12,7 +12,7 @@ const Request = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("company-member-role-set"), companyId: OrgIdSchema, personId: MemberPersonId, role: OrgRoleSchema }).strict(),
   MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
 ]);
-const Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional() }).strict();
+const Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional(), authTime: z.number().int().positive().optional() }).strict();
 export function companyMembersThroughLambda(deps: {
   documentClient: { send(command: unknown): Promise<unknown> }; tableName: string;
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>;
@@ -35,7 +35,10 @@ export function companyMembersThroughLambda(deps: {
       const forwarded = { ...input.data, companyId: member.companyId,
         ...(input.data.kind === "company-member-list" ? {} : { createdBy: member.personId }),
       };
-      if (input.data.kind === "company-member-list" && input.data.cursor !== undefined) memberCursorPerson(member.companyId, input.data.cursor);
+      if (input.data.kind === "company-member-list" && input.data.cursor !== undefined) {
+        try { memberCursorPerson(member.companyId, input.data.cursor); }
+        catch { return { ok: false, error: "invalid_request" }; }
+      }
       const answer = await deps.invoke(Buffer.from(JSON.stringify(forwarded)));
       if (answer.FunctionError !== undefined || answer.Payload === undefined || answer.Payload.byteLength > 1_100_000) return { ok: false, error: "unavailable" };
       const parsed = MemberReply.safeParse(JSON.parse(Buffer.from(answer.Payload).toString("utf8")));

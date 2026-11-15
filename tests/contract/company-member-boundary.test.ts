@@ -43,7 +43,7 @@ it("only the member helper constructs member payloads and derives company/actor 
         z.object({ kind: z.literal("company-member-role-set"), companyId: OrgIdSchema, personId: MemberPersonId, role: OrgRoleSchema }).strict(),
         MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
     ])",
-      " | VariableDeclaration: Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional() }).strict()",
+      " | VariableDeclaration: Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional(), authTime: z.number().int().positive().optional() }).strict()",
       "function:companyMembersThroughLambda(deps) | Parameter: deps: {
         documentClient: {
             send(command: unknown): Promise<unknown>;
@@ -80,7 +80,9 @@ it("only the member helper constructs member payloads and derives company/actor 
     };finally:none > if:input.data.kind === "company-member-list" && input.data.cursor !== undefined:condition | BinaryExpression: input.data.kind === "company-member-list" && input.data.cursor !== undefined",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch {
         return { ok: false, error: "unavailable" };
-    };finally:none > if:input.data.kind === "company-member-list" && input.data.cursor !== undefined:then | ExpressionStatement: memberCursorPerson(member.companyId, input.data.cursor);",
+    };finally:none > if:input.data.kind === "company-member-list" && input.data.cursor !== undefined:then > try:body;catch:catch {
+        return { ok: false, error: "invalid_request" };
+    };finally:none | ExpressionStatement: memberCursorPerson(member.companyId, input.data.cursor);",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch {
         return { ok: false, error: "unavailable" };
     };finally:none | VariableDeclaration: answer = await deps.invoke(Buffer.from(JSON.stringify(forwarded)))",

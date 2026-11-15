@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, companyScoped } from "@agentx/contracts";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
@@ -35,7 +35,7 @@ function assertMirror(h: ReturnType<typeof world>, personId: string) {
 }
 
 it("role-set writes the mirror and one attributed audit atomically; same role is a no-op", async () => {
-  const h = world(); h.seed(p, "admin"); h.seed(actor, "admin");
+  const h = world(); verifyStepUp(h); h.seed(p, "admin"); h.seed(actor, "admin");
   expect(await h.invoke({ ...roleSet(), createdBy: actor })).toEqual({ ok: true });
   expect(await h.store.membership(p)).toMatchObject({ role: "member", updatedBy: actor, updatedAt: at });
   assertMirror(h, p);
@@ -54,15 +54,15 @@ it.each(["admin", "owner"])("refuses target %s at the #660 seam, including an un
 });
 
 it.each([roleSet(), revoke()])("last owner is refused with fixed bytes: %s", async (event) => {
-  const h = world(); h.seed(); h.seed(q, "owner", A, { revokedAt: at, revokedBy: "operator" });
+  const h = world(); verifyStepUp(h); h.seed(); h.seed(q, "owner", A, { revokedAt: at, revokedBy: "operator" });
   const before = [...h.db.items.values()];
-  expect(await h.invoke(event)).toEqual(lastOwner);
+  expect(await h.invoke({ ...event, createdBy: "personId" in event ? event.personId : p })).toEqual(lastOwner);
   expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
 });
 
 it.each(["role-role", "revoke-revoke", "role-revoke"])("last-owner race %s: both commit orders and interleaved reads", async (mode) => {
   for (const reverse of [false, true]) {
-    const h = world(); h.seed(); h.seed(q);
+    const h = world(); verifyStepUp(h); h.seed(); h.seed(q);
     const calls = [mode.startsWith("role") ? roleSet() : revoke(), mode.endsWith("role") ? roleSet(q) : revoke(q)];
     const send = h.db.send; const pending: Array<() => Promise<void>> = [];
     let both!: () => void; const ready = new Promise<void>((resolve) => { both = resolve; });
@@ -73,7 +73,7 @@ it.each(["role-role", "revoke-revoke", "role-revoke"])("last-owner race %s: both
         if (pending.length === 2) both();
       });
     };
-    const results = calls.map((event) => h.invoke(event));
+    const results = calls.map((event) => h.invoke({ ...event, createdBy: "personId" in event ? event.personId : p }));
     await ready;
     for (const commit of reverse ? pending.toReversed() : pending) await commit();
     const answers = await Promise.all(results);
@@ -86,16 +86,16 @@ it.each(["role-role", "revoke-revoke", "role-revoke"])("last-owner race %s: both
 });
 
 it.each([false, true])("sequential demote/revoke cannot remove the final owner (reverse=%s)", async (reverse) => {
-  const h = world(); h.seed(); h.seed(q);
+  const h = world(); verifyStepUp(h); h.seed(); h.seed(q);
   const calls = reverse ? [revoke(q), roleSet()] : [roleSet(), revoke(q)];
-  expect(await h.invoke(calls[0])).toEqual({ ok: true });
-  expect(await h.invoke(calls[1])).toEqual(lastOwner);
+  expect(await h.invoke({ ...calls[0], createdBy: calls[0]!.personId })).toEqual({ ok: true });
+  expect(await h.invoke({ ...calls[1], createdBy: calls[1]!.personId })).toEqual(lastOwner);
 });
 
 it("a stale mirror is never owner authority", async () => {
-  const h = world(); h.seed(); h.seed(q);
+  const h = world(); verifyStepUp(h); h.seed(); h.seed(q);
   h.db.set({ ...h.db.get(membershipKey(q).pk, "COMPANY")!, role: "member" });
-  expect(await h.invoke(roleSet())).toEqual(lastOwner);
+  expect(await h.invoke({ ...roleSet(), createdBy: p })).toEqual(lastOwner);
   expect(await h.store.membership(p)).toMatchObject({ role: "owner" });
 });
 
@@ -126,7 +126,7 @@ it.each(["revoked", "member", "foreign", "missing", "malformed"])("supplied acto
 
 it.each(["company-member-role-set", "company-member-revoke", "company-member-restore"])("%s rechecks actor in its transaction, including self and witness overlap", async (kind) => {
   for (const actorId of [actor, p, q]) {
-    const h = world(); h.seed(p, "owner", A, kind === "company-member-restore" ? { revokedAt: at } : {}); h.seed(q); h.seed(actor, "admin");
+    const h = world(); verifyStepUp(h); h.seed(p, "owner", A, kind === "company-member-restore" ? { revokedAt: at } : {}); h.seed(q); h.seed(actor, "owner");
     if (kind === "company-member-restore" && actorId === p) continue;
     const send = h.db.send;
     h.db.send = async (command) => {
@@ -140,7 +140,7 @@ it.each(["company-member-role-set", "company-member-revoke", "company-member-res
 });
 
 it("operator omission preserves operator attribution; every member writer commits both rows in one transaction", async () => {
-  const h = world(); const transactions: Array<Record<string, unknown>> = [];
+  const h = world(); verifyStepUp(h); const transactions: Array<Record<string, unknown>> = [];
   const send = h.db.send;
   h.db.send = async (command) => { if (command.constructor.name === "TransactWriteCommand") transactions.push(command.input); return send(command); };
   await h.store.preapprove(IMPLICIT_COMPANY_ID, "member@example.test", "admin", 1);
@@ -167,7 +167,7 @@ it("operator omission preserves operator attribution; every member writer commit
 });
 
 it("a failed member transaction leaves membership, mirror and audit unchanged", async () => {
-  const h = world(); h.seed(p, "admin"); const before = [...h.db.items.values()];
+  const h = world(); verifyStepUp(h); h.seed(p, "admin"); const before = [...h.db.items.values()];
   h.db.injectFault({ command: "TransactWriteCommand", error: { name: "AccessDeniedException", message: "private-canary" } });
   expect(await h.invoke(roleSet())).toEqual(unavailable);
   expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
@@ -233,11 +233,11 @@ it.each(["time", "bytes", "cycle", "missing-items", "foreign-cursor"])("list tot
 });
 
 it("owner discovery finds a witness beyond the first 100 non-owners", async () => {
-  const h = world();
+  const h = world(); verifyStepUp(h);
   for (let i = 0; i < 150; i++) h.seed(i.toString(16).padStart(64, "0"), "member");
   h.seed(p); h.seed(q);
-  expect(await h.invoke(roleSet())).toEqual({ ok: true });
-  expect(await h.invoke(revoke(q))).toEqual(lastOwner);
+  expect(await h.invoke({ ...roleSet(), createdBy: p })).toEqual({ ok: true });
+  expect(await h.invoke({ ...revoke(q), createdBy: q })).toEqual(lastOwner);
 });
 
 it("empty filtered pages stop at the total query cap with an explicit resumable short page", async () => {
@@ -253,7 +253,7 @@ it("empty filtered pages stop at the total query cap with an explicit resumable 
 
 it("a concurrent target promotion cannot bypass last-owner protection through a stale demotion/revoke snapshot", async () => {
   for (const event of [roleSet(), revoke()]) {
-    const h = world(); h.seed(p, "admin"); const send = h.db.send;
+    const h = world(); verifyStepUp(h); h.seed(p, "admin"); const send = h.db.send;
     h.db.send = async (command) => {
       if (command.constructor.name === "TransactWriteCommand") h.seed(p, "owner");
       return send(command);
@@ -265,7 +265,7 @@ it("a concurrent target promotion cannot bypass last-owner protection through a 
 });
 
 it.each([p, q])("self-actor and owner-witness overlap commit without duplicate transaction actions: %s", async (createdBy) => {
-  const h = world(); h.seed(); h.seed(q);
+  const h = world(); verifyStepUp(h); h.seed(); h.seed(q);
   expect(await h.invoke({ ...roleSet(), createdBy })).toEqual({ ok: true });
   assertMirror(h, p); expect(h.db.refusals).toEqual([]);
 });
@@ -306,4 +306,69 @@ it("rejects a single mirror whose sort key differs from its person id", async ()
   const h = world(); h.seed(p, "member"); const key = mirrorKey(A, p);
   h.db.set({ ...h.db.get(key.pk, key.sk)!, personId: q });
   expect(await h.invoke(list())).toEqual(unavailable);
+});
+
+// Exercise transaction guards independently of the intentionally closed #660 seam.
+function verifyStepUp(h: ReturnType<typeof world>) {
+  return vi.spyOn(h.store as unknown as { requireMemberStepUp(role: string): void }, "requireMemberStepUp").mockImplementation(() => {});
+}
+const onlyOwner = { ok: false, error: "unavailable", message: "only an owner can change or remove an owner" };
+it.each([roleSet(), revoke(), roleSet(p, "admin")])("FIX-2 admin cannot change or remove an owner: %s", async (event) => {
+  const h = world(); h.seed(); h.seed(q); h.seed(actor, "admin");
+  const before = [...h.db.items.values()];
+  expect(await h.invoke({ ...event, createdBy: actor })).toEqual(onlyOwner);
+  expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
+});
+it.each(["admin", "owner"] as const)("FIX-2 current %s demotion and removal need step-up", async (role) => {
+  for (const event of [roleSet(), revoke()]) {
+    const h = world(); h.seed(p, role); h.seed(actor, "owner");
+    const before = [...h.db.items.values()];
+    expect(await h.invoke({ ...event, createdBy: actor })).toEqual(stepUp);
+    expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
+  }
+});
+it("FIX-2 admin can keep a plain member role and revoke a plain member without step-up", async () => {
+  const h = world(); h.seed(p, "member"); h.seed(actor, "admin");
+  expect(await h.invoke({ ...roleSet(), createdBy: actor })).toEqual({ ok: true });
+  expect(await h.invoke({ ...revoke(), createdBy: actor })).toEqual({ ok: true });
+  assertMirror(h, p);
+});
+it.each([actor, q, p])("FIX-2 concurrent owner actor demotion fails atomically: %s", async (createdBy) => {
+  for (const event of [roleSet(), revoke()]) {
+    const h = world(); h.seed(); h.seed(q); h.seed(actor); verifyStepUp(h);
+    const send = h.db.send;
+    h.db.send = async (command) => {
+      if (command.constructor.name === "TransactWriteCommand") h.seed(createdBy, "admin");
+      return send(command);
+    };
+    expect((await h.invoke({ ...event, createdBy })).ok).toBe(false);
+    expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
+    expect(h.db.refusals).toEqual([]);
+  }
+});
+it.each(["private-canary", "f".repeat(63), 7, null])("FIX-2 invalid revokedBy refuses the whole stored row: %s", async (revokedBy) => {
+  const h = world(); h.seed(p, "member", A, { revokedAt: at, revokedBy });
+  expect(await h.invoke(list())).toEqual(unavailable);
+  expect(await h.invoke({ kind: "company-member-restore", companyId: A, personId: p })).toEqual(unavailable);
+});
+it.each(["operator", actor])("FIX-2 valid revokedBy round trips: %s", async (revokedBy) => {
+  const h = world(); h.seed(p, "member", A, { revokedAt: at, revokedBy });
+  expect(await h.store.membership(p)).toMatchObject({ revokedBy });
+});
+
+it.each(["admin", "owner"])("FIX-2 concurrent member promotion to %s cannot bypass step-up", async (role) => {
+  const h = world(); h.seed(p, "member"); h.seed(actor, "admin");
+  const send = h.db.send;
+  h.db.send = async (command) => {
+    if (command.constructor.name === "TransactWriteCommand") h.seed(p, role as "admin" | "owner");
+    return send(command);
+  };
+  expect(await h.invoke({ ...revoke(), createdBy: actor })).toEqual(unavailable);
+  expect(await h.store.membership(p)).toMatchObject({ role });
+  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
+});
+it.each([roleSet(), revoke()])("FIX-2 omitted operator actor cannot substitute for an owner: %s", async (event) => {
+  const h = world(); h.seed(); h.seed(q); verifyStepUp(h);
+  expect(await h.invoke(event)).toEqual(onlyOwner);
+  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
 });

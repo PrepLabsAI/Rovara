@@ -6,7 +6,7 @@ import { IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, companyScoped } from "
 import { membershipKey } from "../aws/company-check.js";
 import { ownerKeyForSubject } from "../aws/lambda.js";
 import { emailIndexKey } from "./store.js";
-import { CompanyMember, CompanyMemberRefusal, MemberListInput, MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, memberCursor, memberCursorPerson } from "./company-member-contract.js";
+import { CompanyMember, CompanyMemberRefusal, MemberListInput, MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, MEMBER_ONLY_OWNER, memberCursor, memberCursorPerson } from "./company-member-contract.js";
 import { CompanyIssuerRecord, CompanyIssuerSettings, companyIssuerKey } from "./company-issuer.js";
 
 export const CompanyPersonId = z.string().regex(/^[a-f0-9]{64}$/);
@@ -166,9 +166,13 @@ export class CompanySignInStore {
       ExpressionAttributeValues: { ":entity": "COMPANY_MEMBERSHIP", ":company": companyId, ":person": personId, ":owner": "owner", ...(owner ? {} : { ":admin": "admin" }) },
     } };
   }
-  private async checkActor(companyId: string, createdBy: string | undefined): Promise<void> {
-    if (createdBy === undefined) return;
+  private async checkActor(companyId: string, createdBy: string | undefined, owner = false): Promise<void> {
+    if (createdBy === undefined) {
+      if (owner) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_ONLY_OWNER });
+      return;
+    }
     const actor = await this.membership(createdBy);
+    if (owner && actor?.role !== "owner") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_ONLY_OWNER });
     if (actor === undefined || actor.companyId !== companyId || actor.revokedAt !== undefined || (actor.role !== "admin" && actor.role !== "owner")) throw unavailable();
   }
   /** #660 plugs its fresh auth_time verification into this single fail-closed seam. */
@@ -179,6 +183,12 @@ export class CompanySignInStore {
     // A self-actor's target snapshot must itself still be authorized. The earlier
     // actor read alone can race with this read; the snapshot CAS then fences it.
     if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
+    const ownerChange = previous.role === "owner" && (next.role !== "owner" || next.revokedAt !== undefined);
+    if (ownerChange) await this.checkActor(previous.companyId, createdBy, true);
+    // The target snapshot CAS includes its current role in this same transaction.
+    // A concurrent promotion cannot turn a plain-member write into an elevated write.
+    if (next.role !== previous.role || next.revokedAt !== undefined) this.requireMemberStepUp(previous.role);
+    if (next.role !== previous.role) this.requireMemberStepUp(next.role);
     let witness: string | undefined;
     if (previous.role === "owner" && previous.revokedAt === undefined && (next.role !== "owner" || next.revokedAt !== undefined)) {
       // The mirror only locates a candidate; the transaction checks the authoritative row.
@@ -194,7 +204,7 @@ export class CompanySignInStore {
     ];
     // DynamoDB forbids two actions on one item. A self-actor is checked by the target
     // snapshot CAS; an actor who is also the owner witness uses the stronger owner check.
-    if (createdBy !== undefined && createdBy !== previous.personId && createdBy !== witness) writes.push(this.liveMemberCheck(previous.companyId, createdBy, false));
+    if (createdBy !== undefined && createdBy !== previous.personId && createdBy !== witness) writes.push(this.liveMemberCheck(previous.companyId, createdBy, ownerChange));
     const witnessIndex = writes.length;
     if (witness !== undefined) writes.push(this.liveMemberCheck(previous.companyId, witness, true));
     try {
@@ -219,11 +229,10 @@ export class CompanySignInStore {
   async setRole(companyId: string, personId: string, role: Member["role"], createdBy?: string): Promise<"changed" | "unchanged" | "not_found"> {
     if (!OrgIdSchema.safeParse(companyId).success || !OrgRoleSchema.safeParse(role).success) throw unavailable();
     await this.checkActor(companyId, createdBy);
-    this.requireMemberStepUp(role);
     const member = await this.membership(personId);
     if (member === undefined || member.companyId !== companyId) return "not_found";
     if (member.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_REVOKED });
-    if (member.role === role) return "unchanged";
+    if (member.role === role) { this.requireMemberStepUp(role); return "unchanged"; }
     await this.writeMember(member, { ...member, role, updatedAt: this.iso(), updatedBy: createdBy ?? "operator" }, "company-member-role-set", createdBy);
     return "changed";
   }

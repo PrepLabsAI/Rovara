@@ -71,7 +71,7 @@ export function memberBoundary(sources: readonly InventorySource[], caps: Partia
 // permission through an import alias or an owner-module filename.
 const contractImports = new Set([
   "CompanyMember", "CompanyMemberRefusal", "MemberListInput", "MemberPersonId", "MemberReply", "CompanyMemberReply",
-  "MEMBER_LAST_OWNER", "MEMBER_REVOKED", "MEMBER_STEP_UP", "memberCursor", "memberCursorPerson",
+  "MEMBER_LAST_OWNER", "MEMBER_REVOKED", "MEMBER_ONLY_OWNER", "MEMBER_STEP_UP", "memberCursor", "memberCursorPerson",
 ]);
 
 function checkContractImport(node: ts.StringLiteralLike): void {
