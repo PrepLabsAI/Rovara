@@ -17,13 +17,13 @@ function clock() {
   let t = 1_000;
   return { now: () => t, sleep: (ms: number) => { t += ms; return Promise.resolve(); }, advance: (ms: number) => { t += ms; } };
 }
-function setup(script: FakeAndroidScript = {}, over: Partial<AndroidDriverOptions> = {}, tick = 0) {
+function setup(script: FakeAndroidScript = {}, over: Partial<AndroidDriverOptions> = {}, tick = 0, talks = true) {
   const time = clock();
   const fake = fakeAndroid({ ...script, first: (file, args) => { time.advance(tick); return script.first?.(file, args); } });
   const diag: Array<[string, string, string | undefined]> = [];
   const driver = createAndroidEmulatorDriver({
     command: fake.port, appId: APP, apps: { before: "/apps/before.apk", after: "/apps/after.apk" }, flows: FLOWS, tools: { adb: ADB, emulator: EMULATOR, maestro: MAESTRO, avd: "rovara" }, scratchDir: "/tmp/rovara-device",
-    env: ENV, writeFile: fake.writeFile, now: time.now, sleep: time.sleep, diag: (stage, note, detail) => { diag.push([stage, note, detail]); }, ...over,
+    env: ENV, writeFile: fake.writeFile, now: time.now, sleep: time.sleep, ...(talks ? { diag: (stage: string, note: string, detail?: string) => { diag.push([stage, note, detail]); } } : {}), ...over,
   });
   return { ...fake, driver, time, diag };
 }
@@ -95,7 +95,7 @@ describe("createAndroidEmulatorDriver", () => {
       expect(await racing).toBe("device_did_not_start");
       expect(emulator.capture).toBe(true);
       expect(talking.diag.find(([stage, note]) => stage === "boot" && note === "emulator exited")?.[2]).toBe("emulator: ERROR: x86 emulation currently requires hardware acceleration");
-      const quiet = setup({ boot: ["", "", "", ""] }, { diag: undefined });
+      const quiet = setup({ boot: ["", "", "", ""] }, {}, 0, false);
       void quiet.driver.prepare("before", { timeoutMs: 600_000 });
       expect(quiet.starts.find((row) => row.file === EMULATOR)!.capture).toBeUndefined();
     });
