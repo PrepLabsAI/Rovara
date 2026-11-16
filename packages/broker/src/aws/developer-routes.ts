@@ -787,7 +787,11 @@ async function bindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWor
 async function callerWorkspace(deps: DeveloperRouteDependencies, caller: ProjectAccessSubject, record: unknown, teamId: unknown): Promise<SlackWorkspaceScope | undefined> {
   if (!companySlackMode(deps)) return undefined;
   try {
-    if (deps.workspaces === undefined) throw new SlackWorkspaceRefused();
+    // Without the workspace service only the install's own team exists, and it is the implicit company's: the legacy path answers (no scope), any other team or company is refused.
+    if (deps.workspaces === undefined) {
+      if (teamId === deps.developer.slackTeamId && await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) === IMPLICIT_COMPANY_ID) return undefined;
+      throw new SlackWorkspaceRefused();
+    }
     const scope = slackRecordScope(record, teamId);
     const company = await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
     if (company !== scope.companyId || await deps.workspaces.requireCompany(scope.teamId) !== company) throw new SlackWorkspaceRefused();
@@ -1125,11 +1129,10 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
-  companyId ??= deps.workspaces === undefined ? undefined : await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
+  // Company mode, with or without the workspace service: the caller's company filters every project the list shows (the install's own team is the implicit company's).
+  companyId ??= companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
   const grants = await grantsOf(deps, caller);
-  // Without the workspace service, company mode still needs the caller's company for the bindings alone: only the implicit company sees the install's own team.
-  const bindingCompany = companyId ?? (companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined);
-  const bindings = await bindingsOf(deps, undefined, bindingCompany);
+  const bindings = await bindingsOf(deps, undefined, companyId);
   const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)], companyId);
   const access = await resolveDeveloperAccess({
     ...(deps.workspaces === undefined || companyId === undefined ? {} : { companyId }),
@@ -1179,7 +1182,7 @@ export async function checkProjectAccess(
 ): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
   // A name that is not a project name is never echoed back: it could be long or carry markup.
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
-  const companyId = deps.workspaces === undefined ? undefined : await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
+  const companyId = companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
   const known = (await projectsWithPolicy(deps, [project], companyId)).get(project);
   if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
   const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
