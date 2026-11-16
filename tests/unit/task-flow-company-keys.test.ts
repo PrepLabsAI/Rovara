@@ -62,7 +62,8 @@ describe("company task-flow keys", () => {
     expect((await locateWorkspace({ store, companyId: A }, "ws"))?.scope).toBe("legacy");
     get.mockClear();
     expect(await locateWorkspace({ store, companyId: B }, "ws")).toBeUndefined();
-    expect(get.mock.calls).toEqual([[{ pk: `ORG#${B}#WORKSPACE#ws`, sk: "META" }]]);
+    // Its own scoped key first; then the id-only discovery key, only to notice a dangling pointer of its OWN company (controller condition 2). A legacy row is never admitted for B.
+    expect(get.mock.calls).toEqual([[{ pk: `ORG#${B}#WORKSPACE#ws`, sk: "META" }], [{ pk: "WORKSPACE#ws", sk: "META" }]]);
     for (const companyId of [B, "bad", "", null]) {
       await store.put({ item: { ...legacy, companyId } });
       expect(await locateWorkspace({ store, companyId: A }, "ws")).toBeUndefined();
