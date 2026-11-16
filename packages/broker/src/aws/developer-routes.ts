@@ -1494,10 +1494,13 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
   const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  // The member helper's caller is the signed-in person only (its schema is strict and pinned): the step-up travels beside it, and the web-app mark (DEC 236h) is not the helper's.
+  const { stepUp: _callerStepUp, webApp: _webApp, ...person } = caller;
+  void _callerStepUp; void _webApp;
   return routeCompanyMembers({
     documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
     projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
-  }, { caller, stepUp, companyId }, request, url);
+  }, { caller: person, stepUp, companyId }, request, url);
 }
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {

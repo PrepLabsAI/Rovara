@@ -1,4 +1,4 @@
-416 record kinds: 56 company-scoped, 15 install-wide, 345 needs-company. 198 routes: 34 company-scoped, 2 install-wide, 162 needs-company.
+415 record kinds: 55 company-scoped, 15 install-wide, 345 needs-company. 198 routes: 34 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -1333,7 +1333,6 @@ L4 operator copies and forward-writes use the existing company-scoped projectRev
 | forwarding | packages/broker/src/aws/core-project-backfill.ts:240:100:sk | cursor.after | Known gap: opaque continuation validated as REV plus twelve to sixteen digits and bound to the complete operator mapping; legacy history only. | projectKey (legacy PROJECT) |
 ### T4b workspace token caller plumbing (2026-11-15)
 Internal directory/proof/callback scope is optional and runtime-validated. Company-mode senders derive it from authoritative task, project or workspace/thread records and authenticated membership where applicable; receivers recheck the workspace binding before token acquisition. Existing inventory forwarding rows are relocated without changing their family classification; the form refusal expression now uses the fixed `form` fallback. No storage-key family or record kind is added. Legacy PROJECT policy projections remain under their existing T1 inventory classification; the T4a project provider supplies company authority when present. Company activation and scoped IAM/secret access remain deferred to the integrated release owner.
-| record | entity:COMPANY_SLACK_WORKSPACE_VIEW | company-scoped | State table | no | - | T4b FIX-1: ORG#company#SLACK_WORKSPACES / TEAM#team, non-secret binding projection written with an authoritative conditional transaction. Only bounded company-partition Query on request paths; operator backfill snapshot-checked. Writer walk, collisions, bounds and dryRun: slack-workspace-binding.test.ts. Partition family pk:ORG retains its existing mixed-family classification. |
 | forwarding | packages/broker/src/aws/slack-interactivity.ts:445:70:computed | [firstInputBlock(asRecord(payload.view)) &#124;&#124; "form"] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | confirmationKey |
 | forwarding | packages/broker/src/aws/slack-workspace-binding.ts:19:3:pk | z.string().max(43) | Runtime binding row schema, not a stored key constructor; ratcheted explicitly. | pk:SLACK_TEAM |
 | forwarding | packages/broker/src/core/test-env/baseline-cache.ts:32:3:computed | [trustedBrand] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/core/test-env/baseline-cache.ts (trustedBrand) |

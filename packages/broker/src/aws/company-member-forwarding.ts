@@ -12,9 +12,7 @@ const Request = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("company-member-role-set"), companyId: OrgIdSchema, personId: MemberPersonId, role: OrgRoleSchema }).strict(),
   MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
 ]);
-const Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional(), authTime: z.number().int().positive().optional(),
-  // The caller fields lane ID / DEC 236h add to a verified web caller (batch of 2026-11-16 merged #718 with #740): read here only so the strict parse accepts them; nothing of them is forwarded.
-  stepUp: z.object({ at: z.string(), method: z.string() }).strict().optional(), webApp: z.literal(true).optional() }).strict();
+const Caller = z.object({ developerId: MemberPersonId, sessionId: z.string().min(1).max(256), amr: z.enum(["oidc", "slack"]), name: z.string(), slackUserId: z.string().optional(), email: z.string().optional(), clientId: z.string().optional(), authTime: z.number().int().positive().optional() }).strict();
 export function companyMembersThroughLambda(deps: {
   documentClient: { send(command: unknown): Promise<unknown> }; tableName: string;
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>;
