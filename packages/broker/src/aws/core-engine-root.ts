@@ -25,8 +25,8 @@
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, PolicyHookSettingsSchema, isContextSourceStage,
-  type PolicySource, type AdapterRegistry, type PolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, HostedPolicyHookSettingsSchema, isContextSourceStage,
+  type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
@@ -47,7 +47,8 @@ import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { taskPointerKey } from "../core/task-flow/keys.js";
-import { applyPolicyHook, type PolicyHookInstall } from "../core/policy-hook/index.js";
+import type { PolicyHookInstall } from "../core/policy-hook/index.js";
+import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { Membership, membershipKey } from "./company-check.js";
@@ -76,7 +77,7 @@ import { handleCoreContextTools } from "../core-host/context-tools.js";
 
 type DynamoSender = { send(command: unknown): Promise<unknown> };
 
-/** The variable that holds the install's policy hook settings (JSON: `{ address, keys }`). Absent or empty: no hook. */
+/** The variable that holds the install's policy hook settings (JSON: `{ address, jwks, thumbprints }`). Absent or empty: no hook. */
 export const CORE_POLICY_HOOK_VARIABLE = "ROVARA_POLICY_HOOK";
 
 /** What the root gives `codeModules`. */
@@ -174,16 +175,16 @@ const callbackAnswer = (statusCode: number, code: string, message: string): Brok
 const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable.";
 
 /**
- * The install's policy hook settings (ROVARA_POLICY_HOOK, JSON `{ address, keys }`), read the same way for the core engine (here) and for the developer API's company bounds on project
- * settings (#717: `DeveloperApiConfiguration.policyHook = { settings, install }`). Absent or empty: undefined (no hook; today's behaviour). Anything that is not readable settings throws in
- * fixed words, so an install meant to ask never runs without asking.
+ * The hosted install's policy hook settings (ROVARA_POLICY_HOOK, JSON `{ address, jwks, thumbprints }`).
+ * Absent or empty gives undefined. Unreadable settings throw in fixed words, so an install meant to ask always has a hook.
+ * Developer-API composition (#717) can use this reader and the hosted client when that wiring lands.
  */
-export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): PolicyHookSettings | undefined {
+export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): HostedPolicyHookSettings | undefined {
   const raw = env[CORE_POLICY_HOOK_VARIABLE]?.trim() ?? "";
   if (raw === "") return undefined;
   let settings: unknown;
   try { settings = JSON.parse(raw); } catch { throw new Error("the policy hook settings are not JSON"); }
-  const parsed = PolicyHookSettingsSchema.safeParse(settings);
+  const parsed = HostedPolicyHookSettingsSchema.safeParse(settings);
   if (!parsed.success) throw new Error("the policy hook settings are not readable");
   return parsed.data;
 }
@@ -359,7 +360,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     beforeSeal: (registry) => {
       const settings = policyHookSettingsFromEnvironment(env);
       if (settings === undefined) return;
-      applyPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log });
+      applyHostedPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log });
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
