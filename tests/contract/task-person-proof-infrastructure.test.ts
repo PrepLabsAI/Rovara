@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
+import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -59,6 +60,10 @@ function appControlPlane(env: string): TemplateJson {
 
 function parentRemainderDigest(template: TemplateJson): string {
   const remainder = structuredClone(template);
+  // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
+  // the legacy template must carry none of it, so legacy stays byte-identical.
+  if (remainder.Parameters?.CoreEngine !== undefined) withoutCoreEngine(remainder);
+  else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
   // named parameter and its corresponding Broker environment reference from the proof-only hash.
@@ -200,14 +205,14 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "937f39e337701ecc8fa3fe612d801307303ced6bd589cec07f3c7833b4b584eb",
-        withoutRoute: "75541acd8c1e0e584837fc76df3d3e0dd14b1c0bdb6590e88baf4dfa1d66c23d",
+        withRoute: "db5deff9f38e2113f6fd80f63229e88657156952e90633356e65f910d5ce151d",
+        withoutRoute: "24fb68933fbdffaedcd8b364d3dcde3ad15f676e218e9d374e2160c466891d46",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "9ad290085328a9a8f8450e579b26caa1247b62383253217cb9fed95e41c5ee11",
-        withoutRoute: "c223ec7c2fca6cf7f3d9ead8cd5b76f958229bab4957a808fe5c752b2d6258dd",
+        withRoute: "7c24fb2c33b49464b564d4ee7489f29fc9d99f8760323a7f0388bffbdb932c65",
+        withoutRoute: "cd310bbfcab2337921f6312cdf54366a482d334901eb8c0ba0823cd12c045b9b",
       },
       {
         label: "legacy",
@@ -216,6 +221,9 @@ describe("the named TEST proof-only installation gate", () => {
         withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
       },
     ] as const;
+    expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
+    expect(foreign.Parameters?.CoreEngine, "foreign has the core engine switch").toBeDefined();
+    expect(legacy.Parameters?.CoreEngine, "legacy has no core engine switch").toBeUndefined();
     for (const { label, template, withRoute, withoutRoute } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {

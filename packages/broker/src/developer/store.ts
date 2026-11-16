@@ -1,8 +1,9 @@
 // packages/broker/src/developer/store.ts
 // The DeveloperSignIn table (spec 025 FR-005, FR-008). Codes and refresh tokens are stored only as
 // SHA-256 hashes. Every expiry is checked here; the table's TTL only cleans up afterwards.
+import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import {
   DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_CODE_SECONDS,
@@ -12,6 +13,7 @@ import {
   DEVELOPER_STEP_UP_EMAILS_MAX,
   DEVELOPER_STEP_UP_PAGES_PER_HOUR,
   DEVELOPER_STEP_UP_SECONDS,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped,
   SIGN_IN_CLIENTS_PK,
   agentXError,
   SignInClientRecordSchema,
@@ -19,12 +21,13 @@ import {
   type DeveloperSignInMethod,
   type DeveloperStepUpMethod,
   type SignInClientRecord,
+  SignInClientIdSchema,
 } from "@agentx/contracts";
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
 /** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
 /** `scopes` (spec 065): what the client asked for at sign-in that its registration allows. */
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[];
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string; scopes?: string[]; companyId?: string;
   /** Lane ID part 2: the client asked for a step-up (`acr_values=step-up`). The sign-in at the provider then only says who it is; Code's own factor follows. */
   stepUp?: true }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string;
@@ -40,13 +43,13 @@ export interface DeveloperRecord { developerId: string; provider: DeveloperSignI
   factorEmailSetBy?: string }
 /** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
  * company sign-in carried the administrator claim (FR-005). */
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
 
 /**
  * What a code carries into its session. `stepUpAt` (epoch seconds) and `stepUpMethod` (lane ID part 2): when and how the person last proved it was them with a factor Code owns.
  * Set only by a completed step-up; a refresh carries them over unchanged, so the step-up ages and is never renewed by a refresh.
  */
-export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod }
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; stepUpAt?: number; stepUpMethod?: DeveloperStepUpMethod; companyId?: string }
 
 /**
  * Lane ID part 2: one step-up page in progress, keyed by the SHA-256 of a secret held only in the person's browser cookie. `grant` is the code to issue once the factor is proved; `emailCodeHash`
@@ -114,8 +117,10 @@ interface CancellationReason { Code?: string }
 export const META = "META";
 
 /** E8: the email index's key, the SHA-256 of the trimmed, lowercased email, so no email is stored as a key. */
-export function emailIndexKey(email: string): { pk: string; sk: "META" } {
-  return { pk: `EMAIL#${sha256Hex(email.trim().toLowerCase())}`, sk: META };
+export function emailIndexKey(email: string, companyId?: string): { pk: string; sk: "META" } {
+  const key = `EMAIL#${sha256Hex(email.trim().toLowerCase())}`;
+  if (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) return { pk: key, sk: META };
+  return { pk: companyScoped(OrgIdSchema.parse(companyId), key), sk: META };
 }
 const conditionFailed = (error: unknown) =>
   error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
@@ -146,25 +151,66 @@ export class DeveloperSignInStore {
   // ---- Spec 063: the sign-in clients an administrator registered ----
 
   /** Registers a client or replaces it; its first registration's time is kept. */
-  async putClient(client: SignInClientRecord): Promise<void> {
+  async putClient(client: SignInClientRecord, companyId?: string, options: { keepSecret?: true; operator?: true; commit?: (writes: NonNullable<TransactWriteCommandInput["TransactItems"]>) => Promise<void> } = {}): Promise<void> {
+    if (companyId !== undefined) {
+      const started = this.input.now();
+      const scope = OrgIdSchema.parse(companyId);
+      const record = SignInClientRecordSchema.parse(client);
+      if (options.operator !== true && (record.installLevel === true || (record.companyId ?? IMPLICIT_COMPANY_ID) !== scope)) throw new Error("client unavailable");
+      const revision = await this.clientRevision();
+      const clients = await this.clientSnapshot(started, { revision });
+      const current = clients.find((row) => row.clientId === record.clientId);
+      if (current !== undefined && (current.installLevel === true ? options.operator !== true || record.installLevel !== true : record.installLevel === true || (current.companyId ?? IMPLICIT_COMPANY_ID) !== scope)) throw new Error("client unavailable");
+      if (clients.some((row) => row.clientId !== record.clientId && row.audience === record.audience) || (current === undefined && clients.length >= 100)) throw new Error("client unavailable");
+      if (options.keepSecret === true) {
+        if (current?.secretHash === undefined) throw new Error("client unavailable");
+        record.secretHash = current.secretHash;
+      }
+      if (record.fullAccess === true && record.secretHash === undefined) throw new Error("client unavailable");
+      const writes = [{ Put: { TableName: this.input.tableName, Item: { ...signInClientKey(record.clientId), entityType: "SIGN_IN_CLIENT", ...record, createdAt: current?.createdAt ?? record.createdAt } } }, this.reviseClients(revision)];
+      if (this.input.now() - started > 10_000) throw new Error("client unavailable");
+      if (options.commit !== undefined) await options.commit(writes);
+      else await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: writes }));
+      return;
+    }
     const record = SignInClientRecordSchema.parse(client);
     const current = await this.getClient(record.clientId);
     await this.input.documentClient.send(new PutCommand({ TableName: this.input.tableName,
       Item: { ...signInClientKey(record.clientId), entityType: "SIGN_IN_CLIENT", ...record, createdAt: current?.createdAt ?? record.createdAt } }));
   }
 
-  async removeClient(clientId: string): Promise<boolean> {
+  async removeClient(clientId: string, companyId?: string): Promise<boolean> {
+    if (companyId !== undefined) {
+      const started = this.input.now();
+      const scope = OrgIdSchema.parse(companyId);
+      SignInClientIdSchema.parse(clientId);
+      const revision = await this.clientRevision();
+      const clients = await this.clientSnapshot(started, { revision });
+      const current = clients.find((row) => row.clientId === clientId);
+      if (current === undefined || current.installLevel === true || (current.companyId ?? IMPLICIT_COMPANY_ID) !== scope) return false;
+      await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Delete: { TableName: this.input.tableName, Key: signInClientKey(clientId) } }, this.reviseClients(revision),
+      ] }));
+      return true;
+    }
     const response = await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ReturnValues: "ALL_OLD" })) as { Attributes?: unknown };
     return response.Attributes !== undefined;
   }
 
   /** A registered client, or undefined for one never registered or since removed (an unreadable row reads as none). */
-  async getClient(clientId: string): Promise<SignInClientRecord | undefined> {
+  async getClient(clientId: string, companyId?: string, companyMode = false): Promise<SignInClientRecord | undefined> {
     const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ConsistentRead: true })) as { Item?: Record<string, unknown> };
-    return response.Item === undefined ? undefined : clientOf(response.Item);
+    const client = response.Item === undefined ? undefined : clientOf(response.Item);
+    if ((companyMode || companyId !== undefined) && response.Item !== undefined && (response.Item.pk !== SIGN_IN_CLIENTS_PK || response.Item.sk !== `CLIENT#${clientId}` || response.Item.entityType !== "SIGN_IN_CLIENT" || client?.clientId !== clientId)) return undefined;
+    if (companyId !== undefined && (!OrgIdSchema.safeParse(companyId).success || client?.installLevel === true || (client?.companyId ?? IMPLICIT_COMPANY_ID) !== companyId)) return undefined;
+    return client;
   }
 
-  async listClients(): Promise<SignInClientRecord[]> {
+  async listClients(companyId?: string): Promise<SignInClientRecord[]> {
+    if (companyId !== undefined) {
+      const scope = OrgIdSchema.parse(companyId);
+      return (await this.clientSnapshot(this.input.now())).filter((row) => row.installLevel !== true && (row.companyId ?? IMPLICIT_COMPANY_ID) === scope);
+    }
     const clients: SignInClientRecord[] = [];
     let start: Record<string, unknown> | undefined;
     do {
@@ -176,6 +222,39 @@ export class DeveloperSignInStore {
       }
       start = response.LastEvaluatedKey;
     } while (start !== undefined);
+    return clients.sort((a, b) => a.clientId.localeCompare(b.clientId));
+  }
+
+  /** The revision must precede the complete snapshot: all company-mode writers serialize here. */
+  private async clientRevision(): Promise<string | undefined> {
+    const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: { pk: SIGN_IN_CLIENTS_PK, sk: "REVISION" }, ConsistentRead: true })) as { Item?: unknown };
+    if (response.Item === undefined) return undefined;
+    return z.object({ pk: z.literal(SIGN_IN_CLIENTS_PK), sk: z.literal("REVISION"), entityType: z.literal("SIGN_IN_CLIENT_REGISTRY"), revision: z.uuid() }).strict().parse(response.Item).revision;
+  }
+  private reviseClients(revision: string | undefined) {
+    return { Put: { TableName: this.input.tableName, Item: { pk: SIGN_IN_CLIENTS_PK, sk: "REVISION", entityType: "SIGN_IN_CLIENT_REGISTRY", revision: randomUUID() },
+      ...(revision === undefined ? { ConditionExpression: "attribute_not_exists(pk)" } : { ConditionExpression: "revision = :revision", ExpressionAttributeValues: { ":revision": revision } }),
+    } };
+  }
+  /** One query, 100 clients plus the revision, one total byte/time budget. Pagination is not proof. */
+  private async clientSnapshot(started: number, expected?: { revision: string | undefined }): Promise<SignInClientRecord[]> {
+    const response = await this.input.documentClient.send(new QueryCommand({ TableName: this.input.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": SIGN_IN_CLIENTS_PK }, ConsistentRead: true, Limit: 102 })) as { Items?: unknown[]; LastEvaluatedKey?: unknown };
+    if (!Array.isArray(response.Items) || response.Items.length > 101 || response.LastEvaluatedKey !== undefined || Buffer.byteLength(JSON.stringify(response)) > 900_000 || this.input.now() - started > 10_000) throw new Error("client unavailable");
+    const clients: SignInClientRecord[] = []; const ids = new Set<string>(); const audiences = new Set<string>();
+    let revisionSeen = false; let snapshotRevision: string | undefined;
+    for (const value of response.Items) {
+      const row = z.record(z.string(), z.unknown()).parse(value);
+      if (row.sk === "REVISION") {
+        z.object({ pk: z.literal(SIGN_IN_CLIENTS_PK), sk: z.literal("REVISION"), entityType: z.literal("SIGN_IN_CLIENT_REGISTRY"), revision: z.uuid() }).strict().parse(row);
+        if (revisionSeen) throw new Error("client unavailable");
+        snapshotRevision = row.revision as string; revisionSeen = true; continue;
+      }
+      const client = clientOf(row);
+      if (client === undefined || row.pk !== SIGN_IN_CLIENTS_PK || row.sk !== `CLIENT#${client.clientId}` || row.entityType !== "SIGN_IN_CLIENT" || ids.has(client.clientId) || audiences.has(client.audience)) throw new Error("client unavailable");
+      ids.add(client.clientId); audiences.add(client.audience); clients.push(client);
+    }
+    if (expected !== undefined && snapshotRevision !== expected.revision) throw new Error("client unavailable");
+    if (clients.length > 100) throw new Error("client unavailable");
     return clients.sort((a, b) => a.clientId.localeCompare(b.clientId));
   }
 
@@ -225,7 +304,7 @@ export class DeveloperSignInStore {
     return item === undefined ? undefined : strip(item);
   }
 
-  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">): Promise<DeveloperRecord> {
+  async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked" | "displayNameChosen">, companyId?: string): Promise<DeveloperRecord> {
     // One atomic update, not a read-then-overwrite: a concurrent revocation (or another sign-in)
     // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
     // revoked in particular must never flip true back to false (fix round 1, F3).
@@ -274,7 +353,7 @@ export class DeveloperSignInStore {
     }
     if (profile.email !== undefined) {
       // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
-      await this.put({ ...emailIndexKey(profile.email), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+      await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
       // ID-STEPUP-FOLLOWUPS (a): the factor email is captured on the FIRST sign-in only. Both conditions hold only for the write that created the record: if_not_exists keeps an earlier
       // first sign-in's time and mark (a record from before the mark has an older time), so a later sign-in, with whatever email the provider now says, never sets or moves it.
       try {
@@ -370,6 +449,7 @@ export class DeveloperSignInStore {
       ...(record.administrator === true ? { administrator: true as const } : {}),
       ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
       ...(record.stepUpAt === undefined || record.stepUpMethod === undefined ? {} : { stepUpAt: record.stepUpAt, stepUpMethod: record.stepUpMethod }),
+      ...(record.companyId === undefined ? {} : { companyId: record.companyId }),
     };
   }
 

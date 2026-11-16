@@ -10,7 +10,7 @@ import { change, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type 
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
 import { CoreRegistryError, buildCoreRegistry, createCoreHostApp, engineStampKey, stampOf, type CoreAdapterModule } from "../../packages/broker/src/core-host/index.js";
 import { CORE_EXPIRY_COLLISIONS, KEPT_ON_SEPARATE_KEYS, appliesCodeRetention, codeRetentionStore, retentionFor, withCodeRetention } from "../../packages/broker/src/core-host/retention.js";
 import { COMPANY_SECRET_PATHS, CORE_DISPATCH_QUEUE, OWED_POINTS, codeAdapterModules, owedPoints, stateTableIndexes, type CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
@@ -65,6 +65,8 @@ describe("Code's AWS adapter modules", () => {
         callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }),
         now: () => new Date("2026-11-15T10:00:00.000Z"), log: () => undefined,
         services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }),
+        // Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
+        ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const },
       }),
     });
     const store = (await app.registry()).require("storage");
@@ -72,7 +74,7 @@ describe("Code's AWS adapter modules", () => {
     await store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
     await store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
     const runtime = await app.runtimeFor(FAKE_COMPANY);
-    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test" };
+    const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), origin: "app" as const, client: "test" };
     const { task } = await runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     expect(stampOf(await store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core" });
     expect((await runtime.flow.list(owner)).tasks.map((row) => row.taskId)).toEqual([task.taskId]);
@@ -127,7 +129,8 @@ describe("Code's AWS adapter modules", () => {
     const registry = await buildCoreRegistry({ modules: modulesWithOwed(aws), context: context(), areas: ["flow", "build", "merge"] });
     const secrets = registry.require("secrets");
     expect((await secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${FAKE_COMPANY}/linear` }))?.reveal()).toBe("own");
-    await expect(secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${OTHER}/linear` })).rejects.toThrow("the secret reference names a secret of another company");
+    // T6 (#655): another company's secret answers exactly like a missing one, and is never read.
+    expect(await secrets.read(FAKE_COMPANY, { awsSecret: `org-connectors/${OTHER}/linear` })).toBeUndefined();
     expect(aws.secrets.reads).toEqual([`agentx/staging/org-connectors/${FAKE_COMPANY}/linear`]);
     expect(COMPANY_SECRET_PATHS).toContain("org-connectors");
   });

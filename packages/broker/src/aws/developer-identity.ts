@@ -14,6 +14,8 @@ import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "..
 import { slackDirectory } from "../developer/slack-directory.js";
 import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js";
 import { DeveloperSignInStore, methodSince } from "../developer/store.js";
+import { CompanySignInStore } from "../developer/company-membership.js";
+import { companyIssuerProvider } from "../developer/company-issuer.js";
 import type { StepUpDependencies } from "../developer/step-up.js";
 import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
@@ -141,15 +143,29 @@ export function parseOidcClientSecret(json: string): string {
 }
 
 /** One remote key set per URI, so jose's key cache and refetch cooldown apply across sign-ins. */
-export function remoteJwksCache(create: (url: URL) => JWTVerifyGetKey = (url) => createRemoteJWKSet(url)): (uri: string) => JWTVerifyGetKey {
+export function remoteJwksCache(create: (url: URL) => JWTVerifyGetKey = (url) => createRemoteJWKSet(url), maximum = Infinity): (uri: string) => JWTVerifyGetKey {
   const cache = new Map<string, JWTVerifyGetKey>();
   return (uri) => {
     let jwks = cache.get(uri);
     if (jwks === undefined) {
       jwks = create(new URL(uri));
+      if (cache.size >= maximum) cache.delete(cache.keys().next().value!);
       cache.set(uri, jwks);
     }
     return jwks;
+  };
+}
+
+/** Only derived company secret names enter this bounded per-Lambda cache. */
+export function companySecretReader(secrets: SecretsManagerClient): (name: string) => Promise<string> {
+  const companySecrets = new Map<string, () => Promise<string>>();
+  return (name) => {
+    let read = companySecrets.get(name);
+    if (read === undefined) {
+      if (companySecrets.size >= 50) companySecrets.delete(companySecrets.keys().next().value!);
+      read = cachedSecret(secrets, name, parseOidcClientSecret); companySecrets.set(name, read);
+    }
+    return read();
   };
 }
 
@@ -227,13 +243,19 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
   };
   const oidc = oidcProvider();
   if (config.oidcProblem !== undefined) log({ event: "signin.not_configured", method: "oidc", detail: config.oidcProblem });
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(region), { marshallOptions: { removeUndefinedValues: true } });
+  const tableName = required(env, "DEVELOPER_SIGNIN_TABLE_NAME");
+  const company = env.COMPANY_SIGNIN === "enabled" ? new CompanySignInStore({ documentClient, tableName, now }) : undefined;
+  const readCompanySecret = companySecretReader(secrets);
+  const companyJwksFor = remoteJwksCache(undefined, 50);
   return createDeveloperIdentityHandler({
     config,
     store: new DeveloperSignInStore({
-      documentClient: DynamoDBDocumentClient.from(new DynamoDBClient(region), { marshallOptions: { removeUndefinedValues: true } }),
-      tableName: required(env, "DEVELOPER_SIGNIN_TABLE_NAME"),
+      documentClient,
+      tableName,
       now,
     }),
+    ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }) }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
     extraPublicKeys: extraPublicKeysFromEnvironment(env, new KMSClient(region)),
     providers: {

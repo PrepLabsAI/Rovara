@@ -1,4 +1,4 @@
-import { boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -10,7 +10,8 @@ import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import {
-  AgentXNameSchema,
+  AgentXNameSchema, AgentXError,
+  IMPLICIT_COMPANY_ID, OrgIdSchema,
   scopesOf,
   AGENTX_CLI_CLIENT_ID,
   CLIENT_SCOPES,
@@ -80,11 +81,13 @@ import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type C
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
+import { renameTaskOwner } from "../developer/task-owner-name.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
 import { applyAccessRules, type AccessCheckContext, type AccessCheckRule } from "../developer/access-rules.js";
+import { CompanyIssuerRecord, companyIssuerKey } from "../developer/company-issuer.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -131,6 +134,8 @@ export interface DeveloperApiConfiguration {
   setDisplayName?: (request: SetDisplayNameRequest) => Promise<SetDisplayNameResponse>;
   /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
   signInClients?: SignInClientRegistry;
+  companies?: CompanyMembershipReader;
+  companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<boolean>;
   /**
    * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
    * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
@@ -159,7 +164,7 @@ export interface DeveloperRouteDependencies {
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
   createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
-  clientRepositories?: () => Promise<ClientRepositoriesResponse["installations"]>;
+  clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -185,7 +190,7 @@ export interface DeveloperCaller { developerId: string; sessionId: string; amr: 
 export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
 
 /** One structured log line. Only event names, reasons and error names: never payloads or secrets. */
-function logDeveloperEvent(entry: Record<string, string>): void {
+function logDeveloperEvent(entry: Record<string, string | number>): void {
   console.log(JSON.stringify({ component: "broker", ...entry }));
 }
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
@@ -204,7 +209,7 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
   request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest,
+    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest | CompanyPreapprovalRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -384,6 +389,13 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
   if (answer.ok) {
     // This path has no company in scope (the caller is a person), so it uses the file's one company-less logger, already in the inventory, rather than a new console call.
     logDeveloperEvent({ event: "developer.display_name_chosen", developerId: caller.developerId });
+    // #661: the person's tasks take the new name. Best effort: the name is already theirs, so a failure here is logged, not answered.
+    try {
+      const renamed = await renameTaskOwner(deps.documentClient, deps.tableName, caller.developerId, answer.name);
+      logDeveloperEvent({ event: "developer.tasks_renamed", developerId: caller.developerId, ...renamed });
+    } catch (error) {
+      logDeveloperEvent({ event: "developer.tasks_rename_failed", developerId: caller.developerId, error: errorName(error) });
+    }
     return { name: answer.name, nameChosen: true };
   }
   if (answer.error === "not_found") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
@@ -392,11 +404,28 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
 }
 
 /** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
+// Only these two company-admin operations can be built by broker code.
+type CompanyPreapprovalRequest =
+  | { kind: "company-preapprove"; companyId: string; email: string; role: "member"; expiresInHours: number; createdBy: string }
+  | { kind: "company-preapproval-withdraw"; companyId: string; emailHash: string; createdBy: string };
+const CompanyPreapprovalInvoke = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720), createdBy: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  z.object({ kind: z.literal("company-preapproval-withdraw"), companyId: OrgIdSchema, emailHash: z.string().regex(/^[a-f0-9]{64}$/), createdBy: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+]);
+export function companyPreapprovalsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: CompanyPreapprovalRequest) => Promise<boolean> {
+  return async (request) => {
+    const parsed = CompanyPreapprovalInvoke.safeParse(request);
+    if (!parsed.success) return false;
+    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok === true ? true : reply.ok === false ? false : undefined, "developer.company_preapproval");
+    return answer === true;
+  };
+}
+
 export interface SignInClientRegistry {
   /** `keepSecret`: keep the stored client's secret, which only the sign-in server can read. */
-  put(client: SignInClientRecord, options?: { keepSecret?: true }): Promise<void>;
-  remove(clientId: string): Promise<boolean>;
-  list(): Promise<SignInClientView[]>;
+  put(client: SignInClientRecord, options?: { keepSecret?: true; companyId?: string }): Promise<void>;
+  remove(clientId: string, companyId?: string): Promise<boolean>;
+  list(companyId?: string): Promise<SignInClientView[]>;
 }
 
 export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): SignInClientRegistry {
@@ -408,9 +437,9 @@ export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Prom
     return answer as T;
   };
   return {
-    async put(client, options) { await ask({ kind: "put-sign-in-client", client, ...(options?.keepSecret === true ? { keepSecret: true as const } : {}) }, () => true); },
-    remove: (clientId) => ask({ kind: "remove-sign-in-client", clientId }, (reply) => reply.removed === true),
-    list: () => ask({ kind: "list-sign-in-clients" }, (reply) => {
+    async put(client, options) { await ask({ kind: "put-sign-in-client", client, ...(options?.companyId === undefined ? {} : { companyId: options.companyId }), ...(options?.keepSecret === true ? { keepSecret: true as const } : {}) }, () => true); },
+    remove: (clientId, companyId) => ask({ kind: "remove-sign-in-client", clientId, ...(companyId === undefined ? {} : { companyId }) }, (reply) => reply.removed === true),
+    list: (companyId) => ask({ kind: "list-sign-in-clients", ...(companyId === undefined ? {} : { companyId }) }, (reply) => {
       const parsed = z.array(SignInClientViewSchema).safeParse(reply.clients);
       return parsed.success ? parsed.data : undefined;
     }),
@@ -490,25 +519,63 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
   return response.Item;
 }
 
-export async function authenticateDeveloper(deps: DeveloperRouteDependencies, claims: Record<string, unknown> | undefined): Promise<DeveloperCaller> {
-  const token = developerClaims(claims, deps.developer);
-  return authenticateSession(deps, token);
+/** Company policy is selected only from live membership and the stored OIDC session.
+ * Fixed-size reads share one budget and the host's existing SDK timeout; no cache or token company. */
+async function companyOidcSession(deps: DeveloperRouteDependencies, session: SessionRecord, resolvedCompany?: string): Promise<DeveloperRecord | undefined> {
+  if (deps.companies === undefined || session.amr !== "oidc") return undefined;
+  try {
+    const scope = boundedCompanyReads(deps.documentClient, deps.now);
+    const companyId = resolvedCompany ?? await scope.read(() => resolveCompany(deps.companies, session.developerId));
+    if ((session.companyId ?? IMPLICIT_COMPANY_ID) !== companyId) throw new Error("session company");
+    if (companyId === IMPLICIT_COMPANY_ID) return undefined;
+    const parsed = z.object({
+      sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.literal("oidc"),
+      companyId: OrgIdSchema, startedAt: z.iso.datetime(), endsAt: z.number().finite(),
+      reviewExpiresAt: z.number().finite().optional(),
+    }).safeParse(await scope.read(async () => session));
+    if (!parsed.success) throw new Error("session record");
+    const key = companyIssuerKey(companyId);
+    const response = await scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
+    const issuer = CompanyIssuerRecord.extend({ pk: z.literal(key.pk), sk: z.literal("OIDC") }).safeParse(response.Item);
+    if (!issuer.success || !issuer.data.enabled || (issuer.data.requiredValues.length > 0 && issuer.data.requiredClaim === undefined)
+      || startedBeforeMethodOn(session.startedAt, Math.max(issuer.data.enabledSince, issuer.data.since ?? 0))) throw new Error("issuer policy");
+    const developer = await getSignIn<DeveloperRecord>({ ...deps, documentClient: scope.client }, `DEVELOPER#${session.developerId}`);
+    if (developer === undefined || developer.provider !== "oidc"
+      || developer.issuer !== issuer.data.issuer.replace(/\/+$/, "") || developer.revoked !== false) throw new Error("issuer identity");
+    scope.check();
+    return developer;
+  } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
 }
 
-async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }): Promise<DeveloperCaller> {
-  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "endsAt" | "revokedAt" | "startedAt" | "slackUserId" | "clientId">>(deps, `SESSION#${token.sessionId}`);
+export async function authenticateDeveloper(deps: DeveloperRouteDependencies, claims: Record<string, unknown> | undefined): Promise<DeveloperCaller> {
+  // Delay only OIDC's install-wide switch until the authenticated session can select its policy.
+  const config = deps.companies === undefined ? deps.developer : { ...deps.developer, methods: { ...deps.developer.methods, oidc: true } };
+  const token = developerClaims(claims, config);
+  try { return await authenticateSession(deps, token, undefined, true); }
+  catch (error) {
+    if (deps.companies !== undefined && token.amr === "oidc" && !(error instanceof AgentXError)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+    throw error;
+  }
+}
+
+async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }, storedSession?: SessionRecord, checkInstallEnabled = false): Promise<DeveloperCaller> {
+  const session = storedSession ?? await getSignIn<SessionRecord>(deps, `SESSION#${token.sessionId}`);
   if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= Math.floor(deps.now() / 1000)) {
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   }
   // Spec 063 FR-003: a registered client's session never acts on Rovara, whatever token names it.
   if (session.clientId !== undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  const companyDeveloper = await companyOidcSession(deps, session);
+  if (checkInstallEnabled && deps.companies !== undefined && token.amr === "oidc" && companyDeveloper === undefined && !deps.developer.methods.oidc) {
+    throw agentXError("AUTH_REQUIRED", "Company sign-in is turned off in this environment; sign in another way with agentx login <url>");
+  }
   // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
   // session at its next refresh.
-  if (startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
+  if (companyDeveloper === undefined && startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
     throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
   }
-  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
+  const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
     // E9: D16's per-request check ends the session at once; the token endpoint revokes it at its next refresh.
@@ -525,12 +592,17 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
 /** Rechecks an opaque browser-cookie session against DeveloperIdentity on every page/API request. */
 export async function authenticateDeveloperSessionId(deps: DeveloperRouteDependencies, sessionId: string): Promise<DeveloperCaller> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "reviewExpiresAt">>(deps, `SESSION#${sessionId}`);
-  if (session === undefined || (session.amr !== "slack" && session.amr !== "oidc")
-    || session.reviewExpiresAt === undefined || session.reviewExpiresAt <= Math.floor(deps.now() / 1000)) {
-    throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  try {
+    const session = await getSignIn<SessionRecord>(deps, `SESSION#${sessionId}`);
+    if (session === undefined || (session.amr !== "slack" && session.amr !== "oidc")
+      || session.reviewExpiresAt === undefined || session.reviewExpiresAt <= Math.floor(deps.now() / 1000)) {
+      throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+    }
+    return await authenticateSession(deps, { developerId: session.developerId, sessionId, amr: session.amr }, session);
+  } catch (error) {
+    if (deps.companies !== undefined && !(error instanceof AgentXError)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+    throw error;
   }
-  return authenticateSession(deps, { developerId: session.developerId, sessionId, amr: session.amr });
 }
 
 /** Every item under `pk` with the sort key prefix, following LastEvaluatedKey through each page. */
@@ -674,12 +746,25 @@ const ACCESS_REFUSED = "this access check needs a signed-in person's token for t
 /** A registered sign-in client, read from the sign-in table; undefined for an unknown ID or an unreadable row. */
 async function signInClientOf(deps: DeveloperRouteDependencies, clientId: unknown): Promise<SignInClientRecord | undefined> {
   if (!SignInClientIdSchema.safeParse(clientId).success) return undefined;
-  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: signInClientKey(clientId as string), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  let response: { Item?: Record<string, unknown> };
+  try { response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: signInClientKey(clientId as string), ConsistentRead: true })) as typeof response; }
+  catch (error) { if (deps.companies !== undefined) return undefined; throw error; }
   if (response.Item === undefined) return undefined;
+  if (deps.companies !== undefined && (response.Item.entityType !== "SIGN_IN_CLIENT" || response.Item.sk !== `CLIENT#${String(clientId)}` || response.Item.pk !== "SIGNIN_CLIENTS")) return undefined;
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the keys
   const { pk: _pk, sk: _sk, entityType: _type, ...rest } = response.Item;
   const parsed = SignInClientRecordSchema.safeParse(rest);
-  return parsed.success ? parsed.data : undefined;
+  return parsed.success && (deps.companies === undefined || parsed.data.clientId === clientId) ? parsed.data : undefined;
+}
+
+/** Every access refusal has the same bytes, including unreadable membership. */
+async function clientCompany(deps: DeveloperRouteDependencies, client: SignInClientRecord, personId: string): Promise<string | undefined> {
+  if (deps.companies === undefined) return undefined;
+  try {
+    const companyId = await resolveCompany(deps.companies, personId);
+    if (client.installLevel !== true && (client.companyId ?? IMPLICIT_COMPANY_ID) !== companyId) throw new Error("client unavailable");
+    return companyId;
+  } catch { throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED); }
 }
 
 /** RFC 6749 2.3.1 HTTP Basic client credentials, or undefined. */
@@ -720,21 +805,23 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   let developerId: string;
   let administrator = false;
   let clientId: string;
+  let companyId: string | undefined;
   let sessionFacts: AccessCheckContext["session"];
   if (basic !== undefined) {
     const client = await signInClientOf(deps, basic.clientId);
     if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || parsed.data.developerId === undefined) throw refused();
     developerId = parsed.data.developerId;
     clientId = client.clientId;
+    companyId = await clientCompany(deps, client, developerId);
   } else {
     if (parsed.data.developerId !== undefined) throw refused();
     const authenticated = await authenticateClientToken(deps, authorization, nowSeconds);
     ({ developerId, administrator } = authenticated);
     clientId = authenticated.client.clientId;
+    companyId = authenticated.companyId;
     sessionFacts = { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator };
   }
   const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
-  const companyId = await resolveCompany(deps.companies, developerId);
   const access = await projectsAPersonUses(scope === undefined ? deps : { ...deps, documentClient: scope.client }, developerId, companyId);
   scope?.check();
   if (access === undefined) throw refused();
@@ -781,9 +868,8 @@ function githubFullName(url: string): string | undefined {
 }
 
 /** Spec 065: `GET /v1/dev/client/projects/{project}`, for a person who may use it (no scope: it shows only what they may use). */
-async function readClientProject(deps: DeveloperRouteDependencies, developerId: string, project: string): Promise<ClientProjectResponse> {
+async function readClientProject(deps: DeveloperRouteDependencies, developerId: string, project: string, companyId?: string): Promise<ClientProjectResponse> {
   const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
-  const companyId = await resolveCompany(deps.companies, developerId);
   if (scope !== undefined) deps = { ...deps, documentClient: scope.client };
   const access = await projectsAPersonUses(deps, developerId, companyId);
   if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
@@ -811,7 +897,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -830,17 +916,24 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   }
   if (claims.azp !== client.clientId || claims.env !== deps.developer.env || typeof claims.sub !== "string" || typeof claims.sid !== "string") throw refused();
   const amr = claims.amr;
-  if ((amr !== "slack" && amr !== "oidc") || !deps.developer.methods[amr]) throw refused();
-  const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
-  if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
-    || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)
-    || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr])) throw refused();
-  const developer = await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
-  if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
-  // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
-  // access has the person's rights, so every scope.
-  const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
-  return { client, developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt };
+  if ((amr !== "slack" && amr !== "oidc") || (!deps.developer.methods[amr] && !(deps.companies !== undefined && amr === "oidc"))) throw refused();
+  try {
+    const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
+    if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
+      || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)) throw refused();
+    const companyId = await clientCompany(deps, client, session.developerId);
+    const companyDeveloper = await companyOidcSession(deps, session, companyId);
+    if (companyDeveloper === undefined && (!deps.developer.methods[amr] || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
+    const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
+    if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
+    // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
+    // access has the person's rights, so every scope.
+    const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
+    return { client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt };
+  } catch (error) {
+    if (deps.companies !== undefined && amr === "oidc") throw refused();
+    throw error;
+  }
 }
 
 /**
@@ -891,6 +984,7 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
 function memberActions(deps: DeveloperRouteDependencies) {
   return {
     documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName,
+    ...(deps.companies === undefined ? {} : { companies: deps.companies }),
     ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     limitDefaults: { member: 0, organization: 0 }, now: deps.now,
   };
@@ -938,14 +1032,14 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
     if (!creating) {
       if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-      return { installations: await deps.clientRepositories() } satisfies ClientRepositoriesResponse;
+      return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
     }
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
     const parsed = CreateClientProjectRequestSchema.safeParse(jsonBody(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     const created = await deps.createClientProject(creator.developerId, parsed.data);
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
-    return readClientProject(deps, creator.developerId, created.name);
+    return readClientProject(deps, creator.developerId, created.name, creator.companyId);
   }
   const read = CLIENT_PROJECT.exec(url.pathname);
   if (read !== null && request.method === "GET") {
@@ -953,7 +1047,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     requireRouteScope(route, reader);
     const project = decodeURIComponent(read[1]!);
     if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
-    return readClientProject(deps, reader.developerId, project);
+    return readClientProject(deps, reader.developerId, project, reader.companyId);
   }
   const members = CLIENT_MEMBERS.exec(url.pathname);
   if (members === null) throw agentXError("NOT_FOUND", "route not found");
@@ -979,7 +1073,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     return { project, members: named } satisfies ClientProjectMembersResponse;
   }
   if (members[2] === undefined || (request.method !== "PUT" && request.method !== "DELETE")) throw agentXError("NOT_FOUND", "route not found");
-  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]));
+  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]), caller.companyId);
   if (request.method === "PUT") {
     const granted = await grantProjectAccess(actions, by, project, target.developerId);
     console.log(JSON.stringify({ component: "broker", event: "client.project_member_granted", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, already: granted.already }));
@@ -1268,7 +1362,38 @@ export function developerTaskRouteDependencies(
   };
 }
 
+const CompanyInviteInput = z.object({ email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720) }).strict();
+async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const notFound = () => agentXError("NOT_FOUND", "not found");
+  if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const isPost = request.method === "POST" && url.pathname === "/v1/dev/company/preapprovals";
+  const hash = /^\/v1\/dev\/company\/preapprovals\/([a-f0-9]{64})$/.exec(url.pathname)?.[1];
+  if (!isPost && !(request.method === "DELETE" && hash !== undefined)) throw notFound();
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw notFound();
+  // Named scopes never authorize invitations; full access is checked before the live membership role.
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  let member: z.infer<typeof Membership>;
+  try {
+    const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true })) as { Item?: unknown };
+    member = Membership.parse(response.Item);
+    if (member.personId !== caller.developerId || member.companyId !== companyId || member.revokedAt !== undefined) throw new Error("membership unavailable");
+  } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+  if (member.role !== "admin" && member.role !== "owner") throw notFound();
+  let forwarded: CompanyPreapprovalRequest;
+  if (isPost) {
+    const parsed = CompanyInviteInput.safeParse(jsonBody(request));
+    if (!parsed.success) throw agentXError("CONFIG_INVALID", "a member invitation needs an email and an expiry from 1 to 720 hours");
+    forwarded = { kind: "company-preapprove", companyId: member.companyId, ...parsed.data, createdBy: caller.developerId };
+  } else forwarded = { kind: "company-preapproval-withdraw", companyId: member.companyId, emailHash: hash!, createdBy: caller.developerId };
+  try { if (await deps.developer.companyPreapprovals?.(forwarded) !== true) throw notFound(); }
+  catch { throw notFound(); }
+  return { ok: true };
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
   if (url.pathname.startsWith("/review/link/")) {
     const links = deps.channelLinks;

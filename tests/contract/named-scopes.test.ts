@@ -4,7 +4,7 @@
 // refused; the Rovara CLI's own token reaches every row, as before.
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CLIENT_SCOPES, SignInClientRegistrationSchema, type ClientScope } from "@agentx/contracts";
+import { CLIENT_SCOPES, IMPLICIT_COMPANY_ID, SignInClientRegistrationSchema, type ClientScope } from "@agentx/contracts";
 import { signInClientRegistration, signInClientUpdate } from "../../packages/cli/src/admin/sign-in-clients.js";
 import { DEV_ROUTES, devRouteOf, type DevRoute } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import type { DeveloperApiConfiguration, DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
@@ -16,7 +16,7 @@ import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NAMED: readonly ClientScope[] = ["profile:name", "projects:members", "projects:create", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide"];
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-const sample = (path: string) => path.replace(/\{[A-Za-z]+\}/g, "x1");
+const sample = (path: string) => path.replaceAll("{emailHash}", "a".repeat(64)).replace(/\{[A-Za-z]+\}/g, "x1");
 
 // ---- The table ----
 
@@ -77,7 +77,7 @@ describe("the route table", () => {
 
 /** The concrete paths a router regex literal matches, each `([^/]+)` or bare `[^/]+` (R4's grouped task-read pattern) as `{}`. */
 function expandRegex(source: string): string[] {
-  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}");
+  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}").replaceAll("([a-f0-9]{64})", "{}");
   const expand = (text: string): string[] => {
     const start = text.search(/\((\?:)?/);
     if (start < 0) return [text];
@@ -191,12 +191,14 @@ const refusedForScope = (response: Awaited<ReturnType<typeof call>>) => response
 async function setUp(mode: "linking" | "developer") {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   const config: DeveloperApiConfiguration = {
+    companies: { companyOf: async () => IMPLICIT_COMPANY_ID },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
   ({ db, handler } = await createAdminBroker(mode === "linking" ? { linking: config, channelAdapters: true } : { developer: config, channelAdapters: true }));
   db.set({ pk: `DEVELOPER#${ADA}`, sk: "META", developerId: ADA, provider: "oidc", issuer: "https://idp.example.test", subject: "ada", displayName: "Ada", email: "ada@example.com", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
   const started = new Date(T0).toISOString();
+  db.set({ pk: `COMPANY_MEMBER#${ADA}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: ADA, companyId: IMPLICIT_COMPANY_ID, role: "admin", joinedAt: started });
   db.set({ pk: "SESSION#s-cloud", sk: "META", sessionId: "s-cloud", developerId: ADA, amr: "oidc", clientId: "web-app", administrator: true, startedAt: started, endsAt: T0 / 1000 + 604_800 });
   db.set({ pk: "SESSION#s-cli", sk: "META", sessionId: "s-cli", developerId: ADA, amr: "oidc", startedAt: started, endsAt: T0 / 1000 + 604_800 });
   db.set({ pk: "PROJECT#payments", sk: "REV#000000000003", entityType: "PROJECT", definition: { name: "payments", revision: 3 } });

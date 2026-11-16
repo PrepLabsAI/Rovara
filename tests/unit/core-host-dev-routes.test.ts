@@ -16,12 +16,14 @@ const PROJECT: ProjectDefinition = {
   name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
+// Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
+const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 
 function appOver(world: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
   return createCoreHostApp({
     env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES }),
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
 
@@ -104,7 +106,7 @@ describe("the core's handlers on the deployed API", () => {
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const own = remember(FAKE_COMPANY);
     const runtime = await app.runtimeFor(FAKE_COMPANY);
-    const { task } = await runtime.flow.start({ principal: own.principal, client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    const { task } = await runtime.flow.start({ principal: own.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     const read = await routes.route(get(`/v1/dev/tasks/${task.taskId}`), own);
     expect(read?.statusCode).toBe(200);
     expect(JSON.parse(read!.body)).toMatchObject({ task: { taskId: task.taskId } });

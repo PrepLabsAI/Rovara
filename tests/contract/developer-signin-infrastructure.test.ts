@@ -5,6 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -581,10 +582,12 @@ describe("task-token key and membership IAM", () => {
       }
     }
     expect([reads, families]).toEqual([1, 1]);
+    // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts; its shape is asserted here, then it is taken out so the digest still pins everything else.
+    withoutCoreEngine(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny); each is asserted in hosted-wiring-infrastructure.test.ts.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("b8175bf72b4876d9d78575f6aafe78464c7da55471ed1b98c86bd6fefeca5f5e");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("93c005411e7fcf171b145fc2bd60d27e0ff462c7e5ad0d61e6815bfd05f817af");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -690,6 +693,15 @@ describe("task key deployment boundary coverage", () => {
     expect(policyAllows(deploy, "iam:CreateRole", sampleRole)).toBe(false);
     expect(policyAllows(deploy, "iam:CreateRole", sampleRole.replace("staging", "other"), { "iam:PermissionsBoundary": boundaryArn })).toBe(false);
     expect(policyAllows(deploy, "budgets:ModifyBudget", "arn:aws:budgets::111122223333:budget/agentx-other-monthly")).toBe(false);
+  });
+
+  it("covers the schedule-group lifecycle the core engine's group needs, in the deploy role and the boundary", () => {
+    // AWS::Scheduler::ScheduleGroup (core engine, lane E2): CloudFormation creates, tags and deletes it with these calls. The deploy role and the default boundary already allow the
+    // scheduler service by wildcard (SERVICE_ROLE_SERVICES, BOUNDARY_SERVICES), so no policy changed; this pins that it stays so.
+    const group = "arn:aws:scheduler:us-east-1:111122223333:schedule-group/agentx-staging-core-jobs";
+    for (const action of ["scheduler:CreateScheduleGroup", "scheduler:GetScheduleGroup", "scheduler:DeleteScheduleGroup", "scheduler:TagResource", "scheduler:UntagResource", "scheduler:ListTagsForResource"]) {
+      for (const policy of [deploy, boundary]) expect(policyAllows(policy, action, group), action).toBe(true);
+    }
   });
 
   it("covers KMS lifecycle actions while refusing managed-policy creation", () => {
@@ -805,6 +817,8 @@ function accessTuples(template: TemplateJson): AccessTuple[] {
   return [...new Map(tuples.map((tuple) => [JSON.stringify(tuple), tuple])).values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
 
+// The broker's effective access before INFRA-IAM-HEADROOM moved grants into resource policies, plus #663's reviewed core-engine grants (the broker on its own
+// CoreEngineJobs queue and dead letters, the schedules' role invoking the broker), which landed beside it in the 2026-11-15 batch.
 const beforeTuples: AccessTuple[] = [
   ["*","Deny","kms:GetPublicKey","key:DeveloperSignInTaskTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\",\"role:DeveloperSignInFunctionServiceRole\"]}}"],
   ["*","Deny","kms:GetPublicKey","key:DeveloperSignInTokenKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:DeveloperSignInFunctionServiceRole\"]}}"],
@@ -891,7 +905,13 @@ const beforeTuples: AccessTuple[] = [
   ["role:BrokerServiceRole","Allow","secretsmanager:GetSecretValue","parameter:GitHubAppPrivateKeySecretArn","{}"],
   ["role:BrokerServiceRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/channel-adapter/*","{}"],
   ["role:BrokerServiceRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/connectors/*","{\"StringEquals\":{\"secretsmanager:ResourceTag/agentx-writable\":[\"refresh-token\"]}}"],
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:ChannelApiEventDeadLetters","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierNoticeDeadLetterQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DeveloperTaskNotifierStreamFailureQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:DispatchDeadLetterQueue","{}"],
@@ -900,6 +920,10 @@ const beforeTuples: AccessTuple[] = [
   ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:SlackRequestQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueUrl","queue:SlackHandOffFailureQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:GetQueueUrl","queue:SlackRequestQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackHandOffFailureQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackRequestQueue","{}"],
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-features","{}"],
@@ -964,6 +988,7 @@ const beforeTuples: AccessTuple[] = [
   ["role:ChannelApiIngressServiceRole","Allow","sqs:SendMessage","queue:ChannelApiRequests","{}"],
   ["role:ChannelApiIngressServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
   ["role:ChannelApiIngressServiceRole","Allow","xray:PutTraceSegments","*","{}"],
+  ["role:CoreEngineJobsInvokeRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:DeleteItem","table:DeveloperSignInTable","{\"ForAllValues:StringEquals\":{\"dynamodb:LeadingKeys\":[\"SIGNIN_CLIENTS\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:GetItem","table:DeveloperSignInTable","{}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:PutItem","table:DeveloperSignInTable","{}"],
@@ -1513,20 +1538,6 @@ function resolvedInlineSize(template: TemplateJson): number {
 
 const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRequestQueue", "queue:DispatchDeadLetterQueue", "queue:SlackRequestDeadLetterQueue", "queue:DeveloperTaskNotifierNoticeDeadLetterQueue", "queue:DeveloperTaskNotifierStreamFailureQueue", "queue:ChannelApiEventDeadLetters", "key:ChatGptConnectionKey"];
 
-/** #663 (R2 core engine): the core dispatch queues' broker grants (queue policies) and the scheduler's invoke role, which #666's list predates. */
-const coreEngineTuples: AccessTuple[] = [
-  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsDeadLetterQueue","{}"],
-  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsQueue","{}"],
-  ["role:CoreEngineJobsInvokeRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
-];
 /**
  * Hosted wiring: (a) SES SendEmail for the sign-in function on the StepUpEmailSender identity; (b) its passkey Query/DeleteItem on PASSKEYS#; (c) the policy hook's key (broker Sign,
  * public key to the broker and the sign-in function, key-policy Denies); (h) the company-secrets role; (i) the TLS-only Deny on both core dispatch queues. All additive.
@@ -1554,7 +1565,7 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...coreEngineTuples, ...hostedWiringTuples].sort(byText);
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples].sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {
