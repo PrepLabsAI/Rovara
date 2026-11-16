@@ -52,6 +52,7 @@ export const POLICY_FIELDS: readonly PolicyField[] = Object.freeze([
 export const POLICY_FIELD_SURFACES: Readonly<Record<string, "page_only" | "api_ok">> = Object.freeze({
   preset_level: "page_only", real_check: "page_only", ci_fix_rounds: "page_only", round_time_minutes: "page_only", model_budget_usd: "page_only", machine_budget_minutes: "page_only",
   extra_review: "page_only", after_merge_revert: "api_ok", mutation_spot_check: "page_only", prompt_side_by_side: "page_only",
+  browser_evidence: "page_only", device_evidence: "page_only",
 });
 /** True unless the field is listed as `api_ok` (unknown, inherited and pollution names are page-only). */
 export function policyFieldPageOnly(fieldId: string): boolean {

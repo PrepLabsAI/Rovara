@@ -1,4 +1,4 @@
-417 record kinds: 56 company-scoped, 15 install-wide, 346 needs-company. 199 routes: 34 company-scoped, 2 install-wide, 163 needs-company.
+418 record kinds: 57 company-scoped, 15 install-wide, 346 needs-company. 199 routes: 34 company-scoped, 2 install-wide, 163 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -877,8 +877,8 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/aws/connector-metrics.ts:38:7:computed | [metric] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/aws/connector-metrics.ts (emitConnectorMetric) |
 | forwarding | packages/broker/src/aws/credentials.ts:287:94:pk | token.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | tokenPartition and credential registry constructors in credentials.ts |
 | forwarding | packages/broker/src/aws/credentials.ts:287:108:sk | token.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | tokenPartition and credential registry constructors in credentials.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:561:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
-| forwarding | packages/broker/src/aws/developer-routes.ts:582:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
+| forwarding | packages/broker/src/aws/developer-routes.ts:560:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
+| forwarding | packages/broker/src/aws/developer-routes.ts:581:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
 | forwarding | packages/broker/src/aws/developer-tasks.ts:1706:67:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | taskIndexKey and taskKey in developer/task-records.ts |
 | forwarding | packages/broker/src/aws/developer-tasks.ts:1740:92:sk | after | Runtime sort component forwarded within the feeding partition; not an independent record family. | taskIndexKey and taskKey in developer/task-records.ts |
 | forwarding | packages/broker/src/aws/dispatcher.ts:841:77:sk | readiness.dispatchSk | Runtime sort component forwarded within the feeding partition; not an independent record family. | PROJECT revision and workflow dispatch constructors in broker.ts / task-records.ts |
@@ -1282,6 +1282,7 @@ proofHoldKey and proofOverrideKey reuse the existing pk:DEVTASK family; historyK
 | record | entity:COMPANY_LOG | company-scoped | sign-in table | no | - | T3 operatorWrite appends an id-only log under companyScoped(companyId, "COMPANY_LOG") in the mutation transaction. |
 
 | record | entity:COMPANY_SIGNIN_ISSUER | company-scoped | sign-in table | no | - | T3 companyIssuerKey uses companyScoped(companyId, "SIGNIN_ISSUER"); strict records cannot select a secret name; provider cache is keyed by company and rereads settings. |
+| record | entity:COMPANY_SLACK_WORKSPACE_VIEW | company-scoped | State table | no | - | T4b FIX-1: ORG#company#SLACK_WORKSPACES / TEAM#team, non-secret binding projection written with an authoritative conditional transaction. Only bounded company-partition Query on request paths; operator backfill snapshot-checked. Writer walk, collisions, bounds and dryRun: slack-workspace-binding.test.ts. Partition family pk:ORG retains its existing mixed-family classification. |
 
 
 ## T3 independent Slice A work (company mode remains off)

@@ -264,9 +264,12 @@ describe("merge-up 2 named T-lane known gaps (not isolation claims)", () => {
     h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
     h.project(COMPANY_A.orgId);
     const request = { method: "GET", path: "/v1/dev/workspaces", headers: { authorization: h.bearer }, requestId: "test" };
-    expect(await routeLinkingRequest(h.deps, request, new URL(request.path, "https://broker.example.test"))).toMatchObject({ projects: [{ name: "shared-project" }], workspaces: [] });
-    // T3 now checks the client member at authentication; this catalog still lacks a project fence.
-    expect(h.companyOf).toHaveBeenCalledExactlyOnceWith(PERSON);
+    expect(await routeLinkingRequest(h.deps, request, new URL(request.path, "https://broker.example.test"))).toMatchObject({ projects: [], workspaces: [] });
+    // #759 (Slack T4b) filters this project list by the caller's company, so company A's project is no longer listed to company B.
+    // T3 now checks the client member at authentication; this catalog still lacks a project fence. #759's company filter reads the person's company a second time.
+    expect(h.companyOf).toHaveBeenCalledTimes(2);
+    expect(h.companyOf).toHaveBeenNthCalledWith(1, PERSON);
+    expect(h.companyOf).toHaveBeenNthCalledWith(2, PERSON);
   });
 });
 
