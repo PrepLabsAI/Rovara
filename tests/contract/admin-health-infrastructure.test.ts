@@ -158,6 +158,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/lessons/document-store.ts",
       // Lane EV (#649): the company event read only READS the work events' expiry (an expired row is skipped before the store sweeps it); it writes none.
       "packages/broker/src/core/work-events/read.ts",
+      // Team record (#724, LM7): every record row carries the retention expiry the lessons rows use, and a reader checks it itself; none a durable record.
+      "packages/broker/src/team-record/record.ts",
       // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
       "packages/broker/src/local/app/lessons-routes.ts",
       // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).
