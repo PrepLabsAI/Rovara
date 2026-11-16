@@ -33,5 +33,11 @@ export const githubPayloads = {
   checkRun: (action: string, conclusion: string | null, head = "b".repeat(40)) => ({ action, installation: { id: 77 }, repository: REPOSITORY, check_run: { head_sha: head, name: "unit", conclusion } }),
   checkSuite: (action: string, conclusion: string | null, head = "c".repeat(40)) => ({ action, installation: { id: 77 }, repository: REPOSITORY, check_suite: { head_sha: head, conclusion, app: { slug: "ci-app" } } }),
   status: (state: string, sha = "d".repeat(40)) => ({ installation: { id: 77 }, repository: REPOSITORY, sha, state, context: "ci/legacy" }),
+  /** M7 slice 2: a deployment status as GitHub sends it (`deployment_status`, action `created`). */
+  deploymentStatus: (state: string, options: { sha?: string; environment?: string | null; deploymentEnvironment?: string; action?: string } = {}) => ({
+    action: options.action ?? "created", installation: { id: 77 }, repository: REPOSITORY, sender: SENDER,
+    deployment_status: { id: 31, state, ...(options.environment === null ? {} : { environment: options.environment ?? "staging" }), target_url: "https://deploy.example.test/1" },
+    deployment: { id: 11, sha: options.sha ?? "a".repeat(40), ref: "main", ...(options.deploymentEnvironment === undefined ? {} : { environment: options.deploymentEnvironment }) },
+  }),
   push: (ref: string, after = "e".repeat(40), deleted = false) => ({ installation: { id: 77 }, repository: REPOSITORY, sender: SENDER, ref, after, deleted }),
 };

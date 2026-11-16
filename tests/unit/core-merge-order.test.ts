@@ -6,6 +6,7 @@ import {
   MERGE_ORDER_EDGES_MAX, MERGE_ORDER_WORDS, heldAfterHalfMerge, mergeOrderLines, mergeOrderOf, partialMergeState, pressMerge, prepareMerge, type MergeDependencies,
 } from "../../packages/broker/src/core/merge/index.js";
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
+import { expectLinearScaling } from "../support/scaling.js";
 import { TASK_ID, githubShapedHost, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const edge = (consumer: string, provider: string) => ({ consumer, provider, language: "node", source: "both" });
@@ -56,11 +57,16 @@ describe("mergeOrderOf", () => {
   });
 
   it("orders a large input in bounded time", () => {
+    // The task's 32 repositories stay; the work grows linearly with the edges up to the 64 the reader allows (8, then 64), not faster.
     const repositories = Array.from({ length: 32 }, (_, index) => `r${String(index).padStart(2, "0")}`);
-    const facts = Array.from({ length: MERGE_ORDER_EDGES_MAX }, (_, index) => edge(repositories[(index % 31) + 1]!, repositories[index % 31 > 0 ? (index % 31) : 0]!)).filter((fact) => fact.consumer !== fact.provider);
-    const started = performance.now();
-    for (let run = 0; run < 200; run += 1) mergeOrderOf(repositories, facts);
-    expect(performance.now() - started).toBeLessThan(2_000);
+    const factsFor = (count: number) => Array.from({ length: count }, (_, index) => edge(repositories[(index % 31) + 1]!, repositories[index % 31 > 0 ? (index % 31) : 0]!)).filter((fact) => fact.consumer !== fact.provider);
+    const orders = new Map<number, ReturnType<typeof mergeOrderOf>>();
+    expectLinearScaling((count) => {
+      const facts = factsFor(count);
+      return () => { orders.set(count, mergeOrderOf(repositories, facts)); };
+    }, { n: MERGE_ORDER_EDGES_MAX / 8, label: "merge order: edges" });
+    expect(orders.get(MERGE_ORDER_EDGES_MAX / 8)).toMatchObject({ kind: "dependencies" });
+    expect(orders.get(MERGE_ORDER_EDGES_MAX)).toMatchObject({ kind: "dependencies", repositories });
     expect(mergeOrderOf(Array.from({ length: 33 }, (_, index) => `r${String(index)}`), [])).toMatchObject({ kind: "no_safe_order", reason: "unreadable" });
   });
 });
