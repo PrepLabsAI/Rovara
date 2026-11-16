@@ -302,6 +302,8 @@ export class ControlPlaneStack extends Stack {
     // recommends: later phases (such as 25e's Slack Confirm DMs) add filters to an existing
     // trigger, never a third reader.
     new lambda.EventSourceMapping(this, "OutboxStreamMapping", {
+      // Keep the legacy activity-index reader, excluding core company rows (no extra reader).
+      ...(naming.env === undefined ? {} : { filters: [lambda.FilterCriteria.filter({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } })] }),
       target: outboxPublisher,
       eventSourceArn: state.tableStreamArn!,
       startingPosition: lambda.StartingPosition.LATEST,
@@ -928,7 +930,7 @@ export class ControlPlaneStack extends Stack {
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       broker.addEnvironment("CHATGPT_CONNECTION_KEY_ARN", chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
       if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, notifyOperator });

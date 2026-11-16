@@ -44,6 +44,33 @@ export function withoutCoreEngine(template: unknown): unknown {
   table.GlobalSecondaryIndexes = (table.GlobalSecondaryIndexes as Array<{ IndexName: string }>).filter((index) => index.IndexName !== "outbox-pending");
   const definitions = table.AttributeDefinitions as Array<{ AttributeName: string }>;
   table.AttributeDefinitions = definitions.filter((definition) => definition.AttributeName !== "outboxState" && definition.AttributeName !== "outboxStagedAt");
+  // L9 reuses the notifier reader. Assert every addition before restoring the pre-core shape.
+  const notifier = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DeveloperTaskNotifierFunction") && resource.Type === "AWS::Lambda::Function")![1];
+  const notifierVariables = (notifier.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  const brokerId = Object.entries(synthesized.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")![0];
+  expect(notifierVariables.BROKER_FUNCTION_NAME).toEqual({ Ref: brokerId });
+  delete notifierVariables.BROKER_FUNCTION_NAME;
+  const notifierPolicy = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DeveloperTaskNotifierFunctionServiceRoleDefaultPolicy") && resource.Type === "AWS::IAM::Policy")![1];
+  const notifierDocument = notifierPolicy.Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> };
+  expect(notifierDocument.Statement.filter((statement) => statement.Sid === "RelayCoreOutboxToBroker")).toEqual([
+    { Sid: "RelayCoreOutboxToBroker", Action: "lambda:InvokeFunction", Effect: "Allow", Resource: { "Fn::GetAtt": [brokerId, "Arn"] } },
+  ]);
+  notifierDocument.Statement = notifierDocument.Statement.filter((statement) => statement.Sid !== "RelayCoreOutboxToBroker");
+  const streamMapping = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DeveloperTaskNotifierStateStreamMapping") && resource.Type === "AWS::Lambda::EventSourceMapping")![1];
+  expect(streamMapping.Properties.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
+  delete streamMapping.Properties.FunctionResponseTypes;
+  const filters = (streamMapping.Properties.FilterCriteria as { Filters: Array<{ Pattern: string }> }).Filters;
+  expect(filters.map(({ Pattern }) => JSON.parse(Pattern) as unknown)).toEqual([
+    { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK", "DEVELOPER_TASK_POINTER"] } } } },
+    { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
+    { dynamodb: { NewImage: { entityType: { S: ["ADMIN_CHANGE"] } } } },
+    { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL", "TASK_COMMENT_NUDGE", "TASK_PEOPLE_NOTIFICATION"] } } } },
+    { eventName: ["INSERT"], dynamodb: { NewImage: { entityType: { S: ["OUTBOX"] }, pk: { S: [{ prefix: "ORG#" }] }, outboxState: { S: [{ exists: true }] } } } },
+  ]);
+  filters.pop();
+  filters.splice(0, 1,
+    { Pattern: JSON.stringify({ dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK"] } } } }) },
+    { Pattern: JSON.stringify({ dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK_POINTER"] } } } }) });
   const brokers = Object.entries(synthesized.Resources).filter(([id, resource]) => id.startsWith("Broker") && resource.Type === "AWS::Lambda::Function");
   expect(brokers).toHaveLength(1);
   const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;

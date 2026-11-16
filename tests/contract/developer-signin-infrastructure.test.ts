@@ -406,8 +406,7 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     const notifierMapping = mappings.find(([, mapping]) => JSON.stringify(mapping.Properties.FunctionName).includes("DeveloperTaskNotifierFunction"))![1];
     const patterns = (notifierMapping.Properties.FilterCriteria as { Filters: Array<{ Pattern: string }> }).Filters.map((filter) => JSON.parse(filter.Pattern) as unknown);
     expect(patterns).toEqual([
-      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK"] } } } },
-      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK_POINTER"] } } } },
+      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK", "DEVELOPER_TASK_POINTER"] } } } },
       // #342: every ended operation, so one that left its owner's ChatGPT plan says so; the code keeps a developer's
       // own for their notices and drops the rest.
       { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
@@ -416,8 +415,9 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       // Task 19: a fifth, for refused Slack presses, on this same mapping. Spec 061: comment nudges share it, since a
       // mapping takes five filters by default.
       { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL", "TASK_COMMENT_NUDGE", "TASK_PEOPLE_NOTIFICATION"] } } } },
+      { eventName: ["INSERT"], dynamodb: { NewImage: { entityType: { S: ["OUTBOX"] }, pk: { S: [{ prefix: "ORG#" }] }, outboxState: { S: [{ exists: true }] } } } },
     ]);
-    expect(JSON.stringify(patterns.at(-1))).toContain("TASK_PEOPLE_NOTIFICATION");
+    expect(JSON.stringify(patterns.at(-2))).toContain("TASK_PEOPLE_NOTIFICATION");
     expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, MaximumRetryAttempts: 10, BisectBatchOnFunctionError: true });
     // A batch that still fails (the notice queue refusing sends, say) leaves a record of its shard and
     // sequence numbers, never its item images, and the operator is told.
@@ -1583,7 +1583,9 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples].sort(byText);
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples,
+  ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
+].sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {

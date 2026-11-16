@@ -8958,6 +8958,13 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "StreamArn",
           ],
         },
+        "FilterCriteria": {
+          "Filters": [
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"pk":{"S":[{"anything-but":{"prefix":"ORG#"}}]}}}}",
+            },
+          ],
+        },
         "FunctionName": {
           "Ref": "OutboxPublisherD572F72E",
         },

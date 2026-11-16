@@ -53,7 +53,7 @@ describe("the broker's core root, switch off (the default)", () => {
       expect(root.app.serving).toBe(false);
       expect(await root.callback({ method: "POST", path: `/v1/internal/workspaces/${"a".repeat(8)}-aaaa-4aaa-8aaa-${"a".repeat(12)}/operations/${"b".repeat(8)}-bbbb-4bbb-8bbb-${"b".repeat(12)}/result`, headers: {} })).toBeUndefined();
       expect(await root.handleEvent({ source: "agentx.core-job", job: "dispatch-sweep" })).toEqual({ skipped: "off" });
-      expect(await root.handleEvent({ Records: [{ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { NewImage: { pk: { S: `ORG#${ORG}#OUTBOX` }, outboxState: { S: "pending" } } } }] })).toEqual({ relayed: [] });
+      expect(await root.handleEvent({ Records: [{ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { NewImage: { pk: { S: `ORG#${ORG}#OUTBOX` }, outboxState: { S: "pending" } } } }] })).toEqual({ batchItemFailures: [] });
       expect(await root.handleEvent({ source: "something-else" })).toBeUndefined();
     }
     expect(tables.reads).toEqual([]);
@@ -224,5 +224,38 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
     expect(projectRoleOf("administrator")).toBe("maintainer");
     expect(projectRoleOf("developer")).toBe("contributor");
     expect(projectRoleOf(undefined)).toBeUndefined();
+  });
+});
+
+
+describe("core outbox stream partial failures", () => {
+  const record = (company: string, sequence: string) => ({ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { SequenceNumber: sequence, NewImage: { pk: { S: `ORG#${company}#OUTBOX` }, outboxState: { S: "pending" } } } });
+  it("relays each company separately and reports only failed company sequence numbers", async () => {
+    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    const seen: string[][] = [];
+    vi.spyOn(root.app, "relayOutbox").mockImplementation(async (companies) => {
+      seen.push([...companies]);
+      return companies.map((companyId) => ({ companyId, outcome: companyId === ORG ? "failed" as const : "ran" as const }));
+    });
+    const answer = await root.handleEvent({ Records: [record(ORG, "11"), record(OTHER, "12"), record(ORG, "13")] });
+    expect(seen).toEqual([[ORG, OTHER]]);
+    expect(answer).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "13" }] });
+    expect(JSON.stringify(answer)).not.toContain("private failure detail");
+  });
+  it("reports deferred companies and whole-call failures without exposing causes", async () => {
+    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    const relay = vi.spyOn(root.app, "relayOutbox").mockResolvedValue([{ companyId: OTHER, outcome: "deferred" }]);
+    const batch = { Records: [record(ORG, "11"), record(OTHER, "12")] };
+    expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "12" }] });
+    relay.mockResolvedValue([{ companyId: ORG, outcome: "ran", report: { delivered: 0, failed: 1, dead: 0 } }]);
+    expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }] });
+    relay.mockRejectedValue(new Error("private cause"));
+    expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "12" }] });
+  });
+  it("acknowledges a successful two-company batch and leaves unrelated changes alone", async () => {
+    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    const relay = vi.spyOn(root.app, "relayOutbox").mockResolvedValue([]);
+    expect(await root.handleEvent({ Records: [record(ORG, "11"), record(OTHER, "12"), { ...record(ORG, "13"), eventName: "MODIFY" }] })).toEqual({ batchItemFailures: [] });
+    expect(relay.mock.calls).toEqual([[[ORG, OTHER]]]);
   });
 });
