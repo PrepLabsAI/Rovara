@@ -8,7 +8,8 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `labeled` so that adding the `full-ci` label starts a FULL run. Any other label starts an ordinary run too (a skipped run would leave a skipped `local` that reads as a pass).
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   push:
     branches: [code/next]
 
@@ -21,25 +22,29 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Few jobs, because the free plan runs about 20 at once and a queue of pull requests backs up behind them. A pull request runs `quick` (the
-# docs-only scope check, the typecheck and lint checks, and the release check, one after another on one machine), the eight `test (n/8)` shards
-# and `linux-runtime` (each on its own machine), and `port-guard` (code/next only, a check of its own). The job called `local` waits for
-# `quick`, the shards and `linux-runtime`, and is the one check a pull request needs (scripts/ci-gate.ts). A draft skips every job, `local`
-# included, so it shows no failed check.
+# Two modes (DEC 242; scripts/ci-plan.ts decides, in the `plan` job, and every other job reads its answer).
+# FULL: a push to code/next, a manual run, a pull request labelled `full-ci` or titled "Batch ..." or "Sync mainline ...". Everything runs: the typecheck and the whole lint
+#   in `quick`, the release check, all 8 `test (n/8)` shards, `linux-runtime`, and the check `ci-mode (full)`, which exists only in this mode: a merge needs it.
+# AFFECTED (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach, in 2 shards (the whole suite when something shared changes);
+#   lint covers the changed files; `linux-runtime` and the release check run only when their area changes; a Markdown-only change that no test reads runs nothing but `plan`.
+# The job called `local` waits for every job and is the one check a pull request needs (scripts/ci-gate.ts). It knows from `plan` which jobs must have run, so a job
+# skipped by design counts as a pass but a job that should have run and did not fails it. `port-guard` is a check of its own. A draft skips every job.
 #
-# A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips the heavy work (scripts/ci-docs-only.ts). Manual runs
-# always run it. The scope step runs first in `quick`, in each test shard and in `linux-runtime`; when it says docs-only, that job's later steps are
-# skipped and the job still reports success. Keep the three copies of the step the same.
+# Build once: the `build` job builds the packages and hands the output to the test shards as an artifact, so the shards do not each build it again.
 jobs:
-  # What the old `scope`, `checks` and `release` jobs did, in one job: one checkout, one install, one runner.
-  # Each part keeps its own condition and its own step time limit; the job's limit is the sum of the old ones (5 + 15 + 15). A failed step
-  # fails the job, and its name starts with the part it belongs to (scope, checks, release).
-  quick:
+  # The decision. A few seconds on a runner with no install: Node runs the script directly.
+  plan:
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 5
     outputs:
-      docs_only: ${{ steps.scope.outputs.docs_only }}
+      mode: ${{ steps.plan.outputs.mode }}
+      docs_only: ${{ steps.plan.outputs.docs_only }}
+      tests: ${{ steps.plan.outputs.tests }}
+      shards: ${{ steps.plan.outputs.shards }}
+      lint: ${{ steps.plan.outputs.lint }}
+      linux: ${{ steps.plan.outputs.linux }}
+      release: ${{ steps.plan.outputs.release }}
     steps:
       # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
       - uses: actions/checkout@v5
@@ -48,69 +53,38 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
-          cache: npm
-      - name: "scope: Docs-only change?"
-        id: scope
-        if: github.event_name == 'pull_request'
-        timeout-minutes: 5
+      - name: Plan the run
+        id: plan
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          CI_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          node scripts/ci-docs-only.ts "$RUNNER_TEMP/changed.txt"
-      - name: "scope: Markdown-only change"
-        if: steps.scope.outputs.docs_only == 'true'
-        timeout-minutes: 5
-        run: echo "Only Markdown that no test reads changed; typecheck, the stricter type check, lint, tests, synth and the release check are skipped."
-      - name: "checks: npm ci"
-        if: steps.scope.outputs.docs_only != 'true'
-        timeout-minutes: 15
-        run: npm ci
-      - name: "checks: npm run typecheck"
-        if: steps.scope.outputs.docs_only != 'true'
-        timeout-minutes: 15
-        run: npm run typecheck
-      # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
-      # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
-      - name: "checks: npm run typecheck:all"
-        if: steps.scope.outputs.docs_only != 'true'
-        timeout-minutes: 15
-        run: npm run typecheck:all
-      # The whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts), two eslint processes at a time. One process
-      # over the whole repository needed more than 6 GB; each shard stays under a 4 GB heap cap. It reads the packages' declarations that
-      # `npm run typecheck` just built.
-      - name: "checks: npm run lint"
-        if: steps.scope.outputs.docs_only != 'true'
-        timeout-minutes: 15
-        run: npm run lint
-      # The release check shares the install above (the old `release` job ran its own `npm ci`); the rest runs as before.
-      - name: "release: npm run build"
-        if: steps.scope.outputs.docs_only != 'true'
-        timeout-minutes: 15
-        run: npm run build
-      - name: "release: npm run infra:synth"
-        if: steps.scope.outputs.docs_only != 'true'
-        timeout-minutes: 15
-        run: npm run infra:synth
-      - name: "release: Release builds are reproducible"
-        if: steps.scope.outputs.docs_only != 'true'
-        timeout-minutes: 15
-        run: |
-          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
-          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
-          diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
-          npm run release:verify -- "$RUNNER_TEMP/release-a"
+          if [ "$CI_EVENT" = pull_request ]; then
+            git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          else
+            : > "$RUNNER_TEMP/changed.txt"
+          fi
+          node scripts/ci-plan.ts "$RUNNER_TEMP/changed.txt"
 
-  # Vitest hands each shard an even share of the test files. To change the count, change the list:
-  # the shard total below comes from it.
-  test:
-    if: github.event.pull_request.draft != true
-    name: test (${{ matrix.shard }}/${{ strategy.job-total }})
+  # Present (and green) only in a FULL run, so that a merge can require `ci-mode (full)`.
+  ci-mode:
+    name: ci-mode (full)
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
-    # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    timeout-minutes: 5
+    steps:
+      - run: echo "FULL run - every job runs in full (the plan job says why)."
+
+  # What the old `scope`, `checks` and `release` jobs did, in one job: one checkout, one install, one runner.
+  # Each part keeps its own condition and its own step time limit; the job's limit is the sum of the old ones (5 + 15 + 15). A failed step
+  # fails the job, and its name starts with the part it belongs to (checks, release). A Markdown-only change skips the job (the plan says so).
+  quick:
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
@@ -119,31 +93,132 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      # Markdown-only pull requests (scripts/ci-docs-only.ts) skip every step below this one; the job itself still reports success, so its check name is always there.
-      - name: Docs-only change?
-        id: scope
-        if: github.event_name == 'pull_request'
-        timeout-minutes: 5
+      - name: "checks: npm ci"
+        timeout-minutes: 15
+        run: npm ci
+      - name: "checks: npm run typecheck"
+        timeout-minutes: 15
+        run: npm run typecheck
+      # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
+      # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
+      - name: "checks: npm run typecheck:all"
+        timeout-minutes: 15
+        run: npm run typecheck:all
+      # The whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts), two eslint processes at a time. One process
+      # over the whole repository needed more than 6 GB; each shard stays under a 4 GB heap cap. It reads the packages' declarations that
+      # `npm run typecheck` just built. A pull request that changes no lint setting lints only its changed TypeScript files, each in its own shard's program.
+      - name: "checks: npm run lint"
+        if: needs.plan.outputs.lint == 'all'
+        timeout-minutes: 15
+        run: npm run lint
+      - name: "checks: lint the changed files"
+        if: needs.plan.outputs.lint == 'changed'
+        timeout-minutes: 15
         run: |
           git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          node scripts/ci-docs-only.ts "$RUNNER_TEMP/changed.txt"
-      - if: steps.scope.outputs.docs_only != 'true'
-        run: npm ci
+          node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"
+      # The release check shares the install above (the old `release` job ran its own `npm ci`); the rest runs as before, when the release area changed (always in a FULL run).
+      - name: "release: npm run build"
+        if: needs.plan.outputs.release == 'true'
+        timeout-minutes: 15
+        run: npm run build
+      - name: "release: npm run infra:synth"
+        if: needs.plan.outputs.release == 'true'
+        timeout-minutes: 15
+        run: npm run infra:synth
+      - name: "release: Release builds are reproducible"
+        if: needs.plan.outputs.release == 'true'
+        timeout-minutes: 15
+        run: |
+          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
+          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
+          diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
+          npm run release:verify -- "$RUNNER_TEMP/release-a"
+
+  # Builds the packages once and hands the output to the test shards (they used to run `npm run build` eight times).
+  build:
+    needs: plan
+    if: needs.plan.outputs.tests != 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      # The packages import each other through their built output.
+      - run: npm run build
+      # Everything the build left that git ignores, except node_modules anywhere (each shard installs its own): the packages' dist folders and their tsbuildinfo files.
+      - name: Pack the build output
+        run: |
+          git ls-files --others --ignored --exclude-standard --directory | grep -v 'node_modules/' > "$RUNNER_TEMP/build-files.txt"
+          test -s "$RUNNER_TEMP/build-files.txt"
+          tar -czf "$RUNNER_TEMP/build-output.tgz" -T "$RUNNER_TEMP/build-files.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: ${{ runner.temp }}/build-output.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  # Vitest hands each shard a share of the test files balanced by their recorded run time (tests/support/duration-sequencer.ts, tests/.timings/vitest-durations.json).
+  # The shard list comes from the plan: 8 for a FULL run or a change to something shared, 2 for an ordinary pull request.
+  test:
+    needs: [plan, build]
+    if: needs.plan.outputs.tests != 'none'
+    name: test (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
       # tests/unit/port-guard.test.ts runs the real secret scan, and its re-check 3 cases fail loudly without gitleaks (they never skip). Same pinned
       # release and checksum as the port-guard job below; keep the two in step.
       - name: Install gitleaks 8.30.1 (checksum pinned)
-        if: steps.scope.outputs.docs_only != 'true'
         run: |
           curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
-      # The packages import each other through their built output, which `npm run typecheck` used to leave behind.
-      - if: steps.scope.outputs.docs_only != 'true'
-        run: npm run build
-      - if: steps.scope.outputs.docs_only != 'true'
+      # The packages import each other through their built output, which the `build` job made.
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: ${{ runner.temp }}/build-output
+      - name: Unpack the build output
+        run: tar -xzf "$RUNNER_TEMP/build-output/build-output.tgz"
+      - name: Tests (the whole suite)
+        if: needs.plan.outputs.tests == 'all'
         run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+      # Vitest's --changed follows imports; the plan adds the tests that name a changed file or a package the change reaches (scripts/ci-plan.ts relatedTests).
+      - name: Tests (the ones this change can reach)
+        if: needs.plan.outputs.tests == 'changed'
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          CI_TITLE: ${{ github.event.pull_request.title }}
+          CI_EXTRA_TESTS: ${{ runner.temp }}/extra-tests.txt
+        run: |
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          node scripts/ci-plan.ts "$RUNNER_TEMP/changed.txt"
+          npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          if [ -s "$CI_EXTRA_TESTS" ]; then xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
 
   # Real Chromium E2E checks need a Linux ARM64 Docker host, the platform Rovara's runtime targets. This job
   # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against
@@ -155,7 +230,8 @@ jobs:
   # the fallback only when the mirror copy is missing, and every pull retries with backoff. Everything after that uses the local copy: the executor image is built
   # from it, the tests use it, and the Docker 25 (dind) daemon is loaded from the runner's daemon with docker save | docker load and never pulls.
   linux-runtime:
-    if: github.event.pull_request.draft != true
+    needs: plan
+    if: needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 75
     permissions:
@@ -169,17 +245,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      # Markdown-only pull requests (scripts/ci-docs-only.ts) skip every step below this one; the job itself still reports success, so its check name is always there.
-      - name: Docs-only change?
-        id: scope
-        if: github.event_name == 'pull_request'
-        timeout-minutes: 5
-        run: |
-          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          node scripts/ci-docs-only.ts "$RUNNER_TEMP/changed.txt"
       # The very rules the EC2 worker installs at boot: the heredoc inside boot.sh, extracted and run unchanged, so CI and production cannot drift.
       - name: Wall containers off from the host, private networks and the metadata service
-        if: steps.scope.outputs.docs_only != 'true'
         run: |
           sed -n "/<<'FIREWALL'/,/^FIREWALL\$/p" packages/worker/ec2/boot.sh | sed '1d;$d' > "$RUNNER_TEMP/container-firewall.sh"
           test "$(wc -l < "$RUNNER_TEMP/container-firewall.sh")" -gt 5
@@ -190,40 +257,32 @@ jobs:
       # (kernel.apparmor_restrict_unprivileged_userns=1); this only turns that CI-runner restriction off. Production runners are Amazon Linux 2023,
       # which has no such restriction (its kernel only needs user.max_user_namespaces > 0, the default, and the chromium-sandbox-v1 probe fails if not).
       - name: Allow unprivileged user namespaces for Chromium's sandbox
-        if: steps.scope.outputs.docs_only != 'true'
         run: |
           # CI runner only: production runners (Amazon Linux 2023) have no AppArmor userns restriction.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "no AppArmor userns restriction on this kernel"
           sysctl user.max_user_namespaces
       # A failed login (for example a pull request from a fork, whose token cannot read packages) only means the mirror is skipped.
       - name: Log in to the GHCR image mirror (read-only)
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || echo "::warning::GHCR login failed; images will come from their upstream registries"
       # Exports ROVARA_CI_IMAGE_NODE_BUILD and ROVARA_CI_IMAGE_DOCKER_DIND (local aliases of the digest-pinned images) to the steps below.
       - name: Pull the pinned public images (GHCR mirror first)
-        if: steps.scope.outputs.docs_only != 'true'
         run: node scripts/ci-images.ts pull --github-env
       # The Dockerfile's FROM lines name the pinned upstream image; the build uses a copy whose FROM lines name the local alias of the very same digest, so it pulls nothing.
       - name: Build the executor image
-        if: steps.scope.outputs.docs_only != 'true'
         run: |
           node scripts/ci-images.ts verify node-build
           node scripts/ci-images.ts dockerfile environments/e2e-executor/Dockerfile "$RUNNER_TEMP/e2e-executor.Dockerfile"
           docker build -f "$RUNNER_TEMP/e2e-executor.Dockerfile" -t rovara-e2e-executor:ci .
-      - if: steps.scope.outputs.docs_only != 'true'
-        run: npm ci
+      - run: npm ci
       # The packages import each other through their built output.
-      - if: steps.scope.outputs.docs_only != 'true'
-        run: npm run build
+      - run: npm run build
       # The executor as the host runs it (the pinned seccomp profile, every capability dropped, read-only, no network), from the one definition the release path and
       # test-deploy use too. The smoke check fails unless Chromium's renderer is sandboxed.
       - name: Smoke-test the executor image without a network
-        if: steps.scope.outputs.docs_only != 'true'
         run: npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci
       - name: Linux runtime tests
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -232,7 +291,6 @@ jobs:
       # Docker is newer and does, so the step above cannot see that. This one starts Docker 25.0.5 in Docker (a privileged container with its own network namespace, no change to this
       # runner) and runs the production host against it: the app's lookup of an undeclared name must reach the sinkhole, and a mock's alias must resolve.
       - name: Docker 25 DNS regression (dind 25.0.5)
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -240,7 +298,6 @@ jobs:
       # M1.4 Task 4.3a: the worker <-> executor model channel on this Docker host (a scripted model route): the executor container's client reaches the proxy through the mounted
       # socket and the receipt is written, the app container sees neither the socket nor the proxy, and no socket is left behind. It builds a small derived executor image.
       - name: Model channel (scripted route)
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -248,7 +305,6 @@ jobs:
       # M1.4 Task 4.3b: the agent step on this Docker host (a scripted model route, the m14 orders app, the real executor image and Chromium): the renamed export is found by its test
       # id and downloaded once (twenty times in a row, three at a time), a model that does nothing, a decoy, an outage and a second download each leave their record.
       - name: Agent steps (scripted route)
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -256,7 +312,6 @@ jobs:
       # M1.4 Task 4.5: the three agent qualification probes through the production probe runner on this Docker host (the scripted route: no provider, no spend): the renamed export is
       # found and downloaded, a model that does nothing leaves the case UNKNOWN agent-no-download, and the app starts behind a guard that finds no path to the model.
       - name: Agent qualification probes (scripted route)
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -265,7 +320,6 @@ jobs:
       # header, IndexedDB, one opaque id) never reach the model: the real executor image and Chromium on this Docker host, the scripted route recording every call, three groups of three
       # cases. Strong values are refused in any spelling, the weak one shows as `<session>`, a control case goes through, no transcript is truncated. Values are random for each run.
       - name: Mid-step values never reach the model (scripted route)
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -273,21 +327,18 @@ jobs:
       # The browser path end to end through the real worker, broker and this Docker host: a failing round, send-back, a passing round, publication.
       # It skips unless Docker and the executor image are provided, so it is a native-suite file that only this job runs.
       - name: Native browser journey
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-web-journey.test.ts
       # The M1.3 paths on the same Docker host: an external origin served by its approved mock, and a call no mock matches.
       - name: Native M1.3 journeys
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-3-journeys.test.ts
       # The M1.4 paths with an AI navigation step (scripted model), through the worker's own checks: what the executor and the worker leave. The verdicts are Task 4.4's.
       - name: Native M1.4 journeys
-        if: steps.scope.outputs.docs_only != 'true'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -342,7 +393,7 @@ jobs:
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:
-    needs: [quick, test, linux-runtime]
+    needs: [plan, quick, build, test, linux-runtime, ci-mode]
     if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5

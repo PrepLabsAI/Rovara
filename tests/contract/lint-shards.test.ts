@@ -21,6 +21,7 @@ import {
   writeShardTsconfig,
   type Shard,
   type ShardResult,
+  shardsForFiles,
 } from "../../scripts/lint-shards.js";
 
 // `eslint .` with the type-aware rules keeps one TypeScript program over the whole repository, and every file's lint state, in one heap.
@@ -297,5 +298,36 @@ describe("the lint shards: a failing shard fails the command", () => {
     const file = writeShardTsconfig(shards[0]!, root);
     expect(JSON.parse(readFileSync(file, "utf8")) as unknown).toEqual(shardTsconfig(shards[0]!, root));
     expect(readdirSync(dirname(file)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("a pull request's lint (--files): the shards that hold the changed files, aimed at those files only", () => {
+  it("puts each changed file in the shard that holds it, with the group's own program, and the rest in the catch-all", () => {
+    const selected = shardsForFiles(["packages/broker/src/sample.ts", "tests/contract/alpha.test.ts", "tests/contract/tango.test.ts", "scripts/sample-tool.ts", "sample-root-file.ts", "tests/unit/9digit.test.ts"]);
+    const byName = Object.fromEntries(selected.map((shard) => [shard.name, shard]));
+    expect(byName.broker!.targets).toEqual(["packages/broker/src/sample.ts"]);
+    expect(byName.broker!.include).toEqual(["packages/broker/**/*.ts"]);
+    expect(byName["tests-contract-a-d"]!.targets).toEqual(["tests/contract/alpha.test.ts"]);
+    expect(byName["tests-contract-t-z"]!.targets).toEqual(["tests/contract/tango.test.ts"]);
+    expect(byName["infra-scripts"]!.targets).toEqual(["scripts/sample-tool.ts"]);
+    // a file no named shard holds (a root file, a unit test starting with a digit) goes to the catch-all, as in a whole run
+    expect(byName[REST]!.targets).toEqual(["sample-root-file.ts", "tests/unit/9digit.test.ts"]);
+    expect(byName[REST]!.ignore.length).toBeGreaterThan(0);
+  });
+
+  it("leaves out the shards no changed file is in, and does nothing for no file", () => {
+    expect(shardsForFiles([])).toEqual([]);
+    expect(shardsForFiles(["packages/worker/src/sample.ts"]).map((shard) => shard.name)).toEqual(["worker"]);
+  });
+
+  it("takes every file of the whole run's shards exactly once, whatever the file", () => {
+    const files = ["packages/cli/src/a.ts", "packages/gateway/src/b.ts", "tests/unit/context-sources/c.test.ts", "tests/integration/d.test.ts", "tests/support/e.ts", "infra/f.ts", "tests/unit/eslint-ish.test.ts"];
+    const selected = shardsForFiles(files);
+    expect(selected.flatMap((shard) => shard.targets).sort()).toEqual([...files].sort());
+  });
+
+  it("reads its option", () => {
+    expect(parseOptions(["--files", "changed.txt"])).toMatchObject({ filesList: "changed.txt" });
+    expect(parseOptions(["--files"])).toMatch(/--files needs/);
   });
 });

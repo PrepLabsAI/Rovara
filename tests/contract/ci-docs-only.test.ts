@@ -1,13 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
-import { docsOnlyChange } from "../../scripts/ci-docs-only.js";
+import { docsOnlyChange } from "../../scripts/ci-plan.js";
 
 interface Step { id?: string; name?: string; if?: string; run?: string; uses?: string; with?: Record<string, unknown>; "timeout-minutes"?: number }
 interface Job { needs?: string | string[]; if?: string; steps: Step[] }
 interface Workflow { jobs: Record<string, Job> }
-
-const DOCS_ONLY_GUARD = "steps.scope.outputs.docs_only != 'true'";
 
 const noTests = new Map<string, string>([["tests/contract/example.test.ts", "expect(1).toBe(1);"]]);
 
@@ -35,49 +33,21 @@ describe("the docs-only check (CI skips the heavy steps for a Markdown-only pull
     expect(docsOnlyChange(["docs\\notes.md"], noTests).docsOnly).toBe(false);
   });
 
-  it("runs the check on pull requests only, from the merge commit's first parent, before any install, in every job that does heavy work", async () => {
+  it("is decided by the plan job, from the merge commit's first parent, before any install, and a manual run or a push never reaches it", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
-    const copies: string[] = [];
-    for (const job of ["quick", "test", "linux-runtime"]) {
-      const steps = workflow.jobs[job]!.steps;
-      expect(steps[0], job).toMatchObject({ uses: "actions/checkout@v5", with: { "fetch-depth": 2 } });
-      const scope = steps.find((step) => step.id === "scope")!;
-      expect(scope.if, job).toBe("github.event_name == 'pull_request'");
-      expect(scope.run, job).toContain("git diff --name-only HEAD^1 HEAD");
-      expect(scope.run, job).toContain("node scripts/ci-docs-only.ts");
-      expect(scope["timeout-minutes"], job).toBe(5);
-      copies.push(scope.run!);
-      // Nothing is installed or built before the check, and only the checkout and Node's setup come first.
-      const before = steps.slice(0, steps.indexOf(scope));
-      expect(before.every((step) => step.uses?.startsWith("actions/")), job).toBe(true);
-    }
-    expect(new Set(copies).size).toBe(1);
+    const plan = workflow.jobs.plan!;
+    expect(plan.steps[0]).toMatchObject({ uses: "actions/checkout@v5", with: { "fetch-depth": 2 } });
+    const step = plan.steps.find((candidate) => candidate.id === "plan")!;
+    expect(step.run).toContain('if [ "$CI_EVENT" = pull_request ]');
+    expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
+    expect(step.run).toContain("node scripts/ci-plan.ts");
+    expect(plan.steps.some((candidate) => candidate.run === "npm ci")).toBe(false);
   });
 
-  it("guards every heavy step with the check, so a manual run always runs them, and keeps each job's check name present on a Markdown-only change", async () => {
+  it("skips the heavy jobs through the plan: `quick` and the shards by their own condition, never by a step that leaves the job green", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
-    const heavySteps = (job: string) => workflow.jobs[job]!.steps.filter((step) => step.run !== undefined && step.id !== "scope").map((step) => step.name ?? step.run);
-    expect(heavySteps("quick")).toEqual([
-      "scope: Markdown-only change",
-      "checks: npm ci",
-      "checks: npm run typecheck",
-      "checks: npm run typecheck:all",
-      "checks: npm run lint",
-      "release: npm run build",
-      "release: npm run infra:synth",
-      "release: Release builds are reproducible",
-    ]);
-    expect(heavySteps("test")).toEqual(["npm ci", "Install gitleaks 8.30.1 (checksum pinned)", "npm run build", "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}"]);
-    for (const job of ["quick", "test", "linux-runtime"]) {
-      const steps = workflow.jobs[job]!.steps;
-      const after = steps.slice(steps.findIndex((step) => step.id === "scope") + 1);
-      for (const step of after) {
-        if (step.name === "scope: Markdown-only change") expect(step.if).toBe("steps.scope.outputs.docs_only == 'true'");
-        else expect(step.if, `${job}: ${step.name ?? step.run}`).toBe(DOCS_ONLY_GUARD);
-      }
-      // A skipped step still lets the job succeed; a job-level docs-only condition would leave a required check missing.
-      expect(workflow.jobs[job]!.needs, job).toBeUndefined();
-      expect(workflow.jobs[job]!.if, job).toBe("github.event.pull_request.draft != true");
-    }
+    expect(workflow.jobs.quick!.if).toBe("needs.plan.outputs.docs_only != 'true'");
+    for (const job of ["build", "test"]) expect(workflow.jobs[job]!.if, job).toBe("needs.plan.outputs.tests != 'none'");
+    expect(workflow.jobs["linux-runtime"]!.if).toBe("needs.plan.outputs.linux == 'true'");
   });
 });

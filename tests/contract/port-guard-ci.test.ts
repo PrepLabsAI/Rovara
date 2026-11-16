@@ -12,14 +12,14 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
   it("keeps the pull request and manual triggers as they were and adds a push to code/next only", async () => {
     const { on } = await workflow();
     expect(Object.keys(on).sort()).toEqual(["pull_request", "push", "workflow_dispatch"]);
-    expect(on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review"] });
+    expect(on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] });
     expect(on.push).toEqual({ branches: ["code/next"] });
   });
 
   it("keeps the port guard a check of its own, outside `quick` and the `local` gate, with nothing waiting on it", async () => {
     const { jobs } = await workflow();
-    expect(jobs.local!.needs).toEqual(["quick", "test", "linux-runtime"]);
-    expect(Object.keys(jobs).sort()).toEqual(["linux-runtime", "live-aws", "local", "port-guard", "quick", "test"]);
+    expect(jobs.local!.needs).toEqual(["plan", "quick", "build", "test", "linux-runtime", "ci-mode"]);
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
     for (const [name, job] of Object.entries(jobs)) expect(JSON.stringify(job.needs ?? []), name).not.toContain("port-guard");
     expect(jobs.quick!.steps.map((step) => step.run ?? "").join("\n")).not.toContain("port-guard");
   });
