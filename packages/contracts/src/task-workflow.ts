@@ -9,6 +9,7 @@ import { WorkflowDependencyApprovalSchema, WorkItemProgressV1Schema } from "./wo
 import { NO_CODE_CHANGED_REASON, NoChangeFindingsSchema } from "./no-change-findings.js";
 import { CheckKindSchema } from "./evidence.js";
 import { WorkflowDesignReviewSchema } from "./design-review.js";
+import { FindingScaleSchema, WorkflowFlowSchema } from "./task-flow-tier.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -188,6 +189,8 @@ export const WorkflowReviewFindingSchema = z.object({
   file: z.string().trim().min(1).max(500).optional(),
   line: z.number().int().positive().optional(),
   advisory: z.boolean().optional(),
+  /** The lighter flow (0.5.18 reader): how serious the finding is in three words. Nothing writes it yet; `severity` stays as it is. */
+  scale: FindingScaleSchema.optional(),
 }).strict();
 
 export type WorkflowReviewFinding = z.infer<typeof WorkflowReviewFindingSchema>;
@@ -295,7 +298,7 @@ export const WORKFLOW_SECOND_REVIEW_LINE_MAX = 10_000_000;
 
 export const WorkflowSecondReviewBlockSchema = z.object({
   candidateDigest: DigestSchema,
-  findings: z.array(z.object({ text: z.string().trim().min(1).max(600), file: z.string().max(500).optional(), line: z.number().int().positive().max(WORKFLOW_SECOND_REVIEW_LINE_MAX).optional() }).strict()).min(1).max(20),
+  findings: z.array(z.object({ text: z.string().trim().min(1).max(600), file: z.string().max(500).optional(), line: z.number().int().positive().max(WORKFLOW_SECOND_REVIEW_LINE_MAX).optional(), scale: FindingScaleSchema.optional() }).strict()).min(1).max(20),
 }).strict();
 export type WorkflowSecondReviewBlock = z.infer<typeof WorkflowSecondReviewBlockSchema>;
 
@@ -927,6 +930,8 @@ export const WorkflowSnapshotShapeSchema = z.object({
   designReview: WorkflowDesignReviewSchema.optional(),
   /** Rovara Code v2 (1.1.0 only): the risk level of the pull request's code. */
   risk: RiskAssessmentSchema.optional(),
+  /** The lighter flow (0.5.18 reader, both versions; nothing writes it yet): the tier of the change, the steps skipped and the quick checks. See `WorkflowFlowSchema`. */
+  flow: WorkflowFlowSchema.optional(),
   /** Both versions: how many fix rounds of each kind ran, and which kind the round now running is. */
   fixRounds: WorkflowFixRoundsSchema.optional(),
   /** SR-1 (switch `cr`, `on`): the second review's blocking findings for one candidate; see `WorkflowSecondReviewBlockSchema`. */
@@ -970,6 +975,8 @@ export const WorkflowSnapshotShapeSchema = z.object({
     if (workflow.outcome === "ANSWERED") context.addIssue({ code: "custom", path: ["outcome"], message: "this outcome needs definition version 1.1.0" });
     if (workflow.artifacts.some((artifact) => artifact.type === "answer")) context.addIssue({ code: "custom", path: ["artifacts"], message: "an answer needs definition version 1.1.0" });
     for (const field of ["intent", "critique", "risk", "designReview"] as const) {
+      // The lighter flow's record lets a design review sit on a task of either version: only the one that carries `flow`.
+      if (field === "designReview" && workflow.flow !== undefined) continue;
       if (workflow[field] !== undefined) context.addIssue({ code: "custom", path: [field], message: `${field} needs definition version 1.1.0` });
     }
     if (workflow.program?.steps.some((step) => step.kind === "plan_critic") === true) {
@@ -978,7 +985,8 @@ export const WorkflowSnapshotShapeSchema = z.object({
     if (workflow.reviews?.some((review) => review.risk !== undefined) === true) context.addIssue({ code: "custom", path: ["reviews"], message: "a review's risk level needs definition version 1.1.0" });
   }
   if (workflow.designReview !== undefined) {
-    if (workflow.path !== "FULL") context.addIssue({ code: "custom", path: ["designReview"], message: "design review runs on the Full path" });
+    // The lighter flow may ask for a design review on a Quick path: only a task that carries its `flow` record.
+    if (workflow.path !== "FULL" && workflow.flow === undefined) context.addIssue({ code: "custom", path: ["designReview"], message: "design review runs on the Full path" });
     if (new TextEncoder().encode(JSON.stringify(workflow.designReview)).length > 150_000) context.addIssue({ code: "custom", path: ["designReview"], message: "the design review record is too large to keep" });
   }
   if (workflow.fixProblems !== undefined && workflow.fixSource === undefined) {

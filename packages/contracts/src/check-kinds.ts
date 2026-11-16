@@ -29,7 +29,7 @@ const V1_PARTS: readonly CheckPart[] = ["tests", "coverage", "findings", "migrat
 const REGISTRY_ROWS: CheckKindInfo[] = [
   { id: "test", words: "Tests", parts: [...V1_PARTS, "measures"], countsTowardProof: true },
   { id: "e2e", words: "End-to-end tests", parts: ["tests", "pairs", "measures"], countsTowardProof: true },
-  { id: "eval", words: "Eval", parts: ["tests", "measures"], countsTowardProof: true },
+  { id: "eval", words: "Eval", parts: ["tests", "measures"], countsTowardProof: false },
   { id: "lint", words: "Lint", parts: V1_PARTS, countsTowardProof: false },
   { id: "typecheck", words: "Type check", parts: V1_PARTS, countsTowardProof: false },
   { id: "security", words: "Security scan", parts: V1_PARTS, countsTowardProof: false },
@@ -38,6 +38,8 @@ const REGISTRY_ROWS: CheckKindInfo[] = [
   { id: "smoke", words: "Smoke test", parts: [...V1_PARTS, "pairs"], countsTowardProof: false },
   { id: "benchmark", words: "Benchmark", parts: ["measures"], countsTowardProof: false },
   { id: "visual", words: "Visual check", parts: ["pairs"], countsTowardProof: false },
+  // TE-F10: old vs new prompt answers on the same inputs, judged by an independent judge. It shows a difference; it never proves that a change works.
+  { id: "prompt_side_by_side", words: "Old vs new prompt", parts: ["pairs"], countsTowardProof: false },
   { id: "other", words: "Check", parts: ALL_PARTS, countsTowardProof: false },
 ];
 export const CHECK_KIND_REGISTRY: readonly CheckKindInfo[] = Object.freeze(REGISTRY_ROWS.map((info) => Object.freeze(info)));
@@ -83,6 +85,8 @@ export const EVIDENCE_TRUST_CLASS_WORDS: Record<EvidenceTrustClass, string> = {
 export const PROOF_BASES = ["scripted_ai_replies"] as const;
 export type ProofBasis = (typeof PROOF_BASES)[number];
 /** An AI product's change counts as proven when the new tests fail on main and pass with the change against scripted model replies. The label is this and never "Real". */
+export const AGENT_REPLIES_UNCONFIRMED_WORDS = "proven with scripted replies written in this task: check them";
+export const AGENT_REPLIES_DISAGREED_WORDS = "scripted replies written in this task: the real model did not agree";
 export const SCRIPTED_AI_PROOF_WORDS = "proven with scripted AI replies";
 export const PROOF_BASIS_WORDS: Record<ProofBasis, string> = { scripted_ai_replies: SCRIPTED_AI_PROOF_WORDS };
 

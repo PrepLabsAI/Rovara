@@ -16,7 +16,7 @@ import { candidateChanges } from "./diff.js";
 import { changedMigrationFiles, migrationDirectionOf, migrationEvidence } from "./migration-check.js";
 import { readContainedReport } from "./report-file.js";
 import { SARIF_REPORT_MAX_BYTES, findingsPart, newFindings, parseSarif, readsPrebuiltState, sameFindings, sarifPathOf, unverifiedPart, type ParsedSarif } from "./sarif.js";
-import { AgentFilesRestoreError } from "./original-code.js";
+import { isWorkspaceUnsafe } from "./original-code.js";
 import { runBaselineScans, type BaselineRun, type BaselineScan } from "./sarif-baseline.js";
 import { changedTestFiles, readCheckReport, type TestProofRepository } from "./test-proof.js";
 import { withIsolatedGit } from "../isolated-git.js";
@@ -28,6 +28,8 @@ import { withTestIds } from "./test-ids.js";
 export interface CollectEvidenceInput {
   /** The workspace root, where a check's report path is resolved from its cwd. */
   rootPath: string;
+  /** Worker report storage, separate from source paths used to place test IDs and coverage. */
+  reportRootPath?: string | undefined;
   /** The project checks that were run, in order: check `readiness:<index>` is `commands[index]`. */
   commands: readonly ProjectCommand[];
   /** The round's entries on the candidate. */
@@ -54,6 +56,8 @@ export interface CollectEvidenceInput {
    * report: a round that ran against Postgres says so whether or not a test report was read.
    */
   testServices?: TestServicesUsageRecord | undefined;
+  /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
+  repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }
 
 type EvidenceSelection = NonNullable<EvidenceRaw["selection"]>;
@@ -117,20 +121,22 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     for (const [index, command] of input.commands.entries()) {
       const entry = entryOf(index);
       if (entry === undefined) continue;
-      const read = await readCheckReport(input.rootPath, command).catch(() => undefined);
+      const read = await readCheckReport(input.reportRootPath ?? input.rootPath, command).catch(() => undefined);
       const reported = read === undefined ? undefined : parseTestReport(read.text, read.kind);
       // The tests in ID form (contracts `test-id.ts`), the same strings the nightly run and the known-failing marks use.
       const parsed = reported === undefined ? undefined : await withTestIds(reported, { root: input.rootPath, cwd: command.cwd });
       const partial: CheckParts = { index, entry };
+      // The skips among untouched tests before and now, and the tests that ran before and are gone (TE-B3), need the run on the ORIGINAL code, which comes after this file is written: they come from test-proof.json
+      // (`weakening`, test-proof.ts) and the broker joins them to this part when it keeps the pack (evidence-keep.ts), so `skippedOutside` is not given here.
       if (parsed !== undefined) { partial.tests = evidenceTests(parsed, { changedTestPaths }); measured += parsed.total; }
       if (entry.after === "failed") { const tail = outputTailOf(entry.output); if (tail !== undefined) partial.outputTail = tail; }
       // A timed-out, stopped or never-run check may have left an older report on disk: only a check that ended is read.
       if (ended(entry)) {
-        const covered = await readChangedCoverage({ rootPath: input.rootPath, command, repositories: diffs, notBeforeMs: input.roundStartedAtMs, used: usedReports, approvedPath: input.coveragePaths?.[index], lineCoverage: (text, repositories) => placeLineCoverage(text, input.rootPath, command.cwd, repositories) });
+        const covered = await readChangedCoverage({ rootPath: input.rootPath, reportRootPath: input.reportRootPath, command, repositories: diffs, notBeforeMs: input.roundStartedAtMs, used: usedReports, approvedPath: input.coveragePaths?.[index], lineCoverage: (text, repositories) => placeLineCoverage(text, input.rootPath, command.cwd, repositories) });
         if ("coverage" in covered) partial.coverage = coveragePart(covered.coverage, input.repositories.length);
         const argument = sarifPathOf(command);
         if (argument !== undefined) {
-          const sarif = await readContainedReport({ root: input.rootPath, cwd: command.cwd, argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: input.roundStartedAtMs });
+          const sarif = await readContainedReport({ root: input.reportRootPath ?? input.rootPath, cwd: command.cwd, argument, maxBytes: SARIF_REPORT_MAX_BYTES, notBeforeMs: input.roundStartedAtMs });
           const candidate = sarif.ok ? parseSarif(sarif.bytes.toString("utf8"), roots) : undefined;
           if (sarif.ok && candidate !== undefined) scans.push({ index, command, argument, path: sarif.path, candidateBytes: Buffer.from(sarif.bytes), candidate });
         }
@@ -149,7 +155,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     if (asking.length > 0 && input.baselineScans !== undefined) {
       baselines = await input.baselineScans(asking.map((scan): BaselineScan => ({ index: scan.index, command: scan.command, argument: scan.argument, path: scan.path, candidateBytes: scan.candidateBytes }))).catch((error: unknown) => {
         // The one fault that must stop the task is not swallowed: the agent's files are not back.
-        if (error instanceof AgentFilesRestoreError) throw error;
+        if (isWorkspaceUnsafe(error)) throw error;
         return new Map<number, string>();
       });
     }
@@ -210,13 +216,14 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     const raw: EvidenceRaw = {
       schemaVersion: 1, candidateDigest: input.candidateDigest, checks,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
+      ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(selectionOf(input.selection, measured) === undefined ? {} : { selection: selectionOf(input.selection, measured)! }),
     };
     const parsed = EvidenceRawSchema.safeParse(raw);
     if (!parsed.success) return undefined;
     return Buffer.byteLength(JSON.stringify(parsed.data), "utf8") > EVIDENCE_RAW_MAX_BYTES ? undefined : parsed.data;
   } catch (error) {
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     return undefined;
   }
 }
@@ -245,6 +252,8 @@ export async function saveEvidenceRaw(input: {
   baseline?: Pick<BaselineRun, "runners" | "signal" | "budgetMs" | "originalCode" | "capMs"> | undefined;
   /** Test services: the round's usage record (see `CollectEvidenceInput.testServices`). Absent for a task without dependencies: then the file is what it always was. */
   testServices?: TestServicesUsageRecord | undefined;
+  /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
+  repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }): Promise<boolean> {
   try {
     if (input.plan.source !== "project" || input.plan.readiness === undefined) return false;
@@ -256,10 +265,11 @@ export async function saveEvidenceRaw(input: {
     const complete = placed.length === input.repositories.length;
     const baseline = input.baseline;
     const raw = await collectEvidenceRaw({
-      rootPath: input.rootPath, commands: input.plan.readiness, entries: input.entries, candidateDigest: createCandidateManifest(input.candidateBefore).digest, roundStartedAtMs: input.roundStartedAtMs,
+      rootPath: input.rootPath, reportRootPath: input.baseline?.runners.reportRoot?.(), commands: input.plan.readiness, entries: input.entries, candidateDigest: createCandidateManifest(input.candidateBefore).digest, roundStartedAtMs: input.roundStartedAtMs,
       repositories: placed, repositoriesComplete: complete,
       selection: input.selection, coveragePaths: input.coveragePaths,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
+      ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(baseline === undefined || !complete ? {} : {
         baselineScans: (scans: readonly BaselineScan[]) => runBaselineScans(scans, { ...baseline, rootPath: input.rootPath, repositories: placed.map((repository) => ({ directory: repository.directory, commit: repository.startCommit })) }),
       }),
@@ -269,7 +279,7 @@ export async function saveEvidenceRaw(input: {
     return true;
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     return false;
   }
 }

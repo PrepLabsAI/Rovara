@@ -19,10 +19,12 @@ export * from "./developer-tasks-node.js";
 export * from "./task-workflow-node.js";
 export * from "./task-workflow-revise.js";
 export * from "./task-workflow-design-review.js";
+export * from "./task-flow-tier.js";
 export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
 export * from "./rovara-code.js";
+export * from "./person-erase.js";
 export * from "./project-playbook.js";
 export * from "./playbook-file.js";
 export * from "./design-review.js";
@@ -55,6 +57,7 @@ export * from "./plan-grounding.js";
 export * from "./workflow-dependencies-node.js";
 export * from "./display-name.js";
 export * from "./environments.js";
+export * from "./core-engine-infra.js";
 export * from "./github-mcp.js";
 export * from "./oauth-profiles.js";
 export * from "./operation.js";
@@ -134,6 +137,7 @@ export * from "./checks-reply.js";
 export * from "./cancel-callback-key.js";
 export * from "./task-comments.js";
 export * from "./task-people.js";
+export * from "./task-readers.js";
 export * from "./e2e-openapi-fixture.js";
 export * from "./e2e-executor.js";
 export * from "./e2e-model-channel.js";
@@ -153,6 +157,7 @@ export * from "./record-trust.js";
 export * from "./open-ids.js";
 export * from "./standing-instructions.js";
 export * from "./signing-key.js";
+export * from "./policy-hook.js";
 export * from "./task-budget.js";
 export * from "./model-not-enabled.js";
 export * from "./org-scoped-keys.js";
@@ -183,7 +188,7 @@ export * from "./script-tokens.js";
 
 
 export { TICKET_PATTERN } from "./confirmation.js";
-export { SetMyNameBodySchema, type SetMyNameBody, SetMyNameResponseSchema, type SetMyNameResponse, SetMyNameResponseReaderSchema } from "./developer-web.js";
+export { SetMyNameBodySchema, type SetMyNameBody, SetMyNameResponseSchema, type SetMyNameResponse, SetMyNameResponseReaderSchema, SetDisplayNameRequestSchema, type SetDisplayNameRequest, type SetDisplayNameResponse } from "./developer-web.js";
 
 export { TaskResponseSchema, TaskResponseReaderSchema } from "./task-response.js";
 
@@ -217,6 +222,9 @@ export { formatUsdMicrodollars } from "./money-format.js";
 
 // Lane A G1: versioned project intent, preserved but not set by legacy settings writes.
 export * from "./test-proof.js";
+// TE-B5a: the one table of who may decide what (task owner, maintainer, admin).
+export * from "./can-decide.js";
+export * from "./real-model-check.js";
 export * from "./plugins/index.js";
 export * from "./ports/index.js";
 export * from "./outcomes.js";
@@ -227,7 +235,11 @@ export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";
 export * from "./evidence-inert.js";
+export * from "./evidence-ai.js";
+export * from "./evidence-public.js";
 export * from "./evidence-render.js";
+export * from "./rovara-problem.js";
+export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
 export * from "./media-gate.js";
 
@@ -286,12 +298,39 @@ export * from "./model-catalog.js";
 export * from "./model-catalog-rows.js";
 // The unsigned parse (`parseModelCatalogBytes`) is deliberately NOT exported here: only `builtinModelCatalog()` may feed F1 and F2 until the rows are signed.
 export { MODEL_CATALOG_MAX_BYTES, modelCatalogDigest } from "./model-catalog-digest.js";
+// TE-F4: additive static prompt/model change detection; no production callers.
+export * from "./prompt-change.js";
+export * from "./prompt-change-detect.js";
 export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
+// TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
+export * from "./model-egress/index.js";
+// TE-F10 (0.5.20): old vs new prompt outputs side by side, with an independent judge (additive; no callers).
+export * from "./side-by-side.js";
+export * from "./side-by-side-judge.js";
+export * from "./side-by-side-judge-pin.js";
+export * from "./side-by-side-run.js";
+export * from "./side-by-side-render.js";
 export * from "./model-serve.js";
+// TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
+export * from "./model-sse-named.js";
+export * from "./model-family-vectors.js";
+export * from "./model-family-openai-ops.js";
+export * from "./model-family-gemini-extra.js";
+export * from "./model-family-anthropic.js";
+export * from "./model-family-cohere.js";
+export * from "./model-served-family.js";
+export * from "./model-request-facts.js";
+export * from "./model-render.js";
+export * from "./model-failure-pack.js";
+export * from "./model-families.js";
+export * from "./model-reply-provenance.js";
+export * from "./model-reply-set.js";
+export * from "./model-serve-replies.js";
 export * from "./test-account.js";
+export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
 export * from "./mcp-servers.js";
 
@@ -340,3 +379,30 @@ export * from "./task-status.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
+// TE-F8 (M2, 0.5.19): record-then-replay for changed prompts. Additive, no callers; depends on TE-F1a (model-egress) and TE-F4 (prompt-change).
+export * from "./model-record-key.js";
+export * from "./model-record-policy.js";
+export * from "./model-recording-store.js";
+export * from "./model-record-replay.js";
+export * from "./policy.js";
+export * from "./presets.js";
+
+export * from "./measures-file.js";
+// TE-F3 (M2/M3a): the eval check. Pure and additive: the question-level exact verdict, the base score cache, pacing, the hidden eval set rules. Nothing outside tests and the worker's eval round calls these yet.
+export * from "./eval-hidden-set.js";
+export * from "./eval-pacing.js";
+export * from "./eval-base-cache.js";
+export * from "./eval-check.js";
+export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter, EvalReservationAdapter } from "./ports/eval-health.js";
+
+export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
+export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
+export * from "./machine-size.js";
+
+export * from "./setup-prove.js";
+export * from "./eval-round-artifact.js";
+export * from "./eval-proof-basis.js";
+
+export * from "./model-gateway-token.js";
+export * from "./payer.js";
+export * from "./ports/company-log.js";

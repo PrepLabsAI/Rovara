@@ -8,8 +8,10 @@
 // contracts call `PluginKind`.
 import { isBuiltin } from "node:module";
 import { z } from "zod";
+import { AGENTX_NAME_PATTERN } from "../names.js";
 import { PluginKindSchema } from "../plugins/common.js";
 import { ExternalAccountRefSchema } from "../outside-account.js";
+import { PolicyHookSettingsSchema } from "../policy-hook.js";
 import type { ChannelCapabilities, ChannelCommand, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
 import type { CodeHost } from "../plugins/code-host.js";
@@ -22,6 +24,7 @@ import type { ImageRegistry } from "./image-registry.js";
 import type { ObjectStorage } from "./object-storage.js";
 import type { OutboundEventsAdapter } from "./outbound-events.js";
 import type { SecretStore } from "./secrets.js";
+import type { CloudAccount } from "./cloud-account.js";
 import type { MonitoringAdapter } from "./monitoring.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
@@ -65,6 +68,8 @@ export const PLUGIN_POINTS = [
   "model-provider",
   /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
   "secrets",
+  /** Company-scoped, short-lived credentials for one purpose; owner-configured only, with broker rights. */
+  "cloud-account",
   /** Where a project's saved environment image lives (login for one repository, list, delete). Code: a registry container on the owner's Docker; Cloud: its cloud registry. */
   "image-registry",
   /** When something is due (the nightly test run). The scheduler only says when; the core decides what starts. Code: a local timer; Cloud: its cloud scheduler. */
@@ -104,6 +109,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   "outbound-events": "many",
   "model-provider": "many",
   secrets: "one",
+  "cloud-account": "one",
   "image-registry": "one",
   scheduler: "one",
   realtime: "one",
@@ -188,6 +194,7 @@ export interface PluginPointTypes {
   "outbound-events": OutboundEventsAdapter;
   "model-provider": ModelProviderAdapter;
   secrets: SecretStore;
+  "cloud-account": CloudAccount;
   "image-registry": ImageRegistry;
   scheduler: Scheduler;
   realtime: RealtimePublisher;
@@ -288,6 +295,14 @@ export const PluginModuleSpecifierSchema = z.string().min(1).max(256).refine(
 
 const JsonSettingSchema: z.ZodType<JsonObject> = z.record(z.string(), z.json());
 
+/**
+ * FIX-0518 (laptop only, owner-set): what one project's task sandbox may do beyond the install-wide rules. `sandboxModelHosts: "allow"` lets that project's sandboxes reach the model hosts (api.openai.com, api.anthropic.com, ...); absent or "deny" blocks
+ * them, which is the default. Read only from the owner's own config file: a project, a repository or an agent cannot set it.
+ */
+export const LocalProjectSettingsSchema = z.object({ sandboxModelHosts: z.enum(["allow", "deny"]).optional() }).strict();
+export type LocalProjectSettings = z.infer<typeof LocalProjectSettingsSchema>;
+export const LOCAL_PROJECT_SETTINGS_MAX = 200;
+
 export const PluginConfigEntrySchema = z.object({
   point: PluginPointSchema,
   name: PluginNameSchema,
@@ -323,8 +338,19 @@ export const PluginConfigSchema = z.object({
     api: z.enum(MODEL_REQUEST_FORMATS).optional(),
     id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@~-]{0,199}$/u, "a model id is plain characters, as the provider lists it (for OpenRouter, vendor/model)"),
   }).strict().optional(),
+  /**
+   * Lane H (plan v3.2 section 7.5, owner-set): the company rules service this install asks before a task starts, on approvals and for company values, and the public key(s) its answers are signed with
+   * (two while one is rotated). The hook can only make things stricter, and no answer is a refusal. Absent: no hook, and the install behaves exactly as before.
+   */
+  policyHook: PolicyHookSettingsSchema.optional(),
+  /**
+   * FIX-0518 (laptop only, owner-set): per-project settings, by project name, for example `{ "my-app": { "sandboxModelHosts": "allow" } }` for a project whose tests really call a model with the repository's own key. Absent: every project's sandbox is denied the model hosts.
+   * A cloud install ignores it.
+   */
+  projectSettings: z.record(z.string().regex(AGENTX_NAME_PATTERN, "a project name is lower-case letters, digits and hyphens"), LocalProjectSettingsSchema).optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {
+  if (config.projectSettings !== undefined && Object.keys(config.projectSettings).length > LOCAL_PROJECT_SETTINGS_MAX) context.addIssue({ code: "custom", path: ["projectSettings"], message: `at most ${String(LOCAL_PROJECT_SETTINGS_MAX)} projects` });
   const seen = new Set<string>();
   const one = new Set<string>();
   config.plugins.forEach((entry, index) => {

@@ -5,14 +5,14 @@
 // reads `agentx/staging/org-connectors/<company>/<id>`, the hosted product's own name, so no secret moves). The value is checked before any call: parts of plain characters joined by `/`, no
 // `.` or `..` part, so a reference can never name a secret outside the prefix. Other kinds (`env`, `file`, `key`) answer `undefined`, as the port says.
 //
-// Company scope: a value whose first part is one of `companyPaths` (`org-connectors`, `org-hooks`) names a company's own secret, and its second part must be the company of the call, or the read
-// is refused before AWS is asked. IAM is the second fence: a deployment that serves many companies gives `clientFor(companyId)` a client signed by a session that can reach only that company's
+// Company scope: a value whose first part is one of `companyPaths` (`org-connectors`, `org-hooks`, `org-test-accounts`) names a company's own secret, and its second part must be the company of the call, or the read
+// answers missing before AWS is asked. IAM is the second fence: a deployment that serves many companies gives `clientFor(companyId)` a client signed by a session that can reach only that company's
 // secrets (the hosted product tags an AssumeRole session with the company).
 //
 // Read on every call (a rotation takes effect at once), never cached. A value is never logged and never put in an error: every refusal is a fixed `SecretsManagerSecretError` sentence (safe to show), and
 // Secrets Manager's own error text (it can quote the secret's name or ARN) is never passed on.
 import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
-import { SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
+import { OrgIdSchema, SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
 
 /**
  * A refusal with a FIXED sentence: it never quotes a reference's value, a secret's name or value, or the service's own words, so it is safe to show. (Code's broker shows it as its own
@@ -42,18 +42,21 @@ export interface SecretsManagerSecretStoreOptions {
   clientFor: (companyId: string) => SecretsManagerClientLike | Promise<SecretsManagerClientLike>;
   /** First parts that name a company's own secrets (`org-connectors`): the next part must be the company of the call. */
   companyPaths?: readonly string[];
+  /** Legacy names outside companyPaths belong only to this company; with companyPaths set and no owner, refuse them. */
+  unscopedNamesBelongTo?: string;
 }
 
 const invalid = (): SecretsManagerSecretError => new SecretsManagerSecretError("the secret reference is not valid");
 
 /** The value of an `awsSecret` reference is a relative name: parts joined by single slashes, no `.` or `..` part. */
 export function isAwsSecretName(value: string): boolean {
-  if (value.length === 0 || value.length > AWS_SECRET_NAME_MAX) return false;
+  if (typeof value !== "string" || value.length === 0 || value.length > AWS_SECRET_NAME_MAX) return false;
   return value.split("/").every((part) => part !== "." && part !== ".." && PART.test(part));
 }
 
 export function createSecretsManagerSecretStore(options: SecretsManagerSecretStoreOptions): SecretStore {
   if (!PREFIX.test(options.namePrefix) || options.namePrefix.split("/").some((part) => part === "." || part === "..")) throw new SecretsManagerSecretError("the secret name prefix is parts of plain characters, each ending with /");
+  if (options.unscopedNamesBelongTo !== undefined && !OrgIdSchema.safeParse(options.unscopedNamesBelongTo).success) throw invalid();
   const companyPaths = new Set(options.companyPaths ?? []);
   for (const path of companyPaths) if (!PART.test(path) || path === "." || path === "..") throw new SecretsManagerSecretError("a company path is one plain part of a secret name");
   return {
@@ -64,7 +67,13 @@ export function createSecretsManagerSecretStore(options: SecretsManagerSecretSto
       if (kind !== AWS_SECRET_REF_KIND) return undefined;
       if (!isAwsSecretName(value) || options.namePrefix.length + value.length > AWS_SECRET_NAME_MAX) throw invalid();
       const parts = value.split("/");
-      if (companyPaths.has(parts[0]!) && (parts.length < 3 || parts[1] !== companyId)) throw new SecretsManagerSecretError("the secret reference names a secret of another company");
+      if (options.companyPaths !== undefined) {
+        if (!OrgIdSchema.safeParse(companyId).success) throw invalid();
+        if (companyPaths.has(parts[0]!)) {
+          if (parts.length < 3 || !OrgIdSchema.safeParse(parts[1]).success) throw invalid();
+          if (parts[1] !== companyId) return undefined;
+        } else if (companyId !== options.unscopedNamesBelongTo) return undefined;
+      }
       let found: { SecretString?: string | undefined; SecretBinary?: Uint8Array | undefined };
       try {
         const client = await options.clientFor(companyId);
@@ -86,3 +95,7 @@ export function createSecretsManagerSecretStore(options: SecretsManagerSecretSto
     },
   };
 }
+
+export { COMPANY_SECRET_PATHS, COMPANY_SECRET_TAG_KEY, companyOfSecretName } from "./company-names.js";
+export { createCompanyClientFactory } from "./tagged-session.js";
+export { createSecretsManagerConnectionSecrets } from "./connection-secrets.js";

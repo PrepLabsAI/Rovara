@@ -52,7 +52,7 @@ describe("starting a task", () => {
     // The dispatch message went out with the start; it carries no secret, only the ids the dispatcher reads.
     const queue = await h.queues.queue("task-dispatch");
     const [message] = await queue.receive();
-    expect(message?.body).toEqual({ v: 1, workspaceId: task.workspaceId, operationId: prepare!.id });
+    expect(message?.body).toEqual({ v: 1, companyId: COMPANY, workspaceId: task.workspaceId, operationId: prepare!.id });
     expect(h.audit.map((event) => event.action)).toEqual(["task.started"]);
     expect(await h.store.get({ pk: `AUDIT#${COMPANY}`, sk: `EVENT#task.started:${task.taskId}` })).toBeDefined();
   });

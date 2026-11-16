@@ -1,0 +1,327 @@
+{
+  "contract": "policy-hook",
+  "version": 1,
+  "constants": {
+    "alg": "RS256",
+    "questionTyp": "rovara-policy-question+jwt",
+    "answerTyp": "rovara-policy-answer+jwt",
+    "questionLifetimeSeconds": 360,
+    "answerMaxLifetimeSeconds": 300,
+    "clockSkewSeconds": 30,
+    "maxBodyBytes": 8192,
+    "pinnedKeysMax": 2,
+    "requestTimeoutSeconds": 5,
+    "startHoldSeconds": 300,
+    "valuesGraceSeconds": 300
+  },
+  "transport": {
+    "method": "POST",
+    "contentType": "application/jose",
+    "body": "one compact JWS, header exactly alg, typ, kid"
+  },
+  "question": {
+    "claims": [
+      {
+        "name": "v",
+        "type": "1",
+        "required": true
+      },
+      {
+        "name": "iss",
+        "type": "Issuer",
+        "required": true
+      },
+      {
+        "name": "rid",
+        "type": "UUID",
+        "required": true
+      },
+      {
+        "name": "iat",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "name": "exp",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "name": "kind",
+        "type": "start|decide|values",
+        "required": true
+      },
+      {
+        "name": "q",
+        "type": "object",
+        "required": true
+      }
+    ],
+    "kinds": {
+      "start": [
+        {
+          "name": "cid",
+          "type": "OrgId",
+          "required": true
+        },
+        {
+          "name": "pid",
+          "type": "ProjectName",
+          "required": true
+        },
+        {
+          "name": "per",
+          "type": "PersonId",
+          "required": false
+        },
+        {
+          "name": "tid",
+          "type": "TaskId",
+          "required": true
+        },
+        {
+          "name": "path",
+          "type": "QUICK|FULL",
+          "required": false
+        },
+        {
+          "name": "estUsdMicros",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "estTokens",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "decide": [
+        {
+          "name": "cid",
+          "type": "OrgId",
+          "required": true
+        },
+        {
+          "name": "pid",
+          "type": "ProjectName",
+          "required": false
+        },
+        {
+          "name": "stage",
+          "type": "requirement|verdict",
+          "required": true
+        },
+        {
+          "name": "what",
+          "type": "DecisionKind",
+          "required": true
+        },
+        {
+          "name": "styp",
+          "type": "DecisionKind",
+          "required": true
+        },
+        {
+          "name": "sid",
+          "type": "TaskId",
+          "required": true
+        },
+        {
+          "name": "risk",
+          "type": "low|medium|high",
+          "required": false
+        },
+        {
+          "name": "by",
+          "type": "PersonId",
+          "required": false
+        },
+        {
+          "name": "per",
+          "type": "PersonId",
+          "required": false
+        },
+        {
+          "name": "auth",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "values": [
+        {
+          "name": "cid",
+          "type": "OrgId",
+          "required": true
+        },
+        {
+          "name": "pid",
+          "type": "ProjectName",
+          "required": false
+        }
+      ]
+    }
+  },
+  "answer": {
+    "claims": [
+      {
+        "name": "v",
+        "type": "1",
+        "required": true
+      },
+      {
+        "name": "rid",
+        "type": "UUID",
+        "required": true
+      },
+      {
+        "name": "qh",
+        "type": "base64url SHA-256 of the question JWS text",
+        "required": true
+      },
+      {
+        "name": "iat",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "name": "exp",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "name": "kind",
+        "type": "start|decide|values",
+        "required": true
+      },
+      {
+        "name": "a",
+        "type": "object",
+        "required": true
+      }
+    ],
+    "kinds": {
+      "start": [
+        {
+          "name": "allow",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "code",
+          "type": "Code",
+          "required": false
+        }
+      ],
+      "decide": [
+        {
+          "name": "allow",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "minApprovers",
+          "type": "integer 1..10",
+          "required": true
+        },
+        {
+          "name": "secondPerson",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "selfApproval",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "signInMaxAgeSeconds",
+          "type": "integer 0..2592000",
+          "required": false
+        }
+      ],
+      "values": [
+        {
+          "name": "locks",
+          "type": "PolicyValues",
+          "required": true
+        }
+      ]
+    }
+  },
+  "patterns": {
+    "OrgId": "^org_[0-9a-z]{20}$",
+    "ProjectName": "^[a-z][a-z0-9-]{0,62}$",
+    "PersonId": "^[A-Za-z0-9_.:@+-]{1,128}$",
+    "TaskId": "^[A-Za-z0-9_.:-]{1,128}$",
+    "DecisionKind": "^[a-z][a-z0-9_.-]{0,63}$",
+    "Code": "^[a-z][a-z0-9_]{0,63}$",
+    "Kid": "^[A-Za-z0-9_-]{1,64}$",
+    "Issuer": "^https:\\/\\/[^\\s]{1,504}$"
+  },
+  "words": {
+    "startNoAnswer": "the company rules service did not answer; nothing has started",
+    "startRefused": "the company rules do not allow this task to start",
+    "decideNoAnswer": "the company rules service did not answer; nothing was decided",
+    "decideRefused": "the company rules do not allow this decision",
+    "valuesNoAnswer": "the company rules service did not answer; the strictest settings apply"
+  },
+  "testVector": {
+    "question": {
+      "header": {
+        "alg": "RS256",
+        "typ": "rovara-policy-question+jwt",
+        "kid": "install-key-1"
+      },
+      "claims": {
+        "v": 1,
+        "iss": "https://install-a.example/v1/auth",
+        "rid": "11111111-1111-4111-8111-111111111111",
+        "iat": 1800000000,
+        "exp": 1800000360,
+        "kind": "start",
+        "q": {
+          "cid": "org_aaaaaaaaaaaaaaaaaaaa",
+          "pid": "web",
+          "per": "person-1",
+          "tid": "task_1",
+          "path": "FULL",
+          "estUsdMicros": 2000000
+        }
+      }
+    },
+    "answer": {
+      "header": {
+        "alg": "RS256",
+        "typ": "rovara-policy-answer+jwt",
+        "kid": "hook-key-1"
+      },
+      "claims": {
+        "v": 1,
+        "rid": "11111111-1111-4111-8111-111111111111",
+        "qh": "<computed>",
+        "iat": 1800000001,
+        "exp": 1800000061,
+        "kind": "start",
+        "a": {
+          "allow": true
+        }
+      }
+    },
+    "accepted": "the answer above, signed by a pinned key, read at iat + 10",
+    "noAnswer": [
+      "unsigned",
+      "signedByOtherKey",
+      "expired",
+      "otherRequestId",
+      "otherQuestionHash",
+      "otherKind",
+      "unknownClaim",
+      "lifetimeOver300",
+      "typChanged",
+      "algNone",
+      "kidNotPinned",
+      "extraHeaderField",
+      "bodyOver8192"
+    ]
+  }
+}

@@ -11,6 +11,7 @@ import {
 } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { PLAN_REVISION_REQUEST, critiqueModelOf, planCriticBlock, planCritiquePrompt } from "../../rovara-code/critic.js";
+import { recordCatch } from "../decisions/change-tier.js";
 import { textReaderOf } from "../build-step/plan-input.js";
 import { locate, settled, type RowRef } from "../build-step/start.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -175,12 +176,14 @@ export async function recordCritiqued(
     if (read === undefined || !read.ok) { await move(closePlanCritique(workflow, { expectedRevision: workflow.revision, status: "done", now })); return; }
     // The model the install's rule chose for the check (kept on the operation), else the install's one model, which also wrote the plan.
     const model: ModelIdentifier = operation.modelChoice?.model ?? (await deps.installModel?.()) ?? { provider: "unknown", modelId: "unknown" };
-    const next = submitPlanCritique(workflow, {
+    const submitted = submitPlanCritique(workflow, {
       expectedRevision: workflow.revision, now,
       critique: { verdict: read.verdict, points: read.points, model: critiqueModelOf(model) },
       // With one model for every step the plan was checked by the model that wrote it, and the plan says so; a check the rule gave a model of its own says whether it is the planner's.
       ...(operation.modelChoice === undefined || operation.modelChoice.sameModelAsChecked === true ? { sameModelAsPlanner: true as const } : {}),
     });
+    // The catch counters: how many points the plan check made, and how many block.
+    const next = { ...submitted, flow: recordCatch(submitted.flow, { step: "plan_check", findings: read.points.length, mustFix: read.points.filter((point) => point.severity === "blocking").length }) };
     // A blocking point sends the plan back to the planner once, by a row of its own; anything else is the person's now.
     const revise = next.stage === "PLAN" && next.state === "READY";
     if (await move(next, revise ? [dispatchRowItem(deps, task.taskId, next.revision, "CRITIC_REPLAN", now)] : []) && revise) {

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
+import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -59,6 +60,10 @@ function appControlPlane(env: string): TemplateJson {
 
 function parentRemainderDigest(template: TemplateJson): string {
   const remainder = structuredClone(template);
+  // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
+  // the legacy template must carry none of it, so legacy stays byte-identical.
+  if (remainder.Parameters?.CoreEngine !== undefined) withoutCoreEngine(remainder);
+  else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
   // named parameter and its corresponding Broker environment reference from the proof-only hash.
@@ -189,37 +194,39 @@ describe("the named TEST proof-only installation gate", () => {
       const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
       expect(variables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
     }
-    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy has no workflow gate parameter").toBeUndefined();
+    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
     expect(legacyBrokers, "legacy has its Broker Lambda").toHaveLength(1);
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy has no workflow flag").toBeUndefined();
+    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
+    // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "6bc40289bac6c96a3715eca86ac0c644e117d75c69da37b9482952b180ae2754",
-        withoutRoute: "24604f158cff3026bb8d1a3313a41b87541b8d56fcf619939cc8962877e1592c",
+        withRoute: "937f39e337701ecc8fa3fe612d801307303ced6bd589cec07f3c7833b4b584eb",
+        withoutRoute: "75541acd8c1e0e584837fc76df3d3e0dd14b1c0bdb6590e88baf4dfa1d66c23d",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "c2d76013237234ef6116bf832bf90db9076d4f0d9b2a51195b464463b24ac34b",
-        withoutRoute: "732f119b5ebabbc3c1c113f8c8404b895c5d266743ea0abd0b88fe4aca430253",
+        withRoute: "9ad290085328a9a8f8450e579b26caa1247b62383253217cb9fed95e41c5ee11",
+        withoutRoute: "c223ec7c2fca6cf7f3d9ead8cd5b76f958229bab4957a808fe5c752b2d6258dd",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "c568e6cf1ef9c004d1081fd67f89325ce2c5473e670a41af0ef3e3649f146015",
-        withoutRoute: "b123c1f0d3891cef044a15ee16ce0a48c27e2620333c4d4275a4a395129aeb23",
+        withRoute: "c9cd4a7890c9d0502fa0df7e5e06a28f87c0dba8de4fa439db39c7099874c201",
+        withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
       },
     ] as const;
+    expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
+    expect(foreign.Parameters?.CoreEngine, "foreign has the core engine switch").toBeDefined();
+    expect(legacy.Parameters?.CoreEngine, "legacy has no core engine switch").toBeUndefined();
     for (const { label, template, withRoute, withoutRoute } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
-      if (label === "legacy") {
-        expect(creatorChecks, "legacy has no new sign-in creator identity fence").toHaveLength(0);
-      } else {
+      {
         expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);
         expect(creatorChecks[0]!.statement, `${label} checks only the exact sign-in table key namespace`).toEqual({
           Action: "dynamodb:ConditionCheckItem",

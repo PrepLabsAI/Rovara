@@ -1,0 +1,32 @@
+{
+  "format": "junit",
+  "total": 4,
+  "passed": 1,
+  "failed": 1,
+  "skipped": 1,
+  "errored": 1,
+  "tests": [
+    {
+      "file": "tests/cart.py",
+      "name": "same",
+      "status": "passed",
+      "classname": "tests.cart",
+      "fileGiven": true,
+      "durationMs": 12
+    },
+    {
+      "file": "tests/cart.py",
+      "name": "same",
+      "status": "failed",
+      "fileGiven": true
+    },
+    {
+      "name": "skip",
+      "status": "skipped"
+    },
+    {
+      "name": "load",
+      "status": "errored"
+    }
+  ]
+}

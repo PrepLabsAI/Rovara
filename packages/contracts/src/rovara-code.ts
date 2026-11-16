@@ -3,6 +3,7 @@
 // digest) lives in `rovara-code-node.ts`.
 import { z } from "zod";
 import { IntentDesignSchema } from "./design-review.js";
+import { FindingScaleSchema } from "./task-flow-tier.js";
 import { OrgIdSchema, SessionBindingSchema, SessionIdSchema } from "./browser-ids.js";
 import { forwardReader } from "./forward-reader.js";
 import { CommitIdSchema } from "./plugins/common.js";
@@ -252,7 +253,7 @@ export const PlanCritiqueSchema = z
   .object({
     verdict: z.enum(["ok", "revise"]),
     points: z
-      .array(z.object({ id: z.string().min(1).max(32), severity: z.enum(["blocking", "note"]), text: z.string().min(1).max(500), claimId: z.string().min(1).max(64).optional() }).strict())
+      .array(z.object({ id: z.string().min(1).max(32), severity: z.enum(["blocking", "note"]), text: z.string().min(1).max(500), claimId: z.string().min(1).max(64).optional(), scale: FindingScaleSchema.optional() }).strict())
       .max(PLAN_CRITIC_POINTS_MAX),
     // A stored critique is read leniently: a company name this build does not know reads as "other" rather than failing the whole workflow snapshot (a rollback must never strand a task).
     model: ModelIdentifierSchema.extend({ company: z.preprocess((value) => (typeof value === "string" && !(MODEL_COMPANIES as readonly string[]).includes(value) ? "other" : value), ModelCompanySchema) }).strict(),
@@ -430,10 +431,13 @@ export function feedbackFixedReply(commit: string): string {
 export const CI_STATE_WORDS = {
   none: "No CI on this repository",
   unreadable: "CI not readable: grant checks read, or set this project to 'do not read CI'",
+  /** TE-B5: the base branch requires a check that no app has reported on this head, so it can never pass: the repository's settings name a check nothing runs. */
+  required_missing: "A required check has not reported",
 } as const;
 /** The evidence level (`EVIDENCE_LEVELS`) a CI state stands for on the pull request's first line: `their_ci` when checks reported, `no_ci` and `ci_not_readable` for the two honest states; `undefined` while the checks run. */
-export function ciEvidenceLevel(ci: "none" | "pending" | "passing" | "failing" | "unreadable"): "their_ci" | "no_ci" | "ci_not_readable" | undefined {
-  return ci === "none" ? "no_ci" : ci === "unreadable" ? "ci_not_readable" : ci === "pending" ? undefined : "their_ci";
+export function ciEvidenceLevel(ci: "none" | "pending" | "passing" | "failing" | "unreadable" | "required_missing"): "their_ci" | "no_ci" | "ci_not_readable" | undefined {
+  // `required_missing` has no level of its own in the pack's closed list (TE-A2's `EVIDENCE_LEVELS`): its words come from `CI_STATE_WORDS`, and the first line says nothing better than "waiting" until the check reports.
+  return ci === "none" ? "no_ci" : ci === "unreadable" ? "ci_not_readable" : ci === "pending" || ci === "required_missing" ? undefined : "their_ci";
 }
 
 /** The separate item that holds what GitHub says about one pull request of a task (`DEVTASK#<taskId>` / `MERGE_TRACKING#<repositoryId>#<number>`). `decisionDigest` hashes every field but `observedAt`, `version` and itself. */
@@ -448,11 +452,15 @@ export const MergeTrackingItemSchema = z
     draft: z.boolean(),
     state: z.enum(["open", "closed", "merged"]),
     baseBranch: z.string().min(1).max(255),
-    ci: z.enum(["none", "pending", "passing", "failing", "unreadable"]),
+    ci: z.enum(["none", "pending", "passing", "failing", "unreadable", "required_missing"]),
     ciBasis: z.enum(["required", "all_checks"]),
     checksEverSeen: z.boolean(),
     /** TE-B2: since when the head's checks could not be read (cleared when they read, or the head moves). Absent on every row written before: it reads as "not unreadable". */
     ciUnreadableSince: InstantSchema.optional(),
+    /** TE-B5: the required checks no app has reported on this head (at most ten, plain, as the base branch's settings name them), while `ci` is `required_missing`. Absent on every row written before. */
+    /** TE-B5 (L1): since when a head a PERSON pushed has had a required check unreported (its own clock; Rovara's heads use `lastRovaraPushAt`). Absent on every row written before. */
+    ciMissingSince: InstantSchema.optional(),
+    ciMissingChecks: z.array(z.string().min(1).max(120)).max(10).optional(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),
     approval: z.object({ hostUserId: z.string().min(1).max(200), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
@@ -539,6 +547,8 @@ export const MERGE_NOT_READY_MESSAGES = {
   draftNoCi: `${CI_STATE_WORDS.none}, so nothing checked this code. The pull request is still a draft: mark it ready on the code host when you are happy with it.`,
   /** TE-B2: the checks could not be read for a whole wait. */
   ciNotReadable: `${CI_STATE_WORDS.unreadable}.`,
+  /** TE-B5: a required check has not reported. */
+  requiredMissing: `${CI_STATE_WORDS.required_missing}: the base branch requires a check that nothing has run on this code. Add it, or ask an admin to take it off the branch's required list.`,
   notOpen: "The pull request isn't open.",
   changing: "I'm still changing this pull request.",
   repository: (repository: string, reason: string): string => `${repository}'s pull request isn't ready yet: ${reason}`,

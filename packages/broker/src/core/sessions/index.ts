@@ -15,3 +15,4 @@ export * from "./ask.js";
 export * from "./peek.js";
 export * from "./followers.js";
 export * from "./access.js";
+export * from "./live-steer-revise.js";
