@@ -54,8 +54,6 @@ export interface ModelSandboxEnvInput {
   rows: readonly (ModelCatalogRow | CompanyGatewayRow)[];
   /** The model helper's address (.9 of the helper network): the metadata variables name it. */
   helperIp: string;
-  /** Enable the Bedrock product endpoint for the selected Bedrock row. Absent/false leaves AWS variables untouched. */
-  productBedrock?: boolean;
   /** The connected Vertex project and location: required when a Vertex row is among the rows. */
   vertex?: { projectId: string; location: string };
 }
@@ -76,20 +74,6 @@ export function buildModelSandboxEnvironment(input: ModelSandboxEnvInput): Servi
   };
   for (const row of input.rows) {
     if (typeof row.id !== "string" || !ROW_ID.test(row.id)) refuse();
-    if (row.family === "bedrock") {
-      if (input.productBedrock === true) {
-        // Fixed worker-owned names only: catalog redirects still cannot write arbitrary AWS variables.
-        for (const [name, value] of [
-          ["AWS_ENDPOINT_URL_BEDROCK_RUNTIME", `${MODEL_HELPER_BASE_URL}/p/${row.id}`],
-          ["AWS_ACCESS_KEY_ID", MODEL_DUMMY_KEY], ["AWS_SECRET_ACCESS_KEY", MODEL_DUMMY_KEY],
-        ] as const) {
-          const existing = values.get(name);
-          if (existing !== undefined && existing !== value) refuse();
-          values.set(name, value);
-        }
-      }
-      continue;
-    }
     if (!("redirect" in row)) {
       const shape = GATEWAY_VARIABLES[row.family];
       if (shape === undefined) refuse();
