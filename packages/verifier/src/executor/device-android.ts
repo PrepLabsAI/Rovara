@@ -34,8 +34,6 @@ export function androidEmulatorArgs(options: { avd: string; port: number; verbos
   if (!NAME.test(options.avd) || !Number.isInteger(options.port) || options.port < 5554 || options.port > 5584 || options.port % 2 !== 0) throw new Error("the emulator settings are not valid");
   return ["-avd", options.avd, "-port", String(options.port), "-read-only", "-no-snapshot", "-no-window", "-no-audio", "-no-boot-anim", "-no-metrics", "-gpu", "swiftshader_indirect", "-accel", "on",
     "-camera-back", "none", "-camera-front", "none", "-netdelay", "none", "-netspeed", "full", "-memory", "2048", "-cores", "2",
-    // The data partition, in MB: this emulator ignores the AVD's disk.dataPartition.size and wants 7.2 GB free for its default 6 GB one (the container's /tmp has 3 GB), so 768 MB is asked for here.
-    "-partition-size", "768",
     // Only for the CI test's diagnostics (the entry program turns them on on request): what the emulator says while it starts.
     ...(options.verbose === true ? ["-verbose", "-debug-init"] : [])];
 }

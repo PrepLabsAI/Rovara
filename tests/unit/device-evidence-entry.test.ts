@@ -7,10 +7,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEVICE_EVIDENCE_RUN_MS, DEVICE_EVIDENCE_STEP_MS, deviceEvidenceCheck, deviceEvidenceLines, type DeviceEvidenceOutcome } from "../../packages/contracts/src/device-evidence.js";
 import { checkKindInfo } from "../../packages/contracts/src/check-kinds.js";
-import { DEVICE_ENV, emulatorProbes, prepareWritableAvd, runDevicePlan } from "../../packages/verifier/src/executor/device-evidence-entry.js";
+import { DEVICE_ENV, prepareWritableAvd, runDevicePlan } from "../../packages/verifier/src/executor/device-evidence-entry.js";
 import { decodeDeviceExecutorPlan, encodeDeviceExecutorOutput, encodeDeviceExecutorPlan, parseDeviceExecutorOutput, type DeviceExecutorPlanInput } from "../../packages/verifier/src/host/device-executor.js";
 import { decodeJpeg } from "../support/device-jpeg-decode.js";
-import { scriptedPort, answer, fakeAndroid, rawScreencap, type FakeAndroidScript } from "../support/device-command-fake.js";
+import { answer, fakeAndroid, rawScreencap, type FakeAndroidScript } from "../support/device-command-fake.js";
 
 const W = 96;
 const H = 64;
@@ -143,23 +143,5 @@ describe("the AVD the emulator starts from", () => {
     expect(() => { accessSync(join(to, "rovara.avd"), constants.W_OK); }).not.toThrow();
     expect(readFileSync(join(from, "rovara.ini"), "utf8")).toBe("path=/opt/android-avd/rovara.avd\n");
     expect(DEVICE_ENV.ANDROID_AVD_HOME).toBe("/tmp/rovara-avd");
-  });
-});
-
-describe("the CI diagnostics' emulator probes", () => {
-  it("start the emulator three times on throw-away copies of the AVD with one setting changed each, say how each ended, and leave nothing behind", async () => {
-    const root = mkdtempSync(join(tmpdir(), "rovara-probe-test-"));
-    mkdirSync(join(root, "rovara.avd"), { recursive: true });
-    writeFileSync(join(root, "rovara.avd", "config.ini"), "x=1\n");
-    const { port, runs } = scriptedPort((file) => (file === "/bin/df" ? answer("Filesystem 1M-blocks tmpfs 3072 1 3070") : answer("DEBUG | a FATAL | Not enough space. need 3686.40 MB.", 1)));
-    const said: string[] = [];
-    await emulatorProbes(port, (line) => said.push(line), root);
-    const emulatorRuns = runs.filter((row) => row.file.endsWith("/emulator"));
-    expect(emulatorRuns).toHaveLength(3);
-    expect(emulatorRuns.map((row) => [row.args[row.args.indexOf("-memory") + 1], row.args[row.args.indexOf("-partition-size") + 1]])).toEqual([["2048", "768"], ["1024", "768"], ["2048", "256"]]);
-    expect(emulatorRuns.every((row) => row.options.env?.["ANDROID_AVD_HOME"]?.startsWith("/tmp/rovara-probe-"))).toBe(true);
-    expect(said[0]).toContain("tmpfs 3072");
-    expect(said[1]).toBe("as-run: exit 1 | FATAL | Not enough space. need 3686.40 MB.");
-    expect(said).toHaveLength(4);
   });
 });
