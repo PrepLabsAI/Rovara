@@ -12,8 +12,8 @@ import { requireOperation } from "../../../packages/broker/src/aws/cancellation.
 import { requalifyDrainStatus } from "../../../packages/broker/src/e2e/requalify-hold.js";
 import { DRAIN_FIXTURE_NOW, drainFixtureRows, drainIamClient } from "../../support/drain-iam-client.js";
 
-// ANSWER-2: flip this one line when the E2 follow-up guards all three direct readers.
-const LEGACY_CORE_READERS_GUARDED = false;
+// ANSWER-2: flipped by T1 round 7 (2026-11-16): the workspace pointer routes all three direct readers to the core engine, so each refuses (NOT_FOUND).
+const LEGACY_CORE_READERS_GUARDED = true;
 
 let actionsModule: { createDeveloperTaskActions(input: never): DeveloperTaskActions; processGithubWorkflowEvent: typeof processGithubWorkflowEvent };
 beforeAll(async () => {
@@ -112,7 +112,9 @@ describe("T1 Part 0 AWS reader boundary", () => {
     // Q4 reproduction, NOT a passing isolation guarantee. The desired count failed before pinning this gap.
     expect(await requalifyDrainStatus({ documentClient: scoped.documentClient, tableName: "state" }, DRAIN_FIXTURE_NOW))
       .toEqual({ drained: true, applicationRounds: 0, setupRuns: 0 });
-    expect(scoped.requests.find(request => request.indexName === "bySessionState")?.attributes).toEqual(["workspaceId"]);
+    // 4f604a5ee (T1 follow-up) also reads each session's company, so the drain can see core operations under company keys; this
+    // fixture's sessions carry no company and no core company mark, so the gap above still reproduces for it.
+    expect(scoped.requests.find(request => request.indexName === "bySessionState")?.attributes).toEqual(["workspaceId", "companyId"]);
   });
 });
 

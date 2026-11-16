@@ -2371,7 +2371,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     const rerun = await h.nextJob(workspaceId, seen);
     // The rerun is told the owner's recipe (and only the recipe), and its operation needs a worker that lists the feature.
     expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe } });
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).toContain(BROWSER_EVIDENCE_FEATURE);
     // The worker uploads its screenshots in chunks (init, chunk, finalize), as `callback-client` does.
     const jpeg = (seed: string) => { const bytes = new Uint8Array(70_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
@@ -2431,7 +2431,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
     const rerun = await h.nextJob(workspaceId, seen);
     expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", browserEvidence: recipe } });
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).toEqual(expect.arrayContaining([BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE]));
     const jpeg = (seed: string) => { const bytes = new Uint8Array(70_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
     const webm = (seed: string) => { const bytes = new Uint8Array(90_000); bytes.set([0x1a, 0x45, 0xdf, 0xa3]); bytes.fill(seed.charCodeAt(0), 4); return bytes; };
@@ -2486,7 +2486,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await older.callback(o.coding, "result", oFailing);
     await older.api(`/v1/dev/tasks/${o.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
     await older.nextJob(o.workspaceId, o.seen).catch(() => undefined);
-    const operations = await older.runtime.registry.require("storage").query({ pk: `WORKSPACE#${o.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    const operations = await older.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, o.workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } });
     expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("this worker is too old to run this step; upgrade it");
   });
 
@@ -2501,7 +2501,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await plain.api(`/v1/dev/tasks/${t.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
     const rerun = await plain.nextJob(t.workspaceId, t.seen);
     expect(rerun.payload).not.toHaveProperty("browserEvidence");
-    const operation = (await plain.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await plain.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).not.toContain(BROWSER_EVIDENCE_FEATURE);
     // A recipe without an executor image on this machine is not asked for (the worker could not start the capture): the rerun is the plain one.
     const noImage = await launch({ host: true, readiness: true, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["src/**"] }] } } } } });
@@ -2526,7 +2526,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await older.callback(o.coding, "result", oFailing);
     await older.api(`/v1/dev/tasks/${o.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
     await older.nextJob(o.workspaceId, o.seen).catch(() => undefined);
-    const operations = await older.runtime.registry.require("storage").query({ pk: `WORKSPACE#${o.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    const operations = await older.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, o.workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } });
     expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("this worker is too old to run this step; upgrade it");
   });
 
@@ -2550,7 +2550,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
     const rerun = await h.nextJob(workspaceId, seen);
     expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe } });
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).toContain(BROWSER_EVIDENCE_FEATURE);
     // Nothing saved yet: the run is told so, in one fixed word. A run whose recipe has no sign-in (the coding step, which was not asked) cannot ask at all.
     const none = await h.callback(rerun, "browser-evidence-sign-in", { project: "other", ref: "be-other-signin" });
@@ -2563,7 +2563,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect(answer.body).toMatchObject({ status: "ready", values });
     // Nothing the run, the task or the company keeps holds a value: not the operation, not its payload, not the stored recipe, not the task's page, and not a line the run wrote.
     const storage = h.runtime.registry.require("storage");
-    const keep = JSON.stringify([operation, rerun.payload, (await storage.query({ pk: `WORKSPACE#${workspaceId}` })).items, (await storage.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#PROJECT#payments` })).items]);
+    const keep = JSON.stringify([operation, rerun.payload, (await storage.query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId) })).items, await storage.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }), (await storage.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#PROJECT#payments` })).items]);
     for (const text of [values.username, values.password, Buffer.from(values.password).toString("base64"), encodeURIComponent(values.password)]) expect(keep, text).not.toContain(text);
     expect(keep).toContain("be-payments-signin");
     // The run ends; a callback after it takes nothing more.

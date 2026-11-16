@@ -113,6 +113,13 @@ describe("T1 unmodified-base lifecycle goldens", () => {
       const normalized = JSON.parse(actual) as Golden;
       const strip = (pk: string) => pk.startsWith(`ORG#${h.deps.companyId}#WORKSPACE#`) || (pk.startsWith(`ORG#${h.deps.companyId}#IDEMPOTENCY#`) && !pk.endsWith("#DEVTASK")) ? pk.slice(`ORG#${h.deps.companyId}#`.length) : pk;
       for (const snapshot of normalized.snapshots) {
+        // T1 adds exactly one row the base never had: a new workspace's id-only discovery pointer (WORKSPACE#<id>/META,
+        // WORKSPACE_COMPANY_POINTER). It is asserted separately below; every other byte must still match the base capture.
+        if (mode !== "legacy") {
+          const pointer = (key: DocumentKey) => key.pk.startsWith("WORKSPACE#") && key.sk === "META";
+          snapshot.rows = snapshot.rows.filter((row) => !(pointer(row) && row.entityType === "WORKSPACE_COMPANY_POINTER"));
+          snapshot.keys = snapshot.keys.filter((key) => !pointer(key));
+        }
         for (const row of [...snapshot.keys, ...snapshot.rows]) row.pk = strip(row.pk);
         snapshot.keys.sort((a: DocumentKey, b: DocumentKey) => a.pk.localeCompare(b.pk) || a.sk.localeCompare(b.sk));
         snapshot.rows.sort((a: DocumentKey, b: DocumentKey) => a.pk.localeCompare(b.pk) || a.sk.localeCompare(b.sk));
@@ -120,7 +127,8 @@ describe("T1 unmodified-base lifecycle goldens", () => {
       }
       expect(`${JSON.stringify(normalizeT1Golden(normalized), null, 2)}\n`).toBe(`${JSON.stringify(base, null, 2)}\n`);
       for (const snapshot of snapshots) {
-        expect(snapshot.rows.some((row) => row.pk.startsWith("WORKSPACE#"))).toBe(mode === "legacy");
+        expect(snapshot.rows.some((row) => row.pk.startsWith("WORKSPACE#") && row.entityType !== "WORKSPACE_COMPANY_POINTER")).toBe(mode === "legacy");
+        expect(snapshot.rows.some((row) => row.entityType === "WORKSPACE_COMPANY_POINTER")).toBe(mode !== "legacy");
         expect(snapshot.rows.some((row) => row.pk.startsWith(`ORG#${h.deps.companyId}#WORKSPACE#`))).toBe(mode !== "legacy");
       }
     });
