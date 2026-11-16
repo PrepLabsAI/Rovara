@@ -59,7 +59,7 @@ describe("the page", () => {
     view = { ...view, recipe: { ...RECIPE, video: { fixtureDataOnly: true } } };
     const on = (await get(`${base}/browser-evidence/web`)).body;
     expect(on).toMatch(/<input type="checkbox" name="videoOn" value="yes" checked>/u);
-    for (const words of ["cannot be hidden", "before anything is painted over", "test data only", "not available when the app is behind a login", "any page of it shows what looks like a secret", "14 days", "download on the task page, behind your sign-in", "never put on GitHub"]) expect(on, words).toContain(words);
+    for (const words of ["cannot be hidden", "before anything is painted over", "test data only", "not available when the app is behind a login", "drops every video of the run if it finds any", "14 days", "download on the task page, behind your sign-in", "never put on GitHub"]) expect(on, words).toContain(words);
   });
 });
 

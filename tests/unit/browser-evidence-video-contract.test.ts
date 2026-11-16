@@ -220,6 +220,15 @@ describe("the download rule for videos", () => {
     expect(browserEvidenceServableVideos(other, digest)).toEqual([]);
   });
 
+  it("a video check that names a picture (or a recording over the cap) serves nothing", () => {
+    const pack = addBrowserEvidenceToPack(basePack(), outcome());
+    const digest = "a".repeat(64);
+    for (const bad of [ref("jpeg", "a"), ref("webm", "big", BROWSER_EVIDENCE_VIDEO_MAX_BYTES + 1)]) {
+      const tampered = { ...pack, checks: pack.checks.map((check) => (check.id === BROWSER_EVIDENCE_VIDEO_CHECK_ID ? { ...check, pairs: [{ id: "/checkout", after: bad }] } : check)) };
+      expect(browserEvidenceServableVideos(tampered, digest)).toEqual([]);
+    }
+  });
+
   it("the task page's panel lists the videos by route and digest, and has no `videos` key without one", () => {
     const panel = browserEvidencePanelOf(outcome());
     expect(panel?.videos).toEqual([{ route: "/checkout", sha256: ref("webm", "v").sha256 }, { route: "/settings", sha256: ref("webm", "w").sha256 }]);

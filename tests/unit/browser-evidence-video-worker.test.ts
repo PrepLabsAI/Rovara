@@ -92,8 +92,10 @@ describe("video on failure, in the worker", () => {
     const signedIn = { ...VIDEO_RECIPE, signIn: { path: "/login", usernameSelector: "#u", passwordSelector: "#p", submitSelector: "#go", successPath: "/home", credentialRef: "be-demo-signin" } } as BrowserEvidenceRecipe;
     const w = world();
     const answer: BrowserEvidenceSignInAnswer = { status: "ready", values: { username: ["tester", "ada", "7"].join("-"), password: ["pw", "Zq7", "Lm2", "Xv9"].join("-") } };
-    await collectBrowserEvidence(w.input({ recipe: signedIn, signIn: async () => answer }));
-    for (const row of plansOf(w.calls)) expect(row.plan?.video, row.side).toBeUndefined();
+    const captured = await collectBrowserEvidence(w.input({ recipe: signedIn, signIn: async () => answer }));
+    // The recipe does not read (the pair is refused whole), so nothing runs at all: no container, no recording.
+    expect(captured.notRun).toBe("no_recipe");
+    expect(w.calls).toEqual([]);
   });
 
   it("keeps the video of a page that fails on the candidate (and only the candidate), and the upload carries it", async () => {

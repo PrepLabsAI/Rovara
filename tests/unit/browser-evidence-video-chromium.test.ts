@@ -84,7 +84,7 @@ describe.skipIf(!haveChromium)("browser evidence video on failure in a real Chro
   // A screenshot of these pages is masked, so it is shown; a RECORDING of them is not masked, so they are not fixture-only pages and no video of the run is kept.
   it.each([
     ["an email address in the page's text (the scrub rewrote it)", "/email-a"],
-    ["an element the app itself marks as private", "/masked-a"],
+    ["an element the app itself marks as private", "/private-marker"],
     ["an email address in a field", "/signin"],
   ])("a healthy page with %s takes the video of a failed page with it, though its own picture is shown", async (_name, leaky) => {
     const port = await freePort();
@@ -106,6 +106,33 @@ describe.skipIf(!haveChromium)("browser evidence video on failure in a real Chro
     // Positive control: the plain failure alone keeps its recording.
     const plain = await runBrowserEvidence({ ...base, routes: ["/regress"], driver: driverFor(await freePort()), video: true });
     expect((plain.routes[0] as { video?: unknown }).video).toBeDefined();
+  }, 180_000);
+
+  it("a page that did not load by any way but an HTTP error page of the app (here: sent to another origin) was never read, so no recording of it is kept, and its reason is said", async () => {
+    const port = await freePort();
+    const got = await runBrowserEvidence({ ...base, routes: ["/regress-away"], driver: driverFor(port), video: true });
+    expect(got.routes[0]).toEqual({ route: "/regress-away", status: "not_run", reason: "page_did_not_load", videoNotKept: "not_recorded" });
+  }, 120_000);
+
+  it("an app error page too big to read keeps no recording and takes the other videos with it", async () => {
+    const port = await freePort();
+    const got = await runBrowserEvidence({ ...base, routes: ["/regress", "/regress-bigerr"], driver: driverFor(port), video: true });
+    for (const route of ["/regress", "/regress-bigerr"]) expect(got.routes.find((entry) => entry.route === route), route).toMatchObject({ status: "not_run", reason: "page_did_not_load", videoNotKept: "withheld" });
+  }, 180_000);
+
+  it("a page too big to read that had already shown an address takes the video of a failed page with it (the rewrite is not lost to the size limit)", async () => {
+    const port = await freePort();
+    const got = await runBrowserEvidence({ ...base, routes: ["/regress", "/regress-big"], driver: driverFor(port), video: true });
+    expect(got.routes.find((entry) => entry.route === "/regress-big")).toMatchObject({ status: "not_run", reason: "capture_failed" });
+    expect(got.routes.find((entry) => entry.route === "/regress")).toMatchObject({ status: "not_run", reason: "page_did_not_load", videoNotKept: "withheld" });
+    expect((got.routes.find((entry) => entry.route === "/regress") as { video?: unknown }).video).toBeUndefined();
+  }, 180_000);
+
+  it("a region the owner's recipe paints over is real data by the owner's own word: a page that has one takes the video of a failed page with it; without that mask the same run keeps it", async () => {
+    const withMask = await runBrowserEvidence({ ...base, maskSelectors: [...base.maskSelectors, ".balance"], routes: ["/regress", "/balance"], driver: driverFor(await freePort()), video: true });
+    expect(withMask.routes.find((entry) => entry.route === "/regress")).toMatchObject({ videoNotKept: "withheld" });
+    const without = await runBrowserEvidence({ ...base, routes: ["/regress", "/balance"], driver: driverFor(await freePort()), video: true });
+    expect((without.routes.find((entry) => entry.route === "/regress") as { video?: unknown }).video).toBeDefined();
   }, 180_000);
 
   it("a page whose script never yields ends at its time, with the app stopped, and no recording of it is kept (its text was never read, so nothing says it held no secret)", async () => {
@@ -138,6 +165,18 @@ describe.skipIf(!haveChromium)("browser evidence video on failure in a real Chro
       expect(await driver.signIn({ timeoutMs: 15_000 })).toBe("ok");
       const answer = await driver.capture("after", "/regress", { maskSelectors: [...BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, "#email", "#password"], timeoutMs: 10_000, video: true });
       expect(answer.ok).toBe(false);
+      expect(Object.keys(answer)).not.toContain("video");
+      expect(Object.keys(answer)).not.toContain("videoNotKept");
+    } finally { await driver.stopApp("after"); }
+  }, 120_000);
+
+  it("a healthy page asked to record leaves no video and no reason on the answer (its recording is deleted unread)", async () => {
+    const port = await freePort();
+    const driver = driverFor(port);
+    expect(await driver.startApp("after", { timeoutMs: 20_000 })).toBe("ready");
+    try {
+      const answer = await driver.capture("after", "/regress-ok", { maskSelectors: [], timeoutMs: 10_000, video: true });
+      expect(answer.ok).toBe(true);
       expect(Object.keys(answer)).not.toContain("video");
       expect(Object.keys(answer)).not.toContain("videoNotKept");
     } finally { await driver.stopApp("after"); }

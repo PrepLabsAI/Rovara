@@ -114,6 +114,37 @@ createServer((request, response) => {
     response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
     return;
   }
+  // Slice 4: a candidate that sends the person to another origin (the driver aborts it: the navigation throws, so the page was never read), and one whose page holds an address and is far too big to scan.
+  if (url.pathname === "/regress-away") {
+    if (regress) { response.writeHead(303, { location: "http://other.example/profile" }); response.end(); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  if (url.pathname === "/regress-big") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(regress ? `<h1>Profile</h1><p>Signed in as ada@example.com</p>${"<i></i>".repeat(60_000)}` : `<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  // An app error page far too big to scan (no address in it): it was loaded, could not be read, so no recording of it is kept.
+  if (url.pathname === "/regress-bigerr") {
+    if (regress) { response.writeHead(500, { "content-type": "text/html; charset=utf-8" }); response.end(shell(`<h1>Error</h1>${"<i></i>".repeat(60_000)}`)); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  // A healthy page with only an element the app itself marks private (its text matches no mask).
+  if (url.pathname === "/private-marker") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Account</h1><div data-private>Ada</div>`));
+    return;
+  }
+  // A page with a region the owner's recipe paints over (`.balance`): in a picture it is hidden, in a recording it is not.
+  if (url.pathname === "/balance") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Account</h1><p class="balance">Balance on file</p>`));
+    return;
+  }
   // Slice 4: a candidate that breaks AND prints someone's address on its error page (the recording would show it): the video of this page, and of the whole run, is withheld.
   if (url.pathname === "/regress-leaky") {
     if (regress) { response.writeHead(500, { "content-type": "text/html; charset=utf-8" }); response.end(shell(`<h1>Error</h1><p>Could not load the account of ada@example.com</p>`)); return; }

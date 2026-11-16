@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page, type Video } from "playwright-core";
 import {
-  BROWSER_EVIDENCE_TEXT_MASK, BROWSER_EVIDENCE_TEXT_MASKS, BROWSER_EVIDENCE_TEXT_SCAN_MAX, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_SIZE, browserEvidenceSecretMasks, browserEvidenceVideoEligible, isBrowserEvidenceRoute, isWebm,
+  BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, BROWSER_EVIDENCE_TEXT_MASK, BROWSER_EVIDENCE_TEXT_MASKS, BROWSER_EVIDENCE_TEXT_SCAN_MAX, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_SIZE, browserEvidenceSecretMasks, browserEvidenceVideoEligible, isBrowserEvidenceRoute, isWebm,
   type BrowserEvidenceExecutorSignIn, type BrowserEvidenceSignInValues,
 } from "@agentx/contracts";
 import type { BrowserEvidenceCaptureAnswer, BrowserEvidenceDriver, BrowserEvidenceSide } from "./browser-evidence.js";
@@ -42,6 +42,8 @@ const PAGE_NODES_MAX = 50_000;
 const PAGE_CHARS_MAX = 2_000_000;
 /** Elements the app itself marks as private: a page with one is not a fixture-only page, so no recording of it is kept (the pictures paint these over; a recording cannot). */
 const PRIVATE_MARKERS = "[data-rovara-mask], [data-private]";
+/** The markers of one capture: those, and every mask selector the OWNER added to the recipe (the defaults, like `canvas`, are not: an owner who masks `.balance` has said that region holds real data, which a recording would show unmasked). */
+const markersOf = (maskSelectors: readonly string[]): string => [PRIVATE_MARKERS, ...maskSelectors.filter((selector) => !BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS.includes(selector))].join(", ");
 
 const pause = (milliseconds: number) => new Promise<void>((resolve) => { setTimeout(resolve, milliseconds); });
 
@@ -119,7 +121,7 @@ export async function startProjectApp(input: { command: string; cwd: string; por
 
 type PageArg = { masks: ReadonlyArray<{ source: string; flags: string; label?: boolean }>; mask: string; maxText: number; maxNodes: number; maxChars: number; verify: boolean; maskedSelector: string; markers: string };
 /** `changed` (scrub mode only): the page had text a mask rewrote. That is the proof that what the page showed before the scrub was not fixture data only: a recording of it would hold the raw text. */
-type PageVerdict = "clean" | "dirty" | "too_large" | "changed";
+type PageVerdict = "clean" | "dirty" | "too_large" | "changed" | "changed_too_large";
 
 /**
  * Runs IN THE PAGE (each frame). `verify: false` replaces every text mask in the text nodes (light DOM and open shadow roots), form values, placeholders and the title. `verify: true`
@@ -158,6 +160,8 @@ function maskPage(arg: PageArg): PageVerdict {
   let nodes = 0;
   let chars = 0;
   let changed = false;
+  // A page over the budget in scrub mode that had already rewritten something still says so (`changed_too_large`): the page is not photographed, but the run learns it was not fixture-only.
+  const tooBig = (): PageVerdict => (!arg.verify && changed ? "changed_too_large" : "too_large");
   const pending: unknown[] = [doc.documentElement];
   const roots: Array<{ root: Root; joined: string[] }> = [{ root: doc, joined: [] }];
   while (pending.length > 0) {
@@ -165,7 +169,7 @@ function maskPage(arg: PageArg): PageVerdict {
     const walker = doc.createTreeWalker(top, 5);
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
       nodes += 1;
-      if (nodes > arg.maxNodes) return "too_large";
+      if (nodes > arg.maxNodes) return tooBig();
       if (node.nodeType === 1) {
         const shadow = node.shadowRoot;
         if (shadow !== null && shadow !== undefined) { pending.push(shadow); roots.push({ root: shadow, joined: [] }); }
@@ -174,7 +178,7 @@ function maskPage(arg: PageArg): PageVerdict {
       if (unseen.has(node.parentNode?.nodeName ?? "")) continue;
       const text = node.nodeValue ?? "";
       chars += text.length;
-      if (chars > arg.maxChars) return "too_large";
+      if (chars > arg.maxChars) return tooBig();
       if (arg.verify) { if (hits(text)) return "dirty"; continue; }
       const out = scrub(text);
       if (out !== text) { node.nodeValue = out; changed = true; }
@@ -183,13 +187,13 @@ function maskPage(arg: PageArg): PageVerdict {
   for (const { root } of roots) {
     for (const field of Array.from(root.querySelectorAll("input, textarea"))) {
       nodes += 1;
-      if (nodes > arg.maxNodes) return "too_large";
+      if (nodes > arg.maxNodes) return tooBig();
       if (field.type === "hidden") continue;
       for (const key of ["value", "placeholder"] as const) {
         const text = field[key];
         if (typeof text !== "string" || text === "") continue;
         chars += text.length;
-        if (chars > arg.maxChars) return "too_large";
+        if (chars > arg.maxChars) return tooBig();
         if (arg.verify) { if (!masked(field) && hits(text)) return "dirty"; } else {
           // (Text inside an element the picture paints over still counts: a recording is not painted over.)
           const out = scrub(text);
@@ -203,10 +207,10 @@ function maskPage(arg: PageArg): PageVerdict {
   for (const { root } of roots) {
     for (const image of Array.from(root.querySelectorAll("img[alt], input[alt], area[alt]"))) {
       nodes += 1;
-      if (nodes > arg.maxNodes) return "too_large";
+      if (nodes > arg.maxNodes) return tooBig();
       const alt = image.getAttribute?.("alt") ?? "";
       chars += alt.length;
-      if (chars > arg.maxChars) return "too_large";
+      if (chars > arg.maxChars) return tooBig();
       if (alt === "") continue;
       if (arg.verify) { if (!masked(image) && hits(alt)) return "dirty"; continue; }
       const broken = image.complete === true && image.naturalWidth === 0;
@@ -220,7 +224,8 @@ function maskPage(arg: PageArg): PageVerdict {
     if (title !== doc.title) changed = true;
     doc.title = title;
     // An element the app itself marks as private (`data-private`, `data-rovara-mask`) is the app saying it shows private data: not a fixture-only page, whatever its text matches.
-    for (const { root } of roots) if (arg.markers !== "" && root.querySelectorAll(arg.markers).length > 0) changed = true;
+    // (A selector that cannot be read counts as a hit: fail closed.)
+    for (const { root } of roots) { try { if (arg.markers !== "" && root.querySelectorAll(arg.markers).length > 0) changed = true; } catch { changed = true; } }
     return changed ? "changed" : "clean";
   }
   if (hits(doc.title)) return "dirty";
@@ -370,7 +375,7 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
       try { dir = await mkdtemp(join(tmpdir(), "rovara-be-video-")); } catch { dir = undefined; }
       let recorded: Video | undefined;
       const started = Date.now();
-      const flags = { raw: false };
+      const flags = { raw: false, scanned: false };
       try {
         let answer = await captureOnce(route, options, dir === undefined ? undefined : { dir, onPage: (page) => { recorded = page.video() ?? undefined; } }, flags);
         // Recording must never cost the pictures: a context that cannot record (no encoder in this image, a refused write) fails the capture, so the page is taken once more without recording, with the time that is left,
@@ -381,10 +386,14 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
           if (left >= 2_000) { answer = await captureOnce(route, { ...options, timeoutMs: left }, undefined, flags); noRecorder = true; }
         }
         // A page whose text a mask had to rewrite (or that could not be read) was not showing fixture data only. Its recording is never kept, and the answer says so for EVERY page, healthy or not: the run drops every video on it.
+        // A page that could not be photographed or ran out of time on the recorded side was not read to the end: it is treated as showing something, like a page whose text was rewritten.
+        if (dir !== undefined && !answer.ok && (answer.reason === "capture_failed" || answer.reason === "time_limit")) flags.raw = true;
         if (flags.raw) return { ...answer, videoNotKept: "withheld" as const };
         // Only a page that failed to load or showed errors keeps its recording; every other one is deleted without being read.
         const eligible = answer.ok ? browserEvidenceVideoEligible({ status: "shown", consoleErrors: { after: answer.consoleErrors } }) : browserEvidenceVideoEligible({ status: "not_run", reason: answer.reason });
         if (!eligible) return answer;
+        // A page that did not load by any way but an HTTP error page of the app (the navigation threw, no response, another origin) was never read: its recording might hold whatever it painted, so none is kept.
+        if (!answer.ok && !flags.scanned) return { ...answer, videoNotKept: "not_recorded" as const };
         return { ...answer, ...(dir === undefined || noRecorder ? { videoNotKept: "not_recorded" as const } : await collectVideo(recorded, dir)) };
       } finally {
         if (dir !== undefined) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
@@ -392,7 +401,7 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
     },
   });
 
-  async function captureOnce(route: string, options: { maskSelectors: readonly string[]; timeoutMs: number }, recording: { dir: string; onPage(page: Page): void } | undefined, flags: { raw: boolean } = { raw: false }): Promise<BrowserEvidenceCaptureAnswer> {
+  async function captureOnce(route: string, options: { maskSelectors: readonly string[]; timeoutMs: number }, recording: { dir: string; onPage(page: Page): void } | undefined, flags: { raw: boolean; scanned: boolean } = { raw: false, scanned: false }): Promise<BrowserEvidenceCaptureAnswer> {
     if (!isBrowserEvidenceRoute(route)) return { ok: false, reason: "page_did_not_load" };
     const url = new URL(route, origin);
     if (url.origin !== origin) return { ok: false, reason: "page_did_not_load" };
@@ -412,7 +421,7 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
       page.on("console", (message) => { if (message.type() === "error" && originOf(message.location().url) === origin) consoleErrors += 1; });
       page.on("pageerror", () => { consoleErrors += 1; });
       const arg = (verify: boolean): PageArg => ({ masks: [...BROWSER_EVIDENCE_TEXT_MASKS.map((item) => ({ ...item })), ...secretMasks], mask: BROWSER_EVIDENCE_TEXT_MASK, maxText: BROWSER_EVIDENCE_TEXT_SCAN_MAX,
-        maxNodes: PAGE_NODES_MAX, maxChars: PAGE_CHARS_MAX, verify, maskedSelector: options.maskSelectors.join(", "), markers: PRIVATE_MARKERS });
+        maxNodes: PAGE_NODES_MAX, maxChars: PAGE_CHARS_MAX, verify, maskedSelector: options.maskSelectors.join(", "), markers: markersOf(options.maskSelectors) });
       // Every frame the page has: the app's own (and about:/srcdoc ones) are read; a frame of another origin was aborted, so it shows only the browser's error page.
       // A scrub that rewrote something says so (`flags.raw`): what the page showed before the scrub held text a mask hides, and a recording of it would show that text.
       const everyFrame = async (verify: boolean): Promise<PageVerdict> => {
@@ -420,10 +429,13 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
           // Every frame is read, whatever its address (an aborted frame shows the browser's error page, which reads fine); a frame that cannot be read means no picture.
           let verdict: PageVerdict;
           try { verdict = await bounded(frame.evaluate(maskPage, arg(verify)), left()); } catch (error) {
-            if (timedOut(error)) throw error;
+            if (timedOut(error)) { flags.raw = true; throw error; }
+            // A frame that cannot be read cannot be shown to hold no secret: no recording of the run is kept.
+            flags.raw = true;
             return "too_large";
           }
           if (verdict === "changed") { flags.raw = true; continue; }
+          if (verdict === "changed_too_large") { flags.raw = true; return "too_large"; }
           if (verdict !== "clean") return verdict;
         }
         return "clean";
@@ -433,6 +445,7 @@ export function createChromiumEvidenceDriver(input: ChromiumEvidenceDriverInput)
         if (response !== null && response.status() >= 400 && originOf(page.url()) === origin && recording !== undefined) {
           // An error page of the app itself (a 404, a 500 with a trace) was loaded and is in the recording, and no scrub or verify ran on it: it is read once, and a page that holds text a mask hides, or that cannot be read, takes the recording with it.
           try { if ((await everyFrame(false)) !== "clean") flags.raw = true; } catch { flags.raw = true; }
+          flags.scanned = true;
         }
         if (response === null || response.status() >= 400 || originOf(page.url()) !== origin) return { ok: false, reason: "page_did_not_load" };
         // Sent back to the login page: the session did not hold, and the login form is not the picture of this page.
