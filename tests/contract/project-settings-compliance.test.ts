@@ -25,9 +25,13 @@ function world() {
   db.set({ pk: `DEVELOPER#${person}`, sk: "META", displayName: "Test", revoked: false });
   const member = (role: string, extra: Record<string, unknown> = {}, companyId = COMPANY) => db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId, role, joinedAt: new Date(now).toISOString(), ...extra });
   member("admin");
+  const flag = (companyId = COMPANY) => db.set({ ...orgSettingsKey(companyId, "PROJECT_CATALOG_INDEX"), verifiedAt: new Date(now).toISOString(), count: 0, runId: "catalog-test" });
+  flag();
   const project = (name: string, companyId = COMPANY) => {
     db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", companyId, entityType: "PROJECT", definition: { name, revision: 1 } });
     db.set(catalogRow(name));
+    db.set({ ...orgProjectCatalogKey(companyId, name), entityType: "PROJECT_CATALOG", companyId, name, latestRevision: 1 });
+    flag(companyId);
   };
   const admin = (name: string) => db.set({ pk: `MEMBER#${person}`, sk: `PROJECT#${name}`, companyId: COMPANY, projectName: name, role: "administrator" });
   const send = vi.spyOn(db, "send");
@@ -44,7 +48,7 @@ function world() {
   };
   const settings = (name: string, fields: Record<string, unknown>, companyId = COMPANY) => db.set({ pk: `ORG#${companyId}#PROJECT_SETTINGS#${name}`, sk: "META", entityType: "PROJECT_SETTINGS", companyId, projectName: name,
     overrides: {}, revision: 1, updatedAt: new Date(now).toISOString(), updatedBy: person, ...fields });
-  return { db, deps, send, get, call, hook, advance: (ms: number) => { clock += ms; }, member, project, admin, settings, setCompany: (value: string | undefined) => { company = value; } };
+  return { db, deps, send, get, call, hook, advance: (ms: number) => { clock += ms; }, member, project, admin, settings, flag, setCompany: (value: string | undefined) => { company = value; } };
 }
 interface Row { project: string; status: string; values: Record<string, { value: unknown; origin: string }>; clamped: Array<{ field: string }>; [key: string]: unknown }
 interface Page { projects: Row[]; nextCursor: string | null }
@@ -172,62 +176,12 @@ it("pages 250 projects in order, each exactly once, with bounded reads per page 
     expect(page.projects.length).toBeLessThanOrEqual(50);
     expect(w.send.mock.calls.length).toBeLessThan(512);
     seen.push(...page.projects.map((row) => row.project));
-    // The cursor names only this company's last project (or counts entries): never another company's name.
-    if (page.nextCursor !== null) expect(page.nextCursor).toMatch(/^p\d{3}~\d+$/);
+    if (page.nextCursor !== null) expect(page.nextCursor).toBe(c2(COMPANY, names[seen.length - 1]!));
     cursor = page.nextCursor; pages++;
   } while (cursor !== null && pages < 50);
   expect(seen).toEqual(names);
   expect(pages).toBeGreaterThanOrEqual(5);
 }, 20_000);
-
-it("a long run of other companies' projects ends a page early with a cursor that names none of them", async () => {
-  const w = world();
-  for (let index = 0; index < 450; index++) w.project(`a${String(index).padStart(3, "0")}`, B);
-  w.project("z-mine");
-  const seen: string[] = []; const cursors: string[] = []; let cursor: string | null = null; let pages = 0;
-  do {
-    const page: Page = await w.get(cursor === null ? "" : `?cursor=${cursor}`);
-    seen.push(...page.projects.map((row) => row.project));
-    if (page.nextCursor !== null) cursors.push(page.nextCursor);
-    cursor = page.nextCursor; pages++;
-  } while (cursor !== null && pages < 20);
-  expect(seen).toEqual(["z-mine"]);
-  expect(pages).toBeGreaterThan(1);
-  // The only thing a cursor carries about other companies is a count.
-  expect(cursors).toEqual(["~200", "~400"]);
-}, 20_000);
-
-it("a run of other companies' names longer than the cursor can count is refused with fixed words, never cut or looped", async () => {
-  const w = world();
-  for (let index = 0; index < 1300; index++) w.project(`a${String(index).padStart(4, "0")}`, B);
-  w.project("z-mine");
-  let cursor: string | null = null; let pages = 0; let failure: unknown;
-  while (failure === undefined && pages < 10) {
-    try { cursor = (await w.get(cursor === null ? "" : `?cursor=${cursor}`)).nextCursor; } catch (error) { failure = error; }
-    pages++;
-  }
-  expect(failure).toMatchObject({ code: "CONFIG_INVALID", message: "company read limit exceeded" });
-  expect(pages).toBe(6);
-}, 30_000);
-
-it("a cursor can only start at one of the caller's own projects: a foreign or unknown name is refused alike, so no name can be probed", async () => {
-  const w = world();
-  for (let index = 0; index < 250; index++) w.project(`k${String(index).padStart(3, "0")}-secret`, B);
-  w.project("m-mine"); w.project("n-mine");
-  for (let index = 0; index < 250; index++) w.project(`q${String(index).padStart(3, "0")}-filler`, B);
-  const refused = [];
-  // A real foreign name, a one-letter-off name, an unknown name and a name of nobody: the same refusal, with nothing that differs.
-  for (const cursor of ["k010-secret~0", "k010-secres~0", "zzz~0", "k249-secret~5"]) refused.push(await w.get(`?cursor=${cursor}`).then(() => "ok", (error: Error & { code?: string }) => `${error.code}:${error.message}`));
-  expect(new Set(refused)).toEqual(new Set(["CONFIG_INVALID:invalid settings compliance request"]));
-  // Own names work, and nothing in any response carries another company's name.
-  const own = await w.get("?cursor=m-mine~0");
-  expect(own.projects.map((row) => row.project)).toEqual(["n-mine"]);
-  const first = await w.get("");
-  for (const page of [own, first]) expect(JSON.stringify(page)).not.toMatch(/secret|filler/);
-  expect(first.nextCursor).toBe("~200");
-  // A forged count past the bound is refused too.
-  await expect(w.get("?cursor=m-mine~1001")).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-});
 
 it("a slow company rules service ends the page early with a cursor at the last row done, never a failure", async () => {
   const w = world();
@@ -282,20 +236,18 @@ it("is read-only: only reads reach the table, and only POST/PUT/DELETE-free rout
   expect(devRouteOf("POST", COMPLIANCE)).toBeUndefined();
 });
 
-it("a catalog name with no revision is never listed, and a corrupt catalog name stops the read with fixed words instead of cutting the list", async () => {
-  const w = world(); w.project("mine");
-  w.db.set(catalogRow("orphan"));
-  expect((await w.get()).projects.map((row) => row.project)).toEqual(["mine"]);
-  w.db.set({ pk: "PROJECT_CATALOG", sk: "PROJECT#NOT A NAME", name: "x" });
+it("unflagged companies fail closed without querying the shared catalog", async () => {
+  const w = world(); w.project("alpha");
+  const key = orgSettingsKey(COMPANY, "PROJECT_CATALOG_INDEX"); w.db.delete(key.pk, key.sk);
+  w.send.mockClear();
   await expect(w.get()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "settings unavailable" });
+  expect(w.send.mock.calls.some(([command]) => command.constructor.name === "QueryCommand"
+    && (command.input as { ExpressionAttributeValues?: Record<string, unknown> }).ExpressionAttributeValues?.[":pk"] === "PROJECT_CATALOG")).toBe(false);
 });
 
-it("a stored-row failure reads fail closed: the store's own error never reaches the caller", async () => {
+it("a v1 cursor is refused with the fixed invalid-cursor response", async () => {
   const w = world(); w.project("alpha");
-  w.db.injectFault({ command: "QueryCommand", match: (input) => JSON.stringify(input).includes("PROJECT_CATALOG"), error: { name: "InternalServerError", message: "private-canary" } });
-  const error = await w.get().then(() => undefined, (caught: Error & { code?: string }) => caught);
-  expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "settings unavailable" });
-  expect(error?.message).not.toContain("private-canary");
+  await expect(w.get("?cursor=alpha~0")).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "invalid settings compliance request" });
 });
 
 const c2 = (companyId: string, after: string, extra = {}) => "c2." + Buffer.from(canonicalJson({ v: 2, companyId, after, ...extra })).toString("base64url");
@@ -335,14 +287,11 @@ it("flagged cursors reject replay, forgery and v1 with identical fixed words", a
   w.setCompany(B); w.member("admin", {}, B); flag(w, B);
   await expect(w.get(`?cursor=${first.nextCursor}`)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "invalid settings compliance request" });
 });
-it("unflagged behavior stays v1; unmark restores it; flagged deadline resumes in v2", async () => {
+it("flagged deadline resumes in v2", async () => {
   const w = world(); for (let i = 0; i < 12; i++) indexed(w, `p${String(i).padStart(2, "0")}`);
-  expect((await w.get("?limit=1")).nextCursor).toBe("p00~0");
-  flag(w); w.hook(() => { w.advance(1100); return {}; });
+  w.hook(() => { w.advance(1100); return {}; });
   const first = await w.get("?limit=12"); expect(first.projects).toHaveLength(4); expect(first.nextCursor).toBe(c2(COMPANY, "p03"));
   expect((await w.get(`?cursor=${first.nextCursor}`)).projects[0]?.project).toBe("p04");
-  const key = orgSettingsKey(COMPANY, "PROJECT_CATALOG_INDEX"); w.db.delete(key.pk, key.sk);
-  expect((await w.get("?limit=1")).nextCursor).toBe("p00~0");
 });
 it("index drift fails closed and logs only the caller company once", async () => {
   const w = world(); indexed(w, "foreign", B); flag(w);

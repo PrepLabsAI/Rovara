@@ -215,14 +215,16 @@ it("classifies the M4a S3 compliance route as a company-scoped, full-access, rea
 
 it("pins S3 migration text and every catalog constructor caller, including all writers", () => {
   const inventory = readFileSync("docs/architecture/company-inventory.md", "utf8");
-  for (const text of ["PROJECT_CATALOG_INDEX", "canonical company-bound cursor v2", "no shared fallback", "Unflagged companies retain v1", "project_catalog.index_drift", "Future move contract"]) expect(inventory).toContain(text);
+  for (const text of ["PROJECT_CATALOG_INDEX", "canonical company-bound cursor v2", "fixed settings unavailable when unflagged", "v1 cursors receive the fixed invalid-cursor refusal", "project_catalog.index_drift", "Future move contract"]) expect(inventory).toContain(text);
+  const route = readFileSync("packages/broker/src/aws/project-settings.ts", "utf8");
+  expect(route).not.toMatch(/\b(?:PROJECT_CATALOG_PK|projectCatalogKey)\b/);
   // Counts pin every constructor call, not just files. Adding a writer (including to a current reader) requires review here.
   const expected: Record<string, number[]> = {
     "packages/broker/src/aws/broker.ts": [5, 0], // registration + repair dual-write corePlan in the legacy transaction; other calls read/check
     "packages/broker/src/aws/core-project-backfill.ts": [0, 1], // fenced L4 planner, appended atomically by registration/repair
     "packages/broker/src/aws/developer-tasks.ts": [1, 0], // legacy task ConditionCheck
     "packages/broker/src/aws/project-catalog-backfill.ts": [0, 3], // operator reads + fenced mark/undo
-    "packages/broker/src/aws/project-settings.ts": [1, 2], // v1 read and v2 existence/start-key reads
+    "packages/broker/src/aws/project-settings.ts": [0, 2], // v2 company-catalog existence/start-key reads only
     "packages/broker/src/core-host/lessons.ts": [0, 1],
     "packages/broker/src/core/e2e/local-authority.ts": [0, 1],
     "packages/broker/src/core/setup-agent/apply.ts": [0, 2], // core-only approval: condition + fenced latestRevision update
