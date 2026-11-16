@@ -318,3 +318,91 @@ it("an api_ok change next to unchanged page-only overrides needs no step-up", as
   w.setStepUp(noStepUp());
   expect(await w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 3, extra_review: true, after_merge_revert: "off" } })).toMatchObject({ revision: 2 });
 });
+
+// ---- M4a slice 4 (DEC 249a.3): a preset under a company bound is clamped silently; only an explicit override that breaks a bound is refused ----
+it("choosing a preset the company minimum or limit does not allow is clamped, not refused, and the response says so", async () => {
+  const w = world(); w.hook({ real_check: "their_ci_fix", ci_fix_rounds: 2, preset_level: "balanced" });
+  // Before slice 4 every one of these presets was refused ("... cannot be crossed") because the preset's own value crossed a bound.
+  for (const [revision, preset] of [[0, "lightweight"], [1, "balanced"], [2, "careful"]] as const) {
+    const got = await w.call("PUT", { expectedRevision: revision, preset }) as { revision: number; preset: string; overrides: unknown; values: Record<string, { value: unknown; origin: string }>; clamped: Array<Record<string, unknown>> };
+    expect(got).toMatchObject({ revision: revision + 1, preset, overrides: {} });
+    expect(got.values["ci_fix_rounds"]).toMatchObject({ value: 2, origin: "company limit" });
+    expect(got.clamped).toContainEqual({ field: "ci_fix_rounds", bound: "limit", chosen: 3, applied: 2, notice: "lowered to your company's limit" });
+  }
+  const lightweight = await w.call("PUT", { expectedRevision: 3, preset: "lightweight" }) as { values: Record<string, { value: unknown; origin: string }>; clamped: Array<Record<string, unknown>> };
+  expect(lightweight.values["real_check"]).toMatchObject({ value: "their_ci_fix", origin: "company minimum" });
+  expect(lightweight.clamped).toContainEqual({ field: "real_check", bound: "minimum", chosen: "their_ci_watch", applied: "their_ci_fix", notice: "raised to your company's minimum" });
+  // The stored choice is the preset the person picked; the bound only changes what applies. GET agrees.
+  expect(await w.call()).toMatchObject({ revision: 4, preset: "lightweight", values: { real_check: { value: "their_ci_fix", origin: "company minimum" } } });
+  expect(writes(w)).toHaveLength(1);
+});
+it("a preset below the company's preset_level minimum applies the minimum", async () => {
+  const w = world(); w.hook({ preset_level: "balanced" });
+  expect(await w.call("PUT", { expectedRevision: 0, preset: "lightweight" })).toMatchObject({ preset: "lightweight", values: { preset_level: { value: "balanced", origin: "company minimum" } } });
+});
+it("an explicit override that breaks a bound is still refused with fixed words, and nothing is written", async () => {
+  const w = world(); w.hook({ ci_fix_rounds: 2, extra_review: true, preset_level: "balanced" });
+  // Next to a preset that is itself clamped, the override is what is refused.
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "balanced", overrides: { ci_fix_rounds: 3 } })).rejects.toThrow(/^ci_fix_rounds: company limit cannot be crossed$/);
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful", overrides: { extra_review: false } })).rejects.toThrow(/^extra_review: company minimum cannot be crossed$/);
+  // An override of preset_level is explicit too; what that preset expands to for other fields is not.
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { preset_level: "lightweight" } })).rejects.toThrow(/^preset_level: company minimum cannot be crossed$/);
+  expect(writes(w)).toEqual([]);
+  expect(w.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
+  expect(await w.call("PUT", { expectedRevision: 0, preset: "balanced", overrides: { ci_fix_rounds: 2 } })).toMatchObject({ revision: 1, values: { ci_fix_rounds: { value: 2, origin: "changed here" } } });
+});
+it("a value that a preset_level override hands to other fields is clamped, not refused", async () => {
+  const w = world(); w.hook({ ci_fix_rounds: 2 });
+  const got = await w.call("PUT", { expectedRevision: 0, overrides: { preset_level: "balanced" } }) as { values: Record<string, { value: unknown; origin: string }>; clamped: Array<{ field: string }> };
+  expect(got.values["ci_fix_rounds"]).toMatchObject({ value: 2, origin: "company limit" });
+  expect(got.clamped.map((entry) => entry.field)).toContain("ci_fix_rounds");
+});
+it("a budget a preset leaves unset is handed to the company limit; an explicit null cannot remove the limit", async () => {
+  const w = world(); w.hook({ model_budget_usd: 5 });
+  const got = await w.call("PUT", { expectedRevision: 0, preset: "careful" }) as { values: Record<string, { value: unknown; origin: string }>; clamped: Array<{ field: string }> };
+  expect(got.values["model_budget_usd"]).toMatchObject({ value: 5, origin: "company limit" });
+  expect(got.clamped.map((entry) => entry.field)).not.toContain("model_budget_usd");
+  await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: null } })).rejects.toThrow(/^model_budget_usd: company limit cannot be crossed$/);
+});
+it("an override stored before a bound existed does not block an unrelated change, but a new or changed one that crosses is refused", async () => {
+  const w = world();
+  await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 9, extra_review: false } });
+  w.hook({ model_budget_usd: 5, extra_review: true, real_check: "their_ci_fix" });
+  // The stored override is clamped on the page; choosing a preset (overrides carried over) or re-sending the same map works.
+  expect(await w.call("PUT", { expectedRevision: 1, preset: "balanced" })).toMatchObject({ revision: 2, values: { model_budget_usd: { value: 5, origin: "company limit" }, extra_review: { value: true, origin: "company minimum" } } });
+  expect(await w.call("PUT", { expectedRevision: 2, overrides: { model_budget_usd: 9, extra_review: false } })).toMatchObject({ revision: 3 });
+  // A new override, or a changed value, that crosses is refused.
+  await expect(w.call("PUT", { expectedRevision: 3, overrides: { model_budget_usd: 8, extra_review: false } })).rejects.toThrow(/^model_budget_usd: company limit cannot be crossed$/);
+  await expect(w.call("PUT", { expectedRevision: 3, overrides: { model_budget_usd: 9, extra_review: false, real_check: "sandbox_only" } })).rejects.toThrow(/^real_check: company minimum cannot be crossed$/);
+});
+it("the audit row keeps the old chosen value when only the old side was hidden by a bound", async () => {
+  const w = world();
+  await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 9 } });
+  w.hook({ model_budget_usd: 5 });
+  await w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } });
+  const audit = w.db.find((row) => row.entityType === "COMPANY_LOG").map((row) => row.changes as unknown[]);
+  expect(audit[1]).toContainEqual({ field: "model_budget_usd", before: 5, after: 4, chosenBefore: 9, chosenAfter: 4 });
+});
+it("a clamped preset still needs the fresh step-up first", async () => {
+  const w = world(); w.hook({ ci_fix_rounds: 2 }); w.setStepUp(noStepUp());
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
+  expect(writes(w)).toEqual([]);
+});
+it("the audit row for a clamped preset records what applies and the person's choice the bound hides", async () => {
+  const w = world(); w.hook({ real_check: "their_ci_fix" });
+  await w.call("PUT", { expectedRevision: 0, preset: "lightweight" });
+  const audit = w.db.find((row) => row.entityType === "COMPANY_LOG");
+  expect(audit).toHaveLength(1);
+  // real_check still applies as before (their_ci_fix), but the chosen value moved to their_ci_watch: that is on the record.
+  expect(audit[0]?.changes).toContainEqual({ field: "real_check", before: "their_ci_fix", after: "their_ci_fix", chosenBefore: "their_ci_fix", chosenAfter: "their_ci_watch" });
+  // Where nothing is hidden the row is as before (no chosen values).
+  expect(audit[0]?.changes).toContainEqual({ field: "preset_level", before: null, after: "lightweight" });
+});
+it("a change of preset that a company preset_level minimum fully hides still leaves an audit row naming the new choice", async () => {
+  const w = world(); w.hook({ preset_level: "careful" });
+  await w.call("PUT", { expectedRevision: 0, preset: "careful" });
+  await w.call("PUT", { expectedRevision: 1, preset: "lightweight" });
+  const audit = w.db.find((row) => row.entityType === "COMPANY_LOG").map((row) => row.changes);
+  expect(audit).toHaveLength(2);
+  expect(audit[1]).toContainEqual({ field: "preset_level", before: "careful", after: "careful", chosenBefore: "careful", chosenAfter: "lightweight" });
+});

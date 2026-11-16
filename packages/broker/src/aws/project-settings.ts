@@ -153,22 +153,27 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
   let after: ResolvedPolicy;
   try { after = await policy.source.resolve(policy.scope, {}); }
   catch { throw unavailable(); }
-  // Resolve the proposed project layers through the same seam; company bounds are applied by the shared clamp above.
+  // M4a slice 4 (DEC 249a.3): a value that came from a preset (the chosen preset, or what a `preset_level` override hands to other fields) is clamped to the company's bound and the
+  // response says so (`clamped`). Only an explicit override that breaks a bound is refused, and only when this request adds it or changes it: an override stored before the bound
+  // existed is clamped like the rest and never blocks an unrelated change. An explicit `null` budget cannot remove a company limit.
   const unbounded = storedAfter;
   for (const field of POLICY_FIELDS) {
+    const stated = Object.hasOwn(row.overrides, field.id) && (!Object.hasOwn(current?.overrides ?? {}, field.id) || current?.overrides[field.id] !== row.overrides[field.id]);
     const value = unbounded.values[field.id]!.value;
     const bounded = after.values[field.id]!;
-    const explicitlySet = Object.hasOwn(row.overrides, field.id) || input.preset !== undefined;
-    if (explicitlySet && bounded.companyBound !== undefined && value !== bounded.value) {
-      // Presets have no universal budget; their null delegates to the company's limit. An explicit null cannot remove it.
-      if (value === null && bounded.companyBound.kind === "limit" && !Object.hasOwn(row.overrides, field.id)) continue;
-      throw agentXError("FORBIDDEN", `${field.id}: company ${bounded.companyBound.kind} cannot be crossed`);
-    }
+    if (stated && bounded.clampedBy !== undefined && bounded.companyBound !== undefined && value !== bounded.value) throw agentXError("FORBIDDEN", `${field.id}: company ${bounded.companyBound.kind} cannot be crossed`);
   }
+  // The audit row records what applies (`before`/`after`) and, where a company bound hides the person's choice, the choice itself (`chosenBefore`/`chosenAfter`), so a change of the
+  // stored choice leaves a trace even when the bound makes it look like nothing changed.
   const changes = POLICY_FIELDS.filter((field) => before.values[field.id]!.value !== after.values[field.id]!.value
+    || storedBefore.values[field.id]!.value !== storedAfter.values[field.id]!.value
     || current?.overrides[field.id] !== row.overrides[field.id]
     || field.id === "preset_level" && current?.preset !== row.preset)
-    .map((field) => ({ field: field.id, before: before.values[field.id]!.value, after: after.values[field.id]!.value }));
+    .map((field) => {
+      const [chosenBefore, chosenAfter] = [storedBefore.values[field.id]!.value, storedAfter.values[field.id]!.value];
+      const [appliedBefore, appliedAfter] = [before.values[field.id]!.value, after.values[field.id]!.value];
+      return { field: field.id, before: appliedBefore, after: appliedAfter, ...(chosenBefore !== appliedBefore || chosenAfter !== appliedAfter ? { chosenBefore, chosenAfter } : {}) };
+    });
   budget.check();
   try {
     // One atomic write: a losing revision or failed audit leaves both records untouched.
