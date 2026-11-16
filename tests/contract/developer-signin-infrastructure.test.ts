@@ -582,9 +582,9 @@ describe("task-token key and membership IAM", () => {
     // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts; its shape is asserted here, then it is taken out so the digest still pins everything else.
     withoutCoreEngine(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for lane E2 (named only): the core engine construct (#663)
-    // and R2 step 4 (the dispatcher's core queue mapping, its reads, the conditional deleter policy, its core variables, the outbox pending index); the legacy pins are unchanged.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("9b149c364323d61a4056b03cdeb7e00e29ac8c5fcbe9994a4b9ebfd51c789460");
+    // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. The core engine's named-only addition, including R2 step 4's (the dispatcher's core queue
+    // mapping, its reads, the conditional deleter policy, its core variables, the outbox pending index), is taken out above, so the pin is the one code/next holds.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("a1dd557411883920332ddf90e23cec2c6c20be9bc3e178fcd378f4dfad9bfc7b");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
