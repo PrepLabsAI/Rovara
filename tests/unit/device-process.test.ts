@@ -99,6 +99,15 @@ describe("createNodeCommandPort.start", () => {
     await quiet.stop(200);
   });
 
+  it("says how a captured program ended: its exit code and signal, or that it could not be started at all", async () => {
+    const exits = port.start(NODE, ["-e", "process.exit(3)"], { env: {}, capture: true });
+    for (let i = 0; i < 100 && exits.running(); i += 1) await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(exits.how?.()).toBe("exit code 3 signal null");
+    const missing = port.start("/nonexistent/program", [], { env: {}, capture: true });
+    for (let i = 0; i < 100 && missing.running(); i += 1) await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(missing.how?.()).toContain("spawn error ENOENT");
+  });
+
   it("is not running for a program that cannot start", async () => {
     const background = port.start("/nonexistent/program", [], { env: {} });
     for (let i = 0; i < 100 && background.running(); i += 1) await new Promise((resolve) => { setTimeout(resolve, 50); });

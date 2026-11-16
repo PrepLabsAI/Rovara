@@ -34,7 +34,7 @@ describe("deviceExecutorRunArgs", () => {
     expect(deviceExecutorRunArgs(input())).toEqual([
       "run", "--rm", "--pull=never", "--name", "rovara-dev-3c4d", "--label", `${DEVICE_EXECUTOR_LABEL}=1`, "--network", "container:rovara-sbx-1a2b",
       "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--init", "--read-only", "--user", "10001:10001", "--group-add", "108", "--device", "/dev/kvm:/dev/kvm:rw",
-      "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=3g", "--tmpfs", "/home/android:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700",
+      "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=8g", "--tmpfs", "/home/android:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700",
       "--shm-size", "1g", "--memory", "8g", "--memory-swap", "8g", "--pids-limit", "4096", "--cpus", "4",
       "-v", "/var/lib/rovara/apps-1:/apps:ro", "rovara-device-executor:ci", "node", DEVICE_EXECUTOR_ENTRY, PLAN,
     ]);

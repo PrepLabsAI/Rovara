@@ -30,10 +30,12 @@ const toolPath = (value: string) => plainPath(value, 100);
 const NAME = /^[A-Za-z0-9_.-]{1,64}$/u;
 
 /** The emulator's own arguments: headless, from the image's AVD without ever writing to it, no snapshot, no sound, no camera, no metrics, and KVM or nothing (`-accel on` stops it instead of falling back to a slow emulation). */
-export function androidEmulatorArgs(options: { avd: string; port: number }): string[] {
+export function androidEmulatorArgs(options: { avd: string; port: number; verbose?: boolean }): string[] {
   if (!NAME.test(options.avd) || !Number.isInteger(options.port) || options.port < 5554 || options.port > 5584 || options.port % 2 !== 0) throw new Error("the emulator settings are not valid");
   return ["-avd", options.avd, "-port", String(options.port), "-read-only", "-no-snapshot", "-no-window", "-no-audio", "-no-boot-anim", "-no-metrics", "-gpu", "swiftshader_indirect", "-accel", "on",
-    "-camera-back", "none", "-camera-front", "none", "-netdelay", "none", "-netspeed", "full", "-memory", "2048", "-cores", "2"];
+    "-camera-back", "none", "-camera-front", "none", "-netdelay", "none", "-netspeed", "full", "-memory", "2048", "-cores", "2",
+    // Only for the CI test's diagnostics (the entry program turns them on on request): what the emulator says while it starts.
+    ...(options.verbose === true ? ["-verbose", "-debug-init"] : [])];
 }
 
 export type AndroidDriverOptions = Readonly<{
@@ -109,7 +111,7 @@ export function createAndroidEmulatorDriver(options: AndroidDriverOptions): Devi
       const out = (): DeviceEvidencePrepareAnswer | undefined => (mine.stopped || left() <= 0 ? "time_limit" : undefined);
       // adb's server runs in the foreground of its own group, so ending a client never ends it (a daemon forked by a client would die with that client's group).
       mine.adbServer = options.command.start(options.tools.adb, ["server", "nodaemon"], { env: options.env });
-      mine.emulator = options.command.start(options.tools.emulator, androidEmulatorArgs({ avd: options.tools.avd, port }), { env: options.env, ...(options.diag === undefined ? {} : { capture: true }) });
+      mine.emulator = options.command.start(options.tools.emulator, androidEmulatorArgs({ avd: options.tools.avd, port, verbose: options.diag !== undefined }), { env: options.env, ...(options.diag === undefined ? {} : { capture: true }) });
       note("boot", "emulator started");
       const bootEnds = Math.min(deadline, now() + ANDROID_BOOT_MS);
       for (;;) {
@@ -118,7 +120,7 @@ export function createAndroidEmulatorDriver(options: AndroidDriverOptions): Devi
         if (!mine.emulator.running()) {
           // The program's last words may still be in the pipe when it is reported gone: give them a moment (only when output was asked for).
           if (mine.emulator.tail !== undefined) await sleep(300);
-          note("boot", "emulator exited", mine.emulator.tail?.());
+          note("boot", "emulator exited", mine.emulator.how === undefined ? undefined : `${mine.emulator.how()} | ${mine.emulator.tail?.() ?? ""}`);
           return "device_did_not_start";
         }
         // adb's server could not take its port (something in the shared network namespace held it first): nothing it would say is believed.

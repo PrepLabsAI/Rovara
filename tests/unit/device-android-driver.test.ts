@@ -34,6 +34,11 @@ describe("androidEmulatorArgs", () => {
     expect(androidEmulatorArgs({ avd: "rovara", port: 5554 })).toEqual(["-avd", "rovara", "-port", "5554", "-read-only", "-no-snapshot", "-no-window", "-no-audio", "-no-boot-anim", "-no-metrics", "-gpu", "swiftshader_indirect",
       "-accel", "on", "-camera-back", "none", "-camera-front", "none", "-netdelay", "none", "-netspeed", "full", "-memory", "2048", "-cores", "2"]);
   });
+  it("adds the emulator's own verbose start-up log only when asked (the CI diagnostics)", () => {
+    const base = androidEmulatorArgs({ avd: "rovara", port: 5554 });
+    expect(base).not.toContain("-verbose");
+    expect(androidEmulatorArgs({ avd: "rovara", port: 5554, verbose: true })).toEqual([...base, "-verbose", "-debug-init"]);
+  });
   it("refuses a name or port that is not what it was built for", () => {
     for (const bad of [{ avd: "", port: 5554 }, { avd: "a b", port: 5554 }, { avd: "a;b", port: 5554 }, { avd: "../x", port: 5554 }, { avd: "rovara", port: 5555 }, { avd: "rovara", port: 80 }, { avd: "rovara", port: 5586 }, { avd: "rovara", port: 5554.5 }]) {
       expect(() => androidEmulatorArgs(bad), JSON.stringify(bad)).toThrow("the emulator settings are not valid");
@@ -59,7 +64,7 @@ describe("createAndroidEmulatorDriver", () => {
     it("starts adb's server and the emulator in groups of their own, waits for the boot, sets the screen up, installs this side's app, warms Maestro up and says ready", async () => {
       const { driver, runs, starts, files } = setup({ boot: ["", "", "1"] });
       expect(await driver.prepare("before", { timeoutMs: 600_000 })).toBe("ready");
-      expect(starts.map((row) => [row.file, row.args])).toEqual([[ADB, ["server", "nodaemon"]], [EMULATOR, androidEmulatorArgs({ avd: "rovara", port: 5554 })]]);
+      expect(starts.map((row) => [row.file, row.args])).toEqual([[ADB, ["server", "nodaemon"]], [EMULATOR, androidEmulatorArgs({ avd: "rovara", port: 5554, verbose: true })]]);
       for (const row of starts) expect(row.env).toEqual(ENV);
       const adbArgs = runs.filter((row) => row.file === ADB).map((row) => row.args.slice(2));
       expect(adbArgs.filter((row) => row[1] === "getprop")).toHaveLength(3);
@@ -91,10 +96,11 @@ describe("createAndroidEmulatorDriver", () => {
       const racing = talking.driver.prepare("before", { timeoutMs: 600_000 });
       const emulator = talking.starts.find((row) => row.file === EMULATOR)!;
       emulator.printed = "emulator: ERROR: x86 emulation currently requires hardware acceleration";
+      emulator.how = "exit code 1 signal null";
       emulator.running = false;
       expect(await racing).toBe("device_did_not_start");
       expect(emulator.capture).toBe(true);
-      expect(talking.diag.find(([stage, note]) => stage === "boot" && note === "emulator exited")?.[2]).toBe("emulator: ERROR: x86 emulation currently requires hardware acceleration");
+      expect(talking.diag.find(([stage, note]) => stage === "boot" && note === "emulator exited")?.[2]).toBe("exit code 1 signal null | emulator: ERROR: x86 emulation currently requires hardware acceleration");
       const quiet = setup({ boot: ["", "", "", ""] }, {}, 0, false);
       void quiet.driver.prepare("before", { timeoutMs: 600_000 });
       expect(quiet.starts.find((row) => row.file === EMULATOR)!.capture).toBeUndefined();

@@ -86,8 +86,8 @@ export function decodeDeviceExecutorPlan(argument: unknown): DeviceExecutorPlan 
 function sandboxArgs(kvmGid: number | undefined): string[] {
   return ["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--init", "--read-only", "--user", `${String(DEVICE_EXECUTOR_UID)}:${String(DEVICE_EXECUTOR_UID)}`,
     ...(kvmGid === undefined ? [] : ["--group-add", String(kvmGid)]), "--device", "/dev/kvm:/dev/kvm:rw",
-    // /tmp holds the emulator's copy-on-write disk and the JVM's unpacked libraries (so it may run code); the home directory holds only keys and logs.
-    "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=3g", "--tmpfs", `/home/android:rw,noexec,nosuid,nodev,size=256m,uid=${String(DEVICE_EXECUTOR_UID)},gid=${String(DEVICE_EXECUTOR_UID)},mode=0700`,
+    // /tmp holds the emulator's AVD copy and copy-on-write disk and the JVM's unpacked libraries (so it may run code). Its size is a ceiling, not an allocation: the emulator refuses to start unless 7.2 GB (1.2 x its fixed 6 GB data partition) is free where its AVD lives, but a tmpfs only uses memory for what is written, and `--memory 8g` below still caps that; the home directory holds only keys and logs.
+    "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=8g", "--tmpfs", `/home/android:rw,noexec,nosuid,nodev,size=256m,uid=${String(DEVICE_EXECUTOR_UID)},gid=${String(DEVICE_EXECUTOR_UID)},mode=0700`,
     "--shm-size", "1g", "--memory", "8g", "--memory-swap", "8g", "--pids-limit", "4096", "--cpus", "4"];
 }
 
