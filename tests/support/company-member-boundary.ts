@@ -11,7 +11,7 @@ const store = "packages/broker/src/developer/company-membership.ts";
 const kinds = new Set(["company-member-revoke", "company-member-role-set", "company-member-list"]);
 const fail: () => never = () => { throw new Error("Company member boundary unclassifiable."); };
 type Caps = { files: number; bytes: number; nodes: number; sites: number; entries: number; milliseconds: number };
-const defaults: Caps = { files: 4_000, bytes: 40_000_000, nodes: 10_000_000, sites: 100_000, entries: 100_000, milliseconds: 10_000 };
+const defaults: Caps = { files: 4_000, bytes: 40_000_000, nodes: 10_000_000, sites: 100_000, entries: 100_000, milliseconds: 60_000 }; // CI runners took ~11.4 s at 10 s (2026-11-16); the scan still refuses past this bound
 
 function budget(caps: Partial<Caps>) {
   const limits = { ...defaults, ...caps };
