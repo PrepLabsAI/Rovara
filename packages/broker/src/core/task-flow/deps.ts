@@ -9,6 +9,7 @@ import type {
   AgentXErrorCode,
   Autonomy,
   AuditSink,
+  BrowserEvidenceRecipe,
   CheckEntry,
   DocumentStore,
   OrgId,
@@ -298,6 +299,15 @@ export interface TaskFlowDeps {
    * (undefined when it is not known: then no test is flaky on the base). Read BEFORE the verification is recorded; a fault, a missing answer or an empty one changes nothing (the check stays failed). Absent: nothing is excused.
    */
   flakyChecks?: (input: { task: TaskRecord; operation: OperationRecord; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<{ byCheck: ReadonlyMap<string, readonly string[]>; baseFlaky: readonly string[] | undefined } | undefined>;
+  /**
+   * TE-H1 browser evidence (DEC 241), Code only (Cloud leaves it absent: browser evidence is not on Cloud yet). `recipe`: the project's recipe from the owner's own settings, or undefined for off; it is read fail-closed, so anything
+   * unreadable is off. A rerun of the checks that carries it asks the worker for before and after screenshots of the changed pages. `linesOf`: the text lines the pull request description adds about them (never an image).
+   * Absent: nothing is asked, and the description is exactly what it was.
+   */
+  browserEvidence?: {
+    recipe(task: TaskRecord): Promise<BrowserEvidenceRecipe | undefined>;
+    linesOf(task: TaskRecord, candidateDigest: string): Promise<readonly string[]>;
+  };
   /** The design review stage. Absent: no task enters it. */
   designReview?: DesignReviewSteps;
   /**
@@ -350,6 +360,16 @@ export interface TaskFlowDeps {
    * install has no lessons, and the description says so.
    */
   lessonsUsed?: (task: { taskId: string; project: string; startingRevision: number }, repositoryId: string) => Promise<LessonsUsedSection | undefined>;
+  /**
+   * MR3b: the lines about the order a task's pull requests merge in (and what happened when one was merged ahead of the one it depends on), for the pull request descriptions and the task page (`mergeOrderLinesOfTask`).
+   * `undefined`, or an empty answer: the descriptions and the page are exactly what they were. Never throws into the flow (a read that fails leaves the lines out).
+   */
+  mergeOrderLines?: (task: TaskRecord, repositoryId?: string) => Promise<readonly string[]>;
+  /**
+   * MR4 (TE-R4): what the task page says about a pull request whose own CI is failing while a repository it depends on has not merged (`ciWaitLinesOfTask`): that CI tests the repository alone, and Rovara is not trying to fix the failure
+   * before then. `undefined`, or an empty answer: the page is exactly what it was. Never throws into the flow.
+   */
+  ciWaitLines?: (task: TaskRecord, repositoryId: string) => Promise<readonly string[]>;
   /**
    * The lessons a step is given: asked when the step's invocation is built, only for a task step. `features` are the worker's. The answer is the worker's `learnedContext` or none; it never throws into the dispatch, and a slow
    * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.

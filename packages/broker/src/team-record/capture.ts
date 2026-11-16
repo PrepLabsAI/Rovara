@@ -57,7 +57,7 @@ export async function recordEndedTask(input: {
   }
   for (const requestId of subject.sendBackRequestIds) {
     const fact = await input.rows.sendBack({ workspaceId: input.companyId, project, taskId: input.taskId, requestId });
-    if (fact === undefined || fact.origin !== "human" || fact.actorTrust !== "member" || fact.actorDeveloperId === undefined || fact.reasonText === undefined) continue;
+    if (fact === undefined || fact.origin !== "human" || fact.actorTrust !== "member" || fact.actorDeveloperId === undefined || fact.reasonText === undefined || fact.fixedText === true) continue;
     drafts.push({ project, kind: "decision", text: `Sent the work back: ${fact.reasonText}`, taskId: input.taskId, authorId: fact.actorDeveloperId, sourceRef: fact.id, occurredAt });
   }
   let written = 0;

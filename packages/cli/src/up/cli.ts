@@ -340,18 +340,18 @@ export function registerDiagnosisCommand(program: Command, context: Pick<UpComma
 export function registerOpenCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
   program
     .command("open [task]")
-    .description("open the local review page for a task (or for everything that waits for you, `second-review`, `models`, `lessons` or `connections`) in your browser; `rovara up` must be running")
+    .description("open the local review page for a task (or for everything that waits for you, `second-review`, `models`, `lessons`, `connections` or `browser-evidence`) in your browser; `rovara up` must be running")
     .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
     .action(async (task: string | undefined, options: { stateDir?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ json: boolean }>();
-      if (task !== undefined && task !== "second-review" && task !== "lessons" && task !== "connections" && task !== "models" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, `lessons`, `connections`, `models`, or leave it out");
+      if (task !== undefined && task !== "second-review" && task !== "lessons" && task !== "connections" && task !== "models" && task !== "browser-evidence" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, `lessons`, `connections`, `models`, `browser-evidence`, or leave it out");
       const { url, secret } = await requireLocalRuntime(context.home ?? homedir(), options.stateDir);
       let response: Response;
       try {
         response = await context.fetch(`${url}/v1/local/pages/open`, {
           method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
           // The lessons page opens in a new page session: switching on a repository's lessons file asks for one opened in the last few minutes.
-          body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : task === "connections" ? { path: "/connections", fresh: true } : task === "models" ? { path: "/models", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : task === "connections" ? { path: "/connections", fresh: true } : task === "models" ? { path: "/models", fresh: true } : task === "browser-evidence" ? { path: "/browser-evidence", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
         });
       } catch {
         throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not answering at its address. Start it again with `rovara up`.");

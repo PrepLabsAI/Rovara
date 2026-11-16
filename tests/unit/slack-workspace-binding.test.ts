@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, SlackTeamIdSchema } from "@agentx/contracts";
-import { createSlackWorkspaceBindings, SlackWorkspaceRefused } from "../../packages/broker/src/aws/slack-workspace-binding.js";
+import { createSlackWorkspaceBindings, listSlackWorkspaceScopes, backfillSlackWorkspaceIndex, SlackWorkspaceRefused } from "../../packages/broker/src/aws/slack-workspace-binding.js";
 import { tenantIsCompanys } from "../../packages/broker/src/core/channel/company.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -131,4 +131,187 @@ it("refuses malformed configured legacy teams instead of completing a partial ba
 it("treats malformed channel-company queries as unavailable", async () => {
   const { bindings } = world();
   expect(await bindings.channelCompanyOf(null as never)).toBeUndefined();
+});
+
+function binding(teamId = TEAM, companyId = A) {
+  return { pk: `SLACK_TEAM#${teamId}`, sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId, companyId, boundAt: new Date(NOW).toISOString(), boundBy: "operator" };
+}
+function view(teamId = TEAM, companyId = A) {
+  return { ...binding(teamId, companyId), pk: `ORG#${companyId}#SLACK_WORKSPACES`, sk: `TEAM#${teamId}`, entityType: "COMPANY_SLACK_WORKSPACE_VIEW" };
+}
+
+it("walks every binding writer and preserves the authoritative/index pair atomically", async () => {
+  for (const path of ["bind", "legacy backfill", "existing bind", "existing legacy backfill"] as const) {
+    const { db, bindings } = world(path.includes("backfill") ? TEAM : "");
+    expect(Object.keys(bindings).sort()).toEqual(["backfill", "bind", "channelCompanyOf", "companyOf", "requireCompany"]);
+    const company = path.includes("backfill") ? IMPLICIT_COMPANY_ID : A;
+    if (!path.includes("backfill")) await bindings.backfill();
+    if (path.startsWith("existing")) db.set(binding(TEAM, company));
+    const transactions: unknown[] = [];
+    const send = db.send.bind(db);
+    vi.spyOn(db, "send").mockImplementation(async (command) => {
+      if (command.constructor.name === "TransactWriteCommand") transactions.push(command.input);
+      return send(command);
+    });
+    if (path.includes("backfill")) await bindings.backfill(); else await bindings.bind(A, TEAM, "operator");
+    expect(db.get(`ORG#${company}#SLACK_WORKSPACES`, `TEAM#${TEAM}`)).toEqual({ ...db.get(`SLACK_TEAM#${TEAM}`, "BINDING"), pk: `ORG#${company}#SLACK_WORKSPACES`, sk: `TEAM#${TEAM}`, entityType: "COMPANY_SLACK_WORKSPACE_VIEW" });
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]).toMatchObject({ TransactItems: [expect.any(Object), { Put: { Item: { ...view(TEAM, company), boundBy: path === "legacy backfill" ? "backfill" : "operator" } } }] });
+    const before = structuredClone([...db.items]);
+    if (path.includes("backfill")) await bindings.backfill(); else await bindings.bind(A, TEAM, "operator");
+    expect([...db.items]).toEqual(before);
+    expect(db.refusals).toEqual([]);
+  }
+});
+
+it("rolls back both rows if the index write fails", async () => {
+  const { db, bindings } = world(""); await bindings.backfill();
+  db.injectFault({ command: "TransactWriteCommand", error: { name: "TransactionCanceledException" } });
+  await expect(bindings.bind(A, TEAM, "operator")).rejects.toThrow(/^This Slack workspace is not available\.$/);
+  expect(db.get(`SLACK_TEAM#${TEAM}`, "BINDING")).toBeUndefined();
+  expect(db.get(`ORG#${A}#SLACK_WORKSPACES`, `TEAM#${TEAM}`)).toBeUndefined();
+});
+
+it("queries only its company partition, even with identical raw team ids and a large shared table", async () => {
+  const db = new FakeDynamoDb();
+  for (let i = 0; i < 10_000; i++) db.set({ pk: `UNRELATED#${i}`, sk: "META" });
+  // Query isolation independently of the global team's uniqueness enforced by bind below.
+  db.set(view(TEAM, A)); db.set(view(TEAM, B));
+  const send = vi.spyOn(db, "send");
+  for (const companyId of [A, B]) {
+    expect(await listSlackWorkspaceScopes({ client: db, tableName: "state" }, companyId)).toEqual([{ companyId, teamId: TEAM }]);
+    expect(send.mock.calls.at(-1)?.[0].constructor.name).toBe("QueryCommand");
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({ input: {
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :team)", ExpressionAttributeValues: { ":pk": `ORG#${companyId}#SLACK_WORKSPACES`, ":team": "TEAM#" }, ConsistentRead: true,
+    } });
+  }
+  expect(db.commandNames()).not.toContain("ScanCommand");
+  const w = world(""); await w.bindings.backfill(); await w.bindings.bind(A, TEAM, "operator");
+  await expect(w.bindings.bind(B, TEAM, "operator")).rejects.toThrow(SlackWorkspaceRefused);
+  expect(await listSlackWorkspaceScopes({ client: w.db, tableName: "state" }, B)).toEqual([]);
+});
+
+it("accepts exactly 32 scopes across pages with a single total query budget", async () => {
+  const rows = Array.from({ length: 32 }, (_, i) => view(`T${String(i).padStart(8, "0")}`));
+  let page = 0;
+  const client = { send: vi.fn(async () => ({ Items: rows.slice(page * 16, ++page * 16), ...(page === 1 ? { LastEvaluatedKey: { pk: rows[15]!.pk, sk: rows[15]!.sk } } : {}) })) };
+  expect(await listSlackWorkspaceScopes({ client, tableName: "state" }, A)).toEqual(rows.map(({ companyId, teamId }) => ({ companyId, teamId })));
+  expect(client.send).toHaveBeenCalledTimes(2);
+});
+
+it.each(["items", "bytes", "pages", "late", "malformed", "foreign", "foreign metadata", "duplicate", "cursor", "cause"])("query refuses %s without partial results or private cause", async (kind) => {
+  let page = 0; let time = 0;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => time);
+  try {
+    const client = { send: vi.fn(async () => {
+      page++;
+      if (page > 11) throw new Error("test provider sentinel");
+      if (kind === "cause") throw new Error("private enumeration cause");
+      if (kind === "late") time = 3001;
+      return { Items: kind === "pages" ? [] : kind === "items" ? Array.from({ length: 17 }, (_, i) => view(`T${String(i + page * 17).padStart(8, "0")}`))
+        : kind === "malformed" ? [view(), { ...view(), boundBy: "private marker" }]
+        : kind === "foreign" ? [view(TEAM, B)] : kind === "foreign metadata" ? [{ ...view(), companyId: B }] : kind === "duplicate" ? [view(), view()] : [view(`T${String(page).padStart(8, "0")}`)],
+        ...(kind === "bytes" ? { metadata: "x".repeat(40_000) } : {}),
+        ...(["pages", "items", "bytes", "cursor"].includes(kind) ? { LastEvaluatedKey: { pk: kind === "cursor" ? "private-other-partition" : view().pk, sk: `TEAM#T${String(page).padStart(8, "0")}` } } : {}) };
+    }) };
+    await expect(listSlackWorkspaceScopes({ client, tableName: "state" }, A)).rejects.toThrow(/^This Slack workspace is not available\.$/);
+    if (kind === "cursor") expect(client.send).toHaveBeenCalledTimes(1);
+    if (kind === "pages") expect(client.send).toHaveBeenCalledTimes(10);
+    if (kind === "items" || kind === "bytes") expect(client.send).toHaveBeenCalledTimes(2);
+  } finally { clock.mockRestore(); }
+});
+
+it("operator index backfill is bounded, dryRun writes nothing, and repeats idempotently", async () => {
+  const db = new FakeDynamoDb(); db.set(binding()); db.set(binding(OTHER, B));
+  const rows = [binding(), { pk: "OTHER", sk: "META" }, binding(OTHER, B)];
+  const send = vi.fn(async (command: unknown) => (command as { constructor: { name: string } }).constructor.name === "ScanCommand"
+    ? { Items: rows, ScannedCount: 3 } : db.send(command as Parameters<typeof db.send>[0]));
+  const deps = { client: { send }, tableName: "state", now: () => NOW };
+  expect(await backfillSlackWorkspaceIndex(deps, { dryRun: true })).toEqual({ evaluated: 3, bindings: 2, written: 0, complete: true });
+  expect(send.mock.calls[0]?.[0]).toMatchObject({ input: { ProjectionExpression: "pk, sk, entityType, teamId, companyId, boundAt, boundBy" } });
+  expect([...db.items.values()]).toHaveLength(2);
+  expect(send.mock.calls.map(([c]) => (c as { constructor: { name: string } }).constructor.name)).toEqual(["ScanCommand"]);
+  expect(await backfillSlackWorkspaceIndex(deps, { dryRun: false })).toMatchObject({ written: 2, complete: true });
+  const before = structuredClone([...db.items]);
+  await backfillSlackWorkspaceIndex(deps, { dryRun: false }); expect([...db.items]).toEqual(before);
+  expect(db.get(view().pk, view().sk)).toEqual(view());
+  expect(db.get(view(OTHER, B).pk, view(OTHER, B).sk)).toEqual(view(OTHER, B));
+});
+
+it("operator backfill never installs a snapshot after its binding changed", async () => {
+  const db = new FakeDynamoDb(); db.set(binding(TEAM, B));
+  const deps = { tableName: "state", client: { send: async (command: unknown) => (command as { constructor: { name: string } }).constructor.name === "ScanCommand"
+    ? { Items: [binding()], ScannedCount: 1 } : db.send(command as Parameters<typeof db.send>[0]) } };
+  await expect(backfillSlackWorkspaceIndex(deps, { dryRun: false })).rejects.toThrow(/^This Slack workspace is not available\.$/);
+  expect(db.get(view().pk, view().sk)).toBeUndefined();
+});
+
+it("operator backfill returns an explicit continuation and honors it without expanding the batch", async () => {
+  const cursor = { pk: "OTHER", sk: "META" };
+  const send = vi.fn(async () => ({ Items: [], ScannedCount: 100, LastEvaluatedKey: cursor }));
+  expect(await backfillSlackWorkspaceIndex({ client: { send }, tableName: "state" }, { dryRun: true, cursor })).toEqual({ evaluated: 100, bindings: 0, written: 0, complete: false, cursor });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send.mock.calls).toMatchObject([[{ input: { Limit: 100, ExclusiveStartKey: cursor } }]]);
+});
+
+it.each(["items", "bytes", "late", "malformed", "input"])("operator backfill refuses %s before writes", async (kind) => {
+  let time = NOW;
+  const send = vi.fn(async () => {
+    if (kind === "late") time += 10_001;
+    return { Items: kind === "malformed" ? [{ ...binding(), boundBy: "private marker" }] : [binding()], ScannedCount: kind === "items" ? 101 : 1,
+      ...(kind === "bytes" ? { metadata: "x".repeat(1_048_577) } : {}) };
+  });
+  await expect(backfillSlackWorkspaceIndex({ client: { send }, tableName: "state", now: () => time }, { dryRun: kind === "input" ? "false" as never : false })).rejects.toThrow(/^This Slack workspace is not available\.$/);
+  expect(send.mock.calls.length).toBe(kind === "input" ? 0 : 1);
+});
+
+
+it("operator backfill accepts its full 100-binding batch", async () => {
+  const db = new FakeDynamoDb();
+  const rows = Array.from({ length: 100 }, (_, i) => binding(`T${String(i).padStart(8, "0")}`));
+  rows.forEach((row) => db.set(row));
+  const send = async (command: unknown) => (command as { constructor: { name: string } }).constructor.name === "ScanCommand"
+    ? { Items: rows, ScannedCount: 100 } : db.send(command as Parameters<typeof db.send>[0]);
+  expect(await backfillSlackWorkspaceIndex({ client: { send }, tableName: "state" }, { dryRun: false })).toEqual({ evaluated: 100, bindings: 100, written: 100, complete: true });
+  expect(db.find((row) => row.entityType === "COMPANY_SLACK_WORKSPACE_VIEW")).toHaveLength(100);
+});
+
+
+it.each([null, 4, {}, "private-company"])("invalid company input refuses before Query: %j", async (company) => {
+  const send = vi.fn();
+  await expect(listSlackWorkspaceScopes({ client: { send }, tableName: "state" }, company as string)).rejects.toThrow(/^This Slack workspace is not available\.$/);
+  expect(send).not.toHaveBeenCalled();
+});
+
+it.each(["boundAt", "boundBy", "entityType", "teamId", "deleted"])("backfill snapshot condition covers %s", async (field) => {
+  const db = new FakeDynamoDb();
+  if (field !== "deleted") db.set({ ...binding(), [field]: "changed-private-value" });
+  const send = async (command: unknown) => (command as { constructor: { name: string } }).constructor.name === "ScanCommand"
+    ? { Items: [binding()], ScannedCount: 1 } : db.send(command as Parameters<typeof db.send>[0]);
+  await expect(backfillSlackWorkspaceIndex({ client: { send }, tableName: "state" }, { dryRun: false })).rejects.toThrow(/^This Slack workspace is not available\.$/);
+  expect(db.get(view().pk, view().sk)).toBeUndefined();
+});
+
+
+it("a same-company claim race repairs the winner's index without replacing its metadata", async () => {
+  const { db, bindings } = world(""); await bindings.backfill();
+  const send = db.send.bind(db); let raced = false;
+  vi.spyOn(db, "send").mockImplementation(async (command) => {
+    if (!raced && command.constructor.name === "TransactWriteCommand") {
+      raced = true; db.set(binding());
+    }
+    return send(command);
+  });
+  await bindings.bind(A, TEAM, "another.operator");
+  expect(db.get(view().pk, view().sk)).toEqual(view());
+  expect(db.get(binding().pk, binding().sk)).toEqual(binding());
+});
+
+
+it("operator backfill bounds total transaction response bytes and stops before the next write", async () => {
+  const rows = [binding(), binding(OTHER, B), binding("T0CCCCCCC")];
+  let calls = 0;
+  const send = vi.fn(async () => ++calls === 1 ? { Items: rows, ScannedCount: 3 } : { metadata: "x".repeat(1_050_000) });
+  await expect(backfillSlackWorkspaceIndex({ client: { send }, tableName: "state" }, { dryRun: false })).rejects.toThrow(/^This Slack workspace is not available\.$/);
+  expect(send).toHaveBeenCalledTimes(3);
 });

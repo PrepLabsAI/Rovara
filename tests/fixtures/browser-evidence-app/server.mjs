@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 
 const page = readFileSync("page.html", "utf8");
 const shell = (body) => `<!doctype html><html><head><meta charset="utf-8"><style>body{font:16px sans-serif;margin:24px;background:#fff;color:#111}.box{width:600px;height:120px;background:#3a7;color:#fff;padding:8px}</style></head><body>${body}</body></html>`;
+// Slice 4: pages that work on the base code and break on the candidate (BE_REGRESS=1 is set only for the candidate's app): one answers 500, one never yields after load.
+const regress = process.env.BE_REGRESS === "1";
 const routes = {
   "/": page,
   "/checkout": page,
@@ -56,16 +58,100 @@ const routes = {
   "/slot-label": shell(`<h1>Settings</h1><x-field>abcd1234</x-field><script>customElements.define("x-field", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = "<dl><dt>API key:</dt><dd><slot></slot></dd></dl>"; } });</script>`),
   // Sign-in forms laid out on one line: they must be shown.
   "/signin-inline": shell(`<h1>Sign in</h1><form><label>Password:</label> <input type="password" value="hunter2-y"><button>Sign in</button></form><p><label>Password: <input type="password"></label> <a href="/forgot">Forgot?</a></p>`),
+  "/regress-ok": shell(`<h1>Fine</h1><p>This page works.</p>`),
+  "/regress-busy": regress ? shell(`<h1>Busy</h1><script>setTimeout(() => { for (;;) {} }, 0);</script>`) : shell(`<h1>Fine</h1><p>This page works.</p>`),
   // A page whose own script never yields after load.
   "/busy": shell(`<h1>Busy</h1><script>setTimeout(() => { for (;;) {} }, 0);</script>`),
 };
 // Data that arrives after load (a normal app fetch), D ms late, written by the fetch's continuation: /late-fetch/<ms>/<a|b>.
 const lateFetch = (d, who) => shell(`<h1>Profile</h1><p id="w">Signed in as •••</p><script>addEventListener("load", () => fetch("/slow?ms=${d}").then(() => { document.getElementById("w").textContent = "Signed in as ${who === "a" ? "ada@example.com" : "grace@example.org"}"; }));</script>`);
+// Slice 3, an app behind a login: BE_USER and BE_PASS are the one account. A form post with them sets a session cookie and sends the person to /dashboard; anything else is sent back to /login. /expired never holds a session.
+const account = { user: process.env.BE_USER, pass: process.env.BE_PASS };
+const signedIn = (request) => account.user !== undefined && (request.headers.cookie ?? "").split(/;\s*/u).includes(`session=${encodeURIComponent(account.user)}`);
+const loginPage = (note) => shell(`<h1>Sign in</h1>${note}<form method="post" action="/login"><label>Email <input id="email" name="email" type="text"></label><br><label>Password <input id="password" name="password" type="password"></label><br><button type="submit">Sign in</button></form>`);
+const escapeHtml = (text) => text.replace(/[&<>"']/gu, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const signedPages = {
+  "/dashboard": () => shell(`<h1>Dashboard</h1><p>Signed in as ${escapeHtml(account.user ?? "")}</p>`),
+  "/account": () => shell(`<h1>Account</h1><p>Signed in as ${escapeHtml(account.user ?? "")}</p><div class="box">Plan: team</div>`),
+  "/account-urlencoded": () => shell(`<h1>Account</h1><p>Signed in as ${encodeURIComponent(account.user ?? "")}</p><div class="box">Plan: team</div>`),
+  "/profile-field": () => shell(`<h1>Profile</h1><label>Name <input id="name" type="text" value="${escapeHtml(account.user ?? "")}"></label><div class="box">Plan: team</div>`),
+};
+const staticPages = {
+  "/account-static": shell(`<h1>Account</h1><p>Signed in as •••</p><div class="box">Plan: team</div>`),
+  "/account-other": shell(`<h1>Account</h1><p>Signed in as somebody-else-1</p><div class="box">Plan: team</div>`),
+  "/prefilled-a": shell(`<h1>Settings</h1><label>Email <input id="email" type="text" value="alice-visible-1"></label>`),
+  "/prefilled-b": shell(`<h1>Settings</h1><label>Email <input id="email" type="text" value="bob-visible-22"></label>`),
+};
 createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://localhost");
+  if (url.pathname === "/login" && request.method === "GET") { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(loginPage(url.searchParams.has("error") ? "<p>Invalid credentials</p>" : "")); return; }
+  if (url.pathname === "/login" && request.method === "POST") {
+    let text = "";
+    request.on("data", (chunk) => { text += chunk; });
+    request.on("end", () => {
+      const form = new URLSearchParams(text);
+      const ok = account.user !== undefined && form.get("email") === account.user && form.get("password") === account.pass;
+      response.writeHead(303, { location: ok ? "/dashboard" : "/login?error=1", ...(ok ? { "set-cookie": `session=${encodeURIComponent(account.user)}; Path=/; HttpOnly` } : {}) });
+      response.end();
+    });
+    return;
+  }
+  if (url.pathname === "/expired") { response.writeHead(303, { location: "/login" }); response.end(); return; }
+  if (url.pathname === "/away") { response.writeHead(303, { location: "http://other.example/login" }); response.end(); return; }
+  if (Object.hasOwn(signedPages, url.pathname)) {
+    if (!signedIn(request)) { response.writeHead(303, { location: "/login" }); response.end(); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(signedPages[url.pathname]());
+    return;
+  }
+  if (Object.hasOwn(staticPages, url.pathname)) { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(staticPages[url.pathname]); return; }
   if (url.pathname === "/slow") { setTimeout(() => { response.writeHead(200, { "content-type": "text/plain" }); response.end("ok"); }, Math.min(5_000, Number(url.searchParams.get("ms")) || 0)); return; }
   const late = /^\/late-fetch\/(\d{1,4})\/(a|b)$/.exec(url.pathname);
   if (late !== null) { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(lateFetch(Number(late[1]), late[2])); return; }
+  if (url.pathname === "/regress") {
+    if (regress) { response.writeHead(500, { "content-type": "text/plain" }); response.end("boom"); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  // Slice 4: a candidate that sends the person to another origin (the driver aborts it: the navigation throws, so the page was never read), and one whose page holds an address and is far too big to scan.
+  if (url.pathname === "/regress-away") {
+    if (regress) { response.writeHead(303, { location: "http://other.example/profile" }); response.end(); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  if (url.pathname === "/regress-big") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(regress ? `<h1>Profile</h1><p>Signed in as ada@example.com</p>${"<i></i>".repeat(60_000)}` : `<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  // An app error page far too big to scan (no address in it): it was loaded, could not be read, so no recording of it is kept.
+  if (url.pathname === "/regress-bigerr") {
+    if (regress) { response.writeHead(500, { "content-type": "text/html; charset=utf-8" }); response.end(shell(`<h1>Error</h1>${"<i></i>".repeat(60_000)}`)); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
+  // A healthy page with only an element the app itself marks private (its text matches no mask).
+  if (url.pathname === "/private-marker") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Account</h1><div data-private>Ada</div>`));
+    return;
+  }
+  // A page with a region the owner's recipe paints over (`.balance`): in a picture it is hidden, in a recording it is not.
+  if (url.pathname === "/balance") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Account</h1><p class="balance">Balance on file</p>`));
+    return;
+  }
+  // Slice 4: a candidate that breaks AND prints someone's address on its error page (the recording would show it): the video of this page, and of the whole run, is withheld.
+  if (url.pathname === "/regress-leaky") {
+    if (regress) { response.writeHead(500, { "content-type": "text/html; charset=utf-8" }); response.end(shell(`<h1>Error</h1><p>Could not load the account of ada@example.com</p>`)); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(shell(`<h1>Fine</h1><p>This page works.</p>`));
+    return;
+  }
   const body = routes[url.pathname];
   if (body === undefined) { response.writeHead(404, { "content-type": "text/plain" }); response.end("not found"); return; }
   response.writeHead(200, { "content-type": body === "ok" ? "text/plain" : "text/html; charset=utf-8" });

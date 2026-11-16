@@ -78,6 +78,9 @@ export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRu
 export { E2EModelChannelClosedSchema, agentTraceGroupOf, buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./host/agent-model-evidence.js";
 export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationModelChannel, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";
+// TE-H1 browser evidence: the runner and its driver port (the worker supplies the driver that starts the app in its sandbox and Chromium in the executor image).
+export { runBrowserEvidence } from "./executor/browser-evidence.js";
+export type { BrowserEvidenceCaptureAnswer, BrowserEvidenceDriver, BrowserEvidenceRunInput, BrowserEvidenceSide } from "./executor/browser-evidence.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";
 export { deriveWebApiProbeObservation, verifyWebApiProbeRecord, type WebApiProbeDerivation } from "./web-api-probe-evidence.js";
 export { DRIVING_TEST_LIMITS, DRIVING_TEST_SCENARIO_ID, webApiDrivingTestPlan } from "./host/web-api-probe-plan.js";
