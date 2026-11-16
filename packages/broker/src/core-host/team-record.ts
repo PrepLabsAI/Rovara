@@ -3,12 +3,12 @@
 //   search    the context sources' "search team knowledge" tool gets the record as its `teamSearch` (keyword search over the project's rows, no infrastructure);
 //   erase     `erasePersonTeamRecord` removes every row a person wrote, whatever the switch says (the person erase calls it with the lessons erase).
 // Wiring (the deployment, after `createCoreLessons`): `const record = attachCoreTeamRecord(lessons)`, then give `record.search` to the context sources as `teamSearch`.
-import type { DocumentStore, OrgId } from "@agentx/contracts";
+import { OrgIdSchema, type AuditSink, type DocumentStore, type OrgId } from "@agentx/contracts";
 import type { TeamRecordSearch } from "../context-sources/team-record.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { recordEndedTask, teamRecordSearchOver } from "../team-record/capture.js";
 import { createTeamRecord, type TeamRecord } from "../team-record/record.js";
-import { companyProjects, type CoreLessons } from "./lessons.js";
+import { companyProjects, erasePersonLessons, type CoreLessons, type ErasePersonLessonsReport } from "./lessons.js";
 
 export interface CoreTeamRecord {
   readonly record: TeamRecord;
@@ -40,4 +40,17 @@ export function attachCoreTeamRecord(lessons: CoreLessons, input: { store: Docum
 export async function erasePersonTeamRecord(input: { store: DocumentStore; companyId: OrgId; personId: string; now: () => number }): Promise<{ rows: number }> {
   const projects = await companyProjects(input.store, input.companyId);
   return { rows: await createTeamRecord({ store: input.store, companyId: input.companyId, now: input.now }).erasePerson(projects, input.personId) };
+}
+
+/**
+ * The person erase's learning step on a deployed install (`PersonEraseDeps.eraseLearning`): the person's lessons (`erasePersonLessons`) and their Team record rows (`erasePersonTeamRecord`),
+ * in every project of the company, whatever the lessons switch says (data that exists must be erased). Rejects when either could not finish (the erase is then repeated or resumed).
+ */
+export function hostedEraseLearning(input: { store: DocumentStore; audit: AuditSink; now: () => number; log?: (entry: Record<string, unknown>) => void }): (companyId: string, personId: string) => Promise<{ lessons: ErasePersonLessonsReport; teamRecordRows: number }> {
+  return async (companyId, personId) => {
+    const company = OrgIdSchema.parse(companyId);
+    const lessons = await erasePersonLessons({ store: input.store, audit: input.audit, companyId: company, personId, now: input.now, ...(input.log === undefined ? {} : { log: input.log }) });
+    const team = await erasePersonTeamRecord({ store: input.store, companyId: company, personId, now: input.now });
+    return { lessons, teamRecordRows: team.rows };
+  };
 }

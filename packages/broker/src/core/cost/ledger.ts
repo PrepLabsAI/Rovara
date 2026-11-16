@@ -4,6 +4,8 @@
 // Layout, in the task's own company-scoped partition:
 //   `ORG#<c>#COST#<taskId>` / `ENTRY#<entryId>`   one per recorded usage (tokens, the cost the adapter charged, or no cost); written once, so a usage told twice counts once whatever the adapter does
 //   `ORG#<c>#COST#<taskId>` / `TOTAL`             the running total, changed in the same transaction as the entry that changed it
+//   `ORG#<c>#COST_DAY` / `DAY#<yyyy-mm-dd>`        the company's spend on one UTC day (the day the usage was recorded), changed in the same transaction: dollars in `usdMicros`, and a count of
+//                                                  the entries it could not add (`uncountedEntries`: no price, or another currency), so a reader holding a daily cap knows the figure is a floor
 import { INDEX_EXPIRY_ATTRIBUTE, companyScoped, when, type Cost, type DocumentStore, type MeterEntry, type MeterResult, type Metering, type ModelUsage, type StoredDocument } from "@agentx/contracts";
 
 const ENTRY_KEPT_SECONDS = 400 * 86_400;
@@ -27,7 +29,25 @@ export interface CostLedger {
   taskCost(companyId: string, taskId: string): Promise<TaskCost>;
   /** What this usage would cost, without recording it. */
   price(usage: ModelUsage): Promise<Cost | null>;
+  /** The company's spend on one UTC day (`yyyy-mm-dd`), as recorded through this ledger (zero when nothing was). */
+  companyDayCost(companyId: string, day: string): Promise<CompanyDayCost>;
 }
+
+/** The company's spend on one UTC day. `uncountedEntries` above zero: some usage that day has no dollar figure, so `usdMicros` is a floor. */
+export interface CompanyDayCost {
+  day: string;
+  usdMicros: number;
+  entries: number;
+  uncountedEntries: number;
+}
+
+/** The UTC day of a time, as the company-day row names it. */
+export const utcDayOf = (at: Date): string => at.toISOString().slice(0, 10);
+const DAY = /^\d{4}-\d{2}-\d{2}$/u;
+export const companyDayKey = (companyId: string, day: string): { pk: string; sk: string } => {
+  if (!DAY.test(day)) throw new Error("a day is yyyy-mm-dd");
+  return { pk: companyScoped(companyId, "COST_DAY"), sk: `DAY#${day}` };
+};
 
 export const costPartition = (companyId: string, taskId: string): string => companyScoped(companyId, `COST#${taskId}`);
 
@@ -81,6 +101,15 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
         // The total's currency was read above: the update holds only while it is still what that read saw.
         condition: currency === undefined ? when.notExists("currency") : when.eq("currency", currency),
       },
+      // The company's day: only a dollar cost is added; any other usage is counted as one the figure leaves out. Written with no expiry, like the total.
+      {
+        kind: "update", key: companyDayKey(entry.companyId, utcDayOf(at)),
+        ops: [
+          { op: "setIfAbsent", path: ["entityType"], value: "COST_DAY" }, { op: "setIfAbsent", path: ["companyId"], value: entry.companyId }, { op: "setIfAbsent", path: ["day"], value: utcDayOf(at) },
+          { op: "add", path: ["usdMicros"], amount: result.cost !== null && result.cost.currency === "USD" ? result.cost.micros : 0 },
+          { op: "add", path: ["entries"], amount: 1 }, { op: "add", path: ["uncountedEntries"], amount: result.cost !== null && result.cost.currency === "USD" ? 0 : 1 },
+        ],
+      },
     ]);
     if (committed.applied) return { ...result, counted: true };
     // Lost to the same usage told at the same time (its entry is there now), or to the first usage that fixed the currency: tell the first case as already counted, and ask again for the second.
@@ -92,6 +121,13 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
   return {
     price: (usage) => deps.metering.price(usage),
     recordUsage: (entry) => recordUsage(entry),
+    async companyDayCost(companyId, day) {
+      const row = await deps.store.get(companyDayKey(companyId, day));
+      const number = (name: string): number => (row !== undefined && typeof row[name] === "number" && natural(row[name]) ? row[name] : 0);
+      // A row whose figures do not read is no figure: every entry of it is counted as left out, so a cap reader holds back.
+      const readable = row === undefined || ["usdMicros", "entries", "uncountedEntries"].every((name) => typeof row[name] === "number" && natural(row[name]));
+      return readable ? { day, usdMicros: number("usdMicros"), entries: number("entries"), uncountedEntries: number("uncountedEntries") } : { day, usdMicros: number("usdMicros"), entries: 1, uncountedEntries: 1 };
+    },
     async taskCost(companyId, taskId) {
       const total = await deps.store.get({ pk: costPartition(companyId, taskId), sk: "TOTAL" });
       if (total === undefined) return emptyCost(taskId);

@@ -8,7 +8,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createCoreHostApp, engineStampKey, type CoreHostApp, type EngineStamp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp, type EngineStamp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
   TASK_ENTRY_AREAS, coreAnswerValue, coreTaskEntryFrom, entryOwner, ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace, taskEntryOperation, type CoreTaskEntry,
@@ -154,7 +154,7 @@ const ownerRule = (): TaskFlowDeps["access"] => ({
   ownerActing: async (principal, task) => (principal.personId === task.developerId || developerIdOf(principal) === task.developerId ? { actorId: task.ownerKey } : undefined),
 });
 
-async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean } = {}) {
+async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean; newTasksOnWorkflow?: true } = {}) {
   const world = createFakeWorld();
   await registerProject(world, FAKE_COMPANY);
   await registerProject(world, OTHER);
@@ -168,7 +168,9 @@ async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "me
   if (options.unknown === "principal") principals.delete(OMAR.developerId);
   if (options.unknown === "membership") members.delete(`${owner.personId}${OTHER}`);
   const routes = createCoreDevRoutes({ app, companyOf: async (caller) => members.get(caller.principal.personId + caller.principal.companyId), wiring: () => ({ origin: () => "https://api.example", ...(options.actions === true ? { taskActions: { roundCap: async () => undefined } } : {}) }) });
-  const coreTasks: CoreTaskEntry = coreTaskEntryFrom(routes, async (caller) => principals.get(caller.developerId));
+  const entry: CoreTaskEntry = coreTaskEntryFrom(routes, async (caller) => principals.get(caller.developerId));
+  // Step 6: a start goes to the core where the switch sends the company's NEW tasks. `newTasksOnWorkflow`: the core still holds its task, but new ones start on the workflow (a narrowed switch).
+  const coreTasks: CoreTaskEntry = options.newTasksOnWorkflow !== true ? entry : { route: async (request, caller) => (request.method === "POST" && request.path.split("?")[0] === "/v1/dev/tasks" ? undefined : await entry.route(request, caller)) };
   const harness = await createDeveloperTaskBroker(options.wired === false ? {} : { developerExtra: { coreTasks } });
   const rows = [
     ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk),
@@ -338,7 +340,7 @@ describe("the AWS readers see only workflow rows", () => {
   });
 
   it("a workflow task's workspace still reads as before through the same actions", async () => {
-    const { actions, dev, db } = await coreWorld();
+    const { actions, dev, db } = await coreWorld({ newTasksOnWorkflow: true });
     const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
     const taskId = (started.body.task as { taskId: string }).taskId;
     const { workspaceId } = db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
@@ -419,7 +421,7 @@ describe("the operation readers behind requireOperation see only workflow rows (
   });
 
   it("a workflow task's operation still reads through all three", async () => {
-    const { actions, dev, db, brokerInput } = await coreWorld();
+    const { actions, dev, db, brokerInput } = await coreWorld({ newTasksOnWorkflow: true });
     const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
     const taskId = (started.body.task as { taskId: string }).taskId;
     const { workspaceId } = db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
@@ -428,5 +430,30 @@ describe("the operation readers behind requireOperation see only workflow rows (
     expect(await actions.workflowBinding(workspaceId, operation.id)).toBeUndefined();
     expect(await actions.workflowCandidateSourceExportDigest(workspaceId, operation.id)).toBeUndefined();
     await expect(actions.workflowBinding(workspaceId, "missing-operation")).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: operation not found" });
+  });
+});
+
+describe("a task's start on the AWS developer route (lane E2 step 6)", () => {
+  it("goes to the core for a member of a company the switch sends there: the core's task view, its rows on the core, none of the workflow's", async () => {
+    const { dev, world, db } = await coreWorld();
+    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Add a /ready endpoint", workflow: true, workflowPath: "QUICK" });
+    expect(started.status).toBe(200);
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    expect(stampOf(await world.store.get(engineStampKey(taskId)))).toMatchObject({ engine: "core" });
+    expect(db.get(`DEVTASK#${taskId}`, "META")).toBeUndefined();
+  });
+
+  it("stays the workflow's start for a caller the core's mapping names no company for, and without the core's handlers", async () => {
+    const unknown = await coreWorld({ unknown: "principal" });
+    const coreWrites = vi.spyOn(unknown.world.store, "transact");
+    const theirs = await unknown.dev(OMAR, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
+    expect(coreWrites).not.toHaveBeenCalled();
+    const unwired = await coreWorld({ wired: false });
+    const mine = await unwired.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
+    expect(mine.status).toBe(200);
+    expect(unwired.db.get(`DEVTASK#${(mine.body.task as { taskId: string }).taskId}`, "META")).toBeDefined();
+    // The workflow's own start answered OMAR (his task rows are the workflow's when it let him start).
+    if (theirs.status === 200) expect(unknown.db.get(`DEVTASK#${(theirs.body.task as { taskId: string }).taskId}`, "META")).toBeDefined();
+    else expect(theirs.status).toBeLessThan(500);
   });
 });

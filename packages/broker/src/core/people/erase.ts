@@ -308,8 +308,12 @@ export async function walkPersonEvidence(deps: Pick<PersonEraseDeps, "store" | "
   return { complete, counts };
 }
 
-/** The scheduled run: finishes the owed walks of one company, oldest try first, each with a small share of the budget. Answers how many finished and how many are still owed. */
-export async function resumePersonErases(deps: Pick<PersonEraseDeps, "store" | "objects" | "now" | "log">, companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }> {
+/**
+ * The scheduled run: finishes the owed walks of one company, oldest try first, each with a small share of the budget. Answers how many finished and how many are still owed.
+ * With `eraseLearning` (a deployed install's lessons and team record erase), each owed person's learning data is erased again first (it is idempotent): a request whose learning step
+ * failed after its receipt was written is finished here too. When it fails, that person's walk is not run, so the pending row stays and the next run tries both again.
+ */
+export async function resumePersonErases(deps: Pick<PersonEraseDeps, "store" | "objects" | "now" | "log"> & Partial<Pick<PersonEraseDeps, "eraseLearning">>, companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }> {
   const company = OrgIdSchema.parse(companyId);
   const ends = deps.now() + Math.max(0, budgetMs);
   const pending: StoredDocument[] = [];
@@ -326,6 +330,7 @@ export async function resumePersonErases(deps: Pick<PersonEraseDeps, "store" | "
     const personId = row.sk;
     if (!isErasablePersonId(personId) || deps.now() >= ends) { owed += 1; continue; }
     try {
+      if (deps.eraseLearning !== undefined) await deps.eraseLearning(company, personId);
       const report = await walkPersonEvidence(deps, company, personId, Math.min(ends, deps.now() + PERSON_ERASE_RESUME_SHARE_MS));
       if (report.complete) finished += 1; else owed += 1;
     } catch (error) {

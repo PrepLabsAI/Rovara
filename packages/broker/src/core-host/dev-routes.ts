@@ -3,6 +3,8 @@
 // The controller decided that, once the host is deployed, these answers come from the core itself, not from adapters on the old broker:
 //   - sessions (`/v1/app/sessions...`): a session's read (the task view with its evidence), the understanding answers (`POST .../answers`), stop, retry, follow;
 //   - a task's read (`GET /v1/dev/tasks/<id>`), whose view carries the evidence kept for its checked code;
+//   - a task's START (`POST /v1/dev/tasks`), only for a member whose company the switch sends NEW tasks to the core (`engineForNewTask`). Anyone else, and a person with no member company,
+//     gets `undefined`: the old broker starts the task exactly as before (lane E2 step 6). A membership read that fails refuses (the sign-in refusal), never falls back;
 //   - decision cards (`/v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card (approve, reject, request changes,
 //     evidence-opened) needs a FRESH STEP-UP (lane ID part 2): the person proved it was them with a factor Code owns (an emailed code, a passkey, or a company sign-in's own
 //     re-authentication), no longer ago than the company's window. A Slack, Google or GitHub round trip never counts, and a tool holding an ordinary API token has no step-up;
@@ -25,7 +27,7 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
+import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
@@ -47,6 +49,7 @@ const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
 const TASK_READ = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})$/u;
 /** The owner's moves on a task already running (DECISIONS 198), on the old workflow routes' paths. */
 const TASK_ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/(workflow\/send-back|workflow\/review-findings|continue)$/u;
+const TASK_START = "/v1/dev/tasks";
 const DECISIONS = /^\/v1\/app\/decisions(?:\/|$)/u;
 const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:how-we-work|playbook)$/u;
 const SCRIPT_TOKENS = /^\/v1\/app\/script-tokens(?:\/([^/]+)\/revoke)?$/u;
@@ -116,6 +119,8 @@ export interface CoreDevWiring {
   sessionCapSeconds?: number;
   /** The URL clients reach the API at (a session's `link`). */
   origin: () => string;
+  /** Hosted wiring (d): the audit sink for one request, naming the caller it came through (`auditSinkForDeployedCaller`). Absent: the registry's sink as it is. */
+  auditFor?: (caller: DeployedCaller, sink: AuditSink) => AuditSink;
 }
 
 export interface CoreDevRoutesOptions {
@@ -137,6 +142,7 @@ function tokenIdOf(raw: string): string {
 
 /** Only the methods the core's handlers serve: anything else under these paths stays the old broker's (a playbook PUT is its editor's). */
 function owns(path: string, method: string): boolean {
+  if (path === TASK_START) return method === "POST";
   if (TASK_READ.test(path) || PLAYBOOK.test(path)) return method === "GET";
   if (TASK_ACTION.test(path)) return method === "POST";
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
@@ -227,17 +233,24 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       if (!options.app.serving) return undefined;
       const path = request.path.split("?")[0] ?? request.path;
       if (!owns(path, request.method)) return undefined;
+      const starting = path === TASK_START;
       let membership: CompanyMembership | undefined;
+      let unreadable = false;
       try {
         membership = await options.companyOf(caller);
       } catch {
         membership = undefined;
+        unreadable = true;
       }
+      // A start by a person with no member company is no core company's: the old broker starts it, as before. (Every other route refuses below.)
+      if (starting && !unreadable && (membership === undefined || membership === null)) return undefined;
       // Fail closed: no member company, a malformed one or an unknown role is a sign-in refusal, never the install's company.
       if (membership === undefined || membership === null || typeof membership !== "object" || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || !OrgRoleSchema.safeParse(membership.role).success) return unauthenticated();
       const companyId = membership.companyId;
       // The principal the identity point vouched for must be of the member company (checked before anything is built for it); the task flow checks it again on every task read.
       if (caller.principal.companyId !== companyId) return unauthenticated();
+      // A start goes to the core only where the switch sends this company's NEW tasks there; anywhere else the old broker starts it (nothing is read or built here).
+      if (starting && options.app.engineForNewTask(companyId) !== "core") return undefined;
       // A script token reaches only a task's read here (its closed list: its own projects' tasks); never sessions, decisions, playbooks or tokens.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
       if (caller.scriptToken !== undefined && TASK_ACTION.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
@@ -255,6 +268,13 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         if (SESSIONS.test(path)) {
           if (target.sessions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return (await target.sessions(request, taskCaller)) ?? errorAnswer(agentXError("NOT_FOUND", "route not found"));
+        }
+        if (starting) {
+          // The core's own start (it parses the request, checks the person may start on the project, holds the admission and writes the engine stamp in one transaction). A retry with the
+          // same request id answers the first task. The answer is the developer task view, as the old start's.
+          const started = await target.runtime.flow.start({ ...taskCaller, origin: caller.client === undefined ? "cli" : "app" }, bodyOf(request));
+          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, started.task.taskId);
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
         }
         const task = TASK_READ.exec(path);
         if (task !== null) {
@@ -309,7 +329,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         if (tokens !== null) {
           const enabled = target.wiring.scriptTokens?.enabled ?? (() => scriptTokensEnabled());
           if (target.wiring.scriptTokens === undefined || !enabled()) throw agentXError("NOT_FOUND", "route not found");
-          const deps = { store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target) };
+          const audit = target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
+          const deps = { store: target.runtime.flow.deps.store, audit, now: () => nowOf(target) };
           // The live role from membership decides whether the list and revoke reach every token of the company (an administrator) or only the caller's own.
           const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };
           if (tokens[1] === undefined && request.method === "POST") {

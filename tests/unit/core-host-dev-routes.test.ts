@@ -2,7 +2,7 @@
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { blockedReview, plain } from "../support/task-actions-world.js";
@@ -10,7 +10,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -61,7 +61,7 @@ describe("the core's handlers on the deployed API", () => {
     const { world, companyOf } = await world2();
     const off = createCoreDevRoutes({ app: appOver(world, {}), companyOf, wiring: () => WIRED });
     const spy = vi.spyOn(world.store, "get");
-    for (const request of [get("/v1/app/sessions"), get(`/v1/dev/tasks/${randomUUID()}`), get("/v1/app/decisions"), get("/v1/app/projects/payments/how-we-work"), get("/v1/app/script-tokens"), post("/v1/app/script-tokens")]) {
+    for (const request of [get("/v1/app/sessions"), get(`/v1/dev/tasks/${randomUUID()}`), get("/v1/app/decisions"), get("/v1/app/projects/payments/how-we-work"), get("/v1/app/script-tokens"), post("/v1/app/script-tokens"), post("/v1/dev/tasks", { requestId: randomUUID() })]) {
       expect(await off.route(request, callerOf(FAKE_COMPANY)), request.path).toBeUndefined();
     }
     expect(companyOf).not.toHaveBeenCalled();
@@ -329,5 +329,79 @@ describe("the owner's moves on a core task (send back, review findings, continue
     // A same-company person who may READ the task (and so knows it exists) but is not its owner gets the move's own field words for a bad body, and "no such task" for a good one.
     expect((await routes.route({ ...post(`/v1/dev/tasks/${taskId}/workflow/send-back`), body: "[1]" }, colleague))?.statusCode).toBe(400);
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
+  });
+});
+
+describe("a task's start on the deployed API (lane E2 step 6)", () => {
+  const startBody = () => ({ requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+
+  it("starts the task on the core for a member of a company the switch sends there, stamped core, answered as the developer task view", async () => {
+    const { world, app, companyOf, remember } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    const own = remember(FAKE_COMPANY);
+    const body = startBody();
+    const answer = await routes.route(post("/v1/dev/tasks", body), own);
+    expect(answer?.statusCode).toBe(200);
+    const task = (JSON.parse(answer!.body) as { task: { taskId: string } }).task;
+    expect(stampOf(await world.store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core" });
+    // The same request id answers the first task.
+    const again = await routes.route(post("/v1/dev/tasks", body), own);
+    expect((JSON.parse(again!.body) as { task: { taskId: string } }).task.taskId).toBe(task.taskId);
+    // Only POST on the exact path is a start.
+    expect(await routes.route(get("/v1/dev/tasks"), own)).toBeUndefined();
+  });
+
+  it("leaves the start to the old broker, reading nothing of the core, for a company the switch does not cover, in drain, and for a person with no member company", async () => {
+    for (const env of [{ ROVARA_CORE_ENGINE: `on:${OTHER}` }, { ROVARA_CORE_ENGINE: "drain" }]) {
+      const { world, app, companyOf, remember } = await world2(env);
+      const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+      const spy = vi.spyOn(world.store, "get");
+      expect(await routes.route(post("/v1/dev/tasks", startBody()), remember(FAKE_COMPANY)), env.ROVARA_CORE_ENGINE).toBeUndefined();
+      expect(spy).not.toHaveBeenCalled();
+    }
+    const { app, companyOf } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    expect(await routes.route(post("/v1/dev/tasks", startBody()), callerOf(FAKE_COMPANY))).toBeUndefined();
+  });
+
+  it("leaves the start to the old broker for a drained company that still holds core tasks (its runtime is served, its new tasks are not)", async () => {
+    const { world, app, companyOf, remember } = await world2();
+    const own = remember(FAKE_COMPANY);
+    expect((await createCoreDevRoutes({ app, companyOf, wiring: () => WIRED }).route(post("/v1/dev/tasks", startBody()), own))?.statusCode).toBe(200);
+    const drained = appOver(world, { ROVARA_CORE_ENGINE: "drain" });
+    // The drained root still serves the company (it holds a core task)...
+    await expect(drained.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
+    // ...but a new start is the old broker's.
+    expect(await createCoreDevRoutes({ app: drained, companyOf, wiring: () => WIRED }).route(post("/v1/dev/tasks", startBody()), own)).toBeUndefined();
+  });
+
+  it("refuses with the sign-in words, never falling back, when membership cannot be read or names another company than the principal's", async () => {
+    const { app, remember } = await world2();
+    const failing = createCoreDevRoutes({ app, companyOf: async () => { throw new Error("membership store down"); }, wiring: () => WIRED });
+    const refused = await failing.route(post("/v1/dev/tasks", startBody()), remember(FAKE_COMPANY));
+    expect(refused?.statusCode).toBe(401);
+    expect(refused!.body).not.toContain("down");
+    const elsewhere = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "owner" }), wiring: () => WIRED });
+    expect((await elsewhere.route(post("/v1/dev/tasks", startBody()), callerOf(FAKE_COMPANY)))?.statusCode).toBe(401);
+  });
+
+  it("refuses a script token's start, and answers a body that is not an object in fixed words", async () => {
+    const { app, companyOf, remember } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    const own = remember(FAKE_COMPANY);
+    expect((await routes.route(post("/v1/dev/tasks", startBody()), { ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }))?.statusCode).toBe(403);
+    const bad = await routes.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "[1,2]" }, own);
+    expect(bad?.statusCode).toBe(400);
+    expect(bad!.body).not.toContain("[1,2]");
+  });
+
+  it("names the caller in a script token's audit events through the deployment's audit wrapper", async () => {
+    const { world, app, companyOf, remember } = await world2();
+    const auditFor = vi.fn((_caller: DeployedCaller, sink: AuditSink) => sink);
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, auditFor }) });
+    const own = remember(FAKE_COMPANY);
+    expect((await routes.route(get("/v1/app/script-tokens"), own))?.statusCode).toBe(200);
+    expect(auditFor).toHaveBeenCalledWith(own, expect.anything());
+    void world;
   });
 });

@@ -312,8 +312,10 @@ import {
   storedCharge,
   type ChannelConversationDependencies,
 } from "./channel-conversation.js";
-import { companyReadsFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
+import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
+import { brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, type BrokerCoreRoot } from "./core-engine-root.js";
+import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
 import { isPageRefusal, plannerRepliesItem, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
@@ -662,6 +664,8 @@ interface AwsBrokerDependencies {
  * export from `turnRecordsTableName` unless one is injected.
  */
 export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
+  /** Lane E2 step 6: the core engine's root (aws/core-engine-root.ts). Absent, or its switch off: the broker never reaches the core. */
+  core?: BrokerCoreRoot;
   catalogs?: CatalogCache<ScopeDiscovery>;
   connectorCredentials?: ConnectorCredentialsConfiguration;
   turnRecordsTableName?: string;
@@ -954,7 +958,8 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
 }
 
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
-  const dependencies = brokerDependencies(input);
+  const { core, ...brokerInput } = input;
+  const dependencies = brokerDependencies(brokerInput);
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -962,7 +967,17 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string; getRemainingTimeInMillis?: () => number }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+    // Lane E2 step 6: a core job's schedule, or a State table stream batch for the outbox. Only with a core root; with its switch off the answer says so and nothing is read.
+    if (core !== undefined && (isCoreJobEvent(event) || outboxCompaniesOf(event) !== undefined)) {
+      try {
+        const remainingMs = typeof context?.getRemainingTimeInMillis === "function" ? context.getRemainingTimeInMillis() : undefined;
+        return json((await core.handleEvent(event, { remainingMs })) ?? { skipped: "not_core" }, "core-engine");
+      } catch (error) {
+        process.stderr.write(`${JSON.stringify({ component: "broker", event: "core_engine.event_failed", error: error instanceof Error ? error.name : "unknown" })}\n`);
+        return json({ error: "core_event_failed" }, "core-engine", 500);
+      }
+    }
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -1150,7 +1165,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           return await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url) as { statusCode: number; headers: Record<string, string>; body: string };
         }
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
-        return await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -1228,6 +1243,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       if (setupArtifact?.[1] && setupArtifact[2] === "evidence/finalize" && request.method === "POST") {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
+      }
+      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off.
+      if (core !== undefined && request.method === "POST") {
+        const answer = await core.callback(request);
+        if (answer !== undefined) return answer;
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
       const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
@@ -1324,7 +1344,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -15165,8 +15185,23 @@ function slackRequestQueue(queueUrl: string): SlackRequestQueue {
 // Spec 064: the legacy deployment's sign-in is for account linking only (DEVELOPER_API_SCOPE=linking, set by infra).
 const signIn = developerConfiguration();
 const linkingOnly = process.env.DEVELOPER_API_SCOPE === "linking";
-const developer = linkingOnly ? undefined : signIn;
 const linking = linkingOnly ? signIn : undefined;
+
+// Lane E2 step 6: the core engine's root. With ROVARA_CORE_ENGINE off (the default) it builds nothing and the developer routes get no core entry, so the broker is as before.
+const coreRoot = createBrokerCoreRoot({
+  env: process.env,
+  documentClient,
+  stateTableName: requiredEnvironment("STATE_TABLE_NAME"),
+  signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME,
+  callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
+  repositoryGrantKey: repositoryGrantSigningKey,
+  repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
+  codeModules: () => brokerCoreModuleDeps(process.env),
+  policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
+  origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
+  log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
+});
+const developer = linkingOnly || signIn === undefined ? undefined : coreRoot.coreTasks === undefined ? signIn : { ...signIn, coreTasks: coreRoot.coreTasks };
 
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;
@@ -15182,6 +15217,7 @@ const cloudWatch = new CloudWatchClient(awsClientConfiguration);
 const sqs = new SQSClient(awsClientConfiguration);
 
 export const handler = createAwsBrokerHandler({
+  core: coreRoot,
   documentClient,
   s3,
   tableName: requiredEnvironment("STATE_TABLE_NAME"),

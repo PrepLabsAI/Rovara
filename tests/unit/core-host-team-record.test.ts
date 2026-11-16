@@ -7,7 +7,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
-import { attachCoreTeamRecord, erasePersonTeamRecord } from "../../packages/broker/src/core-host/team-record.js";
+import { attachCoreTeamRecord, erasePersonTeamRecord, hostedEraseLearning } from "../../packages/broker/src/core-host/team-record.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -68,6 +68,35 @@ describe("the Team record on the core host", () => {
     const erased = await erasePersonTeamRecord({ store: world.store, companyId: A, personId: a.personId, now: () => world.clock.now });
     expect(erased).toEqual({ rows: 1 });
     expect(await record.search.search({ orgId: A, projectId: "payments", query: "health endpoint build version", asAgentForTask: a.taskId, limit: 5 })).toEqual([]);
+  });
+});
+
+describe("the deployed person erase's learning step (lessons and Team record)", () => {
+  it("removes the person's Team record rows and runs the lessons erase, whatever the switch says; another company's rows stay", async () => {
+    const world = createFakeWorld();
+    const companies = await setup(world);
+    const a = companies[A]!;
+    const b = companies[B]!;
+    const handlers: Array<{ on(m: { kind: "merged"; orgId: string; taskId: string; at: string; text: string }): Promise<void> }> = [];
+    for (const company of [a, b]) {
+      const register = company.lessons.milestones.register.bind(company.lessons.milestones);
+      (company.lessons.milestones as { register: typeof register }).register = (handler) => { handlers.push(handler); return register(handler); };
+      attachCoreTeamRecord(company.lessons, { store: world.store, now: () => world.clock.now });
+    }
+    const at = new Date(world.clock.now).toISOString();
+    for (const [orgId, taskId] of [[A, a.taskId], [B, b.taskId]] as const) for (const handler of handlers) await handler.on({ kind: "merged", orgId, taskId, at, text: "merged" }).catch(() => undefined);
+    const rowsOf = async (companyId: string) => (await world.store.query({ pk: teamRecordPk(companyId, "payments") })).items.filter((item) => item["entityType"] === "TEAM_RECORD_ROW").length;
+    expect(await rowsOf(A)).toBe(1);
+    expect(await rowsOf(B)).toBe(1);
+    const erase = hostedEraseLearning({ store: world.store, audit: { stage: () => [], record: async () => undefined }, now: () => world.clock.now });
+    const report = await erase(A, a.personId);
+    expect(report.teamRecordRows).toBe(1);
+    expect(report.lessons).toMatchObject({ projects: 1 });
+    expect(await rowsOf(A)).toBe(0);
+    expect(await rowsOf(B)).toBe(1);
+    // Repeating it is harmless (the erase is resumed or repeated).
+    expect((await erase(A, a.personId)).teamRecordRows).toBe(0);
+    await expect(erase("not-a-company", a.personId)).rejects.toThrow();
   });
 });
 

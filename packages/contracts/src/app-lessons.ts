@@ -22,7 +22,7 @@ export const LESSON_TIER_REASONS = [
  * Why learning cannot run for a project or its company right now (lessons in production, "never silent"). A fixed code and a time, nothing else: no model name, no amount, no provider text.
  * One current reason at most per project and per company; it is cleared when a learning call succeeds.
  */
-export const LESSONS_PAUSE_CODES = ["no_provider", "all_models_forbidden", "no_suitable_model", "monthly_limit", "no_budget", "cost_too_high", "model_failed"] as const;
+export const LESSONS_PAUSE_CODES = ["no_provider", "all_models_forbidden", "no_suitable_model", "monthly_limit", "no_budget", "cost_too_high", "model_failed", "lessons_off"] as const;
 export const LessonsPauseCodeSchema = z.enum(LESSONS_PAUSE_CODES);
 export type LessonsPauseCode = z.infer<typeof LessonsPauseCodeSchema>;
 /** The one line that says it, on the Lessons tab and on Home. */
@@ -34,6 +34,8 @@ export const LESSONS_PAUSE_TEXT: Record<LessonsPauseCode, string> = {
   no_budget: "Lessons paused: the AI budget has run out",
   cost_too_high: "Lessons paused: even the cheapest available model costs too much for one lesson",
   model_failed: "Lessons paused: the AI provider is not answering",
+  // The model gateway's learning route said lessons are off for this company (its `lessons_paused` refusal with this code).
+  lessons_off: "Lessons paused: lessons are turned off for this company",
 };
 export const lessonsPauseText = (code: string): string => (LESSONS_PAUSE_TEXT as Record<string, string | undefined>)[code] ?? "Lessons paused";
 /** The one line for a reason, with who it applies to: a company-wide reason (the monthly learning limit) says it is for every project of the company. */
