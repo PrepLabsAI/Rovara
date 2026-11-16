@@ -162,13 +162,25 @@ describe("the warning", () => {
     expect(JSON.stringify(w.logged)).not.toContain("secret-canary");
   });
 
-  it("a host that says slow down while the provider is read pauses the sweep and records nothing yet", async () => {
+  it("a host that says slow down while the provider is read goes up (the sweep pauses) and records nothing yet", async () => {
     const w = await withEdges([edge("app", "payments-lib")]);
     mergeByHand(w, "app");
     w.world.prs.find((entry) => entry.repositoryId === "payments-lib")!.model.rateLimitedUntil = w.clock.ms + 3_600_000;
-    await w.tracking.sweep();
+    // The pass itself, not the sweep: the sweep reads the host first and would stop earlier.
+    const budget = { signal: new AbortController().signal, beforeRequest: () => undefined };
+    await expect(w.tracking.deps.observeMerge(TASK_ID, budget)).rejects.toMatchObject({ name: "HostRateLimitError" });
     expect((await readTask(w.h.deps, TASK_ID))!.workflow?.pullRequests?.find((entry) => entry.repositoryId === "app")?.state).toBe("OPEN");
-    expect(w.tracking.pausedUntil()).toBeDefined();
+  });
+
+  it("outOfOrderMilestoneItems lets a rate limit go up and takes any other fault as cannot tell", async () => {
+    const { HostRateLimitError } = await import("../../packages/contracts/src/index.js");
+    const pullRequests = [{ repositoryId: "app", number: 1, url: "https://github.com/acme/app/pull/1", required: true, state: "MERGED" }, { repositoryId: "payments-lib", number: 1, url: "https://github.com/acme/payments-lib/pull/1", required: true, state: "OPEN" }];
+    const task = { taskId: TASK_ID, orgId: ORG, project: "web", startingRevision: 1, workspaceId: "ws", ownerId: "o", ownerName: "n", workflow: { definitionVersion: "1.1.0", pullRequests } };
+    const run = (providerState: () => Promise<never>) => outOfOrderMilestoneItems({
+      milestones: { items: () => [], deliver: async () => undefined }, repositoryEdges: async () => [edge("app", "payments-lib")], providerState,
+    }, task as never, { pullRequests: pullRequests.map((entry) => ({ ...entry, state: "OPEN" })) } as never, task.workflow as never, "2026-11-16T00:00:00.000Z");
+    await expect(run(async () => { throw new HostRateLimitError(Date.now() + 1_000); })).rejects.toBeInstanceOf(HostRateLimitError);
+    await expect(run(async () => { throw new Error("down"); })).resolves.toEqual([]);
   });
 
   it("a provider that was closed without merging is not said about as waiting", async () => {
