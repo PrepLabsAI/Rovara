@@ -58,6 +58,9 @@ export interface EvalHostSources {
   readonly meter?: EvalMeterOptions;
 }
 
+/** The longest the one eval-plan ask may take. */
+export const EVAL_PLAN_ASK_TIMEOUT_MS = 30_000;
+
 /** The invocation fields the trusted sources are asked with: this operation's own ids and capability. */
 export interface EvalSourceInvocation { readonly workspaceId: string; readonly operationId: string; readonly callbackCapability: string }
 
@@ -79,6 +82,8 @@ export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { 
   let delivery: Promise<DeliveredEvalSources | undefined> | undefined;
   const delivered = (): Promise<DeliveredEvalSources | undefined> => delivery ??= fetchEvalPlanDelivery({
     controlPlaneUrl: options.controlPlaneUrl, workspaceId: invocation.workspaceId, operationId: invocation.operationId, capability: invocation.callbackCapability,
+    // One bounded ask: a broker that hangs is "not available" after 30 seconds, never held to the round deadline.
+    signal: AbortSignal.timeout(EVAL_PLAN_ASK_TIMEOUT_MS),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   }).then(evalSourcesFromDelivery, () => undefined);
   return {

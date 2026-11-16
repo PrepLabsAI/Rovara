@@ -68,6 +68,7 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
     const other = "c".repeat(40);
     expect(await inPin(r, delivered(other))).toBeUndefined();
     expect(await inPin(r, delivered(r.baseSha, {}, { codeHash: evalCodeHash(other) }))).toBeUndefined();
+    expect(await inPin(r, delivered(r.baseSha, {}, { baseCommit: other }))).toBeUndefined();
     expect(await inPin(r, delivered(r.baseSha, {}, { judgePin: "d".repeat(64) }))).toBeUndefined();
     // The candidate must name the same base as its repository.
     expect(await inPin({ repositories: r.repositories, candidates: [{ ...r.candidates[0]!, baseCommitSha: other }] }, delivered(r.baseSha))).toBeUndefined();
@@ -86,6 +87,8 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
     expect(await inPin(r, { ...plan, questions: [{ ...plan.questions[0], path: "evals/demo/q1.txt\nHEAD:x" }] })).toBeUndefined();
     const aborted = new AbortController(); aborted.abort();
     expect(await inPin(r, plan, aborted.signal)).toBeUndefined();
+    expect(await inPin(r, { ...plan, questions: [] }, aborted.signal)).toBeUndefined();
+    expect(await inPin(r, { ...plan, questions: [] })).toBeDefined();
     expect(await inPin(r, null)).toBeUndefined();
   });
 
@@ -96,17 +99,21 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
     expect(await inPin(both, delivered(one.baseSha))).toBeUndefined();
     expect((await inPin(both, delivered(one.baseSha, { repository: "web" })))?.key.baseCommit).toBe(one.baseSha);
     expect(await inPin(both, delivered(one.baseSha, { repository: "nowhere" }))).toBeUndefined();
+    // Two repositories pinned at the same base: still not runnable when the plan names none.
+    const twin = { repositories: [{ ...one.repositories[0]!, repositoryId: "twin" }, ...one.repositories], candidates: [{ ...one.candidates[0]!, repositoryId: "twin" }, ...one.candidates] };
+    expect(await inPin(twin, delivered(one.baseSha))).toBeUndefined();
   });
 
   it("is bounded: a question file over the per-file limit is not runnable, and many questions sharing files are read once each", async () => {
     const big = Buffer.alloc(EVAL_QUESTION_FILE_MAX_BYTES + 1, 0x61);
     const r = await repo({ "evals/demo/q1.txt": big, "evals/demo/q2.txt": Q2 }, {});
-    expect(await inPin(r, delivered(r.baseSha, {}, {}))).toBeUndefined();
+    const plan = delivered(r.baseSha);
+    expect(await inPin(r, { ...plan, questions: [{ ...plan.questions[0], hash: evalQuestionHash(big) }, plan.questions[1]] })).toBeUndefined();
     const shared = await repo({ "evals/demo/all.jsonl": Q1 }, {});
     const questions = Array.from({ length: 1000 }, (_, i) => ({ id: `q${i}`, category: "ordinary", path: "evals/demo/all.jsonl", hash: evalQuestionHash(Buffer.from(Q1)) }));
     const started = Date.now();
-    const plan = await inPin(shared, delivered(shared.baseSha, { questions }));
-    expect(plan?.questions).toHaveLength(1000);
+    const many = await inPin(shared, delivered(shared.baseSha, { questions }));
+    expect(many?.questions).toHaveLength(1000);
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(await inPin(shared, delivered(shared.baseSha, { questions: [...questions, { ...questions[0]!, id: "q1000" }] }))).toBeUndefined();
   });

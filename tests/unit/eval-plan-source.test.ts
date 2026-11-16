@@ -98,6 +98,9 @@ describe("the EVAL_PLAN writer", () => {
     const a = company(A);
     const row = await proposeEvalSpendApproval(a.deps, project, { ...spendPlan(), evalPlanDigest: "9".repeat(64) } as never, evalPlan());
     expect(row.plan.evalPlanDigest).toBe(evalPlanDigest(A, project, evalPlan()));
+    // With no plan, a caller's digest would make the item claim a plan it does not have: it is dropped.
+    const none = company(A);
+    expect((await proposeEvalSpendApproval(none.deps, project, { ...spendPlan(), evalPlanDigest: "9".repeat(64) } as never)).plan.evalPlanDigest).toBeUndefined();
     const b = company(A);
     await expect(b.propose(evalPlan({ selection: "evals/other" }))).rejects.toThrow("does not match");
     await expect(b.propose(evalPlan({ inputs: { ...inputs, model: "other-model" } }))).rejects.toThrow("does not match");
@@ -129,6 +132,25 @@ describe("the EVAL_PLAN writer", () => {
     expect(await a.read()).toBeUndefined();
     await a.decide(changed);
     expect((await a.read())?.plan.maxCostMicrosPerQuestion).toBe(11);
+  });
+  it("the lost-row rewrite happens only while the item is still the same one: a newer proposal in between stops it (mutant: the transact check)", async () => {
+    const a = company(A);
+    await a.approve();
+    await a.store.transact([{ kind: "delete", key: evalPlanKey(A, project) }]);
+    // Between the short-circuit's read of the plan row and its write, another proposal replaces the item.
+    const get = a.store.get.bind(a.store);
+    let raced = false;
+    a.store.get = async (key) => {
+      const found = await get(key);
+      if (!raced && key.sk === "EVAL_PLAN") {
+        raced = true;
+        const item = (await get(evalSpendKey(A, project)))!;
+        await a.store.put({ item: { ...item, revision: (item["revision"] as number) + 1 } });
+      }
+      return found;
+    };
+    await expect(a.propose()).rejects.toThrow("changed");
+    expect(await stored(a.store, A)).toBeUndefined();
   });
 });
 
@@ -188,6 +210,15 @@ describe("the EVAL_PLAN reader refuses what is not bound to an approved digest",
     }
   });
 
+  it("a valid item of this company next to a plan row that names another company is refused (mutants: the row's company and project checks, with the digest binding)", async () => {
+    for (const [company_, project_] of [[B, project], [A, "other"]] as const) {
+      const a = company(A);
+      await a.approve();
+      await rewrite(a.store, A, row => ({ ...row, company: company_, project: project_, planDigest: evalPlanDigest(company_, project_, row["plan"] as EvalPlanBody) }));
+      expect(await a.read()).toBeUndefined();
+    }
+  });
+
   it("an edited ITEM is refused too: its plan digest changed after approval breaks its own digest", async () => {
     const a = company(A);
     await a.approve();
@@ -232,6 +263,7 @@ describe("the broker's eval plan source", () => {
       key: { company: A, project, baseCommit: BASE, codeHash: evalCodeHash(BASE), judgePin, commandFingerprint: inputs.commandFingerprint, catalogRowId: "model", model: "model", modelVersion: "version-1" },
     });
     expect(await sources.plan({ companyId: A, project }, { bases: undefined })).toBeUndefined();
+    expect(await sources.plan({ companyId: A, project }, run([{ repositoryId: "web", baseCommitSha: "not-a-commit" }]))).toBeUndefined();
     expect(await sources.plan({ companyId: A, project }, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))).toBeUndefined();
     const named = company(A);
     await named.approve(evalPlan({ repository: "api" }));
