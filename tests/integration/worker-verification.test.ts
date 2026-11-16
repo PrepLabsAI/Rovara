@@ -2046,7 +2046,7 @@ describe("CHECKS eval hook", () => {
   it("the one shared plan read happens inside the pinned candidate, so the pin wraps the changed-prompt classifier", async () => {
     // The classifier makes the first plan read. The pinned plan reader (#809) works only inside the pin, so a read outside it is not runnable. Either order
     // looks the same when the plan is a plain fake, which is why the read itself records whether the pin is active.
-    const w = await createEvalFinalCheckWorld(); const pinned: boolean[] = []; const read = w.ports.plan;
+    const w = await createEvalFinalCheckWorld(); const pinned: boolean[] = []; const read = w.ports.plan.bind(w.ports);
     w.ports.plan = async () => { pinned.push(evalPinnedCandidateActive()); return read(); };
     try {
       const fake = fakeRunners();
