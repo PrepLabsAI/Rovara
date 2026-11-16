@@ -87,6 +87,11 @@ export interface CheckRunners {
    * network) is always closed and the working sandbox put back, also for the TESTPROOF rerun and the baseline scans, which call `runChecks` themselves. Its rejection is ignored. Absent: nothing changes.
    */
   endRound?(): Promise<void>;
+  /**
+   * General fakes (slice 2): the entries `runChecks` just built, after `endRound` ran, with the checks a Rovara-made fake answered marked `madeByRovara`. Called once per `runChecks`, right after `endRound`, only for a
+   * round that ran to its end. It never throws and never changes an entry it does not mark. Absent: nothing changes.
+   */
+  markEntries?(entries: readonly CheckEntry[]): CheckEntry[];
 }
 
 export interface CheckPlan {
@@ -222,11 +227,19 @@ export async function runChecks(
       options.signal.removeEventListener("abort", cancel);
     }
   }
-  if (runners.endRound === undefined) return runChecksRound(plan, runners, options);
+  if (runners.endRound === undefined && runners.markEntries === undefined) return runChecksRound(plan, runners, options);
+  let round: CheckRound;
   try {
-    return await runChecksRound(plan, runners, options);
+    round = await runChecksRound(plan, runners, options);
   } finally {
     await Promise.resolve().then(() => runners.endRound?.()).catch(() => undefined);
+  }
+  if (runners.markEntries === undefined) return round;
+  try {
+    return { ...round, entries: runners.markEntries(round.entries) };
+  } catch {
+    // A marker that failed cannot say which checks a fake answered: fail closed, every check that ran to a result is labelled (a label too many is honest; a label too few is not).
+    return { ...round, entries: round.entries.map((entry) => (entry.after === "passed" || entry.after === "failed" || entry.after === "timed_out" ? { ...entry, madeByRovara: true as const } : entry)) };
   }
 }
 

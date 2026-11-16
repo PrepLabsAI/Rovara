@@ -1,0 +1,495 @@
+{
+ "_source": "agentx-staging-foundation live template before the switch-over (0.5.18, us-west-2, 2026-11-15): the DNS firewall and egress alarm resources",
+ "resources": {
+  "AgentDnsFirewallAllowList8DD5FFDF": {
+   "Type": "AWS::Route53Resolver::FirewallDomainList",
+   "Properties": {
+    "Domains": [
+     "*.compute.internal",
+     "*.ec2.internal",
+     "*.42.10.in-addr.arpa",
+     "github.com",
+     "ghcr.io",
+     "*.ghcr.io",
+     "pkg-containers.githubusercontent.com",
+     "raw.githubusercontent.com",
+     "objects.githubusercontent.com",
+     "release-assets.githubusercontent.com",
+     "codeload.github.com",
+     "registry.npmjs.org",
+     "registry.yarnpkg.com",
+     "pypi.org",
+     "files.pythonhosted.org",
+     "crates.io",
+     "*.crates.io",
+     "proxy.golang.org",
+     "sum.golang.org",
+     "repo.maven.apache.org",
+     "repo1.maven.org",
+     "rubygems.org",
+     "*.rubygems.org",
+     "deb.debian.org",
+     "security.debian.org",
+     "archive.ubuntu.com",
+     "ports.ubuntu.com",
+     "security.ubuntu.com",
+     "dl-cdn.alpinelinux.org",
+     "registry-1.docker.io",
+     "auth.docker.io",
+     "production.cloudflare.docker.com",
+     "production.cloudfront.docker.com",
+     "docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com",
+     "mcr.microsoft.com",
+     "*.data.mcr.microsoft.com",
+     "nodejs.org",
+     "api.anthropic.com",
+     "api.openai.com",
+     "chatgpt.com",
+     "auth.openai.com",
+     "openrouter.ai",
+     "slack.com",
+     "*.slack.com",
+     "api.linear.app",
+     "mcp.linear.app",
+     "*.atlassian.net",
+     "app.asana.com",
+     "dynamodb.us-west-2.amazonaws.com",
+     "sqs.us-west-2.amazonaws.com",
+     "s3.us-west-2.amazonaws.com",
+     "*.s3.us-west-2.amazonaws.com",
+     "al2023-repos-us-west-2-de612dc2.s3.dualstack.us-west-2.amazonaws.com",
+     "kms.us-west-2.amazonaws.com",
+     "ssm.us-west-2.amazonaws.com",
+     "ec2.us-west-2.amazonaws.com",
+     "states.us-west-2.amazonaws.com",
+     "lambda.us-west-2.amazonaws.com",
+     "email.us-west-2.amazonaws.com",
+     "secretsmanager.us-west-2.amazonaws.com",
+     "scheduler.us-west-2.amazonaws.com",
+     "sts.us-west-2.amazonaws.com",
+     "sts.amazonaws.com",
+     "pricing.us-east-1.amazonaws.com",
+     "monitoring.us-west-2.amazonaws.com",
+     "logs.us-west-2.amazonaws.com",
+     "api.ecr.us-west-2.amazonaws.com",
+     {
+      "Fn::Join": [
+       "",
+       [
+        {
+         "Ref": "AWS::AccountId"
+        },
+        ".dkr.ecr.us-west-2.amazonaws.com"
+       ]
+      ]
+     },
+     "bedrock-runtime.us-west-2.amazonaws.com",
+     "bedrock.us-west-2.amazonaws.com",
+     "servicequotas.us-west-2.amazonaws.com",
+     "*.execute-api.us-west-2.amazonaws.com",
+     "*.us-west-2.elb.amazonaws.com",
+     "*.us-west-2.rds.amazonaws.com",
+     "bedrock-runtime.us-east-1.amazonaws.com",
+     "bedrock.us-east-1.amazonaws.com",
+     "sts.us-east-1.amazonaws.com",
+     "bedrock-runtime.us-east-2.amazonaws.com",
+     "bedrock.us-east-2.amazonaws.com",
+     "sts.us-east-2.amazonaws.com",
+     "bedrock-runtime.us-west-1.amazonaws.com",
+     "bedrock.us-west-1.amazonaws.com",
+     "sts.us-west-1.amazonaws.com",
+     "bedrock-runtime.ca-central-1.amazonaws.com",
+     "bedrock.ca-central-1.amazonaws.com",
+     "sts.ca-central-1.amazonaws.com",
+     "bedrock-runtime.ca-west-1.amazonaws.com",
+     "bedrock.ca-west-1.amazonaws.com",
+     "sts.ca-west-1.amazonaws.com",
+     "bedrock-runtime.sa-east-1.amazonaws.com",
+     "bedrock.sa-east-1.amazonaws.com",
+     "sts.sa-east-1.amazonaws.com",
+     "bedrock-runtime.mx-central-1.amazonaws.com",
+     "bedrock.mx-central-1.amazonaws.com",
+     "sts.mx-central-1.amazonaws.com",
+     "bedrock-runtime.eu-west-1.amazonaws.com",
+     "bedrock.eu-west-1.amazonaws.com",
+     "sts.eu-west-1.amazonaws.com",
+     "bedrock-runtime.eu-west-2.amazonaws.com",
+     "bedrock.eu-west-2.amazonaws.com",
+     "sts.eu-west-2.amazonaws.com",
+     "bedrock-runtime.eu-west-3.amazonaws.com",
+     "bedrock.eu-west-3.amazonaws.com",
+     "sts.eu-west-3.amazonaws.com",
+     "bedrock-runtime.eu-central-1.amazonaws.com",
+     "bedrock.eu-central-1.amazonaws.com",
+     "sts.eu-central-1.amazonaws.com",
+     "bedrock-runtime.eu-central-2.amazonaws.com",
+     "bedrock.eu-central-2.amazonaws.com",
+     "sts.eu-central-2.amazonaws.com",
+     "bedrock-runtime.eu-north-1.amazonaws.com",
+     "bedrock.eu-north-1.amazonaws.com",
+     "sts.eu-north-1.amazonaws.com",
+     "bedrock-runtime.eu-south-1.amazonaws.com",
+     "bedrock.eu-south-1.amazonaws.com",
+     "sts.eu-south-1.amazonaws.com",
+     "bedrock-runtime.eu-south-2.amazonaws.com",
+     "bedrock.eu-south-2.amazonaws.com",
+     "sts.eu-south-2.amazonaws.com",
+     "bedrock-runtime.ap-east-1.amazonaws.com",
+     "bedrock.ap-east-1.amazonaws.com",
+     "sts.ap-east-1.amazonaws.com",
+     "bedrock-runtime.ap-east-2.amazonaws.com",
+     "bedrock.ap-east-2.amazonaws.com",
+     "sts.ap-east-2.amazonaws.com",
+     "bedrock-runtime.ap-northeast-1.amazonaws.com",
+     "bedrock.ap-northeast-1.amazonaws.com",
+     "sts.ap-northeast-1.amazonaws.com",
+     "bedrock-runtime.ap-northeast-2.amazonaws.com",
+     "bedrock.ap-northeast-2.amazonaws.com",
+     "sts.ap-northeast-2.amazonaws.com",
+     "bedrock-runtime.ap-northeast-3.amazonaws.com",
+     "bedrock.ap-northeast-3.amazonaws.com",
+     "sts.ap-northeast-3.amazonaws.com",
+     "bedrock-runtime.ap-south-1.amazonaws.com",
+     "bedrock.ap-south-1.amazonaws.com",
+     "sts.ap-south-1.amazonaws.com",
+     "bedrock-runtime.ap-south-2.amazonaws.com",
+     "bedrock.ap-south-2.amazonaws.com",
+     "sts.ap-south-2.amazonaws.com",
+     "bedrock-runtime.ap-southeast-1.amazonaws.com",
+     "bedrock.ap-southeast-1.amazonaws.com",
+     "sts.ap-southeast-1.amazonaws.com",
+     "bedrock-runtime.ap-southeast-2.amazonaws.com",
+     "bedrock.ap-southeast-2.amazonaws.com",
+     "sts.ap-southeast-2.amazonaws.com",
+     "bedrock-runtime.ap-southeast-3.amazonaws.com",
+     "bedrock.ap-southeast-3.amazonaws.com",
+     "sts.ap-southeast-3.amazonaws.com",
+     "bedrock-runtime.ap-southeast-4.amazonaws.com",
+     "bedrock.ap-southeast-4.amazonaws.com",
+     "sts.ap-southeast-4.amazonaws.com",
+     "bedrock-runtime.ap-southeast-5.amazonaws.com",
+     "bedrock.ap-southeast-5.amazonaws.com",
+     "sts.ap-southeast-5.amazonaws.com",
+     "bedrock-runtime.ap-southeast-6.amazonaws.com",
+     "bedrock.ap-southeast-6.amazonaws.com",
+     "sts.ap-southeast-6.amazonaws.com",
+     "bedrock-runtime.ap-southeast-7.amazonaws.com",
+     "bedrock.ap-southeast-7.amazonaws.com",
+     "sts.ap-southeast-7.amazonaws.com",
+     "bedrock-runtime.me-central-1.amazonaws.com",
+     "bedrock.me-central-1.amazonaws.com",
+     "sts.me-central-1.amazonaws.com",
+     "bedrock-runtime.me-south-1.amazonaws.com",
+     "bedrock.me-south-1.amazonaws.com",
+     "sts.me-south-1.amazonaws.com",
+     "bedrock-runtime.af-south-1.amazonaws.com",
+     "bedrock.af-south-1.amazonaws.com",
+     "sts.af-south-1.amazonaws.com",
+     "bedrock-runtime.il-central-1.amazonaws.com",
+     "bedrock.il-central-1.amazonaws.com",
+     "sts.il-central-1.amazonaws.com"
+    ],
+    "Name": "agentx-staging-allow",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ]
+   }
+  },
+  "AgentDnsFirewallProjectAllowList1C0C2230": {
+   "Type": "AWS::Route53Resolver::FirewallDomainList",
+   "Properties": {
+    "Name": "agentx-staging-project-allow",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ]
+   }
+  },
+  "AgentDnsFirewallBlockAllListBD1ED948": {
+   "Type": "AWS::Route53Resolver::FirewallDomainList",
+   "Properties": {
+    "Domains": [
+     "*"
+    ],
+    "Name": "agentx-staging-block-all",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ]
+   }
+  },
+  "AgentDnsFirewallRuleGroupBE69F582": {
+   "Type": "AWS::Route53Resolver::FirewallRuleGroup",
+   "Properties": {
+    "FirewallRules": [
+     {
+      "Action": "ALLOW",
+      "FirewallDomainListId": {
+       "Fn::GetAtt": [
+        "AgentDnsFirewallAllowList8DD5FFDF",
+        "Id"
+       ]
+      },
+      "FirewallDomainRedirectionAction": "TRUST_REDIRECTION_DOMAIN",
+      "Priority": 100
+     },
+     {
+      "Action": "ALLOW",
+      "FirewallDomainListId": {
+       "Fn::GetAtt": [
+        "AgentDnsFirewallProjectAllowList1C0C2230",
+        "Id"
+       ]
+      },
+      "FirewallDomainRedirectionAction": "TRUST_REDIRECTION_DOMAIN",
+      "Priority": 150
+     },
+     {
+      "Action": "BLOCK",
+      "BlockResponse": "NXDOMAIN",
+      "FirewallDomainListId": {
+       "Fn::GetAtt": [
+        "AgentDnsFirewallBlockAllListBD1ED948",
+        "Id"
+       ]
+      },
+      "Priority": 200
+     }
+    ],
+    "Name": "agentx-staging-agents",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ]
+   }
+  },
+  "AgentDnsFirewallAssociation4753647C": {
+   "Type": "AWS::Route53Resolver::FirewallRuleGroupAssociation",
+   "Properties": {
+    "FirewallRuleGroupId": {
+     "Fn::GetAtt": [
+      "AgentDnsFirewallRuleGroupBE69F582",
+      "Id"
+     ]
+    },
+    "Name": "agentx-staging-agents",
+    "Priority": 101,
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ],
+    "VpcId": {
+     "Ref": "Vpc"
+    }
+   }
+  },
+  "AgentDnsFirewallQueryLogs1FB48960": {
+   "Type": "AWS::Logs::LogGroup",
+   "Properties": {
+    "LogGroupName": "/agentx/staging/dns-firewall",
+    "RetentionInDays": 30,
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ]
+   },
+   "UpdateReplacePolicy": "Delete",
+   "DeletionPolicy": "Delete"
+  },
+  "AgentDnsFirewallQueryLoggingB61BDADB": {
+   "Type": "AWS::Route53Resolver::ResolverQueryLoggingConfig",
+   "Properties": {
+    "DestinationArn": {
+     "Fn::GetAtt": [
+      "AgentDnsFirewallQueryLogs1FB48960",
+      "Arn"
+     ]
+    },
+    "Name": "agentx-staging-dns-firewall",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ]
+   }
+  },
+  "AgentDnsFirewallQueryLoggingAssociation7136AF21": {
+   "Type": "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation",
+   "Properties": {
+    "ResolverQueryLogConfigId": {
+     "Fn::GetAtt": [
+      "AgentDnsFirewallQueryLoggingB61BDADB",
+      "Id"
+     ]
+    },
+    "ResourceId": {
+     "Ref": "Vpc"
+    }
+   }
+  },
+  "EgressAlarmsBlockedDnsQueriesFilter6C4EF844": {
+   "Type": "AWS::Logs::MetricFilter",
+   "Properties": {
+    "FilterPattern": "{ $.firewall_rule_action = \"BLOCK\" }",
+    "LogGroupName": {
+     "Ref": "AgentDnsFirewallQueryLogs1FB48960"
+    },
+    "MetricTransformations": [
+     {
+      "DefaultValue": 0,
+      "MetricName": "BlockedDnsQueries",
+      "MetricNamespace": "AgentX/staging",
+      "MetricValue": "1"
+     }
+    ]
+   }
+  },
+  "EgressAlarmsBlockedDnsSpikeAlarm96C746B8": {
+   "Type": "AWS::CloudWatch::Alarm",
+   "Properties": {
+    "AlarmActions": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":sns:us-west-2:",
+        {
+         "Ref": "AWS::AccountId"
+        },
+        ":agentx-staging-alerts"
+       ]
+      ]
+     }
+    ],
+    "AlarmDescription": "Agent machines had 200 or more website lookups blocked by the DNS firewall in 5 minutes. Check the DNS firewall log /agentx/staging/dns-firewall for the blocked names and the source addresses, and check which workspaces were running. A tool that needs a site not on the allowlist is the usual cause; add it with the agentxEgressAllowDomains context if it is legitimate.",
+    "AlarmName": "agentx-staging-blocked-dns-spike",
+    "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+    "EvaluationPeriods": 1,
+    "MetricName": "BlockedDnsQueries",
+    "Namespace": "AgentX/staging",
+    "Period": 300,
+    "Statistic": "Sum",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ],
+    "Threshold": 200,
+    "TreatMissingData": "notBreaching"
+   }
+  },
+  "EgressAlarmsNatEgressSpikeAlarmusw2az15F864F60": {
+   "Type": "AWS::CloudWatch::Alarm",
+   "Properties": {
+    "AlarmActions": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":sns:us-west-2:",
+        {
+         "Ref": "AWS::AccountId"
+        },
+        ":agentx-staging-alerts"
+       ]
+      ]
+     }
+    ],
+    "AlarmDescription": "More than 20 GiB left through the NAT gateway in usw2-az1 in an hour. Check which workspaces were running then, and check the DNS firewall log /agentx/staging/dns-firewall for what they looked up. The firewall does not stop a connection made straight to an IP address, so a large transfer may not show in the log.",
+    "AlarmName": "agentx-staging-nat-egress-spike-usw2-az1",
+    "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+    "Dimensions": [
+     {
+      "Name": "NatGatewayId",
+      "Value": {
+       "Ref": "NatGateway1"
+      }
+     }
+    ],
+    "EvaluationPeriods": 1,
+    "MetricName": "BytesOutToDestination",
+    "Namespace": "AWS/NATGateway",
+    "Period": 3600,
+    "Statistic": "Sum",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ],
+    "Threshold": 21474836480,
+    "TreatMissingData": "notBreaching"
+   }
+  },
+  "EgressAlarmsNatEgressSpikeAlarmusw2az2CD96B37E": {
+   "Type": "AWS::CloudWatch::Alarm",
+   "Properties": {
+    "AlarmActions": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":sns:us-west-2:",
+        {
+         "Ref": "AWS::AccountId"
+        },
+        ":agentx-staging-alerts"
+       ]
+      ]
+     }
+    ],
+    "AlarmDescription": "More than 20 GiB left through the NAT gateway in usw2-az2 in an hour. Check which workspaces were running then, and check the DNS firewall log /agentx/staging/dns-firewall for what they looked up. The firewall does not stop a connection made straight to an IP address, so a large transfer may not show in the log.",
+    "AlarmName": "agentx-staging-nat-egress-spike-usw2-az2",
+    "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+    "Dimensions": [
+     {
+      "Name": "NatGatewayId",
+      "Value": {
+       "Ref": "NatGateway2"
+      }
+     }
+    ],
+    "EvaluationPeriods": 1,
+    "MetricName": "BytesOutToDestination",
+    "Namespace": "AWS/NATGateway",
+    "Period": 3600,
+    "Statistic": "Sum",
+    "Tags": [
+     {
+      "Key": "agentx:env",
+      "Value": "staging"
+     }
+    ],
+    "Threshold": 21474836480,
+    "TreatMissingData": "notBreaching"
+   }
+  }
+ }
+}

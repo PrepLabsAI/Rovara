@@ -2523,3 +2523,32 @@ describe("a task-state card is not dropped after the hour (LIVEFIX-1 item 5)", (
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "start", reason: "channel_not_found" }));
   });
 });
+
+describe("L9 notifier stream relay", () => {
+  const company = "org_staging0000000000001";
+  const coreRecord = (sequence: string, eventName = "INSERT") => ({ eventSource: "aws:dynamodb", eventName, dynamodb: { SequenceNumber: sequence, NewImage: { pk: { S: `ORG#${company}#OUTBOX` }, outboxState: { S: "pending" } } } });
+  function setup(relayCoreOutbox: (records: unknown[]) => Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }>) {
+    return createNotifierHandler({ documentClient: new FakeDynamoDb(), tableName: "state", enqueue: async () => undefined, retryLater: async () => undefined,
+      post: async () => ({ ts: "1.0" }), now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined, relayCoreOutbox });
+  }
+  it("forwards only core INSERTs and propagates sequence failures", async () => {
+    const relay = vi.fn(async () => ({ batchItemFailures: [{ itemIdentifier: "11" }] }));
+    const inserted = coreRecord("11");
+    const answer = await setup(relay)({ Records: [inserted, coreRecord("12", "MODIFY"), { ...coreRecord("13"), dynamodb: { SequenceNumber: "13", NewImage: { pk: { S: "OUTBOX#legacy" } } } }] });
+    expect(relay).toHaveBeenCalledExactlyOnceWith([inserted]);
+    expect(answer).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }] });
+  });
+  it("reports notice enqueue failures independently of successful core work", async () => {
+    const relay = vi.fn(async () => ({ batchItemFailures: [] }));
+    const handler = createNotifierHandler({ documentClient: new FakeDynamoDb(), tableName: "state", enqueue: async () => { throw new Error("private queue detail"); }, retryLater: async () => undefined,
+      post: async () => ({ ts: "1.0" }), now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined, relayCoreOutbox: relay });
+    const notice = { eventSource: "aws:dynamodb", eventName: "INSERT", eventID: "event-99", dynamodb: { SequenceNumber: "99", NewImage: { entityType: { S: "DEVELOPER_TASK_POINTER" }, taskId: { S: "task-1" }, cancelledAt: { S: "2026-11-15T00:00:00.000Z" } } } };
+    expect(await handler({ Records: [notice, coreRecord("11")] })).toEqual({ batchItemFailures: [{ itemIdentifier: "99" }] });
+    expect(relay).toHaveBeenCalledExactlyOnceWith([coreRecord("11")]);
+  });
+  it("returns every core sequence for a failed invocation without leaking its error", async () => {
+    const answer = await setup(async () => { throw new Error("private invocation detail"); })({ Records: [coreRecord("11"), coreRecord("12")] });
+    expect(answer).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "12" }] });
+    expect(JSON.stringify(answer)).not.toContain("private invocation detail");
+  });
+});

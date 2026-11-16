@@ -209,7 +209,7 @@ export const PULL_REQUEST_PARTIAL_REVIEW_LINE = "The change was too large to sho
 
 // AgentX's own lines, exactly in the shape it writes them; a line a person reworded no longer matches and is never touched.
 const REVIEW_WORD = "(?:passed|passed after the owner accepted its findings)";
-const CHECKS_LINE = /^Checks: (?:none recorded|.+ passed(?:, .+ passed)*)$/u;
+const CHECKS_LINE = /^Checks: (?:none recorded|.+ passed(?: \([^()]*\))?(?:, .+ passed(?: \([^()]*\))?)*)$/u;
 const REVIEWS_LINE = new RegExp(`^Reviews: code review ${REVIEW_WORD}; security review ${REVIEW_WORD}(?:; \\d+ earlier issues? noted)?$`, "u");
 const ACCEPTED_HEADER = /^Owner accepted \d+ review findings?:$/u;
 const ACCEPTED_ITEM = /^- (?:\[(?:code|security)\] .* \u2014 accepted: .*|and \d+ more; see the task page)$/u;

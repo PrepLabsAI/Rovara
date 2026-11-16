@@ -29,8 +29,10 @@ export function createOutboxPublisherHandler(dependencies: {
     let published = 0;
     for (const record of event.Records ?? []) {
       if (!record.dynamodb?.NewImage || !["INSERT", "MODIFY"].includes(record.eventName ?? "")) continue;
-      const image = unmarshall(record.dynamodb.NewImage) as Partial<DurableOutboxRecord>;
+      const image = unmarshall(record.dynamodb.NewImage) as Partial<DurableOutboxRecord> & { pk?: unknown };
       if (image.entityType !== "OUTBOX" || image.status !== "PENDING" || typeof image.id !== "string") continue;
+      // Core outbox rows belong exclusively to the company relay, on INSERT and MODIFY.
+      if (image.pk !== `OUTBOX#${image.id}`) continue;
       await dependencies.send(image as DurableOutboxRecord);
       await dependencies.markQueued(image.id);
       published += 1;

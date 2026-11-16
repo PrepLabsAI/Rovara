@@ -7,7 +7,7 @@
 // or email adapter that can send queues and delivers nothing (`canNotify` is false).
 import type { DocumentStore, OrgId, RealtimePublisher, RegistryView } from "@agentx/contracts";
 import { readTaskThread } from "../core/channel/threads.js";
-import { deliverAttention, queueAttention, type AttentionDeliveryDependencies, type AttentionOutcome } from "../core/notify/attention.js";
+import { deliverAttention, queueAttention, type AttentionBudget, type AttentionDeliveryDependencies, type AttentionOutcome } from "../core/notify/attention.js";
 import type { SessionChange } from "../core/sessions/summary.js";
 
 type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets" | "footer" | "thread" | "companyOf" | "access" | "address" | "urgent" | "emailLinks" | "doneToldInThread" | "planCarded">;
@@ -26,7 +26,7 @@ export interface NoticeService {
   /** A session change hook: queues what the change calls for. Never throws. */
   queue(change: SessionChange): Promise<void>;
   /** One delivery sweep, stopping new work at the deadline. Nothing when nobody can be told. */
-  deliver(budget?: { deadlineMs?: number }): Promise<AttentionOutcome | undefined>;
+  deliver(budget?: AttentionBudget): Promise<AttentionOutcome | undefined>;
 }
 
 export function createNoticeService(options: NoticeServiceOptions): NoticeService {

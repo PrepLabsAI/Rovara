@@ -16,11 +16,21 @@ const PARAMETER = `/agentx/${ENV}/worker-e2e-agent-model`;
 const FALLBACK = `/agentx/${ENV}/worker-model-fallback`;
 const SETTINGS = [PARAMETER, FALLBACK] as const;
 
-function head(): CfnTemplate {
+function packedHead(): CfnTemplate {
   const stack = buildAgentXApp({ agentxEnv: ENV, "agentx:e2eQualificationTransport": "enabled" }).node.children
     .filter((child): child is Stack => Stack.isStack(child)).find((candidate) => candidate.stackName === `agentx-${ENV}-control-plane`);
   if (stack === undefined) throw new Error("expected the real control-plane stack");
   return Template.fromStack(stack).toJSON();
+}
+
+/**
+ * ENV-ROOM: head's named Broker now derives AGENTX_E2E_AGENT_SETTINGS_PREFIX from AGENTX_ENV and is given no such variable, so the unit refuses on it (the last test below). The lift
+ * mechanics are still checked, on head as it was before ENV-ROOM: the same template with the Broker given the variable whole.
+ */
+function head(): CfnTemplate {
+  const template = packedHead();
+  (template.Resources!["BrokerE1355FD6"]!.Properties as { Environment: { Variables: Record<string, unknown> } }).Environment.Variables["AGENTX_E2E_AGENT_SETTINGS_PREFIX"] = `/agentx/${ENV}/`;
+  return template;
 }
 
 type Policy = { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } };
@@ -200,5 +210,19 @@ describe("the model-fallback-settings unit against head's runtime template", () 
     properties["Value"] = { Ref: "SomethingTheDeployedStackLacks" };
     expect(() => liftResources(deployed, extra, lift.logicalIdPrefix, lift.parameterNames)).toThrow(/SomethingTheDeployedStackLacks/);
     expect(() => assertOnlyExpectedChanges([{ action: "Add", logicalId: fallbackId, type: "AWS::SSM::Parameter" }, { action: "Modify", logicalId: "WorkerImageParameter", type: "AWS::SSM::Parameter", attributes: ["Properties.Value"] }], changeSet.expect)).toThrow(/Modify WorkerImageParameter/);
+  });
+});
+
+describe("the e2e-agent-settings unit against head's packed Broker (ENV-ROOM)", () => {
+  it("refuses to lift a variable head's Broker derives, and says to deploy the control-plane stack whole", () => {
+    const packed = packedHead();
+    const plan = planTestDeploy({
+      env: ENV, only: ["e2e-agent-settings"], artifacts: { revision: "0123456789ab", outputDir: "/tmp/x" },
+      previous: { "control-plane": { OidcIssuer: "https://issuer.example" }, runtime: {} },
+    });
+    const changeSet = plan.find((step): step is Extract<DeployStep, { kind: "create-change-set" }> => step.kind === "create-change-set")!;
+    const declared = changeSet.template as Extract<typeof changeSet.template, { source: "lift-declared" }>;
+    expect((packed.Resources!["BrokerE1355FD6"]!.Properties as { Environment: { Variables: Record<string, unknown> } }).Environment.Variables).not.toHaveProperty("AGENTX_E2E_AGENT_SETTINGS_PREFIX");
+    expect(() => liftDeclaredSettings(beforeTheUnit(head()), packed, { environment: declared.environment, grants: declared.grants })).toThrow(/derives AGENTX_E2E_AGENT_SETTINGS_PREFIX from its environment's name .*deploy the control-plane stack whole instead/u);
   });
 });

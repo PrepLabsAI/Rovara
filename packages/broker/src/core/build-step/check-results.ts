@@ -1,6 +1,6 @@
 // Lane L10, the build step: reading the worker's check report. Copied from Cloud's `terminal-result.ts` (`checkCommandCouldNotRun`, `regressedCheckLabels`); nothing here names a provider.
 import { posix as posixPath } from "node:path";
-import { WORKFLOW_REGRESSED_CHECKS_MAX, WORKFLOW_REGRESSED_CHECK_MAX, redactText, type CheckEntry } from "@agentx/contracts";
+import { WORKFLOW_REGRESSED_CHECKS_MAX, WORKFLOW_REGRESSED_CHECK_MAX, redactText, type CheckEntry, type ProjectCommand } from "@agentx/contracts";
 
 /**
  * Whether a failed check's command could not run, so the code is not what failed: the shell could not find it or run it
@@ -57,4 +57,31 @@ export function regressedCheckLabels(entries: readonly CheckEntry[]): string[] {
     return line.length > WORKFLOW_REGRESSED_CHECK_MAX ? `${line.slice(0, WORKFLOW_REGRESSED_CHECK_MAX - 3).trimEnd()}...` : line;
   }).filter((label) => label !== "");
   return [...new Set(labels)].slice(0, WORKFLOW_REGRESSED_CHECKS_MAX);
+}
+
+/** One selected check's recorded result, as the workflow's verification holds it. */
+export interface RecordedCheckResult {
+  checkId: string;
+  status: "PASS" | "FAILED" | "UNKNOWN";
+  programNotFound?: true;
+  broken?: true;
+  neverStarted?: true;
+  madeByRovara?: true;
+}
+
+/**
+ * The worker's report as the verification's results: it reports the readiness commands it was sent as `readiness:<index>`, in the order of the selected checks. An agent-claimed entry never stands in for one, and a
+ * missing or unrun one is UNKNOWN. A program the worker could not start is told apart from a check that failed; the Made by Rovara label (general fakes, DEC 234) is copied from the entry, only when the worker set it.
+ */
+export function verificationResultsOf(selected: readonly { id: string; command: Pick<ProjectCommand, "executable" | "args" | "cwd"> }[], entries: readonly CheckEntry[]): RecordedCheckResult[] {
+  const byId = new Map(entries.filter((entry) => entry.source === "project").map((entry) => [entry.id, entry]));
+  return selected.map((check, index) => {
+    const entry = byId.get(`readiness:${index}`);
+    const status = entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const;
+    // The worker's report of a program it could not start, which is all the check's output then holds; any other spawn error with no exit code is the same.
+    const programNotFound = status === "FAILED" && entry?.output.trim() === `spawn ${check.command.executable} ENOENT`;
+    const neverStarted = status === "FAILED" && !programNotFound && entry?.exitCode == null && /^spawn \S+ E[A-Z]+$/u.test(entry?.output.trim() ?? "");
+    const broken = status === "FAILED" && entry !== undefined && (programNotFound || neverStarted || checkCommandCouldNotRun(check.command, entry.exitCode, entry.output));
+    return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}), ...(neverStarted ? { neverStarted: true as const } : {}), ...(entry?.madeByRovara === true ? { madeByRovara: true as const } : {}) };
+  });
 }

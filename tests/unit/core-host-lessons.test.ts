@@ -3,9 +3,10 @@
 // that company only, an erased or outside person's words never teach, and learning model calls go only through the injected port and only while the switch covers the company.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { LEARNED_CONTEXT_FEATURE, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { LEARNED_CONTEXT_FEATURE, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { digestWeekOf, writeDigestSetting } from "../../packages/broker/src/lessons/digest-notice.js";
 import { buildCoreRegistry, createCoreRuntime, CORE_ENGINE_OFF, readCoreEngineFlags, type CoreRuntime } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, erasePersonLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
 import { createHostedLessonParts, OtherCompanyError, type HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
@@ -274,6 +275,19 @@ describe("the daily upkeep", () => {
     expect(await service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
     // B's day is its own.
     expect(await companies.get(B)!.lessons!.service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
+  });
+
+  it("each pass runs the weekly lessons summary for the company's projects that turned it on, and only those (the summary's own tests: lessons/digest-notice.test.ts)", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map());
+    const weekRow = (companyId: OrgId) => world.store.get({ pk: companyScoped(companyId, "LESSON_DIGEST#payments"), sk: "WEEK" });
+    expect(await companies.get(A)!.lessons!.service.pass({ budgetMs: 50_000 })).toMatchObject({ digests: 0 });
+    expect(await weekRow(A)).toBeUndefined();
+    await writeDigestSetting(world.store, A, "payments", true, world.clock.now);
+    expect(await companies.get(A)!.lessons!.service.pass({ budgetMs: 50_000 })).toMatchObject({ digests: 0 });
+    expect(await weekRow(A)).toMatchObject({ week: digestWeekOf(world.clock.now) });
+    await companies.get(B)!.lessons!.service.pass({ budgetMs: 50_000 });
+    expect(await weekRow(B)).toBeUndefined();
   });
 });
 

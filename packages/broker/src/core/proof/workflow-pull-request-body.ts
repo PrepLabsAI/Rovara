@@ -12,6 +12,7 @@ import {
   planSummaryLines,
   workflowFindingAccepted,
 } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { documentSummaryLines } from "../../developer/workflow-messages.js";
@@ -80,7 +81,7 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
   if (workflow.definitionVersion === "1.1.0") {
     return rovaraPullRequestBody({
       summary: typeof plan === "object" && plan.format === "structured" ? planSummaryLines(plan.plan) : documentSummaryLines(typeof plan === "string" ? plan : plan?.markdown ?? ""),
-      fallbackTitle: task.title, workflow, context: { ...(context ?? {}), ...(proofLines.length === 0 ? {} : { proofLines }), ...(reviewSameModelOf(task, workflow) ? { reviewSameModel: true } : {}), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) }, reviewLines: (listed) => workflowReviewLines(workflow, listed), pageUrl,
+      fallbackTitle: task.title, workflow, context: { ...(context ?? {}), ...(proofLines.length === 0 ? {} : { proofLines }), ...(reviewSameModelOf(task, workflow) ? { reviewSameModel: true } : {}), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) }, reviewLines: (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy), pageUrl,
     });
   }
   // A structured plan's summary is its top claims; a legacy one's is its first lines (task 18: the same as the plan's
@@ -99,12 +100,12 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
     // Between markers, so a pushed PR feedback fix can bring them up to date and leave the rest as the person left it.
     PULL_REQUEST_STATUS_START,
     // R1 (re-check round 1): the lessons used belong in the description a version 1 task OPENS with, not only in one a pushed fix rewrites.
-    ...workflowPullRequestStatusLines(workflow, { ...(context?.lessonsUsed === undefined ? {} : { lessonsUsed: context.lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) }, proofLines),
+    ...workflowPullRequestStatusLines(workflow, { ...(context?.lessonsUsed === undefined ? {} : { lessonsUsed: context.lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(context?.acceptedBy === undefined ? {} : { acceptedBy: context.acceptedBy }) }, proofLines),
     PULL_REQUEST_STATUS_END,
     ...attributionBodyLines(context?.attribution),
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
-    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed. Merge it on GitHub.`,
+    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`,
   ];
   return fitPullRequestBody(lines.join("\n"));
 }
@@ -117,16 +118,16 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
  */
 export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, context?: PullRequestBodyContext, proofLines: readonly string[] = []): string[] {
   // Rovara Code version 2 rewrites its whole block (what changed, tests, reviews and risk); version 1's lines are as they were.
-  if (workflow.definitionVersion === "1.1.0") return rovaraStatusLines(workflow, proofLines.length === 0 ? context ?? {} : { ...context, proofLines }, (listed) => workflowReviewLines(workflow, listed)).map((line) => hideEmailAddresses(line));
+  if (workflow.definitionVersion === "1.1.0") return rovaraStatusLines(workflow, proofLines.length === 0 ? context ?? {} : { ...context, proofLines }, (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy)).map((line) => hideEmailAddresses(line));
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const passed = (workflow.verification?.results ?? []).filter((result) => result.status === "PASS")
     // A proposed check's label is model-written: one line, redacted and made inert like a plan line, as every label is.
-    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed`);
+    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed${result.madeByRovara === true ? ` (${GENERAL_FAKE_MADE_NOTE})` : ""}`);
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
   // S3: also the path the status block is rewritten by after a pushed fix, so no line reaches GitHub with an email address.
   return [
     ...(reviewOnly ? [] : [`Checks: ${passed.length > 0 ? passed.join(", ") : "none recorded"}`]),
-    ...workflowReviewLines(workflow, WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED),
+    ...workflowReviewLines(workflow, WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED, context?.acceptedBy),
     ...(context?.secondReviewLines ?? []),
     ...proofLines,
     // Approve by exception (DECISIONS 24): version 1 descriptions list the lessons used too (same visibility rule as version 2).
@@ -138,7 +139,7 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, conte
  * The lines about the reviews of the current code: how they went, the findings the owner accepted (at most `listed` of them named) and whether the reviewers saw only part of the change. Each line is one line,
  * redacted and made inert for GitHub.
  */
-function workflowReviewLines(workflow: WorkflowSnapshot, listed: number): string[] {
+function workflowReviewLines(workflow: WorkflowSnapshot, listed: number, acceptedBy?: Readonly<Record<string, string>>): string[] {
   // The issues noted are those nobody had to resolve: the findings the owner accepted are listed on their own.
   const noted = (workflow.reviews ?? []).reduce((count, review) => count + review.findings.filter((finding) => !workflowFindingAccepted(workflow, review.role, finding)).length, 0);
   const reviewWord = (role: "CRITIC" | "SECURITY") => (workflow.reviews ?? []).some((review) => review.role === role
@@ -150,7 +151,7 @@ function workflowReviewLines(workflow: WorkflowSnapshot, listed: number): string
     ...(accepted.length === 0 ? [] : [
       `Owner accepted ${accepted.length} review finding${accepted.length === 1 ? "" : "s"}:`,
       // Reviewer text and the owner's reason, each on one line, redacted and made inert for GitHub like a plan line.
-      ...accepted.slice(0, listed).map((finding) => `- [${finding.role === "SECURITY" ? "security" : "code"}] ${inertPlanLine(redactText(finding.text).replace(/\s+/gu, " "))} \u2014 accepted: ${inertPlanLine(redactText(finding.reason).replace(/\s+/gu, " "))}`),
+      ...accepted.slice(0, listed).map((finding) => `- [${finding.role === "SECURITY" ? "security" : "code"}] ${inertPlanLine(redactText(finding.text).replace(/\s+/gu, " "))} \u2014 accepted: ${inertPlanLine(redactText(finding.reason).replace(/\s+/gu, " "))}${acceptedBy?.[finding.fingerprint] === undefined ? "" : ` (by ${inertPlanLine(acceptedBy[finding.fingerprint]!)})`}`),
       ...(accepted.length > listed ? [`- and ${accepted.length - listed} more; see the task page`] : []),
     ]),
     ...(partial ? [PULL_REQUEST_PARTIAL_REVIEW_LINE] : []),

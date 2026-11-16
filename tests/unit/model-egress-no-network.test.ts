@@ -93,6 +93,8 @@ const F1C_CALLERS: ReadonlySet<string> = new Set([
   "packages/broker/src/local/model-egress/adapter.ts", "packages/broker/src/local/model-egress/forwarder.ts", "packages/broker/src/local/model-egress/index.ts", "packages/broker/src/local/model-egress/key-store.ts",
   // Eval host binding (plan v3.2 row 20.2): the eval's metered stage over an injected hold-and-egress, and the egress the sandbox exec is handed.
   "packages/worker/src/verification/eval-model-access.ts", "packages/worker/src/verification/eval-runner.ts",
+  // The eval gateway adapter: the production EvalModelAccess, which reaches only the model gateway's own product route (https, or loopback in tests) with the egress frames; it names no provider host.
+  "packages/worker/src/verification/eval-gateway-access.ts",
 ]);
 
 describe("no callers yet", () => {

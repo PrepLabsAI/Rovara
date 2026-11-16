@@ -9,7 +9,7 @@ import { type DeveloperSignInMethod, SLACK_OIDC_ISSUER, SlackUserIdSchema, agent
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
 import { emailIndexKey } from "../developer/store.js";
 import { ownerKeyForSubject } from "./lambda.js";
-import { resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 import { OrgIdSchema } from "@agentx/contracts";
 
 export interface AdminActionDependencies {
@@ -97,8 +97,9 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
 }
 
 /** The membership row's role, and when it was granted (null for a row without that, such as an administrator's). */
-export async function projectGrant(deps: AdminActionDependencies, project: string, developerId: string): Promise<{ role: "developer" | "administrator"; grantedAt: string | null } | undefined> {
+export async function projectGrant(deps: Pick<AdminActionDependencies, "documentClient" | "tableName">, project: string, developerId: string, companyId?: string): Promise<{ role: "developer" | "administrator"; grantedAt: string | null } | undefined> {
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` }, ConsistentRead: true })) as { Item?: { role?: unknown; grantedAt?: unknown } };
+  if (!recordInCompany(response.Item, companyId)) return undefined;
   const role = response.Item?.role;
   if (role !== "developer" && role !== "administrator") return undefined;
   return { role, grantedAt: typeof response.Item?.grantedAt === "string" ? response.Item.grantedAt : null };

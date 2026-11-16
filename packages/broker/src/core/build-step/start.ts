@@ -4,8 +4,8 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
-  AgentXError, EVIDENCE_CAPTURE_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
-  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
+  AgentXError, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, generalFakesPayloadOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { evalRequestForChecks } from "../proof/eval-round-reader.js";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
@@ -13,6 +13,7 @@ import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
 import { withTestRule } from "../proof/verification-report.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
+import { ownerRoundPlaceOf, readOwnerNote, readOwnerRoundPlace } from "../task-flow/owner-note.js";
 import { readTask } from "../task-flow/reads.js";
 import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
@@ -69,6 +70,15 @@ function fixStartHead(workflow: WorkflowSnapshot): string | undefined {
   return open.length === 1 ? open[0]!.headSha : undefined;
 }
 
+/** General fakes (DEC 234): the CHECKS payload field while the task's project revision has the setting on; undefined (off) otherwise, and when the project cannot be read. */
+async function generalFakesOf(deps: TaskFlowDeps, task: TaskRecord): Promise<GeneralFakesPayload | undefined> {
+  try {
+    return generalFakesPayloadOf((await deps.projects.revision(task.project, task.startingRevision))?.definition.generalFakes);
+  } catch {
+    return undefined;
+  }
+}
+
 async function repositoryOf(deps: TaskFlowDeps, task: TaskRecord, repositoryId: string): Promise<ProjectDefinition["repositories"][number] | undefined> {
   const project = await deps.projects.revision(task.project, task.startingRevision);
   return project?.definition.repositories.find((candidate) => candidate.name === repositoryId);
@@ -117,13 +127,16 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   const requestId = workflowRequestId("agentx-implement", task.taskId, workflow.revision);
   const next: WorkflowSnapshot = { ...workflow, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   const found2 = sendBackProblems(workflow);
+  // A round the owner started (a send-back or findings decision just made) always carries the owner's words, even when no check or review problem was recorded (a change ready to
+  // publish, coding that stopped): the coder is never handed only the plan or a CI/conflict fix prompt while the owner's instructions sit unread.
+  const ownerRound = await ownerStartedRound(deps, task.taskId, workflow);
   let prompt: string;
   let approvedPlan: WorkflowApprovedPlan | undefined;
-  if (workflow.fixSource === "ci" && found2.length === 0) {
+  if (workflow.fixSource === "ci" && found2.length === 0 && !ownerRound) {
     // The first run of a fix for failing CI is told what CI said, kept when the round started; the coder has the plan in its conversation.
     const block = await readCiEvidence(deps.store, task.taskId, deps.companyId, workflow.revision);
     prompt = block === undefined ? ciFixPromptWithoutOutput({ names: workflow.fixProblems ?? [], notes: NO_PUBLISH_NOTE }) : ciFixPrompt({ block, notes: NO_PUBLISH_NOTE });
-  } else if (workflow.fixSource === "conflict" && found2.length === 0) {
+  } else if (workflow.fixSource === "conflict" && found2.length === 0 && !ownerRound) {
     // The workspace is in the state the conflicting merge left; the run is told which files.
     prompt = conflictFixPrompt({ paths: workflow.fixProblems ?? [], notes: NO_PUBLISH_NOTE });
   } else {
@@ -132,9 +145,9 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     approvedPlan = { markdown: shortenMarkdown(plan.text, WORKFLOW_PLAN_MAX_BYTES), sha256: plan.sha256, ownerInstructions: ownerPlanInstructions(workflow) };
     // A plan nobody approved (the lighter flow skipped the approval of a small change) is never called approved.
     const approved = !planApprovalSkipped(workflow, plan.sha256);
-    prompt = found2.length === 0
+    prompt = found2.length === 0 && !ownerRound
       ? implementPrompt(plan, approved)
-      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: lastOwnerWords(workflow), approved });
+      : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: await lastOwnerWords(deps, task, workflow), approved });
   }
   const startFrom = fixStartHead(workflow);
   const readiness = selectedCheckCommands(workflow).readiness;
@@ -147,7 +160,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       else {
         // A run that goes on from an earlier one: a retry resumes from the checkpoints the history acknowledged; a send-back runs the whole plan again over the code the workspace holds.
         const resumed = await resumeGraphInvocation(deps, task);
-        if (resumed !== undefined) graph = { invocation: found2.length > 0 ? restartedGraphInvocation(resumed, workflow) : resumed };
+        if (resumed !== undefined) graph = { invocation: found2.length > 0 || ownerRound ? restartedGraphInvocation(resumed, workflow) : resumed };
       }
     } catch (error) {
       if (!(error instanceof AgentXError)) throw error;
@@ -158,14 +171,17 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     }
   }
   // The approved test environment this task pinned: its dependencies are started for the coding run (the working sandbox gets them while the agent codes). A plan that cannot be built blocks the task with its sentence.
-  const testPlan = await testPlanFor(deps, task, "IMPLEMENT", undefined);
+  const testPlan = await testPlanFor(deps, task, "IMPLEMENT", readiness);
   if (typeof testPlan === "string") {
     await commitWorkflow(deps, task, blockWorkflow(workflow, testPlan, receivedAt));
     return settled(deps, row, "STALE");
   }
   const operationId = graph === undefined ? undefined : newId(deps);
+  // General fakes (slice 2): the coding run verifies with the same fakes a CHECKS round would, but only when it has checks to run.
+  const generalFakes = readiness === undefined || readiness.length === 0 ? undefined : await generalFakesOf(deps, task);
   const payload = jsonOf({
     ...(readiness === undefined ? {} : { readiness }),
+    ...(generalFakes === undefined ? {} : { generalFakes }),
     ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }),
     ...baseOf(task, workflow),
     ...(workflow.fixSource === undefined ? {} : { workflowFix: { source: workflow.fixSource, ...(startFrom === undefined ? {} : { startFrom }) } }),
@@ -180,6 +196,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       "task.workflowMode", ...(readiness === undefined ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"]),
       ...(graph === undefined ? [] : ["task.workflowDependencies"]),
       ...(testPlan === undefined ? [] : testPlan.requires),
+      ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE]),
     ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source"],
     ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),
@@ -187,10 +204,31 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   return settled(deps, row, accepted.result);
 }
 
-/** The words the owner sent the work back with, when it was the owner: the last send-back decision that is not Rovara's own. */
-function lastOwnerWords(workflow: WorkflowSnapshot): string | undefined {
-  const sent = workflow.decisions.filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && decision.source === "SEND_BACK").at(-1);
-  return sent?.reason;
+/**
+ * Whether this coding round is the one an owner's send-back or findings decision started (its first run, or a retry of it after its run failed or stopped): the newest decision is theirs (not Rovara's
+ * own autofix), no fix after the pull request opened is under way, no feedback was decided since, and the round is where the decision put it (the very next revision, or the code and program step its
+ * note kept: a finished round leaves new code, a program's next build is another step). A later round keeps its own prompt and evidence.
+ */
+async function ownerStartedRound(deps: TaskFlowDeps, taskId: string, workflow: WorkflowSnapshot): Promise<boolean> {
+  const last = workflow.decisions.at(-1);
+  if (last === undefined || last.decision !== "REQUEST_CHANGES" || last.actorRole === "AGENTX" || (last.source !== "SEND_BACK" && last.source !== "FINDINGS")) return false;
+  if (last.workflowRevision + 1 === workflow.revision) return true;
+  if (workflow.fixSource !== undefined || (workflow.feedbackDecisions ?? []).some((decision) => decision.workflowRevision > last.workflowRevision)) return false;
+  const place = await readOwnerRoundPlace(deps.store, taskId, last.requestId).catch(() => undefined);
+  const here = ownerRoundPlaceOf(workflow);
+  return place !== undefined && place.candidateDigest === here.candidateDigest && place.programStepId === here.programStepId;
+}
+
+/**
+ * The words the owner sent the work back with: the note of the LAST request for changes of any kind, and only when a person made it as a send back or a findings decision. If the last one is Rovara's own (an
+ * automatic send back after failed checks), a plan review's, or any other, there are no owner's words for this round: the owner's earlier numbered notes belong to the problems of THAT round, not this one. The full
+ * words are kept beside the workflow under the decision's request id (`owner-note.ts`; the decision keeps 500 characters); a send-back from before they were kept falls back to the decision's reason. A findings
+ * decision's reason is a count ("1 accepted, 1 to fix"), not the owner's words, so without its note there are none.
+ */
+async function lastOwnerWords(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<string | undefined> {
+  const last = workflow.decisions.filter((decision) => decision.decision === "REQUEST_CHANGES").at(-1);
+  if (last === undefined || last.actorRole === "AGENTX" || (last.source !== "SEND_BACK" && last.source !== "FINDINGS")) return undefined;
+  return (await readOwnerNote(deps.store, task.taskId, last.requestId)) ?? (last.source === "SEND_BACK" ? last.reason : undefined);
 }
 
 // ---- checks again
@@ -227,11 +265,12 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     return settled(deps, row, "STALE");
   }
   const evalRequest = await evalRequestForChecks(deps, task, workflow);
-  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
+  const generalFakes = await generalFakesOf(deps, task);
+  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
-    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(testPlan === undefined ? [] : testPlan.requires)],
+    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(testPlan === undefined ? [] : testPlan.requires), ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE])],
   });
   return settled(deps, row, accepted.result);
 }

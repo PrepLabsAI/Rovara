@@ -6,6 +6,7 @@ import { scanCompanySources, loadCompanySources, validateCompanyInventory, forwa
 import { judgeProofHold, markReadyAnyway, proofHoldKey, proofOverrideKey, readProofHold, readProofHoldHistory } from "../../packages/broker/src/core/merge/proof-hold.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { mergeWorld } from "../support/merge-world.js";
+import { summaryCheckKey, summaryCheckRecordOf } from "../../packages/broker/src/core/merge/summary-check.js";
 
 const source = (text: string, path = "packages/broker/src/aws/broker.ts") => ({ path, text });
 const markdown = (count = "1 record kinds: 0 company-scoped, 0 install-wide, 1 needs-company. 1 routes: 0 company-scoped, 0 install-wide, 1 needs-company.") => `${count}\n\n| kind | identity | class | table | checked | methods | reason |\n|---|---|---|---|---|---|---|\n| record | entity:TASK | needs-company | State table | no | - | T1 |\n| route | /v1/dev/tasks | needs-company | State table | no | GET | T2 |\n`;
@@ -172,4 +173,32 @@ describe("merge-up 3 proof record classifications", () => {
     await expect(press()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(await world.store.get(key)).toEqual(foreign);
   });
+});
+
+it("pins L4 legacy pagination as a known gap and preserves company-scoped target constructors", () => {
+  const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
+  const rows = forwardingCoverage(markdown).filter(row => row.site.startsWith("packages/broker/src/aws/core-project-backfill.ts:"));
+  expect(rows.map(row => row.expression)).toEqual(["projectKey(name, 1).pk", "cursor.after"]);
+  expect(rows.every(row => row.reason.startsWith("Known gap:") && row.constructors === "projectKey (legacy PROJECT)")).toBe(true);
+  const text = readFileSync("packages/broker/src/aws/core-project-backfill.ts", "utf8");
+  expect(text).toContain("projectRevisionKey(company, definition.name, definition.revision)");
+  expect(text).toContain("orgProjectCatalogKey(company, definition.name)");
+});
+
+it("TE-B4: the Rovara Check record is company-scoped: the same task key in two companies is two rows, and a foreign row is refused", () => {
+  const a = summaryCheckKey(COMPANY_A.orgId, "task-1", "app", 7);
+  const b = summaryCheckKey(COMPANY_B.orgId, "task-1", "app", 7);
+  expect(a.pk).not.toBe(b.pk);
+  expect(a.sk).toBe(b.sk);
+  const row = { ...a, entityType: "ROVARA_CHECK", orgId: COMPANY_A.orgId, taskId: "task-1", repositoryId: "app", number: 7, headSha: "a".repeat(40), firstSeenAtMs: 1 };
+  expect(summaryCheckRecordOf(row, COMPANY_A.orgId, "task-1")).toBeDefined();
+  expect(summaryCheckRecordOf(row, COMPANY_B.orgId, "task-1")).toBeUndefined();
+});
+
+it("classifies the M4a settings owner and both full-access company-checked methods", () => {
+  const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
+  expect(markdown).toContain("| record | entity:PROJECT_SETTINGS | company-scoped |");
+  expect(markdown).toContain("| route | /v1/dev/projects/{id}/settings | company-scoped | State table | yes | GET, PUT |");
+  expect(COMPANY_CHECKED_ROUTES).toContain("GET /v1/dev/projects/{id}/settings");
+  expect(COMPANY_CHECKED_ROUTES).toContain("PUT /v1/dev/projects/{id}/settings");
 });

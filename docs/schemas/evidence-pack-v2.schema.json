@@ -289,6 +289,21 @@
                 "minimum": 0,
                 "maximum": 100000000
               },
+              "flakyOnRerun": {
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
+                }
+              },
+              "flakyOnRerunCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000000
+              },
               "names": {
                 "maxItems": 500,
                 "type": "array",
@@ -860,7 +875,7 @@
               "type": "string",
               "enum": [
                 "Worse on eval",
-                "No drop found",
+                "No regression measured (eval)",
                 "Improved on eval",
                 "Not run"
               ]
@@ -1377,6 +1392,7 @@
               "project_image",
               "emulated",
               "test_account",
+              "vendor_test",
               "fake",
               "none"
             ]
@@ -1389,8 +1405,10 @@
               "company_approved",
               "rovara_local_aws",
               "test_account",
+              "vendor_test",
               "recorded_fake",
               "hand_written_fake",
+              "rovara_made_fake",
               "faked_by_tests",
               "not_available"
             ]
@@ -1572,6 +1590,75 @@
                     "source",
                     "dependency",
                     "recordedOn"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string",
+                      "const": "emulated"
+                    },
+                    "dependency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80,
+                      "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "dependency"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string",
+                      "const": "made_by_rovara"
+                    },
+                    "dependency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80,
+                      "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "dependency"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string",
+                      "const": "scripted"
+                    },
+                    "dependency": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80,
+                      "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
+                    },
+                    "provenance": {
+                      "type": "string",
+                      "enum": [
+                        "before_task",
+                        "independent",
+                        "task_made"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "dependency",
+                    "provenance"
                   ],
                   "additionalProperties": false
                 }
@@ -1791,6 +1878,7 @@
                   "project_image",
                   "emulated",
                   "test_account",
+                  "vendor_test",
                   "fake",
                   "none"
                 ]
@@ -1803,8 +1891,10 @@
                   "company_approved",
                   "rovara_local_aws",
                   "test_account",
+                  "vendor_test",
                   "recorded_fake",
                   "hand_written_fake",
+                  "rovara_made_fake",
                   "faked_by_tests",
                   "not_available"
                 ]
@@ -1842,7 +1932,8 @@
                       "local",
                       "project_image",
                       "emulated",
-                      "test_account"
+                      "test_account",
+                      "vendor_test"
                     ]
                   },
                   "reason": {

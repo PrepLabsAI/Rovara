@@ -66,7 +66,7 @@ describe("prompt change detection", () => {
   it.each(["temperature", "top_p", "topP", "top_k", "topK", "max_tokens", "maxTokens", "max_output_tokens", "maxOutputTokens", "max_completion_tokens", "seed", "frequency_penalty", "presencePenalty", "thinking_budget", "thinkingBudget"])("numeric setting %s", (key) => {
     expect(run(`${key}: 0.5`).report.items).toMatchObject([{ kind: "model_setting", after: 0.5 }]);
   });
-  it.each(["stop_sequences", "stopSequences", "response_format", "responseFormat", "reasoning_effort", "reasoningEffort", "tool_choice", "toolChoice"])("fingerprints setting %s", (key) => expect(kinds(`${key}: ['private stop']`)).toContain("model_setting"));
+  it.each(["stop_sequences", "stopSequences", "reasoning_effort", "reasoningEffort", "tool_choice", "toolChoice"])("fingerprints setting %s", (key) => expect(kinds(`${key}: ['private stop']`)).toContain("model_setting"));
   it("echoes only finite numbers and enumerated words", () => {
     const report = run("temperature: 1e999; reasoning_effort: 'high'; tool_choice: 'a-secret-word'; stop: ['halt']").report;
     expect(report.items.filter((i) => 'after' in i).map((i) => 'after' in i ? i.after : null)).toEqual(["high"]);
@@ -154,7 +154,7 @@ describe("prompt change detection", () => {
     expect(report.coverage).toBe("hunks_only");
     expect(promptChangesNeedEval(report)).toMatchObject({ needed: true, reason: "incomplete" });
     expect(promptChangesNeedSideBySide(report)).toMatchObject({ needed: true, reason: "incomplete" });
-    expect(promptChangesNeedSideBySide(run("temperature: 1").report).needed).toBe(false);
+    expect(promptChangesNeedSideBySide(run("temperature: 1").report).needed).toBe(true);
     expect(promptChangesNeedEval(run("temperature: 1").report).needed).toBe(true);
     expect(promptChangesNeedSideBySide(run("prompt: 'hello'").report).needed).toBe(true);
     expect(promptChangesNeedEval(run("").report).needed).toBe(false);

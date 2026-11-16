@@ -6,10 +6,10 @@ import {
   type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
   type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
-  type RepositoryRef,
+  type RepositoryRef, type SummaryCheckPost,
 } from "@agentx/contracts";
 import { readCodeOwnersFile } from "../code-host/code-owners-file.js";
-import type { FakeChangeRequest, FakeHostModel } from "./model.js";
+import { FAKE_ROVARA_SOURCE, type FakeChangeRequest, type FakeHostModel } from "./model.js";
 
 export const FAKE_HOST_KIND = "fake";
 export const FAKE_WEBHOOK_SECRET = "fake-webhook-secret-not-a-real-secret";
@@ -324,6 +324,17 @@ export class FakeCodeHost implements CodeHost {
     this.checkScope(scope);
     this.spend(budget);
     return (this.model.markReady(this.cr(ref).id));
+  }
+
+  async summaryCheckSource(scope: HostScope): Promise<string | undefined> {
+    this.checkScope(scope);
+    return FAKE_ROVARA_SOURCE;
+  }
+
+  async upsertSummaryCheck(repository: RepositoryRef, post: SummaryCheckPost, scope: HostScope, budget?: ReadBudget): Promise<{ runId: string } | "no_permission"> {
+    this.checkScope(scope);
+    this.spend(budget);
+    return this.registered(repository).upsertSummaryCheck(post);
   }
 
   async requestReviewers(ref: ChangeRequestRef, reviewers: readonly string[], scope: HostScope, budget?: ReadBudget): Promise<"requested" | "refused"> {

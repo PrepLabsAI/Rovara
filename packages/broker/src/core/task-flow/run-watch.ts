@@ -11,6 +11,7 @@ import { isTerminalStatus, readOperation, recordOperationResult } from "./result
 import { runWatchPartition, runWatchKey, type RunWatchRecord } from "./run-watch-rows.js";
 import { fromDocument } from "./records.js";
 import { iso, log } from "./support.js";
+import { endUnflushed, spendStopOverdue, spendStopReason, type SpendStopCode } from "./money-stop.js";
 
 /** How long a machine stays lost or unhealthy before the operation on it is ended: a machine restarting or a health check failing once is not a lost run. */
 export const RUN_LOST_GRACE_SECONDS = 120;
@@ -25,7 +26,7 @@ const RUNNING_STATUSES: ReadonlySet<string> = new Set(["DISPATCHING", "RUNNING"]
 export interface LostRunReport {
   /** Rows read. */
   watched: number;
-  /** Operations ended INTERRUPTED. */
+  /** Operations ended INTERRUPTED (and, with a money stop, a spend stop the worker never ended, ended CANCELLED). */
   interrupted: number;
   /** Operations whose machine is lost or unhealthy but not for long enough yet. */
   waiting: number;
@@ -62,6 +63,15 @@ async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: numbe
     await deps.store.delete({ key: runWatchKey(deps.companyId, row.workspaceId, row.operationId) });
     return "cleared";
   }
+  // A run stopped at its spending limit whose worker never ended it (money-stop.ts): past the flush wait, its machine is stopped, its usage is taken as lost (the task's whole hold is kept,
+  // marked estimated), and its end is recorded CANCELLED, which blocks the step with the reason.
+  if (spendStopOverdue(deps, operation)) {
+    await deps.machines.stop(row.machineId).catch(() => undefined);
+    await endUnflushed(deps, operation);
+    await recordOperationResult(deps, { workspaceId: row.workspaceId, operationId: row.operationId, fence: row.fence, status: "CANCELLED", error: spendStopReason(operation.stopReason as SpendStopCode) });
+    await deps.store.delete({ key: runWatchKey(deps.companyId, row.workspaceId, row.operationId) });
+    return "interrupted";
+  }
   // A cancel asked for ends the operation on its own path.
   if (!RUNNING_STATUSES.has(operation.status)) return "waiting";
   const health = await deps.machines.health(row.machineId).catch(() => undefined);
@@ -87,6 +97,8 @@ async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: numbe
   }
   const after = await readOperation(deps, row.workspaceId, row.operationId);
   if (after === undefined || !isTerminalStatus(after.status)) return "waiting";
+  // A model run whose worker was lost never sent its usage: on a deployed install its task's whole hold is kept, marked estimated (money-stop.ts).
+  if (after.status === "INTERRUPTED" && after.error === RUN_LOST_MESSAGE) await endUnflushed(deps, after);
   await deps.store.delete({ key });
   // It ended some other way between the read and the write (a result got in first): the row goes, and the sweep ended nothing.
   return after.status === "INTERRUPTED" && after.error === RUN_LOST_MESSAGE ? "interrupted" : "cleared";

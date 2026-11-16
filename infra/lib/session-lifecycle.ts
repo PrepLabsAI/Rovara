@@ -24,6 +24,7 @@ import { WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
+import { addBrokerName } from "./broker-names.js";
 import { deleterDefinition, provisionerDefinition } from "./session-state-machines.js";
 
 export interface SessionLifecycleProps {
@@ -372,7 +373,9 @@ export class SessionLifecycle extends Construct {
 
   /** The broker starts the deleter when an ec2-ebs workspace closes (#84). */
   connectBroker(broker: lambda.Function): void {
-    this.connectExecutions(broker);
+    // ENV-ROOM (broker-names.ts): a named environment's broker gets the two state machines' names packed; the legacy template passes the ARNs whole, as before.
+    addBrokerName(broker, this.naming, "provisionerStateMachine", this.provisioner.stateMachineName, this.provisioner.stateMachineArn);
+    addBrokerName(broker, this.naming, "deleterStateMachine", this.deleter.stateMachineName, this.deleter.stateMachineArn);
     this.deleter.grantStartExecution(broker);
   }
 

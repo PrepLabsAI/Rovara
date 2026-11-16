@@ -53,6 +53,39 @@ export class GitHubFixtureApi {
 
   constructor(private readonly model: FakeHostModel, private readonly options: GitHubFixtureOptions = {}) {}
 
+  /** TE-B4: the Checks API (list a commit's runs, create, update). A token without `checks: write` is refused (403). A run shows among its head's checks with the App's id as its source. */
+  private checkRunRoute(method: string, path: string, url: URL, body: Record<string, unknown>, token: string): Response | undefined {
+    const listed = new RegExp(`^${ROOT}/commits/([a-f0-9]{40})/check-runs$`).exec(path);
+    const updated = new RegExp(`^${ROOT}/check-runs/(\\d+)$`).exec(path);
+    if (!(method === "GET" && listed) && !(method === "POST" && path === `${ROOT}/check-runs`) && !(method === "PATCH" && updated)) return undefined;
+    if (this.tokens.find((entry) => entry.token === token)?.permissions["checks"] !== "write") return json(403, { message: "Resource not accessible by integration" });
+    const mirror = (run: GitHubFixtureApi["checkRuns"][number]): void => {
+      const others = this.model.checksOf(run.head_sha).filter((check) => !(check.name === run.name && check.source === String(run.app.id)));
+      this.model.setChecks(run.head_sha, [...others, {
+        name: run.name, state: run.status === "completed" ? "completed" : "pending", ...(run.conclusion === null ? {} : { conclusion: run.conclusion as "success" }),
+        required: this.model.requiredChecks.includes(run.name), url: "", source: String(run.app.id),
+      }]);
+    };
+    if (listed) {
+      const name = url.searchParams.get("check_name");
+      const app = url.searchParams.get("app_id");
+      const runs = this.checkRuns.filter((run) => run.head_sha === listed[1] && (name === null || run.name === name) && (app === null || String(run.app.id) === app));
+      return json(200, { total_count: runs.length, check_runs: runs });
+    }
+    if (method === "POST") {
+      const run = { id: 9_000 + this.checkRuns.length + 1, head_sha: String(body.head_sha), name: String(body.name), status: String(body.status), conclusion: typeof body.conclusion === "string" ? body.conclusion : null, output: body.output as Record<string, unknown>, ...(typeof body.details_url === "string" ? { details_url: body.details_url } : {}), app: { id: this.checkRunAppId } };
+      this.checkRuns.push(run);
+      mirror(run);
+      return json(201, run);
+    }
+    const run = this.checkRuns.find((entry) => entry.id === Number(updated![1]));
+    if (run === undefined) return NOT_FOUND();
+    if ("head_sha" in body) return json(422, { message: "head_sha cannot be updated" });
+    Object.assign(run, { status: String(body.status), conclusion: typeof body.conclusion === "string" ? body.conclusion : null, output: body.output, ...(typeof body.details_url === "string" ? { details_url: body.details_url } : {}) });
+    mirror(run);
+    return json(200, run);
+  }
+
   private crJson(cr: FakeChangeRequest): Record<string, unknown> {
     const head = this.model.headRevisionOf(cr);
     return {
@@ -89,6 +122,12 @@ export class GitHubFixtureApi {
 
   /** The `expires_at` the next tokens carry: an hour from now by default, a given time, or none (null). */
   tokenExpiry: string | null | undefined;
+  /** TE-B4: permissions the installation has not granted, as `name:level` (`checks:write`): a mint that asks for one is refused (422), as GitHub does. */
+  readonly deniedPermissions = new Set<string>();
+  /** TE-B4: the Check Runs on the repository, as the Checks API holds them. */
+  readonly checkRuns: Array<{ id: number; head_sha: string; name: string; status: string; conclusion: string | null; output: Record<string, unknown>; details_url?: string; app: { id: number } }> = [];
+  /** TE-B4: the App id the fixture's App runs as (the client's `appId`). */
+  checkRunAppId = 5_002_502;
 
   readonly fetch: typeof fetch = async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
@@ -117,6 +156,7 @@ export class GitHubFixtureApi {
     if (method === "GET" && path === `${ROOT}/installation`) return json(200, { id: INSTALLATION_ID, account: { login: GITHUB_OWNER } });
     if (method === "GET" && /^\/repos\/[^/]+\/[^/]+\/installation$/.test(path)) return NOT_FOUND();
     if (method === "POST" && path === `/app/installations/${INSTALLATION_ID}/access_tokens`) {
+      if (Object.entries((body.permissions ?? {}) as Record<string, string>).some(([name, level]) => this.deniedPermissions.has(`${name}:${level}`))) return json(422, { message: "The permissions requested are not granted to this installation." });
       const token = `ghs_fixture_${this.tokens.length + 1}`;
       this.tokens.push({ token, permissions: (body.permissions ?? {}) as Record<string, string>, ...(Array.isArray(body.repositories) ? { repositories: body.repositories as string[] } : {}) });
       return json(201, { token, ...(this.tokenExpiry === null ? {} : { expires_at: this.tokenExpiry ?? new Date(Date.parse(this.model.now()) + 3_600_000).toISOString() }), permissions: body.permissions ?? {}, repository_selection: "selected" });
@@ -126,6 +166,8 @@ export class GitHubFixtureApi {
 
     if (method === "POST" && path === "/graphql") return json(200, this.graphql(body as { query: string; variables: Record<string, unknown> }));
     if (method === "GET" && path === ROOT) return json(200, this.repositoryJson());
+    const checkRuns = this.checkRunRoute(method, path, url, body, token);
+    if (checkRuns !== undefined) return checkRuns;
     if (method === "GET" && path === `${ROOT}/branches`) {
       const page = Number(url.searchParams.get("page") ?? "1");
       const rows = [...this.model.branches.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).slice((page - 1) * 100, page * 100).map(([name, sha]) => ({ name, commit: { sha } }));
@@ -395,7 +437,7 @@ export class GitHubFixtureApi {
         if (check.conclusion === "error") return { __typename: "StatusContext", context: check.name, state: "ERROR", targetUrl: check.url === "" ? null : check.url, isRequired: required(check.name) };
         return {
           __typename: "CheckRun", name: check.name, status: check.state === "completed" ? "COMPLETED" : "IN_PROGRESS", conclusion: check.conclusion === undefined ? null : CONCLUSIONS[check.conclusion],
-          detailsUrl: check.url === "" ? null : check.url, databaseId: check.runId === undefined ? null : Number(check.runId), checkSuite: { app: null }, isRequired: required(check.name),
+          detailsUrl: check.url === "" ? null : check.url, databaseId: check.runId === undefined ? null : Number(check.runId), checkSuite: { app: check.source !== undefined && /^\d+$/.test(check.source) ? { databaseId: Number(check.source) } : null }, isRequired: required(check.name),
         };
       });
       pr.commits = { nodes: [{ commit: { oid: head, statusCheckRollup: checks.length === 0 ? null : { state: "PENDING", contexts: page(nodes) } } }] };

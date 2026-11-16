@@ -40,7 +40,8 @@ export interface EvidenceSpan {
 export interface ReflectSubject {
   kind: "task" | "facts"; id: string; workspaceId: string; project: string;
   repositories: readonly string[]; baseCommit?: string; mergedCommit?: string;
-  outcome?: "merged" | "closed" | "abandoned" | "reverted";
+  /** `sent_back`: the task is still open; a person sent it back with their words (learn on send-back). */
+  outcome?: "merged" | "closed" | "abandoned" | "reverted" | "sent_back";
   /** Trust of whoever started the task, and of everyone who steered it (a comment, a send-back, a Slack ask). Unknown is outsider. */
   /** The canonical developer id of whoever started the task. Their own send-backs are never a measured outcome. */
   initiatorId?: string;
@@ -149,6 +150,10 @@ export function buildReflectorInput(subject: ReflectSubject): ReflectorInput {
     && !kept.some((s) => (s.kind === "send_back" || s.kind === "close_reason") && s.trust === "member")) {
     return { eligible: false, reason: "no_member_reason", removedOutsider: removed };
   }
+  // A task reflected while open (sent back) teaches only from a member's OWN words in a send-back: a send-back with no reason (code's fixed sentence) is not a correction.
+  if (subject.kind === "task" && subject.outcome === "sent_back" && !kept.some((s) => s.kind === "send_back" && s.trust === "member" && s.fixedText !== true)) {
+    return { eligible: false, reason: "no_member_reason", removedOutsider: removed };
+  }
 
   const repoOnly = subject.promptStyle === "repo_only";
   const nonce = randomBytes(8).toString("hex");
@@ -173,7 +178,7 @@ export function buildReflectorInput(subject: ReflectSubject): ReflectorInput {
     : subject.outcome === "closed" || subject.outcome === "abandoned" ? ["pitfall"]
       : ["fact", "convention", "pitfall", "procedure", "preference", "review_check"];
   const header = [
-    `Subject: ${repoOnly ? "merged change request" : subject.kind === "task" ? "finished task" : "recent decisions and facts"}${subject.outcome === undefined ? "" : `, outcome ${subject.outcome}`}`,
+    `Subject: ${repoOnly ? "merged change request" : subject.kind === "task" ? (subject.outcome === "sent_back" ? "open task a person sent back" : "finished task") : "recent decisions and facts"}${subject.outcome === undefined || subject.outcome === "sent_back" ? "" : `, outcome ${subject.outcome}`}`,
     `Repositories: ${subject.repositories.join(", ") || "none"}`,
     ...(subject.baseCommit === undefined ? [] : [`Base commit: ${subject.baseCommit}`]),
     ...(subject.mergedCommit === undefined ? [] : [`Merged commit: ${subject.mergedCommit}`]),

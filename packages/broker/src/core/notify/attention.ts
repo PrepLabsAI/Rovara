@@ -15,7 +15,7 @@
 // status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content beyond that, never a secret. Logs carry fixed codes and counts only.
 import { createHash } from "node:crypto";
 import {
-  DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
+  OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
   sessionTaskStatus, taskStatusText, when,
   type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type EmailSender, type OrgId, type RealtimeEntry, type RealtimePublisher, type RegistryView,
   type SessionSummary, type StoredDocument,
@@ -265,8 +265,8 @@ function emailSenderOf(registry: Pick<RegistryView, "get" | "names">): EmailSend
   return names.length === 1 ? registry.get("email", names[0]!) : undefined;
 }
 
-export interface AttentionBudget { deadlineMs?: number | undefined }
-export interface AttentionOutcome { people: number; sent: number; emails: number; dropped: number; failed: number; gaveUp: number; unreachable: number; held: number }
+export interface AttentionBudget { deadlineMs?: number | undefined; companyId?: OrgId; maxItems?: number; scan?: { cursor: string | undefined } }
+export interface AttentionOutcome { complete?: boolean; people: number; sent: number; emails: number; dropped: number; failed: number; gaveUp: number; unreachable: number; held: number }
 
 /**
  * The sweep's delivery. The queue is read in pages (at most `ATTENTION_READ_MAX` rows; rows past their expiry are left out). People still inside their batching window are set aside BEFORE the
@@ -282,20 +282,27 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
   const outcome: AttentionOutcome = { people: 0, sent: 0, emails: 0, dropped: 0, failed: 0, gaveUp: 0, unreachable: 0, held: 0 };
   const nowMs = deps.now();
   const late = () => budget.deadlineMs !== undefined && deps.now() >= budget.deadlineMs;
+  if (budget.companyId !== undefined && !OrgIdSchema.safeParse(budget.companyId).success) throw new Error("the notification company is invalid");
+  const maxItems = Math.min(ATTENTION_READ_MAX, budget.maxItems ?? ATTENTION_READ_MAX);
   const byPerson = new Map<string, PendingRow[]>();
-  let cursor: string | undefined;
+  let cursor: string | undefined = budget.scan?.cursor;
   let read = 0;
   do {
-    const page = await deps.store.query({ pk: PENDING_PK, limit: PENDING_PAGE, ...(cursor === undefined ? {} : { cursor }) });
+    if (late() || read >= maxItems) break;
+    const page = await deps.store.query({ pk: PENDING_PK, ...(budget.companyId === undefined ? {} : { sk: { op: "beginsWith" as const, prefix: `${budget.companyId}#` } }), limit: Math.min(PENDING_PAGE, maxItems - read), ...(cursor === undefined ? {} : { cursor }) });
+    let finishedPage = true;
     for (const item of page.items) {
+      if (read >= maxItems || late()) { finishedPage = false; break; }
       read += 1;
       const row = pendingRowOf(item, Math.floor(nowMs / 1000));
-      if (row === undefined) continue;
+      if (row === undefined || (budget.companyId !== undefined && row.orgId !== budget.companyId)) continue;
       const key = `${row.orgId}#${row.developerId}`;
       byPerson.set(key, [...(byPerson.get(key) ?? []), row]);
     }
-    cursor = page.cursor;
-  } while (cursor !== undefined && read < ATTENTION_READ_MAX && !late());
+    if (finishedPage) { cursor = page.cursor; if (budget.scan !== undefined) budget.scan.cursor = cursor; }
+    else break;
+  } while (cursor !== undefined && read < maxItems && !late());
+  if (budget.companyId !== undefined) outcome.complete = cursor === undefined && read < maxItems && !late();
   if (cursor !== undefined) log({ event: "attention.queue_truncated", read });
   // Who is due now (outside their window, with something their quiet hours and digest let go), oldest-waiting first: only they take this sweep's places.
   const due: Array<{ rows: PendingRow[]; marker: SentMarker; prefs: Awaited<ReturnType<typeof readNotifyPrefs>>; digest: boolean }> = [];
@@ -324,9 +331,10 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
   const sessions = new SessionStore(deps.store);
   const dropRow = (row: PendingRow): Promise<unknown> => deps.store.delete({ key: row.key }).catch(() => undefined);
   const email = emailSenderOf(deps.registry);
-  let taken = 0;
+  let taken = 0, visitedPeople = 0;
   for (const { rows, marker, prefs, digest } of due) {
     if (late() || taken >= PEOPLE_PER_SWEEP_MAX) break;
+    visitedPeople += 1;
     const { orgId, developerId } = rows[0]!;
     const current: Array<{ row: PendingRow; line: Line }> = [];
     const stale: PendingRow[] = [];
@@ -381,6 +389,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       for (const { row } of owed) await deps.store.update({ key: row.key, ops, condition: when.and(when.present(), when.eq("at", row.at)) });
     };
     for (const tkey of routes) {
+      if (late()) break;
       let owed = current.filter(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey));
       if (owed.length === 0) continue;
       const target = targets.find((entry) => targetKey(entry) === tkey);
@@ -468,6 +477,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       },
     });
   }
+  if (budget.companyId !== undefined) outcome.complete = outcome.complete === true && visitedPeople === due.length && !late();
   if (outcome.people > 0 || outcome.dropped > 0 || outcome.failed > 0) log({ event: "attention.delivered", ...outcome });
   return outcome;
 }

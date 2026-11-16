@@ -26,3 +26,4 @@ export * from "./task-model.js";
 export * from "./server.js";
 export * from "./usage.js";
 export * from "./worker-log.js";
+export { parsePipelineReport } from "./verification/pipeline-report-parser.js";
