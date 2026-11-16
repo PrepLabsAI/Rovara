@@ -12,6 +12,8 @@ export const STEP_UP_EMAIL_SENDER_PATTERN = "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0
 const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
 const DEV_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
 const FEEDBACK_REVIEW_ROUTE_KEY = "ANY /review/{proxy+}";
+/** Lane L12: the core engine's own /v1/app/* routes, named environments with developer tasks only. The broker answers them only while the core switch serves. */
+const CORE_APP_ROUTE_KEY = "ANY /v1/app/{proxy+}";
 
 export interface DeveloperSignInParameters {
   slackTeamId: CfnParameter; slack: CfnParameter; oidcIssuer: CfnParameter; oidcClientId: CfnParameter;
@@ -299,14 +301,20 @@ export class DeveloperSignIn extends Construct {
     const feedbackReviewRoute = new apigwv2.CfnRoute(this, "FeedbackReviewRoute", {
       apiId: props.api.ref, routeKey: FEEDBACK_REVIEW_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
     });
+    // Lane L12, named environments with developer tasks only (the legacy template stays as deployed): the core's /v1/app/* routes. No authorizer, as DevRoute (D17): the broker
+    // verifies the developer token itself, refuses a method and path with no row in its route table, and answers nothing here while the core switch is off.
+    const coreAppRoute = named && tasks !== undefined ? new apigwv2.CfnRoute(this, "CoreAppRoute", {
+      apiId: props.api.ref, routeKey: CORE_APP_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
+    }) : undefined;
     // Public routes are stage-capped: bursts of 50, 20 requests a second on average,
     // across all callers. A developer signs in a few times a week, so this only bites a flood.
     const throttle = { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 };
-    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: throttle, [DEV_ROUTE_KEY]: throttle, [FEEDBACK_REVIEW_ROUTE_KEY]: throttle };
+    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: throttle, [DEV_ROUTE_KEY]: throttle, [FEEDBACK_REVIEW_ROUTE_KEY]: throttle, ...(coreAppRoute === undefined ? {} : { [CORE_APP_ROUTE_KEY]: throttle }) };
     // Route settings must name routes that already exist.
     props.stage.addDependency(authRoute);
     props.stage.addDependency(devRoute);
     props.stage.addDependency(feedbackReviewRoute);
+    if (coreAppRoute !== undefined) props.stage.addDependency(coreAppRoute);
 
     const broker = props.broker;
     broker.addEnvironment("DEVELOPER_TOKEN_ISSUER", issuer);

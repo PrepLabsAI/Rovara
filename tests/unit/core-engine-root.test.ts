@@ -4,10 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { CORE_APP_UNAVAILABLE } from "../../packages/broker/src/aws/core-app-routes.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
 const OTHER = "org_staging0000000000002" as OrgId;
@@ -48,6 +49,7 @@ describe("the broker's core root, switch off (the default)", () => {
     for (const env of [{}, { ROVARA_CORE_ENGINE: "off" }, { ROVARA_CORE_ENGINE: "typo" }]) {
       const root = createBrokerCoreRoot(rootInputs(env, tables.client, { codeModules }));
       expect(root.coreTasks).toBeUndefined();
+      expect(root.coreApp).toBeUndefined();
       expect(root.app.serving).toBe(false);
       expect(await root.callback({ method: "POST", path: `/v1/internal/workspaces/${"a".repeat(8)}-aaaa-4aaa-8aaa-${"a".repeat(12)}/operations/${"b".repeat(8)}-bbbb-4bbb-8bbb-${"b".repeat(12)}/result`, headers: {} })).toBeUndefined();
       expect(await root.handleEvent({ source: "agentx.core-job", job: "dispatch-sweep" })).toEqual({ skipped: "off" });
@@ -79,6 +81,47 @@ describe("the broker's core root, switch on", () => {
     // A start by a non-member is not the core's: the old start answers it.
     expect(await root.coreTasks!.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-b", sessionId: "s", name: "Bo" })).toBeUndefined();
     void seen;
+  });
+
+  it("gives the HTTP API its /v1/app entry (lane L12): a non-member is asked to sign in again, and a core that cannot be built answers fixed words, never the registry's", async () => {
+    const tables = fakeTables([member("dev-a", ORG, "owner")]);
+    const lines: Array<Record<string, unknown>> = [];
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client, { log: (entry) => lines.push(entry) }));
+    expect(root.coreApp).toBeDefined();
+    expect((await root.coreApp!.route({ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { developerId: "dev-b", sessionId: "s", name: "Bo" }))?.statusCode).toBe(401);
+    for (const request of [{ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { method: "POST", path: "/v1/app/people/dev-c/erase", headers: {}, body: "{}" }]) {
+      const answer = await root.coreApp!.route(request, { developerId: "dev-a", sessionId: "s", name: "Ada" });
+      expect(answer?.statusCode, request.path).toBe(503);
+      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: CORE_APP_UNAVAILABLE } });
+      expect(answer!.body).not.toContain("adapters");
+    }
+    expect(lines.filter((line) => line.event === "core_engine.app_route_unavailable")).toHaveLength(2);
+    // Not a /v1/app path: not this entry's.
+    expect(await root.coreApp!.route({ method: "GET", path: "/v1/dev/projects", headers: {} }, { developerId: "dev-a", sessionId: "s", name: "Ada" })).toBeUndefined();
+  });
+
+  it("maps the caller from live membership for /v1/app too, and reads a person's standing in a company from the company's own record", async () => {
+    const tables = fakeTables([member("dev-a", ORG, "admin"), member("dev-gone", ORG, "member", { revokedAt: "2026-11-10T00:00:00.000Z" }), member("dev-x", OTHER, "member")]);
+    const mapped = await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-a", sessionId: "s", name: "Ada", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" }, clientId: "web-app" });
+    expect(mapped).toEqual({ principal: { companyId: ORG, personId: "dev-a", displayName: "Ada", roles: ["admin"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web-app", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" } });
+    expect(await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-gone", sessionId: "s", name: "Gone" })).toBeUndefined();
+    const standing = personStandingFromDynamo(tables.client, SIGN_IN);
+    expect(await standing(ORG, "dev-a")).toBe("member");
+    expect(await standing(ORG, "dev-gone")).toBe("former");
+    // Another company's person, and nobody, are unknown here.
+    expect(await standing(ORG, "dev-x")).toBe("unknown");
+    expect(await standing(ORG, "dev-none")).toBe("unknown");
+    await expect(personStandingFromDynamo(tables.client, undefined)(ORG, "dev-a")).rejects.toThrow();
+  });
+
+  it("gives the developer API its core entries only while the switch serves; off, the configuration is the very same object", () => {
+    const config = { issuer: "https://api.example" };
+    const off = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
+    expect(withCoreRoutes(config, off)).toBe(config);
+    const on = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, fakeTables().client));
+    expect(withCoreRoutes(config, on)).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks, coreApp: on.coreApp });
+    expect(withCoreRoutes(config, { coreTasks: on.coreTasks, coreApp: undefined })).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks });
+    expect(config).toEqual({ issuer: "https://api.example" });
   });
 
   it("refuses a start, rather than falling back, when membership cannot be read", async () => {

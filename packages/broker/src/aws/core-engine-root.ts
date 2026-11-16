@@ -45,6 +45,7 @@ import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
+import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
@@ -103,13 +104,18 @@ export interface BrokerCoreRoot {
   /** The developer task routes' core entry. Undefined while the switch is off: the routes never reach the core. */
   readonly coreTasks: CoreTaskEntry | undefined;
   /**
+   * Lane L12: the core's own /v1/app/* routes for the broker's HTTP API (sessions, decision cards, how we work, script tokens and person erase), over the same caller mapping as
+   * `coreTasks` (company and role from membership). Undefined while the switch is off: the developer API then answers every /v1/app/* path "route not found" and reads nothing.
+   */
+  readonly coreApp: CoreAppEntry | undefined;
+  /**
    * Lane LM8: the Code lessons API for the developer routes (`deps.lessons`). Undefined while the engine switch is off, while ROVARA_CORE_LESSONS is off, or without the deployment's
    * people port: every lessons route then answers "Lessons are off." and reads nothing.
    */
   readonly lessons: LessonsApi | undefined;
   /**
    * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` while the
-   * switch is off or for any other path. (The broker's HTTP API mounts no /v1/app/* path yet: see the switch-on lanes.)
+   * switch is off or for any other path. The broker's HTTP API reaches it through `coreApp` (lane L12).
    */
   personErase(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined>;
   /** Finishes one company's owed person erases (the learning step first, then the evidence walk). For the scheduled job when it lands. Rejects while the switch is off. */
@@ -165,6 +171,20 @@ export function projectGrantRoleFromDynamo(client: DynamoSender, tableName: stri
   };
 }
 
+/**
+ * What the company's own records say about a person, for person erase (row 13.1): a current `member` of THIS company, a `former` one (removed), or `unknown` (never one of its people, or
+ * another company's). No sign-in table, or a read that fails, throws (the route then refuses and erases nothing).
+ */
+export function personStandingFromDynamo(client: DynamoSender, tableName: string | undefined): (companyId: string, personId: string) => Promise<"member" | "former" | "unknown"> {
+  return async (companyId, personId) => {
+    if (tableName === undefined || tableName === "") throw new Error("no sign-in table");
+    const response = await client.send(new GetCommand({ TableName: tableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
+    const parsed = Membership.safeParse(response?.Item);
+    if (!parsed.success || parsed.data.personId !== personId || parsed.data.companyId !== companyId) return "unknown";
+    return parsed.data.revokedAt === undefined ? "member" : "former";
+  };
+}
+
 /** Whether the person holds a project grant that lets them use the project (developer or administrator: the broker's own rule). */
 export function projectGrantFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string) => Promise<boolean> {
   const role = projectGrantRoleFromDynamo(client, tableName);
@@ -204,6 +224,19 @@ export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => P
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
       return (await inputs.projectGrant(task.developerId, task.project)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };
     },
+  };
+}
+
+/**
+ * The deployment's caller mapping (lane ID): the broker's signed-in developer -> the principal the core knows. The company and role come from the person's LIVE membership, read on every
+ * call (never a token claim); the step-up and the client ride along only as the broker's sign-in set them from the verified token. No membership: undefined (the sign-in refusal).
+ */
+export function deployedCallerFromMembership(membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>): (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined> {
+  return async (caller) => {
+    const membership = await membershipOf(caller.developerId);
+    if (membership === undefined) return undefined;
+    const principal: Principal = { companyId: membership.companyId, personId: caller.developerId, displayName: caller.name, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
+    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }) };
   };
 }
 
@@ -294,6 +327,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
 
   // Off: nothing below is built, and the developer routes never get a core entry.
   let coreTasks: CoreTaskEntry | undefined;
+  let coreApp: CoreAppEntry | undefined;
   let lessons: LessonsApi | undefined;
   if (app.serving) {
     // The library's install-wide learning gate follows the lessons switch.
@@ -316,13 +350,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         };
       },
     });
-    const deployedCallerOf = async (caller: CoreEntryCaller): Promise<DeployedCaller | undefined> => {
-      const membership = await membershipOf(caller.developerId);
-      if (membership === undefined) return undefined;
-      const principal: Principal = { companyId: membership.companyId, personId: caller.developerId, displayName: caller.name, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
-      return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }) };
-    };
+    const deployedCallerOf = deployedCallerFromMembership(membershipOf);
     coreTasks = coreTaskEntryFrom(routes, deployedCallerOf);
+    // Lane L12: the same routes and caller mapping on /v1/app/*, with the person erase (below) next to them.
+    coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
     // runtime's (built once); the person's project role is the broker's own project grant (administrator: maintainer, developer: contributor).
     const lessonsPeople = inputs.lessonsPeople;
@@ -379,27 +410,24 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     void companyId;
     return { store, audit, objects: objects as PersonEraseObjects, eraseLearning: hostedEraseLearning({ store, audit, now: () => now().getTime(), log }), now: () => now().getTime(), log };
   };
-  const standingOf = async (companyId: string, personId: string): Promise<"member" | "former" | "unknown"> => {
-    if (inputs.signInTableName === undefined || inputs.signInTableName === "") throw new Error("no sign-in table");
-    const response = await inputs.documentClient.send(new GetCommand({ TableName: inputs.signInTableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
-    const parsed = Membership.safeParse(response?.Item);
-    if (!parsed.success || parsed.data.personId !== personId || parsed.data.companyId !== companyId) return "unknown";
-    return parsed.data.revokedAt === undefined ? "member" : "former";
-  };
+  const standingOf = personStandingFromDynamo(inputs.documentClient, inputs.signInTableName);
+
+  async function personErase(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined> {
+    if (!app.serving || !(request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return undefined;
+    const registry = await app.registry();
+    return await createPersonEraseRoute({
+      app, log, standing: standingOf,
+      companyOf: async (who) => await membershipOf(who.principal.personId),
+      eraseDeps: (companyId) => eraseDepsOver(registry, companyId),
+    }).route(request, caller);
+  }
 
   return {
     app,
     coreTasks,
+    coreApp,
     lessons,
-    async personErase(request, caller) {
-      if (!app.serving || !(request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return undefined;
-      const registry = await app.registry();
-      return await createPersonEraseRoute({
-        app, log, standing: standingOf,
-        companyOf: async (who) => await membershipOf(who.principal.personId),
-        eraseDeps: (companyId) => eraseDepsOver(registry, companyId),
-      }).route(request, caller);
-    },
+    personErase,
     async resumePersonErases(companyId, budgetMs) {
       const registry = await app.registry();
       return await resumePersonErases(eraseDepsOver(registry, companyId), companyId, budgetMs);
@@ -427,6 +455,15 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       return undefined;
     },
   };
+}
+
+/**
+ * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): while the switch serves, the task routes' core entry and the /v1/app/* routes; off (neither is
+ * built), the configuration exactly as given, so the developer API is byte-identical.
+ */
+export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry }) {
+  if (root.coreTasks === undefined) return config;
+  return { ...config, coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }) };
 }
 
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */

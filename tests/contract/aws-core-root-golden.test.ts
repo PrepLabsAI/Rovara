@@ -24,7 +24,9 @@ function normalise(text: string): string {
     .replace(/\b[0-9a-f]{64}\b/gu, name("hash"))
     // Signed capabilities and grants carry the run's own ids (base64url): a token of its shape, not its bytes.
     .replace(/[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)*/gu, "<token>")
-    .replace(/"durationMs":\d+/gu, "\"durationMs\":<ms>");
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/gu, "<time>")
+    .replace(/"durationMs":\d+/gu, "\"durationMs\":<ms>")
+    .replace(/"(?:expiresAt|indexExpiresAt|ttl|updatedAtEpoch|startedAtEpoch|endsAt|at)":\d{9,13}/gu, (match) => match.replace(/\d{9,13}/u, "<epoch>"));
 }
 
 /** Both runs see the same wall clock: only `Date` is frozen (timers stay real), so every clock-derived field (a session's endsAt, times, durations) is equal by construction. */
@@ -56,6 +58,10 @@ async function script(withCore: boolean): Promise<{ answers: string[]; rows: str
   for (const [who, method, path] of [[MAYA, "GET", `/v1/dev/tasks/${taskId}`], [MAYA, "GET", `/v1/dev/tasks/${taskId}/events?limit=5`], [MAYA, "GET", "/v1/dev/tasks"], [OMAR, "GET", `/v1/dev/tasks/${taskId}`],
     [MAYA, "GET", `/v1/dev/tasks/${randomUUID()}`], [OMAR, "POST", "/v1/dev/tasks"], [MAYA, "POST", `/v1/dev/tasks/${taskId}/close`]] as const) {
     keep(await harness.dev(who, method, path, method === "POST" && path === "/v1/dev/tasks" ? { requestId: randomUUID(), project: "payments", instructions: "Another", client: "claude-code" } : undefined));
+  }
+  // Lane L12: the core's /v1/app/* paths, which the broker answers only while the switch serves: off, exactly as without the root.
+  for (const [method, path] of [["GET", "/v1/app/script-tokens"], ["POST", "/v1/app/script-tokens"], ["GET", "/v1/app/sessions"], ["GET", "/v1/app/decisions"], ["POST", `/v1/app/people/${OMAR.developerId}/erase`], ["GET", "/v1/app/projects/payments/how-we-work"]] as const) {
+    keep(await harness.dev(MAYA, method, path, method === "POST" ? { requestId: randomUUID() } : undefined));
   }
   // Each row on its own (its ids renamed within the row), then sorted: the table's rows as a set, every byte but the ids and times compared.
   const rows = harness.db.find(() => true).map((item) => normalise(JSON.stringify(item))).sort();
