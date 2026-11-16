@@ -3,7 +3,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   isAiInstructionPath, type FileEntryType, agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
-  type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
+  type BranchPage, type DeploymentStatusRead, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
   type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
   type RepositoryRef, type SummaryCheckPost,
@@ -25,7 +25,8 @@ export type FakeRawEvent =
   | { delivery: string; event: "review"; cr: string; state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING"; actor?: string }
   | { delivery: string; event: "comment"; cr: string; commentId: string }
   | { delivery: string; event: "check"; revision: string; name: string; conclusion: "success" | "failure" | "neutral" | "cancelled" | "skipped" | "timed_out" | "action_required" | "stale" | "startup_failure" | "error" }
-  | { delivery: string; event: "push"; branch: string; revision: string };
+  | { delivery: string; event: "push"; branch: string; revision: string }
+  | { delivery: string; event: "deployment"; revision: string; environment: string; state: "success" | "failure" | "in_progress" };
 
 /** A delivery the fake host accepts: the body, and its HMAC signature in the header the host would send. */
 export function fakeSignedDelivery(event: FakeRawEvent, secret = FAKE_WEBHOOK_SECRET): RawDelivery {
@@ -162,6 +163,14 @@ export class FakeCodeHost implements CodeHost {
     const model = this.registered(repository);
     budget?.beforeRequest();
     return { files: model.compareChangedFiles(base, head), complete: true };
+  }
+
+  /** M7 slice 2: the latest state of each deployment of a revision the model holds. The fake never cuts the list; a repository nobody registered is refused. */
+  async deploymentStatuses(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<DeploymentStatusRead> {
+    this.checkScope(scope);
+    const model = this.registered(repository);
+    budget?.beforeRequest();
+    return { statuses: model.deploymentStates(revision), complete: true };
   }
 
   /** A budgeted read: it counts against the pass's allowance, and a host that has told Rovara to slow down says so with the neutral signal. */
@@ -370,6 +379,7 @@ export class FakeCodeHost implements CodeHost {
       case "review": return (parsed({ ...base, type: "review.submitted", ref: this.ref(raw.cr), state: raw.state, ...(raw.actor === undefined ? {} : { actor: raw.actor }) }));
       case "comment": return (parsed({ ...base, type: "comment.created", ref: this.ref(raw.cr), commentId: raw.commentId }));
       case "check": return (parsed({ ...base, type: "check.completed", repository: { url: this.model.url }, revision: raw.revision, name: raw.name, conclusion: raw.conclusion }));
+      case "deployment": return (parsed({ ...base, type: "deployment.status", repository: { url: this.model.url }, revision: raw.revision, environment: raw.environment, state: raw.state }));
       case "push": return (parsed({ ...base, type: "revision.pushed", repository: { url: this.model.url }, branch: raw.branch, revision: raw.revision }));
       default: throw agentXError("CONFIG_INVALID", "the delivery names an event this host does not send");
     }

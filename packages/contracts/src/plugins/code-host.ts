@@ -439,6 +439,19 @@ export type BranchPage = z.infer<typeof BranchPageSchema>;
 
 // ---- neutral events
 
+/** M7 slice 2: where a deployment stands, in Rovara's three words (a host's `inactive`, which says a newer deployment took over, is no state of ours and is left out by the adapter). */
+export const DEPLOYMENT_STATES = ["success", "failure", "in_progress"] as const;
+export const DeploymentStateSchema = z.enum(DEPLOYMENT_STATES);
+export type DeploymentState = z.infer<typeof DeploymentStateSchema>;
+/** An environment name as a deploy tool wrote it: untrusted text of at most 64 characters (the watcher checks it again before using it). */
+export const DeploymentEnvironmentSchema = z.string().min(1).max(64);
+/** What `CodeHost.deploymentStatuses` answers for one revision: the latest state of each environment the host knows a deployment of that revision in, and whether that is the whole of it (`complete` false when the host cut anything: too many deployments, too many requests). */
+export const DeploymentStatusReadSchema = z.object({
+  statuses: z.array(z.object({ environment: DeploymentEnvironmentSchema, state: DeploymentStateSchema }).strict()).max(50),
+  complete: z.boolean(),
+}).strict();
+export type DeploymentStatusRead = z.infer<typeof DeploymentStatusReadSchema>;
+
 const EventBase = { eventId: ExternalIdSchema, host: PluginKindSchema, occurredAt: ISO_TIME.optional() } as const;
 /**
  * What happened at the host, in neutral words. Every adapter maps its own webhooks (or its poller's findings) to these. `eventId` is the host's delivery id
@@ -453,6 +466,8 @@ export const CodeHostEventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventBase, type: z.literal("comment.created"), ref: ChangeRequestRefSchema, commentId: ExternalIdSchema, actor: z.string().max(200).optional() }).strict(),
   z.object({ ...EventBase, type: z.literal("check.completed"), repository: RepositoryRefSchema, revision: RevisionSchema, name: z.string().min(1).max(200), conclusion: CheckConclusionSchema }).strict(),
   z.object({ ...EventBase, type: z.literal("revision.pushed"), repository: RepositoryRefSchema, branch: BranchNameSchema, revision: RevisionSchema }).strict(),
+  /** M7 slice 2 (decision 252b, TE-IF3, add-only): the host says a deployment of `revision` to `environment` is in this state. The after-merge watcher resolves `revision` itself; nothing here is believed beyond which commit and environment to look at. */
+  z.object({ ...EventBase, type: z.literal("deployment.status"), repository: RepositoryRefSchema, revision: RevisionSchema, environment: DeploymentEnvironmentSchema, state: DeploymentStateSchema }).strict(),
 ]);
 export type CodeHostEvent = z.infer<typeof CodeHostEventSchema>;
 export const CODE_HOST_EVENT_TYPES = CodeHostEventSchema.options.map((option) => option.shape.type.value);
@@ -552,6 +567,12 @@ export interface CodeHost {
    * then risky). A host THROWS when it cannot answer, or when `base` is not a revision `head` builds on. `budget`, when given, is called before every page.
    */
   compareChanges?(repository: RepositoryRef, base: string, head: string, scope: HostScope, budget?: PageBudget): Promise<CompareChanges>;
+  /**
+   * M7 slice 2 (decision 252b, TE-IF3, add-only, optional): the latest state of each deployment of `revision` (a full commit id) at this host, read-only and bounded (at most a few requests; `budget`, when given, is called before
+   * every request). It is the backstop for a deployment event that was not delivered, and the laptop's way to learn of a deploy. `complete` is false when the host cut anything. A host that cannot leaves it out and the watcher
+   * hears of deploys by event only; a host that cannot answer THROWS (a refused read is never "no deployments").
+   */
+  deploymentStatuses?(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<DeploymentStatusRead>;
   listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage>;
   /**
    * The code owners of a branch, read and understood by the host itself (the owners file's syntax and its matching rules are the host's, never the core's), or undefined when the branch has none.

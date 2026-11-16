@@ -29,6 +29,8 @@ export const CORE_JOB_SCHEDULES: readonly CoreJobSchedule[] = [
   { job: "person-erase-resume", rate: "rate(15 minutes)" },
   // #684: the lessons job (core-host/jobs.ts), one schedule per scheduled row.
   { job: "lessons", rate: "rate(5 minutes)" },
+  // M7 slice 2: the after-merge watcher's pass (core-host/jobs.ts).
+  { job: "after-merge", rate: "rate(1 minute)" },
 ];
 
 /**

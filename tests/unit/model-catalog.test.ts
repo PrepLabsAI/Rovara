@@ -1,6 +1,7 @@
 // TE-F0a: the provider-row schema, the built-in rows, the company-gateway rows and the stable digest. Offline: a test fails if anything opens a socket or calls fetch.
 import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expectLinearScaling } from "../support/scaling.js";
 import {
   COMPANY_GATEWAY_MAX_PER_PROJECT,
   MODEL_REDIRECT_ENV_NAMES,
@@ -345,9 +346,11 @@ describe("company-gateway rows", () => {
   });
   it("refuses a non-array without throwing, and a huge host fast", () => {
     expect(checkCompanyGatewayRows("nope", builtin())).toMatchObject({ ok: false, issues: [{ code: "invalid_row" }] });
-    const started = Date.now();
     expect(checkModelHost("a".repeat(1_000_000))).toEqual({ ok: false, code: "too_long" });
-    expect(Date.now() - started).toBeLessThan(200);
+    // Refusing it must not cost more as the host grows (125,000 -> 1,000,000 characters, the original size).
+    let refusal: ReturnType<typeof checkModelHost> | undefined;
+    expectLinearScaling((size) => { const host = "a".repeat(size); return () => { refusal = checkModelHost(host); }; }, { n: 125_000, label: "refusing a huge model host" });
+    expect(refusal).toEqual({ ok: false, code: "too_long" });
   });
 });
 

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { parseReportParts } from "../../packages/worker/src/verification/report-adapters.js";
 import { displayLine, evidenceTests, parseTestReport, testText, TEST_REPORT_MAX_BYTES } from "../../packages/worker/src/verification/test-report.js";
 import { inertEvidenceText } from "../../packages/contracts/src/evidence-inert.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../fixtures/report-adapters/${name}`, import.meta.url), "utf8");
 const ctrf = (tests: unknown[]) => JSON.stringify({ reportFormat: "CTRF", results: { tests } });
@@ -56,15 +57,28 @@ describe("adapter boundaries", () => {
     expect(parseReportParts(trx('<UnitTestResult testName="x" outcome="Passed" duration="00:99:00" startTime="2026"/>'))?.tests?.tests[0]).toEqual({ name: "x", status: "passed" });
   });
   it("keeps raw test identity and makes displayed adapter text inert, even huge names", () => {
-    for (const name of ["![a[b]c](https://example.com) [text](https://example.com)", "[x][id] ![img][id]", "@owner #123 <b>raw</b>", "# title", "> quote", "---", "```code", "~~~code", "hidden\u202E\uFE0Fx", "x".repeat(1_000_000)]) {
-      const start = performance.now();
+    for (const name of ["![a[b]c](https://example.com) [text](https://example.com)", "[x][id] ![img][id]", "@owner #123 <b>raw</b>", "# title", "> quote", "---", "```code", "~~~code", "hidden\u202E\uFE0Fx"]) {
       const read = parseReportParts(ctrf([{ name, filepath: name, status: "passed" }]))!;
       expect(read.tests?.tests[0]).toMatchObject({ name: testText(name), file: testText(name) });
       const shown = evidenceTests(read.tests!).names[0]!;
       expect(shown.name).toBe(displayLine(inertEvidenceText(`${testText(name)}::${testText(name)}`, 500).replace(/^\u200D/u, "· ")));
       expect(shown.unlisted).toBe(true);
-      expect(performance.now() - start).toBeLessThan(2_000);
     }
+  });
+  it("keeps raw test identity and makes displayed adapter text inert for a huge name, in time that grows no faster than the name", () => {
+    let name = "";
+    let read = undefined as ReturnType<typeof parseReportParts>;
+    let shown = undefined as ReturnType<typeof evidenceTests>["names"][number] | undefined;
+    // 125,000 characters, then 1,000,000: linear work grows about 8x.
+    expectLinearScaling((size) => {
+      name = "x".repeat(size);
+      const text = ctrf([{ name, filepath: name, status: "passed" }]);
+      return () => { read = parseReportParts(text); shown = evidenceTests(read!.tests!).names[0]; };
+    }, { n: 125_000, label: "a huge test name" });
+    expect(name.length).toBe(1_000_000);
+    expect(read!.tests?.tests[0]).toMatchObject({ name: testText(name), file: testText(name) });
+    expect(shown!.name).toBe(displayLine(inertEvidenceText(`${testText(name)}::${testText(name)}`, 500).replace(/^\u200D/u, "· ")));
+    expect(shown!.unlisted).toBe(true);
   });
   it("rejects XML declarations, external entities and bombs without expansion", () => {
     for (const declaration of ['<!DOCTYPE TestRun SYSTEM "file:///etc/passwd">', '<!DOCTYPE TestRun [<!ENTITY x "boom"><!ENTITY y "&x;&x;">]>', '<!ENTITY x SYSTEM "https://example.com">']) expect(parseReportParts(declaration + trx(result))).toBeUndefined();
@@ -79,12 +93,15 @@ describe("adapter boundaries", () => {
   it("refuses malformed, unclosed, deeply nested or overlong XML tags", () => {
     for (const text of [trx(result).slice(0,-10), trx(result) + "junk", trx(result).replace("</Results>", "</Other>"), trx(result) + trx(result), '<TestRun><Results></Other></TestRun>', trx('<!--unclosed'), trx('<![CDATA[unclosed'), trx('<UnitTestResult testName="never closes'), trx(`<UnitTestResult testName="${"a".repeat(17_000)}"/>`), `<TestRun><Results>${result}</Results>${"<x>".repeat(65)}${"</x>".repeat(65)}</TestRun>`]) expect(parseReportParts(text)).toBeUndefined();
   });
-  it.each(["junit.xml", "jest.json", "go.jsonl", "trx.xml", "ctrf.json", "measures.json"])("reads an 8 MiB %s input within a generous linear bound", (file) => {
+  it.each(["junit.xml", "jest.json", "go.jsonl", "trx.xml", "ctrf.json", "measures.json"])("reads an 8 MiB %s input in time that grows no faster than its size", (file) => {
     const sample = fixture(file);
-    const text = sample + " ".repeat(TEST_REPORT_MAX_BYTES - Buffer.byteLength(sample));
-    const started = performance.now();
-    expect(parseReportParts(text)).toBeDefined();
-    expect(performance.now() - started).toBeLessThan(3_000);
+    let read: ReturnType<typeof parseReportParts>;
+    // 1 MiB, then 8 MiB (the largest input read): linear work grows about 8x.
+    expectLinearScaling((bytes) => {
+      const text = sample + " ".repeat(bytes - Buffer.byteLength(sample));
+      return () => { read = parseReportParts(text); };
+    }, { n: TEST_REPORT_MAX_BYTES / 8, label: `a ${file} report padded to its size limit` });
+    expect(read).toBeDefined();
   });
 });
 
@@ -98,20 +115,28 @@ it("collects Go and Jest clocks separately so legacy report objects stay byte-id
 });
 
 it.each(["junit", "gotest"])("handles an adversarial 8 MiB %s scan in linear time", (format) => {
-  // A separate process bounds a regressed synchronous parser: a vitest timeout cannot interrupt its own event loop.
+  // A separate process bounds a regressed synchronous parser: a vitest timeout cannot interrupt its own event loop. The child times the parse at 1 MiB and at 8 MiB (the size limit)
+  // and reports whether the work grew faster than linear; the parent's timeout is only the generous hang limit that kills a parser that never returns.
   const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     import { parseReportParts } from './packages/worker/src/verification/report-adapters.ts';
-    const body = ${JSON.stringify(format)} === 'junit'
-      ? '<testsuite>' + '<!-- some output -->'.repeat(120_000) + '<testcase name="x"/></testsuite>'
-      : Array.from({ length: 80_000 }, (_, i) => JSON.stringify({ Action: 'fail', Package: 'package' + i })).join('\\n');
-    const text = body + ' '.repeat(8 * 1024 * 1024 - Buffer.byteLength(body));
-    const start = performance.now();
-    const read = parseReportParts(text);
-    console.log(JSON.stringify({ elapsed: performance.now() - start, total: read?.tests?.total ?? null }));
-  `], { cwd: new URL("../../", import.meta.url), timeout: 10_000, encoding: "utf8" });
-  const read = JSON.parse(output) as { elapsed: number; total: number | null };
+    import { expectLinearScaling } from './tests/support/scaling.ts';
+    let total = null;
+    let scaling = null;
+    // One unit is an eighth of the 8 MiB input: 15,000 comment blocks or 10,000 Go events, padded to 1 MiB.
+    const build = (units) => {
+      const body = ${JSON.stringify(format)} === 'junit'
+        ? '<testsuite>' + '<!-- some output -->'.repeat(15_000 * units) + '<testcase name="x"/></testsuite>'
+        : Array.from({ length: 10_000 * units }, (_, i) => JSON.stringify({ Action: 'fail', Package: 'package' + i })).join('\\n');
+      const text = body + ' '.repeat(1024 * 1024 * units - Buffer.byteLength(body));
+      return () => { total = parseReportParts(text)?.tests?.total ?? null; };
+    };
+    try { scaling = { ok: true, result: expectLinearScaling(build, { n: 1, label: 'adversarial ${format} scan' }) }; } catch (error) { scaling = { ok: false, message: String(error && error.message) }; }
+    console.log(JSON.stringify({ scaling, total }));
+  `], { cwd: new URL("../../", import.meta.url), timeout: 120_000, encoding: "utf8" });
+  const read = JSON.parse(output) as { scaling: { ok: boolean; message?: string }; total: number | null };
+  expect(read.scaling.message ?? "").toBe("");
+  expect(read.scaling.ok).toBe(true);
   expect(read.total).toBe(format === "junit" ? 1 : null);
-  expect(read.elapsed).toBeLessThan(3_000);
 });
 
 it.each([
@@ -120,10 +145,13 @@ it.each([
   ["trx", '<TestRun><Results><UnitTestResult testName="', '" outcome="Passed"/></Results></TestRun>', false],
   ["measures", '{"schemaVersion":1,"measures":[{"name":"', '","unit":"B","value":1,"direction":"down_good"}]}', false],
 ] as const)("bounds an 8 MiB single-line %s field", (_format, prefix, suffix, readable) => {
-  const text = prefix + "x".repeat(TEST_REPORT_MAX_BYTES - prefix.length - suffix.length) + suffix;
-  const started = performance.now();
-  expect(parseReportParts(text) !== undefined).toBe(readable);
-  expect(performance.now() - started).toBeLessThan(5_000);
+  let parsed: unknown;
+  // The field grows 8x (1 MiB to 8 MiB): linear work grows about 8x.
+  expectLinearScaling((bytes) => {
+    const text = prefix + "x".repeat(bytes - prefix.length - suffix.length) + suffix;
+    return () => { parsed = parseReportParts(text); };
+  }, { n: TEST_REPORT_MAX_BYTES / 8, label: "a single-line field up to the size limit" });
+  expect(parsed !== undefined).toBe(readable);
 });
 
 it("does not match a display-normalised test to a different real test", () => {

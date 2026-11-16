@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { EvidenceChecksTestsSchema, EvidenceChecksTestsReadSchema } from "../../packages/contracts/src/evidence.js";
 import { absentOnNew, evidenceTests, parseTestReport } from "../../packages/worker/src/verification/test-report.js";
 import { REPORT_ADAPTERS, parseReportParts } from "../../packages/worker/src/verification/report-adapters.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../fixtures/report-adapters/${name}`, import.meta.url), "utf8");
 
@@ -70,12 +71,19 @@ describe("review routing regressions", () => {
     expect(parseReportParts(fixture("measures.json"), "measures")?.measures).toMatchObject({ source: "project_runner" });
   });
   it.each(["ctrf", "trx"] as const)("makes absent %s ids inert without changing raw identity", (format) => {
-    const names = ["[link](https://example.com)", "![a[b]c](https://example.com)", "[x][id]", "@owner #123 <b>raw</b>", "# title", "> quote", "---", "```code", "~~~code", "hidden\u202E\uFE0Fx", "x".repeat(1_000_000)];
-    const before = { format, total: names.length, passed: names.length, failed: 0, skipped: 0, errored: 0, tests: names.map((name) => ({ name, status: "passed" as const })) };
-    const after = { ...before, tests: [], total: 0, passed: 0 };
-    const start = performance.now();
+    const shortNames = ["[link](https://example.com)", "![a[b]c](https://example.com)", "[x][id]", "@owner #123 <b>raw</b>", "# title", "> quote", "---", "```code", "~~~code", "hidden\u202E\uFE0Fx"];
+    const reports = (longLength: number) => {
+      const all = [...shortNames, "x".repeat(longLength)];
+      const full = { format, total: all.length, passed: all.length, failed: 0, skipped: 0, errored: 0, tests: all.map((name) => ({ name, status: "passed" as const })) };
+      return { names: all, before: full, after: { ...full, tests: [], total: 0, passed: 0 } };
+    };
+    // Scaling check: the cost must grow no faster than the long id (the largest is the old 1,000,000 characters).
+    expectLinearScaling((longLength) => {
+      const { before, after } = reports(longLength);
+      return () => absentOnNew(before, after);
+    }, { n: 125_000, label: `absentOnNew with a long ${format} id` });
+    const { names, before, after } = reports(1_000_000);
     const shown = absentOnNew(before, after)!;
-    expect(performance.now() - start).toBeLessThan(2_000);
     expect(shown.count).toBe(names.length);
     expect(shown.ids.slice(0, 9)).toEqual(["link", "test", "(x)(id)", "@ owner # 123 raw", "· # title", "· > quote", "· ---", "· ```code", "· ~~~code"]);
     expect(shown.ids.join("\n")).not.toMatch(/@owner|#123|<b>|https:\/\/|!\[|\[id\]|\u202E|\uFE0F/u);

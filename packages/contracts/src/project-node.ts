@@ -345,6 +345,19 @@ export type ProjectOriginField = (typeof PROJECT_ORIGIN_FIELDS)[number];
 export const ProjectOriginsSchema = z.partialRecord(z.enum(PROJECT_ORIGIN_FIELDS), SettingOriginSchema);
 export type ProjectOrigins = z.infer<typeof ProjectOriginsSchema>;
 
+/**
+ * M7 slice 2: the project's `afterMergeWatch` setting (decision 160 item 5: its own setting, not an automation). OFF unless `enabled` is true. `windowMinutes` (default 30) is how long the project's alarms are watched after a
+ * deploy of a merge Rovara made; `environments` names the environments that count (compared without case; empty: all); `revert` says whether a revert is only reported on or also offered (a person's press still starts it).
+ * Control-plane only (`workerProjectDefinition`). The watcher checks the stored value again every time it reads it (a value that does not check is off).
+ */
+export const AfterMergeWatchSettingSchema = z.object({
+  enabled: z.boolean(),
+  windowMinutes: z.number().int().min(1).max(1_440).optional(),
+  environments: z.array(z.string().min(1).max(64)).max(20).optional(),
+  revert: z.enum(["report_only", "offer_revert"]).optional(),
+}).strict();
+export type AfterMergeWatchSetting = z.infer<typeof AfterMergeWatchSettingSchema>;
+
 function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSchema: Connectors) {
   return z
     .object({
@@ -371,6 +384,8 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       specTarget: SpecTargetSchema.optional(),
       /** General fakes (DEC 234, general-fakes.ts): Rovara-made fakes from the project's OpenAPI descriptions for outside services its checks call. Absent: off. Control-plane only (`workerProjectDefinition`); a CHECKS run gets `generalFakes` in its payload instead. */
       generalFakes: GeneralFakesSettingSchema.optional(),
+      /** M7 slice 2: the after-merge watcher's own setting. Absent: off. */
+      afterMergeWatch: AfterMergeWatchSettingSchema.optional(),
       origins: ProjectOriginsSchema.optional(),
     })
     .strict();
@@ -524,7 +539,7 @@ export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
  * alone (the DNS firewall enforces `network`, the broker's start check the pins).
  * `includeMeta` keeps a meta repository that is not also code, for the one run that reads it whole (the setup draft).
  */
-export function workerProjectDefinition<Definition extends object>(definition: Definition, options: { includeMeta?: boolean } = {}): Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes"> {
+export function workerProjectDefinition<Definition extends object>(definition: Definition, options: { includeMeta?: boolean } = {}): Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes" | "afterMergeWatch"> {
   const rest: Record<string, unknown> = { ...(definition as Record<string, unknown>) };
   delete rest.network;
   // N9: the registries reach a worker as the prepare payload's `registries` (where, never how), only if it lists `prepare.registries.v1`; an earlier worker's strict schema does not know the field.
@@ -535,6 +550,8 @@ export function workerProjectDefinition<Definition extends object>(definition: D
   delete rest.specTarget;
   // General fakes: the setting is the control plane's; a CHECKS run that may use them is sent `generalFakes` in its payload, only to a worker that lists the feature.
   delete rest.generalFakes;
+  // M7 slice 2: whether the after-merge watcher is on for the project is the control plane's; an earlier worker's strict schema does not know it.
+  delete rest.afterMergeWatch;
   // The same for the repository pins (`installationId`, `githubRepositoryId`) and the meta role: the repository entry of an earlier worker is strict too.
   if (Array.isArray(rest.repositories)) {
     rest.repositories = rest.repositories
@@ -559,7 +576,7 @@ export function workerProjectDefinition<Definition extends object>(definition: D
         return repository;
       });
   }
-  return rest as Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes">;
+  return rest as Omit<Definition, "network" | "origins" | "specTarget" | "registries" | "generalFakes" | "afterMergeWatch">;
 }
 
 function isPureMetaRepository(entry: unknown): boolean {

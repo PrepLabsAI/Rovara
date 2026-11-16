@@ -8,8 +8,8 @@
 //  - `events.normalise` (`events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
 // The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
-  agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
-  type BranchPage, type CodeOwnersRead, type CommitChanges, type CompareChanges, type PageBudget, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
+  agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, DeploymentStatusReadSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
+  type BranchPage, type DeploymentStatusRead, type CodeOwnersRead, type CommitChanges, type CompareChanges, type PageBudget, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef, type SummaryCheckPost,
 } from "@agentx/contracts";
@@ -70,6 +70,7 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
   const pathKindOfProvider = typeof provider.getPathKindAtCommit === "function" ? provider.getPathKindAtCommit.bind(provider) : undefined;
   const commitChangesOfProvider = typeof provider.getCommitChanges === "function" ? provider.getCommitChanges.bind(provider) : undefined;
   const compareChangesOfProvider = typeof provider.getCompareChanges === "function" ? provider.getCompareChanges.bind(provider) : undefined;
+  const deploymentStatusesOfProvider = typeof provider.getDeploymentStatuses === "function" ? provider.getDeploymentStatuses.bind(provider) : undefined;
   const commitFilesOfProvider = typeof provider.commitFilesToBranch === "function" ? provider.commitFilesToBranch.bind(provider) : undefined;
   const findPullRequestOfProvider = typeof provider.findLessonsPullRequest === "function" ? provider.findLessonsPullRequest.bind(provider) : undefined;
   const deleteBranchOfProvider = typeof provider.deleteLessonsBranch === "function" ? provider.deleteLessonsBranch.bind(provider) : undefined;
@@ -153,6 +154,16 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
       async compareChanges(repository: RepositoryRef, base: string, head: string, scope: HostScope, budget?: PageBudget): Promise<CompareChanges> {
         const read = await compareChangesOfProvider(repository.url, base, head, checkedScope(scope), budget === undefined ? undefined : () => budget.beforeRequest());
         return { files: read.files.map(fileOf), complete: read.complete };
+      },
+    }),
+
+    // M7 slice 2 (decision 252b, TE-IF3): a revision's deployment states, read only and bounded. Only where the client can read them. The answer is checked against the port's schema (a state or environment it does not name is refused, never passed on).
+    ...(deploymentStatusesOfProvider === undefined ? {} : {
+      async deploymentStatuses(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<DeploymentStatusRead> {
+        const read = await deploymentStatusesOfProvider(repository.url, revision, checkedScope(scope), budget === undefined ? undefined : () => budget.beforeRequest());
+        const checked = DeploymentStatusReadSchema.safeParse(read);
+        if (!checked.success) throw agentXError("RUNTIME_UNAVAILABLE", "the host's deployment answer cannot be read");
+        return checked.data;
       },
     }),
 
