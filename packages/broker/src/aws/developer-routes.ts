@@ -691,7 +691,8 @@ function companySlackMode(deps: DeveloperRouteDependencies): boolean {
 function safeChannelMembers(deps: DeveloperRouteDependencies): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
   return async (request) => {
     try {
-      if (companySlackMode(deps)) {
+      // Without the workspace service only the install's own team is ever asked about (bindingsOf gives it to the implicit company alone), as before company mode.
+      if (companySlackMode(deps) && deps.workspaces !== undefined) {
         const scope = SlackWorkspaceScopeSchema.safeParse(request.workspace);
         if (!scope.success || deps.workspaces === undefined || await deps.workspaces.requireCompany(scope.data.teamId) !== scope.data.companyId) return SLACK_UNAVAILABLE;
       }
@@ -758,10 +759,21 @@ async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessS
 }
 
 async function bindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWorkspaceScope, companyId?: string): Promise<SlackChannelBinding[]> {
-  if (deps.workspaces === undefined) return companySlackMode(deps) || deps.developer.slackTeamId === undefined ? [] : queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, deps.developer.slackTeamId), channelBindingSortPrefix(SLACK_CHANNEL));
+  // The install's own Slack team (the deployment's SlackTeamId) belongs to the implicit company until the workspace backfill binds it: the implicit company keeps
+  // seeing its channel projects exactly as before company mode (the company-check goldens), and no other company ever does.
+  const legacyTeam = deps.developer.slackTeamId;
+  if (deps.workspaces === undefined) {
+    const legacyApplies = legacyTeam !== undefined && (!companySlackMode(deps) || (workspace === undefined && companyId === IMPLICIT_COMPANY_ID));
+    return legacyApplies ? queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, legacyTeam), channelBindingSortPrefix(SLACK_CHANNEL)) : [];
+  }
   if (workspace === undefined && companyId === undefined) throw new SlackWorkspaceRefused();
   const budget = boundedCompanyReads(deps.documentClient, deps.now);
   const scopes = workspace === undefined ? await listSlackWorkspaceScopes({ client: budget.client, tableName: deps.tableName }, companyId!) : [workspace];
+  if (workspace === undefined && companyId === IMPLICIT_COMPANY_ID && legacyTeam !== undefined && !scopes.some((scope) => scope.teamId === legacyTeam)) {
+    let legacyCompany: string | undefined;
+    try { legacyCompany = await deps.workspaces.requireCompany(legacyTeam); } catch { legacyCompany = undefined; }
+    if (legacyCompany === IMPLICIT_COMPANY_ID) scopes.push({ companyId: IMPLICIT_COMPANY_ID, teamId: legacyTeam });
+  }
   const bindings: SlackChannelBinding[] = [];
   for (const scope of scopes) {
     if (!SlackWorkspaceScopeSchema.safeParse(scope).success || await deps.workspaces.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
@@ -1115,7 +1127,9 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
   companyId ??= deps.workspaces === undefined ? undefined : await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
   const grants = await grantsOf(deps, caller);
-  const bindings = await bindingsOf(deps, undefined, companyId);
+  // Without the workspace service, company mode still needs the caller's company for the bindings alone: only the implicit company sees the install's own team.
+  const bindingCompany = companyId ?? (companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined);
+  const bindings = await bindingsOf(deps, undefined, bindingCompany);
   const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)], companyId);
   const access = await resolveDeveloperAccess({
     ...(deps.workspaces === undefined || companyId === undefined ? {} : { companyId }),
