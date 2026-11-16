@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
+  withoutOwnRovaraCheck,
   TRACKING_REQUESTS_BASE,
   TRACKING_REQUESTS_PER_EXTRA_PR,
   CI_STATE_WORDS,
@@ -38,6 +39,7 @@ import {
 import { noteBranchHead } from "../branch-sync/branch-writers.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
+import { ownCheckSourceOf, stopSummaryChecks, syncSummaryCheck, type SummaryCheckSource } from "./summary-check.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
@@ -145,6 +147,11 @@ export interface MergeTrackingDependencies {
    * stays a draft with the reason until a person marks it ready anyway (proof-hold.ts).
    */
   proofHold?: ProofHoldSource;
+  /**
+   * TE-B4: the one "Rovara" Check on each head (gate `summaryCheck`). Without it no Check is written and the pass behaves as it did; with it, after each pull request's pass the Check is worked out and
+   * written when it changed (summary-check.ts), and a task Rovara stops following has its in-progress Check finished as neutral.
+   */
+  summaryCheck?: SummaryCheckSource;
   /** Whether the task's draft must stay a draft (a small change that grew to risky, not yet kept by a person or not yet reviewed at risky). Absent: nothing holds it. */
   readyHold?(task: TrackedTask, current: { repositoryId: string; headSha: string }): Promise<boolean>;
   /** The org's autonomy for Rovara Code, for the deciders; `prepare` when not given. */
@@ -503,6 +510,10 @@ export async function trackPullRequest(deps: MergeTrackingDependencies, taskId: 
 export async function trackTask(deps: MergeTrackingDependencies, taskId: string): Promise<TrackOutcome> {
   const first = await deps.loadTask(taskId);
   if (first === undefined || first.closedAt !== undefined || first.releasedAt !== undefined || first.orgId === undefined || !tracksMerge(first.workflow)) {
+    // TE-B4: Rovara stops following the task, so a Check of it still in progress is finished as neutral (a required Check must not hang).
+    if (first?.orgId !== undefined && deps.summaryCheck !== undefined) {
+      await stopSummaryChecks({ store: deps.store, now: deps.now, source: deps.summaryCheck, repository: (project, revision, repositoryId, orgId) => deps.repository(project, revision, repositoryId, orgId), scope: (orgId) => deps.scope(orgId), ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }) }, { ...first, orgId: first.orgId });
+    }
     return { result: "gone", anyNotOpen: false };
   }
   const orgId = first.orgId;
@@ -593,7 +604,8 @@ async function trackOne(
   }
   const scope = deps.scope(task.orgId);
   const ref = changeRequestRef(url, pullRequest.number);
-  const status = await codeHost.changeRequestStatus(ref, scope, budget);
+  // TE-B4: Rovara's own "Rovara" Check is never read as the customer's CI (no fix loop on it, no wait on itself when a person makes it required).
+  const status = withoutOwnRovaraCheck(await codeHost.changeRequestStatus(ref, scope, budget), await ownCheckSourceOf(codeHost, scope));
   if (status.id !== String(pullRequest.number)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub answered for another pull request");
   seen.requestedReviewerIds = status.requestedReviewerIds ?? [];
   const prior = trackingItemOf(await readTrackingItem(deps.store, task.taskId, pullRequest.repositoryId, pullRequest.number), task.orgId, task.taskId);
@@ -703,12 +715,21 @@ async function trackOne(
   // request for changes (about the candidate whose head the review is on), and a round of fixes started from people's comments. A close is not scored here (it may be reopened), and a merge is scored
   // where it is recorded (the webhook path), which also has the merge commit.
   const observeOutcomes = async (): Promise<void> => {
-    if (deps.hooks?.observe === undefined) return;
-    try {
-      await deps.hooks.observe({ task, pullRequest, fields, prior, now, permissionOf: permission, status, ci: ci.ci });
-    } catch (error) {
-      deps.log?.("outcomes.observe_failed", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    if (deps.hooks?.observe !== undefined) {
+      try {
+        await deps.hooks.observe({ task, pullRequest, fields, prior, now, permissionOf: permission, status, ci: ci.ci });
+      } catch (error) {
+        deps.log?.("outcomes.observe_failed", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+      }
     }
+    // TE-B4: the head's "Rovara" Check, after the item is written (best effort: it never fails the pass).
+    if (deps.summaryCheck === undefined) return;
+    await syncSummaryCheck({ store: deps.store, now: deps.now, source: deps.summaryCheck, ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }) }, {
+      task, pullRequest, codeHost, repositoryUrl: url, scope, budget, status: { headRevision: status.headRevision, draft: status.draft && !markedReady, state: status.state },
+      ci: ci.ci, ciMode, headByRovara: fields.headByRovara, proofHoldOn: deps.proofHold !== undefined,
+      // Ready for THIS head only while the task waits for the merge: `readyAt` outlives a head, and a head of a fix round or a sync is still being worked on.
+      ready: (readyNow || fields.readyAt !== undefined) && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING",
+    });
   };
 
   // Plan 6 Task 19: an approval that counts (a person with write access who is a member and not a requester, unless the org allows self-approval, on the head) is announced once,
