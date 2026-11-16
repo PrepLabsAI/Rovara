@@ -69,6 +69,7 @@ export function walkImportGraph(entry: string, resolveSpecifier: (from: string, 
 export function repoResolver(root: string): (from: string, specifier: string) => string | undefined {
   return (from, specifier) => {
     if (specifier === "@agentx/contracts/model-helper") return join(root, "packages/contracts/src/model-helper-entry.ts");
+    if (specifier === "@agentx/contracts/general-fakes-helper") return join(root, "packages/contracts/src/general-fakes-helper-entry.ts");
     if (specifier === "@agentx/contracts") return join(root, "packages/contracts/src/index.ts");
     if (!specifier.startsWith(".")) return undefined;
     const target = resolve(dirname(from), specifier.replace(/\.js$/u, ".ts"));

@@ -77,6 +77,8 @@ import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { runTestProof, serializeTestProof, withGeneralFakeFacts, withScriptedReplyFacts } from "./verification/test-proof.js";
 import { generalFakesFactsCollector, generalFakesPlanFor, mergeGeneralFakeFacts, withGeneralFakesRound, type GeneralFakeFacts } from "./general-fakes-round.js";
+import { hostedFakesLauncherFor } from "./general-fakes-hosted.js";
+import { checkRoundBudgetMs } from "./verification/selection.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
@@ -414,6 +416,12 @@ async function runTask(
   // R56: the agent's file tools run in the same container as its shell, never in the worker (sandbox-file-tools.ts), for every
   // Pi session of this task: the main ones, the feedback review and the critic and security reviews.
   const fileToolsDocker = dependencies.docker ?? (dependencies.taskShell?.kind === "sandbox" ? dependencies.taskShell.docker : undefined) ?? createDockerCli();
+  // General fakes, slice 2b: the hosted fake helper for a plain task sandbox, only when the operator turned it on (general-fakes-hosted.ts); otherwise undefined and nothing changes.
+  const hostedFakes = hostedFakesLauncherFor({
+    sandbox, testServices: testServices !== undefined, devcontainer: devcontainer !== undefined, requested: invocation.payload.generalFakes !== undefined,
+    docker: fileToolsDocker, rootPath: canonicalRoot, workspaceId: invocation.workspaceId, operationId: invocation.operationId,
+    roundBudgetMs: () => Math.max(CHECK_ROUND_BUDGET_MS, dependencies.checkBudgetMs?.() ?? 0, checkRoundBudgetMs(invocation.payload.testEnvironment)),
+  });
   let fileTools: FileOpsTarget | undefined;
   let fileToolsNote: string | undefined;
   if (sandbox !== undefined) {
@@ -568,7 +576,7 @@ async function runTask(
       const fakesCollector = generalFakesFactsCollector();
       let candidateFakeFactsTaken = false;
       const fakesPlan = fakesCollector.wrap(generalFakesPlanFor(invocation.payload.generalFakes, {
-        localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+        localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), ...(hostedFakes === undefined ? {} : { hosted: hostedFakes }),
         // Only the candidate round's line is posted; later rounds (the original code's) still add their facts.
         onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
       }));
@@ -823,7 +831,7 @@ async function runTask(
   });
   // General fakes (DEC 234, slice 2): the coding run's own verification may use them, when the broker sent the payload (the project setting is on, and the run has checks). Local shell only, as in a CHECKS round, and it says so otherwise.
   const codingFakesPlan = generalFakesPlanFor(invocation.payload.generalFakes, {
-    localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+    localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), ...(hostedFakes === undefined ? {} : { hosted: hostedFakes }),
     onResult: (result) => { for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
   });
   if (invocation.payload.generalFakes !== undefined && codingFakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });

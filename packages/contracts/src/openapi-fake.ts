@@ -21,7 +21,7 @@ const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "tr
 const ANNOTATIONS = new Set(["description", "title", "example", "examples", "format", "deprecated", "readOnly", "writeOnly", "xml", "externalDocs", "default"]);
 
 export type OpenApiFakeAnswer = { status: number; body: unknown };
-interface Operation { method: string; pattern: RegExp; literalSegments: number; segments: number; answer: OpenApiFakeAnswer | "unsupported" }
+interface Operation { method: string; template: string; pattern: RegExp; literalSegments: number; segments: number; answer: OpenApiFakeAnswer | "unsupported" }
 export type OpenApiFake =
   | { status: "built"; basePath: string; operations: readonly Operation[] }
   | { status: "not_built"; reason: "spec_unreadable" };
@@ -122,6 +122,9 @@ function patternOf(template: string): { pattern: RegExp; literalSegments: number
   return { pattern: new RegExp(`^/${source.join("/")}$`, "u"), literalSegments: literal, segments: parts.length };
 }
 
+/** The matcher of a template this adapter cannot match segment by segment: the literal path alone, answered as unsupported. */
+const unmatchable = (template: string) => ({ pattern: new RegExp(`^${escapeRegex(template)}$`, "u"), literalSegments: 0, segments: 0 });
+
 function basePathOf(servers: unknown): string {
   if (!Array.isArray(servers) || !object(servers[0]) || typeof servers[0].url !== "string") return "";
   const url = servers[0].url;
@@ -155,12 +158,12 @@ export function buildOpenApiFake(document: unknown, path: string): OpenApiFake {
     const record = item as Record<string, unknown>;
     // A path item that is a ref (or a template this adapter cannot match) has operations it cannot list: every call to that path is unsupported, never unknown.
     if (matcher === undefined || Object.hasOwn(record, "$ref")) {
-      operations.push({ method: "*", ...(matcher ?? { pattern: new RegExp(`^${escapeRegex(template)}$`, "u"), literalSegments: 0, segments: 0 }), answer: "unsupported" });
+      operations.push({ method: "*", template, ...(matcher ?? unmatchable(template)), answer: "unsupported" });
       continue;
     }
     for (const method of METHODS) {
       if (!Object.hasOwn(record, method)) continue;
-      operations.push({ method, ...matcher, answer: answerOf(record[method], `${where}/${method}`, path, components, responses, budget) });
+      operations.push({ method, template, ...matcher, answer: answerOf(record[method], `${where}/${method}`, path, components, responses, budget) });
     }
   }
   // OpenAPI: concrete paths match before templated ones.
@@ -188,4 +191,46 @@ export function answerOpenApiFake(fake: OpenApiFake, method: string, requestPath
     return { kind: "served", status: operation.answer.status, body: structuredClone(operation.answer.body) };
   }
   return { kind: "cannot_answer", reason: "operation_unknown" };
+}
+
+// ---- the serialized form (slice 2b): the hosted fake-helper container reads a fake from a file the worker wrote. Templates, not regular expressions, are stored: the helper rebuilds each matcher with this module's own
+// `patternOf`, so a file can never carry a pattern of its own.
+
+export interface SerializedOpenApiOperation { method: string; template: string; answer: { status: number; body?: unknown } | "unsupported" }
+export interface SerializedOpenApiFake { status: "built"; basePath: string; operations: SerializedOpenApiOperation[] }
+
+/** The storable form of a built fake. Undefined for a fake that is not built. */
+export function serializeOpenApiFake(fake: OpenApiFake): SerializedOpenApiFake | undefined {
+  if (fake.status !== "built") return undefined;
+  return {
+    status: "built", basePath: fake.basePath,
+    operations: fake.operations.map((operation) => ({
+      method: operation.method, template: operation.template,
+      answer: operation.answer === "unsupported" ? "unsupported" : { status: operation.answer.status, ...(operation.answer.body === undefined ? {} : { body: operation.answer.body }) },
+    })),
+  };
+}
+
+/**
+ * The fake of a serialized form, or undefined for anything that is not one: the value is checked here again (it came from a file), so an unknown method, a template this adapter would not have built, a method on a
+ * template it cannot match, a status outside 2xx or a count past the limits is refused as a WHOLE, never partly served.
+ */
+export function reviveOpenApiFake(value: unknown): OpenApiFake | undefined {
+  if (!object(value) || value.status !== "built" || typeof value.basePath !== "string" || value.basePath.length > OPENAPI_FAKE_LIMITS.pathCharacters || !Array.isArray(value.operations) || value.operations.length > OPENAPI_FAKE_LIMITS.operations) return undefined;
+  const operations: Operation[] = [];
+  for (const entry of value.operations as unknown[]) {
+    if (!object(entry) || typeof entry.method !== "string" || typeof entry.template !== "string") return undefined;
+    const { method, template } = entry;
+    if (!template.startsWith("/") || template.length > OPENAPI_FAKE_LIMITS.pathCharacters || (method !== "*" && !(METHODS as readonly string[]).includes(method))) return undefined;
+    const matcher = patternOf(template);
+    let answer: OpenApiFakeAnswer | "unsupported";
+    if (entry.answer === "unsupported") answer = "unsupported";
+    else if (object(entry.answer) && Number.isInteger(entry.answer.status) && (entry.answer.status as number) >= 200 && (entry.answer.status as number) <= 299) answer = { status: entry.answer.status as number, body: entry.answer.body };
+    else return undefined;
+    // `*` is only ever an operation that cannot be answered; a real method needs a template this adapter can match.
+    if (method === "*" ? answer !== "unsupported" : matcher === undefined) return undefined;
+    operations.push({ method, template, ...(matcher ?? unmatchable(template)), answer });
+  }
+  operations.sort((a, b) => b.literalSegments - a.literalSegments || a.segments - b.segments);
+  return { status: "built", basePath: value.basePath, operations };
 }
