@@ -74,6 +74,14 @@ describe("encodeJpegAt", () => {
     expect(back.rgba[at(150, 100) + 1]!).toBeLessThan(90);
   });
 
+  it("holds the largest coefficients a picture can have (a one-pixel checkerboard at the best quality) in the table's range and still decodes", () => {
+    const rgba = new Uint8Array(32 * 32 * 4);
+    for (let y = 0; y < 32; y += 1) for (let x = 0; x < 32; x += 1) rgba.set(((x + y) & 1) === 0 ? [255, 255, 255, 255] : [0, 0, 0, 255], (y * 32 + x) * 4);
+    const frame = { width: 32, height: 32, rgba };
+    const back = decodeJpeg(encodeJpegAt(frame, 100));
+    expect(meanError(frame.rgba, back.rgba)).toBeLessThan(12);
+  });
+
   it("keeps a painted rectangle black: the point of painting before encoding", () => {
     const frame = screen(160, 100);
     const painted = paintDeviceRects(frame, [{ x: 16, y: 40, width: 64, height: 24 }]);

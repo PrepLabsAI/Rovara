@@ -31,7 +31,7 @@ COPY packages/verifier packages/verifier
 RUN npx tsc -b packages/contracts packages/verifier --pretty false
 RUN npm prune --omit=dev --workspaces
 
-# The Android SDK pieces and Maestro, fetched here so the final image holds no downloader.
+# The Android SDK pieces and Maestro, fetched here so the final image holds no download tool (no curl, no sdkmanager).
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS android
 
 RUN apt-get update \
@@ -87,7 +87,8 @@ COPY --from=android /opt/android-avd /opt/android-avd
 COPY --from=android /opt/maestro /opt/maestro
 
 # Fail the BUILD, not the first run, when the emulator or adb cannot load: every shared library the headless emulator needs must be found, and the tools must start (no KVM is needed to print a version).
-RUN ! ldd /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless | grep "not found" \
+RUN test -x /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless && test -x /opt/android-sdk/emulator/emulator && test -x /opt/android-sdk/platform-tools/adb \
+    && ! ldd /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless | grep "not found" \
     && ! ldd /opt/android-sdk/emulator/emulator | grep "not found" \
     && /opt/android-sdk/emulator/emulator -version | head -n 3 \
     && /opt/android-sdk/platform-tools/adb version \

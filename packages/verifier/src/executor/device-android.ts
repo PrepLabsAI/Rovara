@@ -116,6 +116,8 @@ export function createAndroidEmulatorDriver(options: AndroidDriverOptions): Devi
         if (mine.stopped) return "time_limit";
         if (now() >= bootEnds) { note("boot", "no boot in time"); return left() <= 0 ? "time_limit" : "device_did_not_start"; }
         if (!mine.emulator.running()) { note("boot", "emulator exited"); return "device_did_not_start"; }
+        // adb's server could not take its port (something in the shared network namespace held it first): nothing it would say is believed.
+        if (!mine.adbServer.running()) { note("boot", "adb server exited"); return "device_did_not_start"; }
         const booted = await adb(["shell", "getprop", "sys.boot_completed"], Math.min(ADB_MS, bootEnds - now()));
         if (booted.exitCode === 0 && text(booted).trim() === "1") break;
         await sleep(POLL_MS);
@@ -160,7 +162,7 @@ export function createAndroidEmulatorDriver(options: AndroidDriverOptions): Devi
       const deadline = now() + timeoutMs;
       const left = () => Math.max(1, deadline - now());
       await adb(["shell", `${MAESTRO_PACKAGES.map((name) => `am force-stop ${name}`).join("; ")}; rm -f ${UI_DUMP_FILE}`], Math.min(ADB_MS, left()));
-      const dumped = await adb(["shell", "uiautomator", "dump", UI_DUMP_FILE], Math.min(ADB_MS, left()));
+      const dumped = await adb(["shell", "uiautomator", "dump", "--windows", UI_DUMP_FILE], Math.min(ADB_MS, left()));
       if (dumped.exitCode !== 0) { note("tree", `dump exit ${String(dumped.exitCode)}`); return DEVICE_UNREADABLE_TREE; }
       const read = await adb(["exec-out", "cat", UI_DUMP_FILE], Math.min(ADB_MS, left()), ANDROID_HIERARCHY_MAX_BYTES * 4 + 1_024);
       if (read.exitCode !== 0 || read.tooLarge || read.timedOut) { note("tree", "dump not read"); return DEVICE_UNREADABLE_TREE; }

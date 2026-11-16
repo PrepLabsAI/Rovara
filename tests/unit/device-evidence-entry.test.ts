@@ -12,7 +12,7 @@ import { answer, fakeAndroid, rawScreencap, type FakeAndroidScript } from "../su
 const W = 96;
 const H = 64;
 const box = (l: number, t: number, r: number, b: number) => `[${String(l)},${String(t)}][${String(r)},${String(b)}]`;
-const dump = (...nodes: string[]) => `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0">${nodes.join("")}</hierarchy>`;
+const dump = (...nodes: string[]) => `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><displays><display id="0"><window id="1"><hierarchy rotation="0">${nodes.join("")}</hierarchy></window></display></displays>`;
 const SCREEN = dump(
   `<node class="android.widget.TextView" text="Total: 12" bounds="${box(0, 0, 96, 16)}" />`,
   `<node class="android.widget.TextView" text="Contact: sam@example.org" bounds="${box(0, 16, 96, 32)}" />`,
@@ -62,7 +62,7 @@ describe("runDevicePlan", () => {
     const outcome: DeviceEvidenceOutcome = { ...parsed, steps: parsed.steps.map((row) => (row.status === "shown" ? { ...row, before: ref(row.before.bytes), after: ref(row.after.bytes) } : row)) };
     const { check } = deviceEvidenceCheck(outcome);
     expect(check).toMatchObject({ kind: "visual", runBy: "rovara", label: "Device evidence: Android emulator", stage: "sandbox" });
-    expect(checkKindInfo("visual").countsTowardProof).toBe(false);
+    expect(checkKindInfo("visual")?.countsTowardProof).toBe(false);
     const lines = deviceEvidenceLines(outcome, {});
     expect(lines[0]).toContain("Ran on an Android emulator in Rovara's sandbox");
     expect(lines.filter((row) => row.includes("before and after screenshots")).every((row) => row.includes("does not count as change proof"))).toBe(true);

@@ -74,6 +74,15 @@ describe("maestroStepFlow", () => {
     }
   });
 
+  it("refuses text that Maestro would run as a script (`${...}`), in every action", () => {
+    for (const text of ["${http.get('http://10.0.2.2:1/')}", "a${b}", "$" + "{", "x ${1+1} y"]) {
+      for (const action of [{ do: "input", text }, { do: "tap_text", text }, { do: "wait_text", text }, { do: "tap_id", id: text }, { do: "wait_id", id: text }]) expect(() => maestroStepFlow(APP, [action]), JSON.stringify(action)).toThrow();
+    }
+    // a dollar sign or a brace alone is only text
+    expect(() => maestroStepFlow(APP, [{ do: "input", text: "$5 {ok}" }])).not.toThrow();
+    expect(DeviceEvidenceRecipeSchema.safeParse({ platform: "android", buildCommand: "b", appFile: "a.apk", flows: [{ id: "go", files: ["a/**"], steps: [{ id: "s", label: "S", actions: [{ do: "input", text: "${x}" }] }] }] }).success).toBe(false);
+  });
+
   it("the recipe accepts at most ten actions a step, only the eight, and a recipe without actions or an app id reads as it always did", () => {
     const flow = (actions?: unknown[]) => ({ id: "go", files: ["app/**"], steps: [{ id: "open", label: "Open", ...(actions === undefined ? {} : { actions }) }] });
     const recipe = (extra: Record<string, unknown> = {}, actions?: unknown[]) => ({ platform: "android", buildCommand: "./gradlew assembleDebug", appFile: "app/build/app.apk", flows: [flow(actions)], ...extra });

@@ -44,7 +44,7 @@ describe("the device executor image", () => {
     expect(instructions.filter((row) => row.startsWith("USER "))).toEqual(["USER android"]);
     expect(instructions.at(-2)).toBe("USER android");
     expect(dockerfile).toContain("MAESTRO_CLI_NO_ANALYTICS=true MAESTRO_DISABLE_UPDATE_CHECK=true");
-    expect(dockerfile).toMatch(/! ldd \/opt\/android-sdk\/emulator\/qemu\/linux-x86_64\/qemu-system-x86_64-headless \| grep "not found"/u);
+    expect(dockerfile).toMatch(/test -x \/opt\/android-sdk\/emulator\/qemu\/linux-x86_64\/qemu-system-x86_64-headless[\s\S]*! ldd \/opt\/android-sdk\/emulator\/qemu\/linux-x86_64\/qemu-system-x86_64-headless \| grep "not found"/u);
     expect(dockerfile).toMatch(/emulator -version/u);
     expect(dockerfile).toMatch(/--list_installed/u);
     // never a loosened sandbox in the image's own instructions
@@ -102,6 +102,15 @@ describe("how the emulator test says it was skipped", () => {
     expect(skipped).toEqual(["this runner has no KVM"]);
     expect(written.join("")).toContain("::warning title=Device emulator test SKIPPED::this runner has no KVM\n");
     expect(written.join("")).toContain("SKIPPED (no emulator was run): this runner has no KVM\n");
+  });
+
+  it("fails instead of skipping where a job says KVM is required (ROVARA_DEVICE_REQUIRE_KVM), without skipping or writing a skipped line", () => {
+    const written: string[] = [];
+    const skipped: Array<string | undefined> = [];
+    const skip = (note?: string): never => { skipped.push(note); throw new Error("skipped"); };
+    expect(() => skipWithReason(skip, "no kvm", (text) => written.push(text), true)).toThrow("needs KVM and ROVARA_DEVICE_REQUIRE_KVM is set: no kvm");
+    expect(skipped).toEqual([]);
+    expect(written).toEqual([]);
   });
 
   it("the Linux test reads the KVM probe before it builds, starts or runs anything, in each test, and has no way out that passes without a result", () => {

@@ -108,7 +108,7 @@ describe.runIf(wanted)("device evidence: the Android emulator in the device exec
     expect([host.Dns ?? [], host.ExtraHosts ?? [], host.Links ?? []]).toEqual([[], [], []]);
     expect(Object.keys(host.Tmpfs ?? {}).sort()).toEqual(["/home/android", "/tmp"]);
     expect(Object.keys(host.Sysctls ?? {})).toEqual([]);
-    expect([host.Memory, host.MemorySwap, host.PidsLimit, host.NanoCpus]).toEqual([6 * 1024 ** 3, 6 * 1024 ** 3, 4096, 4_000_000_000]);
+    expect([host.Memory, host.MemorySwap, host.PidsLimit, host.NanoCpus]).toEqual([8 * 1024 ** 3, 8 * 1024 ** 3, 4096, 4_000_000_000]);
     expect(host.Init).toBe(true);
     expect(executor!.Config.User).toBe("10001:10001");
     // nothing of the host's, the worker's or anyone's credentials is in the container's environment: only what the image itself sets

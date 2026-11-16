@@ -7,7 +7,13 @@ import { ANDROID_HIERARCHY_MAX_BYTES, DEVICE_UNREADABLE_TREE, androidHierarchyTo
 const SIZE = { width: 720, height: 1280 };
 const attrs = (row: Record<string, string>) => Object.entries(row).map(([key, value]) => ` ${key}="${value}"`).join("");
 const node = (row: Record<string, string>, children = "") => (children === "" ? `<node${attrs(row)} />` : `<node${attrs(row)}>${children}</node>`);
-const dump = (inner: string) => `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0">${inner}</hierarchy>`;
+const OPEN = `<displays><display id="0"><window id="1" title="app"><hierarchy rotation="0">`;
+const CLOSE = "</hierarchy></window></display></displays>";
+const XML = "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>";
+/** The dump of every window (`uiautomator dump --windows`): the displays, each window and its hierarchy. */
+const dump = (inner: string) => `${XML}${OPEN}${inner}${CLOSE}`;
+/** The dump of several windows: the app's, then a dialog over it. */
+const windows = (...inners: string[]) => `${XML}<displays><display id="0">${inners.map((inner, at) => `<window id="${String(at + 1)}"><hierarchy rotation="0">${inner}</hierarchy></window>`).join("")}</display></displays>`;
 const box = (l: number, t: number, r: number, b: number) => `[${String(l)},${String(t)}][${String(r)},${String(b)}]`;
 const FRAME = { frame: SIZE };
 
@@ -52,10 +58,12 @@ describe("androidHierarchyToTree", () => {
   it("is UNREADABLE (not a tree with less in it) for anything that is not a well-formed dump", () => {
     const ok = node({ text: "x", bounds: box(0, 0, 10, 10) });
     const cases: Record<string, unknown> = {
-      empty: "", notText: 5, nothing: undefined, plain: "hello", noHierarchy: `<node text="x" />`, unclosedHierarchy: `<hierarchy rotation="0">${ok}`, wrongClose: `<hierarchy>${ok}</node>`,
-      afterEnd: `<hierarchy>${ok}</hierarchy>${ok}`, stray: `<hierarchy>${ok}garbage</hierarchy>`, unknownTag: `<hierarchy><view text="x" /></hierarchy>`, badAttribute: `<hierarchy><node text=x /></hierarchy>`,
-      rawLess: `<hierarchy><node text="a<b" /></hierarchy>`, duplicate: `<hierarchy><node text="a" text="b" /></hierarchy>`, unclosedNode: `<hierarchy><node text="a"></hierarchy>`,
-      skipped: `<hierarchy>${ok}<node text="a" ${ok}</hierarchy>`, twoHierarchies: `<hierarchy><hierarchy>${ok}</hierarchy></hierarchy>`, nodeBeforeHierarchy: `${ok}<hierarchy></hierarchy>`,
+      empty: "", notText: 5, nothing: undefined, plain: "hello", noHierarchy: `<node text="x" />`, unclosedHierarchy: `${XML}${OPEN}${ok}`, wrongClose: `${XML}${OPEN}${ok}</node>`,
+      afterEnd: `${dump(ok)}${ok}`, stray: dump(`${ok}garbage`), unknownTag: dump(`<view text="x" />`), badAttribute: dump(`<node text=x />`),
+      rawLess: dump(`<node text="a<b" />`), duplicate: dump(`<node text="a" text="b" />`), unclosedNode: `${XML}${OPEN}<node text="a">${CLOSE}`,
+      skipped: dump(`${ok}<node text="a" ${ok}`), nodeBeforeRoot: `${ok}${dump("")}`, twoRoots: `${dump(ok)}${dump(ok)}`, nodeOutsideAWindow: `<displays><display>${ok}</display></displays>`,
+      activeWindowOnly: `${XML}<hierarchy rotation="0">${ok}</hierarchy>`, noDisplays: `<hierarchy rotation="0">${ok}</hierarchy>`, windowsUnclosed: `${XML}<displays><display><window><hierarchy>${ok}</hierarchy></window></display>`,
+      nestedDisplays: `${XML}<displays><displays><display><window><hierarchy>${ok}</hierarchy></window></display></displays></displays>`,
     };
     for (const [name, xml] of Object.entries(cases)) expect(androidHierarchyToTree(xml, SIZE), name).toBe(DEVICE_UNREADABLE_TREE);
   });
@@ -68,7 +76,7 @@ describe("androidHierarchyToTree", () => {
     expect(androidHierarchyToTree(dump(node({ text: "x".repeat(DEVICE_EVIDENCE_TREE_TEXT_MAX + 1), bounds: box(0, 0, 10, 10) })), SIZE)).toBe(DEVICE_UNREADABLE_TREE);
     const long = node({ text: "x".repeat(DEVICE_EVIDENCE_TREE_TEXT_MAX), bounds: box(0, 0, 10, 10) });
     expect(androidHierarchyToTree(dump(long.repeat(51)), SIZE)).toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(`<hierarchy>${" ".repeat(ANDROID_HIERARCHY_MAX_BYTES)}</hierarchy>`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
+    expect(androidHierarchyToTree(`${OPEN}${" ".repeat(ANDROID_HIERARCHY_MAX_BYTES)}${CLOSE}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
     // Structural nodes count against the raw cap too, so a dump of nothing but containers is not read at all.
     expect(androidHierarchyToTree(dump(node({ class: "a.B", bounds: box(0, 0, 1, 1) }).repeat(DEVICE_EVIDENCE_TREE_NODES_MAX * 4 + 1)), SIZE)).toBe(DEVICE_UNREADABLE_TREE);
   });
@@ -95,7 +103,7 @@ describe("androidHierarchyToTree", () => {
 
   it("an unreadable dump is withheld even when the admin allows fixture data only (that waives a screen with no tree, never a failed read)", () => {
     expect(planDeviceMask(DEVICE_UNREADABLE_TREE, { frame: SIZE, fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "unreadable_screen" });
-    expect(planDeviceMask(androidHierarchyToTree("<hierarchy>", SIZE), { frame: SIZE, fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "unreadable_screen" });
+    expect(planDeviceMask(androidHierarchyToTree(OPEN, SIZE), { frame: SIZE, fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "unreadable_screen" });
     // A dump of a screen with no text at all (a game) is a tree, and is what the waiver is for.
     const game = dump(node({ class: "android.view.SurfaceView", bounds: box(0, 0, 720, 1280) }));
     expect(planDeviceMask(androidHierarchyToTree(game, SIZE), FRAME)).toEqual({ status: "withheld", reason: "unreadable_screen" });
@@ -130,15 +138,26 @@ describe("androidHierarchyToTree", () => {
     const start = Date.now();
     const many = node({ text: "word ".repeat(10), bounds: box(0, 0, 10, 10) }).repeat(DEVICE_EVIDENCE_TREE_NODES_MAX);
     expect(androidHierarchyToTree(dump(many), SIZE)).not.toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(`<hierarchy>${"<node ".repeat(500_000)}</hierarchy>`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(`<hierarchy><node${' a="1"'.repeat(100_000)} x</hierarchy>`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(`<hierarchy>${"<node text=\"".repeat(100_000)}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
+    expect(androidHierarchyToTree(`${OPEN}${"<node ".repeat(500_000)}${CLOSE}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
+    expect(androidHierarchyToTree(`${OPEN}<node${' a="1"'.repeat(100_000)} x${CLOSE}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
+    expect(androidHierarchyToTree(`${OPEN}${"<node text=\"".repeat(100_000)}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
     expect(Date.now() - start).toBeLessThan(3_000);
+  });
+
+  it("reads every window of the screen, a dialog over the app included, so what the picture shows behind and in front is masked", () => {
+    const app = node({ class: "android.widget.TextView", text: "Signed in as sam@example.org", bounds: box(0, 100, 720, 200) });
+    const dialog = node({ class: "android.widget.TextView", text: "Delete this?", bounds: box(100, 500, 620, 600) });
+    const tree = androidHierarchyToTree(windows(app, dialog), SIZE) as { nodes: Array<{ text: string }> };
+    expect(tree.nodes.map((row) => row.text)).toEqual(["Signed in as sam@example.org", "Delete this?"]);
+    expect(planDeviceMask(tree, FRAME)).toEqual({ status: "paint", rects: [{ x: 0, y: 100, width: 720, height: 100 }] });
+    // a notification or keyboard window with a secret is painted too
+    const heads = node({ class: "android.widget.TextView", text: "New mail from ops@example.org", bounds: box(0, 0, 720, 120) });
+    expect(planDeviceMask(androidHierarchyToTree(windows(app, dialog, heads), SIZE), FRAME)).toMatchObject({ status: "paint", rects: expect.arrayContaining([{ x: 0, y: 0, width: 720, height: 120 }]) });
   });
 
   it("never throws and echoes none of the dump's own text in what it returns for a bad one", () => {
     const secret = "tok_SECRET_VALUE";
-    const got = androidHierarchyToTree(`<hierarchy><node text="${secret}" &bad</hierarchy>`, SIZE);
+    const got = androidHierarchyToTree(`${OPEN}<node text="${secret}" &bad${CLOSE}`, SIZE);
     expect(JSON.stringify(got)).not.toContain(secret);
     expect(androidHierarchyToTree(dump(node({ text: "x", bounds: box(0, 0, 10, 10) })), { width: 0, height: -1 })).toBe(DEVICE_UNREADABLE_TREE);
     expect(androidHierarchyToTree(dump(node({ text: "x", bounds: box(0, 0, 10, 10) })), undefined as unknown as { width: number; height: number })).toBe(DEVICE_UNREADABLE_TREE);

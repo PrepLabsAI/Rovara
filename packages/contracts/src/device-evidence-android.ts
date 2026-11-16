@@ -1,4 +1,5 @@
-// Device testing slice 2 (DEC 244): the tree-reading contract for Android. The emulator driver reads the screen with Android's own UI dump (`uiautomator dump`, XML) and this file turns that text into
+// Device testing slice 2 (DEC 244): the tree-reading contract for Android. The emulator driver reads the screen with Android's own UI dump of EVERY window (`uiautomator dump --windows`, XML: a dialog,
+// a popup, the keyboard's suggestions and a notification are windows of their own, and the screenshot shows all of them; a dump of the active window alone would leave the rest unpainted) and this file turns that text into
 // the flat view tree every device driver hands to the mask plan (device-evidence.ts: `DeviceViewTree`): the nodes in reading order (the dump's own order: the document, top to bottom, parent
 // before its children), each with its text, accessibility description, hint, resource id and rectangle, and three flags the mask plan always paints whatever they say: `secure` (a password field),
 // `webView` (an embedded web page) and `surface` (a canvas, game, map, video or other drawn surface, which has no text of its own to read).
@@ -15,6 +16,8 @@ export const DEVICE_UNREADABLE_TREE: Readonly<{ unreadable: true }> = Object.fre
 const TAG = /<(\/?)([A-Za-z][A-Za-z0-9_.-]*)((?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*="[^"<]*")*)\s*(\/?)>|<\?xml[^>]{0,200}\?>|([^<]+)/gu;
 const ATTRIBUTE = /([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"<]*)"/gu;
 const BOUNDS = /^\[(-?\d{1,7}),(-?\d{1,7})\]\[(-?\d{1,7}),(-?\d{1,7})\]$/u;
+/** The elements around the nodes in a dump of every window. */
+const STRUCTURE: ReadonlySet<string> = new Set(["displays", "display", "window", "hierarchy"]);
 const WEB_VIEW = /web[-_ ]?view/iu;
 /** Classes that draw their own pixels: a view tree says nothing of what they show. */
 const SURFACE = /(?:SurfaceView|TextureView|GLSurfaceView|VideoView|MapView|FlutterView|FlutterImageView|FlutterSurfaceView|FlutterTextureView|UnityPlayer|CanvasView|ARView|CameraView|PreviewView)\b/u;
@@ -42,8 +45,8 @@ type RawNode = Record<string, string>;
 function readNodes(xml: string): RawNode[] | undefined {
   const nodes: RawNode[] = [];
   const open: string[] = [];
-  let sawHierarchy = false;
-  let closedHierarchy = false;
+  let sawRoot = false;
+  let closedRoot = false;
   let end = 0;
   for (const match of xml.matchAll(TAG)) {
     // Everything is read: a stretch the pattern skipped (a tag that is not well-formed) is not the dump.
@@ -52,16 +55,18 @@ function readNodes(xml: string): RawNode[] | undefined {
     const [, closing, name, attributes, selfClosing, between] = match;
     if (between !== undefined) { if (between.trim() !== "") return undefined; continue; }
     if (name === undefined) continue; // the XML declaration
-    if (closedHierarchy) return undefined;
+    if (closedRoot) return undefined;
     if (closing === "/") {
       if (open.pop() !== name) return undefined;
-      if (name === "hierarchy") closedHierarchy = true;
+      if (open.length === 0) closedRoot = true;
       continue;
     }
-    if (name !== "hierarchy" && name !== "node") return undefined;
-    if (name === "hierarchy") { if (sawHierarchy || open.length > 0) return undefined; sawHierarchy = true; }
-    else {
-      if (!sawHierarchy) return undefined;
+    if (!STRUCTURE.has(name) && name !== "node") return undefined;
+    // The root is the list of displays (the dump of every window); a bare hierarchy is the active window only, which is not enough to mask a screen.
+    if (!sawRoot) { if (name !== "displays") return undefined; sawRoot = true; }
+    if (name === "displays" && open.length > 0) return undefined;
+    if (name === "node") {
+      if (!open.includes("hierarchy") && !open.includes("window")) return undefined;
       const row: RawNode = {};
       for (const attribute of (attributes ?? "").matchAll(ATTRIBUTE)) {
         const value = decode(attribute[2]!);
@@ -73,7 +78,7 @@ function readNodes(xml: string): RawNode[] | undefined {
     }
     if (selfClosing !== "/") open.push(name);
   }
-  return end === xml.length && sawHierarchy && closedHierarchy && open.length === 0 ? nodes : undefined;
+  return end === xml.length && sawRoot && closedRoot && open.length === 0 ? nodes : undefined;
 }
 
 /**

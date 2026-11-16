@@ -11,7 +11,7 @@ import { ADB, EMULATOR, MAESTRO, answer, fakeAndroid, rawScreencap, type FakeAnd
 const APP = "io.rovara.fixture";
 const ENV = Object.freeze({ PATH: "/usr/bin", HOME: "/home/android", ANDROID_SDK_ROOT: "/opt/android-sdk" });
 const FLOWS = [{ id: "main", steps: [{ id: "open", label: "Open" }, { id: "next", label: "Next", actions: [{ do: "tap_text" as const, text: "Continue" }] }] }];
-const DUMP = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node class="android.widget.TextView" text="Total: 12" bounds="[0,100][720,300]" /><node class="android.widget.EditText" password="true" text="••••" bounds="[0,300][720,500]" /></hierarchy>`;
+const DUMP = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><displays><display id="0"><window id="1"><hierarchy rotation="0"><node class="android.widget.TextView" text="Total: 12" bounds="[0,100][720,300]" /><node class="android.widget.EditText" password="true" text="••••" bounds="[0,300][720,500]" /></hierarchy></window></display></displays>`;
 
 function clock() {
   let t = 1_000;
@@ -82,6 +82,14 @@ describe("createAndroidEmulatorDriver", () => {
       const setupped = setup({ boot: ["", "", "", ""] });
       const racing = setupped.driver.prepare("before", { timeoutMs: 600_000 });
       setupped.starts.find((row) => row.file === EMULATOR)!.running = false;
+      expect(await racing).toBe("device_did_not_start");
+      expect(setupped.runs.some((row) => row.args.includes("install"))).toBe(false);
+    });
+
+    it("says the device did not start when adb's server cannot stay up (its port was taken first), and believes nothing it said", async () => {
+      const setupped = setup({ boot: ["", "", "", ""] });
+      const racing = setupped.driver.prepare("before", { timeoutMs: 600_000 });
+      setupped.starts.find((row) => row.file === ADB)!.running = false;
       expect(await racing).toBe("device_did_not_start");
       expect(setupped.runs.some((row) => row.args.includes("install"))).toBe(false);
     });
@@ -195,13 +203,13 @@ describe("createAndroidEmulatorDriver", () => {
       expect(sent[0]![0]).toBe("shell");
       expect(sent[0]![1]).toContain("am force-stop dev.mobile.maestro");
       expect(sent[0]![1]).toContain("rm -f /data/local/tmp/rovara-ui.xml");
-      expect(sent[1]).toEqual(["shell", "uiautomator", "dump", "/data/local/tmp/rovara-ui.xml"]);
+      expect(sent[1]).toEqual(["shell", "uiautomator", "dump", "--windows", "/data/local/tmp/rovara-ui.xml"]);
       expect(sent[2]).toEqual(["exec-out", "cat", "/data/local/tmp/rovara-ui.xml"]);
     });
 
     it("is unreadable (not null: a failed read is never 'no tree') when the dump fails, cannot be read, is too big or is not a dump", async () => {
       for (const script of [{ dump: answer("ERROR: could not get idle state", 1) }, { dump: DUMP, cat: answer("", 1) }, { dump: DUMP, cat: answer("x", 0, { tooLarge: true }) }, { dump: DUMP, cat: answer("x", 0, { timedOut: true }) },
-        { dump: "not xml" }, { dump: "" }, { dump: "<hierarchy>" }]) {
+        { dump: "not xml" }, { dump: "" }, { dump: "<displays>" }, { dump: DUMP.replace("<displays><display id=\"0\"><window id=\"1\">", "").replace("</window></display></displays>", "") }]) {
         const { driver } = setup(script);
         await driver.prepare("before", { timeoutMs: 600_000 });
         const tree = await driver.readTree("before", { timeoutMs: 20_000 });
@@ -263,7 +271,7 @@ describe("createAndroidEmulatorDriver", () => {
 
   describe("what it says", () => {
     it("says nothing unless asked, and a log that throws changes no answer", async () => {
-      const quiet = setup({}, { diag: undefined });
+      const quiet = setup({});
       expect(await quiet.driver.prepare("before", { timeoutMs: 600_000 })).toBe("ready");
       const throwing = setup({}, { diag: () => { throw new Error("log failed"); } });
       expect(await throwing.driver.prepare("before", { timeoutMs: 600_000 })).toBe("ready");

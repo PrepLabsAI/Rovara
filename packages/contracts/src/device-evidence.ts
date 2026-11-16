@@ -70,7 +70,8 @@ export const DEVICE_EVIDENCE_RECIPE_FLOWS_MAX = 50;
 /** What one step may do before its picture (slice 2: written into a Maestro flow by the executor, never taken from the repository). */
 export const DEVICE_EVIDENCE_ACTIONS_MAX = 10;
 export const DEVICE_EVIDENCE_ACTION_TEXT_MAX = 200;
-const ActionTextSchema = line(DEVICE_EVIDENCE_ACTION_TEXT_MAX);
+// Maestro reads `${...}` in any text as a script to run, so that sequence is never allowed, in any action.
+const ActionTextSchema = line(DEVICE_EVIDENCE_ACTION_TEXT_MAX).refine((value) => !value.includes("${"), "no script in a text");
 /**
  * One thing a step does, from a short fixed list (the driver turns each into one Maestro command; nothing here is Maestro's own syntax, so a recipe cannot run a script, open a link or reach
  * another app). `text` and `id` are matched exactly as written. `input` types fixture text, so it never holds a real secret: what it types is masked on the picture like any other text.

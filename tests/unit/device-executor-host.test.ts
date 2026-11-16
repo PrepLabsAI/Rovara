@@ -34,8 +34,8 @@ describe("deviceExecutorRunArgs", () => {
     expect(deviceExecutorRunArgs(input())).toEqual([
       "run", "--rm", "--pull=never", "--name", "rovara-dev-3c4d", "--label", `${DEVICE_EXECUTOR_LABEL}=1`, "--network", "container:rovara-sbx-1a2b",
       "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--init", "--read-only", "--user", "10001:10001", "--group-add", "108", "--device", "/dev/kvm:/dev/kvm:rw",
-      "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=4g", "--tmpfs", "/home/android:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700",
-      "--shm-size", "1g", "--memory", "6g", "--memory-swap", "6g", "--pids-limit", "4096", "--cpus", "4",
+      "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=3g", "--tmpfs", "/home/android:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700",
+      "--shm-size", "1g", "--memory", "8g", "--memory-swap", "8g", "--pids-limit", "4096", "--cpus", "4",
       "-v", "/var/lib/rovara/apps-1:/apps:ro", "rovara-device-executor:ci", "node", DEVICE_EXECUTOR_ENTRY, PLAN,
     ]);
   });
@@ -71,7 +71,7 @@ describe("deviceExecutorRunArgs", () => {
   it("limits the container: memory, swap, processes, cpus and shared memory", () => {
     const args = deviceExecutorRunArgs(input());
     const after = (flag: string) => args[args.indexOf(flag) + 1];
-    expect([after("--memory"), after("--memory-swap"), after("--pids-limit"), after("--cpus"), after("--shm-size")]).toEqual(["6g", "6g", "4096", "4", "1g"]);
+    expect([after("--memory"), after("--memory-swap"), after("--pids-limit"), after("--cpus"), after("--shm-size")]).toEqual(["8g", "8g", "4096", "4", "1g"]);
   });
 
   it("refuses an image, container name, mount directory or plan that could become another argument", () => {
@@ -114,7 +114,7 @@ describe("deviceExecutorArgProblems", () => {
       ["writable root", good.filter((word) => word !== "--read-only")],
       ["environment", [...good.slice(0, 1), "--env", "AWS_SECRET_ACCESS_KEY=x", ...good.slice(1)]],
       ["published port", [...good.slice(0, 1), "-p", "5555:5555", ...good.slice(1)]],
-      ["more memory", good.map((word) => (word === "6g" ? "64g" : word))],
+      ["more memory", good.map((word) => (word === "8g" ? "64g" : word))],
       ["no pids limit", good.filter((word, at) => word !== "--pids-limit" && good[at - 1] !== "--pids-limit")],
       ["root group", good.map((word, at) => (good[at - 1] === "--group-add" ? "0" : word))],
       ["another image command", [...good.slice(0, -3), "sh", "-c", "id"]],
