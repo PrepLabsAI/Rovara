@@ -1,4 +1,5 @@
 // Spec 051 FR-009: AgentX's own verdict leads the Slack reply, and the agent's account follows it.
+import { EVIDENCE_TRUST_CLASS_WORDS } from "./check-kinds.js";
 import type { CheckReport } from "./checks.js";
 
 export const AGENT_ACCOUNT_LABEL = "*Agent's account:*";
@@ -17,13 +18,16 @@ function reportLines(report: CheckReport): string[] {
     // Only checks that passed now count: not already-failing, failing-with-no-earlier-result or not-rerun ones.
     const rerun = report.checks.filter((check) => check.class !== "not_rerun").length;
     const count = report.checks.filter((check) => check.class === "passing" || check.class === "fixed").length;
+    // General fakes (DEC 234): checks a Rovara-made fake answered are counted apart, in fixed words, never as plain passes.
+    const made = report.checks.filter((check) => check.madeByRovara === true && (check.class === "passing" || check.class === "fixed")).length;
+    const madeWords = made === 0 ? "" : `; ${made} ${EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara}, never change proof`;
     // With nothing passing (only checks that fail with no earlier result), "Checks passed" would mislead.
     if (count === 0) lines.push("No regression found, but no check passes yet.");
     // Ruling Z (I-2): a success headline only when every rerun check passes now.
-    else if (count < rerun) lines.push(`Checks: ${count} of ${rerun} pass.`);
+    else if (count < rerun) lines.push(`Checks: ${count} of ${rerun} pass${made === 0 ? "" : ` (${made} ${EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara}, never change proof)`}.`);
     else lines.push(report.source === "agent_commands"
-      ? `Checks passed (${count} of the agent's own test commands, rerun by AgentX).`
-      : `Checks passed (${count} project ${count === 1 ? "check" : "checks"}).`);
+      ? `Checks passed (${count} of the agent's own test commands, rerun by AgentX${madeWords}).`
+      : `Checks passed (${count} project ${count === 1 ? "check" : "checks"}${madeWords}).`);
   } else if (report.notVerifiedReason === "no_checks" && report.source === "none") {
     // Only a project with no checks at all gets this advice; a round that could not rerun its checks is "stopped".
     lines.push("Not verified: no checks ran. Add readiness checks to the project so AgentX can check the agent's work.");

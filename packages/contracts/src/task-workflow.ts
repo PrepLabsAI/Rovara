@@ -158,6 +158,8 @@ export const VerificationResultsSchema = z.object({
     broken: z.literal(true).optional(),
     /** The check's process never started (the worker failed to start it, EAGAIN say): nothing is wrong with it, and a retry may run it. */
     neverStarted: z.literal(true).optional(),
+    /** General fakes (DEC 234, slice 2): a Rovara-made fake answered an outside call of this check. The check is never change proof (the proof table reads it as a `made_by_rovara` dependency). Absent on every other result. */
+    madeByRovara: z.literal(true).optional(),
   }).strict()).max(100),
   /** No check was selected for this task: the candidate was validated and goes to review with no check results. */
   reviewOnly: z.boolean().optional(),

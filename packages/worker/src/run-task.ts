@@ -1,5 +1,5 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
-import { EVAL_ROUND_ARTIFACT, evalResultFromArtifact } from "@agentx/contracts";
+import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -75,7 +75,8 @@ import { currentWorkspaceSafety } from "./workspace-safety.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine.js";
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
-import { runTestProof, serializeTestProof, withScriptedReplyFacts } from "./verification/test-proof.js";
+import { runTestProof, serializeTestProof, withGeneralFakeFacts, withScriptedReplyFacts } from "./verification/test-proof.js";
+import { generalFakesFactsCollector, generalFakesPlanFor, mergeGeneralFakeFacts, withGeneralFakesRound, type GeneralFakeFacts } from "./general-fakes-round.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
@@ -564,17 +565,28 @@ async function runTask(
         : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
         ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
-      const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+      // General fakes (DEC 234): only when the broker sent the payload (the project setting is on); slice 1 serves them on the local shell only, and says so otherwise.
+      const fakesCollector = generalFakesFactsCollector();
+      let candidateFakeFactsTaken = false;
+      const fakesPlan = fakesCollector.wrap(generalFakesPlanFor(invocation.payload.generalFakes, {
+        localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+        // Only the candidate round's line is posted; later rounds (the original code's) still add their facts.
+        onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
+      }));
+      if (invocation.payload.generalFakes !== undefined && fakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
+      const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(fakesPlan, withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(sandbox === undefined ? {} : { sandbox }),
         ...(localShell ? { local: true } : {}),
-      }))));
+      })))));
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
       const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
       const candidateReplyFacts = replyCollector.take();
+      const candidateFakeFacts = fakesCollector.take();
+      candidateFakeFactsTaken = true;
       assertWorkspaceSafe();
       for (const message of repositoryChecks.notes()) await events.append("progress", { message });
       const roundSpentMs = Date.now() - roundStarted;
@@ -637,7 +649,8 @@ async function runTask(
         // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
-        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts);
+        // General fakes: the original code's run used the fakes too. A fake answer there can make a new test fail on the old code, so its facts join the candidate's (never proof either way).
+        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts, mergeGeneralFakeFacts(candidateFakeFacts, fakesCollector.take()));
       }
       // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
       if (invocation.payload.evalRequest !== undefined) {
@@ -809,12 +822,18 @@ async function runTask(
     // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
     ...(containerPaths === undefined ? {} : { cdTarget: (target: string) => workspaceRelativeCdTarget(target, containerPaths, canonicalRoot) }),
   });
-  const checkRunners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
+  // General fakes (DEC 234, slice 2): the coding run's own verification may use them, when the broker sent the payload (the project setting is on, and the run has checks). Local shell only, as in a CHECKS round, and it says so otherwise.
+  const codingFakesPlan = generalFakesPlanFor(invocation.payload.generalFakes, {
+    localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)),
+    onResult: (result) => { for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
+  });
+  if (invocation.payload.generalFakes !== undefined && codingFakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
+  const checkRunners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(codingFakesPlan, withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
     rootPath: canonicalRoot,
     ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(localShell ? { local: true } : {}),
-  }))));
+  })))));
   const checkBudgetMs = dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS);
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;
@@ -2209,9 +2228,9 @@ async function runTestProofStep(input: {
 }
 
 /** Saves the proof. A failed save is only a missing note, never a failed round. */
-async function saveTestProof(sink: ArtifactSink, proof: NonNullable<Awaited<ReturnType<typeof runTestProofStep>>>, events: EventBatcher, facts: ScriptedReplyFacts | undefined): Promise<void> {
+async function saveTestProof(sink: ArtifactSink, proof: NonNullable<Awaited<ReturnType<typeof runTestProofStep>>>, events: EventBatcher, facts: ScriptedReplyFacts | undefined, fakeFacts?: GeneralFakeFacts): Promise<void> {
   try {
-    await sink({ name: TEST_PROOF_ARTIFACT, mediaType: "application/json", content: serializeTestProof(withScriptedReplyFacts(proof, "project", facts)) });
+    await sink({ name: TEST_PROOF_ARTIFACT, mediaType: "application/json", content: serializeTestProof(withGeneralFakeFacts(withScriptedReplyFacts(proof, "project", facts), fakeFacts)) });
   } catch {
     await events.append("progress", { message: "AgentX could not save its check of the new tests against the original code." }).catch(() => undefined);
   }

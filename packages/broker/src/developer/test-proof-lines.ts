@@ -4,6 +4,8 @@
 // key are ignored. Quoted labels are redacted and made inert by the caller's `inert` (developer-tasks.ts passes inertPlanLine).
 import { AGENT_REPLIES_UNCONFIRMED_WORDS, TEST_PROOF_ARTIFACT, TestProofSchema, redactText, type TestProof } from "@agentx/contracts";
 import { byCreated, type OperationFacts } from "./task-records.js";
+// Used only inside a function (proof-table.ts imports this file too; the cycle is safe at module load).
+import { MOCK_PROOF_PREFIX } from "../core/proof/proof-table.js";
 
 const OPERATIONS_READ = 10;
 const PROOF_READ_BYTES = 256 * 1024;
@@ -79,12 +81,14 @@ export async function loadTestProofLines(
       const raw: unknown = JSON.parse(await actions.readArtifact(artifact.objectKey, PROOF_READ_BYTES));
       const parsed = TestProofSchema.safeParse(raw);
       // Never revive an older proof that lacks the newest proof's unreadable reply provenance.
-      if (!parsed.success && typeof raw === "object" && raw !== null && "scriptedReplies" in raw) return [];
+      if (!parsed.success && typeof raw === "object" && raw !== null && ("scriptedReplies" in raw || "madeByRovara" in raw)) return [];
       if (parsed.success && parsed.data.candidateDigest === candidateDigest) {
         const proving = new Set(parsed.data.items.filter((item) => item.verdict === "proves_change").map((item) => item.checkId));
         const taskMade = parsed.data.scriptedReplies?.some((facts) => (facts.taskMade > 0 || (facts.independent ?? 0) > 0) && proving.has(facts.checkId)) === true;
         // This v1 path has no real-model reader. The shared v2 renderer retains its own agreement qualifier.
-        return linesOfBoundProof(parsed.data, inert).map((line) => taskMade && line.startsWith("Test proof:") ? `${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${line}` : line);
+        // General fakes (DEC 234): a proving check a Rovara-made fake answered is never proof; the line says so first.
+        const fakeAnswered = parsed.data.madeByRovara?.some((facts) => proving.has(facts.checkId)) === true;
+        return linesOfBoundProof(parsed.data, inert).map((line) => !line.startsWith("Test proof:") ? line : fakeAnswered ? `${MOCK_PROOF_PREFIX}${line}` : taskMade ? `${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${line}` : line);
       }
     }
   } catch {

@@ -23,6 +23,7 @@ import { WorkflowFixPayloadSchema } from "./rovara-code.js";
 import { LiveSteerPayloadSchema } from "./live-steer.js";
 import { PREPARE_PINS_FEATURE, PreparePinsSchema, SETUP_AGENT_FEATURE, SetupAgentWireSchema } from "./setup-run.js";
 import { NIGHTLY_RUN_FEATURE, NightlyRunPayloadSchema } from "./nightly-run.js";
+import { GENERAL_FAKES_FEATURE, GeneralFakesPayloadSchema } from "./general-fakes.js";
 import { STANDING_INSTRUCTIONS_FEATURE, StandingInstructionsPayloadSchema } from "./standing-instructions.js";
 import { EVAL_FILES_FEATURE, EvalFilesPayloadSchema } from "./eval-files.js";
 import { SETUP_RECIPES_FEATURE, SETUP_RECIPE_OFFERS_MAX, SetupRecipeOfferSchema } from "./setup-recipe.js";
@@ -64,7 +65,7 @@ export const EvalRequestSchema = z.object({
 export type EvalRequest = z.infer<typeof EvalRequestSchema>;
 
 export const WORKER_INVOCATION_FEATURES = [TEST_ENV_PROVE_MEASURE_FEATURE, "task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.workflowApprovedPlan.v1", SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, EVAL_ROUND_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
-  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE, USAGE_CHECKPOINTS_FEATURE] as const;
+  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, USAGE_CHECKPOINTS_FEATURE] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** An agent step's payload (`agentStep`) goes only to a worker that lists this; the agent kind also needs AGENT_RUN_FEATURE. */
 export const AGENT_STEP_FEATURE = "task.agentStep" as const;
@@ -394,6 +395,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         setupAgent: SetupAgentWireSchema.optional(),
         /** The nightly run (NH-1, switch `nh`): what the broker fixed when the fire started it. Only with `workflowMode: "CHECKS"`, and only to a worker whose /ping lists "task.nightlyRun.v1". */
         nightlyRun: NightlyRunPayloadSchema.optional(),
+        /** General fakes (DEC 234): the services a CHECKS round, or the coding run's own verification (`workflowMode: "IMPLEMENT"`, slice 2), may answer with Rovara-made fakes. Only while the project's `generalFakes` setting is on, and only to a worker whose /ping lists "task.generalFakes.v1". */
+        generalFakes: GeneralFakesPayloadSchema.optional(),
         /**
          * Meta repo lane B: a setup proposal run is told which of the project's repositories is its meta repository (the team's rules, specs and runbooks live there), so it
          * knows where to look for them. Sent only with `workflowMode: "SETUP_DRAFT"`, and only to a worker whose /ping lists "task.setupProposal.v2".
@@ -581,6 +584,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.setupAgent !== undefined && (payload.agentStep !== undefined || payload.ownerRedirect !== undefined || payload.specWrite !== undefined || payload.contextSources !== undefined || payload.diagnosis !== undefined || payload.testEnvDetect !== undefined)) {
           context.addIssue({ code: "custom", path: ["setupAgent"], message: "a setup run carries no agent step, redirect, spec write, context sources, diagnosis or detection" });
+        }
+        if (payload.generalFakes !== undefined && payload.workflowMode !== "CHECKS" && payload.workflowMode !== "IMPLEMENT") {
+          context.addIssue({ code: "custom", path: ["generalFakes"], message: "general fakes are a checks or coding setting" });
         }
         if (payload.nightlyRun !== undefined && payload.workflowMode !== "CHECKS") {
           context.addIssue({ code: "custom", path: ["nightlyRun"], message: "a nightly run is a verification-mode operation" });

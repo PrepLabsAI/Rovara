@@ -59,7 +59,7 @@ export async function loadProofContext(
   };
   const [loadedProof, scenarioRows, evidence, design, realModelRun] = await Promise.all([checked ? loadTestProof(deps.actions, task, digest, operations) : Promise.resolve(undefined), scenarios(), evidenceOf(), designOf(), realRunOf()]);
   let testProof = loadedProof;
-  const checkDependencies = new Map<string, readonly { dependencyId: string; trust: "simulated"; replies: "task_made" | "independent" }[]>();
+  const checkDependencies = new Map<string, readonly ({ dependencyId: string; trust: "simulated"; replies: "task_made" | "independent" } | { dependencyId: string; trust: "made_by_rovara" })[]>();
   if (testProof?.scriptedReplies !== undefined) {
     const recorded = recordedCheckIdsOf(workflow);
     for (const facts of testProof.scriptedReplies) {
@@ -68,6 +68,20 @@ export async function loadProofContext(
       const used = [...(facts.taskMade > 0 ? ["task_made" as const] : []), ...((facts.independent ?? 0) > 0 ? ["independent" as const] : [])];
       if (used.length > 0) checkDependencies.set(checkId, used.map((replies) => ({ dependencyId: "scripted_replies", trust: "simulated" as const, replies })));
     }
+  }
+  // General fakes (DEC 234): a check a Rovara-made fake answered depends on a Rovara-made mock, so the proof table never counts it as Proven. A fact that names no recorded check drops the whole proof (fail closed).
+  if (testProof?.madeByRovara !== undefined) {
+    const recorded = recordedCheckIdsOf(workflow);
+    for (const facts of testProof.madeByRovara) {
+      const checkId = checkIdOfProofItem(facts.checkId, recorded);
+      if (checkId === undefined) { testProof = undefined; checkDependencies.clear(); break; }
+      checkDependencies.set(checkId, [...(checkDependencies.get(checkId) ?? []), { dependencyId: "general_fake", trust: "made_by_rovara" }]);
+    }
+  }
+  // The label on the check result itself (slice 2): a recorded result a Rovara-made fake answered is never Proven, with or without a test proof. One dependency per check, whichever source said it first.
+  for (const result of checked ? workflow.verification?.results ?? [] : []) {
+    if (result.madeByRovara !== true || checkDependencies.get(result.checkId)?.some((dependency) => dependency.trust === "made_by_rovara") === true) continue;
+    checkDependencies.set(result.checkId, [...(checkDependencies.get(result.checkId) ?? []), { dependencyId: "general_fake", trust: "made_by_rovara" }]);
   }
   return { plan, ...(checkDependencies.size === 0 ? {} : { checkDependencies }), ...(realModelRun === undefined ? {} : { realModelRun }), ...(scenarioRows === undefined ? {} : { scenarioRows }), ...(testProof === undefined ? {} : { testProof }), ...(evidence === undefined ? {} : { evidence }), ...(design === undefined ? {} : { design }) };
 }

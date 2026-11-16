@@ -2,7 +2,8 @@
 
 Owner call O10: outside services are generic, not special cases. The flow is three steps:
 contract source (a `ContractAdapter` reads one kind of repo file) -> answer shape (`findServiceContract`,
-`service-contract.ts`) -> labelled mock config (`generateServiceMock`, `service-contract-mock.ts`). An adapter names its
+`service-contract.ts`) -> labelled mock config (`generateServiceMock`, `service-contract-mock.ts`). Both generic files now live in
+`packages/contracts/src/` (general fakes, DEC 234: the worker builds OpenAPI fakes from them, `openapi-fake.ts`); the files here re-export them. An adapter names its
 `service`, its source `kinds` in priority order, its `errorCases`, and a `read` function that turns one file's text into a
 parsed value (an example answer or a schema) or says it is unsupported. Everything below the adapter is the same for every
 service. A `read` that throws, or returns anything outside its contract (an unknown status or form, a pointer over 65,536

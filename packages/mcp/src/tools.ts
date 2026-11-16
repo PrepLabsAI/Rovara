@@ -238,7 +238,7 @@ function taskOutput(shown: DeveloperTaskClientView, timedOut?: boolean): Record<
         ...(blockingFindings.length === 0 ? {} : { blocking_findings: blockingFindings }),
         ...(task.workflow.verification === undefined ? {} : { verification: {
           candidate_digest: task.workflow.verification.candidateDigest,
-          results: task.workflow.verification.results.map((result) => ({ check_id: result.checkId, status: result.status })),
+          results: task.workflow.verification.results.map((result) => ({ check_id: result.checkId, status: result.status, ...(result.madeByRovara === true ? { made_by_rovara: true } : {}) })),
         } }),
         ...(task.workflow.reviews === undefined ? {} : { reviews: task.workflow.reviews.map((review) => ({
           role: review.role, status: review.status, candidate_digest: review.candidateDigest,

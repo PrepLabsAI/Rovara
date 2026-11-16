@@ -22,6 +22,8 @@ export interface ProofCheckResult {
   label?: string | undefined;
   status: "PASS" | "FAILED" | "UNKNOWN";
   couldNotRun?: boolean | undefined;
+  /** General fakes: a Rovara-made fake answered an outside call of this check, so it is never Proven (the table reads it as a `made_by_rovara` dependency). */
+  madeByRovara?: true | undefined;
 }
 
 /** A browser or API scenario's row (`E2EDisplayScenario`), cut to what the table reads. */

@@ -6,6 +6,7 @@ import {
   VerificationReportSchema, redactText, workflowCheckResultBroken, workflowIsReviewOnly, workflowSelectedChecks,
   type VerificationReport, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 
 /** The build rule of a version 2 task, exact: it ends every build prompt (the plan's text). */
 export const IMPLEMENT_TEST_RULE = "Add or update tests for every behaviour you change. If a change can't be tested, say why in your final message.";
@@ -92,6 +93,8 @@ export function verificationReport(workflow: WorkflowSnapshot, changedFiles: rea
   const failed: VerificationReport["failed"] = [];
   const notChecked: VerificationReport["notChecked"] = [];
   const labelOf = (label: string) => oneLine(label, LABEL_MAX, "A check");
+  // General fakes (DEC 234): a check a Rovara-made fake answered says so wherever it is listed, in fixed words.
+  const madeLabel = (label: string, result: { madeByRovara?: true | undefined }) => (result.madeByRovara === true ? `${label} (${GENERAL_FAKE_MADE_NOTE})` : label);
   const missing = (label: string, reason: string) => notChecked.push({ label: labelOf(label), reason: oneLine(reason, REASON_MAX, "It was not checked.") });
 
   if (reviewOnly) {
@@ -105,15 +108,15 @@ export function verificationReport(workflow: WorkflowSnapshot, changedFiles: rea
       else if (result.neverStarted === true) missing(check.label, "It never started.");
       else if (workflowCheckResultBroken(result)) {
         missing(check.label, result.programNotFound === true ? "Its program isn't installed on Rovara's machine, so it did not run." : "Its command couldn't run, so it did not check the code.");
-      } else if (result.status === "PASS") passed.push({ label: labelOf(check.label) });
-      else if (result.status === "FAILED") failed.push({ label: labelOf(check.label), summary: oneLine("It failed on the latest code.", SUMMARY_MAX, "It failed.") });
+      } else if (result.status === "PASS") passed.push({ label: madeLabel(labelOf(check.label), result) });
+      else if (result.status === "FAILED") failed.push({ label: madeLabel(labelOf(check.label), result), summary: oneLine("It failed on the latest code.", SUMMARY_MAX, "It failed.") });
       else missing(check.label, "Rovara couldn't tell whether it passed.");
       results.delete(check.id);
     }
     // A result for a check the policy no longer lists (the policy changed after the run) is shown by its id, never dropped silently.
     for (const [checkId, result] of results) {
-      if (result.status === "PASS") passed.push({ label: labelOf(checkId) });
-      else if (result.status === "FAILED" && !workflowCheckResultBroken(result) && result.neverStarted !== true) failed.push({ label: labelOf(checkId), summary: "It failed on the latest code." });
+      if (result.status === "PASS") passed.push({ label: madeLabel(labelOf(checkId), result) });
+      else if (result.status === "FAILED" && !workflowCheckResultBroken(result) && result.neverStarted !== true) failed.push({ label: madeLabel(labelOf(checkId), result), summary: "It failed on the latest code." });
       else missing(checkId, "It was not checked.");
     }
   }

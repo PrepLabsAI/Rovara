@@ -4,8 +4,8 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
-  AgentXError, EVIDENCE_CAPTURE_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
-  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
+  AgentXError, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, generalFakesPayloadOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { evalRequestForChecks } from "../proof/eval-round-reader.js";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
@@ -68,6 +68,15 @@ function fixStartHead(workflow: WorkflowSnapshot): string | undefined {
   if (workflow.fixSource === undefined || workflow.fixSource === "conflict") return undefined;
   const open = (workflow.pullRequests ?? []).filter((entry) => entry.state === "OPEN" || entry.state === "UNKNOWN");
   return open.length === 1 ? open[0]!.headSha : undefined;
+}
+
+/** General fakes (DEC 234): the CHECKS payload field while the task's project revision has the setting on; undefined (off) otherwise, and when the project cannot be read. */
+async function generalFakesOf(deps: TaskFlowDeps, task: TaskRecord): Promise<GeneralFakesPayload | undefined> {
+  try {
+    return generalFakesPayloadOf((await deps.projects.revision(task.project, task.startingRevision))?.definition.generalFakes);
+  } catch {
+    return undefined;
+  }
 }
 
 async function repositoryOf(deps: TaskFlowDeps, task: TaskRecord, repositoryId: string): Promise<ProjectDefinition["repositories"][number] | undefined> {
@@ -168,8 +177,11 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     return settled(deps, row, "STALE");
   }
   const operationId = graph === undefined ? undefined : newId(deps);
+  // General fakes (slice 2): the coding run verifies with the same fakes a CHECKS round would, but only when it has checks to run.
+  const generalFakes = readiness === undefined || readiness.length === 0 ? undefined : await generalFakesOf(deps, task);
   const payload = jsonOf({
     ...(readiness === undefined ? {} : { readiness }),
+    ...(generalFakes === undefined ? {} : { generalFakes }),
     ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }),
     ...baseOf(task, workflow),
     ...(workflow.fixSource === undefined ? {} : { workflowFix: { source: workflow.fixSource, ...(startFrom === undefined ? {} : { startFrom }) } }),
@@ -184,6 +196,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       "task.workflowMode", ...(readiness === undefined ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"]),
       ...(graph === undefined ? [] : ["task.workflowDependencies"]),
       ...(testPlan === undefined ? [] : testPlan.requires),
+      ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE]),
     ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source"],
     ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),
@@ -252,11 +265,12 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     return settled(deps, row, "STALE");
   }
   const evalRequest = await evalRequestForChecks(deps, task, workflow);
-  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
+  const generalFakes = await generalFakesOf(deps, task);
+  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
-    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(testPlan === undefined ? [] : testPlan.requires)],
+    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(testPlan === undefined ? [] : testPlan.requires), ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE])],
   });
   return settled(deps, row, accepted.result);
 }

@@ -80,6 +80,11 @@ export const CheckEntrySchema = z.object({
   exitCode: z.number().int().nullable().optional(),
   /** What the check is for (proof and evidence design, 3.1). Older workers send none, and none reads as `other`. */
   kind: CheckKindSchema.optional(),
+  /**
+   * General fakes (DEC 234, slice 2): a Rovara-made fake answered at least one outside call of this check, so the result is "Made by Rovara" and NEVER change proof. Present only as `true` and only on a check that
+   * ran to a pass, a failure or a timeout; absent on every other check (an entry without it is byte-identical to before). Older workers send none.
+   */
+  madeByRovara: z.literal(true).optional(),
 }).strict();
 export type CheckEntry = z.infer<typeof CheckEntrySchema>;
 

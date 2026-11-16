@@ -149,6 +149,10 @@ describe("read-only task page", () => {
   it("marks the checks AgentX proposed, and says plainly when no check applies or the proposal could not be read, all escaped", async () => {
     const proposed = await render({ checks: [{ label: "npm test", passed: true }, { label: "Unit <tests>", passed: undefined, proposed: true }] });
     expect(proposed.body).toContain("<li>npm test: Passed</li>");
+    // General fakes (DEC 234): a check a Rovara-made fake answered is never said to have passed on its own.
+    const made = await render({ checks: [{ label: "npm test", passed: true, madeByRovara: true }, { label: "lint", passed: true }] });
+    expect(made.body).toContain("<li>npm test: Passed (Made by Rovara, never change proof)</li>");
+    expect(made.body).toContain("<li>lint: Passed</li>");
     expect(proposed.body).toContain("<li>Unit &lt;tests&gt; (proposed by AgentX): Not run yet</li>");
     const reviewOnly = await render({ checks: [], checksNote: "No automated checks apply: Only <b>docs</b> change. Review only." });
     expect(reviewOnly.body).toContain("No automated checks apply: Only &lt;b&gt;docs&lt;/b&gt; change. Review only.");
