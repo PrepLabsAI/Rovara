@@ -195,9 +195,15 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(caps.stdout.trim()).toBe("no-caps");
     const writes = await inHelper("const fs=require('fs');const t=(p)=>{try{fs.writeFileSync(p,'x');return 'wrote'}catch(e){return e.code}};console.log(JSON.stringify([t('/probe'),t('/rovara/fakes/probe'),t('/tmp/probe'),t('/rovara/ledger/probe')]))");
     expect(JSON.parse(writes.stdout.trim())).toEqual(["EROFS", "EROFS", "EROFS", "wrote"]);
-    // The set cannot be changed by the helper: the mount is read-only and the file is not its own to rewrite.
+    // Proof that the root and the set are mounted read-only, from the container's own mount table (not inferred from an error code).
+    const mountsOut = await inHelper("console.log(JSON.stringify(require('fs').readFileSync('/proc/self/mounts','utf8').split('\\n').filter(Boolean).map((l)=>{const f=l.split(' ');return [f[1],f[3].split(',')]})))");
+    const mounts = new Map(JSON.parse(mountsOut.stdout.trim()) as Array<[string, string[]]>);
+    expect(mounts.get("/")).toContain("ro");
+    expect(mounts.get(GENERAL_FAKES_RUN_DIR)).toContain("ro");
+    expect(mounts.get("/rovara/ledger")).toContain("rw");
+    // The set cannot be changed by the helper. On a read-only bind mount the kernel checks the file's permission bits before the mount flag, so a file the helper's user does not own is refused with EACCES; either way the write fails and the mount proof above is what shows it is read-only.
     const set = await inHelper("const fs=require('fs');try{fs.appendFileSync('/rovara/fakes/set.json','x');console.log('appended')}catch(e){console.log(e.code)}");
-    expect(set.stdout.trim()).toBe("EROFS");
+    expect(["EROFS", "EACCES"]).toContain(set.stdout.trim());
     // The only network is the internal one: its gateway, a public address and the metadata address are all unreachable (none is "open").
     const reach = await inHelper(reachScript([["bridge", 8080], ["bridge", 22], ["8.8.8.8", 53], ["169.254.169.254", 80]]));
     const outcomes = JSON.parse(reach.stdout.trim().split("\n").at(-1)!) as string[];
