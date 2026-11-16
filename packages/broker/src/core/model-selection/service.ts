@@ -45,6 +45,16 @@ export interface ModelSelectionDependencies {
   /** Whether a run limit is held on the model proxy (a model with no price then cannot be used). Read at each choice. */
   capApplies(): boolean;
   now(): number;
+  /** The words of a host whose "this computer" and "sign-in" are not the laptop's (the hosted core's models are the gateway's offered list). Absent: the laptop's words. */
+  words?: ModelSelectionWords | undefined;
+}
+
+/** What a host may say in its own words: the refusals of a choice, the model that cannot be called, and the page that needs a fresh sign-in. */
+export interface ModelSelectionWords {
+  refusals?: Partial<Record<StageModelRefusalCode | "NO_MODEL", string>>;
+  /** The words for a model named in a change that cannot be called now. */
+  unavailable?: (label: string, capApplies: boolean) => string;
+  reauth?: string;
 }
 
 /** The stage a workflow operation runs under, from the hosted product's mapping. CHECKS runs commands and has no model of its own: the install's model stands. */
@@ -105,6 +115,7 @@ const WORDS: Record<StageModelRefusalCode | "NO_MODEL", string> = {
 
 export function createModelSelection(deps: ModelSelectionDependencies): ModelSelectionService {
   const orgId = deps.companyId;
+  const wordsFor = (code: StageModelRefusalCode | "NO_MODEL"): string => deps.words?.refusals?.[code] ?? WORDS[code];
   /** Whether a cap can be held to this model: it has a price in DOLLARS (the budget is in dollars, so a price in another currency is no price to it: the proxy would refuse every call). */
   const pricedInDollars = (model: ModelIdentifier): boolean => usdPerMillion(deps.prices.findCap(model)) !== undefined;
 
@@ -145,6 +156,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
 
   /** The words for a refusal. Where a limit is held and a model that could be called has no price, they name it: that is the one thing the owner can fix at once. */
   function refusalWords(code: StageModelRefusalCode, ctx: Context): string {
+    if (deps.words?.refusals?.[code] !== undefined) return deps.words.refusals[code];
     const unpriced = ctx.capApplies && (code === "NO_VERIFIED_CANDIDATE" || code === "MODEL_NOT_VERIFIED") ? ctx.candidates.find((entry) => !pricedInDollars(entry.model)) : undefined;
     return unpriced === undefined ? WORDS[code] : `${label(unpriced.model)} has no price, and a run limit is held, so it cannot be used: add its price to its model provider, or set ROVARA_RUN_LIMIT=0 to run without a limit.`;
   }
@@ -160,7 +172,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
 
   async function routed(model: ModelIdentifier, found: Omit<StepModel, "route" | "model">): Promise<StepChoice> {
     const route = await deps.seams.route(model);
-    if (route === undefined) return { ok: false, code: "MODEL_NOT_VERIFIED", words: WORDS.MODEL_NOT_VERIFIED };
+    if (route === undefined) return { ok: false, code: "MODEL_NOT_VERIFIED", words: wordsFor("MODEL_NOT_VERIFIED") };
     return { ok: true, step: { ...found, model, route } };
   }
 
@@ -169,18 +181,18 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
     const setting = settingOf(ctx.policy, stage);
     const checking = CHECKING.has(stage);
     // Nothing set for this step and the install has no model at all (no key): there is no model to choose.
-    if (ctx.install === undefined && setting?.model === undefined) return { ok: false, code: "NO_MODEL", words: WORDS.NO_MODEL };
+    if (ctx.install === undefined && setting?.model === undefined) return { ok: false, code: "NO_MODEL", words: wordsFor("NO_MODEL") };
     let referenceModel = reference;
     if (checking && referenceModel === undefined && depth === 0) {
       const checked = await choose(ctx, STAGE_REFERENCE[stage as keyof typeof STAGE_REFERENCE], undefined, 1);
       referenceModel = checked.ok ? checked.step.model : ctx.install;
     }
     const installOnly = (): Promise<StepChoice> => {
-      if (ctx.install === undefined) return Promise.resolve({ ok: false, code: "NO_MODEL", words: WORDS.NO_MODEL });
+      if (ctx.install === undefined) return Promise.resolve({ ok: false, code: "NO_MODEL", words: wordsFor("NO_MODEL") });
       const candidate = ctx.candidates.find((entry) => same(entry.model, ctx.install!));
       // The install's one model already failed this step for this account: there is no other model to try.
-      if (candidate !== undefined && denied.some((model) => same(model, candidate.model))) return Promise.resolve({ ok: false, code: "NO_VERIFIED_CANDIDATE", words: WORDS.NO_VERIFIED_CANDIDATE });
-      if (candidate === undefined || !candidate.enabled) return Promise.resolve({ ok: false, code: "MODEL_NOT_VERIFIED", words: WORDS.MODEL_NOT_VERIFIED });
+      if (candidate !== undefined && denied.some((model) => same(model, candidate.model))) return Promise.resolve({ ok: false, code: "NO_VERIFIED_CANDIDATE", words: wordsFor("NO_VERIFIED_CANDIDATE") });
+      if (candidate === undefined || !candidate.enabled) return Promise.resolve({ ok: false, code: "MODEL_NOT_VERIFIED", words: wordsFor("MODEL_NOT_VERIFIED") });
       return routed(candidate.model, { thinkingLevel: null, reason: "INSTALL_MODEL", sameModelAsChecked: referenceModel !== undefined && same(candidate.model, referenceModel) });
     };
     // A checking step nobody set, on an install that keeps one model for everything (what a laptop always did): the install's model, and the step says it is the same one.
@@ -249,7 +261,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
     if (!parsed.success) return { ok: false, code: "invalid", words: "That is not a change the model setting offers." };
     const body = parsed.data;
     // Every change is the owner's own act in a page session opened within ten minutes, never a token's.
-    if (!ctxIn.fresh) return { ok: false, code: "reauth_required", words: "That change needs a recent sign-in. Close this page and run `rovara open models` again, then make the change within ten minutes." };
+    if (!ctxIn.fresh) return { ok: false, code: "reauth_required", words: deps.words?.reauth ?? "That change needs a recent sign-in. Close this page and run `rovara open models` again, then make the change within ten minutes." };
     let ctx: Context;
     try { ctx = await context(true); } catch { return { ok: false, code: "settings_unreadable", words: "The model setting could not be read, so it was not changed." }; }
     const policy = ctx.policy;
@@ -272,7 +284,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
         for (const model of named) {
           const callable = await deps.seams.canServe(model).catch(() => false);
           if (!callable || (ctx.capApplies && !pricedInDollars(model))) {
-            return { ok: false, code: "model_unavailable", words: `${label(model)} cannot be called on this computer now: its provider has no sign-in here${ctx.capApplies ? ", or it has no price while a run limit is held" : ""}.` };
+            return { ok: false, code: "model_unavailable", words: deps.words?.unavailable?.(label(model), ctx.capApplies) ?? `${label(model)} cannot be called on this computer now: its provider has no sign-in here${ctx.capApplies ? ", or it has no price while a run limit is held" : ""}.` };
           }
         }
       }
@@ -328,7 +340,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
   return {
     async choose(input) {
       let ctx: Context;
-      try { ctx = await context(false); } catch { return { ok: false, code: "MODEL_STALE", words: WORDS.MODEL_STALE }; }
+      try { ctx = await context(false); } catch { return { ok: false, code: "MODEL_STALE", words: wordsFor("MODEL_STALE") }; }
       return choose(ctx, input.stage, input.reference, 0, { denied: input.denied, lastAttempt: input.lastAttempt });
     },
     state,

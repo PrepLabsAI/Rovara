@@ -569,7 +569,14 @@ export const MERGE_VIEW_MESSAGE_MAX = 500;
 /** The risk of the pull request's code as the Merge section shows it (owner decision 2026-10-27): a level and the reasons in words. */
 export const MergeRiskSchema = z.object({ level: z.enum(["low", "medium", "high"]), reasons: z.array(z.string().min(1).max(200)).max(8) }).strict();
 export type MergeRisk = z.infer<typeof MergeRiskSchema>;
-export const MergeViewSchema = z.object({ ready: z.boolean(), message: z.string().min(1).max(MERGE_VIEW_MESSAGE_MAX).optional(), risk: MergeRiskSchema.optional() }).strict();
+/**
+ * MR3b (TE-R3): the order a multi-repository task's pull requests merge in, as the Merge section shows it: fixed words, at most 4 lines. `needsOverride` is true when no safe order could be found (a dependency cycle, or
+ * facts that could not be read): only a person's confirmation (`MergePressBody.orderOverride`) merges them, in repository order (DEC 209). Absent for a one-repository task, a task with no dependency facts and any install that
+ * has not turned it on: the field is added READERS FIRST (DEC 152a), and the writer (`MergeDependencies.orderInView`) is switched on one release after the readers shipped.
+ */
+export const MergeOrderViewSchema = z.object({ lines: z.array(z.string().min(1).max(MERGE_VIEW_MESSAGE_MAX)).min(1).max(4), needsOverride: z.literal(true).optional() }).strict();
+export type MergeOrderView = z.infer<typeof MergeOrderViewSchema>;
+export const MergeViewSchema = z.object({ ready: z.boolean(), message: z.string().min(1).max(MERGE_VIEW_MESSAGE_MAX).optional(), risk: MergeRiskSchema.optional(), order: MergeOrderViewSchema.optional() }).strict();
 export type MergeView = z.infer<typeof MergeViewSchema>;
 
 /** The exact texts of `MERGE_NOT_READY` (409). Words for a person: nothing here carries a title, a comment or a log. */
@@ -618,7 +625,11 @@ export const MERGE_NOT_READY_MESSAGES = {
  * `POST /v1/app/sessions/{id}/merge` (and the same through the web boundary): the request id, and for the web app the risk level the person saw in the dialog. A medium or high risk press that did
  * not see the current level is refused. Nothing else is taken: a token cannot add a field that makes it a browser.
  */
-export const MergePressBodySchema = z.object({ requestId: z.string().uuid(), risk: z.enum(["low", "medium", "high"]).optional() }).strict();
+export const MergePressBodySchema = z.object({
+  requestId: z.string().uuid(), risk: z.enum(["low", "medium", "high"]).optional(),
+  /** MR3b (DEC 209): a PERSON confirms merging in repository order although no safe order could be found. Only the value `true` is read; it is bound into the approval's digest, so a proof for the ordered question never approves the override. */
+  orderOverride: z.literal(true).optional(),
+}).strict();
 export type MergePressBody = z.infer<typeof MergePressBodySchema>;
 
 /** What a web press answers when it merged (200): the pull requests Rovara merged. */

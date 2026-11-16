@@ -31,6 +31,7 @@ import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-
 import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js";
 import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
 import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
+import { createCiWaitLines, createMergeOrderLines, createTaskRepositoryEdgesSeam } from "../../core/merge/repository-edges.js";
 import { createAsk } from "../../core/sessions/ask.js";
 import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
 import { createLocalAskModel } from "../ask-model.js";
@@ -468,7 +469,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   // Lane L12: merge tracking by polling. The publish step enrols a task's tracking row; a timer reads the due rows and calls the core's pass for each (pull request status, CI fix, branch sync, ready for review).
-  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log });
+  // MR3b: the dependency facts TE-MR2 recorded for a task's code (kept beside its evidence), read for the merge order: the tracking pass's warning and hold, and the order lines of the descriptions and the task page.
+  const repositoryEdges = createTaskRepositoryEdgesSeam({ flow: flow.deps, blobs, companyId });
+  flow.deps.mergeOrderLines = createMergeOrderLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
+  flow.deps.ciWaitLines = createCiWaitLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
+  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.

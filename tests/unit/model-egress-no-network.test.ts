@@ -95,6 +95,10 @@ const F1C_CALLERS: ReadonlySet<string> = new Set([
   "packages/worker/src/verification/eval-model-access.ts", "packages/worker/src/verification/eval-runner.ts",
   // The eval gateway adapter: the production EvalModelAccess, which reaches only the model gateway's own product route (https, or loopback in tests) with the egress frames; it names no provider host.
   "packages/worker/src/verification/eval-gateway-access.ts",
+  // The eval's task binding: the sandbox exec's bridge (the F1-c bridge over the stage's egress) and the per-task wiring that hands it the gateway adapter. No provider host; the only route is the gateway's product route.
+  "packages/worker/src/verification/eval-bridged-exec.ts", "packages/worker/src/verification/eval-wiring.ts",
+  // The product bridge's egress (PRODUCT-BRIDGE-CODE-SIDE, #794): checked frames go only to the model gateway's own product route (https, or loopback in tests) with the task token; it names no provider host.
+  "packages/worker/src/product-gateway-egress.ts",
 ]);
 
 describe("no callers yet", () => {

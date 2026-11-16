@@ -1,6 +1,9 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { pathToFileURL } from "node:url";
+import { createWorkspaceSlackClients, type ServiceSlackWorkspaces } from "./slack-workspace-clients.js";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetCommand, DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { DeleteObjectCommand, GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -15,7 +18,7 @@ import {
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, channelEventGroupId, confirmationBlocks,
-  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, usableWebhookSecret, type ChannelEvent, type ConversationRef, type SlackRequestMessage, type SlackThread,
+  slackThreadOf, isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, usableWebhookSecret, type ChannelEvent, type ConversationRef, type SlackRequestMessage, type SlackThread,
 } from "@agentx/contracts";
 import { channelRequestHandler, readChannelQueueItem } from "./channel-requests.js";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
@@ -30,10 +33,8 @@ import { slackChannelRequests } from "./slack-channel.js";
 import { processSlackRequest } from "./slack-processor.js";
 import { createEvalBatchWatchApi, withSlackThreadRoutes, type SlackThreadServiceApi } from "./slack-thread-api.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
-import { createSlackUserNames } from "./user-names.js";
 import { createThreadApi } from "./thread-api.js";
 import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
-import { createSlackWebClient } from "./slack-web.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
@@ -42,6 +43,21 @@ import { DynamoTurnRecordWriter } from "./turn-records.js";
 import { handlePageComment } from "./page-comment.js";
 import { handleTaskQuestion, runTaskAnswer } from "./task-question.js";
 
+export function createSlackServiceDelivery(options: Parameters<typeof createWorkspaceSlackClients>[0]) {
+  const clients = createWorkspaceSlackClients(options);
+  return {
+    async post(thread: SlackThread, threadTs: string | undefined, text: string, blocks?: unknown[], signal?: AbortSignal) {
+      return (await clients.forThread(thread)).web.postMessage(thread.channelId, threadTs, text, { ...(blocks === undefined ? {} : { blocks }), ...(signal === undefined ? {} : { signal }) });
+    },
+    async delete(thread: SlackThread, ts: string) { await (await clients.forThread(thread)).web.delete(thread.channelId, ts); },
+    async update(thread: SlackThread, ts: string, text: string) { await (await clients.forThread(thread)).web.update(thread.channelId, ts, text); },
+    async ephemeral(thread: SlackThread, userId: string, text: string) { await (await clients.forThread(thread)).web.postEphemeral(thread.channelId, thread.threadTs, userId, text); },
+    async userName(thread: Pick<SlackThread, "teamId">, userId: string) { return (await clients.forThread(thread)).userName(userId); },
+  };
+}
+
+/** The integrated deployment supplies company dependencies; absent dependencies preserve the installation path. */
+export async function runSlackService(workspaces?: ServiceSlackWorkspaces) {
 const MAX_RECEIVE_COUNT = 5;
 const VISIBILITY_SECONDS = 15 * 60;
 
@@ -118,14 +134,11 @@ function slackBotToken(): Promise<string> {
   return botToken.value;
 }
 
-const slackUserName = createSlackUserNames({ token: slackBotToken });
-
-// Spec 062 FR-042: the service's Slack Web API calls are all in slack-web.ts.
-const slackWeb = createSlackWebClient({ token: slackBotToken });
-
-/** Posts in a thread, or with no thread a new message in the channel; answers the message's timestamp. */
-function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[], signal?: AbortSignal): Promise<string | undefined> {
-  return slackWeb.postMessage(channel, threadTs, text, { ...(blocks === undefined ? {} : { blocks }), ...(signal === undefined ? {} : { signal }) });
+const slackDelivery = createSlackServiceDelivery({ legacyToken: slackBotToken, ...(workspaces === undefined ? {} : { workspaces }) });
+const requestThread = new AsyncLocalStorage<SlackThread>();
+const slackUserName = (thread: Pick<SlackThread, "teamId">, userId: string) => slackDelivery.userName(thread, userId);
+function postToSlack(thread: SlackThread, text: string, blocks?: unknown[], signal?: AbortSignal): Promise<string | undefined> {
+  return slackDelivery.post(thread, thread.threadTs, text, blocks, signal);
 }
 
 function threadApi(message: Pick<SlackRequestMessage, "thread" | "userId">): SlackThreadServiceApi {
@@ -242,7 +255,7 @@ type ServiceScope = Omit<Parameters<typeof createSignedServiceFetch>[0], "region
 /** A Slack turn acts for its thread and member, with the member's display name. */
 async function slackScope(input: TurnInput): Promise<ServiceScope> {
   const message = input.message as ProcessorMessage<SlackThread>;
-  const userName = await slackUserName(message.userId);
+  const userName = await slackUserName(message.thread, message.userId);
   return { thread: message.thread, userId: message.userId, ...(userName === undefined ? {} : { userName }) };
 }
 
@@ -394,12 +407,12 @@ const batchWatcher = runEvalBatchWatcher({
     signedFetchFor: (scope) => createSignedServiceFetch({ region, credentials, ...(scope === undefined ? {} : { thread: scope.thread, userId: scope.userId }) }),
   }),
   slack: {
-    async post(channel, threadTs, text) {
-      const ts = await postToSlack(channel, threadTs, text);
+    async post(thread, threadTs, text) {
+      const ts = await slackDelivery.post(thread, threadTs, text);
       if (ts === undefined) throw new Error("Slack chat.postMessage answered no message timestamp");
       return ts;
     },
-    delete: (channel, ts) => slackWeb.delete(channel, ts),
+    delete: (thread, ts) => slackDelivery.delete(thread, ts),
   },
   log,
   logError: (event, fields) => console.error(JSON.stringify({ component: "slack-orchestrator", level: "error", event, ...fields })),
@@ -438,7 +451,10 @@ const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueu
     },
     send: (event) => sendChannelEvent(channelEventQueueUrl, event),
     surfaces: {
-      slack: slackChannelRequests({
+      slack: ((handle: ReturnType<typeof slackChannelRequests>): ReturnType<typeof slackChannelRequests> => (item, context) => {
+        const conversation = item.kind === "message" ? item.message.conversation : item.kind === "action" ? item.action.conversation : item.decision.conversation;
+        return conversation === undefined ? handle(item, context) : requestThread.run(slackThreadOf(conversation), () => handle(item, context));
+      })(slackChannelRequests({
         processor: {
           api: threadApi,
           threads,
@@ -446,7 +462,11 @@ const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueu
           log,
           confirmations,
           turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
-          userName: slackUserName,
+          userName: (userId) => {
+            const thread = requestThread.getStore();
+            if (thread === undefined && workspaces !== undefined) throw new Error("This Slack workspace is not available.");
+            return slackUserName(thread ?? { teamId: "" }, userId);
+          },
         },
         send: (event) => sendChannelEvent(channelEventQueueUrl, event),
         log,
@@ -471,7 +491,7 @@ const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueu
               finish: (subject) => threads.finish(subject),
               log }),
         }),
-      }),
+      })),
     },
     log,
   }), {
@@ -489,14 +509,14 @@ log("service.started", {
   concurrency, channelAdapters: channelRequestQueueUrl !== undefined && channelEventQueueUrl !== undefined, provider: model.provider, model: model.modelId,
   classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable, requestRouting: requestRouter !== undefined,
 });
-const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks), log });
+const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => postToSlack(thread, text, blocks), log });
 const rememberAnswered = createContinuationRecorder({ documentClient, tableName: threadsTableName, log });
 await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQuestion !== undefined
   ? handleTaskQuestion(message, taskQuestion, {
     ...(requestRouter === undefined ? {} : { route: requestRouter }),
     answer: (question) => runTaskAnswer(message, taskQuestion, question, { api: threadApi(message), runTurn, ...(context.handoff === undefined ? {} : { handoff: context.handoff }) }),
-    post: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
-    postPrivate: (thread, userId, text) => slackWeb.postEphemeral(thread.channelId, thread.threadTs, userId, text),
+    post: async (thread, text) => { await postToSlack(thread, text); },
+    postPrivate: (thread, userId, text) => slackDelivery.ephemeral(thread, userId, text),
     markAnswered: async (input) => {
       const api = threadApi(message);
       if (api.markThreadNoteAnswered === undefined) throw new Error("marking a note answered is unavailable in this deployment");
@@ -508,7 +528,7 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
   ? routeSlackRequest(message, {
     // Decision 147: the person AgentX answered here may reply without a mention for the next 24 hours.
     answered: (request) => rememberAnswered(request.thread, request.userId), ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
-    notify: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
+    notify: async (thread, text, blocks) => { await postToSlack(thread, text, blocks); },
     // Decision 134: a clear small change starts Quick on its own, through the broker's check and the requester's own start.
     autoStart: async ({ message: request, requestId }) => {
       const api = threadApi(request);
@@ -544,16 +564,16 @@ function processRequest(message: SlackRequestMessage, context: Parameters<typeof
     api: threadApi,
     threads,
     runTurn,
-    post: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
+    post: async (thread, text) => { await postToSlack(thread, text); },
     log,
     confirmations,
-    postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)); },
-    postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
+    postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread, text, confirmationBlocks(text, confirmation.confirmationId)); },
+    postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread, text, blocks); },
     // Issue 219: a progress post Slack does not answer is given up after ten seconds.
-    postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text, undefined, AbortSignal.timeout(10_000)),
-    updateMessage: (thread, ts, text) => slackWeb.update(thread.channelId, ts, text),
+    postProgress: (thread, text) => postToSlack(thread, text, undefined, AbortSignal.timeout(10_000)),
+    updateMessage: (thread, ts, text) => slackDelivery.update(thread, ts, text),
     turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
-    userName: slackUserName,
+    userName: (userId) => slackUserName(message.thread, userId),
   }, context);
 }
 await channelConsumer;
@@ -564,3 +584,5 @@ log("service.stopped", {});
 // belongs to the new task, so nothing here may run on until SIGKILL. Logs go to stdout, which is
 // written synchronously for the awslogs driver's pipe on Linux.
 process.exit(0);
+}
+if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) await runSlackService();

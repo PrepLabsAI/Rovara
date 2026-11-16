@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WORKFLOW_AGENTX_ACTOR_ID, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../../packages/broker/src/core/task-flow/access.js";
 import { taskKey } from "../../../packages/broker/src/core/task-flow/keys.js";
+import { ownerNoteItem } from "../../../packages/broker/src/core/task-flow/owner-note.js";
 import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
@@ -68,17 +69,21 @@ async function world(env: NodeJS.ProcessEnv): Promise<{ world: FakeWorld; compan
 type Decision = { source: "SEND_BACK" | "FINDINGS" | "AUTO_FIX" | "GATE"; decision?: "REQUEST_CHANGES" | "APPROVE"; reason: string; agent?: true };
 
 /** Writes decisions onto the task's stored workflow, as a send-back would have committed them. */
-async function decide(fake: FakeWorld, taskId: string, decisions: Decision[], over: Record<string, unknown> = {}): Promise<void> {
+async function decide(fake: FakeWorld, taskId: string, decisions: Decision[], over: Record<string, unknown> = {}): Promise<string[]> {
   const record = (await fake.store.get(taskKey(taskId)))! as unknown as Record<string, unknown> & { workflow: { decisions: unknown[]; revision: number } };
   const at = new Date(fake.clock.now).toISOString();
-  const workflow = {
-    ...record.workflow,
-    decisions: [...record.workflow.decisions, ...decisions.map((d) => ({
-      requestId: randomUUID(), workflowRevision: record.workflow.revision, decision: d.decision ?? "REQUEST_CHANGES", reason: d.reason, source: d.source, at,
-      ...(d.agent === true ? { actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX", auto: { stage: "IMPLEMENT" } } : { actorId: "person-1", actorRole: "TASK_OWNER" }),
-    }))],
-  };
+  const added = decisions.map((d) => ({
+    requestId: randomUUID(), workflowRevision: record.workflow.revision, decision: d.decision ?? "REQUEST_CHANGES", reason: d.reason, source: d.source, at,
+    ...(d.agent === true ? { actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX", auto: { stage: "IMPLEMENT" } } : { actorId: "person-1", actorRole: "TASK_OWNER" }),
+  }));
+  const workflow = { ...record.workflow, decisions: [...record.workflow.decisions, ...added] };
   await fake.store.put({ item: { ...record, workflow, ...over } as never });
+  return added.map((entry) => entry.requestId);
+}
+
+/** The person's per-finding notes of a findings answer, kept beside the workflow the way the answer keeps them (`owner-note.ts`). */
+async function keepFindingNotes(fake: FakeWorld, taskId: string, requestId: string, findingNotes?: string[]): Promise<void> {
+  await fake.store.transact([ownerNoteItem({ taskId, requestId, text: "Fix only the problems listed. The owner gave no further instructions for them.", now: new Date(fake.clock.now), ...(findingNotes === undefined ? {} : { findingNotes }) })]);
 }
 
 async function queued(fake: FakeWorld): Promise<Array<Record<string, unknown>>> {
@@ -140,14 +145,60 @@ describe("queueing: a person's send-back, behind the switch and the mode, for th
   it("the second send-back is round 2; a findings request-changes counts as a send-back; past the round bound nothing is queued", async () => {
     const { world: fake, companies, logs } = await world({ [CORE_LESSONS_VARIABLE]: "on" });
     const a = companies.get(A)!;
-    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "first" }, { source: "FINDINGS", reason: "Fix the null check the reviewer found." }]);
+    // A findings answer's reason is code's own summary, never the person's words: with no per-finding notes it counts as round 2 but queues nothing itself.
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "first" }, { source: "FINDINGS", reason: "0 accepted, 1 to fix" }]);
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
-    expect((await queued(fake)).map((m) => m["round"])).toEqual([2]);
+    expect(await queued(fake)).toEqual([]);
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "third, in a person's words" }]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect((await queued(fake)).map((m) => m["round"])).toEqual([3]);
     await decide(fake, a.taskId, Array.from({ length: SEND_BACK_REFLECTIONS_MAX - 1 }, (_, i) => ({ source: "SEND_BACK" as const, reason: `again ${String(i)}` })));
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
     expect(await queued(fake)).toEqual([]);
     // Refused by the round bound itself, not by a failed send.
     expect(logs).not.toContain("send_back_not_queued");
+  });
+
+  it("a findings fix teaches only through the person's per-finding notes: with notes it queues its round, with none (or an unreadable row) it queues nothing, and it is never read from the summary", async () => {
+    const { world: fake, companies, logs } = await world({ [CORE_LESSONS_VARIABLE]: "on" });
+    const a = companies.get(A)!;
+    // No owner note row at all (an answer from before notes were kept), then a note row with no per-finding notes: counted rounds, nothing queued.
+    const [bare] = await decide(fake, a.taskId, [{ source: "FINDINGS", reason: "0 accepted, 1 to fix" }]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect(await queued(fake)).toEqual([]);
+    const [silent] = await decide(fake, a.taskId, [{ source: "FINDINGS", reason: "0 accepted, 1 to fix" }]);
+    await keepFindingNotes(fake, a.taskId, silent!);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect(await queued(fake)).toEqual([]);
+    expect(bare).toBeDefined();
+    // A round the person wrote notes for is queued as that round (round 3 here: both earlier findings answers were rounds).
+    const [noted] = await decide(fake, a.taskId, [{ source: "FINDINGS", reason: "0 accepted, 2 to fix" }]);
+    await keepFindingNotes(fake, a.taskId, noted!, ["Return 404, not 500.", "Keep the footer line."]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect(await queued(fake)).toEqual([{ orgId: A, taskId: a.taskId, outcome: "sent_back", round: 3, requestId: sendBackRequestId(a.taskId, 3) }]);
+    expect(logs).not.toContain("send_back_not_queued");
+  });
+
+  it("a findings fix of another company's task, one past the round bound, or in a project whose mode does not reflect queues nothing even with notes", async () => {
+    const { world: fake, companies } = await world({ [CORE_LESSONS_VARIABLE]: `on:${A}` });
+    const a = companies.get(A)!;
+    const b = companies.get(B)!;
+    const [other] = await decide(fake, b.taskId, [{ source: "FINDINGS", reason: "0 accepted, 1 to fix" }]);
+    await keepFindingNotes(fake, b.taskId, other!, ["B's correction."]);
+    await a.lessons!.host.noteSentBack(b.taskId);
+    expect(await queued(fake)).toEqual([]);
+
+    await writeLearningMode(a.lessons!.runtime.documents, { workspaceId: A, project: "payments" }, "Collect", fake.clock.now);
+    const [collect] = await decide(fake, a.taskId, [{ source: "FINDINGS", reason: "0 accepted, 1 to fix" }]);
+    await keepFindingNotes(fake, a.taskId, collect!, ["Use the helper."]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect(await queued(fake)).toEqual([]);
+
+    await writeLearningMode(a.lessons!.runtime.documents, { workspaceId: A, project: "payments" }, "Suggest", fake.clock.now);
+    const many = await decide(fake, a.taskId, Array.from({ length: SEND_BACK_REFLECTIONS_MAX }, () => ({ source: "FINDINGS" as const, reason: "0 accepted, 1 to fix" })));
+    await keepFindingNotes(fake, a.taskId, many.at(-1)!, ["Late notes."]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect(await queued(fake)).toEqual([]);
   });
 
   it("an automatic send-back, a findings approval, a send-back in code's fixed words, and a closed task queue nothing", async () => {

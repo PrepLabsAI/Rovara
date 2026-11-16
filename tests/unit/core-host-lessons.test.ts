@@ -17,6 +17,7 @@ import { createLocalLessonSources } from "../../packages/broker/src/local/app/le
 import { createLessonRepositories, type LessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
 import type { PipelineModel } from "../../packages/broker/src/lessons/ports.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { lessonRecord, draft } from "./lessons/lesson-helpers.js";
 
@@ -261,6 +262,55 @@ describe("what a finished task teaches, per person", () => {
     expect(await gone.sources.source.read({ workspaceId: A, taskId: gone.task.taskId })).toBeUndefined();
     // Another company's workspace never reads A's task.
     expect(await listed.sources.source.read({ workspaceId: B, taskId: listed.task.taskId })).toBeUndefined();
+  });
+});
+
+describe("a findings answer's send-back, per person", () => {
+  const SUMMARY = "0 accepted, 2 to fix";
+  async function withFindingsAnswer(members: string[], erased: string[], notes: string[] | undefined) {
+    const world = createFakeWorld();
+    const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
+    await registerProject(world, A);
+    const runtime = createCoreRuntime({
+      registry, companyId: A, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
+    });
+    const { task } = await runtime.flow.start({ principal: localOwnerPrincipal({ companyId: A }), client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+    const requestId = randomUUID();
+    const record = (await world.store.get(taskKey(task.taskId)))! as unknown as Record<string, unknown> & { workflow: { decisions: unknown[]; revision: number } };
+    const decision = { requestId, workflowRevision: record.workflow.revision, decision: "REQUEST_CHANGES", actorId: "ann", actorRole: "TASK_OWNER", reason: SUMMARY, source: "FINDINGS", at: new Date(world.clock.now).toISOString() };
+    await world.store.put({ item: { ...record, workflow: { ...record.workflow, decisions: [...record.workflow.decisions, decision] } } as never });
+    await world.store.transact([ownerNoteItem({ taskId: task.taskId, requestId, text: "Fix only the problems listed. The owner gave no further instructions for them.", now: new Date(world.clock.now), ...(notes === undefined ? {} : { findingNotes: notes }) })]);
+    const repos = createLessonRepositories({ flow: runtime.flow.deps, registry, companyId: A, now: () => world.clock.now });
+    const sources = createLocalLessonSources({ flow: runtime.flow.deps, companyId: A, ownerId: "rovara-system", repos, now: () => world.clock.now, hosted: { people: peopleOf({ [A]: members }, erased) } });
+    return { sources, taskId: task.taskId, requestId };
+  }
+  const ask = (w: Awaited<ReturnType<typeof withFindingsAnswer>>, workspaceId: string = A) => w.sources.rows.sendBack({ workspaceId, project: "payments", taskId: w.taskId, requestId: w.requestId });
+
+  it("a member's per-finding notes are their words (their standing now); a person off the roster keeps the outsider standing, so the words are removed later; an erased person's send-back is not read", async () => {
+    const notes = ["Return 404, not 500.", "Keep the footer line."];
+    const member = await withFindingsAnswer(["ann"], [], notes);
+    const fact = await ask(member);
+    expect(fact).toMatchObject({ origin: "human", actorDeveloperId: "ann", actorTrust: "member", reasonText: notes.join("\n") });
+    expect(JSON.stringify(fact)).not.toContain(SUMMARY);
+
+    const outsider = await withFindingsAnswer([], [], notes);
+    expect(await ask(outsider)).toMatchObject({ origin: "human", actorDeveloperId: "ann", actorTrust: "outsider" });
+
+    const gone = await withFindingsAnswer(["ann"], ["ann"], notes);
+    expect(await ask(gone)).toBeUndefined();
+  });
+
+  it("with no per-finding notes the summary is fixed text, counted and never read as the person's words", async () => {
+    const w = await withFindingsAnswer(["ann"], [], undefined);
+    const fact = await ask(w);
+    expect(fact).toMatchObject({ origin: "human", actorTrust: "member", fixedText: true });
+    expect(JSON.stringify(fact)).not.toContain(SUMMARY);
+  });
+
+  it("another company's workspace reads nothing of this company's task or its notes", async () => {
+    const w = await withFindingsAnswer(["ann"], [], ["Return 404, not 500."]);
+    expect(await ask(w, B)).toBeUndefined();
   });
 });
 

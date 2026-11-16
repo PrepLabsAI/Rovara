@@ -15,7 +15,7 @@ import {
   endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits,
   type AdminActionDependencies, type ResolvedDeveloper,
 } from "./admin-actions.js";
-import { adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
+import { adminSlackScope, adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
 import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
@@ -129,6 +129,7 @@ export interface ResolvedChannel { channelId: string; label: string; confirmatio
  * bindings, then through Slack. A private channel is never found by name.
  */
 export async function resolveChannel(deps: PlanDependencies, teamId: string, value: string, options: PlanOptions = {}): Promise<ResolvedChannel> {
+  if (deps.reads.slackWorkspaces !== undefined && (deps.reads.workspace === undefined || deps.reads.workspace.teamId !== teamId)) throw agentXError("SLACK_UNAVAILABLE", "This Slack workspace is not available.");
   const text = value.trim().replace(/^#/, "");
   if (SlackChannelIdSchema.safeParse(text).success) return labelled(deps, text, options);
   if (!CHANNEL_NAME.test(text)) throw agentXError("CONFIG_INVALID", "channel must be a Slack channel ID such as C0123456789, or a public channel's name such as #payments-dev");
@@ -138,7 +139,7 @@ export async function resolveChannel(deps: PlanDependencies, teamId: string, val
   for (const [channelId, label] of labels) {
     if (!label.private && label.name === text) return { channelId, label: `#${text} (${channelId})`, confirmationLabel: `#${text} (${channelId})` };
   }
-  const found = deps.channelByName === undefined ? undefined : await deps.channelByName({ kind: "channel-by-name", name: text });
+  const found = deps.channelByName === undefined ? undefined : await deps.channelByName({ kind: "channel-by-name", name: text, ...(deps.reads.workspace === undefined ? {} : { workspace: deps.reads.workspace }) });
   if (found !== undefined && !found.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to find that channel; try again, or give the channel's ID");
   // Final review M6: the name the admin typed is never echoed; it may name a private channel.
   if (found?.channel === undefined) throw agentXError("NOT_FOUND", "no public channel with that name in this Slack workspace; give a private channel by its ID");
@@ -624,6 +625,11 @@ export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
  * admin's linked Slack user (B4); it changes only `confirmationEffect`, never the hash.
  */
 export async function planChange(deps: PlanDependencies, identity: AuthenticatedIdentity, input: AdminChangeInput, options: PlanOptions = {}): Promise<ChangePlan> {
+  if ((input.kind === "bind_channel" || input.kind === "unbind_channel") && (deps.reads.companies !== undefined || deps.reads.slackWorkspaces !== undefined)) {
+    const workspace = await adminSlackScope(deps.reads, identity);
+    if (workspace === undefined) throw agentXError("SLACK_UNAVAILABLE", "This Slack workspace is not available.");
+    deps = { ...deps, reads: { ...deps.reads, workspace, slackTeamId: workspace.teamId } };
+  }
   const planner = PLANNERS[input.kind];
   if (planner === undefined) throw agentXError("CONFIG_INVALID", `${input.kind} is not a change this AgentX can plan; update AgentX, or make the change with the agentx admin command`);
   return planner(deps, identity, input, options);
