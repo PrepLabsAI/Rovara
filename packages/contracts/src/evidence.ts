@@ -511,6 +511,26 @@ export const EvidenceRawCheckSchema = z
   })
   .strict()
   .superRefine((entry, context) => checkPartsProblems(entry, (path, message) => context.addIssue({ code: "custom", path, message })));
+/** Repository facts only. MR3/MR2b must NEVER use absence from the candidate to skip or narrow tests. */
+const RepositoryEdgesSchema = z.object({
+  edges: z.array(z.object({
+    consumer: line(200), provider: line(200),
+    language: z.enum(["node", "go", "python", "maven", "gradle"]),
+    source: z.enum(["base", "candidate", "both"]),
+  }).strict()).max(64),
+  notes: z.array(z.enum([
+    "ambiguous", "dependency manifest unreadable", "too many repositories or dependencies; tested separately",
+    "tested separately: no cross-repo wiring for maven", "tested separately: no cross-repo wiring for gradle",
+    "tested separately: multi-repository checks run only on the local runner for now",
+  ])).max(8),
+}).strict().superRefine((record, context) => {
+  const keys = new Set<string>();
+  for (const edge of record.edges) {
+    const key = JSON.stringify([edge.consumer, edge.provider, edge.language]);
+    if (edge.consumer === edge.provider || keys.has(key)) context.addIssue({ code: "custom", message: "repository edges must be distinct and connect different repositories" });
+    keys.add(key);
+  }
+});
 export const EvidenceRawSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -523,6 +543,7 @@ export const EvidenceRawSchema = z
     testServices: TestServicesUsageRecordSchema.optional(),
     /** TE-C1: the nearest trusted baseline commit that is an ancestor of the task's base, found by the worker at the start of the round. Written only when the plan carried candidates (an asked-for field); the broker uses it only for a sha it offered. */
     baseline: RawBaselineSchema.optional(),
+    repositoryEdges: RepositoryEdgesSchema.optional(),
   })
   .strict()
   .superRefine((raw, context) => {
