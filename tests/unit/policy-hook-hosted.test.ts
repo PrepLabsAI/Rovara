@@ -45,7 +45,8 @@ describe("hosted policy-hook settings", () => {
     const canonical = `{"e":"${key.jwk.e}","kty":"RSA","n":"${key.jwk.n}"}`;
     const expected = createHash("sha256").update(canonical).digest("base64url");
     expect(policyHookKeyThumbprint(key.jwk)).toBe(expected);
-    expect(policyHookKeyThumbprint({ ...key.jwk, kid: "changed" })).toBe(expected);
+    const renamed = { ...key.jwk, kid: "changed" };
+    expect(policyHookKeyThumbprint(renamed)).toBe(expected);
   });
 });
 
@@ -74,7 +75,7 @@ describe("hosted pinned JWKS resolution", () => {
     w.advance(299_999);
     expect(await w.send()).toMatchObject({ answered: true });
     expect(w.get).toHaveBeenCalledTimes(1);
-    expect(w.get).toHaveBeenCalledWith(settings.jwks, expect.objectContaining({ method: "GET", redirect: "error", signal: expect.any(AbortSignal) }));
+    expect(w.get).toHaveBeenCalledWith(settings.jwks, expect.objectContaining({ method: "GET", redirect: "error", signal: expect.any(AbortSignal) as AbortSignal }));
     w.advance(1);
     expect(await w.send()).toMatchObject({ answered: true });
     expect(w.get).toHaveBeenCalledTimes(2);
@@ -164,7 +165,7 @@ describe("hosted pinned JWKS resolution", () => {
   it("uses the existing fixed unavailable words at admission", async () => {
     const w = world(async () => json([foreign.jwk]));
     const base = { admit: async () => ({ allowed: true }), stage: async () => ({ decision: { allowed: true }, items: [] }), release: async () => undefined, settle: async () => undefined };
-    const admission = withPolicyHookAdmission(base, w.client, { holdMs: 0 });
+    const admission = withPolicyHookAdmission(base as unknown as Parameters<typeof withPolicyHookAdmission>[0], w.client, { holdMs: 0 });
     expect(await admission.admit({ companyId: COMPANY, idempotencyKey: "k", action: "task.start", projectName: "demo", subject: { type: "task", id: "task-1" } })).toMatchObject({ allowed: false, message: POLICY_HOOK_WORDS.startNoAnswer });
   });
 });

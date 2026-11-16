@@ -602,6 +602,18 @@ export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCor
 /** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */
 export const CORE_MODEL_ACCESS_PATH = MODEL_ACCESS_PATH;
 
+/** L1a's queue piece, called by L6 only when composing a serving broker's complete dependencies. Makes no client or queue. */
+export function brokerCoreDispatchQueue(env: NodeJS.ProcessEnv): CodeModuleDeps["queue"] {
+  const url = env[CORE_DISPATCH_QUEUE_URL_VARIABLE];
+  const deadLetterUrl = env[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE];
+  // Same URL shape and queue-kind rule as the SQS adapter; validate here before a registry can be built, with fixed refusal words.
+  const queueUrl = (value: unknown): value is string => typeof value === "string" && /^https?:\/\/[^\s/]+\/(?:[^\s/]+\/)*[A-Za-z0-9_-]{1,80}(?:\.fifo)?$/u.test(value);
+  if (!queueUrl(url) || !queueUrl(deadLetterUrl) || url.endsWith(".fifo") !== deadLetterUrl.endsWith(".fifo")) {
+    throw Object.assign(new Error("the broker needs valid core dispatch queue URLs"), { name: "BrokerCoreQueueNotConfigured" });
+  }
+  return { settings: { ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }), queues: { [CORE_DISPATCH_QUEUE]: { url, deadLetterUrl } } } };
+}
+
 export { taskTokensFromEnvironment };
 
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */
