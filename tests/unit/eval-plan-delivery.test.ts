@@ -9,7 +9,7 @@ import {
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { CallbackCapabilities, type CallbackAction } from "../../packages/broker/src/callbacks.js";
-import { EVAL_PLAN_DELIVERY_FORBIDDEN, handleEvalPlanDelivery, type EvalPlanSources } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
+import { EVAL_PLAN_DELIVERY_FORBIDDEN, handleEvalPlanDelivery, type EvalPlanScope, type EvalPlanSources } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
 import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { taskKey, taskPointerKey } from "../../packages/broker/src/developer/task-records.js";
 import { evalSourcesFromDelivery, fetchEvalPlanDelivery } from "../../packages/worker/src/verification/eval-plan-delivery.js";
@@ -45,9 +45,9 @@ async function world(options: { company?: string; operation?: Record<string, unk
   const caches = new Map<string, BaseScoreCache>([[A, createDocumentBaseScoreCache(store, { companyId: A })], [B, createDocumentBaseScoreCache(store, { companyId: B })]]);
   const asked: Array<{ source: string; scope: unknown }> = [];
   const sources: EvalPlanSources = {
-    plan: vi.fn(async (scope) => { asked.push({ source: "plan", scope }); return planOf(scope.companyId, scope.project); }),
-    approval: vi.fn((scope) => { asked.push({ source: "approval", scope }); return { read: async () => grantOf(scope.companyId, scope.project) }; }),
-    cache: vi.fn((companyId) => { asked.push({ source: "cache", scope: companyId }); return caches.get(companyId); }),
+    plan: vi.fn(async (scope: EvalPlanScope) => { asked.push({ source: "plan", scope }); return planOf(scope.companyId, scope.project); }),
+    approval: vi.fn((scope: EvalPlanScope) => { asked.push({ source: "approval", scope }); return { read: async () => grantOf(scope.companyId, scope.project) }; }),
+    cache: vi.fn((companyId: string) => { asked.push({ source: "cache", scope: companyId }); return caches.get(companyId); }),
   };
   const capabilities = new CallbackCapabilities(KEY);
   const token = (actions: string[], over: { workspaceId?: string; operationId?: string; fence?: number; expiresInSeconds?: number } = {}) => capabilities.issue({ workspaceId: over.workspaceId ?? workspaceId, operationId: over.operationId ?? operationId, fence: over.fence ?? 3, actions: actions as CallbackAction[], expiresInSeconds: over.expiresInSeconds ?? 60 });
@@ -137,7 +137,7 @@ describe("the eval-plan callback", () => {
     const good = w.token([EVAL_PLAN_DELIVERY_ACTION]);
     const [body] = good.split(".");
     const forgedBody = Buffer.from(JSON.stringify({ workspaceId: w.workspaceId, operationId: w.operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION], expiresAt: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
-    const otherKey = new CallbackCapabilities(Buffer.alloc(32, 1)).issue({ workspaceId: w.workspaceId, operationId: w.operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION as CallbackAction], expiresInSeconds: 60 });
+    const otherKey = new CallbackCapabilities(Buffer.alloc(32, 1)).issue({ workspaceId: w.workspaceId, operationId: w.operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION], expiresInSeconds: 60 });
     for (const capability of [undefined, "", `${forgedBody}.${good.split(".")[1]}`, `${body}.`, `${body}`, otherKey, w.token([EVAL_PLAN_DELIVERY_ACTION], { expiresInSeconds: -1 })]) {
       const reply = await w.call(capability);
       expect(reply.statusCode, String(capability)).toBeGreaterThanOrEqual(400);
@@ -154,7 +154,7 @@ describe("the eval-plan callback", () => {
     expect(w.asked).toEqual([]);
     // A plan whose answer would be over the bound: "not_available", and the oversize is logged by its fixed name only.
     const huge = await world();
-    huge.sources.plan = async (scope) => planOf(scope.companyId, scope.project, { padding: "y".repeat(EVAL_PLAN_DELIVERY_MAX_BYTES) });
+    huge.sources.plan = async (scope: EvalPlanScope) => planOf(scope.companyId, scope.project, { padding: "y".repeat(EVAL_PLAN_DELIVERY_MAX_BYTES) });
     const log = vi.fn();
     const answer = await handleEvalPlanDelivery({ sources: huge.sources, companyId: A, projectOf: async () => "web", log },
       (await huge.store.get(operationKey(huge.workspaceId, huge.operationId))) as never);
@@ -199,7 +199,7 @@ describe("the eval-plan callback", () => {
     expect(bare.statusCode).toBe(404);
     for (const plan of [async () => undefined, async () => { throw new Error("secret-canary"); }, async () => "not a plan"]) {
       const x = await world();
-      x.sources.plan = plan as never;
+      x.sources.plan = plan;
       const reply = await x.call(x.token([EVAL_PLAN_DELIVERY_ACTION]));
       expect(json(reply)).toEqual({ status: "not_available" });
       expect(reply.body).not.toContain("secret-canary");

@@ -24,12 +24,13 @@ export interface EvalPlanDeliveryRequest {
 async function boundedText(response: Response, maxBytes: number): Promise<string | undefined> {
   const declared = Number(response.headers.get("content-length") ?? "0");
   if (!Number.isFinite(declared) || declared > maxBytes || response.body === null) return undefined;
-  const reader = response.body.getReader();
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
+    const next = await reader.read() as { done: boolean; value?: Uint8Array };
+    if (next.done || next.value === undefined) break;
+    const value = next.value;
     total += value.byteLength;
     if (total > maxBytes) { await reader.cancel().catch(() => undefined); return undefined; }
     chunks.push(value);
