@@ -73,6 +73,16 @@ describe("the gate behind the local check: what each job must have done, from th
     expect(gateVerdict({ plan: { ...DOCS, tests: "changed" }, results: docsRan }).ok).toBe(false);
   });
 
+  it("fails a plan that runs the whole suite in fewer than eight shards", () => {
+    for (const shards of ["[1]", "[1,2]", "[1,2,3,4,5,6,7]", "[]", "", "[1,2,3,4,5,6,7,8,9]"]) {
+      const verdict = gateVerdict({ plan: { ...FULL, shards }, results: fullRan });
+      expect(verdict.ok, shards).toBe(false);
+      expect(verdict.reason).toMatch(/shard list/);
+    }
+    expect(gateVerdict({ plan: { ...AFFECTED, tests: "all", shards: "[1,2]" }, results: affectedRan }).ok).toBe(false);
+    expect(gateVerdict({ plan: { ...AFFECTED, tests: "all", shards: "[1,2,3,4,5,6,7,8]" }, results: affectedRan }).ok).toBe(true);
+  });
+
   it("holds every plan the planner can make to the same jobs the workflow gives them", () => {
     const changes = [["docs/sample/guide.md"], ["packages/other-d/src/x.ts"], ["package.json"], ["packages/worker/src/x.ts"], []];
     for (const changed of changes) {
