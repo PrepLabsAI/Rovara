@@ -786,12 +786,6 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
         }
       }
     } },
-    // TE-H1: one before or after screenshot of the task's browser evidence, behind the page session like every route here. The data source serves only a picture the task's current pack names (and only for the task's own company).
-    { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})/evidence/([a-f0-9]{64})$`), handle: async (_request, match) => {
-      const image = await options.data.readEvidenceImage?.(match[1] ?? "", match[2] ?? "");
-      if (image === undefined || image.contentType !== "image/jpeg" || image.bytes.byteLength > MAX_IMAGE_BYTES) return notFound();
-      return { status: 200, type: image.contentType, body: image.bytes, headers: { "content-security-policy": "default-src 'none'; sandbox", "content-disposition": "inline" } };
-    } },
     { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})$`), handle: async (request, match) => {
       const view = await options.data.getProofReport(match[1] ?? "");
       return view === undefined ? notFound() : page(request, (context) => renderProof(context, view));

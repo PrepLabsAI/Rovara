@@ -125,39 +125,6 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     monitor.stop();
   });
 
-  it("lists browser evidence on its own (no shared runtime directory needed), keeps it through one failed look and withholds it after two in a row (TE-H1)", async () => {
-    const BROWSER = "task.browserEvidence.v1";
-    let code = 0;
-    const docker = { run: vi.fn(async () => ({ code, stdout: "", stderr: "" })) };
-    // A platform with no shared runtime directory: application CHECKS cannot be listed, browser evidence still can.
-    const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "darwin", arch: "arm64", docker, intervalMs: 25 });
-    vi.useFakeTimers();
-    try {
-      monitor.start();
-      await vi.advanceTimersByTimeAsync(5);
-      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
-      expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(FEATURE);
-      code = 1;
-      // One failed look is kept through (a slow or busy Docker is not the image being gone) ...
-      await vi.advanceTimersByTimeAsync(25);
-      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
-      // ... and two in a row are not.
-      await vi.advanceTimersByTimeAsync(25);
-      expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(BROWSER);
-      // And it comes back at once when the image does.
-      code = 0;
-      await vi.advanceTimersByTimeAsync(25);
-      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
-      monitor.stop();
-    } finally { vi.useRealTimers(); }
-    // An image reference that is not one is never listed.
-    const bad = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: "-v /:/host" }, platform: "linux", arch: "arm64", docker: { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) }, intervalMs: 60_000 });
-    bad.start();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect((await pingOf(bad)).body.invocationFeatures).not.toContain(BROWSER);
-    bad.stop();
-  });
-
   it("refreshes in the background: a host that loses the image stops listing the feature, and one that gets it lists it again", async () => {
     vi.useFakeTimers();
     try {
@@ -188,9 +155,7 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     const REPLAY = "task.workflowE2EReplayChecks.v1";
     // T6: trying a plan's proposed checks runs them in a container of the executor image, so it is listed, and withheld, with the application CHECKS feature.
     const DRY_RUN = "task.workflowPlanDryRun.v1";
-    // TE-H1 browser evidence photographs the changed pages in a container of the executor image too (DEC 241a), so it is listed, and withheld, with them.
-    const BROWSER = "task.browserEvidence.v1";
-    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, V2, BASELINE, "task.workflowE2EAgentSteps.v1", REPLAY, DRY_RUN, "task.workflowE2EMidStepSync.v1", BROWSER]);
+    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, V2, BASELINE, "task.workflowE2EAgentSteps.v1", REPLAY, DRY_RUN, "task.workflowE2EMidStepSync.v1"]);
     const before = await pingOf(monitor);
     expect(before.body.invocationFeatures).not.toContain(BASELINE);
     // Task 3.4: the string for version 2 admissions (web and API groups in one plan) is listed and withheld with the application CHECKS feature, so a worker that cannot run application rounds never claims it.
@@ -200,13 +165,11 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     // Task 4.6b: running a replay needs exactly what an application round needs, so it is listed, and withheld, with them.
     expect(before.body.invocationFeatures).not.toContain(REPLAY);
     expect(before.body.invocationFeatures).not.toContain(DRY_RUN);
-    expect(before.body.invocationFeatures).not.toContain(BROWSER);
-    expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [BROWSER]: { status: "unavailable", reason: "not-yet-checked" } });
     expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [REPLAY]: { status: "unavailable", reason: "not-yet-checked" } });
     monitor.start();
     await vi.waitFor(() => expect(monitor.current()).toEqual({ status: "ready" }));
     const ready = await pingOf(monitor);
-    expect(ready.body.invocationFeatures).toEqual(expect.arrayContaining([FEATURE, V2, BASELINE, REPLAY, DRY_RUN, BROWSER]));
+    expect(ready.body.invocationFeatures).toEqual(expect.arrayContaining([FEATURE, V2, BASELINE, REPLAY, DRY_RUN]));
     monitor.stop();
     const missing = { run: vi.fn(async () => ({ code: 1, stdout: "", stderr: "" })) };
     const without = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker: missing, intervalMs: 60_000 });
@@ -214,7 +177,6 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     await vi.waitFor(() => expect(without.current()).toMatchObject({ status: "unavailable" }));
     const lacking = await pingOf(without);
     expect(lacking.body.invocationFeatures).not.toContain(BASELINE);
-    expect(lacking.body.invocationFeatures).not.toContain(BROWSER);
     expect(lacking.body.invocationFeatures).not.toContain(V2);
     expect(lacking.body.invocationFeatures).not.toContain(REPLAY);
     expect(lacking.body.invocationFeatures).not.toContain(DRY_RUN);
@@ -234,8 +196,7 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
       const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker, intervalMs: 1_000 });
       monitor.start();
       await vi.advanceTimersByTimeAsync(10_000);
-      // One look at the image for application CHECKS and one for browser evidence (TE-H1), and no second round while the first still waits.
-      expect(docker.run).toHaveBeenCalledTimes(2);
+      expect(docker.run).toHaveBeenCalledTimes(1);
       monitor.stop();
     } finally { vi.useRealTimers(); }
   });

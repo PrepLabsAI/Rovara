@@ -4,7 +4,7 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
-  AgentXError, BROWSER_EVIDENCE_FEATURE, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, generalFakesPayloadOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  AgentXError, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, generalFakesPayloadOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { evalRequestForChecks } from "../proof/eval-round-reader.js";
@@ -266,15 +266,11 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
   }
   const evalRequest = await evalRequestForChecks(deps, task, workflow);
   const generalFakes = await generalFakesOf(deps, task);
-  // TE-H1 browser evidence (DEC 241): only with the evidence capture, and only for a project whose owner set a recipe (read fail-closed by the seam; a fault is no recipe). It asks the worker to photograph the changed pages; a worker without
-  // the feature is refused the step by `requires` below, never sent a field it cannot read.
-  const browserRecipe = capture ? await deps.browserEvidence?.recipe(task).catch(() => undefined) : undefined;
-  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...(browserRecipe === undefined ? {} : { browserEvidence: browserRecipe }), ...baseOf(task, workflow) });
+  const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
-    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(browserRecipe === undefined ? [] : [BROWSER_EVIDENCE_FEATURE]), ...(testPlan === undefined ? [] : testPlan.requires), ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE])],
-    ...(browserRecipe === undefined ? {} : { extraActions: ["browser-evidence"] }),
+    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(testPlan === undefined ? [] : testPlan.requires), ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE])],
   });
   return settled(deps, row, accepted.result);
 }

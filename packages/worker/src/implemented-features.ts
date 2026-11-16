@@ -61,8 +61,6 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.diagnosis.v1",
   // Proof and evidence (wire-proof): a CHECKS run writes evidence-raw.json when the invocation carries `evidenceCapture` (verification/evidence-raw.ts).
   "task.evidenceCapture.v1",
-  // TE-H1 browser evidence (DEC 241): a CHECKS run that carries `browserEvidence` starts the app in its sandbox and photographs the changed pages in the executor image (browser-evidence-run.ts).
-  "task.browserEvidence.v1",
   // Learning v2 (L4): approved lessons arrive as `learnedContext`, are re-checked against the base commit and framed as inert advice (learned-run.ts, learned-context.ts).
   "task.learnedContext.v1",
   // Test environment (wire-testenv): a setup draft run that is told `testEnvDetect` also reports the environment the detectors would propose (test-env-detect.ts).

@@ -9,7 +9,6 @@
 import { isBuiltin } from "node:module";
 import { z } from "zod";
 import { AGENTX_NAME_PATTERN } from "../names.js";
-import { BrowserEvidenceRecipeSchema } from "../browser-evidence.js";
 import { PluginKindSchema } from "../plugins/common.js";
 import { ExternalAccountRefSchema } from "../outside-account.js";
 import { PolicyHookSettingsSchema } from "../policy-hook.js";
@@ -300,14 +299,7 @@ const JsonSettingSchema: z.ZodType<JsonObject> = z.record(z.string(), z.json());
  * FIX-0518 (laptop only, owner-set): what one project's task sandbox may do beyond the install-wide rules. `sandboxModelHosts: "allow"` lets that project's sandboxes reach the model hosts (api.openai.com, api.anthropic.com, ...); absent or "deny" blocks
  * them, which is the default. Read only from the owner's own config file: a project, a repository or an agent cannot set it.
  */
-export const LocalProjectSettingsSchema = z.object({
-  sandboxModelHosts: z.enum(["allow", "deny"]).optional(),
-  /**
-   * TE-H1 browser evidence (DEC 241c, laptop only, owner-set): the project's start command and port (run in its sandbox), its pages, and the elements to paint over. A recipe that is there and valid turns browser evidence on for that project;
-   * absent or one that does not parse means off (`browserEvidenceRecipeOf` reads it fail-closed). Read only from the owner's own config file, until the company setting (TE-D1) can be read in production.
-   */
-  browserEvidence: BrowserEvidenceRecipeSchema.optional(),
-}).strict();
+export const LocalProjectSettingsSchema = z.object({ sandboxModelHosts: z.enum(["allow", "deny"]).optional() }).strict();
 export type LocalProjectSettings = z.infer<typeof LocalProjectSettingsSchema>;
 export const LOCAL_PROJECT_SETTINGS_MAX = 200;
 
