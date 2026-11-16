@@ -1,6 +1,6 @@
 // Test services: the detector pass under a wall-clock limit (a worker thread that the caller can end).
 import { existsSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ENV_DETECT_MAX_FILE_BYTES, ENV_DETECT_MAX_TOTAL_BYTES, boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { ENV_DETECT_TIMEOUT_NOTE, runDetectorsGuarded, type ThreadEntry } from "../../packages/worker/src/env-detect/guarded.js";
 import type { RepositoryReader } from "../../packages/worker/src/env-detect/types.js";
@@ -43,15 +43,33 @@ describe("a repository that finishes in time", () => {
 describe("a pass that does not finish", () => {
   it("is ended at the limit, and today's detection comes back without dependency candidates, with the note", async () => {
     const files = REPOS["node"]!;
-    const started = Date.now();
-    const detection = await runDetectorsGuarded(reader(files).reader, "svc", { timeoutMs: 4_000, entry: entryOf("env-detect-slow-thread.ts") });
-    expect(Date.now() - started).toBeLessThan(15_000);
-    expect(Object.hasOwn(detection, "dependencies")).toBe(false);
-    expect(detection.checks.map((check) => check.value.id)).toContain("unit");
-    expect(detection.notes).toContain(ENV_DETECT_TIMEOUT_NOTE);
-    const direct = await runDetectors(reader(files).reader, "svc", { legacyOnly: true });
-    expect(JSON.stringify({ ...detection, notes: detection.notes.filter((note) => note !== ENV_DETECT_TIMEOUT_NOTE) })).toBe(JSON.stringify(direct));
-  });
+    // The guard's timers run in THIS thread, so they are faked: the limit fires exactly when the test says, and the second (shorter) pass gets its
+    // full limit however long its real thread takes to start on a busy machine. Only the thread's own work is real.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const timeoutMs = 4_000;
+      const delays: number[] = [];
+      const realSetTimeout = globalThis.setTimeout;
+      vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, delay?: number, ...rest: unknown[]) => { if (typeof delay === "number") delays.push(delay); return (realSetTimeout as unknown as (...args: unknown[]) => unknown)(handler, delay, ...rest); }) as unknown as typeof setTimeout);
+      const pending = runDetectorsGuarded(reader(files).reader, "svc", { timeoutMs, entry: entryOf("env-detect-slow-thread.ts") });
+      const turns = async (count: number) => { for (let i = 0; i < count; i += 1) await new Promise<void>((done) => setImmediate(done)); };
+      while (vi.getTimerCount() === 0) await turns(1); // the full pass's limit timer is armed
+      expect(vi.getTimerCount()).toBe(1);
+      expect(delays, "the stuck pass is given exactly its limit").toEqual([timeoutMs]);
+      vi.advanceTimersByTime(timeoutMs - 1);
+      await turns(5);
+      expect(delays, "nothing is re-armed before the limit passes").toEqual([timeoutMs]);
+      vi.advanceTimersByTime(1); // the limit: the stuck thread is ended
+      while (vi.getTimerCount() === 0) await turns(1); // the shorter pass is armed with its own full limit (never more than the limit given)
+      expect(delays, "the shorter pass gets the same limit").toEqual([timeoutMs, timeoutMs]);
+      const detection = await pending; // finishes by the thread's own work, not by the clock
+      expect(Object.hasOwn(detection, "dependencies")).toBe(false);
+      expect(detection.checks.map((check) => check.value.id)).toContain("unit");
+      expect(detection.notes).toContain(ENV_DETECT_TIMEOUT_NOTE);
+      const direct = await runDetectors(reader(files).reader, "svc", { legacyOnly: true });
+      expect(JSON.stringify({ ...detection, notes: detection.notes.filter((note) => note !== ENV_DETECT_TIMEOUT_NOTE) })).toBe(JSON.stringify(direct));
+    } finally { vi.restoreAllMocks(); vi.useRealTimers(); }
+  }, 60_000);
   it("gives an empty detection with the note when even the shorter pass is stuck", async () => {
     const detection = await runDetectorsGuarded(reader(REPOS["node"]!).reader, "svc", { timeoutMs: 500, entry: entryOf("env-detect-stuck-thread.ts") });
     expect(detection.checks).toEqual([]);

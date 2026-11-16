@@ -24,6 +24,7 @@ import { createApplicationChecksFeatureMonitor } from "../../packages/worker/src
 import { OperationJournal, createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/index.js";
 import type { E2EModelReceipt } from "../../packages/contracts/src/e2e-model-channel.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
+import { expectLinearScaling } from "../support/scaling.js";
 import { CASE_ID, RUN_ID, bedrockRoute, call, channelRequest, tapAnswer } from "../support/e2e-model-fixtures.js";
 
 // MIDSTEPCOOKIE: the redaction set is current before EVERY model call, and a call without a current sync is refused.
@@ -363,12 +364,16 @@ describe("what a run may teach the worker is bounded: values, bytes, and the wor
   });
 
   it("keeps a prompt scan with hundreds of synced values fast (a call is not held for seconds)", async () => {
-    const values = Array.from({ length: E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES }, (_, index) => `cookie-${String(index).padStart(4, "0")}-${"x7".repeat(24)}`);
-    const guard = createE2ECredentialGuard({ passwords: [], emails: [], cookieValues: [], sessionValues: values });
-    const started = performance.now();
-    const outcome = guard.inspect(call(`#n1 text "${"ordinary page text ".repeat(2_000)}"`));
+    // A scaling check, not a wall-clock bound: the same prompt scanned against an eighth of the value limit and against the whole limit may take about eight times as long, never sixty-four.
+    const promptText = `#n1 text "${"ordinary page text ".repeat(2_000)}"`;
+    let outcome: ReturnType<ReturnType<typeof createE2ECredentialGuard>["inspect"]> | undefined;
+    expectLinearScaling((count) => {
+      const values = Array.from({ length: count }, (_, index) => `cookie-${String(index).padStart(4, "0")}-${"x7".repeat(24)}`);
+      const guard = createE2ECredentialGuard({ passwords: [], emails: [], cookieValues: [], sessionValues: values });
+      const prompt = call(promptText);
+      return () => { outcome = guard.inspect(prompt); };
+    }, { n: E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES / 8, label: "prompt scan against synced values" });
     expect(outcome).toMatchObject({ refuse: false });
-    expect(performance.now() - started).toBeLessThan(2_000);
   });
 });
 

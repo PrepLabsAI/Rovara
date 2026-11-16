@@ -3,6 +3,7 @@ import { EVAL_NOT_RUN_REASONS, EVAL_NOT_RUN_SENTENCES, readEvidencePack, renderE
 import { renderPublicAi } from "../../packages/contracts/src/evidence-ai-render.js";
 import { evidenceAiFromArtifact, EvidenceAiSchema, readEvidenceAi } from "../../packages/contracts/src/evidence-ai.js";
 import { v2Pack } from "../support/evidence-v2-fixtures.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const digest = "a".repeat(64);
 const question = (id: string, category = "ordinary", pass = false) => ({ id, category, edited: false, old: [true, true, true], first: pass, ...(pass ? {} : { freshOld: [true, true, true], freshNew: [false, false, false] }), answers: pass ? undefined : { old: ["old answer", "old answer", "old answer"], first: "new answer", freshOld: ["old answer", "old answer", "old answer"], freshNew: ["new answer", "new answer", "new answer"] } });
@@ -35,20 +36,27 @@ describe("AI evidence projection", () => {
     expect(renderEvidence(pack(privateArtifact)).text).not.toContain("0 questions");
   });
   it("prioritizes broken safety questions and keeps every count at the 1,000-question maximum in bounded time", () => {
-    const qs = Array.from({ length: 999 }, (_, i) => question(`q${i}`, "ordinary", true)); qs.push(question("safety-last", "safety"));
-    const start = performance.now();
-    const ai = evidenceAiFromArtifact(artifact({ questions: qs }), digest)!;
+    const questionsFor = (count: number) => { const qs = Array.from({ length: count - 1 }, (_, i) => question(`q${i}`, "ordinary", true)); qs.push(question("safety-last", "safety")); return qs; };
+    const project = (count: number) => {
+      const ai = evidenceAiFromArtifact(artifact({ questions: questionsFor(count) }), digest)!;
+      const outs = ([10, 5, 2, 0] as const).map((questionLimit) => ({ questionLimit, out: renderEvidence(v2Pack({ ai }), { questionLimit, compact: questionLimit === 0 }) }));
+      return { ai, outs };
+    };
+    const { ai, outs } = project(1000);
     expect(ai.eval.counts!.questions).toBe(1000);
     expect(ai.eval.questions[0]?.id).toBe("safety-last");
     expect(ai.eval.questions.length).toBeLessThanOrEqual(10);
-    for (const questionLimit of [10, 5, 2, 0] as const) {
-      const out = renderEvidence(v2Pack({ ai }), { questionLimit, compact: questionLimit === 0 });
+    for (const { out } of outs) {
       expect(out.firstLine).toBe("Worse on eval: 1 question broke");
       expect(out.text).toContain("1000 questions");
       expect(out.text).toContain("safety-last");
       expect(out.text.length).toBeLessThanOrEqual(9000);
     }
-    expect(performance.now() - start).toBeLessThan(2000);
+    // Bounded time as a scaling check: eight times the questions (125 -> 1000) costs about eight times, not sixty-four.
+    expectLinearScaling((count) => { const qs = questionsFor(count); const input = artifact({ questions: qs }); return () => {
+      const projected = evidenceAiFromArtifact(input, digest)!;
+      for (const questionLimit of [10, 5, 2, 0] as const) renderEvidence(v2Pack({ ai: projected }), { questionLimit, compact: questionLimit === 0 });
+    }; }, { n: 125, label: "evidence AI projection by question count" });
   });
   it("cuts and neutralizes hostile excerpts without links, mentions, blocks or credential fragments", () => {
     const hostile = "![x](https://evil.test) [x][ref] @owner #123 <b>bad</b>\n# heading\n> quote\n---\n```\n~~~\n\u202e\ufe0f";
@@ -232,10 +240,12 @@ it("refuses exotic payloads before a schema can invoke their accessors", () => {
   const bad = { get eval() { reads++; return { label: "CANARY" }; } };
   expect(readEvidenceAi(bad)).toBeUndefined(); expect(reads).toBe(0);
   const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
-  const started = performance.now();
   expect(readEvidenceAi(cyclic)).toBeUndefined();
   expect(readEvidenceAi({ pad: "CANARY".repeat(200000) })).toBeUndefined();
-  expect(performance.now() - started).toBeLessThan(2000);
+  // Refusing a huge payload must not cost more as the payload grows (25,000 -> 200,000 repeats, the original size).
+  let refused: unknown = "unset";
+  expectLinearScaling((repeats) => { const huge = { pad: "CANARY".repeat(repeats) }; return () => { refused = readEvidenceAi(huge); }; }, { n: 25_000, label: "refusing an oversized evidence payload" });
+  expect(refused).toBeUndefined();
 });
 
 it("refuses a malformed stored AI flag with fixed words", () => {

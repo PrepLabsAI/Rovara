@@ -1,5 +1,6 @@
 // TE-F3 part A: the base score cache. The key is content-addressed, so a change to any part is a miss and a fresh base run, never a stale score; the store is company-scoped; only Rovara's own base round writes it.
 import { describe, expect, it } from "vitest";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DOCUMENT_STORE_LIMITS, type StoredDocument } from "../../packages/contracts/src/ports/document-store.js";
 import { COMPANY_KEY_PREFIX, companyOfKey } from "../../packages/contracts/src/ports/company-scope.js";
@@ -332,19 +333,23 @@ it("refuses malformed claim identities with fixed words and leaves their marks i
 it("bounds malformed large claim reads and never calls the writer", async () => {
   const { store, cache } = world(); await cache(parts().company).startMeasurement!(parts());
   const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
-  const malformed = { ...(await store.get(address))!, claimId: "x".repeat(1_000_000) };
+  const stored = (await store.get(address))!;
   let reads = 0; let writes = 0;
-  // Inject a corrupt read directly: the real DocumentStore rejects oversized writes.
-  const mine = createDocumentBaseScoreCache({
-    get: async () => { reads++; return malformed; },
-    put: async () => { writes++; return { applied: true }; },
-  }, { companyId: parts().company, now: () => 1_800_000_000_000 });
-  const start = performance.now();
-  expect(await mine.readMeasurement!(parts())).toBe("unavailable");
-  expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
+  let read: unknown; let started: unknown;
+  // A 125 KB, then 1 MB, corrupt claim: reading it must cost no more than its size (linear work grows about 8x).
+  await expectLinearScalingAsync((size) => {
+    const malformed = { ...stored, claimId: "x".repeat(size) };
+    // Inject a corrupt read directly: the real DocumentStore rejects oversized writes.
+    const mine = createDocumentBaseScoreCache({
+      get: async () => { reads++; return malformed; },
+      put: async () => { writes++; return { applied: true }; },
+    }, { companyId: parts().company, now: () => 1_800_000_000_000 });
+    return async () => { reads = 0; writes = 0; read = await mine.readMeasurement!(parts()); started = await mine.startMeasurement!(parts()); };
+  }, { n: 125_000, label: "reading a malformed large claim" });
+  expect(read).toBe("unavailable");
+  expect(started).toEqual({ status: "unavailable" });
   expect(reads).toBe(2); expect(writes).toBe(0);
-  expect(performance.now() - start).toBeLessThan(1_000);
-}, 1_000);
+}, 60_000);
 
 it("does not classify a lost claim against an identity-less mark as measuring", async () => {
   const { store, cache } = world(); await cache(parts().company).startMeasurement!(parts());

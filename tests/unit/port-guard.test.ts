@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { expectLinearScaling } from "../support/scaling.js";
 import {
   DEFAULT_NAMES,
   GuardError,
@@ -668,9 +669,9 @@ describe("port-guard hardening (review of lane L0)", () => {
   });
 
   it("stays fast on a long line of host-name characters", () => {
-    const started = Date.now();
+    // A scaling check, not a wall-clock bound: the line is timed at 12,500 and at 100,000 characters.
+    expectLinearScaling((n) => { const line = "a".repeat(n); return () => lineFindings(line); }, { n: 12_500, label: "lineFindings on a long line" });
     expect(lineFindings(`${"a".repeat(100_000)}`)).toEqual([]);
-    expect(Date.now() - started).toBeLessThan(2000);
   });
 
   it("sees a symlink, and a file of any name, introduced inside a merge's own resolution", () => {
@@ -782,13 +783,22 @@ describe("port-guard hardening (review of lane L0)", () => {
   });
 
   it("re-check 3: a 100k-line added lockfile is scanned in linear time, and a secret deep inside it is still found", () => {
-    const lines = Array.from({ length: 100_000 }, (_, i) => `package-${String(i)}@1.0.${String(i % 97)}:\n  resolved "https://registry.example.test/p/-/p-${String(i)}.tgz"`);
-    lines.splice(73_219, 0, `key "${fakeAccessKey()}"`);
-    lane.write("yarn.lock", `${lines.join("\n")}\n`);
+    const lockOf = (count: number) => {
+      const lines = Array.from({ length: count }, (_, i) => `package-${String(i)}@1.0.${String(i % 97)}:\n  resolved "https://registry.example.test/p/-/p-${String(i)}.tgz"`);
+      lines.splice(Math.floor(count * 0.73219), 0, `key "${fakeAccessKey()}"`);
+      return `${lines.join("\n")}\n`;
+    };
+    // A scaling check, not a wall-clock bound: a 12,500-line and a 100,000-line added lockfile, each in a lane of its own (built outside the timed guard run). The guard's own scan is timed
+    // (gitleaks off): the external gitleaks process would add a large linear cost that hides a super-linear one; it still runs on the full 100,000-line lockfile below.
+    expectLinearScaling((count) => {
+      const own = new Lane();
+      own.write("yarn.lock", lockOf(count));
+      own.commit("big lock");
+      return () => own.guard({ gitleaks: "off" });
+    }, { n: 12_500, label: "guard on an added lockfile" });
+    lane.write("yarn.lock", lockOf(100_000));
     lane.commit("big lock");
-    const started = performance.now();
     const found = lane.guard({ gitleaks: "run" });
-    expect(performance.now() - started).toBeLessThan(60_000);
     expect(found.map((f) => f.file)).toEqual(["yarn.lock"]);
   }, 120_000);
 
@@ -1056,10 +1066,9 @@ describe("the hashed name list and the private extended list", () => {
   });
 
   it("stays fast on a 100,000-line file", () => {
-    const text = Array.from({ length: 100_000 }, (_, i) => `const name${String(i)} = "value-${String(i % 97)}"; // resolved package-${String(i)}`);
-    const started = Date.now();
-    for (const line of text) lineFindings(line, INVENTED);
-    expect(Date.now() - started).toBeLessThan(4000);
+    const linesOf = (count: number) => Array.from({ length: count }, (_, i) => `const name${String(i)} = "value-${String(i % 97)}"; // resolved package-${String(i)}`);
+    // A scaling check, not a wall-clock bound: 12,500 and 100,000 lines.
+    expectLinearScaling((count) => { const text = linesOf(count); return () => { for (const line of text) lineFindings(line, INVENTED); }; }, { n: 12_500, label: "lineFindings over many lines" });
   });
 
   it("the command line says when the extended list was not loaded, and does not say it when the list is given", () => {

@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -62,10 +63,10 @@ it("refuses malformed stored metadata and storage failures without leaking cause
   await expect(store.ownerOf(1)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
 });
 it("handles 100 installations in bounded time, and reports truncation without opening claims", async () => {
+  // A scaling check, not a wall-clock bound: 12 and 96 installations (the store's cap is 100, which a larger input would cross). Each run backfills a fresh store, because a completed backfill answers at once.
+  await expectLinearScalingAsync((n) => { const items = listed(n); return async () => { await setup().store.backfill(async () => items); }; }, { n: 12, label: "backfill of installations" });
   const { store } = setup();
-  const started = performance.now();
   expect(await store.backfill(async () => listed(100))).toEqual({ more: false });
-  expect(performance.now() - started).toBeLessThan(10_000);
   const other = setup();
   expect(await other.store.backfill(async () => listed(101))).toEqual({ more: true });
   expect(other.db.get("GITHUB_INSTALLATION_BINDING", "BACKFILL")).toBeUndefined();
