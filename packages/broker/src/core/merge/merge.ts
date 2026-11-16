@@ -66,6 +66,7 @@ import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, isHostRateLimit, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
 import { DEFAULT_CI_MODE, PERMISSION_LOOKUPS_MAX, ciAllowsMerge, ciCountsAsPassing, readBranch, readCi, tracksMerge, unreadableSinceOf, type ProjectCiMode } from "./merge-tracking.js";
 import type { MergePeople } from "./people.js";
+import { heldAfterHalfMerge, mergeOrderOf, MERGE_ORDER_WORDS, type MergeOrder } from "./merge-order.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergeTask, SessionTimeline } from "./seams.js";
 import { plain, readMergeTracking, taskRecordKey } from "./store.js";
@@ -241,6 +242,11 @@ export interface MergeDependencies {
   mergeWait?(task: MergeTask): string | undefined;
   /** TE-B2: the project's real-check mode (see `ProjectCiMode`); `DEFAULT_CI_MODE` when absent. It decides whether an approval of the head before a clean sync carries over on "No CI". */
   ciMode?(task: MergeTask): Promise<ProjectCiMode> | ProjectCiMode;
+  /**
+   * MR3: the dependency facts between the task's repositories (TE-MR2's `repositoryEdges.edges`, `{ consumer, provider }`), read at runtime by `mergeOrderOf`. Absent, or answering undefined: no
+   * facts, and the merge order, digest and words are the ones the merge core always had. A read that throws is "unreadable" (no safe order until a person confirms the override).
+   */
+  repositoryEdges?(task: MergeTask): unknown;
 }
 
 const byRepository = <T extends { repositoryId: string; number: number }>(list: readonly T[]): T[] =>
@@ -385,12 +391,43 @@ export interface PreparedMerge {
   risk: MergeRisk;
   /** The change tier the task carried when the request was made (absent when it carries none): the tier the person approves at. The press refuses when the change has grown past it. */
   tier?: TierLevel | undefined;
+  /** MR3: the repositories in the order they merge, when that order came from dependencies (absent otherwise). The person approves this order: it is in the digest. */
+  mergeOrder?: string[];
+  /** MR3: a person confirmed merging in repository order although no safe order could be found (DEC 209). In the digest. */
+  orderOverride?: true;
 }
 
 /** The digest a proof is bound to: the exact pull requests and heads, the merge method and the risk level the person is shown. A change to any of them is a new question. */
-export function mergeArtifactDigest(subject: MergeSubject, method: CodeSettings["mergeMethod"], risk: MergeRisk["level"], tier?: TierLevel): string {
-  // The tier is in the digest only when the task carries one, so the digest of every task from before the change tier is the one it always was.
-  return createHash("sha256").update(JSON.stringify({ kind: MERGE_APPROVAL_KIND, taskId: subject.taskId, method, risk, ...(tier === undefined ? {} : { tier }), pullRequests: byRepository(subject.pullRequests) })).digest("hex");
+export function mergeArtifactDigest(subject: MergeSubject, method: CodeSettings["mergeMethod"], risk: MergeRisk["level"], tier?: TierLevel, order?: readonly string[] | "override"): string {
+  // The tier is in the digest only when the task carries one, so the digest of every task from before the change tier is the one it always was. The same holds for the MR3 order: only an
+  // order from dependencies, or a person's override, is in it.
+  return createHash("sha256").update(JSON.stringify({
+    kind: MERGE_APPROVAL_KIND, taskId: subject.taskId, method, risk, ...(tier === undefined ? {} : { tier }), pullRequests: byRepository(subject.pullRequests), ...(order === undefined ? {} : { order }),
+  })).digest("hex");
+}
+
+/** MR3: the merge order of the task's required pull requests (merged ones included, so a half merge keeps its order). A seam that throws gives "unreadable", never today's order. */
+async function mergeOrderOfTask(deps: MergeDependencies, task: MergeTask & { workflow: WorkflowSnapshot }): Promise<MergeOrder> {
+  const repositories = requiredPullRequests(task.workflow).map((entry) => entry.repositoryId);
+  if (deps.repositoryEdges === undefined) return mergeOrderOf(repositories, undefined);
+  // The read and the reading of the facts are both inside the try: a seam that throws (at once or later) or facts that throw when read are "unreadable", never a raw error.
+  try {
+    return mergeOrderOf(repositories, await deps.repositoryEdges(task));
+  } catch (error) {
+    deps.host.log?.("merge.order_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    return { kind: "no_safe_order", reason: "unreadable", repositories: mergeOrderOf(repositories, undefined).repositories };
+  }
+}
+
+/** What each change line says when a person confirmed merging although no safe order could be found. */
+const ORDER_OVERRIDE_SUFFIX = " (in the order listed, which you confirmed)";
+
+/** The pull requests in the order they merge: the order's when it came from dependencies, repository order otherwise (today's, and a person's override). */
+function inMergeOrder<T extends { repositoryId: string; number: number }>(list: readonly T[], order: MergeOrder): T[] {
+  const sorted = byRepository(list);
+  if (order.kind !== "dependencies") return sorted;
+  const rank = new Map(order.repositories.map((repository, index) => [repository, index]));
+  return sorted.sort((left, right) => (rank.get(left.repositoryId) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.repositoryId) ?? Number.MAX_SAFE_INTEGER));
 }
 
 const changeText = (repository: string, number: number, method: string): string => `Merge ${repository} pull request ${String(number)} (${method})`;
@@ -403,7 +440,11 @@ const changeText = (repository: string, number: number, method: string): string 
  */
 export async function prepareMerge(
   deps: MergeDependencies,
-  input: { taskId: string; requestId: string; presserPersonId?: string | undefined; expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined },
+  input: {
+    taskId: string; requestId: string; presserPersonId?: string | undefined; expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined;
+    /** MR3 (DEC 209): a person confirms merging in repository order although no safe order could be found. Ignored when there is a safe order (nothing to override). */
+    orderOverride?: boolean | undefined;
+  },
 ): Promise<PreparedMerge> {
   const body = MergePressBodySchema.safeParse({ requestId: input.requestId });
   if (!body.success) throw agentXError("CONFIG_INVALID", "requestId: must be a uuid");
@@ -443,15 +484,24 @@ export async function prepareMerge(
     taskId: tracked.taskId,
     pullRequests: byRepository(open.map((entry) => ({ repositoryId: entry.repositoryId, number: entry.number, headSha: heads.get(pullRequestKey(entry))! }))),
   };
+  // MR3: the order the pull requests merge in. No safe order is refused until a person confirms the override; only a person can (DEC 209).
+  // With one pull request left to merge (a half merge being finished) there is no order to get wrong: nothing to refuse or override.
+  const found = await mergeOrderOfTask(deps, tracked);
+  const order: MergeOrder = found.kind === "no_safe_order" && subject.pullRequests.length < 2 ? { kind: "repository", repositories: found.repositories } : found;
+  if (order.kind === "no_safe_order" && input.orderOverride !== true) throw agentXError("MERGE_NOT_READY", MERGE_ORDER_WORDS.noSafeOrder[order.reason]);
+  const ordered = inMergeOrder(subject.pullRequests, order);
+  const orderShown = order.kind === "dependencies" ? ordered.map((pr) => pr.repositoryId) : order.kind === "no_safe_order" ? "override" as const : undefined;
   const risk = riskOfTask(tracked.workflow, items);
   const tier = tracked.workflow.flow?.tier?.level;
   const request: ApprovalRequest = {
     companyId: tracked.orgId, requestId: input.requestId, kind: MERGE_APPROVAL_KIND, subject: { type: "task", id: tracked.taskId }, projectName: tracked.project,
-    revision: tracked.workflow.revision, artifactDigest: mergeArtifactDigest(subject, checked.settings.mergeMethod, risk.level, tier), risk: risk.level,
+    revision: tracked.workflow.revision, artifactDigest: mergeArtifactDigest(subject, checked.settings.mergeMethod, risk.level, tier, orderShown), risk: risk.level,
   };
+  const steps = order.kind === "dependencies" && ordered.length > 1;
   return {
     request, requirement: await deps.approvers.requirement(request), subject, risk, mergeMethod: checked.settings.mergeMethod, ...(tier === undefined ? {} : { tier }),
-    changes: subject.pullRequests.map((pr) => changeText(pr.repositoryId, pr.number, checked.settings.mergeMethod)),
+    changes: ordered.map((pr, index) => `${changeText(pr.repositoryId, pr.number, checked.settings.mergeMethod)}${steps ? (index === 0 ? " first" : " then") : orderShown === "override" ? ORDER_OVERRIDE_SUFFIX : ""}`),
+    ...(orderShown === undefined ? {} : orderShown === "override" ? { orderOverride: true as const } : { mergeOrder: orderShown }),
   };
 }
 
@@ -463,7 +513,10 @@ export type MergePressResult = { status: "MERGED"; pullRequests: Array<{ reposit
  */
 export async function pressMerge(
   deps: MergeDependencies,
-  input: { taskId: string; requestId: string; proof: ApprovalProof; presserPersonId?: string | undefined; expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined },
+  input: {
+    taskId: string; requestId: string; proof: ApprovalProof; presserPersonId?: string | undefined; expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined;
+    orderOverride?: boolean | undefined;
+  },
 ): Promise<MergePressResult> {
   const prepared = await prepareMerge(deps, input);
   // What the approver adapter requires is enforced here, before the proof is looked at: a method it does not list is no approval, and more than one approver cannot be collected yet.
@@ -491,6 +544,7 @@ export async function pressMerge(
   if (await scopeHoldOf({ store: deps.store }, task)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
   const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
     decidedBy: verdict.approver.personId, occurrence: input.requestId, proof: input.proof, method: verdict.method, mergeMethod: prepared.mergeMethod, requestId: input.requestId, tier: prepared.tier,
+    ...(prepared.mergeOrder === undefined ? {} : { mergeOrder: prepared.mergeOrder }),
   });
   return { status: "MERGED", pullRequests: merged };
 }
@@ -774,9 +828,12 @@ const hashNumber = (seed: string): number => Number.parseInt(createHash("sha256"
  */
 async function mergeTask(
   deps: MergeDependencies, tracked: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, subject: MergeSubject,
-  who: { decidedBy: string; occurrence: string; proof: ApprovalProof; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string; tier?: TierLevel | undefined },
+  who: { decidedBy: string; occurrence: string; proof: ApprovalProof; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string; tier?: TierLevel | undefined; mergeOrder?: readonly string[] },
 ): Promise<Array<{ repositoryId: string; number: number }>> {
-  const { plan, settings, alreadyMerged, mergedBefore, entries } = await mergeableNow(deps, tracked, subject, who.decidedBy, who.tier);
+  const { plan: checkedPlan, settings, alreadyMerged, mergedBefore, entries } = await mergeableNow(deps, tracked, subject, who.decidedBy, who.tier);
+  // MR3: the order the person approved (bound into the digest the proof verified): providers first, so a pull request is never merged before one it depends on.
+  const order: MergeOrder | undefined = who.mergeOrder === undefined ? undefined : { kind: "dependencies", repositories: [...who.mergeOrder], providersOf: {} };
+  const plan = order === undefined ? checkedPlan : inMergeOrder(checkedPlan.map((step) => ({ ...step, repositoryId: step.entry.repositoryId, number: step.entry.number })), order);
   // The method the person was shown is the method used: a setting changed since is a new question.
   if (settings.mergeMethod !== who.mergeMethod) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (alreadyMerged) return entries.map((entry) => ({ repositoryId: entry.repositoryId, number: entry.number }));
@@ -816,8 +873,8 @@ async function mergeTask(
     if (merged.length === 0) {
       throw agentXError("MERGE_NOT_READY", result.reason === "head_changed" ? M.changedAfterConfirm : M.notMerged(entry.repositoryId, why));
     }
-    // A merge that fails after an earlier pull request merged stops: a person finishes it, and is told.
-    const text = M.halfMerged(merged.join(", "), entry.repositoryId, why);
+    // A merge that fails after an earlier pull request merged stops: a person finishes it, and is told. MR3: with an order from dependencies, what was held back and the next steps.
+    const text = order === undefined ? M.halfMerged(merged.join(", "), entry.repositoryId, why) : `${M.halfMerged(merged.join(", "), entry.repositoryId, why)} ${heldAfterHalfMerge(order, entry.repositoryId, merged)}`;
     const at = new Date(deps.now()).toISOString();
     const stuck = deps.milestones.items({
       kind: "stuck", orgId: tracked.orgId, taskId: tracked.taskId, ...(tracked.sessionId === undefined ? {} : { sessionId: tracked.sessionId }), at, text,
