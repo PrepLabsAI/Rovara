@@ -274,6 +274,8 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       const round = sentBack.length;
       const latest = sentBack.at(-1);
       if (latest === undefined || round > SEND_BACK_REFLECTIONS_MAX) return;
+      // A findings answer's reason is code's own summary ("N accepted, M to fix", contracts `resolveWorkflowReviewFindings`), not the person's words: it counts as a round but is never a correction to learn from.
+      if (latest.source === "FINDINGS") return;
       // Only a person's own words are a correction: no reason, or code's fixed sentence, queues nothing.
       const words = latest.reason.trim();
       if (words === "" || words === NO_REASON_TEXT) return;

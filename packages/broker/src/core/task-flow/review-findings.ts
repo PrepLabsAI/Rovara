@@ -21,6 +21,7 @@ import { findingAcceptItem, type FindingAcceptMethod } from "./finding-accept.js
 import { ownerNoteItem, ownerRoundPlaceOf } from "./owner-note.js";
 import { CLOSED_TASK, NEVER_STARTED_TASK, WAITING_FOR_SPEND, admitRound, loadTaskAsOwner, ownerWords, parseBody, requireMayStartWork, waitingForSpend, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
+import { tellLessons } from "./lessons-tell.js";
 import { acceptedOfRole, requirePageForSecurityAccept } from "./security-accept.js";
 import { commitWorkflow, readWorkspace, runDispatchRow } from "./stage-machine.js";
 import { iso, log } from "./support.js";
@@ -89,6 +90,8 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     if (fresh?.workflow !== undefined && again?.source === "FINDINGS" && again.workflowRevision === request.expectedRevision && sameAnswers(fresh.workflow, request, again.reason)) return taskViewOf(deps, fresh);
     throw agentXError("IDEMPOTENCY_CONFLICT", FINDINGS_OUT_OF_DATE);
   }
+  // A fix sends the task back to coding: the lessons seam is told once, by the call that committed (an answer that only accepts findings is an approval and tells nothing). Best effort, bounded (`lessons-tell.ts`).
+  if (fixes > 0) await tellLessons(deps, task.taskId);
   if (due !== undefined) {
     await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: due })
       .catch((error: unknown) => log(deps, { event: "task_actions.findings_start_deferred", taskId: task.taskId, kind: due, error: error instanceof Error ? error.name : "unknown" }));

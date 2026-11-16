@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Admission, AdmissionRequest } from "@agentx/contracts";
 import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll, when } from "@agentx/contracts";
-import { LESSONS_TELL_LIMIT_MS } from "../../packages/broker/src/core/task-flow/send-back.js";
+import { LESSONS_TELL_LIMIT_MS } from "../../packages/broker/src/core/task-flow/lessons-tell.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
