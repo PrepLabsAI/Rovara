@@ -17,7 +17,9 @@
 // exec and a fresh-sandbox exec side by side and a token can never do more than the exec it was issued for (a `record` token does not allow `real`). A call with no token is read in the bridge's default round (`roundKind`, working when absent).
 //
 // Limits (design 7): request headers 16 KB, body 5 MB, response 10 MB in all, one stream chunk 1 MB (a bigger chunk from the port is split), header read 10 s, a call 10 minutes in all.
-// The bridge logs fixed fields only (event, row, mode, status, class, refusal word). Never a body, a header value, a URL query, a token, or a provider's words; an error is never repeated.
+// The bridge logs fixed fields only (event, row, mode, status, class, refusal word, reason word). Never a body, a header value, a URL query, a token, or a provider's words; an error is never repeated.
+// DROPS (EVAL-WIRE-BRIDGE-UNLOGGED-DROPS): every connection or call the bridge ends WITHOUT an answer the egress settled is logged as `{event: "dropped", reason: <one of MODEL_BRIDGE_DROP_REASONS>}`, and a call whose
+// answer was cut carries `reason: <cut word>` on its `call` event, so a caller that must fail a run on any bridge-made end (the eval exec) sees every one of them.
 import { randomBytes } from "node:crypto";
 import { chmod, rm } from "node:fs/promises";
 import http from "node:http";
@@ -51,6 +53,10 @@ export type ModelBridgeLimits = { -readonly [K in keyof typeof MODEL_BRIDGE_LIMI
 /** The modes that may forward a real call. `replay` forwards nothing and needs no token. */
 export type ModelBridgeForwardMode = "real" | "record";
 const FORWARD_MODES: readonly ModelBridgeForwardMode[] = ["real", "record"];
+
+/** The fixed words of a `dropped` event: a request head that never came (`header_time`) or was too large (`header`), a path that is not `/call` (`not_call`), a body that paused (`slow`) or went away (`gone`), a connection over the limit (`connections`), and a fault inside the handler (`fault`). */
+export const MODEL_BRIDGE_DROP_REASONS = ["header_time", "header", "not_call", "slow", "gone", "connections", "fault"] as const;
+export type ModelBridgeDropReason = (typeof MODEL_BRIDGE_DROP_REASONS)[number];
 
 export const MODEL_FRESH_SANDBOX_SENTENCE = "not run: real model checks need a fresh check sandbox";
 /** The rounds that may make a real call: the fresh unsealed check round (TE-B1, not built) and the sealed round. Never the working round. */
@@ -135,6 +141,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
   const log = (fields: Readonly<Record<string, string | number>>): void => {
     try { options.log?.(fields); } catch { /* a log sink that throws is not the call's problem */ }
   };
+  const dropped = (reason: ModelBridgeDropReason): void => log({ event: "dropped", reason });
 
   // ---- events on the wire (NDJSON)
   const line = (event: Record<string, unknown>): string => `${JSON.stringify(event)}\n`;
@@ -348,6 +355,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
 
   async function handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     if (request.method !== "POST" || request.url !== "/call") {
+      dropped("not_call");
       response.writeHead(404, { connection: "close" }).end();
       return;
     }
@@ -362,7 +370,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     const mode = (MODEL_BRIDGE_MODES as readonly unknown[]).includes(modeHeader) ? (modeHeader as ModelBridgeMode) : undefined;
     const read = await readBody(request, limits.envelopeBytes);
     if (!read.ok) {
-      if (read.reason === "slow" || read.reason === "gone") { response.destroy(); return; }
+      if (read.reason === "slow" || read.reason === "gone") { dropped(read.reason); response.destroy(); return; }
       await refuse(DEFAULT_FAMILY, "too_large");
       request.destroy();
       return;
@@ -418,7 +426,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     }
     if (mode === "real") {
       const entered = await enter(token, "real", controller.signal);
-      if (entered === "aborted") { aborts.delete(controller); response.end(); return; }
+      if (entered === "aborted") { dropped("gone"); aborts.delete(controller); response.end(); return; }
       if (entered !== "started") return refuseBlocked(entered);
       try {
         await pump(response, { row: frame.row, family, mode, via: "real", events: options.egress.forward(options.egressScope, frame, { signal: controller.signal }), controller, ...(execId === undefined ? {} : { execId }) });
@@ -431,7 +439,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
     // record: forwards the first call per changed prompt when a real call is allowed, otherwise only replays.
     if (options.recording === undefined) return finishWith([line({ t: "scripted" })], "refused", "refused", 0);
     const entered = await enter(token, "record", controller.signal);
-    if (entered === "aborted") { aborts.delete(controller); response.end(); return; }
+    if (entered === "aborted") { dropped("gone"); aborts.delete(controller); response.end(); return; }
     const block = entered === "started" ? undefined : entered;
     const served = await (block === undefined ? options.recording.record : options.recording.replay).serve(frame, { signal: controller.signal });
     return answerRecording(served, block === undefined, block);
@@ -468,7 +476,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       if (Buffer.byteLength(path) > 100) throw new Error("the model bridge socket path is too long");
       await rm(path, { force: true });
       const created = http.createServer({ maxHeaderSize: limits.headersBytes, keepAlive: false } as http.ServerOptions, (request, response) => {
-        handle(request, response).catch(() => { try { response.destroy(); } catch { /* gone */ } });
+        handle(request, response).catch(() => { dropped("fault"); try { response.destroy(); } catch { /* gone */ } });
       });
       created.maxConnections = limits.connections;
       created.requestTimeout = limits.totalMs;
@@ -477,7 +485,7 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
       created.on("connection", (socket) => {
         sockets.add(socket);
         // The header read: a connection that has not sent a whole request head by then is closed.
-        const timer = setTimeout(() => socket.destroy(), limits.headerReadMs);
+        const timer = setTimeout(() => { dropped("header_time"); socket.destroy(); }, limits.headerReadMs);
         socket.once("close", () => { clearTimeout(timer); sockets.delete(socket); });
         (socket as net.Socket & { __headerTimer?: NodeJS.Timeout }).__headerTimer = timer;
       });
@@ -485,7 +493,9 @@ export function createModelBridge(options: ModelBridgeOptions): ModelBridge {
         const timer = (request.socket as net.Socket & { __headerTimer?: NodeJS.Timeout }).__headerTimer;
         if (timer !== undefined) clearTimeout(timer);
       });
-      created.on("clientError", (_error, socket) => { try { socket.end("HTTP/1.1 431 Request Header Fields Too Large\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"); } catch { socket.destroy(); } });
+      // A connection over `maxConnections` is closed by Node before any request: logged, never silent.
+      created.on("drop", () => dropped("connections"));
+      created.on("clientError", (_error, socket) => { dropped("header"); try { socket.end("HTTP/1.1 431 Request Header Fields Too Large\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"); } catch { socket.destroy(); } });
       await new Promise<void>((resolve, reject) => { created.once("error", reject); created.listen(path, () => { created.off("error", reject); resolve(); }); });
       await chmod(path, 0o600);
       server = created;
