@@ -248,6 +248,27 @@ describe("review-1 shapes", () => {
     const set = aiRelatedSet({ paths: ["package.json", "a.ts"], links: ["assets/persona.txt"], removed: [], text: new Map([["package.json", "{\"dependencies\":{\"openai\":\"1\"}}"], ["a.ts", "import 'openai';\nconst p = 'assets/persona.txt';\n"]]) });
     expect(set.known).toBe(false);
   });
+  // REVIEW-1 re-check (Sonnet) residual gaps.
+  it("a computed path that leaves the reader's folder counts (template pieces, parent.parent, cwd)", async () => {
+    const tpl = { ...TS, "src/lib/roles.ts": "import OpenAI from 'openai';\nimport { readFileSync } from 'node:fs';\nexport const role = (r: string) => readFileSync(`${__dirname}/../instructions/${r}.md`, 'utf8');\n", "src/instructions/reviewer.md": "Review strictly.\n" };
+    expect(await classify(tpl, { "src/instructions/reviewer.md": "Review gently.\n" })).toBeUndefined();
+    const up = { ...PY, "app/llm.py": `${PY["app/llm.py"] as string}\ndef role(r):\n    return (Path(__file__).parent.parent / f"{r}.txt").read_text()\n`, "reviewer.txt": "Review strictly.\n" };
+    expect(await classify(up, { "reviewer.txt": "Review gently.\n" })).toBeUndefined();
+    const cwd = { ...TS, "src/llm.ts": `${TS["src/llm.ts"] as string}export const role = (r: string) => readFileSync(process.cwd() + "/" + r + ".md", "utf8");\n`, "notes/reviewer.md": "Review strictly.\n" };
+    expect(await classify(cwd, { "notes/reviewer.md": "Review gently.\n" })).toBeUndefined();
+    expect(await classify(tpl, typo)).toMatchObject({ status: "none_found" });
+    // Only the template's static piece names the folder (no "..", no cwd).
+    const piece = { ...TS, "src/lib/deep/roles.ts": "import OpenAI from 'openai';\nimport { readFileSync } from 'node:fs';\nimport { root } from '../root.js';\nexport const role = (r: string) => readFileSync(`${root}/instructions/${r}.md`, 'utf8');\n", "src/lib/root.ts": "export const root = process.env.ROOT ?? '/srv';\n", "instructions/reviewer.md": "Review strictly.\n" };
+    expect(await classify(piece, { "instructions/reviewer.md": "Review gently.\n" })).toBeUndefined();
+  });
+  it("a non-code file under an agents/ai/llm folder is a root", async () => {
+    const base = { ...TS, "agents/planner.md": "Plan carefully.\n" };
+    expect(await classify(base, { "agents/planner.md": "Plan quickly.\n" })).toBeUndefined();
+  });
+  it("a local Ollama endpoint is a model call", async () => {
+    const base = { "package.json": "{}", "src/llm.ts": "import { S } from './s.js';\nexport const ask = () => fetch('http://localhost:11434/api/chat', { method: 'POST', body: S });\n", "src/s.ts": "export const S = 'Be kind.';\n" };
+    expect(await classify(base, { "src/s.ts": "export const S = 'Be very kind.';\n" })).toBeUndefined();
+  });
   it("an unclosed Python import list stays linear", () => {
     expectLinearScaling(n => {
       const text = "import openai\n" + "from x import (\n".repeat(Math.ceil(n / 16));

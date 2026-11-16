@@ -39,7 +39,7 @@ export const AI_MARKER = new RegExp([
   String.raw`@anthropic-ai\/|@google\/genai|@google\/generative-ai|@google-cloud\/vertexai|@google-cloud\/aiplatform|@aws-sdk\/client-bedrock|@ai-sdk\/|@langchain\/|@mistralai\/|@azure\/openai|@huggingface\/inference`,
   String.raw`bedrock[-_](?:agent[-_])?runtime|invoke_?model|converse_?stream|\bconverse\b|api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com`,
   // Raw HTTP to OpenAI-compatible and other provider APIs, Azure AI Inference.
-  String.raw`chat\/completions|\/v1\/messages|\/v1\/completions|\/v1\/responses|:(?:stream)?generateContent|openrouter|deepseek|api\.together|api\.mistral|api\.x\.ai|api\.groq|api\.cohere|azure\.ai\.inference|ai-inference|huggingface_hub|InferenceClient`,
+  String.raw`chat\/completions|\/v1\/messages|\/v1\/completions|\/v1\/responses|:(?:stream)?generateContent|openrouter|deepseek|api\.together|api\.mistral|api\.x\.ai|api\.groq|api\.cohere|azure\.ai\.inference|ai-inference|huggingface_hub|InferenceClient|invoke_endpoint|:11434|\/api\/chat|\/api\/generate`,
   String.raw`(["'\x60])ai(?:\/[^"'\x60\s]{0,256})?\1`,
 ].join("|"), "iu");
 
@@ -145,16 +145,21 @@ function scanPython(source: string): Imports {
 export function hasDynamicLoad(path: string, text: string): boolean {
   return CODE_PATH.test(path) && (PY_PATH.test(path) ? scanPython(text).dynamic : scanTs(text).dynamic);
 }
-const READ_CALL = /\b(?:readFileSync|readFile|createReadStream|readdirSync|readdir|opendir|read_text|read_bytes|open|files|resource_string|resource_stream|read_resource|listdir|scandir|iterdir|glob|rglob|FileSystemLoader|PackageLoader|load_prompt)\s*\(/u;
-const LITERAL = /"([^"\\\r\n]{1,512})"|'([^'\\\r\n]{1,512})'|\x60([^\x60\\$\r\n]{1,512})\x60/gu;
+const READ_CALL = /\b(?:readFileSync|readFile|readTextFile|createReadStream|readdirSync|readdir|opendir|read_text|read_bytes|open|files|file|get_data|resource_string|resource_stream|read_resource|listdir|scandir|iterdir|walk|glob|globSync|sync|rglob|FileSystemLoader|PackageLoader|load_prompt)\s*\(/u;
+/** A computed read that may leave the reader's folder: one level up, or from the working directory (the repository root). */
+const READ_UP = /\.\.\/|parent\.parent|dirname\(\s*dirname|\bparents\[/u;
+const READ_CWD = /\bcwd\s*\(|\bgetcwd\s*\(|Path\.cwd/u;
+const LITERAL = /"([^"\\\r\n]{1,512})"|'([^'\\\r\n]{1,512})'|\x60([^\x60\\\r\n]{1,512})\x60/gu;
 const PATHISH = /^[\w@.\-/ ]*[A-Za-z][\w@.\-/ ]*$/u;
 function pathLiterals(text: string): string[] {
   const out: string[] = [];
   for (const m of text.matchAll(LITERAL)) {
-    const value = (m[1] ?? m[2] ?? m[3])!;
-    if (!PATHISH.test(value)) continue;
-    const key = value.split("/").filter(part => part !== "" && part !== "." && part !== "..").join("/");
-    if (key !== "") out.push(key);
+    // A computed path (`${dir}/instructions/${r}.md`, f"{base}/prompts/{r}.txt") contributes its static pieces.
+    for (const value of (m[1] ?? m[2] ?? m[3])!.split(/\$?\{[^}]{0,512}\}/u)) {
+      if (!PATHISH.test(value)) continue;
+      const key = value.split("/").filter(part => part !== "" && part !== "." && part !== "..").join("/");
+      if (key !== "") out.push(key);
+    }
   }
   return out;
 }
@@ -338,9 +343,8 @@ function walk(snapshot: RepositorySnapshot, limits: AiWalkLimits): AiRelatedSet 
   // Every code file's edges, once.
   const markerSeeds: string[] = []; const roots = new Set<string>();
   for (const path of universe) {
-    if (promptFilePath(path)) roots.add(path);
+    if (promptFilePath(path) || AI_FOLDER.test(path)) roots.add(path);
     if (!CODE_PATH.test(path)) continue;
-    if (AI_FOLDER.test(path)) roots.add(path);
     const body = text.get(path);
     if (body === undefined) {
       // A removed file has no candidate text; a present code file the caller did not read is a broken snapshot.
@@ -398,7 +402,11 @@ function walk(snapshot: RepositorySnapshot, limits: AiWalkLimits): AiRelatedSet 
     const body = path.startsWith("\0") ? undefined : text.get(path);
     if (body === undefined) continue;
     // A file read by a computed name (join(__dirname, role + ".md"), importlib.resources): every non-code file under the reader's own folder.
-    if (READ_CALL.test(body)) { spend(); visit(assetDir(dirOf(path))); }
+    if (READ_CALL.test(body)) {
+      spend(); const own = dirOf(path); visit(assetDir(own));
+      if (READ_UP.test(body) && own !== "") visit(assetDir(dirOf(own)));
+      if (READ_CWD.test(body)) visit(assetDir(""));
+    }
     for (const literal of pathLiterals(body)) {
       spend();
       if (seenLiteral.has(literal)) continue;
