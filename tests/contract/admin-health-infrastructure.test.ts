@@ -191,6 +191,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core-host/retention.ts", "packages/broker/src/core-host/code-modules.ts",
       // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item core/sessions/notes.ts writes, with the same 400-day expiry; it reads that item back too.
       "packages/broker/src/developer/task-code-routes.ts",
+      // Task actions (decision 198): the owner's own words for a round they sent back, one OWNER_NOTE row per decision, kept 400 days (KEEP_SECONDS) and then expired. Not a durable record: the decision itself is.
+      "packages/broker/src/core/task-flow/owner-note.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
