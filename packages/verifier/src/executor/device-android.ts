@@ -109,13 +109,13 @@ export function createAndroidEmulatorDriver(options: AndroidDriverOptions): Devi
       const out = (): DeviceEvidencePrepareAnswer | undefined => (mine.stopped || left() <= 0 ? "time_limit" : undefined);
       // adb's server runs in the foreground of its own group, so ending a client never ends it (a daemon forked by a client would die with that client's group).
       mine.adbServer = options.command.start(options.tools.adb, ["server", "nodaemon"], { env: options.env });
-      mine.emulator = options.command.start(options.tools.emulator, androidEmulatorArgs({ avd: options.tools.avd, port }), { env: options.env });
+      mine.emulator = options.command.start(options.tools.emulator, androidEmulatorArgs({ avd: options.tools.avd, port }), { env: options.env, ...(options.diag === undefined ? {} : { capture: true }) });
       note("boot", "emulator started");
       const bootEnds = Math.min(deadline, now() + ANDROID_BOOT_MS);
       for (;;) {
         if (mine.stopped) return "time_limit";
         if (now() >= bootEnds) { note("boot", "no boot in time"); return left() <= 0 ? "time_limit" : "device_did_not_start"; }
-        if (!mine.emulator.running()) { note("boot", "emulator exited"); return "device_did_not_start"; }
+        if (!mine.emulator.running()) { note("boot", "emulator exited", mine.emulator.tail?.()); return "device_did_not_start"; }
         // adb's server could not take its port (something in the shared network namespace held it first): nothing it would say is believed.
         if (!mine.adbServer.running()) { note("boot", "adb server exited"); return "device_did_not_start"; }
         const booted = await adb(["shell", "getprop", "sys.boot_completed"], Math.min(ADB_MS, bootEnds - now()));
