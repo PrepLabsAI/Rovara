@@ -91,7 +91,7 @@ export class CompanySignInStore {
     } catch { return refused(); }
   }
   /** Every mutation and its durable log commit together. Logs contain only fixed events and opaque ids. */
-  async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string, memberAudit?: { createdBy: string; createdAt: string; fromRole: Member["role"]; toRole: Member["role"] }): Promise<void> {
+  async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string, memberAudit?: { createdBy: string; createdAt: string; fromRole: Member["role"]; toRole: Member["role"]; ownerOverride?: true }): Promise<void> {
     if (!OrgIdSchema.safeParse(companyId).success || !/^company-[a-z-]+$/.test(event) || writes.length > 4) throw unavailable();
     await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: [...writes, { Put: {
       TableName: this.input.tableName, Item: { pk: companyScoped(companyId, "COMPANY_LOG"), sk: `${this.iso()}#${randomUUID()}`, entityType: "COMPANY_LOG", event, companyId, ...(personId === undefined ? {} : { personId }), ...memberAudit }, ConditionExpression: "attribute_not_exists(pk)",
@@ -167,10 +167,8 @@ export class CompanySignInStore {
     } };
   }
   private async checkActor(companyId: string, createdBy: string | undefined, owner = false): Promise<void> {
-    if (createdBy === undefined) {
-      if (owner) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_ONLY_OWNER });
-      return;
-    }
+    // Omission is reserved for direct operator invokes; the broker pins a live actor.
+    if (createdBy === undefined) return;
     const actor = await this.membership(createdBy);
     if (owner && actor?.role !== "owner") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_ONLY_OWNER });
     if (actor === undefined || actor.companyId !== companyId || actor.revokedAt !== undefined || (actor.role !== "admin" && actor.role !== "owner")) throw unavailable();
@@ -183,12 +181,14 @@ export class CompanySignInStore {
     // A self-actor's target snapshot must itself still be authorized. The earlier
     // actor read alone can race with this read; the snapshot CAS then fences it.
     if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
-    const ownerChange = previous.role === "owner" && (next.role !== "owner" || next.revokedAt !== undefined);
+    const ownerChange = (previous.role === "owner" && (next.role !== "owner" || next.revokedAt !== undefined)) || (previous.role !== "owner" && next.role === "owner");
     if (ownerChange) await this.checkActor(previous.companyId, createdBy, true);
     // The target snapshot CAS includes its current role in this same transaction.
     // A concurrent promotion cannot turn a plain-member write into an elevated write.
-    if (next.role !== previous.role || next.revokedAt !== undefined) this.requireMemberStepUp(previous.role);
-    if (next.role !== previous.role) this.requireMemberStepUp(next.role);
+    if (createdBy !== undefined) {
+      if (next.role !== previous.role || next.revokedAt !== undefined) this.requireMemberStepUp(previous.role);
+      if (next.role !== previous.role) this.requireMemberStepUp(next.role);
+    }
     let witness: string | undefined;
     if (previous.role === "owner" && previous.revokedAt === undefined && (next.role !== "owner" || next.revokedAt !== undefined)) {
       // The mirror only locates a candidate; the transaction checks the authoritative row.
@@ -208,7 +208,7 @@ export class CompanySignInStore {
     const witnessIndex = writes.length;
     if (witness !== undefined) writes.push(this.liveMemberCheck(previous.companyId, witness, true));
     try {
-      await this.operatorWrite(previous.companyId, event, writes, previous.personId, { createdBy: createdBy ?? "operator", createdAt: this.iso(), fromRole: previous.role, toRole: next.role });
+      await this.operatorWrite(previous.companyId, event, writes, previous.personId, { createdBy: createdBy ?? "operator", createdAt: this.iso(), fromRole: previous.role, toRole: next.role, ...(ownerChange && createdBy === undefined ? { ownerOverride: true } : {}) });
     } catch (error) {
       const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | null)?.CancellationReasons;
       if (witness !== undefined && conditional(error) && reasons?.[witnessIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
@@ -232,7 +232,7 @@ export class CompanySignInStore {
     const member = await this.membership(personId);
     if (member === undefined || member.companyId !== companyId) return "not_found";
     if (member.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_REVOKED });
-    if (member.role === role) { this.requireMemberStepUp(role); return "unchanged"; }
+    if (member.role === role) { if (createdBy !== undefined) this.requireMemberStepUp(role); return "unchanged"; }
     await this.writeMember(member, { ...member, role, updatedAt: this.iso(), updatedBy: createdBy ?? "operator" }, "company-member-role-set", createdBy);
     return "changed";
   }

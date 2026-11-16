@@ -1,8 +1,9 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { companyMemberActionsThroughLambda, companyMembersThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
+import { CompanyMember } from "../../packages/broker/src/developer/company-member-contract.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const A = `org_${"a".repeat(20)}`, B = `org_${"b".repeat(20)}`;
@@ -40,6 +41,8 @@ it.each(["member", "revoked", "missing", "foreign", "malformed", "slack-unlinked
 });
 it("preserves step-up fixed response and rechecks actor when Lambda runs after broker authentication", async () => {
   const h = world();
+  expect(await h.forward(caller, { ...request, role: "owner" })).toEqual({ ok: false, error: "unavailable", message: "only an owner can change or remove an owner" });
+  h.seed(actor, "owner");
   expect(await h.forward(caller, { ...request, role: "owner" })).toEqual({ ok: false, error: "step_up_required", message: "this role change needs a fresh sign-in check; sign in again and retry" });
   const send = h.db.send; let reads = 0;
   h.db.send = async (command) => {
@@ -114,4 +117,20 @@ it.each(["private-canary", Buffer.from(JSON.stringify({ v: 1, companyId: B, pers
 it.each(["company-member-role-set", "company-member-revoke"])("FIX-2 forwards the fixed owner refusal: %s", async (kind) => {
   const h = world(); h.seed(target, "owner");
   expect(await h.forward(caller, kind === "company-member-role-set" ? request : { kind, companyId: A, personId: target })).toEqual({ ok: false, error: "unavailable", message: "only an owner can change or remove an owner" });
+});
+
+// Fault-inject a lost actor between the live-row validation and payload construction.
+// The helper must refuse the resulting actorless write before calling the Lambda.
+it.each([request, { kind: "company-member-revoke", companyId: A, personId: target }])("FIX-3 refuses a forwarded write missing createdBy before invoke: %s", async (event) => {
+  const h = world();
+  let reads = 0;
+  const parsed = { entityType: "COMPANY_MEMBERSHIP" as const, companyId: A, role: "admin" as const, joinedAt: at,
+    get personId(): string { return ++reads === 1 ? actor : undefined as unknown as string; },
+  };
+  const fault = vi.spyOn(CompanyMember, "parse").mockReturnValue(parsed);
+  try {
+    expect(await h.forward(caller, event)).toEqual({ ok: false, error: "unavailable" });
+    expect(h.forwarded).toEqual([]);
+    expect(h.db.commandNames()).not.toContain("TransactWriteCommand");
+  } finally { fault.mockRestore(); }
 });

@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, companyScoped } from "@agentx/contracts";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
@@ -76,7 +76,6 @@ it("the real server lets only one of two identities racing spend the same approv
 it("first admin joins through the real server, and both code redemption and refresh recheck membership", async () => {
   const h = world(); h.deps.company = h.company;
   // This test exercises token revocation after a future successful fresh sign-in check.
-  vi.spyOn(h.company as unknown as { requireMemberStepUp(role: string): void }, "requireMemberStepUp").mockImplementation(() => {});
   await h.invoke({ kind: "company-preapprove", companyId: IMPLICIT_COMPANY_ID, email, role: "admin", expiresInHours: 1 });
   const back = await h.signIn("oidc", "person");
   const code = back.searchParams.get("code")!;

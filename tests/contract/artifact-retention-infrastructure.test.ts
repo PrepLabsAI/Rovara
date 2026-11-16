@@ -67,13 +67,22 @@ describe("the retention of workflow screenshots is a rule on the bucket the brok
 });
 
 describe("the broker may put the tag on the object it stores", () => {
-  type Statement = { Action: string | string[]; Resource: unknown };
+  type Statement = { Action: string | string[]; Resource: unknown; Effect?: string; Principal?: unknown };
   type Policy = { Properties: { PolicyDocument: { Statement: Statement[] }; Roles: Array<{ Ref?: string }> } };
-  it("holds s3:PutObjectTagging on the artifact bucket, so no new IAM statement is needed", () => {
+  it("holds s3:PutObjectTagging in the exact broker-only artifact bucket policy", () => {
     const template = Template.fromStack(new ControlPlaneStack(new App(), "RetentionControlPlane", { naming: environmentNaming("live25d") }));
     const statements = (Object.values(template.findResources("AWS::IAM::Policy")) as Policy[])
       .filter((policy) => policy.Properties.Roles.some((role) => role.Ref?.startsWith("BrokerServiceRole"))).flatMap((policy) => policy.Properties.PolicyDocument.Statement);
-    expect(statements.some((statement) => [statement.Action].flat().includes("s3:PutObjectTagging"))).toBe(true);
+    expect(statements.some((statement) => [statement.Action].flat().includes("s3:PutObjectTagging"))).toBe(false);
+    const bucket = Object.keys(template.findResources("AWS::S3::Bucket")).find((id) => /^Artifacts[0-9A-F]{8}$/.test(id))!;
+    const broker = Object.keys(template.findResources("AWS::IAM::Role")).find((id) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id))!;
+    const policies = Object.values(template.findResources("AWS::S3::BucketPolicy")) as Array<{ Properties: { Bucket: { Ref: string }; PolicyDocument: { Statement: Statement[] } } }>;
+    const tagging = policies.filter((p) => p.Properties.Bucket.Ref === bucket).flatMap((p) => p.Properties.PolicyDocument.Statement).filter((s) => [s.Action].flat().includes("s3:PutObjectTagging"));
+    expect(tagging).toHaveLength(1);
+    expect(tagging[0]).toMatchObject({
+      Effect: "Allow", Principal: { AWS: { "Fn::GetAtt": [broker, "Arn"] } },
+      Resource: [{ "Fn::GetAtt": [bucket, "Arn"] }, { "Fn::Join": ["", [{ "Fn::GetAtt": [bucket, "Arn"] }, "/*"]] }],
+    });
   });
 });
 
