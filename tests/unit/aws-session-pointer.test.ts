@@ -92,8 +92,9 @@ describe("AWS lifecycle follows workspace discovery", () => {
     db.set({ pk: "PROJECT#payments", sk: "REV#000000000001", runtimeBinding: binding });
     expect(await workspaceBinding(db, "state", workspaceId)).toEqual(binding);
   });
-  it.each(["missing", "foreign", "org mismatch"])("refuses a %s scoped workspace with one fixed integrity event", async (fault) => {
+  it.each(["missing", "foreign", "org mismatch"])("skips a %s scoped workspace while reaping a healthy session", async (fault) => {
     const operationId = randomUUID(); const { workspaceId, pk } = seed({ activeOperationId: operationId }); ready(workspaceId);
+    const healthy = seed(); ready(healthy.workspaceId);
     if (fault === "missing") db.delete(pk, "META");
     else db.set({ ...db.get(pk, "META")!, ...(fault === "foreign" ? { companyId: otherCompany } : { orgId: otherCompany }) });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -103,12 +104,16 @@ describe("AWS lifecycle follows workspace discovery", () => {
       () => failActiveOperation(db, "state", workspaceId, "lost"),
       () => workspaceBinding(db, "state", workspaceId),
       () => workspaceProjectReader(db, "state")(workspaceId),
-      async () => (await import("../../packages/broker/src/aws/session-reaper.js")).handler(),
     ]) {
       warn.mockClear();
       await expect(read()).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
       expect(warn.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
     }
-    expect(ec2Calls).not.toContain("TerminateInstancesCommand");
+    warn.mockClear();
+    const result = await (await import("../../packages/broker/src/aws/session-reaper.js")).handler();
+    expect(result.skippedBusy).toContain(workspaceId);
+    expect(result.claimed).toContain(healthy.workspaceId);
+    expect(ec2Calls.filter((call) => call === "TerminateInstancesCommand")).toHaveLength(1);
+    expect(warn.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
   });
 });

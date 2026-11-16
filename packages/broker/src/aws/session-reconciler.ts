@@ -190,7 +190,14 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       if (!settled(volume.createdAt) || volume.workspaceId === undefined) continue;
       const owner = sessions.get(volume.workspaceId) ?? await dependencies.sessions.get(volume.workspaceId);
       if (owner !== undefined && owner.state !== "DELETED" && owner.volumeId === volume.volumeId) continue;
-      const closedAt = await dependencies.closedAt(volume.workspaceId);
+      let closedAt: string | undefined;
+      try {
+        closedAt = await dependencies.closedAt(volume.workspaceId);
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND")) throw error;
+        // A pointer integrity fault cannot authorize deletion or quarantine. Continue the run.
+        continue;
+      }
       if (closedAt !== undefined && now - Date.parse(closedAt) > CLOSED_VOLUME_MS && volume.state === "available") {
         await dependencies.deleteVolume(volume.volumeId);
         report.closedVolumesDeleted.push(volume.volumeId);

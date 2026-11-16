@@ -26,7 +26,7 @@ const hex = () => randomUUID().replaceAll("-", "").slice(0, 17);
 
 type Start = (input: { stateMachineArn: string; name: string; input: string }) => Promise<string>;
 
-type SetupOptions = { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; sweepStuckCancels?: ReconcilerDependencies["sweepStuckCancels"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; qualifiedWorkerAmi?: ReconcilerDependencies["qualifiedWorkerAmi"]; log?: ReconcilerDependencies["log"] };
+type SetupOptions = { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; closedAt?: ReconcilerDependencies["closedAt"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; sweepStuckCancels?: ReconcilerDependencies["sweepStuckCancels"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; qualifiedWorkerAmi?: ReconcilerDependencies["qualifiedWorkerAmi"]; log?: ReconcilerDependencies["log"] };
 
 function setup(options: SetupOptions = {}) {
   const db = new FakeDynamoDb();
@@ -49,10 +49,10 @@ function setup(options: SetupOptions = {}) {
     ping: options.ping ?? (async () => "Healthy"),
     terminate, deleteVolume, quarantine,
     failActiveOperation: (workspaceId, error) => failActiveOperation(db, "state", workspaceId, error),
-    closedAt: async (workspaceId) => {
+    closedAt: options.closedAt ?? (async (workspaceId) => {
       const item = db.get(`WORKSPACE#${workspaceId}`, "META");
       return item?.status === "CLOSED" ? item.closedAt as string : undefined;
-    },
+    }),
     binding: async () => binding,
     emit,
     now: () => NOW,
@@ -145,6 +145,30 @@ describe("reconciler: instances", () => {
     const third = await reconcile();
     expect(third.unresponsiveInstances).toEqual([worker.instanceId]);
     expect(terminate).toHaveBeenCalledExactlyOnceWith(worker.instanceId);
+  });
+});
+
+describe("reconciler: pointer faults", () => {
+  it("skips an integrity-faulted volume while processing a healthy volume and running the setup sweep", async () => {
+    const brokenWorkspace = randomUUID();
+    const healthyWorkspace = randomUUID();
+    const sweep = vi.fn(async () => ({ failed: [] }));
+    const { state, reconcile, deleteVolume, quarantine } = setup({
+      closedAt: async (workspaceId) => {
+        if (workspaceId === brokenWorkspace) throw Object.assign(new Error("workspace unavailable"), { code: "NOT_FOUND" });
+        return minutesAgo(120);
+      },
+      sweepStuckSetups: sweep,
+    });
+    state.volumes = [
+      { volumeId: "vol-0000000000000aa01", state: "available", workspaceId: brokenWorkspace, createdAt: minutesAgo(120), quarantined: false },
+      { volumeId: "vol-0000000000000aa02", state: "available", workspaceId: healthyWorkspace, createdAt: minutesAgo(120), quarantined: false },
+    ];
+    const report = await reconcile();
+    expect(report.closedVolumesDeleted).toEqual(["vol-0000000000000aa02"]);
+    expect(deleteVolume).toHaveBeenCalledExactlyOnceWith("vol-0000000000000aa02");
+    expect(quarantine).not.toHaveBeenCalled();
+    expect(sweep).toHaveBeenCalledOnce();
   });
 });
 
