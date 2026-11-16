@@ -24,6 +24,7 @@ import {
 import { COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
+import { createFakeOfferedModels } from "../support/offered-models-fake.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
 import { FakeS3 } from "../support/ports/aws-fakes.js";
@@ -335,6 +336,32 @@ describe("the core on the dispatcher", () => {
     // Another company's workspace is not started through this company's runtime.
     await expect(runtime.flow.deps.machines.start({ machineKey: world.workspace(COMPANY_B), companyId: COMPANY_A })).rejects.toMatchObject({ code: "rejected" });
     expect(world.executions).toHaveLength(1);
+  });
+
+  it("DEC 243c: with the gateway's offered-models reader each company's step rule chooses from ITS list on the gateway's agent route; without it the declared route stands byte for byte", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
+    const route = { route: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" }) };
+    const flow = { standingInstructions: null, modelAccess: route, learned: null };
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    // No reader: no step rule (every step runs on the declared route, as before).
+    const plain = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow }).app.runtimeFor(COMPANY_A);
+    expect(plain.flow.deps.stepModels).toBeUndefined();
+    expect(plain.flow.deps.modelAccess).toBe(route);
+    // A reader, but no model route declared: nothing to choose among, so no step rule.
+    const reader = createFakeOfferedModels();
+    reader.set(COMPANY_A, ["claude-sonnet-5-5", "qwen.qwen3-coder-480b-a35b-v1:0"]);
+    reader.set(COMPANY_B, ["claude-haiku-5-5"]);
+    const noRoute = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { ...flow, modelAccess: null }, offeredModels: reader }).app.runtimeFor(COMPANY_A);
+    expect(noRoute.flow.deps.stepModels).toBeUndefined();
+    // With both: the company's own list decides. A is offered the default and a Bedrock model; B (the default is not on its list) is refused its steps.
+    const host = createDispatcherCoreHost({ ...made.inputs, env: { ...made.inputs.env, [CORE_ENGINE_VARIABLE]: "on" }, extraModules, flow, offeredModels: reader });
+    const a = await host.app.runtimeFor(COMPANY_A);
+    const b = await host.app.runtimeFor(COMPANY_B);
+    expect(a.flow.deps.modelAccess).toBe(route);
+    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-sonnet-5-5", api: "anthropic-messages" } } });
+    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
+    expect(reader.asked).toEqual(expect.arrayContaining([COMPANY_A, COMPANY_B]));
   });
 
   it("builds nothing until a core record arrives, and then refuses by name while the security-list points are owed: the record comes back, no machine is started", async () => {

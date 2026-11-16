@@ -33,7 +33,7 @@ import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
-import type { TaskFlow } from "../core/task-flow/flow.js";
+import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { applyPolicyHook, type PolicyHookInstall } from "../core/policy-hook/index.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
@@ -50,6 +50,7 @@ import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import { kmsTokenSigner, type TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskKeySigner } from "../core-host/gateway-model-access.js";
+import { agentModelChoiceFromRegistry, type AgentModelChoice, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
@@ -94,6 +95,11 @@ export interface BrokerCoreRootInputs {
    * for the gateway. Configured without these: the core callback layer refuses to build (never a worker that cannot reach its model, silently).
    */
   taskTokens?: () => { signer: TokenSigner; issuer: string } | undefined;
+  /**
+   * DEC 243c: what the model gateway offers one company's agents (the contract is `OfferedAgentModels`; no gateway API publishes it yet, docs/architecture/agent-model-choice.md). With it (and the model
+   * gateway configured) each company chooses its agents' models on the web page from that list; without it every core step runs on ROVARA_CORE_AGENT_MODEL, exactly as before.
+   */
+  offeredModels?: OfferedModelsReader;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -247,9 +253,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
+  // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
+  const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => {
+    const wiring = modelGateway()!;
+    const choice = agentModelChoiceFromRegistry({ registry, companyId, reader: inputs.offeredModels, modelAccess: wiring.flowOptions.modelAccess, now: () => now().getTime() });
+    if (choice === undefined) return wiring.flowOptions;
+    modelChoices.set(companyId, choice);
+    return { ...wiring.flowOptions, stepModels: choice.stepModels };
+  };
   const lessonsSwitch = readCoreLessonsSwitch(env);
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
+  const modelChoices = new Map<string, AgentModelChoice>();
 
   const app = createCoreHostApp({
     env,
@@ -266,7 +281,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       callbackSigningKey: inputs.callbackSigningKey,
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts.
-      ...(modelGateway() === undefined ? {} : { flowOptions: modelGateway()!.flowOptions }),
+      ...(modelGateway() === undefined ? {} : { flowOptions: modelFlowOptions(registry, companyId) }),
       access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
@@ -310,10 +325,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const companyOf = async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => membershipOf(caller.principal.personId);
     const routes = createCoreDevRoutes({
       app, companyOf, log,
-      wiring: () => ({
+      wiring: (runtime) => ({
         origin: inputs.origin,
         sessionCapSeconds: hostedSessionCapSeconds(),
         scriptTokens: {},
+        ...(modelChoices.get(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.get(runtime.companyId)! }),
         canReadProject: (personId, project) => projectGrant(personId, project),
         auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
         // Not wired yet (each answers "not on the core yet"): the session levels and the decision cards (lanes ID and T, #662), how we work (the company's code host).

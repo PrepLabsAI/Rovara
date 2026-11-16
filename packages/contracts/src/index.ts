@@ -407,3 +407,4 @@ export * from "./eval-proof-basis.js";
 export * from "./model-gateway-token.js";
 export * from "./payer.js";
 export * from "./ports/company-log.js";
+export * from "./agent-model-choice.js";
