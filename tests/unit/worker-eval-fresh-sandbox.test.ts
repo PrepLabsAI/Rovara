@@ -301,7 +301,7 @@ describe("TE-F1C-SOCKET-ACCESS from the daemon's view", () => {
 });
 
 describe("the sandbox's arguments (allow-list)", () => {
-  const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`] };
+  const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`, "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
   const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
   const input = { net, image: IMAGE, name: "rovara-svc-0123456789ab-eval", checkout: "/s/r1/checkout", envFile: "/s/r1/env", block, command: { executable: "node", args: ["eval.js", "--fast"], cwd: "evals" } };
   const expected = { checkout: input.checkout, bridgeDir: "/s/e1/models", helperIp: "172.30.7.9" };
@@ -393,7 +393,7 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     expect(sandbox[sandbox.indexOf("--log-driver") + 1]).toBe("none");
   });
   it("names unsound limits, name, working folder, labels and env file (mutants of the built list)", () => {
-    const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`] };
+    const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`, "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
     const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
     const input = { net, image: IMAGE, name: "rovara-svc-0123456789ab-eval", checkout: "/s/r1/checkout", envFile: "/s/r1/env", block, command: { executable: "node", args: [], cwd: "." } };
     const expected = { checkout: input.checkout, bridgeDir: "/s/e1/models", helperIp: "172.30.7.9" };
@@ -404,7 +404,7 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     for (const [name, mutant] of Object.entries({
       memory: replace("--memory", "64g"), swap: replace("--memory-swap", "-1"), cpus: replace("--cpus", "64"), pids: replace("--pids-limit", "-1"), stop: replace("--stop-timeout", "3600"),
       logs: replace("--log-driver", "json-file"), name: replace("--name", "other"), workdir: replace("--workdir", "/"), workdirUp: replace("--workdir", "/workspace/../etc"),
-      label: insert("--label", "com.docker.compose.project=x"), envInCheckout: replace("--env-file", "/s/r1/checkout/.env"), envInBridge: replace("--env-file", "/s/e1/models/env"),
+      label: insert("--label", "com.docker.compose.project=x"), labelLookalike: insert("--label", "rovara.run-networkX=1"), envInCheckout: replace("--env-file", "/s/r1/checkout/.env"), envInBridge: replace("--env-file", "/s/e1/models/env"),
     })) expect(freshEvalSandboxArgProblems(mutant, net, expected), name).not.toEqual([]);
   });
   it("a helper with any second mount (a volume, not only a bind) is refused", () => {

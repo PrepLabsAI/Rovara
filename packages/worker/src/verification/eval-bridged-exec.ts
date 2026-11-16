@@ -22,7 +22,7 @@ import { modelHostAddHostArgs, type ModelHostBlock } from "../model-helper-block
 import { modelHelperOffer, startModelHelper, type StartedModelHelper } from "../model-helper-network.js";
 import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } from "../model-reply-bundle.js";
 import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL } from "../model-sandbox-env.js";
-import { RUN_NETWORK_LABEL, type ServicesNetwork } from "../run-network.js";
+import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, type ServicesNetwork } from "../run-network.js";
 import type { DockerCli } from "../swebench/containers.js";
 import { SANDBOX_INIT } from "../task-sandbox.js";
 import { readContainedReport } from "./report-file.js";
@@ -374,7 +374,8 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   const workdirs = flags.get("--workdir") ?? [];
   if (workdirs.length !== 1 || (workdirs[0] !== FRESH_EVAL_WORKSPACE && !workdirs[0]!.startsWith(`${FRESH_EVAL_WORKSPACE}/`)) || workdirs[0]!.split("/").includes("..")) problems.push("the sandbox's working folder must be in its checkout");
   const labelKeys = (flags.get("--label") ?? []).map((label) => label.split("=")[0]!);
-  if (labelKeys.some((key) => !key.startsWith(`${RUN_NETWORK_LABEL}`)) || new Set(labelKeys).size !== labelKeys.length) problems.push("the sandbox carries the round network's labels and no other");
+  const runLabels = [RUN_NETWORK_LABEL, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_WORKSPACE_LABEL];
+  if (labelKeys.length !== runLabels.length || runLabels.some((key) => labelKeys.filter((candidate) => candidate === key).length !== 1)) problems.push("the sandbox carries the round network's labels and no other");
   for (const host of flags.get("--add-host") ?? []) if (expected.helperIp === undefined || host.slice(host.lastIndexOf(":") + 1) !== expected.helperIp) problems.push("a pinned name points somewhere other than the model helper");
   return problems;
 }
