@@ -162,10 +162,11 @@ export async function candidatePromptChanges(
 export async function withEvalChangedPromptClassifier<T>(
   repositories: readonly CandidateRepositoryInput[], candidates: readonly CandidateRepositoryIdentity[], signal: AbortSignal,
   /** The eval's own plan. Absent, or unreadable: every call counts as changed. */
-  plan: (() => Promise<{ readonly key: { readonly baseCommit: string } } | undefined>) | undefined, run: () => Promise<T>,
+  plan: (() => Promise<{ readonly key: { readonly baseCommit: string } } | { readonly notRun: string } | undefined>) | undefined, run: () => Promise<T>,
 ): Promise<T> {
   let planBase: string | undefined;
-  try { planBase = plan === undefined ? undefined : (await plan())?.key.baseCommit; } catch { planBase = undefined; }
+  // A plan the broker answered "not run" (questions changed since approval) has no base: no plan, so every call counts as changed.
+  try { const answered = plan === undefined ? undefined : await plan(); planBase = answered !== undefined && "key" in answered ? answered.key.baseCommit : undefined; } catch { planBase = undefined; }
   const classifier = changedPromptClassifier(await candidatePromptChanges(repositories, candidates, signal, planBase));
   return classifiers.run(classifier, run);
 }

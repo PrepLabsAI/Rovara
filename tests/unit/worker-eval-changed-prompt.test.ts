@@ -251,6 +251,8 @@ describe("the diff base is the plan's baseCommit (EVAL-WIRE-CLASSIFIER-BASE-BIND
     expect(await ask(planned("9".repeat(40)))).toBe(true);
     expect(await ask(planned("not-a-commit"))).toBe(true);
     expect(await ask(async () => ({}) as never)).toBe(true);
+    // A plan the broker answered "not run" (questions changed since approval, #816) has no base: every call counts as changed.
+    expect(await ask(async () => ({ notRun: "questions_changed" }))).toBe(true);
   });
 });
 
