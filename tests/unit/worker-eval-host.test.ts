@@ -143,6 +143,14 @@ describe("a provider or gateway fault is Not run, never a pass and never Worse",
     expect(notRun(artifact)).toBe("provider_error"); expect(JSON.stringify(artifact)).not.toContain("docker-secret");
     expect(access.released).toHaveLength(access.holds.length);
   });
+  it("a stage that spent exactly its held cost and calls once more is over budget with the cost known, and the refused call is not counted", async () => {
+    const { access, ports, facts } = await bound({ script: () => answer({ costMicros: 20 }) });
+    const artifact = read(await runFinalCheckEval(request, ports, facts()));
+    expect(notRun(artifact)).toBe("cap");
+    expect(artifact.usage).toEqual({ calls: 2, costMicros: 40 });
+    expect(access.forwarded).toHaveLength(2);
+    expect(access.released[0]).toEqual({ calls: 2, costMicros: 40, unknown: false });
+  });
   it("an overrun settle stops the stage and is not a pass", async () => {
     const { access, ports, facts } = await bound({ script: () => answer({ overrun: true }) });
     const artifact = await runFinalCheckEval(request, ports, facts());

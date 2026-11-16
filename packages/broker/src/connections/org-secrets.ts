@@ -46,3 +46,14 @@ export function admitSecretName(env: string, orgId: string, name: string): OrgId
   }
   throw agentXError("FORBIDDEN", "that secret does not belong to this company");
 }
+
+/** Valid other-company names answer missing on reads; malformed paths still refuse. */
+export function secretNameBelongsTo(env: string, orgId: string, name: string): boolean {
+  if (!OrgIdSchema.safeParse(orgId).success) throw agentXError("FORBIDDEN", "that is not a company id");
+  if (typeof name !== "string" || name.length > 512) throw agentXError("FORBIDDEN", "that secret does not belong to this company");
+  const prefix = `agentx/${env}/`;
+  if (!name.startsWith(prefix)) throw agentXError("FORBIDDEN", "that secret does not belong to this company");
+  const parts = name.slice(prefix.length).split("/");
+  if (parts.length !== 3 || (parts[0] !== "org-connectors" && parts[0] !== "org-hooks") || !OrgIdSchema.safeParse(parts[1]).success || !LEAF.test(parts[2]!)) throw agentXError("FORBIDDEN", "that secret does not belong to this company");
+  return parts[1] === orgId;
+}
