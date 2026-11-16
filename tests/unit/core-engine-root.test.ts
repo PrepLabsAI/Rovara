@@ -73,7 +73,8 @@ describe("the broker's core root, switch on", () => {
       [{ ROVARA_CORE_ENGINE: "on" }, "ROVARA_CORE_ALLOWED_COMPANIES"],
     ] as const;
     for (const [env, privateValue] of cases) {
-      const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client));
+      const tables = fakeTables([member("dev-a", ORG, "owner")]);
+      const root = createBrokerCoreRoot(rootInputs(env, tables.client));
       const answer = await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" });
       expect(answer?.statusCode).toBe(503);
       expect(answer?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
@@ -86,6 +87,30 @@ describe("the broker's core root, switch on", () => {
       expect(job.statusCode).toBe(503);
       expect(job.body).toContain("The core engine settings are not readable.");
     }
+  });
+
+  it("blocks only members covered by the core switch when settings are unreadable", async () => {
+    const request = (method: string, path: string) => ({ method, path, headers: {}, ...(method === "POST" ? { body: "{}" } : {}) });
+    const caller = (developerId: string) => ({ developerId, sessionId: "s", name: "Ada" });
+    const tables = fakeTables([member("covered", ORG), member("uncovered", OTHER)]);
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: "none" }, tables.client));
+    for (const methodPath of [["POST", "/v1/dev/tasks"], ["GET", "/v1/dev/tasks/task-a"]] as const) {
+      const [method, path] = methodPath;
+      const blocked = await root.coreTasks?.route(request(method, path), caller("covered"));
+      expect(blocked?.statusCode).toBe(503);
+      expect(blocked?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
+      expect(await root.coreTasks?.route(request(method, path), caller("uncovered"))).toBeUndefined();
+      expect(await root.coreTasks?.route(request(method, path), caller("no-membership"))).toBeUndefined();
+    }
+
+    const onRoot = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, tables.client));
+    const onAnswer = await onRoot.coreTasks?.route(request("POST", "/v1/dev/tasks"), caller("uncovered"));
+    expect(onAnswer?.statusCode).toBe(503);
+
+    const unreadableMembership = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: "none" }, { send: async () => { throw new Error("dynamo down"); } }));
+    const failedRead = await unreadableMembership.coreTasks?.route(request("POST", "/v1/dev/tasks"), caller("covered"));
+    expect(failedRead?.statusCode).toBe(503);
+    expect(failedRead?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
   });
 
   it("drains without the root reading the admission settings: a new task goes the old way (draining tasks are refused later, by the admission module)", async () => {

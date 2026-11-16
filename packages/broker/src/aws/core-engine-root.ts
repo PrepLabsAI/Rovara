@@ -68,7 +68,7 @@ import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
-import { CORE_ENGINE_VARIABLE, parseCoreSwitch } from "../core-host/flags.js";
+import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
 import { CallbackCapabilities } from "../callbacks.js";
 import { handleCoreContextTools } from "../core-host/context-tools.js";
@@ -402,7 +402,19 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   let coreApp: CoreAppEntry | undefined;
   let lessons: LessonsApi | undefined;
   if (settingsBlocked) {
-    coreTasks = { route: async () => callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS) };
+    const blockedSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value;
+    coreTasks = {
+      route: async (_request, caller) => {
+        let membership: CompanyMembership | undefined;
+        try {
+          membership = await membershipOf(caller.developerId);
+        } catch {
+          return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
+        }
+        if (membership === undefined || !switchCovers(blockedSwitch, membership.companyId)) return undefined;
+        return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
+      },
+    };
   } else if (app.serving) {
     // The library's install-wide learning gate follows the lessons switch.
     setCoreLessonsGate(env);
