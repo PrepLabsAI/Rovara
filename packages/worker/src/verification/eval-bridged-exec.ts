@@ -77,12 +77,11 @@ function runEgress(inner: ModelEgress, options: BridgedEvalExecOptions, state: R
       // Never reaches the stage: the run is failed (Not run) when it ends, and the sandbox is told the call failed.
       if (!allowed) { state.blocked = true; throw new Error("model not allowed"); }
       const changed = ((): boolean => { try { return options.changedPrompt?.(frame) === true; } catch { return false; } })();
-      let counted = false;
       state.open += 1;
       try {
         for await (const event of inner.forward(scope, frame, forwardOptions)) {
           // Counted when the settle arrives, before it is passed on: the sandbox cannot end before the count is in.
-          if (event.kind === "settle" && changed && !counted && event.class === "ok") { counted = true; state.changedPromptCalls += 1; }
+          if (event.kind === "settle" && changed && event.class === "ok") state.changedPromptCalls += 1;
           yield event;
         }
       } finally { state.open -= 1; }

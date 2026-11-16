@@ -4,7 +4,7 @@
 import { existsSync, statSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { attestRovaraOnlyBaseCheckout, type ModelEgress, type ModelEgressEvent, type ModelEgressFrame, type ModelEgressScope } from "@agentx/contracts";
 import { createBridgedEvalExec as create, EVAL_BRIDGE_CALLS_MAX, type FreshEvalSandbox, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
@@ -117,6 +117,8 @@ describe("refusals before anything starts", () => {
     const root = await makeRoot(); const e = egressOf();
     await expect(createBridgedEvalExec({ sandbox: sandboxOf(ok, false), runDir: root }).run(request(e))).rejects.toThrow();
     await expect(createBridgedEvalExec({ sandbox: sandboxOf(ok), runDir: "relative/dir" }).run(request(e))).rejects.toThrow();
+    // an EXISTING folder named relatively is refused too (the guard, not a missing folder, is what stops it)
+    await expect(createBridgedEvalExec({ sandbox: sandboxOf(ok), runDir: relative(process.cwd(), root) }).run(request(e))).rejects.toThrow();
     const stop = new AbortController(); stop.abort();
     await expect(createBridgedEvalExec({ sandbox: sandboxOf(ok), runDir: root }).run(request(e, { signal: stop.signal }))).rejects.toThrow();
     await expect(createBridgedEvalExec({ sandbox: {} as never, runDir: root }).run(request(e))).rejects.toThrow();
