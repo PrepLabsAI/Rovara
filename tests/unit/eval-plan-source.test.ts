@@ -46,6 +46,8 @@ const evalPlan = (over: Partial<EvalPlanBody> = {}): EvalPlanBody => ({
   maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 10, ...over,
 });
 const BASE = "c".repeat(40);
+/** A registry with `adapter` (or nothing) bound at the `eval-reservation` plug-in point. */
+const registryWith = (adapter?: EvalReservationAdapter) => ({ names: (point: string) => point === "eval-reservation" && adapter !== undefined ? ["test"] : [], get: () => adapter }) as never;
 const run = (bases: Array<{ repositoryId: string; baseCommitSha: string }> | undefined = [{ repositoryId: "web", baseCommitSha: BASE }]) => ({ bases });
 
 /** One company's setup table, decision gate and spend approvals, over a store that may be shared with another company. */
@@ -244,11 +246,11 @@ describe("the EVAL_PLAN reader refuses what is not bound to an approved digest",
     const item = (await store.get(evalSpendKey(B, project)))!;
     await store.put({ item: { ...item, company: B } });
     expect(await b.read()).toBeUndefined();
-    const sourcesA = createEvalPlanSources({ store, companyId: A, adapter: a.adapter });
+    const sourcesA = createEvalPlanSources({ store, companyId: A, registry: registryWith(a.adapter) });
     expect(await sourcesA.plan({ companyId: B, project }, run())).toBeUndefined();
     expect(sourcesA.approval({ companyId: B, project })).toBeUndefined();
     expect(sourcesA.cache(B)).toBeUndefined();
-    expect(await createEvalPlanSources({ store, companyId: B, adapter: b.adapter }).plan({ companyId: B, project }, run())).toBeUndefined();
+    expect(await createEvalPlanSources({ store, companyId: B, registry: registryWith(b.adapter) }).plan({ companyId: B, project }, run())).toBeUndefined();
     expect(JSON.stringify(await sourcesA.plan({ companyId: A, project }, run()))).not.toContain(B);
   });
 });
@@ -257,7 +259,7 @@ describe("the broker's eval plan source", () => {
   it("answers the approved plan with the run's own base in the key, only for a base it can name (mutants: the base choice)", async () => {
     const a = company(A);
     await a.approve();
-    const sources = createEvalPlanSources({ store: a.store, companyId: A });
+    const sources = createEvalPlanSources({ store: a.store, companyId: A, registry: registryWith() });
     expect(await sources.plan({ companyId: A, project }, run())).toEqual({
       company: A, project, ...(({ key, ...rest }) => { void key; return rest; })(evalPlan()), planDigest: evalPlanDigest(A, project, evalPlan()),
       key: { company: A, project, baseCommit: BASE, codeHash: evalCodeHash(BASE), judgePin, commandFingerprint: inputs.commandFingerprint, catalogRowId: "model", model: "model", modelVersion: "version-1" },
@@ -267,20 +269,20 @@ describe("the broker's eval plan source", () => {
     expect(await sources.plan({ companyId: A, project }, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))).toBeUndefined();
     const named = company(A);
     await named.approve(evalPlan({ repository: "api" }));
-    const namedSources = createEvalPlanSources({ store: named.store, companyId: A });
+    const namedSources = createEvalPlanSources({ store: named.store, companyId: A, registry: registryWith() });
     expect(((await namedSources.plan({ companyId: A, project }, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))) as { key: { baseCommit: string } }).key.baseCommit).toBe("d".repeat(40));
     expect(await namedSources.plan({ companyId: A, project }, run())).toBeUndefined();
   });
 
-  it("spend authority comes only from the reservation adapter: Code (none) answers no approval; a trusted adapter answers the grant for this plan (mutant: the adapter check)", async () => {
+  it("spend authority comes only from the registry's bound eval-reservation adapter: Code (none) answers no approval; a bound adapter answers the grant for this plan (mutant: the adapter check)", async () => {
     const a = company(A);
     await a.approve();
-    expect(await createEvalPlanSources({ store: a.store, companyId: A, members: a.members }).approval({ companyId: A, project })!.read()).toBeUndefined();
-    const grant = await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, adapter: a.adapter }).approval({ companyId: A, project })!.read();
+    expect(await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith() }).approval({ companyId: A, project })!.read()).toBeUndefined();
+    const grant = await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }).approval({ companyId: A, project })!.read();
     expect(grant).toMatchObject({ company: A, project, selection: "evals/demo", inputsDigest: evalSpendInputsDigest(inputs), provider: "customer", connected: true, maxCalls: 6, maxCostMicros: 60 });
     // The approval follows the plan's binding: an edited plan withdraws it.
     await rewrite(a.store, A, row => ({ ...row, plan: { ...(row["plan"] as EvalPlanBody), maxCallsPerQuestion: 99 } }));
-    expect(await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, adapter: a.adapter }).approval({ companyId: A, project })!.read()).toBeUndefined();
+    expect(await createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }).approval({ companyId: A, project })!.read()).toBeUndefined();
   });
 });
 
@@ -317,7 +319,7 @@ async function endToEnd(options: { adapter?: boolean; head?: Record<string, stri
   const parts = { company: A, project, baseCommit: repo.baseSha, codeHash: evalCodeHash(repo.baseSha), judgePin, commandFingerprint: inputs.commandFingerprint, catalogRowId: "model", model: "model", modelVersion: "version-1", evalSetHash: inputs.evalSetHash, hiddenSetHash: "none", settingsFingerprint: inputs.settingsFingerprint };
   await createDocumentBaseScoreCache(store, { companyId: A }).write(parts, RECORD, { writer: "rovara_base_round", baseCommit: repo.baseSha });
   const handler = createCallbackHandler({ flow: { store, companyId: A, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never,
-    evalPlan: createEvalPlanSources({ store, companyId: A, members: a.members, ...(options.adapter === true ? { adapter: a.adapter } : {}) }) });
+    evalPlan: createEvalPlanSources({ store, companyId: A, members: a.members, ...(options.adapter === true ? { registry: registryWith(a.adapter) } : {}) }) });
   const capability = new CallbackCapabilities(KEY).issue({ workspaceId, operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION], expiresInSeconds: 60 });
   const asks: string[] = [];
   // The worker's fetch reaches the broker's callback handler directly (no network).

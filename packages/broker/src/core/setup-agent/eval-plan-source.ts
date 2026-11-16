@@ -3,21 +3,23 @@
 //   plan      the stored EVAL_PLAN of this company's project, only while it is bound to an APPROVED eval spend item and unedited since (`readApprovedEvalPlan`). The run's own pinned base
 //             (the operation's stored `workflowBase`, never the request) fills the per-task key parts the broker can know: the base commit and its code hash (`evalCodeHash`). The worker
 //             computes the same parts and every question's base and head hash from the pinned candidate and checks them against this plan; a mismatch is not runnable.
-//   approval  `createEvalSpendCapabilities(...).approval` over the same item, bound to the same stored plan. Spend AUTHORITY comes only from the injected `EvalReservationAdapter`
-//             (Cloud F1e). Code has none: the approval reads undefined and the eval reads "spend not approved", with zero calls.
+//   approval  `createBoundEvalSpendCapabilities(registry, ...).approval` (#805) over the same item, bound to the same stored plan. Spend AUTHORITY comes only from the
+//             `EvalReservationAdapter` the install bound at its `eval-reservation` plug-in point. Code binds none: the approval reads undefined and the eval reads
+//             "spend not approved", with zero calls.
 //   cache     this company's own base-score cache (`createDocumentBaseScoreCache`), read by the callback at the plan's own key.
 //
 // Every source answers only its own company: a scope naming another company is no answer. Nothing here reads the request.
-import { createDocumentBaseScoreCache, evalCodeHash, type BaseScoreCache, type DocumentStore, type EvalReservationAdapter, type EvalSpendApproval, type OrgId } from "@agentx/contracts";
+import { createDocumentBaseScoreCache, evalCodeHash, type AdapterRegistry, type BaseScoreCache, type DocumentStore, type EvalSpendApproval, type OrgId } from "@agentx/contracts";
 import type { EvalPlanRun, EvalPlanScope, EvalPlanSources } from "../proof/eval-plan-delivery.js";
 import type { SessionMembers } from "../sessions/access.js";
-import { createEvalSpendCapabilities, readApprovedEvalPlan } from "./eval-spend.js";
+import { readApprovedEvalPlan } from "./eval-spend.js";
+import { createBoundEvalSpendCapabilities } from "./eval-reservation.js";
 
 export interface EvalPlanSourceDeps {
   readonly store: DocumentStore;
   readonly companyId: OrgId;
-  /** Cloud F1e's trusted reservation adapter. Absent (Rovara Code today): no approval is ever answered, so no eval spends. */
-  readonly adapter?: EvalReservationAdapter | undefined;
+  /** The install's adapters: the approval uses ONLY the adapter bound at the `eval-reservation` plug-in point (#805, `createBoundEvalSpendCapabilities`). Code binds none: no approval is ever answered, so no eval spends. */
+  readonly registry: Pick<AdapterRegistry, "names" | "get">;
   /** The install's members, for the approver's current role. Absent: the local owner only. */
   readonly members?: SessionMembers | undefined;
   readonly log?: ((event: "eval_spend_approval_invalid" | "eval_plan_invalid") => void) | undefined;
@@ -49,7 +51,7 @@ export function createEvalPlanSources(deps: EvalPlanSourceDeps): EvalPlanSources
     },
     approval(scope: EvalPlanScope): EvalSpendApproval | undefined {
       if (scope.companyId !== deps.companyId) return undefined;
-      return createEvalSpendCapabilities({ ...table, project: scope.project, ...(deps.adapter === undefined ? {} : { adapter: deps.adapter }),
+      return createBoundEvalSpendCapabilities(deps.registry, { ...table, project: scope.project,
         // The current trusted plan is the approved item, only while its stored eval plan is still bound to it.
         current: async () => (await readApprovedEvalPlan(table, scope.project))?.spend.plan }).approval;
     },

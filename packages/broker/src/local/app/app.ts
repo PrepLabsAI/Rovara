@@ -698,9 +698,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}),
     // The saved sign-in is read only for a run whose recipe has one, from the company's own secret path (`browser-evidence-sign-in-callback.ts`).
     ...(browserEvidence === undefined ? {} : { browserEvidenceSignIn: browserEvidence.signInReader }),
-    // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). No reservation adapter on a laptop,
-    // so the approval never answers and an eval reads "spend not approved" (zero calls).
-    evalPlan: createEvalPlanSources({ store, companyId }),
+    // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). The approval uses only the
+    // registry's `eval-reservation` adapter; a laptop binds none, so it never answers and an eval reads "spend not approved" (zero calls).
+    evalPlan: createEvalPlanSources({ store, companyId, registry }),
   });
   // The owner's moves on a task already running (send back, review findings, continue): with a run limit held, a round is not started on a task that has spent its limit (or whose spend cannot be told); the limit is the one the model proxy holds the task to.
   const taskActions = createTaskActions(flow.deps, options.runLimit === false ? {} : { roundCap: async (task) => ({ limitUsd: taskLimitUsd(task), spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) }) });
