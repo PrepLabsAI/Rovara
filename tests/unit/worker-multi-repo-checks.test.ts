@@ -853,8 +853,8 @@ describe("MR2 report pruning", () => {
   });
 });
 
-describe("MR2 automatic invocation (MR1 off: edges recorded, checks unchanged)", () => {
-  it.each(["removed edge", "provider edited"])("CHECKS runs in the shared workspace as today, records %s from workflow bases and preserves publication identity", async variant => {
+describe("MR2 automatic invocation (MR1-LIVE: MR1 on)", () => {
+  it.each(["removed edge", "provider edited"])("CHECKS runs in MR1's check root with the provider wired, records %s from workflow bases and preserves publication identity", async variant => {
     const f = await fixture();
     for (const repo of f.input.repositories) {
       const directory = join(f.root, repo.path);
@@ -874,10 +874,10 @@ describe("MR2 automatic invocation (MR1 off: edges recorded, checks unchanged)",
       rootPath: f.root, model: FAUX_MODEL, taskShell: { kind: "local" }, stopBeforeReading: { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) }, eventSink: async () => undefined, artifactSink: async artifact => { artifacts.set(artifact.name, String(artifact.content)); },
     });
     expect(result.checks?.checks[0]?.after).toBe("passed");
-    // Today's path: the check ran in the task's own repository folder, with no MR1 wiring, and no check root or report folder was made.
-    expect(result.checks?.checks[0]?.output).toBe(`${join(f.root, "app")}\nfalse\n`);
+    // MR1 on: the check ran in the round's check root (removed afterwards), with the provider linked into node_modules; its report was kept.
+    expect(result.checks?.checks[0]?.output).toMatch(new RegExp(`^${f.root.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}/\\.agentx-check-[^/]+/app\ntrue\n$`, "u"));
     expect((await readdir(f.root)).some(name => name.startsWith(".agentx-check-"))).toBe(false);
-    await expect(stat(join(f.root, ".agentx/multi-repo-reports"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await stat(join(f.root, ".agentx/multi-repo-reports"))).isDirectory()).toBe(true);
     expect((JSON.parse(artifacts.get("evidence-raw.json")!) as { repositoryEdges: unknown }).repositoryEdges).toEqual({ edges: [{ consumer: "app", provider: "lib", language: "node", source: variant === "removed edge" ? "base" : "both" }], notes: [] });
     expect(result.workflowCheckCandidateRepositories).toEqual(before);
     expect(await readFile(join(f.root, "app/package.json"), "utf8")).toBe(variant === "removed edge" ? '{"name":"app"}' : '{"name":"app","dependencies":{"lib":"*"}}');

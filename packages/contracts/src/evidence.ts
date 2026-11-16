@@ -540,6 +540,22 @@ export const EvidenceRawCheckSchema = z
   })
   .strict()
   .superRefine((entry, context) => checkPartsProblems(entry, (path, message) => context.addIssue({ code: "custom", path, message })));
+/**
+ * MR1-LIVE: why a local multi-repository round with edges ran on today's per-repository path instead of MR1's check root. Fixed words only, in this order
+ * (the worker maps its refusals onto them by position): a submodule, the candidate tree's copy limits, the installed dependencies' copy limits, a link out
+ * of the check copy, an unsupported dependency layout, a repository not at its task branch or base, a failed dependency wiring setup, anything else.
+ */
+export const MULTI_REPO_FALLBACK_NOTES = [
+  "multi-repo check not run: a repository has a submodule",
+  "multi-repo check not run: the repositories exceed the copy limits",
+  "multi-repo check not run: the installed dependencies exceed the copy limits",
+  "multi-repo check not run: a link leaves the check copy",
+  "multi-repo check not run: the installed dependencies use an unsupported layout",
+  "multi-repo check not run: a repository is not at its task branch or base",
+  "multi-repo check not run: dependency wiring setup failed",
+  "multi-repo check not run: the check copy could not be made",
+] as const;
+export type MultiRepoFallbackNote = (typeof MULTI_REPO_FALLBACK_NOTES)[number];
 /** Repository facts only. MR3/MR2b must NEVER use absence from the candidate to skip or narrow tests. */
 const RepositoryEdgesSchema = z.object({
   edges: z.array(z.object({
@@ -551,6 +567,7 @@ const RepositoryEdgesSchema = z.object({
     "ambiguous", "dependency manifest unreadable", "too many repositories or dependencies; tested separately",
     "tested separately: no cross-repo wiring for maven", "tested separately: no cross-repo wiring for gradle",
     "tested separately: multi-repository checks run only on the local runner for now",
+    ...MULTI_REPO_FALLBACK_NOTES,
   ])).max(8),
 }).strict().superRefine((record, context) => {
   const keys = new Set<string>();
