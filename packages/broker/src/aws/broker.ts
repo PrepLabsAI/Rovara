@@ -337,6 +337,7 @@ import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntri
 import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
+import { ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace } from "./engine-boundary.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
@@ -842,14 +843,15 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     }),
     ensureProjectCatalogPointer: (name) => ensureProjectCatalogPointer(dependencies, name),
     preparation: (identity, project, requestId) => newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId),
+    // Lane E2: these readers answer only a workflow task's workspace. A core task's workspace reads as missing (engine-boundary.ts); its own handlers read it.
     workspace: (id) => requireWorkspace(dependencies, id),
-    operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
+    operations: async (workspaceId) => (await ownerOfWorkspace(dependencies, workspaceId) === "core" ? [] : await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as unknown as OperationRecord)),
     workflowBinding: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).workflowDependencies,
     workflowCandidateSourceExportDigest: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).candidateSourceRef?.candidateDigest,
     eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
-    artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
+    artifacts: async (workspaceId, operationId) => (await ownerOfWorkspace(dependencies, workspaceId) === "core" ? [] : await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
       .map((item) => ({
         id: String(item.id), operationId: String(item.operationId), name: String(item.name), mediaType: String(item.mediaType), objectKey: String(item.objectKey),
@@ -859,12 +861,12 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: objectKey, Range: `bytes=0-${maxBytes - 1}` }));
       return object.Body ? await object.Body.transformToString("utf8") : "";
     },
-    pullRequests: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "PULL_REQUEST#"))
+    pullRequests: async (workspaceId) => (await ownerOfWorkspace(dependencies, workspaceId) === "core" ? [] : await query(`WORKSPACE#${workspaceId}`, "PULL_REQUEST#"))
       .map((item) => ({ repository: String(item.repository), number: Number(item.number), url: String(item.url), state: item.state as "open" | "closed" | "merged" })),
     acceptTask: (identity, workspaceId, request, extra, options) => acceptTask(dependencies, identity, workspaceId, request, extra, options),
     acceptPullRequest: (identity, workspaceId, request, extra, options) => acceptPullRequest(dependencies, identity, workspaceId, request, extra, options),
     acceptPullRequestUpdate: (identity, workspaceId, request, extra, workflowCandidate) => acceptPullRequestLifecycle(dependencies, identity, workspaceId, request, extra, { workflowCandidate }),
-    failedPublications: async (workspaceId, candidate) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
+    failedPublications: async (workspaceId, candidate) => (await ownerOfWorkspace(dependencies, workspaceId) === "core" ? [] : await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => {
         const publication = item.publication as OperationRecord["publication"];
         return item.entityType === "OPERATION" && item.kind === "publish" && TERMINAL.has(item.status as OperationStatus) && item.status !== "SUCCEEDED"
@@ -6331,6 +6333,8 @@ async function ownedSlackWorkflowTask(dependencies: AwsBrokerDependencies, event
     if (access.role !== "owner") throw agentXError("FORBIDDEN", `only a current task owner can ${what}`);
     task = access.task;
   } catch {
+    // Lane E2: a core task's record is not read here to pick the words (engine-boundary.ts).
+    if (await ownerOfTaskId(dependencies, taskId) === "core") throw agentXError("FORBIDDEN", `only a current task owner can ${what}`);
     const stored = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
     const sidecar = await getItem<Record<string, unknown>>(dependencies, { pk: `DEVTASK#${taskId}`, sk: "PEOPLE" });
     let exactNativeOwner = false;
@@ -6370,6 +6374,8 @@ async function slackTaskAccess(
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) throw agentXError("FORBIDDEN", "task access could not be verified");
+  // Lane E2: a task the core owns is never acted on from the workflow's Slack paths (engine-boundary.ts), not even as the legacy commenter below.
+  if (await ownerOfExistingTask(dependencies, taskId) === "core") throw agentXError("FORBIDDEN", "task access could not be verified");
   const sidecar = await getItem<Record<string, unknown>>(dependencies, { pk: `DEVTASK#${taskId}`, sk: "PEOPLE" });
   const canonical = slackWorkflowCaller(userId);
   const caller = sidecar === undefined && legacySlackOwner && task.provider === "slack" && task.slackUserId === userId
@@ -14238,6 +14244,8 @@ async function requireOwnedWorkspace(
 }
 
 async function requireWorkspace(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<WorkspaceInstance> {
+  // Lane E2: a core task's workspace is not the workflow's to read or act on (engine-boundary.ts); it answers like a missing one.
+  if (await ownerOfWorkspace(dependencies, workspaceId) === "core") throw agentXError("NOT_FOUND", "workspace not found");
   const item = await getItem<Record<string, unknown>>(dependencies, workspaceKey(workspaceId));
   if (!item) throw agentXError("NOT_FOUND", "workspace not found");
   return WorkspaceInstanceSchema.parse(workspaceRecordFields(item));
