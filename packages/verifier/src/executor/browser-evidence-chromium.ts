@@ -75,16 +75,22 @@ export async function startProjectApp(input: { command: string; cwd: string; por
     child = spawn("/bin/sh", ["-c", input.command], { cwd: input.cwd, env: { ...input.env, PORT: String(input.port) }, detached: true, stdio: "ignore" });
   } catch { return { status: "app_did_not_start" }; }
   let exited = false;
-  const exit = new Promise<void>((resolve) => { child.once("exit", () => { exited = true; resolve(); }); child.once("error", () => { exited = true; resolve(); }); });
+  child.once("exit", () => { exited = true; });
+  child.once("error", () => { exited = true; });
   const groupAlive = () => { if (child.pid === undefined) return false; try { process.kill(-child.pid, 0); return true; } catch { return false; } };
   const signalGroup = (signal: NodeJS.Signals) => { if (child.pid !== undefined) { try { process.kill(-child.pid, signal); } catch { /* the group is already gone */ } } };
+  // Waits until nothing of the group is left (not only its leader, the shell): the app the shell started can outlive the shell by a moment, and the next side must find the port free.
+  const groupGone = async (ms: number): Promise<void> => {
+    const end = Date.now() + ms;
+    while (groupAlive() && Date.now() < end) await pause(25);
+  };
   const stop = async (): Promise<void> => {
     // The group, not only the shell: the app the shell started is in it. Only this group, never by name; never signalled again once it is gone (its id could be reused).
     if (!groupAlive()) return;
     signalGroup("SIGTERM");
-    if (!exited) await Promise.race([exit, pause(STOP_GRACE_MS)]);
+    await groupGone(STOP_GRACE_MS);
     if (groupAlive()) signalGroup("SIGKILL");
-    if (!exited) await Promise.race([exit, pause(STOP_KILLED_MS)]);
+    await groupGone(STOP_KILLED_MS);
   };
   const deadline = Date.now() + Math.max(0, input.timeoutMs);
   while (Date.now() < deadline) {
