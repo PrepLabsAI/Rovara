@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, it, vi } from "vitest";
 import type { AdapterRegistry } from "@agentx/contracts";
 import type { CoreHostAppOptions } from "../../packages/broker/src/core-host/app.js";
@@ -7,7 +8,9 @@ const captured = vi.hoisted<{ options: unknown }>(() => ({ options: undefined })
 vi.mock("../../packages/broker/src/core-host/app.js", () => ({ createCoreHostApp(options: unknown) { captured.options = options; return { serving: false }; } }));
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 const inputs = (extra: Partial<BrokerCoreRootInputs> = {}): BrokerCoreRootInputs => ({ env: {}, documentClient: { send: async () => { throw new Error("unused"); } }, stateTableName: "state", signInTableName: undefined, callbackSigningKey: "a".repeat(32), repositoryGrantKey: Buffer.alloc(32), repositoryCredential: async () => { throw new Error("unused"); }, codeModules: () => { throw new Error("unused"); }, origin: () => "", log: () => undefined, ...extra });
-const runtimeOptions = () => (captured.options as CoreHostAppOptions).runtime({} as AdapterRegistry, A, {} as never);
+// The registry is only asked for its store by the money stop (core-money-stop, merged with L3 in the batch of 2026-11-16); nothing here reads it.
+const registry = { require: () => ({}) } as unknown as AdapterRegistry;
+const runtimeOptions = () => (captured.options as CoreHostAppOptions).runtime(registry, A, {} as never);
 const task = (orgId: string) => ({ orgId, project: "web" }) as never;
 
 it("the root gives runtime the injected company/project policy, or D1 today when absent", async () => {
@@ -33,4 +36,10 @@ it("passes the runtime's checked CI reader into the company service builder", ()
 it("preserves an explicitly malformed CI reporting input for the runtime to refuse", () => {
   createBrokerCoreRoot(inputs({ ciReporting: null as never }));
   expect(runtimeOptions().ciReporting).toBeNull();
+});
+
+it("the deployed broker and dispatcher roots wire no D1 policy source yet (TE-D1 is not shipped), so CI mode is their_ci_fix", () => {
+  for (const file of ["packages/broker/src/aws/broker.ts", "packages/broker/src/aws/dispatcher.ts", "packages/broker/src/aws/worker-machines/dispatcher-core.ts"]) {
+    expect(readFileSync(file, "utf8"), file).not.toMatch(/\bpolicySource\b/u);
+  }
 });

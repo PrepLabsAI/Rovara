@@ -43,7 +43,11 @@ function policyCallers(root: string): string[] {
     });
 }
 it("allows only the authorized M4a settings adapter outside contracts/testing", () => {
-  expect(policyCallers(process.cwd())).toEqual([join(process.cwd(), "packages/broker/src/aws/project-settings.ts")]);
+  expect(policyCallers(process.cwd())).toEqual([
+    // L3 (#752): D1 policy read for CI mode and policy-backed jobs; Opus-reviewed; default when no source = their_ci_fix.
+    join(process.cwd(), "packages/broker/src/aws/core-engine-root.ts"), join(process.cwd(), "packages/broker/src/aws/core-job-services.ts"),
+    join(process.cwd(), "packages/broker/src/aws/project-settings.ts"),
+  ]);
 });
 it("caller guard detects scripts, infra, JS and every public policy entry", () => {
   const root = mkdtempSync(join(tmpdir(), "d1-callers-"));

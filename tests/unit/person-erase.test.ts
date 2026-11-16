@@ -395,7 +395,7 @@ describe("person erase: bounded and resumable", () => {
 describe("scheduled person erase resume (L13)", () => {
   function scheduled(w: World, switchValue = `on:${A}`) {
     const fakes = createFakeWorld();
-    const modules = fakes.modules.filter((module) => !["identity", "admission", "metering", "audit-sink"].includes(module.point)).map((module) => {
+    const modules = fakes.modules.filter((module) => !["identity", "admission", "metering", "audit-sink", "approvers"].includes(module.point)).map((module) => {
       if (module.point === "storage") return { ...module, create: () => w.store };
       if (module.point === "object-storage") return { ...module, create: () => Object.assign(new S3ObjectStorage({ client: w.bucket.client, bucket: "artifacts-a", now: () => w.clock.now }), w.deps.objects) };
       return module;
