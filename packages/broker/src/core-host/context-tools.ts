@@ -55,7 +55,7 @@ export async function handleCoreContextTools(request: BrokerRequest, ports: Core
       const { flow, teamSearch } = await ports.runtimeFor(companyId!);
       deadline.check();
       if (flow.companyId !== companyId) return refuse();
-      const location = await locateWorkspace({ store: flow.store, companyId: companyId! }, claims.workspaceId);
+      const location = await locateWorkspace({ store: flow.store, companyId }, claims.workspaceId);
       const workspace = fromDocument<WorkspaceRecord>(location?.workspace);
       deadline.check();
       if (location === undefined || workspace === undefined || workspace.id !== claims.workspaceId || workspace.companyId !== companyId

@@ -65,7 +65,7 @@ describe("AWS lifecycle follows workspace discovery", () => {
   });
   it("deletes a closed core workspace volume instead of quarantining it", async () => {
     const { workspaceId } = seed({ status: "CLOSED", closedAt: ago(120) });
-    vi.mocked(EC2Client.prototype.send).mockImplementation((async (command: { constructor: { name: string } }) => {
+    vi.spyOn(EC2Client.prototype, "send").mockImplementation((async (command: { constructor: { name: string } }) => {
       ec2Calls.push(command.constructor.name);
       if (command.constructor.name === "DescribeInstancesCommand") return { Reservations: [] };
       if (command.constructor.name === "DescribeVolumesCommand") return { Volumes: [{ VolumeId: "vol-0123456789abcdef0", State: "available", CreateTime: new Date(ago(600)), Tags: [{ Key: "agentx:workspace", Value: workspaceId }] }] };

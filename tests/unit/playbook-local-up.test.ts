@@ -8,6 +8,7 @@ import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
 import { PLAYBOOK_FILE_PATH, STANDING_INSTRUCTIONS_FEATURE, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, type WorkerInvocation } from "@agentx/contracts";
 import { defaultStateDirectory } from "../../packages/broker/src/local/state-directory.js";
+import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
@@ -58,10 +59,9 @@ async function launch(options: { file?: string | undefined; rules?: string } = {
     req.end(text);
   });
   const nextJob = async (workspaceId: string, seen: Set<string>): Promise<WorkerInvocation> => {
-    const store = runtime.registry.require("storage");
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await runtime.tick();
-      const machineId = ((await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))?.["machine"] as { machineId?: string } | undefined)?.machineId;
+      const machineId = ((await locateWorkspace(runtime.app.flow.deps, workspaceId))?.workspace["machine"] as { machineId?: string } | undefined)?.machineId;
       const fresh = machineId === undefined ? undefined : machines.delivered(machineId).find((job) => !seen.has(job.operationId));
       if (fresh !== undefined) { seen.add(fresh.operationId); return fresh; }
     }

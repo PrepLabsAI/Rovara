@@ -20,7 +20,8 @@ it("creates the thin discovery pointer atomically with the scoped workspace and 
   expect(await h.store.get({ pk: pointer.pk, sk: "META" })).toEqual(pointer);
   const creation = transactions.mock.calls.find(([items]) => items.some((item) => item.kind === "put" && item.item.entityType === "WORKSPACE"))![0];
   for (const pk of [pointer.pk, `ORG#${A}#WORKSPACE#${task.workspaceId}`]) {
-    expect(creation).toContainEqual(expect.objectContaining({ kind: "put", item: expect.objectContaining({ pk, sk: "META" }), condition: { op: "notExists", path: ["pk"] } }));
+    const put = creation.find((item) => item.kind === "put" && item.item.pk === pk && item.item.sk === "META");
+    expect(put).toMatchObject({ kind: "put", condition: { op: "notExists", path: ["pk"] } });
   }
   const other = new MemoryDocumentStore();
   const pointerStep = creation.find((item) => item.kind === "put" && item.item.pk === pointer.pk)!;
