@@ -1,8 +1,12 @@
 // TE-H1 slice 2 (DEC 241a): the worker's half. The project's app starts in the TASK SANDBOX through the check runners; Chromium runs in a container of the executor image that shares only the sandbox's network; the base code is shown
 // for the "before" side and the agent's files are put back exactly; the slice-1 runner's limits hold for whatever the capture container prints; a fault that must stop the task is never absorbed.
 import { createHash } from "node:crypto";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { BROWSER_EVIDENCE_EXECUTOR_ENTRY, BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceUpload, type BrowserEvidenceExecutorLine, type BrowserEvidenceRecipe } from "../../packages/contracts/src/index.js";
+import { BROWSER_EVIDENCE_EXECUTOR_ENTRY, BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, BROWSER_EVIDENCE_SIGN_IN_ENV, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceSignInEnv, decodeBrowserEvidenceUpload, type BrowserEvidenceExecutorLine, type BrowserEvidenceRecipe, type BrowserEvidenceSignInAnswer } from "../../packages/contracts/src/index.js";
+import { createDockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import { browserEvidenceExecutorArgs, collectBrowserEvidence, parseCaptureOutput, saveBrowserEvidence, type BrowserEvidenceWorkInput } from "../../packages/worker/src/browser-evidence-run.js";
@@ -52,11 +56,11 @@ function world(over: { capture?: (side: "before" | "after", routes: string[], in
   });
   const docker: BrowserEvidenceWorkInput["docker"] = {
     async run(args) { log.push(`docker ${args.join(" ")}`); return { exitCode: 0, signal: undefined, stdout: "", stderr: "", timedOut: false } as never; },
-    async execBytes(args) {
+    async execBytes(args, options) {
       const side = swapped ? "before" : "after";
       const plan = decodeBrowserEvidenceExecutorPlan(args.at(-1));
       log.push(`exec:${side}:${args.join(" ").slice(0, 0)}${plan?.routes.join(",") ?? "?"}`);
-      calls.push({ side, args: [...args] });
+      calls.push({ side, args: [...args], env: options.env });
       if (over.execDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, over.execDelayMs));
       const index = execs; execs += 1;
       const out = over.capture !== undefined ? over.capture(side, plan?.routes ?? [], index)
@@ -64,7 +68,7 @@ function world(over: { capture?: (side: "before" | "after", routes: string[], in
       return { exitCode: over.execFault?.exitCode ?? 0, stdout: Buffer.from(out), stderr: "", ...(over.execFault?.timedOut === true ? { timedOut: true } : {}), ...(over.execFault?.tooLarge === true ? { tooLarge: true } : {}) };
     },
   };
-  const calls: Array<{ side: string; args: string[] }> = [];
+  const calls: Array<{ side: string; args: string[]; env: Readonly<Record<string, string>> | undefined }> = [];
   const input = (extra: Partial<BrowserEvidenceWorkInput> = {}): BrowserEvidenceWorkInput => ({
     recipe: RECIPE, repositories: [{ repositoryId: "demo", directory: "/work/repo/demo", baseCommitSha: COMMIT }], candidateTrees: new Map([["demo", "2".repeat(40)]]), rootPath: "/work",
     runners, sandboxName: SANDBOX, originalCode, docker, executorImage: IMAGE, signal: new AbortController().signal, budgetMs: 120_000,
@@ -251,5 +255,114 @@ describe("handing the pictures to the broker", () => {
   it("rethrows the faults that must stop the task", async () => {
     const w = world({ restoreError: new AgentFilesRestoreError("not restored") });
     await expect(saveBrowserEvidence({ ...w.input(), sink: async () => undefined, progress: async () => undefined })).rejects.toBeInstanceOf(AgentFilesRestoreError);
+  });
+});
+
+// TE-H1 slice 3: an app behind a login. The saved sign-in is asked for only when the recipe has one and a page was picked, held in memory, and given to the capture container in ONE environment variable of the docker CLI (never an
+// argument of the command line, never the plan); a run with no sign-in is exactly today's run.
+describe("the sign-in", () => {
+  const VALUES = { username: ["tester", "example"].join("@") + ".test", password: ["pw", "Zq7", "Lm2", "Xv9"].join("-") };
+  const SIGNED: BrowserEvidenceRecipe = { ...RECIPE, signIn: { path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard", credentialRef: "be-demo-signin" } };
+  const answer = (value: BrowserEvidenceSignInAnswer | Error | undefined) => ({ async signIn() { if (value instanceof Error) throw value; return value as BrowserEvidenceSignInAnswer; }, asked: 0 });
+  const ready: BrowserEvidenceSignInAnswer = { status: "ready", values: VALUES };
+  const spy = (value: BrowserEvidenceSignInAnswer | Error | undefined) => { const state = { asked: 0 }; return { state, signIn: async () => { state.asked += 1; if (value instanceof Error) throw value; return value as BrowserEvidenceSignInAnswer; } }; };
+  const seen = (w: ReturnType<typeof world>): string => JSON.stringify({ log: w.log, calls: w.calls.map((call) => ({ side: call.side, args: call.args })) });
+
+  it("hands the values to the capture container in the environment of the docker CLI only: `-e NAME` without a value, no value in the arguments or the plan, and the plan carries the form and the extra painted-over fields", async () => {
+    const w = world();
+    const asked = spy(ready);
+    const result = await collectBrowserEvidence(w.input({ recipe: SIGNED, signIn: asked.signIn }));
+    expect(result.notRun).toBeUndefined();
+    expect(result.routes[0]?.status).toBe("shown");
+    expect(asked.state.asked).toBe(1);
+    expect(w.calls).toHaveLength(2);
+    for (const call of w.calls) {
+      const at = call.args.indexOf("-e");
+      expect(call.args[at + 1]).toBe(BROWSER_EVIDENCE_SIGN_IN_ENV);
+      expect(call.args.filter((value) => value === "-e")).toHaveLength(1);
+      expect(Object.keys(call.env ?? {})).toEqual([BROWSER_EVIDENCE_SIGN_IN_ENV]);
+      expect(decodeBrowserEvidenceSignInEnv(call.env?.[BROWSER_EVIDENCE_SIGN_IN_ENV])).toEqual(VALUES);
+      const plan = decodeBrowserEvidenceExecutorPlan(call.args.at(-1))!;
+      expect(plan.signIn).toEqual({ path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard" });
+      expect(plan.maskSelectors).toEqual([".account", "#email", "#password"]);
+    }
+    // Nothing the worker wrote down (its log, the container's arguments) holds a value or the reference.
+    for (const text of [VALUES.username, VALUES.password, Buffer.from(VALUES.password).toString("base64"), "be-demo-signin"]) expect(seen(w), text).not.toContain(text);
+  });
+
+  it("is today's run, with no question and no environment, for a recipe without a sign-in (golden)", async () => {
+    const w = world();
+    const asked = spy(ready);
+    const result = await collectBrowserEvidence(w.input({ signIn: asked.signIn }));
+    expect(result.routes[0]?.status).toBe("shown");
+    expect(asked.state.asked).toBe(0);
+    for (const call of w.calls) { expect(call.args).not.toContain("-e"); expect(call.env).toBeUndefined(); expect(decodeBrowserEvidenceExecutorPlan(call.args.at(-1))?.signIn).toBeUndefined(); }
+  });
+
+  it("does not run, with a fixed reason and nothing started, when no sign-in is saved, the broker cannot be asked or its answer is not one (mutant: a run that goes on signed out)", async () => {
+    const notSet = world();
+    expect((await collectBrowserEvidence(notSet.input({ recipe: SIGNED, signIn: spy({ status: "not_set" }).signIn }))).notRun).toBe("sign_in_not_set");
+    expect(notSet.log.filter((entry) => entry.startsWith("app:") || entry.startsWith("swap") || entry.startsWith("exec"))).toEqual([]);
+    for (const value of [new Error(`HTTP 500 for ${VALUES.password}`), undefined]) {
+      const w = world();
+      const run = await collectBrowserEvidence(w.input({ recipe: SIGNED, signIn: value === undefined ? undefined : spy(value).signIn }));
+      expect(run.notRun, String(value)).toBe("capture_failed");
+      expect(w.calls).toEqual([]);
+      expect(JSON.stringify(run)).not.toContain(VALUES.password);
+    }
+    // No page changed: the sign-in is not even asked for.
+    const unchanged = world({ changed: ["README.md"] });
+    const asked = spy(ready);
+    expect((await collectBrowserEvidence(unchanged.input({ recipe: SIGNED, signIn: asked.signIn }))).notRun).toBe("no_changed_page");
+    expect(asked.state.asked).toBe(0);
+  });
+
+  it("says the sign-in did not work, as the run's one reason, when the capture container could not sign in; no page of a signed-out app is kept", async () => {
+    const w = world({ capture: () => line({ t: "app", status: "sign_in_failed" }) });
+    const run = await collectBrowserEvidence(w.input({ recipe: SIGNED, signIn: spy(ready).signIn }));
+    expect(run.notRun).toBe("sign_in_failed");
+    expect(run.routes).toEqual([]);
+    expect(JSON.stringify(run)).not.toContain(VALUES.username);
+    // A run with no sign-in cannot be told this by the container: it is an unreadable answer.
+    expect(parseCaptureOutput(Buffer.from(line({ t: "app", status: "sign_in_failed" })), ["/a"])?.app).toBe("sign_in_failed");
+  });
+
+  it("drops a picture whose bytes carry a saved value (defence in depth), and refuses to give a value that is not a valid sign-in to a container", async () => {
+    const leaking = world({ capture: (_side, routes) => line({ t: "app", status: "ready" }) + routes.map((route) => line({ t: "shot", route, ok: true, consoleErrors: 0, jpegBase64: Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from(`xx${VALUES.password}xx`)]).toString("base64") })).join("") });
+    expect((await collectBrowserEvidence(leaking.input({ recipe: SIGNED, signIn: spy(ready).signIn }))).routes).toEqual([{ route: "/checkout", status: "not_run", reason: "masked_content" }]);
+    const bad = world();
+    expect((await collectBrowserEvidence(bad.input({ recipe: SIGNED, signIn: async () => ({ status: "ready", values: { username: "ab", password: "cd" } }) as never }))).notRun).toBe("capture_failed");
+    expect(bad.calls).toEqual([]);
+  });
+
+  it("gives the container's arguments the variable only on request, and only that one name", () => {
+    const base = { image: IMAGE, sandbox: SANDBOX, name: "rovara-be-abc", seccompProfile: "/p", plan: "cGxhbg" };
+    expect(browserEvidenceExecutorArgs(base)).not.toContain("-e");
+    const withSignIn = browserEvidenceExecutorArgs({ ...base, withSignIn: true });
+    expect(withSignIn[withSignIn.indexOf("-e") + 1]).toBe("ROVARA_BE_SIGNIN");
+    expect(withSignIn.slice(-4)).toEqual([IMAGE, "node", BROWSER_EVIDENCE_EXECUTOR_ENTRY, "cGxhbg"]);
+    void answer;
+  });
+});
+
+describe("the docker CLI's environment", () => {
+  it("gives `docker run -e NAME` its value from the CLI process's environment only: the value is never an argument, the worker's own environment is not changed, and no env is the worker's environment as it was", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rovara-fake-docker-"));
+    const savedPath = process.env["PATH"];
+    try {
+      // A `docker` that prints the variable it was given and the arguments it was called with.
+      await writeFile(join(directory, "docker"), "#!/bin/sh\nprintf '%s|%s' \"${ROVARA_BE_SIGNIN-unset}\" \"$*\"\n");
+      await chmod(join(directory, "docker"), 0o755);
+      process.env["PATH"] = `${directory}:${savedPath ?? ""}`;
+      const cli = createDockerCli();
+      const given = await cli.execBytes!(["run", "-e", "ROVARA_BE_SIGNIN", "image"], { maxStdoutBytes: 1_000, env: { ROVARA_BE_SIGNIN: "value-123" } });
+      expect(given.stdout.toString()).toBe("value-123|run -e ROVARA_BE_SIGNIN image");
+      expect(process.env["ROVARA_BE_SIGNIN"]).toBeUndefined();
+      const plain = await cli.execBytes!(["run", "image"], { maxStdoutBytes: 1_000 });
+      expect(plain.stdout.toString()).toBe("unset|run image");
+    } finally {
+      process.env["PATH"] = savedPath;
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

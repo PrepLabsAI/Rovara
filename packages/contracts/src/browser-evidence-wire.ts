@@ -9,7 +9,7 @@
 // Browser-safe and pure: nothing here imports a Node module.
 import { z } from "zod";
 import {
-  BROWSER_EVIDENCE_CHECK_ID, BROWSER_EVIDENCE_NOT_PROOF_WORDS, BROWSER_EVIDENCE_NOT_RUN_REASONS, BROWSER_EVIDENCE_NOT_RUN_WORDS, BROWSER_EVIDENCE_NOT_SHOWN_REASONS, BROWSER_EVIDENCE_NOT_SHOWN_WORDS, BROWSER_EVIDENCE_RUN_BY_WORDS,
+  BrowserEvidenceSignInValuesSchema, BROWSER_EVIDENCE_CHECK_ID, BROWSER_EVIDENCE_NOT_PROOF_WORDS, BROWSER_EVIDENCE_NOT_RUN_REASONS, BROWSER_EVIDENCE_NOT_RUN_WORDS, BROWSER_EVIDENCE_NOT_SHOWN_REASONS, BROWSER_EVIDENCE_NOT_SHOWN_WORDS, BROWSER_EVIDENCE_RUN_BY_WORDS,
   BROWSER_EVIDENCE_TOTAL_MAX_BYTES, BrowserEvidenceRecipeSchema, checkedBrowserEvidenceCaptured, isBrowserEvidenceRoute,
   type BrowserEvidenceCaptured, type BrowserEvidenceIsolation, type BrowserEvidenceNotRunReason, type BrowserEvidenceNotShownReason, type BrowserEvidenceOutcome, type BrowserEvidenceRecipe,
 } from "./browser-evidence.js";
@@ -24,6 +24,17 @@ export const BrowserEvidencePayloadSchema = BrowserEvidenceRecipeSchema;
 export type BrowserEvidencePayload = BrowserEvidenceRecipe;
 /** Cloud's answer while browser evidence is not on Cloud (DEFERRED 1b-X5): fixed words, no echo of anything the caller sent. */
 export const BROWSER_EVIDENCE_NOT_ON_CLOUD = "Browser evidence is not on Cloud yet";
+
+// ---- the sign-in callback (slice 3)
+
+/** The callback action a CHECKS run asks for the project's saved sign-in with, only when its recipe has a sign-in. The broker answers from the company's secret store, never from the request. */
+export const BROWSER_EVIDENCE_SIGN_IN_ACTION = "browser-evidence-sign-in" as const;
+/** The broker's answer: the saved values (read at that moment, never kept by the worker beyond the run), or `not_set` when nothing is saved. Fixed shape: no secret is ever in an error. */
+export const BrowserEvidenceSignInAnswerSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("ready"), values: BrowserEvidenceSignInValuesSchema }).strict(),
+  z.object({ status: z.literal("not_set") }).strict(),
+]);
+export type BrowserEvidenceSignInAnswer = z.infer<typeof BrowserEvidenceSignInAnswerSchema>;
 
 // ---- the callback's upload
 
@@ -221,9 +232,41 @@ const PLAIN_LINE = /^[^\p{Cc}\p{Cf}]*$/u;
 const RouteField = z.string().refine(isBrowserEvidenceRoute, "a path on the app's own origin");
 
 /** What the worker tells the capture program (one command-line argument): the app's port, the pages, the elements to paint over, and the time. Everything is bounded; nothing else crosses. */
+const SelectorField = z.string().min(1).max(200).regex(PLAIN_LINE);
+/** How the capture program signs in (never the values: those come in its environment, `BROWSER_EVIDENCE_SIGN_IN_ENV`). */
+export const BrowserEvidenceExecutorSignInSchema = z.object({
+  path: RouteField, usernameSelector: SelectorField, passwordSelector: SelectorField, submitSelector: SelectorField,
+  successPath: RouteField.optional(), successSelector: SelectorField.optional(),
+}).strict().refine((signIn) => signIn.successPath !== undefined || signIn.successSelector !== undefined, "a signed-in page is told by a page or an element");
+export type BrowserEvidenceExecutorSignIn = z.infer<typeof BrowserEvidenceExecutorSignInSchema>;
+/** The one environment variable the capture container may have: base64url of the sign-in's JSON (`{ username, password }`). The program reads it once and removes it. */
+export const BROWSER_EVIDENCE_SIGN_IN_ENV = "ROVARA_BE_SIGNIN" as const;
+export const BROWSER_EVIDENCE_SIGN_IN_ENV_MAX = 1_536;
+/** The sign-in's values as the environment variable carries them. Throws on values that are not a valid sign-in. */
+export function encodeBrowserEvidenceSignInEnv(values: unknown): string {
+  const checked = BrowserEvidenceSignInValuesSchema.parse(values);
+  const bytes = new TextEncoder().encode(JSON.stringify({ username: checked.username, password: checked.password }));
+  let binary = "";
+  for (const value of bytes) binary += String.fromCharCode(value);
+  const text = btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
+  if (text.length > BROWSER_EVIDENCE_SIGN_IN_ENV_MAX) throw new Error("browser evidence sign-in is too long");
+  return text;
+}
+/** The values an environment variable holds, or undefined when it is not exactly a valid sign-in. */
+export function decodeBrowserEvidenceSignInEnv(text: unknown): z.infer<typeof BrowserEvidenceSignInValuesSchema> | undefined {
+  if (typeof text !== "string" || text.length === 0 || text.length > BROWSER_EVIDENCE_SIGN_IN_ENV_MAX || !/^[A-Za-z0-9_-]+$/u.test(text)) return undefined;
+  try {
+    const padded = text.replace(/-/gu, "+").replace(/_/gu, "/");
+    const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+    const parsed = BrowserEvidenceSignInValuesSchema.safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)))));
+    return parsed.success ? parsed.data : undefined;
+  } catch { return undefined; }
+}
+
 export const BrowserEvidenceExecutorPlanSchema = z.object({
   port: z.number().int().min(1_024).max(65_535),
   readyPath: RouteField.optional(),
+  signIn: BrowserEvidenceExecutorSignInSchema.optional(),
   routes: z.array(RouteField).min(1).max(5),
   maskSelectors: z.array(z.string().min(1).max(200).regex(PLAIN_LINE)).max(20),
   runMs: z.number().int().min(1_000).max(120_000),
@@ -233,7 +276,7 @@ export type BrowserEvidenceExecutorPlan = z.infer<typeof BrowserEvidenceExecutor
 
 /** One line the capture program prints (JSON, one object per line): first the app's state, then one row per page. A picture is base64 of a JPEG within the cap; the worker checks its bytes again. */
 export const BrowserEvidenceExecutorLineSchema = z.union([
-  z.object({ t: z.literal("app"), status: z.enum(["ready", "app_did_not_start", "time_limit"]) }).strict(),
+  z.object({ t: z.literal("app"), status: z.enum(["ready", "app_did_not_start", "time_limit", "sign_in_failed"]) }).strict(),
   z.object({ t: z.literal("shot"), route: RouteField, ok: z.literal(true), consoleErrors: z.number().int().min(0).max(1_000_000), jpegBase64: z.string().min(4).max(Math.ceil(BROWSER_EVIDENCE_TOTAL_MAX_BYTES / 8 * 4 / 3) + 8) }).strict(),
   z.object({ t: z.literal("shot"), route: RouteField, ok: z.literal(false), reason: z.enum(["page_did_not_load", "time_limit", "capture_failed", "masked_content"]) }).strict(),
 ]);

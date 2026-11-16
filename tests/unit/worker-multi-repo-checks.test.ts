@@ -912,6 +912,16 @@ describe("TE-H1 browser evidence hook (DEC 241): the CHECKS run hands the broker
     expect(uploads).toHaveLength(1);
     expect(events).toContain("AgentX took no screenshots of the changed pages (see the evidence for why).");
   });
+  it("gives the capture the broker's sign-in question (slice 3) only as a function of the run, and never asks it itself", async () => {
+    const asked: Array<Record<string, unknown>> = [];
+    let questions = 0;
+    const signIn = async () => { questions += 1; return { status: "not_set" as const }; };
+    const withSignIn = { ...recipe, signIn: { path: "/login", usernameSelector: "#a", passwordSelector: "#b", submitSelector: "button", successPath: "/home", credentialRef: "be-demo-signin" } };
+    await checksRun({ evidenceCapture: true, browserEvidence: withSignIn }, { collectBrowserEvidence: async (input: Record<string, unknown>) => { asked.push(input); return { isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "no_changed_page" }; }, browserEvidenceSink: async () => undefined, browserEvidenceSignIn: signIn });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!["signIn"]).toBe(signIn);
+    expect(questions).toBe(0);
+  });
   it("asks for nothing without the field (even with the evidence capture), or without the capture, and a capture that fails or an upload the broker refuses never fails the round", async () => {
     let calls = 0;
     const deps = { collectBrowserEvidence: async () => { calls += 1; return { isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "no_changed_page" }; }, browserEvidenceSink: async () => { calls += 1; } };
