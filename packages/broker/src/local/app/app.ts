@@ -84,6 +84,7 @@ import { createLocalConnections } from "./connections.js";
 import type { TaskEndRegistrar } from "../../context-sources/quotes.js";
 
 import { createSessionStartExtras } from "./session-start.js";
+import { withStartFenceExtras } from "../../core/task-flow/start-fence.js";
 import { createLocalDesignReview } from "./design-review.js";
 import { createLocalChat } from "./chat.js";
 import { createLocalIntake } from "./intake.js";
@@ -438,7 +439,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     installModel: async () => { const choice = await chosen(); return choice === undefined ? undefined : { provider: choice.provider, modelId: choice.model }; },
     ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
     ...(options.modelCalls === undefined ? {} : { modelCalls: options.modelCalls }),
-    startExtras: createSessionStartExtras(companyId),
+    // A chat start carries the chat link's fence (core/channel/links.ts) in the same transaction: an unlink that committed first leaves nothing started.
+    startExtras: withStartFenceExtras(createSessionStartExtras(companyId)),
     // The ticket a task started from: a pull request's description says which issue it fixes.
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,

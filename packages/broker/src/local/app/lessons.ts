@@ -12,7 +12,7 @@
 // repository the lessons that were learned only from a repository's own review comments may be proposed to that repository as `.rovara/lessons.md`, in a pull request, by the weekly pass (off per repository).
 import { createHash, randomUUID } from "node:crypto";
 import {
-  IMPLICIT_COMPANY_ID, LEARNED_CONTEXT_FEATURE, LESSONS_WORKER_DEADLINE_SECONDS, codeRepositoriesOf, companyScoped, orgProjectCatalogKey, learnedLoadReportOfProgress,
+  IMPLICIT_COMPANY_ID, codeRepositoriesOf, companyScoped, orgProjectCatalogKey,
   type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type LearnedContext, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
 } from "@agentx/contracts";
 import type { ModelProviderBook } from "../model-proxy/types.js";
@@ -21,30 +21,23 @@ import type { ProviderEndpoints } from "../model-proxy/providers.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
 import type { LessonLocalToolsView, LessonReposView, LocalActionResult, LessonView as PageLessonView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
-import { taskPointerKey } from "../../core/task-flow/keys.js";
 import { readTask } from "../../core/task-flow/reads.js";
-import { fromDocument, type TaskPointerRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
-import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
-import { applyLoadReport, recordFeedback } from "../../lessons/counters.js";
+import type { TaskRecord } from "../../core/task-flow/records.js";
+import { recordFeedback } from "../../lessons/counters.js";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import { approveLesson, retireByPerson } from "../../lessons/approve.js";
-import { learnedContextForDispatch } from "../../lessons/load.js";
 import { readVisible } from "../../lessons/read-visible.js";
-import { modeAllows, requireAudit, resolveLearning, setLearnedLessonsGate } from "../../lessons/policy.js";
+import { requireAudit, setLearnedLessonsGate } from "../../lessons/policy.js";
 import { createLessonsRuntime, type LessonsRuntime } from "../../lessons/runtime.js";
-import { documentReflectClaims } from "../../lessons/reflect-claims.js";
-import { reflectQueueOf, queueReflectQueue, queueReflectVisibility } from "../../lessons/reflect-queue.js";
-import { retryDelayFor, runReflectMessage, type ReflectWorkerDeps } from "../../lessons/reflect-worker.js";
-import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps } from "../../lessons/task-end.js";
 import { buildLessonsView } from "../../lessons/view.js";
 import { repoFileAction, repoFileStatus } from "../../lessons/repo-file-routes.js";
 import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools, type LocalToolsSetResult } from "../../lessons/local-tools-setting.js";
-import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "../../lessons/used-in-pr.js";
+import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
-import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob, type RepoFileRuntime } from "../../lessons/repo-file-job.js";
-import { planLoadFacts } from "../../lessons/plan-facts.js";
+import type { RepoFileRuntime } from "../../lessons/repo-file-job.js";
+import { createLessonsHost, pumpReflectQueue } from "../../lessons/host-glue.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources } from "./lessons-sources.js";
@@ -54,14 +47,7 @@ import type { PrCommandWorld } from "../../core/pr-commands/handler.js";
 import type { Lesson } from "../../lessons/types.js";
 
 /** The longest a step's dispatch waits for the loader: a slow load sends nothing, and the step runs as it would without lessons. */
-export const LESSON_LOAD_DEADLINE_MS = 2_500;
-/** The messages one pass of the timer takes off the reflection queue. */
-const REFLECT_PER_PASS = 2;
-const LOAD_RECORD_KEEP_SECONDS = 30 * 86_400;
-const INTENT_REQUEST_CHARS = 600;
-
-/** The workflow modes that carry lessons, and the lesson stage each is. Every other mode (the checks, a publication) carries none. */
-const STAGES: Readonly<Record<string, "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "REVIEW">> = { UNDERSTAND: "UNDERSTAND", PLAN: "PLAN", IMPLEMENT: "IMPLEMENT", REVIEW: "REVIEW" };
+export { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
 
 export interface LocalLessonsOptions {
   flow: TaskFlowDeps;
@@ -192,51 +178,20 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   };
   runtime.repoFile = repoFile;
 
-  // ---- capture: the queue, the lease and the worker
+  // ---- capture, loading, the pull request and the upkeep: the same for every host (`lessons/host-glue.ts`)
 
-  let reflectQueue: ReturnType<typeof queueReflectQueue> | undefined;
-  let queuePromise: ReturnType<typeof reflectQueueOf> | undefined;
-  const queueOf = (): ReturnType<typeof reflectQueueOf> => (queuePromise ??= reflectQueueOf(registry.require("queue")));
-  const sender = async (): Promise<ReturnType<typeof queueReflectQueue>> => (reflectQueue ??= queueReflectQueue(await queueOf()));
-
-  const claims = documentReflectClaims({ store: flow.store, keysOutcome: async () => "clear" });
-  const learning: TaskLearningDeps = {
-    source: sources.source, rows: sources.rows, settings: runtime.settings,
-    reflect: { model, spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause },
-    process: runtime.process, counters: runtime.counters, log: (event, fields) => log(event, fields),
-  };
-  const workerDeps = (visibility?: ReflectWorkerDeps["visibility"]): ReflectWorkerDeps => ({
-    claims, learn: (input) => learnFromEndedTaskTyped(learning, input), now, deadlineMs: LESSONS_WORKER_DEADLINE_SECONDS * 1000,
-    ...(visibility === undefined ? {} : { visibility }), log: (event, fields) => log(event, fields),
-  });
-
-  async function pumpReflections(): Promise<void> {
-    const queue = await queueOf();
-    const visibility = queueReflectVisibility(queue);
-    const received = await queue.receive({ maxMessages: REFLECT_PER_PASS, visibilityTimeoutSeconds: 10 * 60 });
-    for (const message of received) {
-      const outcome = await runReflectMessage(workerDeps(visibility), JSON.stringify(message.body)).catch(() => ({ result: "failed" as const, retry: true }));
-      if (outcome.retry) await queue.changeVisibility(message.receiptHandle, retryDelayFor(message.receiveCount, "retryAt" in outcome ? outcome.retryAt : undefined, now())).catch(() => undefined);
-      else await queue.ack(message.receiptHandle).catch(() => undefined);
-    }
-  }
-
-  const onTaskEnd = learningTaskEndHandler(() => ({ queue: { send: async (message) => (await sender()).send(message) }, log: (event, fields) => log(event, fields) }));
-  const endOf = (kind: string): TaskEndOutcome | undefined => (kind === "merged" ? "merged" : kind === "closed" ? "closed" : undefined);
-  options.milestones.register({
-    name: "lessons",
-    async on(milestone) {
-      // Behind the switch: with it off nothing is queued, so no later switching-on finds a backlog of old tasks to pay for.
-      if (!enabled()) return;
-      const outcome = endOf(milestone.kind);
-      if (outcome === undefined) return;
-      const task = await readTask(flow, milestone.taskId);
-      if (task === undefined || task.companyId !== companyId) return;
-      const resolved = await resolveLearning(runtime.settings, companyId, task.project);
-      if (!modeAllows(resolved.mode, "reflect")) return;
-      await onTaskEnd({ orgId: companyId, taskId: milestone.taskId, outcome });
+  const host = createLessonsHost({
+    flow, runtime, companyId, blobs: options.blobs, queues: registry.require("queue"), enabled, sources: { source: sources.source, rows: sources.rows },
+    visibility: async (project): Promise<RepositoryVisibility> => {
+      const found = await repositories.ofProject(project);
+      if (found.length === 0) return "unknown";
+      if (found.some((repository) => repository.private === false)) return "public";
+      return found.every((repository) => repository.private === true) ? "private" : "unknown";
     },
+    now, log: (event, fields) => log(event, fields),
   });
+  options.milestones.register(host.milestone);
+  const pumpReflections = async (): Promise<void> => { await pumpReflectQueue({ queues: registry.require("queue"), hostFor: async (id) => (id === companyId ? host : undefined), now, log: (event, fields) => log(event, fields) }); };
 
   // ---- the owner's page and decisions
 
@@ -395,106 +350,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     return { ok: true, message: "Saved." };
   }
 
-  async function learnedFor(input: Parameters<LocalLessons["learnedFor"]>[0]): Promise<{ learnedContext?: LearnedContext }> {
-    const stage = input.workflowMode === undefined || !Object.hasOwn(STAGES, input.workflowMode) ? undefined : STAGES[input.workflowMode];
-    if (stage === undefined || !enabled() || !input.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const pointer = fromDocument<TaskPointerRecord>(await flow.store.get(taskPointerKey(input.workspaceId)));
-      const task = pointer === undefined ? undefined : await readTask(flow, pointer.taskId);
-      if (task === undefined || task.companyId !== companyId || task.workflow === undefined) return {};
-      const round = task.workflow.revision;
-      // Set when the deadline passes: the dispatch went on without lessons, so nothing is recorded as loaded or used afterwards.
-      let abandoned = false;
-      const run = (async () => {
-        const plan = await planFactsOf(task).catch(() => undefined);
-        const project = await flow.projects.revision(task.project, task.startingRevision);
-        const repos = project === undefined ? [] : codeRepositoriesOf(project.definition).map((repository) => repository.name);
-        const requestText = (task as { requestText?: string }).requestText ?? "";
-        const intent = [task.title, requestText.slice(0, INTENT_REQUEST_CHARS)].filter((part) => part.trim() !== "").join("\n");
-        const loaded = await learnedContextForDispatch(runtime.load, {
-          workspaceId: companyId, project: task.project, taskId: task.taskId, stage, round, intent, ...(plan === undefined || plan.summary === "" ? {} : { planSummary: plan.summary }),
-          repos, files: plan?.files ?? [], languages: [], taskAudience: { kind: "shared" }, wanted: () => !abandoned,
-        }, [LEARNED_CONTEXT_FEATURE]);
-        if (loaded.learnedContext === undefined || abandoned) return {};
-        // What this dispatch loaded, so the worker's report is applied to this stage's manifest only; and, for the lessons page, which tasks used which lessons.
-        const at = Math.floor(now() / 1000);
-        if (abandoned) return {};
-        await flow.store.put({ item: { pk: companyScoped(companyId, "LESSON_LOAD"), sk: input.operationId, entityType: "LESSON_LOAD_REF", taskId: task.taskId, project: task.project, stage, round, ...(flow.store.ttlAttribute === undefined ? {} : { [flow.store.ttlAttribute]: at + LOAD_RECORD_KEEP_SECONDS }) } });
-        for (const lesson of loaded.learnedContext.lessons) {
-          if (abandoned) return {};
-          await flow.store.put({ item: { pk: companyScoped(companyId, `LESSON_USE#${task.project}#${lesson.id}`), sk: task.taskId, entityType: "LESSON_USE", taskId: task.taskId, title: task.title.slice(0, 200), at: now(), ...(flow.store.ttlAttribute === undefined ? {} : { [flow.store.ttlAttribute]: at + 180 * 86_400 }) } }).catch(() => undefined);
-        }
-        return loaded;
-      })();
-      const result = await Promise.race([run, new Promise<{ learnedContext?: LearnedContext }>((resolve) => { timer = setTimeout(() => { abandoned = true; resolve({}); }, LESSON_LOAD_DEADLINE_MS); timer.unref?.(); })]);
-      return result.learnedContext === undefined ? {} : { learnedContext: result.learnedContext };
-    } catch (error) {
-      log("load_failed", { error: error instanceof Error ? error.name : "unknown" });
-      return {};
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
-  }
-
-  /** What the loader is told about a task besides its title: a summary of its latest plan and the files the plan names. */
-  async function planFactsOf(task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> {
-    const artifact = task.workflow?.artifacts.filter((entry) => entry.type === "plan").sort((a, b) => a.version - b.version).at(-1);
-    if (artifact === undefined) return undefined;
-    const loaded = await loadWorkflowDocument(readText, artifact, {});
-    if (loaded === undefined) return undefined;
-    if (loaded.format === "structured") return planLoadFacts(loaded.plan);
-    // A Markdown plan: its first words are the summary, and the files it names in words are the files.
-    return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
-  }
-
-  async function onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void> {
-    if (!enabled()) return;
-    try {
-      const reports = events.slice(0, 500).flatMap((event) => (event.type === "progress" ? [learnedLoadReportOfProgress(event.payload)] : [])).flatMap((report) => (report === undefined ? [] : [report]));
-      if (reports.length === 0) return;
-      const ref = await flow.store.get({ pk: companyScoped(companyId, "LESSON_LOAD"), sk: operation.id });
-      if (ref === undefined || typeof ref["taskId"] !== "string" || typeof ref["project"] !== "string" || typeof ref["stage"] !== "string" || typeof ref["round"] !== "number") return;
-      const resolved = await resolveLearning(runtime.settings, companyId, ref["project"]);
-      if (!modeAllows(resolved.mode, "load")) return;
-      for (const report of reports) {
-        if (report.stage !== ref["stage"]) continue;
-        await applyLoadReport(runtime.counters, { workspaceId: companyId, project: ref["project"], taskId: ref["taskId"], stage: report.stage, round: ref["round"], report });
-      }
-    } catch { /* information only: a lost report leaves a lesson "not checked"; it never fails the worker's events */ }
-  }
-
-  // ---- the pull request
-
-  const usedReader = lessonsUsedReaderOver({
-    store: runtime.store, settings: runtime.settings, access: runtime.access, commands: true, names: runtime.routes.names,
-    visibility: async (_orgId, project): Promise<RepositoryVisibility> => {
-      const found = await repositories.ofProject(project);
-      if (found.length === 0) return "unknown";
-      if (found.some((repository) => repository.private === false)) return "public";
-      return found.every((repository) => repository.private === true) ? "private" : "unknown";
-    },
-  });
-  async function usedSummary(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSummary | undefined> {
-    return usedReader({ orgId: companyId, project: task.project, taskId: task.taskId, pageUrl: undefined, repo: repositoryId, startingRevision: task.startingRevision });
-  }
-  // The numbers a pull request shows are the position in the list written into its description. That list is kept as it was written, so a comment's number means what the person read, even after
-  // the lessons held, or a later round's list, have moved on.
-  const listKey = (taskId: string, repositoryId: string) => ({ pk: companyScoped(companyId, `LESSON_LIST#${taskId}`), sk: repositoryId });
-  async function recordList(task: Pick<TaskRecord, "taskId" | "project">, repositoryId: string, ids: readonly string[]): Promise<void> {
-    const at = Math.floor(now() / 1000);
-    await flow.store.put({ item: { ...listKey(task.taskId, repositoryId), entityType: "LESSON_LIST", project: task.project, ids: [...ids], ...(flow.store.ttlAttribute === undefined ? {} : { [flow.store.ttlAttribute]: at + 180 * 86_400 }) } }).catch(() => undefined);
-  }
-  async function usedInPullRequest(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSection | undefined> {
-    // Switched off, the description says so; switched on with nothing used yet, it says that: the section is there either way and a reader knows why it is empty.
-    if (!enabled()) { await recordList(task, repositoryId, []); return { count: 0, taskUrl: "", entries: [], none: true, reason: "off" }; }
-    try {
-      const summary = await usedSummary(task, repositoryId);
-      await recordList(task, repositoryId, summary?.items.map((item) => item.id) ?? []);
-      const section = lessonsUsedSection(summary);
-      return section === undefined || section.count <= 0 ? { count: 0, taskUrl: "", entries: [], none: true, reason: "unused" } : section;
-    } catch { return undefined; }
-  }
+  const learnedFor: LocalLessons["learnedFor"] = (input) => host.learnedFor(input);
+  const onEvents: LocalLessons["onEvents"] = (operation, events) => host.onEvents(operation, events);
+  const usedInPullRequest: LocalLessons["usedInPullRequest"] = (task, repositoryId) => host.usedInPullRequest(task, repositoryId);
+  const listKey = (taskId: string, repositoryId: string) => host.listKey(taskId, repositoryId);
 
   const RETIRE_ASK_KEEP_SECONDS = 30 * 86_400;
   const retireAskKey = (project: string, lessonId: string) => ({ pk: companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`), sk: lessonId });
@@ -547,26 +406,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   }
 
   async function nightly(): Promise<void> {
-    const names = await projectNames();
-    const { sweepExpired } = await import("../../lessons/expiry.js");
-    const { promoteStableTrials } = await import("../../lessons/trial.js");
-    for (const project of names) {
-      const key = { workspaceId: companyId, project };
-      const resolved = await resolveLearning(runtime.settings, companyId, project);
-      if (!modeAllows(resolved.chosenMode, "capture")) continue;
-      await sweepExpired({ ...runtime.counters, vectors: runtime.vectors }, runtime.store, key, {}).catch(() => undefined);
-      await promoteStableTrials({ ...runtime.counters, store: runtime.store }, key).catch(() => undefined);
-    }
-    // The erasure sweep comes first and has its own budget; then the weekly lessons file pass (each repository is off until the owner switches it on).
-    const day = Math.floor(now() / 86_400_000);
-    await lessonsRepoFileSweepJob(repoFile, companyId, names, 60_000, day).catch(() => undefined);
-    await lessonsRepoFilePublishJob(repoFile, companyId, names, 120_000, day).catch(() => undefined);
+    await host.nightly(await projectNames());
   }
 
-  async function noteReverted(taskId: string): Promise<void> {
-    if (!enabled()) return;
-    try { await (await sender()).send({ orgId: companyId, taskId, outcome: "reverted", requestId: randomUUID() }); } catch { log("revert_not_queued"); }
-  }
+  const noteReverted: LocalLessons["noteReverted"] = (taskId) => host.noteReverted(taskId);
 
   return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted };
 }

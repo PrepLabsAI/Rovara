@@ -1,0 +1,1 @@
+{"statusCode":200,"headers":{"content-type":"application/json","cache-control":"no-store"},"body":"{\"developer\":{\"id\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"name\":\"Test Person\",\"provider\":\"slack\",\"slackUserId\":\"U0SHARED\"},\"projects\":[],\"notices\":[],\"requestId\":\"company-test\"}"}
