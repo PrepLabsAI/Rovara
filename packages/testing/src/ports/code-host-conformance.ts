@@ -326,6 +326,27 @@ const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
     },
   },
   {
+    name: "gives the latest state of each deployment of a revision (read only, each request counted), and refuses a repository nobody registered",
+    needs: ({ host }) => host.deploymentStatuses !== undefined,
+    async run({ host, model, repository, unregistered, scope }) {
+      const sha = model.commit("feature/deployed", { "src/deploy.ts": "export const deploy = 1;\n" });
+      const other = model.commit("feature/not-deployed", { "src/other.ts": "export const other = 1;\n" });
+      expect(await host.deploymentStatuses!(repository, sha, scope)).toEqual({ statuses: [], complete: true });
+      model.setDeployment(sha, "staging", "success");
+      model.setDeployment(sha, "production", "in_progress");
+      model.setDeployment(sha, "production", "failure");
+      const counted = countingBudget();
+      const read = await host.deploymentStatuses!(repository, sha, scope, { beforeRequest: () => counted.budget.beforeRequest() });
+      expect(read.complete).toBe(true);
+      expect([...read.statuses].sort((a, b) => (a.environment < b.environment ? -1 : 1))).toEqual([{ environment: "production", state: "failure" }, { environment: "staging", state: "success" }]);
+      expect(counted.requests()).toBeGreaterThan(0);
+      // Another revision has none of them.
+      expect((await host.deploymentStatuses!(repository, other, scope)).statuses).toEqual([]);
+      expect(await rejection(() => host.deploymentStatuses!(unregistered, sha, scope))).toBeDefined();
+      expect(await rejection(() => host.deploymentStatuses!(repository, sha, { orgId: "not-a-company" }))).toBeDefined();
+    },
+  },
+  {
     name: "writes the lessons file on a branch Rovara owns: idempotent, never the base branch, never another path or branch name",
     needs: ({ host }) => host.commitFiles !== undefined,
     async run({ host, model, repository, scope }) {

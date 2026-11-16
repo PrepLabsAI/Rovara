@@ -1,5 +1,6 @@
 // Item C4: the CODEOWNERS file syntax lives behind the code host now (`CodeHost.codeOwners()`); these are the parser's own tests, moved with it from the merge core's.
 import { describe, expect, it } from "vitest";
+import { expectLinearScaling } from "../support/scaling.js";
 import { codeOwnerOf, ownersOfPath, parseCodeOwners, readCodeOwnersFile } from "../../packages/broker/src/plugins/code-host/code-owners-file.js";
 
 const rules = (text: string) => parseCodeOwners(text).rules;
@@ -69,25 +70,34 @@ describe("readCodeOwnersFile", () => {
   });
 });
 
-// The file is the repository's: no pattern may make one path slow. The bar is far above linear work (a few ms) and far below what the old regex
-// (`*a*a…b`: 19 s on a 256-character path) or a per-state reach list (`*` x 4000: 5.9 s) took. Sizes grow, and the first one over the bar fails.
+// The file is the repository's: no pattern may make one path slow. Matching steps an automaton over the path, so its cost is path length x pattern size, and a pattern such as `*a*a…b` made the old regex
+// take 19 s on a 256-character path, or a per-state reach list (`*` x 4000) 5.9 s. A bar on the clock cannot tell a slow runner from a slow algorithm, so each case is checked for scaling on each axis:
+// the pattern grows 8x over a fixed path, then the path grows 8x under a fixed pattern. Linear work grows about 8x on each axis; the old behaviour grew much faster.
 describe("a hostile pattern cannot make matching slow", () => {
-  const BAR_MS = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false" ? 2_000 : 500;
-  const cases: Array<[string, (n: number) => string, (n: number) => string]> = [
-    ["a run of stars", (n) => "*".repeat(n), (n) => "a".repeat(n / 4)],
-    ["stars between letters", (n) => "*a".repeat(n / 2) + "*b", (n) => "a".repeat(n / 4)],
-    ["a long name between stars", (n) => "a" + "*".repeat(n) + "b", (n) => "a" + "c".repeat(n / 4) + "b"],
-    ["many any-directory segments", (n) => "a/" + "**/".repeat(n / 3) + "b", (n) => "a/" + "c/".repeat(n / 8) + "b"],
+  const cases: Array<[string, (n: number) => string, (m: number) => string[]]> = [
+    ["a run of stars", (n) => "*".repeat(n), (m) => ["a".repeat(m)]],
+    // The second path holds the letters the quick refusal looks for, so the automaton itself runs and fails only at the end.
+    ["stars between letters", (n) => "*a".repeat(n / 2) + "*b", (m) => ["a".repeat(m), `${"a".repeat(m)}ba`]],
+    ["a long name between stars", (n) => "a" + "*".repeat(n) + "b", (m) => ["a" + "c".repeat(m) + "b"]],
+    ["many any-directory segments", (n) => "a/" + "**/".repeat(n / 3) + "b", (m) => ["a/" + "c/".repeat(m / 2) + "b"]],
   ];
-  for (const [label, pattern, path] of cases) {
+  for (const [label, pattern, paths] of cases) {
     it(label, () => {
-      for (const size of [256, 1_024, 4_096]) {
+      let matched: boolean[] = [];
+      // The pattern grows 8x (512 to 4,096 characters) over a fixed path of 256.
+      expectLinearScaling((size) => {
         const [rule] = rules(`${pattern(size)} @o`);
-        const started = performance.now();
-        rule!.matches(path(size));
-        const took = performance.now() - started;
-        expect(took, `${label} at ${String(size)}`).toBeLessThan(BAR_MS);
-      }
+        const fixed = paths(256);
+        return () => { matched = fixed.map((path) => rule!.matches(path)); };
+      }, { n: 512, label: `${label}: pattern size` });
+      expect(matched).toHaveLength(paths(256).length);
+      // The path grows 8x (512 to 4,096 characters) under a fixed pattern of 256.
+      expectLinearScaling((size) => {
+        const [rule] = rules(`${pattern(256)} @o`);
+        const grown = paths(size);
+        return () => { matched = grown.map((path) => rule!.matches(path)); };
+      }, { n: 512, label: `${label}: path length` });
+      expect(matched).toHaveLength(paths(256).length);
     }, 60_000);
   }
 });

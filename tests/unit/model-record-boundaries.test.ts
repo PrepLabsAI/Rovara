@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 const root = join(__dirname, "..", "..");
 const CONTRACT_FILES = ["model-record-key", "model-record-policy", "model-recording-store", "model-record-replay"].map((name) => `packages/contracts/src/${name}.ts`);
 const WORKER_FILE = "packages/worker/src/model-record-store-task.ts";
-// TE-F1c consumes F8's cache (`createRecordReplay`, `createTaskRecordingStore`) in exactly one file: the bridge's cache glue.
-const F1C_CONSUMERS = ["packages/worker/src/model-record-cache.ts"];
+// F8's named consumers: TE-F1c's cache glue (`createRecordReplay`, `createTaskRecordingStore`) and the eval's changed-prompt classifier (`planRecording`). A new consumer is a new line here.
+const F1C_CONSUMERS = ["packages/worker/src/model-record-cache.ts",
+  // EVAL-WIRE-CHANGED-PROMPT-CLASSIFIER (#796): the eval's changed-prompt classifier reads F8's planRecording locally over the F4 report (no store, no recording, no network).
+  "packages/worker/src/verification/eval-changed-prompt.ts"];
 const OWN = new Set([...CONTRACT_FILES, WORKER_FILE, "packages/contracts/src/index.ts", ...F1C_CONSUMERS]);
 const MODULES = ["model-record-key", "model-record-policy", "model-recording-store", "model-record-replay", "model-record-store-task"];
 const NAMES = /\b(?:createRecordReplay|modelRecordKey|modelRecordKeyOfView|readModelRequest|modelPromptSegments|planRecording|matchChangedItems|decideRecording|createMemoryRecordingStore|createTaskRecordingStore|recordedDependencyFor|recordingPlacement|RECORDING_STORE_TASK_CACHE)\b/u;

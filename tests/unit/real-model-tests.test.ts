@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvalSpendGrant, EvalMeterCall, EvalMeterReservation, MonthlyMeter } from "@agentx/contracts";
 import { RealModelCheckSchema, RealModelCheckWriteSchema, realModelCheckLine, realModelPassed } from "../../packages/contracts/src/real-model-check.js";
+import { expectLinearScaling, expectLinearScalingAsync } from "../support/scaling.js";
 import { runRealModelTests, selectChangedAiTests, type RealModelTestsInput, type ScriptedAiTest } from "../../packages/worker/src/verification/real-model-tests.js";
 
 const test = (name = "one", calls: number | "unknown" = 1): ScriptedAiTest => ({ checkId: "unit", test: `tests/ai.test.ts::${name}`, modelCalls: calls, modelFiles: ["src/model.ts"] });
@@ -37,10 +38,24 @@ describe("changed AI selection", () => {
     expect(selectChangedAiTests(raw)).toMatchObject({ status: "not_run", reason: "invalid_input" });
   });
   it("bounds the total inventory and bytes without quadratic matching", () => {
-    const start = performance.now();
-    expect(selectChangedAiTests({ ...world().input.selection, tests: Array.from({ length: 10_001 }, (_, i) => test(String(i))) })).toMatchObject({ status: "not_run", reason: "input_limit" });
-    expect(selectChangedAiTests({ ...world().input.selection, tests: [test("x".repeat(1_000_000))] })).toMatchObject({ status: "not_run" });
-    expect(performance.now() - start).toBeLessThan(1000);
+    // Refusing too many rows costs nothing per row: 10,001 rows, then eight times as many (the rows are built before the timing).
+    const refusals = new Map<number, ReturnType<typeof selectChangedAiTests>>();
+    expectLinearScaling((count) => {
+      const raw = { ...world().input.selection, tests: Array.from({ length: count }, (_, i) => test(String(i))) };
+      return () => { refusals.set(count, selectChangedAiTests(raw)); };
+    }, { n: 10_001, label: "real model tests: too many rows" });
+    expect(refusals.get(10_001)).toMatchObject({ status: "not_run", reason: "input_limit" });
+    expect(refusals.get(80_008)).toMatchObject({ status: "not_run", reason: "input_limit" });
+  });
+  it("refuses one very long test name without work that grows faster than its length", () => {
+    // 125,000, then 1,000,000 characters.
+    const longNames = new Map<number, ReturnType<typeof selectChangedAiTests>>();
+    expectLinearScaling((length) => {
+      const raw = { ...world().input.selection, tests: [test("x".repeat(length))] };
+      return () => { longNames.set(length, selectChangedAiTests(raw)); };
+    }, { n: 125_000, label: "real model tests: one huge name" });
+    expect(longNames.get(125_000)).toMatchObject({ status: "not_run" });
+    expect(longNames.get(1_000_000)).toMatchObject({ status: "not_run" });
   });
 });
 describe("real model spend and runs", () => {
@@ -140,12 +155,15 @@ describe("real model boundary controls", () => {
     expect(w.reserve.mock.calls[0]![0]).toMatchObject({ calls: 100, costMicros: 100_000 });
   });
   it("resolves 10,000 combined rows and files within a bounded time", () => {
-    const changes = Array.from({ length: 5000 }, (_, i) => ({ path: `src/m${i}.ts`, status: "modified" as const }));
-    const tests = Array.from({ length: 5000 }, (_, i) => ({ ...test(String(i), 0), modelFiles: [changes[i]!.path] }));
-    tests[4999]!.modelCalls = 1;
-    const start = performance.now();
-    expect(selectChangedAiTests({ changes, tests, attribution: "test" })).toMatchObject({ status: "selected", tests: [tests[4999]] });
-    expect(performance.now() - start).toBeLessThan(1500);
+    // 625 changes and 625 tests, then eight times as many (5,000 and 5,000 = 10,000 rows, 10,000 files): the matching is indexed, so the work grows linearly.
+    const outcomes = new Map<number, { result: ReturnType<typeof selectChangedAiTests>; last: ScriptedAiTest }>();
+    expectLinearScaling((count) => {
+      const changes = Array.from({ length: count }, (_, i) => ({ path: `src/m${i}.ts`, status: "modified" as const }));
+      const tests = Array.from({ length: count }, (_, i) => ({ ...test(String(i), 0), modelFiles: [changes[i]!.path] }));
+      tests[count - 1]!.modelCalls = 1;
+      return () => { outcomes.set(count, { result: selectChangedAiTests({ changes, tests, attribution: "test" }), last: tests[count - 1]! }); };
+    }, { n: 625, label: "real model tests: 10,000 rows and files" });
+    for (const count of [625, 5000]) expect(outcomes.get(count)!.result).toMatchObject({ status: "selected", tests: [outcomes.get(count)!.last] });
   });
   it("refuses aggregate bytes and files, even though every row fits", () => {
     const input = world().input.selection;
@@ -295,9 +313,14 @@ describe("stage ceilings", () => {
 
 describe("untrusted boundary budgets", () => {
   it("bounds tier reasons before parsing and refuses a missing runner", async () => {
-    const w = world(); const start = performance.now();
-    expect((await runRealModelTests({ ...w.input, tier: { reasons: Array.from({ length: 100_000 }, () => ({ code: "eval_hint" })) } })).reason).toBe("invalid_input");
-    expect(performance.now() - start).toBeLessThan(1000); expect(w.reserve).not.toHaveBeenCalled();
+    const w = world();
+    // A 100,000-reason tier is refused on its length, before its reasons are parsed: the cost does not grow with the list (12,500, then 100,000).
+    const reasons = new Map<number, string | undefined>();
+    await expectLinearScalingAsync((count) => {
+      const tier = { reasons: Array.from({ length: count }, () => ({ code: "eval_hint" })) };
+      return async () => { reasons.set(count, (await runRealModelTests({ ...w.input, tier })).reason); };
+    }, { n: 12_500, label: "real model tests: a huge tier list" });
+    expect([reasons.get(12_500), reasons.get(100_000)]).toEqual(["invalid_input", "invalid_input"]); expect(w.reserve).not.toHaveBeenCalled();
     expect((await runRealModelTests({ ...w.input, run: undefined } as never)).reason).toBe("invalid_input");
   });
   it.each(["../source.ts", "/source.ts", "src\\source.ts", "src/\nsource.ts"])("refuses malformed paths as a whole: %s", path => {

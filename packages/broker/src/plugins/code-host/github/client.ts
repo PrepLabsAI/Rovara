@@ -1,6 +1,7 @@
 import { createHash, createSign } from "node:crypto";
 import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
-import { GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
+import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -2134,6 +2135,61 @@ export class GitHubAppCredentialProvider {
     return { files, complete };
   }
 
+  /**
+   * M7 slice 2 (decision 252b): the latest state of each deployment of one commit, READ ONLY, read with a token that asks for `deployments: read` (and `metadata: read`) on this one repository. `GET /repos/<owner>/<name>/deployments?sha=<sha>`
+   * lists the commit's deployments (at most `DEPLOYMENTS_LISTED_MAX`; more, or a deployment GitHub gave no answer for, is `complete: false`); each one's newest status is `GET .../deployments/<id>/statuses?per_page=1`. The work is bounded: one
+   * list and at most `DEPLOYMENTS_LISTED_MAX` status reads, every request with its own timeout, no redirects, and `beforeRequest` called before EACH (one unit of the pass's allowance; it throws when the allowance or time is used up, and
+   * the read stops with it). A deployment that is not of this commit (GitHub's filter is not trusted), a malformed answer, or an App without the `deployments` permission THROWS; it is never read as "no deployments". `inactive` (a
+   * newer deployment took over) is skipped. When several deployments of the commit went to one environment the newest (highest id) says.
+   */
+  async getDeploymentStatuses(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforeRequest?: () => void): Promise<{ statuses: Array<{ environment: string; state: DeploymentState }>; complete: boolean }> {
+    if (!/^[a-f0-9]{40}$/u.test(commitSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.createInstallationToken(repository, { deployments: "read", metadata: "read" }, scope);
+    const base = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/deployments`;
+    const read = async (url: string): Promise<{ body: unknown; hasNext: boolean }> => {
+      beforeRequest?.();
+      const response = await this.fetchImplementation(url, { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" });
+      if (!response.ok) {
+        // A limited caller is told to slow down with the neutral signal (never a plain failure that is asked again a minute later).
+        const limitedBody: unknown = response.status === 403 ? await response.json().catch(() => undefined) : undefined;
+        const retryAt = compareRateLimitRetryAt(response, limitedBody, this.now());
+        await response.body?.cancel().catch(() => undefined);
+        if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
+        throw agentXError("RUNTIME_UNAVAILABLE", `GitHub deployment read failed with HTTP ${response.status}`);
+      }
+      return { body: await response.json(), hasNext: (response.headers.get("link") ?? "").split(",").some((link) => /;\s*rel="next"/u.test(link)) };
+    };
+    const listed = await read(`${base}?sha=${commitSha}&per_page=${String(DEPLOYMENTS_LISTED_MAX)}`);
+    if (!Array.isArray(listed.body) || listed.body.length > DEPLOYMENTS_LISTED_MAX) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid deployment read.");
+    let complete = !listed.hasNext;
+    const deployments = listed.body.map((entry) => {
+      const record = feedbackRecord(entry);
+      if (typeof record.sha !== "string" || record.sha.toLowerCase() !== commitSha || typeof record.id !== "number" || !Number.isSafeInteger(record.id) || record.id < 1) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid deployment read.");
+      return { id: record.id, environment: typeof record.environment === "string" ? record.environment : undefined };
+    }).sort((left, right) => right.id - left.id);
+    const byEnvironment = new Map<string, DeploymentState>();
+    // The newest deployment of an environment is the one that says, whatever its newest status is: an environment seen is never overruled by an older deployment.
+    const seen = new Set<string>();
+    for (const deployment of deployments) {
+      const answered = await read(`${base}/${String(deployment.id)}/statuses?per_page=1`);
+      if (!Array.isArray(answered.body) || answered.body.length > 1) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid deployment read.");
+      // A deployment with no status yet is not known to have started: it says nothing, and it still holds its environment (an older deployment never answers for it).
+      if (answered.body.length === 0) { if (deployment.environment !== undefined) seen.add(deployment.environment); continue; }
+      const status = feedbackRecord(answered.body[0]);
+      const environment = typeof status.environment === "string" && status.environment !== "" ? status.environment : deployment.environment;
+      if (typeof status.state !== "string" || environment === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid deployment read.");
+      if (seen.has(environment)) continue;
+      seen.add(environment);
+      const state = DEPLOYMENT_STATES_OF_GITHUB[status.state];
+      // An environment the port cannot name (too long, empty) cannot be watched: left out, and the answer is then not the whole of it.
+      if (!DeploymentEnvironmentSchema.safeParse(environment).success) { complete = false; continue; }
+      if (state === undefined) continue;
+      byEnvironment.set(environment, state);
+    }
+    return { statuses: [...byEnvironment].map(([environment, state]) => ({ environment, state })), complete };
+  }
+
   /** The commit a branch points at now, as GitHub says; throws when the branch does not exist. */
   async getBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string> {
     if (!/^agentx\/[0-9a-f-]{36}$/iu.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
@@ -3396,6 +3452,8 @@ async function workingBranchPageJson(response: Response): Promise<unknown> {
 
 /** DEC 213: the most pages of one commit's files read (100 a page); past them the commit's list is cut. */
 const COMMIT_FILES_PAGES_MAX = 3;
+/** M7 slice 2: the most deployments of one commit `getDeploymentStatuses` reads the status of (one request each). */
+const DEPLOYMENTS_LISTED_MAX = 10;
 /** DEC 213: GitHub lists at most 300 changed files of a comparison; a list that long may have been cut. */
 const COMPARE_FILES_MAX = 300;
 

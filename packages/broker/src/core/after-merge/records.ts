@@ -99,3 +99,14 @@ export const readOpen = (stored: StoredDocument | undefined, orgId: OrgId): Open
 export const readPending = (stored: StoredDocument | undefined, orgId: OrgId): PendingRow | undefined =>
   readRow(PendingRowSchema, stored, orgId, (row) => pendingKey(orgId, row.kind, row.repository, row.number, row.environment, row.signalKey));
 
+
+// ---- the reporter's own rows (M7 slice 2): one row per report and surface it was told to, so a report that failed on one surface is sent again to that one only.
+//   ORG#<company>#AFTER_MERGE_SENT   <reportId>#<surface>      (watcher's stable 64-hex report id; surface: pull_request, task or chat); expires 30 days after it was written
+export const SENT_ENTITY = "AFTER_MERGE_SENT";
+export const sentPartition = (orgId: OrgId): string => companyScoped(orgId, "AFTER_MERGE_SENT");
+export const SURFACES = ["pull_request", "task", "chat"] as const;
+export type Surface = (typeof SURFACES)[number];
+export const sentKey = (orgId: OrgId, reportId: string, surface: Surface): DocumentKey => ({ pk: sentPartition(orgId), sk: `${reportId}#${surface}` });
+export const SentRowSchema = z.looseObject({ ...base, entityType: z.literal(SENT_ENTITY), reportId: z.string().regex(/^[0-9a-f]{64}$/u), surface: z.enum(SURFACES), state: z.enum(["sending", "done"]), claimId: z.string().optional(), leaseUntil: z.number().optional() });
+export type SentRow = z.infer<typeof SentRowSchema>;
+export const readSent = (stored: StoredDocument | undefined, orgId: OrgId): SentRow | undefined => readRow(SentRowSchema, stored, orgId, (row) => sentKey(orgId, row.reportId, row.surface));

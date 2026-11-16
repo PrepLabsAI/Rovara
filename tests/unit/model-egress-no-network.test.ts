@@ -99,6 +99,8 @@ const F1C_CALLERS: ReadonlySet<string> = new Set([
   "packages/worker/src/verification/eval-bridged-exec.ts", "packages/worker/src/verification/eval-wiring.ts",
   // The product bridge's egress (PRODUCT-BRIDGE-CODE-SIDE, #794): checked frames go only to the model gateway's own product route (https, or loopback in tests) with the task token; it names no provider host.
   "packages/worker/src/product-gateway-egress.ts",
+  // EVAL-WIRE-CHANGED-PROMPT-CLASSIFIER (#796): reads egress frames only to classify them locally against F4/F8 (no transport, no host, no network).
+  "packages/worker/src/verification/eval-changed-prompt.ts",
 ]);
 
 describe("no callers yet", () => {

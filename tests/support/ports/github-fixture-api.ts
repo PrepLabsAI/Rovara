@@ -51,6 +51,17 @@ export class GitHubFixtureApi {
   /** DEC 213: how the compare read (`GET /repos/../compare/<base>...<head>`) answers: at most `filesMax` files (GitHub's is 300), a file whose patch GitHub leaves out, another merge base, a "next" link. */
   readonly compareReads: { filesMax: number; withoutPatch?: string; mergeBase?: string; nextLink?: boolean } = { filesMax: 300 };
 
+  /**
+   * M7 slice 2: how the deployment reads answer (`GET /repos/../deployments?sha=` and `GET /repos/../deployments/<id>/statuses`). By default one deployment per environment the model knows a state of, newest status
+   * only. `rows` replaces that with explicit deployments (a newest-first status list each); `next` adds a "next" link to the list; `statusHttp` answers every status read with that HTTP status; `listHttp` the list.
+   */
+  readonly deploymentReads: { rows?: Array<{ id: number; sha?: string; environment: string; statuses: Array<{ state: string; environment?: string }> }>; next?: boolean; statusHttp?: number | undefined; listHttp?: number | undefined; listHeaders?: Record<string, string> | undefined; listMessage?: string | undefined } = {};
+
+  private deploymentRows(sha: string): Array<{ id: number; sha: string; environment: string; statuses: Array<{ state: string; environment?: string }> }> {
+    if (this.deploymentReads.rows !== undefined) return this.deploymentReads.rows.map((row) => ({ ...row, sha: row.sha ?? sha }));
+    return this.model.deploymentStates(sha).map((entry, index) => ({ id: 1_000 + index, sha, environment: entry.environment, statuses: [{ state: entry.state === "in_progress" ? "in_progress" : entry.state }] }));
+  }
+
   constructor(private readonly model: FakeHostModel, private readonly options: GitHubFixtureOptions = {}) {}
 
   /** TE-B4: the Checks API (list a commit's runs, create, update). A token without `checks: write` is refused (403). A run shows among its head's checks with the App's id as its source. */
@@ -258,6 +269,20 @@ export class GitHubFixtureApi {
       const parents = page > 1 && this.commitReads.parentsAfterFirstPage !== undefined ? this.commitReads.parentsAfterFirstPage : revision.parents;
       return json(200, { sha: this.commitReads.answerSha ?? revision.sha, parents: parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size) },
         all.length > page * size ? { link: `<${API}${ROOT}/commits/${revision.sha}?per_page=100&page=${page + 1}>; rel="next"` } : {});
+    }
+    if (method === "GET" && path === `${ROOT}/deployments`) {
+      if (this.deploymentReads.listHttp !== undefined) return json(this.deploymentReads.listHttp, { message: this.deploymentReads.listMessage ?? "Resource not accessible by integration" }, this.deploymentReads.listHeaders ?? {});
+      const sha = url.searchParams.get("sha") ?? "";
+      const rows = this.deploymentRows(sha).slice(0, Number(url.searchParams.get("per_page") ?? "30")).map((row) => ({ id: row.id, sha: row.sha, environment: row.environment }));
+      return json(200, rows, this.deploymentReads.next === true ? { link: `<${API}${ROOT}/deployments?sha=${sha}&per_page=10&page=2>; rel="next"` } : {});
+    }
+    match = new RegExp(`^${ROOT}/deployments/([0-9]+)/statuses$`).exec(path);
+    if (method === "GET" && match) {
+      if (this.deploymentReads.statusHttp !== undefined) return json(this.deploymentReads.statusHttp, { message: "Resource not accessible by integration" });
+      const everyRow = this.deploymentReads.rows ?? [...this.model.revisions.keys()].flatMap((sha) => this.deploymentRows(sha));
+      const found = everyRow.find((entry) => entry.id === Number(match![1]));
+      if (found === undefined) return NOT_FOUND();
+      return json(200, found.statuses.slice(0, Number(url.searchParams.get("per_page") ?? "30")).map((status) => ({ state: status.state, ...(status.environment === undefined ? {} : { environment: status.environment }) })));
     }
     match = new RegExp(`^${ROOT}/git/commits/([0-9a-f]{40})$`).exec(path);
     if (method === "GET" && match) {

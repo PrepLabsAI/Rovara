@@ -1,5 +1,6 @@
 // Proof and evidence P2: reading a check's own JUnit or vitest/jest JSON report into totals, names, new tests and skip counts. Fail closed: a file that is not a report, is empty, too big or holds no test is "not measured".
 import { describe, expect, it } from "vitest";
+import { expectLinearScaling } from "../support/scaling.js";
 import { isValidTestId } from "@agentx/contracts";
 import { EvidencePackSchema } from "../../packages/contracts/src/evidence.js";
 import { absentOnNew, evidenceTests, originalRunLooksCut, untouchedCount, parseGoTestJson, parseJsonReport, parseJunit, parseTestReport, plainName, skipRise, counted, skippedOutsideChanged, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
@@ -55,7 +56,6 @@ describe("JUnit", () => {
 });
 
 describe("JUnit written by a command the agent can influence", () => {
-  const started = () => performance.now();
   it("refuses an unclosed tag, comment, CDATA section or test case, and reads a `>` inside an attribute", () => {
     expect(parseJunit('<testsuite><testcase name="a"')).toBeUndefined();
     expect(parseJunit('<testsuite><testcase name="a">')).toBeUndefined();
@@ -65,16 +65,22 @@ describe("JUnit written by a command the agent can influence", () => {
     expect(parseJunit('<testsuite><testcases name="a"/><testcase name="b"/></testsuite>')?.total).toBe(1);
   });
   it("reads a test case with one huge attribute without a quadratic scan: over 16 KiB of attributes is unreadable, under it is read in linear time", () => {
+    // Scaling checks, not wall-clock bounds: the same parse at an eighth of the size and at the full size may take about eight times as long, never sixty-four.
     for (const filler of ["a", "a=", "a =", 'a="', "a='", "= "]) {
-      const hostile = `<testsuite><testcase ${filler.repeat(Math.ceil(8_000_000 / filler.length))}/></testsuite>`;
-      const t0 = started();
-      expect(parseJunit(hostile), filler).toBeUndefined();
-      expect(performance.now() - t0, filler).toBeLessThan(2_000);
+      const hostileOf = (size: number) => `<testsuite><testcase ${filler.repeat(Math.ceil(size / filler.length))}/></testsuite>`;
+      let got: ReturnType<typeof parseJunit> | undefined = parseJunit('<testsuite><testcase name="seed"/></testsuite>');
+      expectLinearScaling((size) => {
+        const hostile = hostileOf(size);
+        return () => { got = parseJunit(hostile); };
+      }, { n: 1_000_000, label: `junit attribute filler ${JSON.stringify(filler)}` });
+      expect(got, filler).toBeUndefined();
     }
-    const nearCap = `<testsuite><testcase name="ok" ${"a".repeat(16_000)}/></testsuite>`;
-    const t1 = started();
-    expect(parseJunit(nearCap)?.tests[0]?.name).toBe("ok");
-    expect(performance.now() - t1).toBeLessThan(500);
+    let read: ReturnType<typeof parseJunit> | undefined;
+    expectLinearScaling((length) => {
+      const nearCap = `<testsuite><testcase name="ok" ${"a".repeat(length)}/></testsuite>`;
+      return () => { read = parseJunit(nearCap); };
+    }, { n: 2_000, label: "junit attributes near the cap" });
+    expect(read?.tests[0]?.name).toBe("ok");
     expect(parseJunit(`<testsuite><testcase name="ok" ${"a".repeat(17_000)}/></testsuite>`)).toBeUndefined();
   });
   it("reads each attribute pair once: the first of a repeated name wins, both quote kinds work, a malformed pair is skipped", () => {
@@ -82,16 +88,20 @@ describe("JUnit written by a command the agent can influence", () => {
     expect(read.tests[0]).toMatchObject({ name: "first", file: "a/b" });
   });
   it("reads a hostile 8 MiB file in one pass: many unclosed test cases, comments or CDATA sections cost no more than a single scan", () => {
-    const hostile = [
-      `<testsuite>${'<testcase name="a">'.repeat(400_000)}`,
-      `<testsuite>${"<!--".repeat(2_000_000)}`,
-      `<testsuite>${"<![CDATA[".repeat(900_000)}`,
-      `<testsuite>${'<testcase name="a" '.repeat(400_000)}`,
+    // Scaling checks, not wall-clock bounds: the same hostile shape at an eighth of the count and at the full count (the old input) may take about eight times as long, never sixty-four.
+    const hostile: ReadonlyArray<readonly [string, number]> = [
+      ['<testcase name="a">', 400_000],
+      ["<!--", 2_000_000],
+      ["<![CDATA[", 900_000],
+      ['<testcase name="a" ', 400_000],
     ];
-    for (const text of hostile) {
-      const t0 = started();
-      expect(parseJunit(text)).toBeUndefined();
-      expect(performance.now() - t0).toBeLessThan(2_000);
+    for (const [unit, count] of hostile) {
+      let got: ReturnType<typeof parseJunit> | undefined = parseJunit('<testsuite><testcase name="seed"/></testsuite>');
+      expectLinearScaling((copies) => {
+        const text = `<testsuite>${unit.repeat(copies)}`;
+        return () => { got = parseJunit(text); };
+      }, { n: count / 8, label: `junit hostile ${JSON.stringify(unit)}` });
+      expect(got, unit).toBeUndefined();
     }
   });
 });
@@ -334,10 +344,14 @@ describe("tests that ran before and not now (absentOnNew)", () => {
     expect(absentOnNew(report(), undefined)).toBeUndefined();
   });
   it("reads a very large report in linear time", () => {
-    const big = counted("json", Array.from({ length: 50_000 }, (_unused, n) => ({ file: "t.py", name: `test_${String(n)}`, status: "passed" as const })));
-    const started = Date.now();
-    expect(absentOnNew(big, report())?.count).toBe(50_000);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // A scaling check, not a wall-clock bound: 6,250 tests and 50,000 tests (the old input) may take about eight times as long, never sixty-four.
+    let count: number | undefined;
+    expectLinearScaling((tests) => {
+      const big = counted("json", Array.from({ length: tests }, (_unused, n) => ({ file: "t.py", name: `test_${String(n)}`, status: "passed" as const })));
+      const other = report();
+      return () => { count = absentOnNew(big, other)?.count; };
+    }, { n: 6_250, label: "absentOnNew over a large report" });
+    expect(count).toBe(50_000);
   });
 });
 
