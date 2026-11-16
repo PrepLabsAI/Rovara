@@ -199,7 +199,7 @@ function namedProviders(waiting: readonly string[], pullRequests: ReadonlyArray<
   return { text, plural: names.length > 1 };
 }
 
-const mergedOf = (pullRequests: ReadonlyArray<{ repositoryId: string; state?: string | undefined }>): string[] => pullRequests.filter((pr) => pr.state === "MERGED").map((pr) => pr.repositoryId);
+const mergedOf = (pullRequests: ReadonlyArray<{ repositoryId: string; state?: string | undefined }>): string[] => pullRequests.filter((pr) => pr.state === "MERGED" || pr.state === "CLOSED").map((pr) => pr.repositoryId);
 
 /** The sentence a consumer's pull request carries about its own CI while a repository it depends on waits (nothing otherwise: a provider, an independent repository, no dependency facts). */
 export function perRepositoryCiLines(order: MergeOrder, repositoryId: string, pullRequests: ReadonlyArray<{ repositoryId: string; number: number; state?: string | undefined }>): string[] {

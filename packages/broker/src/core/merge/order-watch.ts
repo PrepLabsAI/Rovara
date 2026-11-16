@@ -125,7 +125,8 @@ export async function providersWaitingFor(
   deps: Parameters<typeof dependencyOrderOf>[0], task: MergeTask & { workflow: WorkflowSnapshot }, repositoryId: string,
 ): Promise<string[]> {
   const order = await dependencyOrderOf(deps, task);
-  return order === undefined ? [] : waitingProviders(order, repositoryId, mergedRepositoriesOf(task.workflow));
+  // A provider whose pull request was closed without merging is not "about to merge": its consumer's failure is no longer explained by waiting.
+  return order === undefined ? [] : waitingProviders(order, repositoryId, requiredOf(task.workflow).filter((entry) => entry.state === "MERGED" || entry.state === "CLOSED").map((entry) => entry.repositoryId));
 }
 
 /** MR4: what the task page says for this repository's pull request while its CI is failing and a repository it depends on waits. Nothing otherwise. Never throws. */

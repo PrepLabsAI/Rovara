@@ -31,6 +31,12 @@ describe("what a consumer's CI is told", () => {
     expect(perRepositoryCiLines(order, "elsewhere", PRS)).toEqual([]);
   });
 
+  it("does not call a provider whose pull request was closed unmerged waiting", () => {
+    const closed = [pr("app", 40), pr("payments-lib", 12, "CLOSED")];
+    expect(perRepositoryCiLines(order, "app", closed)).toEqual([]);
+    expect(ciFailureWaitLine(order, "app", closed)).toEqual([]);
+  });
+
   it("names every waiting provider of a chain or a diamond, at most three, then counts the rest", () => {
     const diamond = mergeOrderOf(["app", "core", "left", "right"], [edge("app", "left"), edge("app", "right"), edge("left", "core"), edge("right", "core")]);
     expect(waitingProviders(diamond, "app", [])).toEqual(["left", "right"]);
@@ -187,6 +193,15 @@ describe("failing CI while the repository it depends on waits", () => {
     setChecks(w, "payments-lib", "pending");
     await trackTask(deps, TASK_ID);
     expect(events).not.toContain("facts");
+  });
+
+  it("starts a round again once the provider's pull request was closed unmerged", async () => {
+    const { w, deps } = await setup([edge("app", "payments-lib")]);
+    const task = await w.task();
+    await w.setWorkflow({ pullRequests: task.workflow.pullRequests!.map((entry) => ({ ...entry, state: entry.repositoryId === "payments-lib" ? "CLOSED" : entry.state })) });
+    setChecks(w, "app", "failing");
+    await trackTask(deps, TASK_ID);
+    expect(asked).toEqual(["app"]);
   });
 
   it("providersWaitingFor answers from the same facts and refuses nothing it cannot read", async () => {
