@@ -1,7 +1,7 @@
 // Lane L8: what the local review pages read and do. The pages know nothing about task records, the document store or a code host: the task flow
 // (lanes L6a and L6b) implements these two interfaces and hands them to `createLocalPagesServer`. Reads are plain view models; every write names
 // the exact revision and digest the person saw, and an approval carries a proof for the W0 `Approvers` seam to check.
-import type { ApprovalProof, CreatedScriptToken, ModelSelectionBody, ModelSelectionState, PlanDocument, PlanEvidenceBundle, ScriptTokenView, SecondReviewContext, SecondReviewMode, SecondReviewModelRef, SecondReviewState } from "@agentx/contracts";
+import type { ApprovalProof, BrowserEvidencePanel, CreatedScriptToken, ModelSelectionBody, ModelSelectionState, PlanDocument, PlanEvidenceBundle, ScriptTokenView, SecondReviewContext, SecondReviewMode, SecondReviewModelRef, SecondReviewState } from "@agentx/contracts";
 
 /** Why a write did not happen, in words fit to show. `stale`: the content moved on since the page was drawn. */
 export type LocalActionResult = { ok: true; message?: string } | { ok: false; reason: "stale" | "refused" | "not_found" | "invalid" | "reauth"; message: string };
@@ -194,6 +194,8 @@ export interface ProofReportView {
   revision: number;
   summary: string;
   rows: ProofRowView[];
+  /** TE-H1: the before and after screenshots of the changed pages (visual evidence only), each picture served by `readEvidenceImage` behind the page session. Absent: none were taken for this code. */
+  browserEvidence?: BrowserEvidencePanel;
   /** One line: what the task cost, when the metering seam knows. */
   cost?: string;
   pullRequests: Array<{ url: string; number: number; state: string }>;
@@ -412,6 +414,8 @@ export interface LocalPageData {
   /** The local coding tools switches (decision 46b). Absent: the page shows none. */
   listLessonLocalTools?(): Promise<LessonLocalToolsView | undefined>;
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
+  /** TE-H1: one picture of a task's browser evidence, served by the proof page behind the page session. Only a picture the task's current pack names as a before or after pair of the task's own company; absent or undefined: not found. */
+  readEvidenceImage?(taskId: string, sha256: string): Promise<{ contentType: string; bytes: Uint8Array } | undefined>;
   /** the owner's script tokens. Absent, or undefined: script tokens are off here and the page is not found. */
   listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
   /** The projects that have a test environment page. Absent, or undefined: the test environment is off here and the pages are not found. */

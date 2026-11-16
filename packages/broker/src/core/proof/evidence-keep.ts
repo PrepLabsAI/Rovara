@@ -9,10 +9,12 @@
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
   EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText, EvidenceBaselineSchema,
+  addBrowserEvidenceToPack, type ArtifactRef, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening, type EvidenceBaseline, type RawBaseline,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
-import { storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
+import { deleteEvidenceArtifacts, statEvidenceArtifacts, storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
+import { storeBrowserEvidence } from "./browser-evidence-store.js";
 import type { EvidenceBlobStore } from "./evidence-blob-store.js";
 import type { PinnedDependency } from "./dependency-evidence.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
@@ -66,6 +68,12 @@ export interface KeepEvidenceInput {
   extraNotTested?: readonly EvidenceNotTested[] | undefined;
   /** TE-C1: see `KeepEvidenceBaseline`. */
   baseline?: KeepEvidenceBaseline | undefined;
+  /**
+   * TE-H1 slice 2 (DEC 241): what the worker's browser-evidence run captured for THIS operation (the keeper read it from the operation's own upload: `readBrowserEvidenceUpload`). Absent: the pack is exactly what it was (a v1 pack
+   * when no writer says otherwise, byte for byte). Present: the pictures are stored (`storeBrowserEvidence`), the pack is written as a v2 pack, and it gets the `visual` check with the before and after pairs.
+   * Visual evidence only: the check never counts toward the change proof (kind `visual`).
+   */
+  browserEvidence?: BrowserEvidenceCaptured | undefined;
 }
 
 export interface KeepEvidenceDeps {
@@ -131,6 +139,8 @@ function withWeakeningFacts(raw: EvidenceRaw, facts: ReadonlyMap<string, TestPro
 
 /** Assembles and keeps the pack for a verification run. Never throws. */
 export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceInput): Promise<KeepEvidenceResult> {
+  // TE-H1: deletes the browser evidence pictures this keep stored, for every way out that writes no pack.
+  let abandonBrowser: () => Promise<void> = async () => undefined;
   try {
     if (!DIGEST.test(input.candidateDigest) || !TASK_ID.test(input.task.taskId)) return { kept: false, reason: "invalid" };
     // A scan that finds nothing for a card number, a credential and an address is not the data guard: nothing is kept unscanned.
@@ -188,21 +198,50 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
       void _lost;
       return withoutTail;
     }) };
+    // TE-H1: the browser evidence run's pictures go into the store (a run the check refuses stores nothing and the pack goes without it). Whatever stops this keep from writing the pack deletes them again, so no picture is left that no pack names.
+    let browser: BrowserEvidenceOutcome | undefined;
+    // Pictures this task's store already held (a re-keep of the same candidate, whose earlier pack may name them) are never deleted by this keep's own clean-up.
+    let heldBefore = new Map<string, unknown>();
+    if (input.browserEvidence !== undefined) {
+      try {
+        heldBefore = await statEvidenceArtifacts(deps.store, owner, input.browserEvidence.routes.flatMap((row) => (row.status === "shown" ? [row.before.sha256, row.after.sha256] : [])));
+        browser = await storeBrowserEvidence(deps.store, owner, input.browserEvidence);
+      } catch { deps.log?.("evidence.browser_not_stored", {}); }
+    }
+    const abandon = async (): Promise<void> => {
+      if (browser === undefined) return;
+      const refs = browser.routes.flatMap((row): ArtifactRef[] => (row.status === "shown" ? [row.before, row.after] : [])).filter((ref) => !heldBefore.has(ref.sha256));
+      if (refs.length > 0) await deleteEvidenceArtifacts(deps.store, owner, refs);
+    };
+    abandonBrowser = abandon;
     const checked = EvidencePackSchema.safeParse(pack);
-    if (!checked.success) return { kept: false, reason: "invalid" };
+    if (!checked.success) { await abandon(); return { kept: false, reason: "invalid" }; }
     // TE-A2b: a version 2 writer keeps the same pack as a v2 pack (every v1 part kept); a pack the strict v2 schema refuses is not kept at all.
+    // A browser evidence outcome needs a v2 pack (the `visual` check and its pairs have no v1 form): Code's producer is Rovara's sandbox, as the outcome says.
     const droppedPaths = { droppedPaths: 0 };
-    let toKeep = input.writer?.version === 2 ? evidencePackV2Of(checked.data, input.writer, droppedPaths) : checked.data;
-    if (toKeep === undefined) return { kept: false, reason: "invalid" };
+    const writer: EvidenceWriter | undefined = browser === undefined || input.writer?.version === 2 ? input.writer : { version: 2, producer: { edition: "code", isolation: browser.isolation } };
+    // The v2 form was forced only for the pictures: when it cannot be had, the task keeps the plain pack it would have had without them, never less.
+    const forced = browser !== undefined && input.writer?.version !== 2;
+    const withoutBrowser = async (): Promise<void> => { await abandon(); browser = undefined; deps.log?.("evidence.browser_not_added", {}); };
+    let toKeep = writer?.version === 2 ? evidencePackV2Of(checked.data, writer, droppedPaths) : checked.data;
+    if (toKeep === undefined && forced) { await withoutBrowser(); toKeep = checked.data; }
+    if (toKeep === undefined) { await abandon(); return { kept: false, reason: "invalid" }; }
     if (droppedPaths.droppedPaths > 0) deps.log?.("evidence.paths_dropped", { count: droppedPaths.droppedPaths });
     // The v1 pack went through the data guard above; what only a v2 pack adds (override reason, file names, branch names, meters) goes through it here, and a part with a finding is left out with the same "left out" line.
     if (toKeep.schemaVersion === 2) {
       const v2 = guardV2Parts(toKeep, deny, deps.scan);
+      if (forced && browser !== undefined && v2.dropped.parts > 0) { await withoutBrowser(); toKeep = checked.data; }
+      else {
       guarded += v2.dropped.parts;
       toKeep = v2.dropped.parts === 0 || v2.pack.notTested.some((item) => item.id === WITHHELD_ITEM.id) ? v2.pack
         : { ...v2.pack, notTested: [...v2.pack.notTested, { kind: WITHHELD_ITEM.kind, id: WITHHELD_ITEM.id, what: WITHHELD_ITEM.text, reason: WITHHELD_ITEM.reason }].slice(0, EVIDENCE_NOT_TESTED_MAX) };
+      }
     }
-    if (deps.late?.() === true) return { kept: false, reason: "fault" };
+    // The browser evidence check joins the finished pack: fixed words and refs the store holds (the data guard looked at everything else). A pack that refuses it (another producer, a check of that id, a limit) is kept without it, and its pictures go.
+    if (browser !== undefined && toKeep.schemaVersion === 2) {
+      try { toKeep = addBrowserEvidenceToPack(toKeep, browser); } catch { await withoutBrowser(); if (forced) toKeep = checked.data; }
+    }
+    if (deps.late?.() === true) { await abandon(); return { kept: false, reason: "fault" }; }
     // The stored pack is kept like the tails (`evidence-std`): it expires with them and is deleted with them on erasure.
     await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(toKeep), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" },
       // One pack per task and candidate digest: re-keeping the same candidate (a re-check, a retried keep) writes the pack again, so this caller overwrites on purpose.
@@ -221,6 +260,7 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     }
     return { kept: true, problems: built.problems, guardedParts: guarded };
   } catch (error) {
+    await abandonBrowser().catch(() => undefined);
     deps.log?.("evidence.keep_failed", { error: error instanceof Error ? error.name : "unknown" });
     return { kept: false, reason: "fault" };
   }
@@ -254,7 +294,9 @@ export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, ta
   if (read.status === "v1") return read.pack;
   if (read.status !== "v2") return undefined;
   // `evidencePackV2ToV1` picks only the fields v1 has (an unknown part or kind is left behind, a kind v1 lacks is `other`), and the result must still parse as a v1 pack: a value this build does not know ("newer") does not.
-  const v1 = evidencePackV2ToV1(read.pack as unknown as EvidencePackV2);
+  // TE-H1: browser evidence is visual evidence only. Its `visual` check has no place in the v1 view that the proof page and the evidence risk read: it is left out, so a picture never reads as a passed check.
+  const pack = read.pack as unknown as EvidencePackV2;
+  const v1 = evidencePackV2ToV1({ ...pack, checks: pack.checks.filter((entry) => entry.kind !== "visual") });
   const parsed = v1 === undefined ? undefined : EvidencePackReadSchema.safeParse(v1);
   return parsed?.success === true ? parsed.data : undefined;
 }

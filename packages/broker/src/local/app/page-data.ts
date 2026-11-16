@@ -70,7 +70,7 @@ const KIND: Record<WorkflowArtifact["type"], PlanVersionView["kind"] | undefined
 export interface PageDataDeps {
   flow: TaskFlowDeps;
   /** Lane L12: the evidence kept for a task's checked code (the proof report reads it). Absent: the report shows the recorded checks and reviews only. */
-  evidence?: Pick<LocalEvidence, "packOf">;
+  evidence?: Pick<LocalEvidence, "packOf" | "browserEvidencePanelOf" | "browserEvidenceImageOf">;
   /** Lane L12: comment commands, so the page can show and attach the thread a plan is posted on. */
   comments?: Pick<LocalComments, "attachThread" | "attachedThread" | "available">;
   /** The design review: whether the project allows skipping, for the cost hold's choices. */
@@ -260,12 +260,23 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
     async listLessons() { return deps.lessons === undefined ? [] : deps.lessons.list(); },
     async listLessonRepos() { return deps.lessons === undefined ? [] : deps.lessons.repoSwitches(); },
     async listLessonLocalTools() { return deps.lessons === undefined ? undefined : deps.lessons.localToolsSwitches(); },
+    async readEvidenceImage(taskId, sha256) {
+      // The page session is checked by the server; the task's company here (a task of another company is not found, the same as one that does not exist).
+      const task = await taskOf(taskId);
+      const digest = task?.workflow?.candidate?.digest;
+      if (task === undefined || digest === undefined || deps.evidence === undefined) return undefined;
+      const read = await deps.evidence.browserEvidenceImageOf(task, digest, sha256).catch(() => undefined);
+      return read?.status === 200 && read.kind === "jpeg" ? { contentType: read.contentType, bytes: read.bytes } : undefined;
+    },
     async getProofReport(taskId): Promise<ProofReportView | undefined> {
       const task = await taskOf(taskId);
       const workflow = task?.workflow;
       if (task === undefined || workflow === undefined) return undefined;
       const pack = workflow.candidate === undefined ? undefined : await deps.evidence?.packOf(task, workflow.candidate.digest);
-      const report = proofReportOf(task, workflow, pack, { verified: await verifiedChangedFiles(deps.flow, task.workspaceId, workflow.candidate?.digest), reported: await reportedChangedFiles(deps.flow, task.workspaceId) });
+      const baseReport = proofReportOf(task, workflow, pack, { verified: await verifiedChangedFiles(deps.flow, task.workspaceId, workflow.candidate?.digest), reported: await reportedChangedFiles(deps.flow, task.workspaceId) });
+      // TE-H1: the before and after screenshots of exactly this code, when the run took any (text and pictures only after the page session's check).
+      const browserEvidence = workflow.candidate === undefined ? undefined : await deps.evidence?.browserEvidencePanelOf(task, workflow.candidate.digest).catch(() => undefined);
+      const report = browserEvidence === undefined ? baseReport : { ...baseReport, browserEvidence };
       // The design's part (when it went through design review and was approved): one line of counts, the approver and the reason, and a row for it.
       const design = workflow.designReview === undefined ? undefined : await loadDesignProof({ store: deps.flow.store, artifacts: deps.flow.artifacts }, taskId, workflow);
       return design === undefined ? report : { ...report, summary: `${designProofLine(design)} ${report.summary}`, rows: [{ claim: "Design review", check: "fresh-context reviewers", status: design.approval.openBlockers === 0 ? "passed" : "not_run", detail: `approved by ${design.approval.approverLabel}` }, ...report.rows] };
