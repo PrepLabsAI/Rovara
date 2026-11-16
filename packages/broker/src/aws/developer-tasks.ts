@@ -1,3 +1,5 @@
+import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
+import type { CallerStepUp } from "./step-up-check.js";
 import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
@@ -42,7 +44,7 @@ import {
   SlackUserIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
-  agentXError,
+  agentXError, IMPLICIT_COMPANY_ID,
   cleanClientName,
   developerTaskPolicy,
   diffStat,
@@ -265,6 +267,10 @@ export interface DeveloperTaskRouteDependencies {
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
   companyId?: string;
+  /** Lane W: the merge core wired for this deployment's tasks (lane E2); absent, `POST .../merge` answers a fixed "not set up". */
+  taskMerge?: TaskMergeWiring;
+  /** Lane W: the caller's step-up as the verified token states it (step-up-check.ts); the merge route checks its age. Never from a header, a query or a body. */
+  stepUp?: CallerStepUp;
   /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
   readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
@@ -6332,7 +6338,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
   if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -6367,5 +6373,9 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "share") return shareTask(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "merge") {
+    // Lane W: every merge rule is the merge core's (task-merge.ts); this only refuses earlier.
+    return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, stepUp: deps.stepUp, body: body(request), now: deps.now() });
+  }
   throw agentXError("NOT_FOUND", "route not found");
 }
