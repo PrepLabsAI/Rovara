@@ -8,7 +8,7 @@ import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES
 import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
 import { TEST_ID_MAX } from "./test-id.js";
-import { RawBaselineSchema } from "./test-env-baseline.js";
+import { RawBaselineSchema, RawRepositoryBaselinesSchema } from "./test-env-baseline.js";
 import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
 import { FLAKY_ON_RERUN_MAX } from "./test-flaky.js";
 import { ABSENT_ON_NEW_MAX, TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
@@ -598,11 +598,14 @@ export const EvidenceRawSchema = z
     testServices: TestServicesUsageRecordSchema.optional(),
     /** TE-C1: the nearest trusted baseline commit that is an ancestor of the task's base, found by the worker at the start of the round. Written only when the plan carried candidates (an asked-for field); the broker uses it only for a sha it offered. */
     baseline: RawBaselineSchema.optional(),
+    /** TE-MR2b: the same for a task with several repositories, one part per repository (never beside `baseline`). */
+    baselines: RawRepositoryBaselinesSchema.optional(),
     repositoryEdges: RepositoryEdgesSchema.optional(),
   })
   .strict()
   .superRefine((raw, context) => {
     if (new Set(raw.checks.map((entry) => entry.checkId)).size !== raw.checks.length) context.addIssue({ code: "custom", path: ["checks"], message: "check ids are unique" });
+    if (raw.baseline !== undefined && raw.baselines !== undefined) context.addIssue({ code: "custom", path: ["baselines"], message: "one baseline claim, not two" });
   });
 export type EvidenceRaw = z.infer<typeof EvidenceRawSchema>;
 

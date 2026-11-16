@@ -8,7 +8,7 @@
 //
 // Every git call runs in the isolated environment (`withIsolatedGit`): a throwaway repository that reads the candidate's OBJECTS and nothing else of it (no refs, replace refs, shallow file, grafts, config or inherited GIT_* variable).
 // Any fault is a miss: this never throws, and "no answer" leaves the engine on today's behaviour.
-import { BASELINE_ANCESTOR_MAX, BASELINE_CANDIDATES_MAX, type RawBaseline } from "@agentx/contracts";
+import { BASELINE_ANCESTOR_MAX, BASELINE_CANDIDATES_MAX, BASELINE_REPOSITORIES_MAX, RawRepositoryBaselinesSchema, type RawBaseline, type RawRepositoryBaseline } from "@agentx/contracts";
 import { withIsolatedGit } from "../isolated-git.js";
 
 const HEX40 = /^[a-f0-9]{40}$/u;
@@ -58,6 +58,36 @@ export async function findBaselineAncestor(input: FindBaselineAncestorInput): Pr
       }
       return undefined;
     });
+  } catch {
+    return undefined;
+  }
+}
+
+/** The most the walks of all repositories may take together. */
+const ALL_REPOSITORIES_MAX_MS = 60_000;
+
+/**
+ * TE-MR2b: the claim for a task with several repositories. Each repository's own nearest offered ancestor (`findBaselineAncestor`), sorted by repository id; a claim exists only when EVERY repository has one, no repository is
+ * named twice and no commit is claimed twice (one row would count twice). One repository, more than 32, no candidates, or any gap: undefined, which leaves the engine on today's behaviour. One time limit for all of them;
+ * never throws.
+ */
+export async function findBaselineAncestors(input: {
+  repositories: ReadonlyArray<{ repositoryId: string; directory: string; baseCommitSha: string | undefined }>;
+  candidates: ReadonlyArray<{ sha: string }> | undefined;
+  signal?: AbortSignal | undefined;
+}): Promise<RawRepositoryBaseline[] | undefined> {
+  if (input.repositories.length < 2 || input.repositories.length > BASELINE_REPOSITORIES_MAX || input.candidates === undefined) return undefined;
+  try {
+    const signal = input.signal === undefined ? AbortSignal.timeout(ALL_REPOSITORIES_MAX_MS) : AbortSignal.any([input.signal, AbortSignal.timeout(ALL_REPOSITORIES_MAX_MS)]);
+    const claims: RawRepositoryBaseline[] = [];
+    for (const repository of [...input.repositories].sort((left, right) => (left.repositoryId < right.repositoryId ? -1 : left.repositoryId > right.repositoryId ? 1 : 0))) {
+      if (signal.aborted) return undefined;
+      const found = await findBaselineAncestor({ directory: repository.directory, baseCommit: repository.baseCommitSha, candidates: input.candidates, signal });
+      if (found === undefined) return undefined;
+      claims.push({ repositoryId: repository.repositoryId, ...found });
+    }
+    const parsed = RawRepositoryBaselinesSchema.safeParse(claims);
+    return parsed.success ? parsed.data : undefined;
   } catch {
     return undefined;
   }
