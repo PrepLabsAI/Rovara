@@ -18,9 +18,10 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EvalDiscoveryConfirmBodySchema, SetupEvalDiscoveryReportSchema,
-  agentXError, canonicalJson, change, evalCommandFingerprintOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
+  agentXError, canonicalJson, change, evalCommandFingerprintOf, evalJudgePinOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
   type DocumentStore, type EvalPlanBody, type OrgId, type Principal, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
+import type { SetupEvalDiscoveryView } from "../local-pages/views.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import { taskKey } from "../task-flow/keys.js";
@@ -120,13 +121,26 @@ export interface EvalDiscoveryConfirmDeps {
   now: () => number;
   /** The install's members: the confirmer's role is read here, live. Absent: the local owner only. */
   members?: SessionMembers | undefined;
-  /** The trusted host's monthly cap for the spend item (`proposeEvalSpendApproval`). Absent: no item fits, and the confirm is refused. */
-  monthlyCapMicros?: number | undefined;
+  /**
+   * DEC 253q(c): the cap's source on a host that reads it: the bound `eval-reservation` adapter's `monthlyCapMicros` (Cloud's company budget, min of the company's and the project's monthly caps).
+   * The ONLY source of the cap. Absent (a laptop), no answer or a fault: the confirm is refused with a fixed reason before anything is read or marked.
+   */
+  monthlyCap?: ((scope: { company: string; project: string }) => Promise<number | undefined>) | undefined;
   /** The project's latest revision's repositories (for the code host read). */
   latest(project: string): Promise<{ definition: SetupDefinition } | undefined>;
   /** The code host's read of a whole file at a commit (undefined: not there; throws: the host cannot answer). */
   readFile?: ((repository: SetupDefinition["repositories"][number], path: string, commit: string, options: { timeoutMs: number; maxBytes: number }) => Promise<string | undefined>) | undefined;
   log?: Log;
+}
+
+/** The fixed refusal when the install has no eval budget to hold the spend item to. */
+export const EVAL_NO_CAP_MESSAGE = "This install has no eval budget, so an eval can't be confirmed here. Evals run within a company's monthly budget on Rovara Cloud.";
+
+/** The monthly cap: the host's source's answer for this company and project. A fault, a non-whole or negative number, or no source is undefined. */
+async function capOf(deps: EvalDiscoveryConfirmDeps, company: string, project: string): Promise<number | undefined> {
+  const whole = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  if (deps.monthlyCap === undefined) return undefined;
+  try { const cap = await deps.monthlyCap({ company, project }); return whole(cap) ? cap : undefined; } catch { return undefined; }
 }
 
 /** Reads every selected file at `commit`, a few at a time, inside one deadline and one byte total. Undefined for a file that is not there; throws a fixed refusal for anything else. */
@@ -176,6 +190,9 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   if (principal?.companyId !== company) refuse(log, "eval_discovery_confirm_refused", "company", "FORBIDDEN", "Only a company owner, admin or project maintainer confirms the eval.");
   const role = await roleFor(deps.members === undefined ? {} : { members: deps.members }, project, { companyId: company, developerId: developerIdOf(principal), principal });
   if (role === undefined) refuse(log, "eval_discovery_confirm_refused", "role", "FORBIDDEN", "Only a company owner, admin or project maintainer confirms the eval.");
+  // DEC 253q(c): the monthly cap from the trusted host, read before anything else; none is a fixed refusal (a laptop has no eval budget).
+  const monthlyCapMicros = await capOf(deps, company, project);
+  if (monthlyCapMicros === undefined) refuse(log, "eval_discovery_confirm_refused", "no_cap", "CONFIG_INVALID", EVAL_NO_CAP_MESSAGE);
   // Only the project's latest setup run's report (T1: this company's own setup partition).
   const pointer = await deps.store.get(setupAgentKey(company, project));
   if (pointer?.["taskId"] !== body.taskId) refuse(log, "eval_discovery_confirm_refused", "not_latest", "CHANGE_STALE", "That is not the project's latest setup run.");
@@ -195,21 +212,27 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   const record = latest?.definition.repositories.find((entry) => entry.name === at?.repository);
   if (at === undefined || record === undefined) refuse(log, "eval_discovery_confirm_refused", "repository", "CONFIG_INVALID", "The eval's repository is not in the project.");
 
-  // The broker's own reads and hashes.
-  const files = await readSelected(deps, record, at.commit, body.paths);
+  // The broker's own reads and hashes: the selected question files and the judge's scoring file, at the recorded commit, in one bounded read.
+  const read = await readSelected(deps, record, at.commit, [...body.paths, suite.judge.scoringPath]);
+  const scoringBytes = read.get(suite.judge.scoringPath)!;
+  const files = new Map([...read].filter(([path]) => path !== suite.judge.scoringPath));
   const hashes = new Map([...files].map(([path, bytes]) => [path, evalQuestionHash(bytes)]));
+  // DEC 253q: the judge pin is the broker's own, over the scoring file it just read; the baseline is measured with the same judge.
+  const judgeScoring = { path: suite.judge.scoringPath, hash: evalQuestionHash(scoringBytes) };
+  const judgePin = evalJudgePinOf({ catalogRowId: suite.catalogRowId, judge: suite.judge, scoringHash: judgeScoring.hash });
   const selected = new Set(body.paths);
   const questions = suite.questions.filter((question) => selected.has(question.path)).map((question) => ({ id: question.id, category: question.category, path: question.path, hash: hashes.get(question.path)! }));
   const evalSetHash = evalSetHashOf([...files].map(([path, bytes]) => ({ path, bytes })));
   const commandFingerprint = evalCommandFingerprintOf(suite.command, suite.report);
   const settings = { imageDigest: suite.image, route: suite.route };
-  const inputs = { evalSetHash, judgePin: suite.judgePin, modelVersion: suite.modelVersion, model: suite.model, catalogRowId: suite.catalogRowId, commandFingerprint, settingsFingerprint: evalSettingsFingerprintOf(settings, suite.judgePin) };
+  const inputs = { evalSetHash, judgePin, modelVersion: suite.modelVersion, model: suite.model, catalogRowId: suite.catalogRowId, commandFingerprint, settingsFingerprint: evalSettingsFingerprintOf(settings, judgePin) };
   const plan: EvalPlanBody = {
     selection: suite.selection, ...(suite.repository === undefined ? {} : { repository: suite.repository }), inputs,
     key: { commandFingerprint, catalogRowId: suite.catalogRowId, model: suite.model, modelVersion: suite.modelVersion },
-    settings, evalSetHash, evalConfigured: true, judgePin: suite.judgePin, baselineJudgePin: suite.baselineJudgePin, ...(suite.sameJudgeFamily === undefined ? {} : { sameJudgeFamily: suite.sameJudgeFamily }),
+    // A model judge goes through the eval's one product row, so it is the product model's family: the existing notice says so (DEC 253q(b)).
+    settings, evalSetHash, evalConfigured: true, judgePin, baselineJudgePin: judgePin, ...(suite.judge.kind === "model" ? { sameJudgeFamily: true } : {}),
     subsetSupported: suite.subsetSupported, questions, maxCallsPerQuestion: suite.maxCallsPerQuestion, maxCostMicrosPerQuestion: suite.maxCostMicrosPerQuestion,
-    command: suite.command, report: suite.report,
+    command: suite.command, report: suite.report, judgeScoring,
   };
   const planDigest = evalPlanDigest(company, project, plan);
   // F3d's whole estimate: three runs of every question at its caps. The maximum is at least the default and never below the estimate.
@@ -224,7 +247,7 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
     { kind: "check", key: setupAgentKey(company, project), condition: when.eq("taskId", body.taskId) },
   ]);
   if (!marked.applied) refuse(log, "eval_discovery_confirm_refused", "stale", "CHANGE_STALE", "That eval report was already confirmed, or a newer setup run replaced it. Read it again.");
-  const table = { store: deps.store, companyId: company, ...(deps.members === undefined ? {} : { members: deps.members }), ...(deps.monthlyCapMicros === undefined ? {} : { monthlyCapMicros: deps.monthlyCapMicros }) };
+  const table = { store: deps.store, companyId: company, ...(deps.members === undefined ? {} : { members: deps.members }), monthlyCapMicros };
   try {
     await proposeEvalSpendApproval(table, project, { selection: suite.selection, inputs, estimate, budget }, plan);
   } catch (error) {
@@ -246,4 +269,38 @@ export async function readEvalDiscovery(deps: { store: DocumentStore; companyId:
     if (row === undefined) return undefined;
     return { taskId, reportDigest: row.reportDigest, state: row.state, report: row.report, ...(row.confirmed === undefined ? {} : { confirmedSelection: row.confirmed.selection }) };
   } catch { return undefined; }
+}
+
+/** The question categories, in the order the setup page counts them. */
+const CATEGORY_ORDER = ["ordinary", "safety", "refusal"] as const;
+
+/**
+ * DEC 253q: what the setup page shows of the latest run's eval definition (`readEvalDiscovery`) and its spend item (`readEvalSpendItem`'s state). Pure. The suites' texts came from the repository or
+ * the model; the page renders them as such. Undefined: no eval was discovered.
+ */
+export function setupEvalDiscoveryView(
+  discovery: Awaited<ReturnType<typeof readEvalDiscovery>>,
+  spendState: "waiting" | "approved" | "rejected" | "approval needs renewing" | undefined,
+  cannotConfirm: string | undefined,
+): SetupEvalDiscoveryView | undefined {
+  if (discovery === undefined) return undefined;
+  const state = discovery.state === "reported" ? "waiting" as const : spendState === "waiting" || spendState === "approved" ? "confirmed" as const : "reapprove" as const;
+  const suites = discovery.report.suites.map((suite) => {
+    const counts = CATEGORY_ORDER.map((category) => [category, suite.questions.filter((q) => q.category === category).length] as const).filter(([, n]) => n > 0);
+    return {
+      selection: suite.selection, ...(suite.repository === undefined ? {} : { repository: suite.repository }),
+      files: [...new Set(suite.questions.map((q) => q.path))], questions: suite.questions.length,
+      categories: counts.map(([category, n]) => `${n} ${category}`).join(", "),
+      // The WHOLE command, each argument on its own and quoted (JSON), never cut: what is confirmed is exactly what is shown (the schema bounds it at 16 KiB).
+      command: JSON.stringify([suite.command.executable, ...suite.command.args]), commandCwd: suite.command.cwd,
+      report: suite.report.cwd === "." ? suite.report.argument : `${suite.report.cwd}/${suite.report.argument}`,
+      model: `${suite.model} (${suite.modelVersion}) through ${suite.catalogRowId}`,
+      judge: suite.judge.kind === "rule" ? `a rule, scored by ${suite.judge.scoringPath}` : `${suite.judge.model} (${suite.judge.version}), scored by ${suite.judge.scoringPath}; the same model family as the product`,
+      caps: `at most ${suite.maxCallsPerQuestion} calls and $${(suite.maxCostMicrosPerQuestion / 1_000_000).toFixed(2)} a question`,
+    };
+  });
+  return {
+    state, taskId: discovery.taskId, reportDigest: discovery.reportDigest, ...(discovery.confirmedSelection === undefined ? {} : { confirmedSelection: discovery.confirmedSelection }),
+    ...(cannotConfirm === undefined ? {} : { cannotConfirm }), suites,
+  };
 }

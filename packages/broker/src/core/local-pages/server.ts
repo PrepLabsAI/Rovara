@@ -15,6 +15,7 @@ import { renderConnections, renderSources } from "./connection-pages.js";
 import { renderAutomation, renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, renderTestEnvironment, type PageContext } from "./pages.js";
 import { renderHowWeWork, renderHowWeWorkIndex } from "./how-we-work-page.js";
 import { renderModelSelection } from "./models-page.js";
+import { evalConfirmBinding } from "./setup-eval-binding.js";
 import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
 import { renderBrowserEvidenceIndex, renderBrowserEvidencePage } from "./browser-evidence-page.js";
 import { browserEvidenceRecipeFromForm } from "./browser-evidence-form.js";
@@ -768,7 +769,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const view = await options.data.getSetupPage?.(match[1] ?? "");
       return view === undefined ? notFound() : page(request, (context) => renderSetupPage(context, view));
     } },
-    { method: "POST", pattern: new RegExp(`^/setup/(${PROJECT})/(start|stop|command|confirm|discard|check|host|forget|apply|eval)$`), handle: async (request, match) => {
+    { method: "POST", pattern: new RegExp(`^/setup/(${PROJECT})/(start|stop|command|confirm|discard|check|host|forget|apply|eval|eval-confirm)$`), handle: async (request, match) => {
       const project = match[1] ?? "";
       const verb = match[2] ?? "";
       const back = `${request.base}/setup/${project}`;
@@ -815,6 +816,16 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
           if (actions.setupDecideHost === undefined || offer === undefined || (decision !== "approve" && decision !== "reject") || !/^[A-Za-z0-9.-]{1,300}$/u.test(host)) return redirect(`${back}?n=invalid`);
           if (!verified(request, { action: "setup.host", subject: `${project}:${host}`, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${back}?n=form`);
           return done(await actions.setupDecideHost({ project, host, decision, approval: offer, proof: proofFor(request, offer) }));
+        }
+        case "eval-confirm": {
+          // DEC 253q: one suite of the latest setup run's eval, bound by the form token to the report digest the page showed. The broker re-checks everything.
+          const taskId = request.form?.get("taskId") ?? ""; const reportDigest = request.form?.get("reportDigest") ?? ""; const selection = request.form?.get("selection") ?? "";
+          const paths = request.form?.getAll("path") ?? [];
+          if (actions.setupEvalConfirm === undefined) return redirect(`${back}?n=setupoff`);
+          if (!/^[A-Za-z0-9_-]{1,160}$/u.test(taskId) || !/^[a-f0-9]{64}$/u.test(reportDigest) || selection === "" || selection.length > 512 || paths.length === 0 || paths.length > 100 || paths.some((path) => path === "" || path.length > 512)) return redirect(`${back}?n=invalid`);
+          // The token binds the project, the report digest, the suite and its exact files: a form of one suite cannot confirm another or a subset.
+          if (!verified(request, evalConfirmBinding(project, taskId, reportDigest, selection, paths))) return redirect(`${back}?n=form`);
+          return done(await actions.setupEvalConfirm({ project, taskId, reportDigest, selection, paths }));
         }
         case "eval": {
           const offer = offerOf(request, "setup-eval-spend");
