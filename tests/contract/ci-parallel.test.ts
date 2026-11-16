@@ -24,9 +24,9 @@ const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml
 describe("CI runs its checks side by side, as the plan says (a Markdown-only change skips them all)", () => {
   it("has the jobs of the plan-driven CI, each waiting only on the plan (and the build, for the tests), and no job left over from before", async () => {
     const { jobs } = await workflow();
-    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-ios", "device-runtime", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
     expect(jobs.plan!.needs).toBeUndefined();
-    for (const name of ["ci-mode", "quick", "build", "linux-runtime", "device-runtime"]) expect(jobs[name]!.needs, name).toBe("plan");
+    for (const name of ["ci-mode", "quick", "build", "linux-runtime", "device-runtime", "device-ios"]) expect(jobs[name]!.needs, name).toBe("plan");
     expect(jobs.test!.needs).toEqual(["plan", "build"]);
     expect(jobs["port-guard"]!.needs).toBeUndefined();
   });
@@ -234,8 +234,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(gate.name).toBeUndefined();
     expect(gate.if).toBe("always() && github.event.pull_request.draft != true");
     // port-guard (the Rovara Code port's check, tests/contract/port-guard-ci.test.ts) runs on code/next only; a skipped job would fail the gate on mainline's pull requests.
-    // device-runtime (DEC 244, tests/contract/device-executor-image.test.ts) is informational until its first real run has been read, so the gate does not wait for it yet.
-    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard" && name !== "device-runtime").sort();
+    // device-runtime and device-ios (DEC 244, tests/contract/device-executor-image.test.ts and device-ios-ci.test.ts) are informational until their first real runs have been read, so the gate does not wait for them yet.
+    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard" && name !== "device-runtime" && name !== "device-ios").sort();
     expect([...(gate.needs as string[])].sort()).toEqual(others);
     expect([...(gate.needs as string[])].sort()).toEqual(["plan", ...GATED_JOBS].sort());
     expect(gate["timeout-minutes"]).toBe(5);

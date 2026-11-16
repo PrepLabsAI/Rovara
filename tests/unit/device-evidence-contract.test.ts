@@ -285,7 +285,7 @@ describe("the pull request's lines", () => {
     expect(DEVICE_EVIDENCE_NOT_PROOF_WORDS).toBe("Visual evidence only: it does not count as change proof.");
     expect(DEVICE_EVIDENCE_DEVICE_WORDS).toEqual({
       fake: { sandbox: "Ran on a fake device (a test stand-in, not a real run)", developer_machine: "Ran on a fake device (a test stand-in, not a real run)" },
-      android_emulator: { sandbox: "Ran on an Android emulator in Rovara's sandbox", developer_machine: "Ran on an Android emulator on a developer machine" },
+      android_emulator: { sandbox: "Ran on an Android emulator in Rovara's sandbox", developer_machine: "Ran on an Android emulator on a developer machine, not in a sandbox" },
       ios_simulator: { developer_machine: "Ran on an iOS simulator on a developer machine, not in a sandbox" },
     });
     expect(deviceEvidenceLines(shown, {})[0]).toBe("Device evidence: Ran on a fake device (a test stand-in, not a real run). Visual evidence only: it does not count as change proof.");

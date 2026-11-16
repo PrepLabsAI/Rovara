@@ -100,7 +100,7 @@ describe("the affected plan of an ordinary pull request", () => {
   });
 
   it("runs the device emulator check only when its area changes: the device executor image, the device code and tests, the CI image list, the plan, the workflow", () => {
-    for (const area of ["environments/device-executor/Dockerfile", "packages/contracts/src/device-evidence.ts", "packages/verifier/src/executor/device-android.ts", "packages/verifier/src/host/device-executor.ts", "tests/linux/device-evidence-emulator.test.ts", "tests/fixtures/device-evidence-app/build.sh", "tests/support/device-kvm.ts", "scripts/ci-images.ts", "scripts/ci-plan.ts", ".github/ci-images.json", ".github/workflows/ci.yml", "package-lock.json"]) {
+    for (const area of ["environments/device-executor/Dockerfile", "packages/contracts/src/device-evidence.ts", "packages/verifier/src/executor/device-android.ts", "packages/verifier/src/host/device-executor.ts", "tests/linux/device-evidence-emulator.test.ts", "tests/macos/device-evidence-ios.test.ts", "tests/fixtures/device-evidence-app/build.sh", "tests/fixtures/device-evidence-ios-app/build.sh", "packages/verifier/src/executor/device-ios.ts", "packages/contracts/src/device-evidence-ios.ts", "tests/support/device-kvm.ts", "scripts/ci-images.ts", "scripts/ci-plan.ts", ".github/ci-images.json", ".github/workflows/ci.yml", "package-lock.json"]) {
       expect(planCi(input({ changed: [area] })).device, area).toBe(true);
     }
     for (const elsewhere of ["packages/worker/src/x.ts", "packages/verifier/src/x.ts", "packages/verifier/src/executor/browser-evidence.ts", "environments/e2e-executor/Dockerfile", "tests/linux/sample.test.ts", "tests/unit/plain.test.ts", "docs/sample/guide.md"]) {

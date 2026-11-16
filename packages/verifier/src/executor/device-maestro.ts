@@ -2,7 +2,10 @@
 // that text to its own scratch file and runs `maestro test` on it. The recipe never holds Maestro's own syntax: there is no way to say `runScript`, `evalScript`, `openLink`, `runFlow` or
 // another app's id, because nothing but the eight actions below can be written, every string is quoted (no text can end its line or start a new command), and the app id is the recipe's own,
 // checked. A flow is launched from a clean state with every permission denied. Pure.
-import { DEVICE_EVIDENCE_APP_ID, DeviceEvidenceActionSchema, type DeviceEvidenceAction } from "@agentx/contracts";
+import { DEVICE_EVIDENCE_APP_ID, DEVICE_EVIDENCE_BUNDLE_ID, DeviceEvidenceActionSchema, type DeviceEvidenceAction } from "@agentx/contracts";
+
+/** The flow is for an Android application id or an iOS bundle identifier (slice 4: the same eight actions on both). */
+export type MaestroPlatform = "android" | "ios";
 
 /** A string as a double-quoted YAML scalar: JSON's quoting, with the three Unicode line breaks written as escapes (YAML 1.1 reads them as line ends). */
 function quoted(value: string): string {
@@ -27,20 +30,21 @@ function commandOf(action: DeviceEvidenceAction): string[] {
   }
 }
 
-const header = (appId: string): string => {
-  if (!DEVICE_EVIDENCE_APP_ID.test(appId) || appId.length > 200) throw new Error("the application id is not valid");
-  return `appId: ${appId}\n---\n`;
+const header = (appId: string, platform: MaestroPlatform): string => {
+  if (typeof appId !== "string" || !(platform === "ios" ? DEVICE_EVIDENCE_BUNDLE_ID : DEVICE_EVIDENCE_APP_ID).test(appId) || appId.length > 200) throw new Error("the application id is not valid");
+  // A bundle identifier can be all digits and dots, which YAML reads as a number: it is quoted (its characters are only letters, digits, dots and hyphens).
+  return `appId: ${platform === "ios" ? JSON.stringify(appId) : appId}\n---\n`;
 };
 /** Starts the app from a clean state: its data cleared, every permission denied (Maestro grants them all unless told not to). */
 const LAUNCH = ["- launchApp:", "    clearState: true", "    stopApp: true", "    permissions:", "      all: deny"];
 
 /** The flow that starts the app from a clean state and does nothing else. */
-export function maestroLaunchFlow(appId: string): string {
-  return `${header(appId)}${LAUNCH.join("\n")}\n`;
+export function maestroLaunchFlow(appId: string, platform: MaestroPlatform = "android"): string {
+  return `${header(appId, platform)}${LAUNCH.join("\n")}\n`;
 }
 /** The flow of one step: its actions, in order. Every action is checked here again (this is the one place that writes Maestro), and a step with none has no flow (null). */
-export function maestroStepFlow(appId: string, actions: readonly unknown[]): string | null {
+export function maestroStepFlow(appId: string, actions: readonly unknown[], platform: MaestroPlatform = "android"): string | null {
   if (actions.length === 0) return null;
   const lines = actions.flatMap((action) => commandOf(DeviceEvidenceActionSchema.parse(action)));
-  return `${header(appId)}${lines.join("\n")}\n`;
+  return `${header(appId, platform)}${lines.join("\n")}\n`;
 }

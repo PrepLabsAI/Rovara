@@ -23,6 +23,23 @@ export function deviceEvidenceOn(policy: unknown): boolean {
   return isRecord(row) && row["value"] === "on";
 }
 
+/**
+ * Whether a project may run its device flows on this machine, outside a sandbox (slice 4). Needs BOTH the project's switch (`deviceEvidenceOn`) and the recipe's own opt-in
+ * (`outsideSandbox`, exactly the words `DEVICE_HOST_RUN_ACK`); a recipe that is not valid is "no recipe". Fails closed, never throws, and says nothing but a fixed reason.
+ */
+export function deviceHostRunAllowed(input: { policy: unknown; recipe: unknown }): { allowed: true; recipe: DeviceEvidenceRecipe } | { allowed: false; reason: Extract<DeviceEvidenceNotRunReason, "no_recipe" | "host_run_not_allowed"> } {
+  try {
+    const recipe = DeviceEvidenceRecipeSchema.safeParse(input.recipe);
+    if (!recipe.success) return { allowed: false, reason: "no_recipe" };
+    // The opt-in must be the INPUT recipe's OWN property (never one inherited through the prototype chain: the parsed copy would hold it as its own) and exactly the words.
+    if (!deviceEvidenceOn(input.policy) || typeof input.recipe !== "object" || input.recipe === null || !Object.hasOwn(input.recipe, "outsideSandbox") || recipe.data.outsideSandbox !== DEVICE_HOST_RUN_ACK) return { allowed: false, reason: "host_run_not_allowed" };
+    return { allowed: true, recipe: recipe.data };
+  } catch {
+    // A recipe or policy that throws when read (a getter, a proxy) is not an opt-in.
+    return { allowed: false, reason: "no_recipe" };
+  }
+}
+
 // ---- caps
 
 /** One screenshot: the pack's own JPEG cap (the same as the e2e capture and browser evidence). */
@@ -89,6 +106,16 @@ export const DeviceEvidenceActionSchema = z.discriminatedUnion("do", [
 export type DeviceEvidenceAction = z.infer<typeof DeviceEvidenceActionSchema>;
 /** An Android application id (package name): dotted words, at least two. */
 export const DEVICE_EVIDENCE_APP_ID = /^[A-Za-z][A-Za-z0-9_]{0,63}(?:\.[A-Za-z][A-Za-z0-9_]{0,63}){1,8}$/u;
+/** An iOS bundle identifier: dotted words, at least two, and a hyphen is allowed in a word (slice 4). */
+export const DEVICE_EVIDENCE_BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}(?:\.[A-Za-z0-9][A-Za-z0-9-]{0,63}){1,8}$/u;
+/**
+ * Slice 4 (DEC 244a): a project that wants its mobile flows run on the developer's own machine, outside a sandbox, says so in its recipe with exactly these words, after being shown
+ * `DEVICE_HOST_RUN_WARNING`. Anything else (absent, `true`, another sentence) is not an opt-in. The words are the ones the evidence carries.
+ */
+export const DEVICE_HOST_RUN_ACK = "not in a sandbox";
+/** What the settings screen shows before it writes the opt-in: plain words, the whole of what it means. */
+export const DEVICE_HOST_RUN_WARNING = "This runs the project's own build and the app on this machine, not in a sandbox: with this account's files, this machine's network and its tools. "
+  + "Nothing here limits what that code can reach. The pictures will say \"not in a sandbox\". Turn this on only for a project you trust on a machine you can afford to risk.";
 export const DEVICE_EVIDENCE_MASK_IDS_MAX = 20;
 export const DEVICE_EVIDENCE_PLATFORMS = ["android", "ios"] as const;
 
@@ -102,13 +129,20 @@ export const DeviceEvidenceRecipeSchema = z.object({
   buildCommand: line(500),
   appFile: z.string().refine(relativeProjectPath, "a path inside the project"),
   /** The app's Android application id; the emulator driver needs it to start the app (slice 2). */
-  appId: z.string().max(200).regex(DEVICE_EVIDENCE_APP_ID, "an application id").optional(),
+  appId: z.string().max(200).regex(DEVICE_EVIDENCE_BUNDLE_ID, "an application id or bundle identifier").optional(),
   flows: z.array(z.object({ id: NameSchema, files: z.array(GlobSchema).min(1).max(20),
     steps: z.array(z.object({ id: NameSchema, label: line(80), actions: z.array(DeviceEvidenceActionSchema).max(DEVICE_EVIDENCE_ACTIONS_MAX).optional() }).strict()).min(1).max(DEVICE_EVIDENCE_STEPS_MAX) }).strict())
     .min(1).max(DEVICE_EVIDENCE_RECIPE_FLOWS_MAX),
   maskIds: z.array(line(200)).max(DEVICE_EVIDENCE_MASK_IDS_MAX).optional(),
   fixtureDataOnly: z.boolean().optional(),
+  /**
+   * The per-project opt-in to run on the developer's own machine, outside a sandbox (slice 4): it counts only when it is exactly `DEVICE_HOST_RUN_ACK` (`deviceHostRunAllowed`). Any other value is
+   * a valid recipe that has not opted in (so the reason given is "not switched on", not "no recipe"). Never taken from the repository.
+   */
+  outsideSandbox: z.unknown().optional(),
 }).strict().superRefine((recipe, context) => {
+  // An Android application id has no hyphen (an iOS bundle identifier may). That an iOS app is a `.app` folder is the iOS driver's own check (slice 1's recipes already name any file).
+  if (recipe.platform === "android" && recipe.appId !== undefined && !DEVICE_EVIDENCE_APP_ID.test(recipe.appId)) context.addIssue({ code: "custom", message: "an application id" });
   if (new Set(recipe.flows.map((row) => row.id)).size !== recipe.flows.length) context.addIssue({ code: "custom", message: "flow ids are unique" });
   for (const row of recipe.flows) if (new Set(row.steps.map((step) => step.id)).size !== row.steps.length) context.addIssue({ code: "custom", message: "step ids are unique" });
 });
@@ -118,7 +152,7 @@ export type DeviceEvidenceRecipe = z.infer<typeof DeviceEvidenceRecipeSchema>;
 
 /** Why a run, or one step of it, has no before and after pictures. Fixed words, never an error's own text. */
 export const DEVICE_EVIDENCE_NOT_RUN_REASONS = ["no_recipe", "no_changed_flow", "changes_unreadable", "too_many_changed_files", "app_did_not_build", "device_did_not_start", "needs_macos",
-  "step_failed", "capture_failed", "over_size_cap", "masked_content", "unreadable_screen", "time_limit", "not_stored"] as const;
+  "step_failed", "capture_failed", "over_size_cap", "masked_content", "unreadable_screen", "time_limit", "not_stored", "host_run_not_allowed"] as const;
 export type DeviceEvidenceNotRunReason = (typeof DEVICE_EVIDENCE_NOT_RUN_REASONS)[number];
 export const DEVICE_EVIDENCE_NOT_RUN_WORDS: Record<DeviceEvidenceNotRunReason, string> = {
   no_recipe: "no build command or flows are set for this project",
@@ -135,6 +169,7 @@ export const DEVICE_EVIDENCE_NOT_RUN_WORDS: Record<DeviceEvidenceNotRunReason, s
   unreadable_screen: "this screen cannot be checked for private data",
   time_limit: "the time limit was reached",
   not_stored: "it could not be stored",
+  host_run_not_allowed: "running on this machine is not switched on for this project",
 };
 /** The reasons that need no work from the device: a run that never opened one. */
 type PickNotRun = Extract<DeviceEvidenceNotRunReason, "no_recipe" | "no_changed_flow" | "changes_unreadable" | "too_many_changed_files">;
@@ -151,8 +186,13 @@ export type DeviceEvidenceIsolation = (typeof DEVICE_EVIDENCE_ISOLATIONS)[number
 const FAKE_WORDS = "Ran on a fake device (a test stand-in, not a real run)";
 export const DEVICE_EVIDENCE_DEVICE_WORDS: { [D in DeviceEvidenceDevice]: Partial<Record<DeviceEvidenceIsolation, string>> } = {
   fake: { sandbox: FAKE_WORDS, developer_machine: FAKE_WORDS },
-  android_emulator: { sandbox: "Ran on an Android emulator in Rovara's sandbox", developer_machine: "Ran on an Android emulator on a developer machine" },
+  android_emulator: { sandbox: "Ran on an Android emulator in Rovara's sandbox", developer_machine: "Ran on an Android emulator on a developer machine, not in a sandbox" },
   ios_simulator: { developer_machine: "Ran on an iOS simulator on a developer machine, not in a sandbox" },
+};
+/** What a run on a developer machine adds to the pull request's lines. */
+export const DEVICE_EVIDENCE_HOST_WORDS: Record<Exclude<DeviceEvidenceDevice, "fake">, string> = {
+  android_emulator: "Network not restricted: the app could reach this machine's network.",
+  ios_simulator: "Built and run on this machine, outside a sandbox, with this machine's own network.",
 };
 export const DEVICE_EVIDENCE_NOT_PROOF_WORDS = "Visual evidence only: it does not count as change proof.";
 const FAKE_LINE_WORDS = "Fake device, not a real run.";
@@ -416,5 +456,7 @@ export function deviceEvidenceLines(outcome: DeviceEvidenceOutcome | undefined, 
     ...checked.notShown.map((row) => `- \`${row.flow}\`: Not shown: ${DEVICE_EVIDENCE_NOT_SHOWN_WORDS[row.reason]}`),
     ...(checked.moreNotShown > 0 ? [`- ${String(checked.moreNotShown)} more changed flows not shown: ${DEVICE_EVIDENCE_NOT_SHOWN_WORDS.over_flow_cap}`] : []),
     ...(checked.unmasked > 0 ? [`- ${String(checked.unmasked)} screen${checked.unmasked === 1 ? "" : "s"} shown unmasked: fixture data only`] : []),
+    // A run on a developer machine had that machine's network (slice 4): said once, for a run that happened.
+    ...(checked.isolation === "developer_machine" && checked.device !== "fake" && checked.steps.length > 0 ? [`- ${DEVICE_EVIDENCE_HOST_WORDS[checked.device]}`] : []),
   ];
 }

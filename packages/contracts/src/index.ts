@@ -237,6 +237,7 @@ export * from "./browser-evidence.js";
 export * from "./browser-evidence-wire.js";
 export * from "./device-evidence.js";
 export * from "./device-evidence-android.js";
+export * from "./device-evidence-ios.js";
 export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";

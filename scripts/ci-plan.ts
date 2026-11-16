@@ -134,12 +134,13 @@ export const LINUX_PATTERNS: readonly RegExp[] = [
   /^tsconfig[^/]*\.json$/,
 ];
 
-/** The device emulator check's area (device testing, DEC 244): the device executor image, the device code and tests, the CI image list, the plan and the workflow itself. */
+/** The device emulator check's area (device testing, DEC 244): the device executor image, the device code and tests (Android on Linux, the iOS simulator on macOS), the CI image list, the plan and the workflow itself. */
 export const DEVICE_PATTERNS: readonly RegExp[] = [
   /^environments\/device-executor\//,
   /^packages\/contracts\/src\/device-/,
   /^packages\/verifier\/src\/(executor|host)\/device-/,
   /^tests\/linux\/device-/,
+  /^tests\/macos\//,
   /^tests\/fixtures\/device-/,
   /^tests\/support\/device-/,
   /^scripts\/(ci-images|ci-plan|ci-gate)\.ts$/,

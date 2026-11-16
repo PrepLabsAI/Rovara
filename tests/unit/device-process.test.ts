@@ -114,3 +114,25 @@ describe("createNodeCommandPort.start", () => {
     expect(background.running()).toBe(false);
   });
 });
+
+describe("createNodeCommandPort.run: the host build's options (slice 4)", () => {
+  it("starts the program in the folder it is given, and in the parent's own folder when it is given none", async () => {
+    const dir = Buffer.from(process.cwd()).toString("utf8");
+    const here = await port.run(NODE, ["-e", "process.stdout.write(process.cwd())"], { timeoutMs: 10_000, maxStdoutBytes: 1_000 });
+    expect(text(here.stdout)).toBe(dir);
+    const there = await port.run(NODE, ["-e", "process.stdout.write(require('fs').realpathSync(process.cwd()))"], { timeoutMs: 10_000, maxStdoutBytes: 1_000, cwd: "/" });
+    expect(text(there.stdout)).toBe("/");
+  });
+  it("keeps none of the output of a program asked to discard it, sets no limit on it, and still answers its exit code", async () => {
+    const loud = "process.stdout.write('x'.repeat(2_000_000));process.stderr.write('y'.repeat(2_000_000));process.exit(4)";
+    const result = await port.run(NODE, ["-e", loud], { timeoutMs: 20_000, maxStdoutBytes: 1, discardOutput: true, mergeStderr: true });
+    expect(result).toMatchObject({ exitCode: 4, timedOut: false, tooLarge: false });
+    expect(result.stdout.byteLength).toBe(0);
+    const limited = await port.run(NODE, ["-e", loud], { timeoutMs: 20_000, maxStdoutBytes: 1_000 });
+    expect(limited.tooLarge).toBe(true);
+  });
+  it("still stops a program that discards its output when it runs past its time", async () => {
+    const result = await port.run(NODE, ["-e", "setInterval(()=>{},1000)"], { timeoutMs: 700, maxStdoutBytes: 1, discardOutput: true });
+    expect(result).toMatchObject({ timedOut: true, exitCode: null });
+  });
+});
