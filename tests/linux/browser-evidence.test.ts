@@ -22,7 +22,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const result = spawnSync("docker", args, { encoding: "utf8", timeout: 280_000 });
     expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(0);
     const out = JSON.parse(result.stdout.trim().split("\n").at(-1)!) as Out;
-    expect(out.changed.notRun).toBeNull();
+    expect(out.changed.notRun, result.stderr).toBeNull();
     const [checkout, missing] = out.changed.routes;
     expect(missing).toEqual({ route: "/missing", status: "not_run", reason: "page_did_not_load" });
     if (checkout?.status !== "shown") throw new Error(`the changed page was not shown: ${JSON.stringify(checkout)}`);

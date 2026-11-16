@@ -15,6 +15,12 @@ const driver = createChromiumEvidenceDriver({
     async start(side, timeoutMs) {
       const started = await startProjectApp({ command: "node ../server.mjs", cwd: `/fixture/${side}`, port, readyPath: "/health", timeoutMs, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" } });
       if (started.status === "ready") apps.set(side, started.app);
+      // A start that fails says why on stderr (the test shows it): what the shell sees, and what the start command prints when run once by hand.
+      else {
+        const { spawnSync } = await import("node:child_process");
+        const probe = spawnSync("/bin/sh", ["-c", "id; command -v node; ls -ld /fixture /fixture/" + side + "; timeout 2 node ../server.mjs; echo exit=$?"], { cwd: `/fixture/${side}`, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", PORT: String(port + 1) }, encoding: "utf8", timeout: 10_000 });
+        process.stderr.write(`app did not start (${side}, ${started.status}): ${probe.stdout}${probe.stderr}\n`);
+      }
       return started.status;
     },
     async stop(side) { await apps.get(side)?.stop(); apps.delete(side); },
