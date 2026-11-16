@@ -599,7 +599,7 @@ describe("what a finished task tells lessons", () => {
     it("with no notes the send-back is counted but its text is fixed: never the summary, never a correction", async () => {
       const w = await world();
       for (const notes of [undefined, [], ["  "]]) {
-        const requestId = await findingsTask(w, notes as string[] | undefined);
+        const requestId = await findingsTask(w, notes);
         const fact = await back(w, requestId);
         expect(fact, JSON.stringify(notes)).toMatchObject({ origin: "human", actorTrust: "member", fixedText: true });
         expect(fact).not.toHaveProperty("reasonText");
@@ -607,6 +607,15 @@ describe("what a finished task tells lessons", () => {
         expect(subject.spans).toEqual([expect.objectContaining({ kind: "send_back", text: NO_REASON_TEXT, fixedText: true })]);
         expect(JSON.stringify(subject)).not.toContain(FINDINGS_REASON);
       }
+    });
+
+    it("reads at most 4,000 characters of the notes in all, and at most 50 notes", async () => {
+      const w = await world();
+      const requestId = await findingsTask(w, Array.from({ length: 60 }, (_, i) => `${String(i).padStart(2, "0")} ${"x".repeat(197)}`));
+      const fact = await back(w, requestId);
+      expect(fact?.reasonText?.length).toBe(4_000);
+      expect(fact?.reasonText?.startsWith("00 x")).toBe(true);
+      expect(fact?.reasonText).not.toContain("50 x");
     });
 
     it("a fact marked as code's text never becomes the span's text, even when it still carries the sentence", () => {
@@ -638,7 +647,7 @@ describe("what a finished task tells lessons", () => {
       const requestId = await findingsTask(w, ["Return 404, not 500."]);
       const reads: string[] = [];
       const get = w.h.store.get.bind(w.h.store);
-      w.h.store.get = (async (key: Parameters<typeof get>[0]) => { reads.push(String((key as { sk?: unknown }).sk)); return get(key); }) as typeof w.h.store.get;
+      w.h.store.get = (async (key: Parameters<typeof get>[0]) => { reads.push(String((key as { sk?: unknown }).sk)); return get(key); });
       expect(await back(w, requestId, "org_zzzzzzzzzzzzzzzzzzzz")).toBeUndefined();
       expect(reads.filter((sk) => sk.startsWith("OWNER_NOTE#"))).toEqual([]);
       // A task whose own company is another's is not this company's, whatever workspace is named.

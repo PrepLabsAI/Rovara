@@ -353,6 +353,8 @@ describe("the person's per-finding notes are kept apart from code's lead-in (for
     expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_A)).toEqual([]);
     await h.store.put({ item: { ...key(REQUEST_B), entityType: "OWNER_NOTE", taskId: TASK_ID, requestId: REQUEST_B, text: "x", findingNotes: ["ok", 3, "", "  ", { a: 1 }] } });
     expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_B)).toEqual(["ok"]);
+    await h.store.put({ item: { ...key(REQUEST_B), entityType: "OWNER_NOTE", taskId: TASK_ID, requestId: REQUEST_B, text: "x", findingNotes: Array.from({ length: 60 }, (_, i) => `note ${String(i)}`) } });
+    expect(await readOwnerFindingNotes(h.store, TASK_ID, REQUEST_B)).toHaveLength(50);
     // A row filed under this request id but naming another request (or task) is not this decision's.
     await h.store.put({ item: { ...key("44444444-4444-4444-8444-444444444444"), entityType: "OWNER_NOTE", taskId: TASK_ID, requestId: REQUEST_B, text: "x", findingNotes: ["wrong round"] } });
     expect(await readOwnerFindingNotes(h.store, TASK_ID, "44444444-4444-4444-8444-444444444444")).toEqual([]);
