@@ -96,7 +96,9 @@ describe("the operation as the handlers read it, and the counter on its record",
   const seeded = async (dispatch: Record<string, unknown> = {}) => {
     const store = new MemoryDocumentStore();
     await store.put({ item: { ...operationKey(T1_COMPANY, "ws-1", "op-1"), entityType: "OPERATION", kind: "prepare", status: "RUNNING", dispatch: { kind: "prepare", payload: dispatch } } as never });
-    await store.put({ item: { ...workspaceKey(T1_COMPANY, "ws-1"), entityType: "WORKSPACE", orgId: "org_aaaaaaaaaaaaaaaaaaaa", projectName: "payments", status: "PREPARING", activeOperationId: "op-1" } });
+    await store.put({ item: { ...workspaceKey(T1_COMPANY, "ws-1"), entityType: "WORKSPACE", companyId: T1_COMPANY, orgId: T1_COMPANY, projectName: "payments", status: "PREPARING", activeOperationId: "op-1" } });
+    // T1: an id-only reader finds the workspace's company through its pointer, written with the scoped record.
+    await store.put({ item: { pk: "WORKSPACE#ws-1", sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: "ws-1", companyId: T1_COMPANY } });
     return store;
   };
 
