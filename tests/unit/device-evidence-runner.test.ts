@@ -280,6 +280,58 @@ describe("runDeviceEvidence", () => {
     });
   });
 
+  describe("painting is bounded and checked", () => {
+    it("a screen of hundreds of full-screen rectangles is withheld at once, and one full-screen paint on a phone-sized frame is quick", async () => {
+      const W2 = 1080;
+      const H2 = 2400;
+      const full = { x: 0, y: 0, width: W2, height: H2 };
+      const many = fake({ screen: () => ({ tree: { width: W2, height: H2, nodes: [node({ text: "Hello", bounds: { x: 0, y: 0, width: 10, height: 10 } }), ...Array.from({ length: 400 }, () => node({ secure: true, bounds: full }))] }, frame: fakeFrame(W2, H2, 100) }) });
+      const started = Date.now();
+      expect(reasons(await runDeviceEvidence(input(many.driver, { flows: [flows[1]!], limits: { runMs: 1_000, stepMs: 500 } })))).toEqual(["masked_content"]);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      const one = fake({ screen: () => ({ tree: { width: W2, height: H2, nodes: [node({ text: "Hello", bounds: { x: 0, y: 0, width: 10, height: 10 } }), node({ secure: true, bounds: full })] }, frame: fakeFrame(W2, H2, 100) }) });
+      const t0 = Date.now();
+      expect(reasons(await runDeviceEvidence(input(one.driver, { flows: [flows[1]!], encodeJpeg: () => bytesOf(1_000) })))).toEqual(["shown"]);
+      expect(Date.now() - t0).toBeLessThan(5_000);
+    });
+    it("a painter that did not paint, painted a frame of another size, or threw is never encoded", async () => {
+      const lazy = (frame: DeviceFrame) => ({ ...frame, rgba: Uint8Array.from(frame.rgba) });
+      const small = () => fakeFrame(10, 10);
+      const throws = () => { throw new Error("boom at /home/ada"); };
+      for (const [paint, expected] of [[lazy, "masked_content"], [small, "masked_content"], [throws, "capture_failed"], [() => null as never, "masked_content"]] as const) {
+        let encoded = 0;
+        const got = await runDeviceEvidence(input(fake().driver, { flows: [flows[1]!], paint, encodeJpeg: (frame) => { encoded += 1; return encodeFakeJpeg(frame); } }));
+        expect(reasons(got)).toEqual([expected]);
+        expect(encoded).toBe(0);
+        expect(JSON.stringify(got)).not.toContain("ada");
+      }
+    });
+    it("the time is read again after painting: a step whose paint ran past the limit is Not run (time limit)", async () => {
+      let clock = 0;
+      const slow = (frame: DeviceFrame, rects: Parameters<typeof paintDeviceRects>[1]) => { clock += 1_000_000; return paintDeviceRects(frame, rects); };
+      let encoded = 0;
+      const got = await runDeviceEvidence(input(fake().driver, { flows: [flows[1]!], paint: slow, now: () => clock, limits: { runMs: 500_000 }, encodeJpeg: (frame) => { encoded += 1; return encodeFakeJpeg(frame); } }));
+      expect(reasons(got)).toEqual(["time_limit"]);
+      expect(encoded).toBe(0);
+    });
+    it("counts a screen shown under the fixture-data choice even when part of it was painted", async () => {
+      const web = fake({ screen: (side) => ({ tree: { width: W, height: H, nodes: [node({ webView: true })] }, frame: fakeFrame(W, H, side === "before" ? 100 : 150) }) });
+      const got = await runDeviceEvidence(input(web.driver, { flows: [flows[1]!], fixtureDataOnly: true }));
+      expect(reasons(got)).toEqual(["shown"]);
+      expect(got.unmasked).toBe(1);
+      expect(reasons(await runDeviceEvidence(input(web.driver, { flows: [flows[1]!] })))).toEqual(["unreadable_screen"]);
+    });
+    it("a prepare that fails after the run gave up is stopped too", async () => {
+      const stops: string[] = [];
+      let fail: (reason: unknown) => void = () => undefined;
+      const driver: DeviceDriver = { ...fake().driver, prepare: () => new Promise((_, reject) => { fail = reject; }), async stop(side) { stops.push(side); } };
+      await runDeviceEvidence(input(driver, { flows: [flows[1]!], limits: { runMs: 30 } }));
+      fail(new Error("late"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(stops).toEqual(["before", "before"]);
+    });
+  });
+
   describe("a fake device is never a real run", () => {
     it("says it is fake in its kind, and no driver input can make a fake into a real device", async () => {
       expect(fake().driver.kind).toBe("fake");

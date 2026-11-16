@@ -83,6 +83,18 @@ describe("storeDeviceEvidence", () => {
     expect(await blobs.get(keyOf("a"), 1_000)).toBeDefined();
   });
 
+  it("never deletes a picture that was already stored under the task (an earlier round's pack may name it) when the other half fails", async () => {
+    const blobs = createDocumentEvidenceBlobStore(new MemoryDocumentStore(), { companyId: COMPANY_A });
+    await storeDeviceEvidence({ blobs }, OWNER, captured());
+    expect(await blobs.get(keyOf("a"), 1_000)).toBeDefined();
+    const failing: EvidenceBlobStore = { ...blobs, async put(key, bytes, meta, options) { if (meta.metadata["sha256"] === shot("e").sha256) throw new Error("no"); return blobs.put(key, bytes, meta, options); } };
+    const second = captured();
+    second.steps = [{ flow: "checkout", step: "open", status: "shown", before: shot("a"), after: shot("e") }];
+    expect((await storeDeviceEvidence({ blobs: failing }, OWNER, second)).steps[0]).toMatchObject({ status: "not_run", reason: "not_stored" });
+    expect(await blobs.get(keyOf("a"), 1_000)).toBeDefined();
+    expect(await blobs.get(keyOf("b"), 1_000)).toBeDefined();
+  });
+
   it("checks the run whole before the first write: a run it refuses stores nothing", async () => {
     const documents = new MemoryDocumentStore();
     const blobs = createDocumentEvidenceBlobStore(documents, { companyId: COMPANY_A });

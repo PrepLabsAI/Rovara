@@ -159,6 +159,29 @@ describe("the view-tree mask plan", () => {
     for (const tree of bad) expect(plan(tree), JSON.stringify(tree)?.slice(0, 80)).toEqual({ status: "withheld", reason: "unreadable_screen" });
     expect(plan(screen(Array.from({ length: DEVICE_EVIDENCE_TREE_NODES_MAX }, (_, i) => node({ text: `n${i}` }))))).toMatchObject({ status: "paint" });
   });
+  it("text of only spaces or hidden characters is no text: that screen cannot be read either", () => {
+    for (const text of [" ", "\u200b", " \u00a0\t\n", "\u202e"]) {
+      expect(plan(screen([node({ text })])), JSON.stringify(text)).toEqual({ status: "withheld", reason: "unreadable_screen" });
+      expect(plan(screen([node({ description: text }), node({ hint: text })]))).toEqual({ status: "withheld", reason: "unreadable_screen" });
+    }
+    expect(plan(screen([node({ text: " a " })]))).toMatchObject({ status: "paint" });
+  });
+  it("a canvas, game or map surface is always painted, whatever text its screen has", () => {
+    expect(plan(screen([node({ text: "Play" }), node({ surface: true, bounds: { x: 0, y: 20, width: 360, height: 300 } })]))).toEqual({ status: "paint", rects: [{ x: 0, y: 20, width: 360, height: 300 }] });
+    expect(plan(screen([node({ text: "Play" }), node({ surface: "yes" })]))).toEqual({ status: "withheld", reason: "unreadable_screen" });
+  });
+  it("a value before its label (a hint shown above a value) and an accessibility label as the visible one read as a label and value too", () => {
+    expect(plan(screen([node({ text: "abcd1234", hint: "token:" })]))).toEqual({ status: "withheld", reason: "masked_content" });
+    expect(plan(screen([node({ description: "Password:" }), node({ text: "hunter22" })]))).toEqual({ status: "withheld", reason: "masked_content" });
+    expect(plan(screen([node({ description: "Close" }), node({ text: "Welcome back" })]))).toMatchObject({ status: "paint" });
+  });
+  it("the painted area is bounded: rectangles that cover the frame more than four times over withhold the screen, and four times is allowed", () => {
+    const full = { x: 0, y: 0, width: 360, height: 640 };
+    const stack = (n: number) => screen([node({ text: "hi" }), ...Array.from({ length: n }, () => node({ secure: true, bounds: full }))]);
+    expect(plan(stack(4))).toMatchObject({ status: "paint" });
+    expect(plan(stack(5))).toEqual({ status: "withheld", reason: "masked_content" });
+    expect(plan(stack(DEVICE_EVIDENCE_TREE_NODES_MAX - 1))).toEqual({ status: "withheld", reason: "masked_content" });
+  });
   it("the maskIds option can only add: a bad one is ignored and the defaults stay", () => {
     expect(plan(screen([node({ id: "a", secure: true }), node({ id: "b", text: "x" })]), { maskIds: 3 })).toMatchObject({ status: "paint", rects: [{ x: 10 }] });
     expect(plan(screen([node({ id: "b", text: "x" })]), { maskIds: [3, "b"] })).toMatchObject({ status: "paint", rects: [{ x: 10 }] });
@@ -166,17 +189,25 @@ describe("the view-tree mask plan", () => {
   it("with fixture data only switched on, a screen with no readable text is shown unmasked, but a screen with a match it cannot paint is still withheld", () => {
     expect(plan(null, { fixtureDataOnly: true })).toEqual({ status: "unmasked" });
     expect(plan(screen([node({})]), { fixtureDataOnly: true })).toEqual({ status: "unmasked" });
-    expect(plan(screen([node({ secure: true })]), { fixtureDataOnly: true })).toEqual({ status: "paint", rects: [{ x: 10, y: 10, width: 200, height: 40 }] });
+    // Some of it painted, the rest shown under the waiver: counted as unmasked.
+    expect(plan(screen([node({ secure: true })]), { fixtureDataOnly: true })).toEqual({ status: "paint", rects: [{ x: 10, y: 10, width: 200, height: 40 }], unmasked: true });
+    expect(plan(screen([node({ webView: true })]), { fixtureDataOnly: true })).toMatchObject({ status: "paint", unmasked: true });
+    expect(plan(screen([node({ text: "hi" })]), { fixtureDataOnly: true })).not.toHaveProperty("unmasked");
     expect(plan({ nope: 1 }, { fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "unreadable_screen" });
     expect(plan(screen([node({ text: "ok" }), { text: email }]), { fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "masked_content" });
     expect(plan(null, { fixtureDataOnly: "true" })).toEqual({ status: "withheld", reason: "unreadable_screen" });
     expect(plan(null)).toEqual({ status: "withheld", reason: "unreadable_screen" });
   });
   it("finishes a customer-sized tree within a bounded time", () => {
-    const nodes = Array.from({ length: DEVICE_EVIDENCE_TREE_NODES_MAX }, (_, i) => node({ text: `${"a.".repeat(10)}${i}`, description: "x ".repeat(10), bounds: { x: 0, y: i % 600, width: 10, height: 10 } }));
+    const nodes = Array.from({ length: DEVICE_EVIDENCE_TREE_NODES_MAX }, (_, i) => node({ text: `${"a.".repeat(10)}${i}`, description: "x ".repeat(3), bounds: { x: 0, y: i % 600, width: 10, height: 10 } }));
     const started = performance.now();
     expect(plan(screen(nodes)).status).toBe("paint");
     expect(performance.now() - started).toBeLessThan(5_000);
+  });
+  it("a screen with more visible text than the masks scan (200,000 characters) is withheld whole, never half checked", () => {
+    const nodes = Array.from({ length: 50 }, () => node({ text: "word ".repeat(900) }));
+    expect(plan(screen(nodes))).toEqual({ status: "withheld", reason: "masked_content" });
+    expect(plan(screen(nodes.slice(0, 40)))).toMatchObject({ status: "paint" });
   });
 });
 

@@ -57,6 +57,8 @@ export type DeviceEvidenceRunInput = Readonly<{
   driver: DeviceDriver;
   /** Turns the painted pixels into a JPEG (slice 2 brings the real encoder; tests and the fake bring theirs). */
   encodeJpeg(frame: DeviceFrame): Uint8Array;
+  /** Paints the rectangles on a copy of the frame (default `paintDeviceRects`); the real executor can paint natively. Its result is checked before anything is encoded. */
+  paint?(frame: DeviceFrame, rects: readonly DeviceRect[]): DeviceFrame;
   /** The run's credential scan (the executor's `CredentialRedactor`) over the JPEG bytes: defence in depth only. */
   redactor?: Readonly<{ contains(bytes: Uint8Array): boolean }>;
   now?: () => number;
@@ -88,28 +90,31 @@ const lower = (given: number | undefined, most: number) => (typeof given === "nu
 
 /** The colour a painted rectangle gets. */
 export const DEVICE_EVIDENCE_PAINT = Object.freeze([0, 0, 0, 255] as const);
-/** `frame` with every rectangle painted over (a copy: the caller's pixels are never touched). Rectangles are clipped to the frame. */
+/** The paint colour as one 32-bit pixel in this machine's byte order, so a row is painted and read a pixel at a time instead of a byte at a time. */
+const PAINT_PIXEL = new Uint32Array(new Uint8Array(DEVICE_EVIDENCE_PAINT).buffer)[0]!;
+const pixelsOf = (rgba: Uint8Array) => new Uint32Array(rgba.buffer, rgba.byteOffset, rgba.byteLength / 4);
+/** `frame` with every rectangle painted over (a copy: the caller's pixels are never touched). Rectangles are clipped to the frame. One native fill per row of a rectangle. */
 export function paintDeviceRects(frame: DeviceFrame, rects: readonly DeviceRect[]): DeviceFrame {
   const rgba = Uint8Array.from(frame.rgba);
+  const pixels = pixelsOf(rgba);
   for (const rect of rects) {
+    const x0 = Math.max(0, rect.x);
     const x1 = Math.min(frame.width, rect.x + rect.width);
     const y1 = Math.min(frame.height, rect.y + rect.height);
-    for (let y = Math.max(0, rect.y); y < y1; y += 1) {
-      for (let x = Math.max(0, rect.x); x < x1; x += 1) rgba.set(DEVICE_EVIDENCE_PAINT, (y * frame.width + x) * 4);
-    }
+    if (x1 <= x0) continue;
+    for (let y = Math.max(0, rect.y); y < y1; y += 1) pixels.fill(PAINT_PIXEL, y * frame.width + x0, y * frame.width + x1);
   }
   return { width: frame.width, height: frame.height, rgba };
 }
 /** Whether every pixel of every rectangle is the paint colour: the check after the paint ("check again"). */
 export function deviceRectsPainted(frame: DeviceFrame, rects: readonly DeviceRect[]): boolean {
+  const pixels = frame.rgba.byteOffset % 4 === 0 ? pixelsOf(frame.rgba) : pixelsOf(Uint8Array.from(frame.rgba));
   for (const rect of rects) {
+    const x0 = Math.max(0, rect.x);
     const x1 = Math.min(frame.width, rect.x + rect.width);
     const y1 = Math.min(frame.height, rect.y + rect.height);
     for (let y = Math.max(0, rect.y); y < y1; y += 1) {
-      for (let x = Math.max(0, rect.x); x < x1; x += 1) {
-        const at = (y * frame.width + x) * 4;
-        for (let channel = 0; channel < 4; channel += 1) if (frame.rgba[at + channel] !== DEVICE_EVIDENCE_PAINT[channel]) return false;
-      }
+      for (let x = x0, at = y * frame.width + x0; x < x1; x += 1, at += 1) if (pixels[at] !== PAINT_PIXEL) return false;
     }
   }
   return true;
@@ -206,9 +211,12 @@ export async function runDeviceEvidence(input: DeviceEvidenceRunInput): Promise<
       const plan = planDeviceMask(second, { frame: { width: frame.width, height: frame.height }, maskIds: input.maskIds, fixtureDataOnly: input.fixtureDataOnly });
       if (plan.status === "withheld") return plan.reason;
       if (plan.status === "unmasked") return keepShot(input.encodeJpeg, frame, true, input.redactor);
-      const painted = paintDeviceRects(frame, plan.rects);
-      if (!deviceRectsPainted(painted, plan.rects)) return "masked_content";
-      return keepShot(input.encodeJpeg, painted, false, input.redactor);
+      let painted: DeviceFrame | undefined;
+      try { painted = frameOf((input.paint ?? paintDeviceRects)(frame, plan.rects)); } catch { return "capture_failed"; }
+      if (painted === undefined || painted.width !== frame.width || painted.height !== frame.height || !deviceRectsPainted(painted, plan.rects)) return "masked_content";
+      // Painting and checking are not driver calls, so the time limit is read again before the picture is kept.
+      if (left() <= 0) return "time_limit";
+      return keepShot(input.encodeJpeg, painted, plan.unmasked === true, input.redactor);
     }
     // The screen changed between the two readings, twice: what was in the picture cannot be told.
     return "masked_content";
@@ -223,7 +231,7 @@ export async function runDeviceEvidence(input: DeviceEvidenceRunInput): Promise<
       let preparing: Promise<unknown> | undefined;
       const answer = await within(() => { preparing = driver.prepare(side, { timeoutMs: budget }); return preparing; }, budget);
       // A prepare that answers after the run gave up on it has started a device nobody would stop: it is stopped as soon as it settles (bounded like every stop).
-      if (answer === TIMED_OUT && preparing !== undefined) void preparing.then(() => within(() => driver.stop(side), DEVICE_EVIDENCE_STOP_MS), () => undefined);
+      if (answer === TIMED_OUT && preparing !== undefined) { const stopLate = () => within(() => driver.stop(side), DEVICE_EVIDENCE_STOP_MS); void preparing.then(stopLate, stopLate); }
       if (answer !== "ready") {
         const reason = typeof answer === "string" ? PREPARE_REASONS.get(answer) : undefined;
         return nothing(answer === TIMED_OUT ? "time_limit" : (reason ?? "device_did_not_start"));

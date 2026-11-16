@@ -50,6 +50,8 @@ export const DEVICE_EVIDENCE_FRAME_PIXELS_MAX = 8_000_000;
 export const DEVICE_EVIDENCE_TREE_NODES_MAX = 5_000;
 export const DEVICE_EVIDENCE_TREE_TEXT_MAX = 10_000;
 export const DEVICE_EVIDENCE_TREE_TEXT_TOTAL_MAX = 500_000;
+/** The painted rectangles of one screen may cover at most this many times the frame (overlaps counted): over it, painting is not bounded and the screen is withheld. */
+export const DEVICE_EVIDENCE_PAINT_AREA_FACTOR = 4;
 
 // ---- the recipe
 
@@ -185,11 +187,11 @@ const BoundsSchema = z.object({ x: PixelSchema, y: PixelSchema, width: z.number(
 const TextSchema = z.string().max(DEVICE_EVIDENCE_TREE_TEXT_MAX);
 /**
  * One element of the screen's view tree (Android's UI hierarchy dump, iOS's accessibility tree), flattened in reading order by the driver. `secure` is a password or other secure field,
- * `webView` an embedded web page (its content has no tree of its own here). `id` is the Android resource id or the iOS accessibility identifier.
+ * `webView` an embedded web page and `surface` a canvas, game, map or other drawn surface (neither has a tree of its own here: both are always painted). `id` is the Android resource id or the iOS accessibility identifier.
  */
 const ViewNodeSchema = z.object({
   id: z.string().min(1).max(200).regex(NO_HIDDEN).optional(), text: TextSchema.optional(), description: TextSchema.optional(), hint: TextSchema.optional(),
-  secure: z.boolean().optional(), webView: z.boolean().optional(), bounds: BoundsSchema.optional(),
+  secure: z.boolean().optional(), webView: z.boolean().optional(), surface: z.boolean().optional(), bounds: BoundsSchema.optional(),
 }).strict();
 const ViewTreeSchema = z.object({ width: z.number().int().min(1).max(100_000), height: z.number().int().min(1).max(100_000), nodes: z.array(ViewNodeSchema).max(DEVICE_EVIDENCE_TREE_NODES_MAX) }).strict()
   .refine((tree) => tree.nodes.reduce((sum, row) => sum + (row.text?.length ?? 0) + (row.description?.length ?? 0) + (row.hint?.length ?? 0), 0) <= DEVICE_EVIDENCE_TREE_TEXT_TOTAL_MAX, "bounded text");
@@ -201,9 +203,10 @@ export function parseDeviceViewTree(tree: unknown): DeviceViewTree | undefined {
 }
 
 export type DeviceMaskPlan =
-  | { status: "paint"; rects: DeviceRect[] }
+  | { status: "paint"; rects: DeviceRect[]; /** true when the screen had no readable text and is shown under the admin's fixture-data choice */ unmasked?: true }
   | { status: "unmasked" }
   | { status: "withheld"; reason: Extract<DeviceEvidenceNotRunReason, "masked_content" | "unreadable_screen"> };
+const READABLE = /[^\s\p{Cc}\p{Cf}]/u;
 const WITHHELD_SECRET = { status: "withheld", reason: "masked_content" } as const;
 const WITHHELD_UNREADABLE = { status: "withheld", reason: "unreadable_screen" } as const;
 
@@ -222,18 +225,20 @@ export function planDeviceMask(tree: unknown, options: { frame: { width: number;
   if (parsed === undefined) return noTree && waived ? { status: "unmasked" } : WITHHELD_UNREADABLE;
   if (parsed.width !== options.frame.width || parsed.height !== options.frame.height) return WITHHELD_UNREADABLE;
   const maskIds = new Set(Array.isArray(options.maskIds) ? (options.maskIds as unknown[]).slice(0, DEVICE_EVIDENCE_MASK_IDS_MAX).filter((id): id is string => typeof id === "string") : []);
-  const hasText = parsed.nodes.some((row) => [row.text, row.description, row.hint].some((value) => value !== undefined && value !== ""));
+  // Text that is only spaces or hidden characters is no text: a screen of it has nothing a tree can vouch for.
+  const hasText = parsed.nodes.some((row) => [row.text, row.description, row.hint].some((value) => value !== undefined && READABLE.test(value)));
   if (!hasText && !waived) return WITHHELD_UNREADABLE;
 
   const paint: DeviceRect[] = [];
   const lines: string[] = [];
   for (const row of parsed.nodes) {
     // A secure field or web view is painted whatever it says; its own text is never read into the label view (a marker stands in, as a form field does on a page).
-    const always = row.secure === true || row.webView === true || (row.id !== undefined && maskIds.has(row.id));
+    const always = row.secure === true || row.webView === true || row.surface === true || (row.id !== undefined && maskIds.has(row.id));
     const fields = [row.text, row.description, row.hint].filter((value): value is string => value !== undefined && value !== "");
     const matches = !always && fields.some((value) => scrubVisibleText(value) !== value);
-    if (row.secure === true || row.webView === true) lines.push("•");
-    else for (const value of [row.text, row.hint]) if (value !== undefined && value !== "") lines.push(value);
+    if (row.secure === true || row.webView === true || row.surface === true) lines.push("•");
+    // A hint shows above or in place of a value, and an accessibility label can be the visible one: all three read in the order a label would come before its value.
+    else for (const value of [row.hint, row.description, row.text]) if (value !== undefined && value !== "") lines.push(value);
     if (!always && !matches) continue;
     const rect = row.bounds === undefined ? undefined : clip(row.bounds, parsed.width, parsed.height);
     if (rect !== undefined) { paint.push(rect); continue; }
@@ -243,9 +248,11 @@ export function planDeviceMask(tree: unknown, options: { frame: { width: number;
   }
   // A label and its value in two elements: read as lines of their own, the screen shows a secret that no one rectangle covers (the masks only reach across a line break for this).
   if (scrubVisibleText(lines.join("\n")) !== lines.map(scrubVisibleText).join("\n")) return WITHHELD_SECRET;
-  // Only an admin's fixture-data choice gets here without text: nothing to paint means the screen is shown as it is.
+  // The painted area is bounded, so painting is: a screen of rectangles that cover the frame many times over is withheld.
+  if (paint.reduce((sum, rect) => sum + rect.width * rect.height, 0) > DEVICE_EVIDENCE_PAINT_AREA_FACTOR * parsed.width * parsed.height) return WITHHELD_SECRET;
+  // Only an admin's fixture-data choice gets here without text: nothing to paint means the screen is shown as it is, and a screen with only some painted is counted as unmasked too.
   if (!hasText && paint.length === 0) return { status: "unmasked" };
-  return { status: "paint", rects: paint };
+  return { status: "paint", rects: paint, ...(hasText ? {} : { unmasked: true as const }) };
 }
 
 /** The part of `bounds` that is on the screen; undefined when none of it is, or when it has no area. */

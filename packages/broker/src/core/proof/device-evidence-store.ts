@@ -2,15 +2,17 @@
 // under the task, `private/<owner>/<workspace>/evidence/<task>/<sha256>`, in the company's partition of the blob store (the document adapter's key is `companyScoped(companyId, ...)`), as `jpeg`
 // with the standard retention, and read back only through `readEvidenceArtifact` (sign-in on every request, and only what the task's current pack names). No new key is made here.
 // A screenshot the store does not keep turns its step into "Not run: it could not be stored": the pack never names an object that is not there.
-import { checkedDeviceEvidenceCaptured, deviceEvidenceCheck, type ArtifactRef, type DeviceEvidenceCaptured, type DeviceEvidenceOutcome, type DeviceEvidenceStepResult } from "@agentx/contracts";
-import { deleteEvidenceArtifacts, storeEvidenceArtifacts, type EvidenceArtifactStore, type EvidenceOwner } from "./evidence-artifacts.js";
+import { DEVICE_EVIDENCE_SCREENSHOT_MAX_BYTES, checkedDeviceEvidenceCaptured, deviceEvidenceCheck, type ArtifactRef, type DeviceEvidenceCaptured, type DeviceEvidenceOutcome, type DeviceEvidenceStepResult } from "@agentx/contracts";
+import { deleteEvidenceArtifacts, evidenceArtifactKey, storeEvidenceArtifacts, type EvidenceArtifactStore, type EvidenceOwner } from "./evidence-artifacts.js";
 
 /** Stores one screenshot; its ref, or undefined when the store did not keep it (not a JPEG, the wrong digest, over the cap, the store failing). Never throws for one screenshot. */
-async function storeShot(store: EvidenceArtifactStore, owner: EvidenceOwner, shot: { sha256: string; bytes: Uint8Array }): Promise<ArtifactRef | undefined> {
+async function storeShot(store: EvidenceArtifactStore, owner: EvidenceOwner, shot: { sha256: string; bytes: Uint8Array }): Promise<{ ref: ArtifactRef; existed: boolean } | undefined> {
   try {
+    // Content addressed under the task: a picture that is already there (the base code's screen, the same in an earlier round) may be named by an earlier pack, so it is never ours to delete.
+    const existed = (await store.blobs.get(evidenceArtifactKey(owner.ownerKey, owner.workspaceId, owner.taskId, shot.sha256), DEVICE_EVIDENCE_SCREENSHOT_MAX_BYTES + 1)) !== undefined;
     const stored = await storeEvidenceArtifacts(store, owner, [{ kind: "jpeg", bytes: shot.bytes, sha256: shot.sha256 }]);
     const ref = stored.get(shot.sha256);
-    return ref?.kind === "jpeg" ? ref : undefined;
+    return ref?.kind === "jpeg" ? { ref, existed } : undefined;
   } catch { return undefined; }
 }
 
@@ -28,11 +30,11 @@ export async function storeDeviceEvidence(store: EvidenceArtifactStore, owner: E
     const before = await storeShot(store, owner, row.before);
     const after = await storeShot(store, owner, row.after);
     if (before === undefined || after === undefined) {
-      for (const ref of [before, after]) if (ref !== undefined) halves.push(ref);
+      for (const half of [before, after]) if (half !== undefined && !half.existed) halves.push(half.ref);
       steps.push({ flow: row.flow, step: row.step, status: "not_run", reason: "not_stored" });
       continue;
     }
-    steps.push({ flow: row.flow, step: row.step, status: "shown", before, after });
+    steps.push({ flow: row.flow, step: row.step, status: "shown", before: before.ref, after: after.ref });
   }
   // Content addressed under the task: a digest a kept step names (the same picture on two steps) stays.
   const named = new Set(steps.flatMap((row) => (row.status === "shown" ? [row.before.sha256, row.after.sha256] : [])));
