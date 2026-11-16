@@ -2,7 +2,7 @@
 // companies with the same project name never see or change each other's lessons; only a project or company admin sets the learning mode; every write is audited; an erased person's words never come back.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, LessonViewSchema, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
+import { AgentXError, LessonViewSchema, companyScoped, learningModeLockKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
@@ -10,6 +10,7 @@ import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESS
 import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MODE_NEEDS_ADMIN, NO_SUCH_PROJECT, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
+import { DocumentPresetStore, DocumentTier0Settings, writeLearningMode } from "../../packages/broker/src/lessons/document-settings.js";
 import type { CoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { DEV_ROUTES } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { LESSONS_API_ROUTES } from "../../packages/broker/src/aws/developer-routes.js";
@@ -118,6 +119,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", `${P}/lessons/les_aaaa1111/approve`, { version: 1 }], ["POST", `${P}/lessons/les_aaaa1111/reject`, { version: 1, reason: "wrong" }], ["POST", `${P}/lessons/les_aaaa1111/retire`, { reason: "outdated" }],
   ["POST", `${P}/lessons/les_aaaa1111/retire-request`, {}], ["GET", `${P}/tasks/${randomUUID()}/lessons`],
   ["POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_aaaa1111", version: 1, decision: "keep" }] }], ["POST", `${P}/tasks/${randomUUID()}/lessons/les_aaaa1111/not-helpful`, {}],
+  ["POST", `${P}/lessons/mode/trial-offer`, { decision: "accept" }],
 ];
 
 describe("the paths", () => {
@@ -128,7 +130,7 @@ describe("the paths", () => {
       "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
-      "PUT /v1/dev/projects/{project}/lessons/mode",
+      "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer",
     ]].sort());
     expect(rows.every((route) => route.requires === "full")).toBe(true);
     const samples = [...rows.map((route) => route.path.replace(/\{[A-Za-z]+\}/g, "x1")), "/v1/dev/projects/x1", "/v1/dev/projects/x1/lessons/", "/v1/dev/projects/x1/lessons/a/b", "/v1/dev/projects/x1/lessons/a/approve/b", "/v1/dev/projects/x1/tasks/t1", "/v1/dev/projects/x1/lessonsx"];
@@ -536,5 +538,183 @@ describe("used in N tasks", () => {
     expect(answer.ok && answer.body["usedInIncomplete"]).toBeUndefined();
     expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedInTasks");
     expect(asked).toBe(0);
+  });
+});
+
+describe("earned trust (DEC 231): the offer to let low-risk lessons go live on trial", () => {
+  const DAY = 86_400_000;
+  const OFFER = `${P}/lessons/mode/trial-offer`;
+  /** `approved` lessons a person of the company approved now, and `dropped` lessons a person rejected now. */
+  async function decide(w: World, companyId: OrgId, approved: number, dropped: number, over: { by?: string; mode?: "one" | "auto" | "trial"; at?: number } = {}): Promise<void> {
+    const at = over.at ?? w.world.clock.now;
+    const by = over.by ?? (companyId === A ? "a-maint" : "b-maint");
+    const kept = Array.from({ length: approved }, (_, i) => lesson(companyId, `les_kept${String(i).padStart(4, "0")}`, { status: "active", approvals: [{ approvalId: `ap${String(i)}`, by, at, mode: over.mode ?? "one" }], updatedAt: at }));
+    const gone = Array.from({ length: dropped }, (_, i) => lesson(companyId, `les_drop${String(i).padStart(4, "0")}`, { status: "rejected", approvals: [], pendingExpiresAt: at, updatedAt: at }));
+    await put(w, companyId, ...kept, ...gone);
+  }
+  const offerOf = async (target: ReturnType<typeof createLessonsApi>, personId: string) => {
+    const answer = await call(target, personId, "GET", `${P}/lessons/mode`);
+    return answer.ok ? answer.body["trialOffer"] : answer;
+  };
+
+  it("control: no offer on a new project; the mode answer is exactly what it was", async () => {
+    const w = await setUp();
+    const { api: target } = api(w);
+    expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toEqual({ ok: true, body: { project: "payments", mode: "suggest", effective: "suggest", lockedByCompany: false, canChange: true } });
+  });
+
+  it("offered after 10 approvals with few drops, to people who may change the mode only; 9 approvals, or too many drops, is no offer", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 2);
+    const { api: target } = api(w);
+    expect(await offerOf(target, "a-admin")).toEqual({ approvals: 10, drops: 2, since: w.world.clock.now - 90 * DAY });
+    expect(await offerOf(target, "a-maint")).toMatchObject({ approvals: 10, drops: 2 });
+    expect(await offerOf(target, "a-contrib")).toBeUndefined();
+    await decide(w, A, 0, 3);
+    expect(await offerOf(target, "a-admin")).toBeUndefined();
+    const nine = await setUp();
+    await decide(nine, A, 9, 0);
+    expect(await offerOf(api(nine).api, "a-admin")).toBeUndefined();
+  });
+
+  it("two companies, one project name: a company's offer comes only from its own decisions", async () => {
+    const w = await setUp();
+    await decide(w, A, 12, 0);
+    const { api: target } = api(w);
+    expect(await offerOf(target, "a-admin")).toMatchObject({ approvals: 12 });
+    expect(await offerOf(target, "b-admin")).toBeUndefined();
+    expect(await call(target, "b-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+    expect(await call(target, "b-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "suggest" } });
+  });
+
+  it("only a person's own approvals in the last 90 days count: the system's go-lives, trials, the repository edit and old approvals do not", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0, { mode: "auto" });
+    const { api: target } = api(w);
+    expect(await offerOf(target, "a-admin")).toBeUndefined();
+    const w2 = await setUp();
+    await decide(w2, A, 10, 0, { by: "system:repository-edit" });
+    expect(await offerOf(api(w2).api, "a-admin")).toBeUndefined();
+    const w3 = await setUp();
+    await decide(w3, A, 10, 0, { at: w3.world.clock.now - 91 * DAY });
+    expect(await offerOf(api(w3).api, "a-admin")).toBeUndefined();
+    const w4 = await setUp();
+    await decide(w4, A, 10, 0, { mode: "trial" });
+    expect(await offerOf(api(w4).api, "a-admin")).toBeUndefined();
+  });
+
+  it("no offer unless the project is in Suggest by its own choice, under no company lock and on the Standard preset", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0);
+    const { api: target } = api(w);
+    expect(await call(target, "a-admin", "PUT", `${P}/lessons/mode`, { mode: "off" })).toMatchObject({ ok: true });
+    expect(await offerOf(target, "a-admin")).toBeUndefined();
+    const locked = await setUp();
+    await decide(locked, A, 10, 0);
+    await locked.world.store.put({ item: { ...learningModeLockKey(A), entityType: "LESSON_MODE", mode: "collect", updatedAt: 1 } });
+    expect(await offerOf(api(locked).api, "a-admin")).toBeUndefined();
+    // The project chose auto but a company lock holds it at Suggest: the project's own choice is not Suggest, so there is nothing to offer.
+    const heldBack = await setUp();
+    await decide(heldBack, A, 10, 0);
+    expect(await call(api(heldBack).api, "a-admin", "PUT", `${P}/lessons/mode`, { mode: "auto" })).toMatchObject({ ok: true });
+    await heldBack.world.store.put({ item: { ...learningModeLockKey(A), entityType: "LESSON_MODE", mode: "suggest", updatedAt: 1 } });
+    expect(await call(api(heldBack).api, "a-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "auto", effective: "suggest" } });
+    expect(await offerOf(api(heldBack).api, "a-admin")).toBeUndefined();
+    const regulated = await setUp();
+    await decide(regulated, A, 10, 0);
+    await new DocumentPresetStore(regulated.world.store).write({ kind: "company", workspaceId: A }, "regulated", { by: "a-admin", at: 1 }, "standard");
+    expect(await offerOf(api(regulated).api, "a-admin")).toBeUndefined();
+  });
+
+  it("accept: only who may change the mode, never a script token; audited before the change; the mode becomes auto and the offer is gone", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0);
+    const { api: target } = api(w);
+    expect(await call(target, "a-contrib", "POST", OFFER, { decision: "accept" })).toEqual({ ok: false, code: "FORBIDDEN", status: 403, message: MODE_NEEDS_ADMIN });
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" }, undefined, { scriptToken: { tokenId: "t1" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    for (const body of [{}, { decision: "yes" }, { decision: "accept", extra: 1 }]) expect(await call(target, "a-admin", "POST", OFFER, body)).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    expect(await call(target, "a-admin", "GET", OFFER)).toMatchObject({ ok: false, code: "NOT_FOUND", message: "route not found" });
+    expect(lessonEvents(w).filter((e) => e.action === "lesson.trial_offer_answered" || e.action === "lesson.mode_changed")).toEqual([]);
+    expect(await call(target, "a-maint", "POST", OFFER, { decision: "accept" })).toEqual({ ok: true, body: { project: "payments", decision: "accept", mode: "auto", effective: "auto" } });
+    // One record: the mode change, marked as the offer's answer, with the tally.
+    const records = w.world.audit.filter((e) => e.action === "lesson.trial_offer_answered" || e.action === "lesson.mode_changed");
+    expect(records.map((e) => [e.action, e.actor.id, e.companyId])).toEqual([["lesson.mode_changed", "a-maint", A]]);
+    expect(records[0]!.details).toMatchObject({ fromMode: "suggest", toMode: "auto", via: "trial_offer", approvals: 10, drops: 0 });
+    expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toEqual({ ok: true, body: { project: "payments", mode: "auto", effective: "auto", lockedByCompany: false, canChange: true } });
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT", message: "There is no offer to answer now." });
+    // Going back to Suggest by hand does not bring the offer straight back.
+    expect(await call(target, "a-admin", "PUT", `${P}/lessons/mode`, { mode: "suggest" })).toMatchObject({ ok: true });
+    expect(await offerOf(target, "a-admin")).toBeUndefined();
+  });
+
+  it("not now: audited, the mode stays suggest, and the offer is hidden for 30 days", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0);
+    const { api: target } = api(w);
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "not_now" })).toEqual({ ok: true, body: { project: "payments", decision: "not_now", mode: "suggest" } });
+    expect(w.world.audit.filter((e) => e.action === "lesson.trial_offer_answered").map((e) => e.details)).toEqual([expect.objectContaining({ answer: "not_now" })]);
+    expect(w.world.audit.filter((e) => e.action === "lesson.mode_changed")).toEqual([]);
+    expect(await offerOf(target, "a-admin")).toBeUndefined();
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+    // B's same-named project was never snoozed by A's answer.
+    await decide(w, B, 10, 0);
+    expect(await offerOf(target, "b-admin")).toMatchObject({ approvals: 10 });
+    w.world.clock.now += 31 * DAY;
+    await decide(w, A, 10, 0);
+    expect(await offerOf(target, "a-admin")).toMatchObject({ approvals: 10 });
+  });
+
+  it("an accept never writes over a mode someone changed after the offer was read", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0);
+    const documents = w.lessons.get(A)!.runtime.documents;
+    const put = documents.put.bind(documents);
+    let raced = false;
+    const spy = vi.spyOn(documents, "put").mockImplementation(async (request) => {
+      if (!raced && request.item["entityType"] === "LESSON_MODE") { raced = true; await writeLearningMode(documents, { workspaceId: A, project: "payments" }, "Off", 1); }
+      return await put(request);
+    });
+    const { api: target } = api(w);
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+    spy.mockRestore();
+    expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "off" } });
+  });
+
+  it("no offer where accepting would not start trials, or would let tier 0 go live by itself", async () => {
+    const floor = await setUp();
+    await decide(floor, A, 10, 0);
+    await new DocumentTier0Settings(floor.world.store).write({ kind: "company", workspaceId: A }, "one", { by: "a-admin", at: 1 }, "auto");
+    expect(await offerOf(api(floor).api, "a-admin")).toBeUndefined();
+    const autoTier0 = await setUp();
+    await decide(autoTier0, A, 10, 0);
+    await new DocumentTier0Settings(autoTier0.world.store).write({ kind: "project", workspaceId: A, project: "payments" }, "auto", { by: "a-admin", at: 1 }, "one");
+    expect(await offerOf(api(autoTier0).api, "a-admin")).toBeUndefined();
+    const twoPeople = await setUp();
+    await decide(twoPeople, A, 10, 0);
+    await new DocumentTier0Settings(twoPeople.world.store).write({ kind: "project", workspaceId: A, project: "payments" }, "two", { by: "a-admin", at: 1 }, "one");
+    expect(await offerOf(api(twoPeople).api, "a-admin")).toBeUndefined();
+  });
+
+  it("an answer that cannot be audited changes nothing", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0);
+    const real = w.lessons.get(A)!;
+    const failing = { emit: async () => { throw new Error("ledger down"); } };
+    const { api: target } = api(w, { lessonsOf: async (companyId) => (companyId === A ? { ...real, runtime: { ...real.runtime, audit: failing } } : undefined) });
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "AUDIT_UNAVAILABLE" });
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "not_now" })).toMatchObject({ ok: false, code: "AUDIT_UNAVAILABLE" });
+    expect(await offerOf(api(w).api, "a-admin")).toMatchObject({ approvals: 10 });
+    expect(await call(api(w).api, "a-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "suggest" } });
+  });
+
+  it("a tally that cannot be read is no offer, and the mode still reads", async () => {
+    const w = await setUp();
+    await decide(w, A, 10, 0);
+    const real = w.lessons.get(A)!;
+    const broken = { ...real.runtime.store, listPage: async () => { throw new Error("down"); } };
+    const { api: target } = api(w, { lessonsOf: async (companyId) => (companyId === A ? { ...real, runtime: { ...real.runtime, store: broken } } : undefined) });
+    expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "suggest" } });
+    expect(await offerOf(target, "a-admin")).toBeUndefined();
+    expect(await call(target, "a-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
   });
 });

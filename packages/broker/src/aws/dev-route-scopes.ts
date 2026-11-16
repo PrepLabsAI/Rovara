@@ -89,6 +89,7 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/retire-requests", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/mode/trial-offer", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/approve", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/reject", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
