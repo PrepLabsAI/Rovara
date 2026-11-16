@@ -1,4 +1,4 @@
-418 record kinds: 57 company-scoped, 15 install-wide, 346 needs-company. 200 routes: 35 company-scoped, 2 install-wide, 163 needs-company.
+418 record kinds: 57 company-scoped, 15 install-wide, 346 needs-company. 201 routes: 36 company-scoped, 2 install-wide, 163 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -552,6 +552,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/internal/workspaces/{id}/operations/{id}/e2e-evidence | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/browser-evidence | needs-company | State table | no | POST | TE-H1 slice 2: Cloud answers it with a fixed refusal (browser evidence is not on Cloud yet, DEFERRED 1b-X5) before any read; Code serves it behind the operation capability and the company-scoped operation read. T2: not membership-checked in R4. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/e2e-model-budget | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
+| route | /v1/internal/workspaces/{id}/operations/{id}/eval-plan | company-scoped | State table | no | POST | DEC 253c eval plan delivery: Code serves it only in the core callback layer (services/callbacks.ts, core/proof/eval-plan-delivery.ts) behind a signed capability naming `eval-plan` for this workspace, operation and fence; the operation must be this company's live task CHECKS run whose stored invocation carries an evalRequest, and its project comes from the workspace pointer's task of this company. Sources are asked only for that company and project; a plan or grant naming another is dropped, the cache is the company's own; body and answer size-bounded; fail closed. The AWS host refuses it after the capability check, before any read. Two-company, wrong-action, unsigned and oversize refusals in tests/unit/eval-plan-delivery.test.ts. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/events | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/feedback-approval | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/feedback-bundles | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |

@@ -7,7 +7,7 @@
 import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentXError, DESIGN_REVIEW_ARTIFACT, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
+  AgentXError, DESIGN_REVIEW_ARTIFACT, EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
 } from "@agentx/contracts";
 import { CallbackCapabilities, type CallbackAction } from "../callbacks.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -17,6 +17,7 @@ import { handleCodingRunUpload, isCodingRunUpload } from "./candidate-export.js"
 import { handleE2EEvidenceUpload, readE2EAdmissionChunk, type RoundRecordReaders } from "../core/e2e/callbacks.js";
 import { handleBrowserEvidenceUpload } from "../core/proof/browser-evidence-upload.js";
 import { handleBrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in-callback.js";
+import { handleEvalPlanDelivery, type EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import type { BrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in.js";
 import type { UploadStores } from "../core/e2e/uploads-chunks.js";
 import { openPullRequest } from "../core/build-step/publish.js";
@@ -89,6 +90,8 @@ export interface CallbackDeps {
   bookUsage?: ((operation: OperationRecord, events: ReadonlyArray<{ type: string; timestamp: string; payload: unknown }>) => Promise<unknown>) | undefined;
   /** TE-H1 browser evidence, slice 3: the company's saved sign-ins (a laptop's secret files). Absent: `browser-evidence-sign-in` is answered "not available" (Cloud has no browser evidence yet). */
   browserEvidenceSignIn?: Pick<BrowserEvidenceSignIn, "read"> | undefined;
+  /** EVAL-WIRE-SOURCES (DEC 253c): the trusted eval plan, spend approval and base-score cache, answered to a CHECKS run the broker asked for an eval. Absent: `eval-plan` is answered "not available". */
+  evalPlan?: EvalPlanSources | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -107,7 +110,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent"]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", EVAL_PLAN_DELIVERY_ACTION]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -303,7 +306,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)) {
+      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)
+        || (action === EVAL_PLAN_DELIVERY_ACTION && deps.evalPlan === undefined)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
         throw agentXError("NOT_FOUND", "this callback is not available on this install");
@@ -332,6 +336,17 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         const signIn = deps.browserEvidenceSignIn!;
         const answer = await handleBrowserEvidenceSignIn({ signIn, companyId: deps.flow.companyId, async projectOf(op) {
           const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(op.workspaceId)));
+          const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
+          return task !== undefined && task.companyId === deps.flow.companyId ? task.project : undefined;
+        } }, operation);
+        return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
+      }
+      if (action === EVAL_PLAN_DELIVERY_ACTION) {
+        // The run's own company and task project, never the request's: the body is bounded and must be an object, and no field of it is read. The answer is for this one ask; no cache keeps it.
+        if (request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval plan request is too large");
+        bodyOf(request);
+        const answer = await handleEvalPlanDelivery({ sources: deps.evalPlan!, companyId: deps.flow.companyId, log: (event) => deps.flow.log?.({ component: "callbacks", event }), async projectOf() {
+          const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(operation.workspaceId)));
           const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
           return task !== undefined && task.companyId === deps.flow.companyId ? task.project : undefined;
         } }, operation);

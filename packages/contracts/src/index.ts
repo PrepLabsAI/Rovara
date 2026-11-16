@@ -412,6 +412,7 @@ export * from "./machine-setup.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
+export * from "./eval-plan-delivery.js";
 export * from "./eval-proof-basis.js";
 
 export * from "./model-gateway-token.js";
