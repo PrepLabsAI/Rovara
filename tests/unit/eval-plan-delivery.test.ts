@@ -10,8 +10,9 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { CallbackCapabilities, type CallbackAction } from "../../packages/broker/src/callbacks.js";
 import { EVAL_PLAN_DELIVERY_FORBIDDEN, handleEvalPlanDelivery, type EvalPlanScope, type EvalPlanSources } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { taskKey, taskPointerKey } from "../../packages/broker/src/developer/task-records.js";
+import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
+import { taskKey } from "../../packages/broker/src/developer/task-records.js";
 import { evalSourcesFromDelivery, fetchEvalPlanDelivery } from "../../packages/worker/src/verification/eval-plan-delivery.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -34,13 +35,15 @@ const grantOf = (company: string, project: string): EvalSpendGrant => ({ company
 const RECORD: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.04, count: 50 }], caseCount: 50, recordedOn: "2026-11-13", roundKind: "check_unsealed", runnerSchemaVersion: 1 };
 
 /** One store holding two companies' tasks and sources; every source is per company and per project, and records what it was asked. */
-async function world(options: { company?: string; operation?: Record<string, unknown>; taskCompany?: string; taskWorkspace?: string; body?: string } = {}) {
+async function world(options: { company?: string; operation?: Record<string, unknown>; taskCompany?: string; taskWorkspace?: string; body?: string; workspace?: boolean } = {}) {
   const company = options.company ?? A;
   const store = new MemoryDocumentStore();
   const workspaceId = randomUUID(); const operationId = randomUUID(); const taskId = randomUUID();
-  await store.put({ item: { ...operationKey(workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS", status: "RUNNING", fence: 3, companyId: company,
+  // T1: the workspace, its operation and its task pointer sit under the company's own workspace partition; the workspace record names the company.
+  if (options.workspace !== false) await store.put({ item: { ...workspaceKey(company, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: company } });
+  await store.put({ item: { ...operationKey(company, workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS", status: "RUNNING", fence: 3, companyId: company,
     dispatch: { kind: "task", payload: { workflowMode: "CHECKS", evalRequest: EVAL_REQUEST } }, ...options.operation } });
-  await store.put({ item: { ...taskPointerKey(workspaceId), taskId } });
+  await store.put({ item: { ...(await workspaceKeys({ store, companyId: company }, workspaceId)).taskPointerKey(), taskId } });
   await store.put({ item: { ...taskKey(taskId), taskId, workspaceId: options.taskWorkspace ?? workspaceId, project: "web", companyId: options.taskCompany ?? company } });
   const caches = new Map<string, BaseScoreCache>([[A, createDocumentBaseScoreCache(store, { companyId: A })], [B, createDocumentBaseScoreCache(store, { companyId: B })]]);
   const asked: Array<{ source: string; scope: unknown }> = [];
@@ -152,12 +155,17 @@ describe("the eval-plan callback", () => {
     const big = await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION]), JSON.stringify({ pad: "x".repeat(100) }));
     expect(big.statusCode).toBe(400);
     expect(w.asked).toEqual([]);
+    // The handler itself refuses an operation of another company than the one it serves, before any source is asked (mutant: the handler's operation company check).
+    const foreign = await world({ company: B });
+    await expect(handleEvalPlanDelivery({ sources: foreign.sources, companyId: A, projectOf: async () => "web" }, (await foreign.store.get(operationKey(B, foreign.workspaceId, foreign.operationId))) as never))
+      .rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+    expect(foreign.asked).toEqual([]);
     // A plan whose answer would be over the bound: "not_available", and the oversize is logged by its fixed name only.
     const huge = await world();
     huge.sources.plan = async (scope: EvalPlanScope) => planOf(scope.companyId, scope.project, { padding: "y".repeat(EVAL_PLAN_DELIVERY_MAX_BYTES) });
     const log = vi.fn();
     const answer = await handleEvalPlanDelivery({ sources: huge.sources, companyId: A, projectOf: async () => "web", log },
-      (await huge.store.get(operationKey(huge.workspaceId, huge.operationId))) as never);
+      (await huge.store.get(operationKey(A, huge.workspaceId, huge.operationId))) as never);
     expect(answer).toEqual({ status: "not_available" });
     expect(log).toHaveBeenCalledWith("eval_plan_oversize");
     // The worker refuses an answer over the bound while reading it.
@@ -188,9 +196,19 @@ describe("the eval-plan callback", () => {
     expect(json(await moved.call(moved.token([EVAL_PLAN_DELIVERY_ACTION])))).toEqual({ error: { code: "CALLBACK_FORBIDDEN", message: EVAL_PLAN_DELIVERY_FORBIDDEN } });
     expect(moved.asked).toEqual([]);
     const w = await world();
-    await w.store.delete({ key: taskPointerKey(w.workspaceId) });
+    await w.store.delete({ key: (await workspaceKeys({ store: w.store, companyId: A }, w.workspaceId)).taskPointerKey() });
     expect(json(await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION])))).toEqual({ error: { code: "CALLBACK_FORBIDDEN", message: EVAL_PLAN_DELIVERY_FORBIDDEN } });
     expect(w.asked).toEqual([]);
+    // T1: a workspace that is not located in the run's own company (no workspace record, or one that names another company) gives no project (mutant: the locateWorkspace check).
+    for (const [name, build] of [["no workspace record", async () => world({ workspace: false })], ["another company's workspace record", async () => {
+      const other = await world();
+      await other.store.put({ item: { ...workspaceKey(A, other.workspaceId), entityType: "WORKSPACE", id: other.workspaceId, companyId: B } });
+      return other;
+    }]] as const) {
+      const lost = await build();
+      expect(json(await lost.call(lost.token([EVAL_PLAN_DELIVERY_ACTION]))), name).toEqual({ error: { code: "CALLBACK_FORBIDDEN", message: EVAL_PLAN_DELIVERY_FORBIDDEN } });
+      expect(lost.asked, name).toEqual([]);
+    }
   });
 
   it("fails closed: no sources wired is `not available`; a missing plan, a throwing source or an unreadable grant gives nothing a worker could spend on", async () => {

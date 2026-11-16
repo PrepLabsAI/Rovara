@@ -1,4 +1,4 @@
-import { workspaceKeys } from "../core/task-flow/workspace-location.js";
+import { locateWorkspace, workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The callback endpoints a worker posts to (`/v1/internal/workspaces/<w>/operations/<o>/<action>`), for the three every job has: its events, its artifacts and
 // its terminal result. The capability the flow issued at delivery (HMAC, one workspace, one operation, one fence, a list of actions) is checked first; the ids in the address must be the
 // capability's own. Every other callback the worker can make (a model fallback, the model budget of the browser checks, ...) answers "not available" until its lane is wired; the worker
@@ -348,7 +348,10 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         // The run's own company and task project, never the request's: the body is bounded and must be an object, and no field of it is read. The answer is for this one ask; no cache keeps it.
         bodyOf(request);
         const answer = await handleEvalPlanDelivery({ sources: deps.evalPlan!, companyId: deps.flow.companyId, log: (event) => deps.flow.log?.({ component: "callbacks", event }), async projectOf() {
-          const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(operation.workspaceId)));
+          // T1: the workspace is located in the run's own company (the operation record's), and only then is its task pointer read from that workspace's own keys.
+          const located = await locateWorkspace({ store: deps.flow.store, companyId: operation.companyId }, operation.workspaceId);
+          if (located === undefined) return undefined;
+          const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get((await workspaceKeys(deps.flow, operation.workspaceId)).taskPointerKey()));
           const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
           // The pointer's task must be this company's AND this operation's workspace's own.
           return task !== undefined && task.companyId === deps.flow.companyId && task.workspaceId === operation.workspaceId ? task.project : undefined;
