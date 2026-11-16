@@ -35,6 +35,7 @@ import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFA
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine } from "./core-engine.js";
+import { CompanySecrets } from "./company-secrets.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -124,7 +125,7 @@ export class ControlPlaneStack extends Stack {
     });
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
-    const signInParameters = developerSignInParameters(this, { tasks: true });
+    const signInParameters = developerSignInParameters(this, { tasks: true, named: naming.env !== undefined });
     const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
       type: "String",
       default: "false",
@@ -921,6 +922,8 @@ export class ControlPlaneStack extends Stack {
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
       if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, notifyOperator });
+      // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets. Named environments only; nothing assumes it yet.
+      if (naming.env !== undefined) broker.addEnvironment("COMPANY_SECRETS_ROLE_ARN", new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role.roleArn);
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
