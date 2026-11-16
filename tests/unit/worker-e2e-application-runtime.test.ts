@@ -131,14 +131,25 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     const docker = { run: vi.fn(async () => ({ code, stdout: "", stderr: "" })) };
     // A platform with no shared runtime directory: application CHECKS cannot be listed, browser evidence still can.
     const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "darwin", arch: "arm64", docker, intervalMs: 25 });
-    monitor.start();
-    await vi.waitFor(async () => expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER));
-    expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(FEATURE);
-    code = 1;
-    const looks = docker.run.mock.calls.length;
-    await vi.waitFor(() => expect(docker.run.mock.calls.length).toBeGreaterThan(looks + 3));
-    await vi.waitFor(async () => expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(BROWSER));
-    monitor.stop();
+    vi.useFakeTimers();
+    try {
+      monitor.start();
+      await vi.advanceTimersByTimeAsync(5);
+      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
+      expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(FEATURE);
+      code = 1;
+      // One failed look is kept through (a slow or busy Docker is not the image being gone) ...
+      await vi.advanceTimersByTimeAsync(25);
+      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
+      // ... and two in a row are not.
+      await vi.advanceTimersByTimeAsync(25);
+      expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(BROWSER);
+      // And it comes back at once when the image does.
+      code = 0;
+      await vi.advanceTimersByTimeAsync(25);
+      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
+      monitor.stop();
+    } finally { vi.useRealTimers(); }
     // An image reference that is not one is never listed.
     const bad = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: "-v /:/host" }, platform: "linux", arch: "arm64", docker: { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) }, intervalMs: 60_000 });
     bad.start();
