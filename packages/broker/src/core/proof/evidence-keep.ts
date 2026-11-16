@@ -9,7 +9,7 @@
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
   EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, RepositoryEdgesSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText, EvidenceBaselineSchema,
-  addBrowserEvidenceToPack, type ArtifactRef, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
+  addBrowserEvidenceToPack, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening, type EvidenceBaseline, type RawBaseline, type RawRepositoryBaseline,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
