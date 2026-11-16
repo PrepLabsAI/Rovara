@@ -8,8 +8,10 @@ import { WORKSPACE_SESSION_STATE_INDEX } from "./session.js";
  * A read that names attributes outside its list, or none at all, is refused by IAM; the drain then throws and never counts 0.
  */
 export const REQUALIFY_DRAIN_READS = {
-  /** The READY sessions, read through the bySessionState index (it projects ALL attributes, so any of these is available there). */
-  sessions: ["workspaceId"],
+  /** The READY sessions, read through the bySessionState index (it projects ALL attributes, so any of these is available there). `companyId`: the company a core session's rows are keyed under (server-written). */
+  sessions: ["workspaceId", "companyId"],
+  /** The core engine's in-use marks (`CORE_ENGINE_IN_USE`, written only by the core's start): the companies whose operations may sit under company keys. */
+  coreCompanies: ["orgId"],
   /** A workspace's operations: the kind, the mode, the admission's kind, the status and the two times that tell a stale one. */
   operations: ["entityType", "workflowMode", "workflowE2EAdmission", "status", "updatedAt", "createdAt"],
   /** The setup-run markers the drain finds the running setups by. */

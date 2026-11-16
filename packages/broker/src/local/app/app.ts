@@ -24,6 +24,7 @@ import { OneShotOperations, capabilityModelGrants, localRoute, readyProviders, r
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { estimatePathOf, recordRunCost, runCostInputOf } from "../../core/cost/estimate.js";
 import { remainingUsd, taskLimitUsd } from "../../core/cost/limits.js";
+import { createTaskActions } from "../../core/task-flow/task-actions.js";
 import { createModelSelection, type ModelSelectionService } from "../../core/model-selection/service.js";
 import { createUsableModels } from "../../core/model-selection/usable-models.js";
 import { createLocalModelSelectionSeams } from "./model-selection.js";
@@ -63,6 +64,7 @@ import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { attachCitedCode } from "../../core/plan/store.js";
 import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
+import { createLocalFlakyChecks } from "./flaky-checks.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
 import { createLessonRoutes } from "./lessons-routes.js";
@@ -345,7 +347,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
-  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs, ...(options.sandboxModelHostsAllowed === undefined ? {} : { sandboxModelHostsAllowed: options.sandboxModelHostsAllowed }), ...(options.sandboxModelHostsOf === undefined ? {} : { sandboxModelHostsOf: options.sandboxModelHostsOf }) });
+  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs, testEnv: { store, now: () => clock().getTime(), env: options.environment ?? process.env }, ...(options.sandboxModelHostsAllowed === undefined ? {} : { sandboxModelHostsAllowed: options.sandboxModelHostsAllowed }), ...(options.sandboxModelHostsOf === undefined ? {} : { sandboxModelHostsOf: options.sandboxModelHostsOf }) });
   // The project's approved test environment: tasks pin it when they start, a coding or verification run is told its plan, and the owner approves a change on a page (the gate decides it).
   // `pages` and `gate` are made below; the module asks for them when it is used, never when it is built.
   const pagesServer: { current?: LocalPagesServer } = {};
@@ -447,6 +449,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
+    // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
+    flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
@@ -570,6 +574,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   flow.deps.learned = (input) => lessons.learnedFor(input);
   flow.deps.lessonsUsed = (task, repositoryId) => lessons.usedInPullRequest(task, repositoryId);
+  flow.deps.lessonsSentBack = (taskId) => lessons.noteSentBack(taskId);
   // The setup agent: a run that sets a project up by running its commands in a sandbox, its journal, the websites it asks for and the owner's use of what it found. Its decisions go through the gate above.
   const setupAgent = createLocalSetupAgent({
     flow: flow.deps, registry, gate, owner, companyId, now: () => clock().getTime(), enabled: options.setupAgent ?? true,
@@ -652,7 +657,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
   const callbackHandler = createCallbackService({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
+  // The owner's moves on a task already running (send back, review findings, continue): with a run limit held, a round is not started on a task that has spent its limit (or whose spend cannot be told); the limit is the one the model proxy holds the task to.
+  const taskActions = createTaskActions(flow.deps, options.runLimit === false ? {} : { roundCap: async (task) => ({ limitUsd: taskLimitUsd(task), spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) }) });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, taskActions, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
     store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,

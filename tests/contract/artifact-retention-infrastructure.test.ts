@@ -8,6 +8,7 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 // M1.3 Task 3.7b, finding F8 and owner decision D4 ("reuse the existing private-artifact retention, else add a 30-day lifecycle rule"): no rule reached the current version of a
 // screenshot, so one is added. S3 lifecycle filters match the start of a key, and a screenshot's key starts with `private/<owner>/<workspace>/` like every other private object, so
@@ -25,7 +26,7 @@ describe("the retention of workflow screenshots is a rule on the bucket the brok
   const brokerBucketId = (() => {
     const functions = Object.entries(controlPlane.findResources("AWS::Lambda::Function") as Record<string, { Properties: { Environment?: { Variables?: Record<string, unknown> } } }>);
     const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-    return (broker?.[1].Properties.Environment?.Variables?.ARTIFACT_BUCKET_NAME as { Ref?: string } | undefined)?.Ref;
+    return (unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {}).ARTIFACT_BUCKET_NAME as { Ref?: string } | undefined)?.Ref;
   })();
 
   it("names the tag once, in the contracts, with the 30-day period of the owner's decision", () => {
@@ -35,7 +36,10 @@ describe("the retention of workflow screenshots is a rule on the bucket the brok
 
   it("expires an object that carries the screenshot tag after 30 days on the bucket the broker is configured with, and only such an object", () => {
     expect(brokerBucketId, "the broker names its artifact bucket").toBeDefined();
-    const rules = buckets[brokerBucketId!]?.Properties.LifecycleConfiguration?.Rules ?? [];
+    const all = buckets[brokerBucketId!]?.Properties.LifecycleConfiguration?.Rules ?? [];
+    // The other rules are the evidence and nightly-map expiry rules (switchover-parity-infrastructure.test.ts pins them to the live staging rules).
+    expect(all.map((rule) => rule.Id)).toEqual(["ExpireE2EScreenshots", "ExpireEvidenceShort", "ExpireEvidenceStd", "ExpireEvidenceRecord", "ExpireNightlyMaps"]);
+    const rules = all.filter((rule) => rule.TagFilters?.some((tag) => tag.Value === E2E_ARTIFACT_RETENTION_TAG_VALUE));
     expect(rules).toHaveLength(1);
     expect(rules[0]).toMatchObject({ Status: "Enabled", ExpirationInDays: E2E_ARTIFACT_RETENTION_DAYS,
       TagFilters: [{ Key: E2E_ARTIFACT_RETENTION_TAG_KEY, Value: E2E_ARTIFACT_RETENTION_TAG_VALUE }] });

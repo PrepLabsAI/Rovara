@@ -1,7 +1,7 @@
 // Lane H (plan v3.2 section 7.5): "what are the company's values?" over a `PolicySource`. The answer's locks can only make a resolved value stricter (each field by its own direction).
 // Read with a short cache: an answer is used until its own expiry; when a refresh gets no answer, the last good answer is used for a few more minutes (five by
 // default), and after that the strictest default applies, which is the source's fixed refusal (`policy_unavailable`): nothing runs on unknown company values.
-import { POLICY_FIELDS, PolicyRowsSchema, stricterPolicyValue, type PolicyValue, type ResolvedPolicy } from "../policy.js";
+import { applyCompanyBounds, PolicyRowsSchema, type PolicyValue } from "../policy.js";
 import { POLICY_HOOK_VALUES_GRACE_SECONDS } from "../policy-hook.js";
 import type { PolicyScope as PolicySourceScope, PolicySource } from "./policy-source.js";
 
@@ -30,11 +30,12 @@ export function withPolicyHookValues(base: PolicySource, ask: PolicyHookValuesAs
   const pending = new Map<string, Promise<Entry | undefined>>();
 
   async function fetchLocks(companyId: string, projectName: string | undefined): Promise<Entry | undefined> {
-    const answer = await ask(companyId, projectName).catch(() => undefined);
-    // The answer's locks must be readable as company locks by Code's own field list; anything else is no answer.
-    // A preset lock would stand for several fields at once; the hook names fields one by one, so a preset lock is not readable here.
-    if (answer === undefined || Object.hasOwn(answer.locks, "preset_level") || !PolicyRowsSchema.safeParse({ companyLocks: answer.locks }).success) return undefined;
-    return { locks: Object.freeze({ ...answer.locks }) as Locks, expiresAt: answer.expiresAt };
+    try {
+      const answer = await ask(companyId, projectName);
+      // Invalid or expired answers are never interpreted as an empty set of bounds.
+      if (answer === undefined || !Number.isFinite(answer.expiresAt) || answer.expiresAt <= now() || !PolicyRowsSchema.safeParse({ companyLocks: answer.locks }).success) return undefined;
+      return { locks: Object.freeze({ ...answer.locks }) as Locks, expiresAt: answer.expiresAt };
+    } catch { return undefined; }
   }
 
   async function locksFor(companyId: string, projectName: string | undefined): Promise<Locks | undefined> {
@@ -66,14 +67,9 @@ export function withPolicyHookValues(base: PolicySource, ask: PolicyHookValuesAs
       if (target === undefined) throw unavailable();
       const locks = await locksFor(target.companyId, target.projectName);
       if (locks === undefined) throw unavailable();
-      const values: ResolvedPolicy["values"] = Object.assign(Object.create(null) as ResolvedPolicy["values"], resolved.values);
-      for (const row of POLICY_FIELDS) {
-        const next = locks[row.id];
-        const current = values[row.id];
-        if (next === undefined) continue;
-        if (current === undefined || stricterPolicyValue(row.id, next, current.value)) values[row.id] = { value: next, origin: "company_lock", clampedBy: "company_lock" };
-      }
-      return { status: resolved.status, values, issues: [...resolved.issues] };
+      const bounded = applyCompanyBounds(resolved, locks, {}, request.taskRaises as Readonly<Record<string, PolicyValue>> | undefined, true);
+      if (bounded.status === "refused") throw unavailable();
+      return bounded;
     },
   };
 }

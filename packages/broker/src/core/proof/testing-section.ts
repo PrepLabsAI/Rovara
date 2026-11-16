@@ -13,6 +13,7 @@ import {
   workflowCheckResultBroken, workflowSelectedChecks,
   type AutoFixBudget, type AutoFixFacts, type EvidencePack, type TestingBlockedReason, type TestingReason, type TestingRow, type TestingView, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { classifyTestingResult, hasUnconfirmedFailingTest, type FullSuiteState, type KnownFailingEntry, type ResultWaiting } from "./verification-result.js";
 import { inertLine } from "./inert-text.js";
 
@@ -54,7 +55,7 @@ function rowsOf(input: TestingViewInput, outcome: { result: TestingView["result"
       rows.push(outcome.result === "blocked_by_environment" && firstBlocked !== undefined ? { label, command, status: "blocked", reason: firstBlocked } : { label, command, status: "not_run", reason: "check_not_run" });
     } else if (result.status === "PASS") {
       const passed = proof?.tests?.passed;
-      rows.push({ label, command, status: "passed", ...(passed === undefined ? {} : { passedTests: passed }) });
+      rows.push({ label, command, status: "passed", ...(passed === undefined ? {} : { passedTests: passed }), ...(result.madeByRovara === true ? { madeByRovara: true as const } : {}) });
     } else if (workflowCheckResultBroken(result) || result.neverStarted === true) {
       rows.push({ label, command, status: "blocked", reason: result.neverStarted === true ? "check_could_not_start" : "check_command_broken" });
     } else if (proof?.after === "timed_out") {
@@ -96,7 +97,7 @@ const ROW_MARK: Readonly<Record<TestingRow["status"], string>> = { passed: "✅"
 const cell = (text: string): string => text.replaceAll("|", "¦").replaceAll("`", "'");
 
 function rowResult(row: TestingRow): string {
-  if (row.status === "passed") return `${ROW_MARK.passed} ${row.passedTests === undefined ? "passed" : `${String(row.passedTests)} passed`}`;
+  if (row.status === "passed") return `${ROW_MARK.passed} ${row.passedTests === undefined ? "passed" : `${String(row.passedTests)} passed`}${row.madeByRovara === true ? ` (${GENERAL_FAKE_MADE_NOTE})` : ""}`;
   const word = TESTING_ROW_STATUS_LABELS[row.status];
   return `${ROW_MARK[row.status]} ${word}${row.reason === undefined ? "" : `: ${TESTING_REASON_TEXT[row.reason]}`}`;
 }
@@ -113,8 +114,10 @@ export const testingHeading = (view: Pick<TestingView, "result">): string => `##
 export function testingSectionLines(view: TestingView, level: number, extra: readonly string[] = []): string[] {
   if (level >= 5) return testingMinimalLines(view, extra);
   const foldPassed = level >= 2;
-  const passed = view.rows.filter((row) => row.status === "passed");
-  const shown = foldPassed ? view.rows.filter((row) => row.status !== "passed") : view.rows;
+  // A passed row a Rovara-made fake answered is never folded into the plain count: it stays listed with its words.
+  const plainPassed = (row: TestingRow): boolean => row.status === "passed" && row.madeByRovara !== true;
+  const passed = view.rows.filter(plainPassed);
+  const shown = foldPassed ? view.rows.filter((row) => !plainPassed(row)) : view.rows;
   const commandMax = level >= 4 ? 30 : level === 3 ? 40 : level === 1 || level === 2 ? 60 : TESTING_COMMAND_MAX;
   const labelMax = level >= 4 ? 40 : level === 3 ? 60 : 80;
   const lines = [testingHeading(view), testingSummary(view)];
@@ -138,11 +141,13 @@ function testingMinimalLines(view: TestingView, extra: readonly string[]): strin
     const key = `${TESTING_ROW_STATUS_LABELS[row.status]}${row.reason === undefined ? "" : `: ${TESTING_REASON_TEXT[row.reason]}`}`;
     groups.set(key, (groups.get(key) ?? 0) + 1);
   }
-  const passed = view.rows.filter((row) => row.status === "passed").length;
+  const passed = view.rows.filter((row) => row.status === "passed" && row.madeByRovara !== true).length;
+  const madePassed = view.rows.filter((row) => row.status === "passed" && row.madeByRovara === true).length;
   const lines = [testingHeading(view), testingSummary(view)];
-  if (groups.size > 0 || passed > 0) {
+  if (groups.size > 0 || passed > 0 || madePassed > 0) {
     lines.push("", ...[...groups].map(([what, count]) => `- ${String(count)} check${count === 1 ? "" : "s"} ${what}`));
     if (passed > 0) lines.push(`- ${String(passed)} check${passed === 1 ? "" : "s"} passed`);
+    if (madePassed > 0) lines.push(`- ${String(madePassed)} check${madePassed === 1 ? "" : "s"} passed (${GENERAL_FAKE_MADE_NOTE})`);
     lines.push("", "Every check, with its command, is listed on the task page.");
   }
   if (extra.length > 0) lines.push("", ...extra);

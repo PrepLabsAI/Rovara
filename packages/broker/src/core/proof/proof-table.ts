@@ -6,7 +6,7 @@
 // A claim is NOT static-only when the plan self-check says so: `planQualityFindings` gives a `claim-static-only` finding for a claim proved only by checks that read files (`grep`, `cat`, `test`) and
 // by no check or scenario that runs the code. That finding is the plan's own notion; this module asks it and does not guess. (The finding names at most 32 claims and only leaf claims; a parent is
 // static-only when all its leaves are.)
-import { AGENT_REPLIES_UNCONFIRMED_WORDS, AGENT_REPLIES_DISAGREED_WORDS, SCRIPTED_AI_PROOF_WORDS, type RealModelCheck, inertEvidenceText, TestProofSchema, type EvidenceTrustClass, type PlanClaim, type PlanDocument, type TestProof } from "@agentx/contracts";
+import { AGENT_REPLIES_UNCONFIRMED_WORDS, AGENT_REPLIES_DISAGREED_WORDS, SCRIPTED_AI_PROOF_WORDS, type ReplyProvenance, type RealModelCheck, inertEvidenceText, TestProofSchema, type EvidenceTrustClass, type PlanClaim, type PlanDocument, type TestProof } from "@agentx/contracts";
 import { planQualityFindings } from "../../developer/plan-quality.js";
 import { testProofPullRequestLines } from "../../developer/test-proof-lines.js";
 import { agentReplyStatuses, type AgentRepliesStatus } from "./agent-replies.js";
@@ -22,6 +22,8 @@ export interface ProofCheckResult {
   label?: string | undefined;
   status: "PASS" | "FAILED" | "UNKNOWN";
   couldNotRun?: boolean | undefined;
+  /** General fakes: a Rovara-made fake answered an outside call of this check, so it is never Proven (the table reads it as a `made_by_rovara` dependency). */
+  madeByRovara?: true | undefined;
 }
 
 /** A browser or API scenario's row (`E2EDisplayScenario`), cut to what the table reads. */
@@ -74,7 +76,7 @@ export interface ProofTableInput {
   plan: PlanDocument;
   checkResults: readonly ProofCheckResult[];
   /** Dependencies actually used by these recorded check results, keyed by check id (not readiness index). Absent: legacy behaviour exactly. Dependency ids are never displayed. */
-  checkDependencies?: ReadonlyMap<string, readonly { dependencyId: string; trust: EvidenceTrustClass; replies?: "task_made" }[]> | undefined;
+  checkDependencies?: ReadonlyMap<string, readonly { dependencyId: string; trust: EvidenceTrustClass; replies?: ReplyProvenance }[]> | undefined;
   realModelRun?: RealModelCheck | undefined;
   scenarioRows: readonly ProofScenarioRow[];
   /** Used only when its `candidateDigest` equals `candidateDigest`; otherwise ignored, as if absent. */
@@ -182,9 +184,12 @@ function mappedReplyStatuses(proof: TestProof | undefined, provenance: ProofProv
 
 function replyStatus(checkId: string, provenance: ProofProvenance, statuses: ReadonlyMap<string, AgentRepliesStatus>): AgentRepliesStatus | undefined {
   const dependencies = provenance.checkDependencies?.get(checkId);
-  if (dependencies === undefined || !dependencies.some((dependency) => dependency.replies !== undefined)) return undefined;
-  // Runtime callers do not get to treat an unknown provenance as an ordinary pre-task reply.
-  if (dependencies.some((dependency) => dependency.replies !== undefined && dependency.replies !== "task_made")) return "unconfirmed";
+  const replies = (dependencies ?? []).flatMap((dependency) => (dependency.replies === undefined ? [] : [dependency.replies as unknown]));
+  if (replies.length === 0) return undefined;
+  // The one reply-set rule (contracts, model-reply-provenance.ts): before_task counts by itself, task_made once the real model confirmed it, and independent (parked by DEC 192a) or any value this build does not know never does. Runtime callers
+  // do not get to treat an unknown provenance as an ordinary pre-task reply, and one reply that cannot count keeps the whole check from being Proven.
+  if (replies.some((value) => value !== "before_task" && value !== "task_made")) return "unconfirmed";
+  if (!replies.includes("task_made")) return undefined;
   return statuses.get(checkId) ?? "unconfirmed";
 }
 

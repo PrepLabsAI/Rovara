@@ -1,6 +1,6 @@
 // The LessonsWorker's work. One queue message is one finished task (`reflect-queue.ts`). The worker:
 //   1. reads the message (anything that is not exactly the four ids is dropped with one fixed log line: a poison message must never be retried or hold the queue);
-//   2. takes the lease on `LEARN#<org>#<task>#<outcome>` (`reflect-claims.ts`): a redelivery, a second task-end call or the nightly re-send never runs the model twice. A fault from BEFORE the model call (a read, the mint,
+//   2. takes the lease on `LEARN#<org>#<task>#<outcome>` (`reflect-claims.ts`; a send-back's is per round, `sent_back-<round>`): a redelivery, a second task-end call or the nightly re-send never runs the model twice. A fault from BEFORE the model call (a read, the mint,
 //      the deadline) leaves the lease at `retry` and the next take runs the work again. Once the call has started (the lease carries `callStartedAt`, written just before it) the reflection is spent: never run again,
 //      whatever the key settles at (re-check);
 //   3. runs `learnFromEndedTaskTyped` as one attempt (`learning-deadline.ts`): no model call starts that could still be running at the deadline, the deadline's abort signal goes into the model call (it stops OUR WAIT;
@@ -15,7 +15,7 @@ import { withLearningAttempt, type LearningAttempt } from "./learning-deadline.j
 import { logRef } from "./log-ref.js";
 import type { HumanEditJob } from "./capture-types.js";
 import { CLAIM_TTL_SECONDS, type ClaimStore, type LeaseTarget } from "./reflect-claims.js";
-import { humanEditJobOf, humanEditLeaseOutcome, parseHumanEditMessage, parseReflectMessage, type ReflectMessage, type ReflectVisibility } from "./reflect-queue.js";
+import { humanEditJobOf, humanEditLeaseOutcome, parseHumanEditMessage, parseReflectMessage, reflectLeaseOutcome, type ReflectMessage, type ReflectVisibility } from "./reflect-queue.js";
 import type { LearnResult, LearnStatus } from "./task-end.js";
 
 export { CLAIM_TTL_SECONDS };
@@ -59,7 +59,7 @@ export async function runReflectMessage(deps: ReflectWorkerDeps, body: string, c
   // Which kind of message this is, in the result line (fixed words: an operator reading the dead-letter alarm can tell a human edit from a reflection).
   const kind = edit !== undefined ? "human_edit" : "reflection";
   // What the lease is on (a reflection: the task's end; a human edit: the task's head commit) and the work it guards.
-  const message: LeaseTarget = edit !== undefined ? { orgId: edit.orgId, taskId: edit.taskId, outcome: humanEditLeaseOutcome(edit) } : { orgId: reflection!.orgId, taskId: reflection!.taskId, outcome: reflection!.outcome };
+  const message: LeaseTarget = edit !== undefined ? { orgId: edit.orgId, taskId: edit.taskId, outcome: humanEditLeaseOutcome(edit) } : { orgId: reflection!.orgId, taskId: reflection!.taskId, outcome: reflectLeaseOutcome(reflection!) };
   if (edit !== undefined && deps.humanEdit === undefined) {
     deps.log("lessons_worker.result", { class: "human_edit_unavailable", kind, task: logRef(edit.orgId, edit.taskId) });
     return { result: "failed", retry: true };

@@ -186,6 +186,18 @@ describe("192a injected real-model input", () => {
       expect(context?.testProof).toBeUndefined();
     }
   });
+  it("an independent reply (parked by DEC 192a) in a check marks it as independent: it never counts, whatever the real model says", async () => {
+    const withFacts = (fact: Record<string, unknown>) => ({ ...scripted, scriptedReplies: [{ checkId: "readiness:0", taskMade: 0, counted: 0, ...fact }] });
+    const independent = actionsOf({ stored: { [key("op-1")]: JSON.stringify(withFacts({ independent: 2 })) } });
+    expect((await loadProofContext({ actions: independent.actions, realModelRun: async () => run }, task, wf(), approved, [operation(1)] as never))?.checkDependencies?.get("unit"))
+      .toEqual([{ dependencyId: "scripted_replies", trust: "simulated", replies: "independent" }]);
+    const both = actionsOf({ stored: { [key("op-1")]: JSON.stringify(withFacts({ independent: 1, taskMade: 3 })) } });
+    expect((await loadProofContext({ actions: both.actions }, task, wf(), approved, [operation(1)] as never))?.checkDependencies?.get("unit"))
+      .toEqual([{ dependencyId: "scripted_replies", trust: "simulated", replies: "task_made" }, { dependencyId: "scripted_replies", trust: "simulated", replies: "independent" }]);
+    const zero = withFacts({ independent: 0 });
+    const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(zero) } });
+    expect(await loadProofContext({ actions: t.actions }, task, wf(), approved, [operation(1)] as never)).toEqual({ plan, testProof: zero });
+  });
   it("zero task-made replies do not add provenance or change the legacy context", async () => {
     const value = { ...scripted, scriptedReplies: [{ checkId: "readiness:0", taskMade: 0, counted: 2 }] };
     const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(value) } });

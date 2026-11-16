@@ -1,0 +1,1 @@
+{"calls":[{"method":"chat.postMessage","token":"legacy-bot","body":{"channel":"C0123456789","thread_ts":"1700000000.000001","text":"Project `payments` now uses Fast (`amazon-bedrock/fast`) for coding work. This applies to every Slack workspace in the project on its next turn.","unfurl_links":false},"query":{}}],"selected":[{"provider":"amazon-bedrock","modelId":"fast"}]}

@@ -26,7 +26,7 @@ it("fails closed: unusable logger company", () => {
 import ts from "typescript";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-const MAX_FILES = 1200, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000;
+const MAX_FILES = 1600, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000; // files: 1200 -> 1600 when the batch of 2026-11-16 put 1205 sources under the roots
 const roots = ["packages/broker/src", "packages/aws-adapters/src", "packages/local-adapters/src"];
 function scan(sources: readonly { path: string; source: string }[], clock = () => performance.now(), began = clock()): Record<string, number> {
   let bytes = 0;
@@ -52,6 +52,14 @@ function scan(sources: readonly { path: string; source: string }[], clock = () =
           if (!ts.isCallExpression(callable.parent) || callable.parent.expression !== callable) throw new Error("unclassifiable");
           count++;
         }
+      }
+      // A write to the process's own streams is a log line too (`process.stderr.write(...)`, `process.stdout.write(...)`): counted like a console call, so a sink that moved off
+      // `console` stays under review. Only the direct call form is accepted; an alias of a stream or of its `write` cannot be classified.
+      if (ts.isIdentifier(node) && node.text === "process" && ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && ["stderr", "stdout"].includes(node.parent.name.text)) {
+        const stream = node.parent;
+        const write = stream.parent;
+        if (!ts.isPropertyAccessExpression(write) || write.expression !== stream || write.name.text !== "write" || !ts.isCallExpression(write.parent) || write.parent.expression !== write) throw new Error("unclassifiable");
+        count++;
       }
       ts.forEachChild(node, (child) => { stack.push(child); });
     }
@@ -85,6 +93,11 @@ it("ratchets every existing console call in the scoped source inventory", () => 
 });
 it("refuses an unlisted log call with fixed file words", () => {
   expect(() => ratchet(scan([{ path: "new.ts", source: 'console.log("secret-canary")' }]), {})).toThrow("Company logging needs review: new.ts");
+});
+it("counts a direct write to stderr or stdout as a log call, and refuses an alias of a stream or of its write", () => {
+  expect(scan([{ path: "w.ts", source: 'process.stderr.write("a\\n"); process.stdout.write("b"); console.log("c");' }])).toEqual({ "w.ts": 3 });
+  expect(() => ratchet(scan([{ path: "w.ts", source: 'process.stderr.write("secret-canary")' }]), {})).toThrow("Company logging needs review: w.ts");
+  for (const source of ['const err = process.stderr; err.write("x")', 'const write = process.stderr.write;', 'process.stderr.on("error", () => undefined)']) expect(() => scan([{ path: "x.ts", source }])).toThrow("unclassifiable");
 });
 it("unparsable syntax and console aliases fail as unclassifiable", () => {
   for (const source of ['const broken = {', 'const logger = console; logger.log("x")', 'const { log } = console;', 'console["log"]("x")', 'const log = console.log;']) expect(() => scan([{ path: "x.ts", source }])).toThrow("unclassifiable");

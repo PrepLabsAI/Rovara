@@ -10,6 +10,34 @@ const A = IMPLICIT_COMPANY_ID;
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
 // Runtime calls deliberately exercise the new mandatory argument before its implementation exists.
 const call = (fn: unknown, ...args: string[]) => (fn as (...values: string[]) => unknown)(...args);
+it("creates the thin discovery pointer atomically with the scoped workspace and never overwrites it", async () => {
+  const { createHarness, newRequestId } = await import("../support/task-flow-harness.js");
+  const h = createHarness();
+  await h.registerProject();
+  const transactions = vi.spyOn(h.store, "transact");
+  const { task } = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add health" });
+  const pointer = { pk: `WORKSPACE#${task.workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: task.workspaceId, companyId: A };
+  expect(await h.store.get({ pk: pointer.pk, sk: "META" })).toEqual(pointer);
+  const creation = transactions.mock.calls.find(([items]) => items.some((item) => item.kind === "put" && item.item.entityType === "WORKSPACE"))![0];
+  for (const pk of [pointer.pk, `ORG#${A}#WORKSPACE#${task.workspaceId}`]) {
+    expect(creation).toContainEqual(expect.objectContaining({ kind: "put", item: expect.objectContaining({ pk, sk: "META" }), condition: { op: "notExists", path: ["pk"] } }));
+  }
+  const other = new MemoryDocumentStore();
+  const pointerStep = creation.find((item) => item.kind === "put" && item.item.pk === pointer.pk)!;
+  const workspaceStep = creation.find((item) => item.kind === "put" && item.item.entityType === "WORKSPACE")!;
+  await other.put({ item: { ...pointer, companyId: B } });
+  expect((await other.transact([pointerStep, workspaceStep])).applied).toBe(false);
+  expect(await other.get(keys.workspaceKey(A, task.workspaceId))).toBeUndefined();
+  expect(await other.get({ pk: pointer.pk, sk: "META" })).toEqual({ ...pointer, companyId: B });
+  transactions.mockRestore();
+});
+
+it("never treats an orphan discovery pointer as an implicit legacy workspace", async () => {
+  const { locateWorkspace } = await import("../../packages/broker/src/core/task-flow/workspace-location.js");
+  const store = new MemoryDocumentStore();
+  await store.put({ item: { pk: "WORKSPACE#ws", sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: "ws", companyId: A } });
+  expect(await locateWorkspace({ store, companyId: A }, "ws")).toBeUndefined();
+});
 describe("company task-flow keys", () => {
   it("scopes every workspace constructor and request; refuses invalid companies", () => {
     expect(call(keys.workspaceKey, A, "ws")).toEqual({ pk: `ORG#${A}#WORKSPACE#ws`, sk: "META" });

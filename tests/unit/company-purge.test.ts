@@ -1,6 +1,6 @@
 // Company purge (C112, plan row 13.5): operator only, a closed company only, a cooling-off delay with a cancel window, a dry run in counts, bounded passes that resume after a fault, idempotent,
 // and company-scoped: the second company's data (and the people both share) is untouched, byte for byte.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DocumentStoreError, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
@@ -140,6 +140,41 @@ async function startCoreWorkspace(w: World, companyId: OrgId) {
 }
 
 describe("company purge: CORE company-scoped workspaces", () => {
+  it("keeps the discovery pointer through a failed file pass and deletes it only after all scoped rows", async () => {
+    const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+    const started = await startCoreWorkspace(w, A);
+    const pointerKey = { pk: `WORKSPACE#${started.workspaceId}`, sk: "META" };
+    // Seed explicitly so this regression also catches premature deletion independently of start.
+    await w.store.put({ item: { ...pointerKey, entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: started.workspaceId, companyId: A } });
+    // DynamoDB scan order is unspecified: discover the pointer on a page before its scoped META.
+    const scan = w.store.scanPage.bind(w.store);
+    let pointerFirst = true;
+    vi.spyOn(w.store, "scanPage").mockImplementation(async (request) => {
+      if (pointerFirst) {
+        pointerFirst = false;
+        return { items: [(await w.store.get(pointerKey))!], cursor: "pointer-first" };
+      }
+      return scan(request?.cursor === "pointer-first" ? { limit: request.limit } : request);
+    });
+    const remove = w.store.delete.bind(w.store);
+    let deletedPointer = false;
+    vi.spyOn(w.store, "delete").mockImplementation(async (request) => {
+      if (request.key.pk === pointerKey.pk && request.key.sk === "META") {
+        expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+        expect(w.files.under(started.prefix)).toEqual([]);
+        deletedPointer = true;
+      }
+      return remove(request);
+    });
+    w.files.failPrefix = started.prefix;
+    await scheduledAndDue(w);
+    await runCompanyPurge(w.deps, A);
+    expect(await w.store.get(pointerKey)).toMatchObject({ companyId: A });
+    w.files.failPrefix = undefined;
+    await purgeToEnd(w, A);
+    expect(deletedPointer).toBe(true);
+    expect(await w.store.get(pointerKey)).toBeUndefined();
+  });
   it("proves the scoped META before deleting it and removes the rows and every workspace file", async () => {
     const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
     const started = await startCoreWorkspace(w, A);
@@ -891,4 +926,49 @@ describe("company purge: laptop files", () => {
     expect(await port.deleteEveryVersion("private/o/w/", {})).toBe(true);
     expect(seen).toEqual(["private/o/w/"]);
   });
+});
+
+it("resumes after scoped deletion while the discovery pointer remains and refuses all pointer reads", async () => {
+  const { workspaceCompanyReader } = await import("../../packages/broker/src/aws/worker-machines/workspace-company.js");
+  const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+  const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+  const started = await startCoreWorkspace(w, A);
+  const pointerKey = { pk: `WORKSPACE#${started.workspaceId}`, sk: "META" };
+  const remove = w.store.delete.bind(w.store);
+  let stop = true;
+  const deletion = vi.spyOn(w.store, "delete").mockImplementation(async (request) => {
+    if (stop && request.key.pk === pointerKey.pk && request.key.sk === "META") {
+      expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+      throw new Error("injected after scoped deletes");
+    }
+    return remove(request);
+  });
+  await scheduledAndDue(w);
+  await expect(runCompanyPurge(w.deps, A)).rejects.toThrow();
+  expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+  expect(await w.store.get(pointerKey)).toMatchObject({ entityType: "WORKSPACE_COMPANY_POINTER", companyId: A });
+  const reader = workspaceCompanyReader({ send: async (command: unknown) => {
+    if (!(command instanceof GetCommand)) throw new Error("unexpected command");
+    return { Item: await w.store.get(command.input.Key as { pk: string; sk: string }) };
+  } } as never, "state");
+  const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    expect(await reader(started.workspaceId)).toBeUndefined();
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+  } finally { integrity.mockRestore(); }
+  stop = false;
+  w.clock.now += 70_000;
+  await purgeToEnd(w, A);
+  expect(await w.store.get(pointerKey)).toBeUndefined();
+  expect(await companyPurgeState(w.deps, A)).toMatchObject({ status: "done" });
+  deletion.mockRestore();
+});
+
+it("purge scan reports a discovery pointer only as a pointer count, never a workspace", async () => {
+  const w = world();
+  await w.store.put({ item: { pk: "WORKSPACE#pointer-canary", sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: "pointer-canary", companyId: A } });
+  const report = await dryRunCompanyPurge(w.deps, { companyId: A, by: OP });
+  expect(report.partitions.ws).toBe(0);
+  expect(report.rows).toEqual({ WORKSPACE_COMPANY_POINTER: 1 });
+  expect(JSON.stringify(report)).not.toContain("pointer-canary");
 });

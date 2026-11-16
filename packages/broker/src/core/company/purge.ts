@@ -515,6 +515,7 @@ export async function dryRunCompanyPurge(deps: Pick<CompanyPurgeDeps, "store" | 
         case "tombstone": report.tombstones += 1; break;
         case "conflicting": report.conflicting += 1; break;
         case "prove": {
+          if (item["entityType"] === "WORKSPACE_COMPANY_POINTER") { add("WORKSPACE_COMPANY_POINTER"); break; }
           report.partitions[verdict.what] += 1;
           proved.add(`${verdict.what}#${verdict.id}`);
           const prefixes = prefixesOf(verdict.what, verdict.id, item);
@@ -580,6 +581,13 @@ async function save(run: Run, extra: { ops?: ReturnType<typeof change.set>[]; cu
 
 /** Records a proved partition (its files and the partitions hanging off it) and the id, so the partition is emptied and rows elsewhere that name the id go too. */
 async function prove(run: Run, verdict: Extract<Verdict, { act: "prove" }>, meta: StoredDocument): Promise<void> {
+  // A discovery row has no workspace content. Queue the scoped partition, never the pointer's partition.
+  if (meta["entityType"] === "WORKSPACE_COMPANY_POINTER") {
+    const scopedKey = workspaceKey(run.companyId, verdict.id);
+    const scoped = await run.deps.store.get(scopedKey);
+    if (metaStatus(scoped, run.companyId) === "foreign") return;
+    meta = scoped ?? { ...scopedKey, companyId: run.companyId };
+  }
   const prefixes = prefixesOf(verdict.what, verdict.id, meta);
   const sides = sidePartitionsOf(verdict.what, verdict.id, meta);
   await run.deps.store.put({ item: { pk: marksPk(run.companyId), sk: `${verdict.what}#${verdict.id}`, entityType: "COMPANY_PURGE_MARK" } });
@@ -669,6 +677,16 @@ async function drainParts(run: Run): Promise<boolean> {
         continue;
       }
       if (!emptied) return false;
+      if (part["what"] === "ws") {
+        const workspaceId = part.sk.slice(part.sk.lastIndexOf("#") + 1);
+        if (part.sk === workspaceKey(run.companyId, workspaceId).pk) {
+          const removed = await run.deps.store.delete({
+            key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" },
+            condition: when.and(when.eq("entityType", "WORKSPACE_COMPANY_POINTER"), when.eq("companyId", run.companyId)),
+          });
+          if (removed.applied) { run.row.counts.deleted += 1; run.row.acted = true; }
+        }
+      }
       run.row.counts.prefixes += prefixes.length;
       await run.deps.store.delete({ key: { pk: part.pk, sk: part.sk } });
       run.row.acted = true;

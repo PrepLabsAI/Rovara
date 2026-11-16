@@ -29,31 +29,31 @@
     {
       "path": "packages/broker/src/aws/slack-adapter.ts",
       "rule": "cloud-aws",
-      "blob": "e89ec7edbfd752e78616fc62e74511d00b7964c9",
+      "blob": "2b6483d42dbac94f6ab64571a6080b00396e60a9",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
       "path": "packages/broker/src/aws/slack-channel-presses.ts",
       "rule": "cloud-aws",
-      "blob": "7afa740a3bc81e2aeef09dffdd2d92a262653bc4",
+      "blob": "d2bbc888372a7ac886c9aa66cd7dbc77d601d0bb",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
       "path": "packages/broker/src/aws/slack-channel-router.ts",
       "rule": "cloud-aws",
-      "blob": "8db65d8028d42c51ea9a21ec6f3aa050dfe9d932",
+      "blob": "74927e4f5ee17999b1d82046e3b1caaa1bee3d4c",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
       "path": "packages/broker/src/aws/slack-directory-channel.ts",
       "rule": "cloud-aws",
-      "blob": "d16621063ac8a05ebb0f0ae6f5c3b08609d5cb79",
+      "blob": "af6d9e7e5deb7f9ef76909a1f8a9b64e743bcdc4",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
       "path": "packages/broker/src/aws/slack-notice-channel.ts",
       "rule": "cloud-aws",
-      "blob": "9faa9e75f37433e18336e13579520e7223c260bc",
+      "blob": "5da62bf68ee95b3b93233a4313d56fa78ec0d7f2",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {

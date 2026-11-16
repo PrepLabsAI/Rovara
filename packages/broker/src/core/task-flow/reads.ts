@@ -52,7 +52,7 @@ async function operationsAt(deps: Pick<TaskFlowDeps, "store" | "companyId">, loc
       if (page.items.length > 0 || page.cursor !== undefined) throw agentXError("CONFIG_INVALID", "workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)");
       break;
     }
-    items.push(...page.items.filter((item) => (item["companyId"] === undefined ? IMPLICIT_COMPANY_ID : item["companyId"]) === deps.companyId));
+    items.push(...page.items.filter((item) => item["entityType"] !== "WORKSPACE_COMPANY_POINTER" && (item["companyId"] === undefined ? IMPLICIT_COMPANY_ID : item["companyId"]) === deps.companyId));
     cursor = page.cursor;
     if (cursor === undefined) break;
   }
@@ -118,7 +118,7 @@ export async function listTasks(deps: TaskFlowDeps, caller: TaskCaller, options:
     });
     for (const item of page.items) {
       const company = item["orgId"] === undefined ? IMPLICIT_COMPANY_ID : item["orgId"];
-      if (company === deps.companyId) tasks.push(item as unknown as DeveloperTaskIndexRecord);
+      if (item["entityType"] !== "WORKSPACE_COMPANY_POINTER" && company === deps.companyId) tasks.push(item as unknown as DeveloperTaskIndexRecord);
     }
     cursor = page.cursor;
     if (tasks.length === limit || cursor === undefined) break;

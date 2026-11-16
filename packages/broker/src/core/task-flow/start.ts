@@ -4,6 +4,7 @@
 // index row, its callback pointer, the conversation, the idempotency record, the workspace-slot charge, whatever `Admission` and `AuditSink`
 // stage, and (for a workflow that understands first) the dispatch row of its first step. Either all of it exists or none of it does.
 import { ROVARA_CODE_PROGRAM } from "../plan/program.js";
+import { legacyWorkspaceKey } from "./legacy-keys.js";
 import {
   AgentXError,
   WorkOriginSchema,
@@ -220,6 +221,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     ...staged,
     ...stageAudit(deps, { eventId: `task.started:${taskId}`, actor: { type: "person", id: developerId }, action: "task.started", subject: { type: "task", id: taskId }, details: { project: request.project, workflow: asWorkflow, ...(asWorkflow ? { path: workflowPath } : {}) } }),
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
+    { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace.companyId }, condition: when.absent() },
     ...prepare.items,
     { kind: "put", item: toDocument(taskItem), condition: when.absent() },
     { kind: "put", item: { ...taskIndexKey(developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, orgId: deps.companyId, project: request.project, title, client, status: "STARTING", shared: false, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },

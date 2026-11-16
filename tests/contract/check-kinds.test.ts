@@ -18,7 +18,7 @@ describe("the registry", () => {
     }
   });
 
-  it("counts toward proof only for kinds that run tests, never for lint, type checks, scans, builds or migrations", () => {
+  it("counts toward proof only for kinds that run tests, never for evals, lint, type checks, scans, builds or migrations", () => {
     expect(["test", "e2e"].every((id) => checkKindInfo(id)?.countsTowardProof === true)).toBe(true);
     for (const id of ["eval", "lint", "typecheck", "security", "build", "migration", "benchmark", "visual", "smoke", "prompt_side_by_side", "other"]) expect(checkKindInfo(id)?.countsTowardProof, id).toBe(false);
   });

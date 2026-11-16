@@ -13,6 +13,7 @@ import { isTerminalStatus, readOperation, syncTaskIndex } from "./results.js";
 import type { OperationRecord, TaskRecord, WorkspaceRecord } from "./records.js";
 import { readWorkspace } from "./stage-machine.js";
 import { iso, log } from "./support.js";
+import { flushBeforeClose } from "./money-stop.js";
 import { announceTaskEnd } from "./task-end.js";
 import { DocumentStoreError } from "@agentx/contracts";
 
@@ -86,6 +87,8 @@ export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: 
 export async function closeLoadedTask(deps: TaskFlowDeps, loaded: TaskRecord, actorId: string): Promise<TaskView> {
   const taskId = loaded.taskId;
   let task = loaded;
+  // A deployed install (money-stop.ts): a model run still going sends its usage before the close ends it. Without `moneyStop` nothing is read or written here.
+  if (task.closedAt === undefined && deps.moneyStop !== undefined) await flushBeforeClose(deps, await readWorkspace(deps, task.workspaceId));
   for (let attempt = 1; task.closedAt === undefined && attempt <= CLOSE_ATTEMPTS; attempt += 1) {
     const now = iso(deps);
     const parts = await closeParts(deps, task, now, { type: "person", id: actorId });

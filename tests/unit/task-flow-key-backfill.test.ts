@@ -294,3 +294,14 @@ it("retries the indexed workspace after its first META read fails", async () => 
   expect(await locateWorkspace(w.deps, w.meta.id)).toMatchObject({ scope: "company" });
   expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([]);
 });
+
+it("backfill omits discovery pointers from candidates even with stale legacy workspace fields", async () => {
+  const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
+  const w = await world();
+  await w.store.put({ item: { ...w.meta, entityType: "WORKSPACE_COMPANY_POINTER" } });
+  const before = (await w.store.query({ pk: w.meta.pk })).items;
+  const report = await backfillWorkspaceKeysPage(w.deps, { limit: 25 });
+  expect(report).toMatchObject({ moved: 0, skippedActive: 0, failed: 0 });
+  expect(await w.store.get(workspaceKey(companyId, w.meta.id))).toBeUndefined();
+  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual(before);
+});

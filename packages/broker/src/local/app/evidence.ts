@@ -7,8 +7,12 @@ import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 //     re-check of the same code replaces, with the documented opt-in (`overwrite: true` in `evidence-keep.ts`: one pack per task and candidate digest).
 // It is informational: a fault or a slow store only means there is no evidence for this code. It never changes a verdict and never holds a callback longer than `EVIDENCE_KEEP_MAX_MS`.
 import { scanText } from "@agentx/verifier";
-import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, SANDBOX_MODEL_HOSTS_ITEM_ID, workflowSelectedChecks, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
-import { keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
+import { MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, SANDBOX_MODEL_HOSTS_ITEM_ID, workflowSelectedChecks, TestEnvTaskPlanSchema, type CheckEntry, type EvidenceNotTested, type EvidencePack, type ObjectStorage, type WorkflowSnapshot, type EvidenceBaseline } from "@agentx/contracts";
+import type { TestProofActions } from "../../developer/test-proof-lines.js";
+import { keepEvidence, loadEvidencePack, policyKindsOf, loadEvidenceBaseline, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
+import type { TestEnvDeps } from "../../core/test-env/deps.js";
+import { taskBaselineOf } from "../../core/test-env/baseline-task.js";
+import { baselineCacheEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
@@ -22,14 +26,48 @@ export interface LocalEvidence {
   keepAfterChecks(input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }): Promise<KeepEvidenceResult | undefined>;
   /** The pack kept for exactly this code of this task, or undefined. */
   packOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidencePack | undefined>;
+  /** TE-C1: the words of the baseline the checks of exactly this code were compared with, or undefined. */
+  baselineOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidenceBaseline | undefined>;
 }
 
 /** FIX-0518: the pack's line when the owner let a project's sandboxes reach the model hosts: the fixed sentence, and the setting named (a name, never a value from the repository). */
 export const MODEL_HOSTS_ALLOWED_ITEM: EvidenceNotTested = { kind: "environment", id: SANDBOX_MODEL_HOSTS_ITEM_ID, text: MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, reason: "sandboxModelHosts is allow in the Rovara config" };
 
+/**
+ * The run's own artifacts, offered to a reader under the names it reads them by (`private/<owner>/<workspace>/<operation>/<name>`): a reader checks an artifact is under the operation's own prefix. Only this operation's
+ * rows are listed, and an object is read only through its recorded digest (`readVerifiedText`).
+ */
+export function operationArtifactActions(flow: { store: TaskFlowDeps["store"]; blobs: ObjectStorage }, task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "companyId">, operation: Pick<OperationRecord, "id">): Pick<TestProofActions, "artifacts" | "readArtifact"> {
+  const { store, blobs } = flow;
+  const rows = new Map<string, { name: string; sha256: string; objectKey: string }>();
+  const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
+  return {
+    async artifacts(workspaceId, operationId) {
+      if (workspaceId !== task.workspaceId || operationId !== operation.id) return [];
+      const found = await store.query({ pk: (await workspaceKeys({ store, companyId: task.companyId }, workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
+      const listed: Array<{ name: string; objectKey: string }> = [];
+      for (const row of found.items) {
+        if (typeof row["name"] !== "string" || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") continue;
+        const virtual = `${prefix}${row["name"]}`;
+        rows.set(virtual, { name: row["name"], sha256: row["sha256"], objectKey: row["objectKey"] });
+        listed.push({ name: row["name"], objectKey: virtual });
+      }
+      return listed;
+    },
+    async readArtifact(objectKey, maxBytes) {
+      const row = rows.get(objectKey);
+      if (row === undefined) return "";
+      const read = await readVerifiedText(blobs, row, maxBytes);
+      return "text" in read ? read.text : "";
+    },
+  };
+}
+
 export function createLocalEvidence(options: {
   flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">;
   blobs: ObjectStorage;
+  /** TE-C1: the engine's own store and clock, to look a baseline row up. Absent: no baseline is ever looked at. */
+  testEnv?: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined;
   /** FIX-0518: whether the owner let this project's sandboxes reach the model hosts. Absent: the deny stands and the pack says nothing about it. */
   sandboxModelHostsAllowed?: ((project: string) => boolean) | undefined;
   /** FIX-0518 (L2): the state the task's worker machine was created with. Read first; the config setting above is only the answer when the machine cannot say (gone, Docker not answering, no machine on the record). */
@@ -56,41 +94,32 @@ export function createLocalEvidence(options: {
     async keepAfterChecks(input) {
       const { task, operation } = input;
       let late = false;
-      // The run's own artifacts, offered to the keeper under the names it reads them by (`private/<owner>/<workspace>/<operation>/<name>`): the keeper checks an artifact is under the operation's own prefix.
-      const rows = new Map<string, { name: string; sha256: string; objectKey: string }>();
-      const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
+      const actions = operationArtifactActions({ store: flow.store, blobs }, task, operation);
       const run = keepEvidence({
         scan: scanText, store: { blobs }, late: () => late, log,
-        actions: {
-          async artifacts(workspaceId, operationId) {
-            if (workspaceId !== task.workspaceId || operationId !== operation.id) return [];
-            const found = await flow.store.query({ pk: (await workspaceKeys(flow, workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
-            const listed: Array<{ name: string; objectKey: string }> = [];
-            for (const row of found.items) {
-              if (typeof row["name"] !== "string" || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") continue;
-              const virtual = `${prefix}${row["name"]}`;
-              rows.set(virtual, { name: row["name"], sha256: row["sha256"], objectKey: row["objectKey"] });
-              listed.push({ name: row["name"], objectKey: virtual });
-            }
-            return listed;
-          },
-          async readArtifact(objectKey, maxBytes) {
-            const row = rows.get(objectKey);
-            if (row === undefined) return "";
-            const read = await readVerifiedText(blobs, row, maxBytes);
-            return "text" in read ? read.text : "";
-          },
-        },
+        actions,
       }, {
         orgId: flow.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),
         ...(await modelHostsAllowed(task.workspaceId) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
+        // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), when the switch is on.
+        ...baselineInput(options.testEnv, flow.companyId, task.project, task.taskId, () => operation.dispatch.payload["testEnvironment"]),
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => { late = true; resolve(undefined); }, EVIDENCE_KEEP_MAX_MS); timer.unref(); });
       try { return await Promise.race([run, timeout]); } finally { clearTimeout(timer); }
     },
     packOf: (task, candidateDigest) => loadEvidencePack(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest),
+    baselineOf: (task, candidateDigest) => loadEvidenceBaseline(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest),
   };
+}
+
+/** The keeper's baseline input for an operation whose stored plan offered candidates; nothing (so the keeper looks at no claim, and the operation's plan is not even read) when the switch is off, the plan is not readable or it offered none. */
+function baselineInput(testEnv: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined, companyId: string, project: string, taskId: string, storedPlan: () => unknown): { baseline?: ReturnType<typeof taskBaselineOf> } {
+  if (testEnv === undefined || !baselineCacheEnabled(testEnv.env ?? process.env)) return {};
+  const plan = TestEnvTaskPlanSchema.safeParse(storedPlan());
+  if (!plan.success) return {};
+  const baseline = taskBaselineOf(testEnv, { orgId: companyId, project, taskId, plan: plan.data });
+  return baseline === undefined ? {} : { baseline };
 }
 

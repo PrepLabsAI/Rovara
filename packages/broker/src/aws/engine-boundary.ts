@@ -1,3 +1,4 @@
+import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
 // Engine boundary (migration plan v3.2 lane E2, step 6 part): every AWS entry point that reads or acts on an EXISTING task goes by the task's stored engine (its stamp,
 // core-host/engine-stamp.ts), never by the switch.
 //
@@ -14,7 +15,8 @@
 // A stamp is written once, with the core task, in the start's own transaction, and never changes; a task without one never gets one. So a verdict about a task that EXISTS is fixed for
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXErrorCodeSchema, agentXError } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, OrgIdSchema, agentXError } from "@agentx/contracts";
+import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
@@ -118,9 +120,22 @@ export async function ownerOfExistingTask(table: EngineStateTable, taskId: strin
 
 /**
  * Who owns a workspace's rows (its META, operations, artifacts, pull requests): the engine of the task whose pointer it holds. A workspace with no task pointer is no core task's
- * (every core start writes its pointer with the task), so it is the workflow's. A pointer is written once, with its task, so a verdict for a workspace with a pointer is kept.
+ * (every core start writes its pointer with the task), so it is the workflow's. Company discovery pointers require a live scoped META on every call; legacy workspace verdicts are kept.
  */
 export async function ownerOfWorkspace(table: EngineStateTable, workspaceId: string): Promise<Engine> {
+  const discovery = await readItem(table, { pk: `WORKSPACE#${workspaceId}`, sk: "META" });
+  if (discovery?.["entityType"] === "WORKSPACE_COMPANY_POINTER") {
+    const company = OrgIdSchema.safeParse(discovery["companyId"]);
+    if (!company.success) { logWorkspacePointerIntegrity(); throw new Error("workspace unavailable"); }
+    const scoped = await readItem(table, workspaceKey(company.data, workspaceId));
+    if (scoped === undefined || scoped["companyId"] !== company.data || (scoped["orgId"] !== undefined && scoped["orgId"] !== company.data)) {
+      logWorkspacePointerIntegrity();
+      throw new Error("workspace unavailable");
+    }
+    const pointer = await readItem(table, scopedTaskPointerKey(company.data, workspaceId));
+    if (typeof pointer?.taskId !== "string" || !TASK_ID.test(pointer.taskId)) throw new Error("workspace unavailable");
+    return await ownerOfExistingTask(table, pointer.taskId);
+  }
   const key = `workspace:${workspaceId}`;
   const known = remembered(table).get(key);
   if (known !== undefined) return known;
@@ -135,8 +150,24 @@ export async function ownerOfWorkspace(table: EngineStateTable, workspaceId: str
 
 /** The core's handlers for a developer task request, as the deployment composes them (the core host's dev routes over its caller mapping). Undefined: the core does not serve it. */
 export interface CoreTaskEntry {
-  route(request: BrokerRequest, caller: { developerId: string; sessionId: string; name: string }): Promise<BrokerResponse | undefined>;
+  route(request: BrokerRequest, caller: CoreEntryCaller): Promise<BrokerResponse | undefined>;
 }
+
+/**
+ * The broker's signed-in caller as the core entry takes it. `stepUp` is the step-up the VERIFIED access token states (`stepUpOf`), set only by the broker's token sign-in; `clientId` is the
+ * registered sign-in client whose token made the call (absent for the Rovara CLI).
+ */
+export interface CoreEntryCaller {
+  developerId: string;
+  sessionId: string;
+  name: string;
+  stepUp?: { at: string; method: string } | undefined;
+  clientId?: string | undefined;
+}
+
+/** The developer start route's path: a start is the core's only where the core's routes say so (`undefined` keeps the old start). */
+const DEVELOPER_START = "/v1/dev/tasks";
+const isStart = (request: BrokerRequest): boolean => request.method === "POST" && request.path.split("?")[0] === DEVELOPER_START;
 
 /**
  * Composes the core host's dev routes (`createCoreDevRoutes`) as the developer task routes' core entry. `deployedCallerOf` is the deployment's identity mapping from the broker's
@@ -145,16 +176,20 @@ export interface CoreTaskEntry {
  */
 export function coreTaskEntryFrom(
   routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> },
-  deployedCallerOf: (caller: { developerId: string; sessionId: string; name: string }) => Promise<DeployedCaller | undefined>,
+  deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
 ): CoreTaskEntry {
   return {
     async route(request, caller) {
       let deployed: DeployedCaller | undefined;
+      let unreadable = false;
       try {
         deployed = await deployedCallerOf(caller);
       } catch {
         deployed = undefined;
+        unreadable = true;
       }
+      // A start by a person the mapping names no company for is not the core's: the old start answers it, as before. A mapping that failed refuses it.
+      if (deployed === undefined && !unreadable && isStart(request)) return undefined;
       if (deployed === undefined) return { statusCode: 401, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code: "UNAUTHENTICATED", message: "Sign in again." } }) };
       return await routes.route(request, deployed);
     },
@@ -188,7 +223,7 @@ export function coreAnswerValue(answer: BrokerResponse): unknown {
  * developer route's own answer for an id with no task (input checks, wrong method and words included), so a core task's id answers exactly like an id with no task. Never falls back to
  * the workflow's readers for the task itself.
  */
-export async function serveCoreTask(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: { developerId: string; sessionId: string; name: string }, taskId: string, missing: () => Promise<unknown>): Promise<unknown> {
+export async function serveCoreTask(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller, taskId: string, missing: () => Promise<unknown>): Promise<unknown> {
   if (entry === undefined) return await missing();
   const answer = await entry.route(request, caller);
   // The broker has already signed the caller in: a 401 or 404 from the core means only "not the core's to show this caller", which is a missing task's answer here.
@@ -197,4 +232,14 @@ export async function serveCoreTask(entry: CoreTaskEntry | undefined, request: B
   const read = await entry.route({ method: "GET", path: `/v1/dev/tasks/${taskId}`, headers: {}, ...(request.requestId === undefined ? {} : { requestId: request.requestId }) }, caller);
   if (read?.statusCode === 200) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
   return await missing();
+}
+
+/**
+ * The developer start, through the core where the switch sends this caller's company (lane E2 step 6). `undefined`: the old start answers it (no core entry on this install, a company the
+ * switch does not send to the core, or a person with no member company). Otherwise the core's answer, as the developer routes return it.
+ */
+export async function startOnCore(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller): Promise<{ value: unknown } | undefined> {
+  if (entry === undefined || !isStart(request)) return undefined;
+  const answer = await entry.route(request, caller);
+  return answer === undefined ? undefined : { value: coreAnswerValue(answer) };
 }

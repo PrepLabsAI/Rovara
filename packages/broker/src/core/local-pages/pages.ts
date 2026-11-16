@@ -377,12 +377,13 @@ export function renderTestEnvironment(context: PageContext, view: TestEnvironmen
       + (view.proposal.lessSafe.length === 0 ? "" : `<p class="warn">Less safe than the approved revision: ${view.proposal.lessSafe.map((word) => esc(word.replace(/_/gu, " "))).join(", ")}.</p>`)
       + `<h3>What changes</h3>${view.proposal.changes.length === 0 ? "<p class=\"muted\">Nothing differs from the approved revision.</p>" : `<ul>${view.proposal.changes.map((line) => `<li><code>${untrusted(line)}</code></li>`).join("")}</ul>`}${form}`;
   }
+  const machine = view.machine === undefined || view.machine.length === 0 ? "" : `<section class="panel"><h2>Machine size</h2><ul>${view.machine.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
   const extra = view.extra === undefined || view.extra.length === 0 ? "" : `<section class="panel"><h2>More</h2><ul>${view.extra.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
   const serviceImages = view.serviceImages === undefined ? "" : renderServiceImages(context, view.project, view.serviceImages, options.fresh === true);
   return layout({
     title: `Test environment: ${view.project}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>Test environment: ${untrusted(view.project)}</h1><p>The environment tasks of this project run their checks in, and the nightly run uses. A change is approved here, by you, once it has been proved.</p>`
-      + `<section class="panel"><h2>Approved</h2>${approved}</section><section class="panel"><h2>Waiting for approval</h2>${proposal}</section>${serviceImages}${extra}`,
+      + `<section class="panel"><h2>Approved</h2>${approved}</section><section class="panel"><h2>Waiting for approval</h2>${proposal}</section>${machine}${serviceImages}${extra}`,
   });
 }
 

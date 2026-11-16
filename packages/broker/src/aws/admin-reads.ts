@@ -85,7 +85,7 @@ export async function queryAllItems(deps: Pick<AdminReadDependencies, "documentC
       ...(options.limit === undefined ? {} : { Limit: options.limit - items.length }),
       ...(start === undefined ? {} : { ExclusiveStartKey: start }),
     })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
-    items.push(...(page.Items ?? []));
+    items.push(...(page.Items ?? []).filter((item) => item.entityType !== "WORKSPACE_COMPANY_POINTER"));
     start = page.LastEvaluatedKey;
   } while (start !== undefined && (options.limit === undefined || items.length < options.limit));
   return items;
@@ -512,6 +512,7 @@ export async function projectWorkspaceRows(deps: AdminReadDependencies, project:
       ...(start === undefined ? {} : { ExclusiveStartKey: start }),
     })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
     for (const item of page.Items ?? []) {
+      if (item.entityType === "WORKSPACE_COMPANY_POINTER") continue;
       const parsed = WorkspaceInstanceSchema.safeParse(workspaceRecordFields(item));
       if (parsed.success) rows.push(parsed.data);
       else deps.log({ event: "admin.workspace_unreadable", project });

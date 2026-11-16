@@ -1,5 +1,9 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The run-lost watchdog (`sweepLostRuns`): a worker machine lost after the delivery of an operation must not leave the operation, and the task with it, running for ever.
+import { brokerCoreWorkerMachines } from "../../packages/broker/src/aws/worker-machines/broker-core.js";
+import { SessionWorkerFleet } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
+import { sweepLostRuns } from "../../packages/broker/src/core/task-flow/run-watch.js";
+import { createSessionMachinesWorld, TABLE } from "../support/session-machines-world.js";
 import { describe, expect, it } from "vitest";
 import { change, queryAll } from "@agentx/contracts";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -152,4 +156,27 @@ describe("an operation whose worker machine is lost", () => {
     expect(await h.flow.get(h.owner, run.taskId)).toEqual(task);
     expect(await operationOf(h, run)).toEqual(operation);
   });
+});
+
+
+it("the broker watchdog waits on unavailable live health and interrupts a recorded deleted session", async () => {
+  const h = createHarness();
+  await h.registerProject();
+  const run = await runningPlan(h, "Rename the flag");
+  const world = createSessionMachinesWorld();
+  const workspace = world.workspace(COMPANY);
+  const machine = await world.machinesFor(COMPANY).start({ companyId: COMPANY, machineKey: workspace });
+  await world.settle();
+  await h.store.update({ key: operationKey(h.deps.companyId, run.workspaceId, run.operationId), ops: [change.set("machineId", machine.machineId)] });
+  await h.store.update({ key: runWatchKey(COMPANY, run.workspaceId, run.operationId), ops: [change.set("machineId", machine.machineId)] });
+  const fleet = new SessionWorkerFleet(brokerCoreWorkerMachines({ sessions: world.sessions, documentClient: world.db, tableName: TABLE }));
+  const deps = { ...h.deps, machines: fleet.forCompany(COMPANY) };
+  expect(await sweepLostRuns(deps)).toMatchObject({ waiting: 1, interrupted: 0 });
+  expect(await h.store.get(runWatchKey(COMPANY, run.workspaceId, run.operationId))).not.toHaveProperty("unhealthySince");
+  await deps.machines.stop(machine.machineId);
+  await world.settle();
+  expect(await sweepLostRuns(deps)).toMatchObject({ waiting: 1, interrupted: 0 });
+  h.clock.advance(RUN_LOST_GRACE_SECONDS + 1);
+  expect(await sweepLostRuns(deps)).toMatchObject({ interrupted: 1 });
+  expect(await operationOf(h, run)).toMatchObject({ status: "INTERRUPTED", error: RUN_LOST_MESSAGE });
 });

@@ -6,8 +6,9 @@
 // to THIS interface instead. Anything that implements it can sit under the adapters: Cloud's `GitHubAppCredentialProvider`, a client built on
 // `gh` or a personal token for the local runtime (L4), or a test fixture. The types below are copies of Cloud's declarations in `github-app.ts`
 // (same names, same fields); when a lane brings that client in, replace them with `export type { ... } from "../../../github-app.js"`.
-import type { HostScope, ReadBudget } from "@agentx/contracts";
+import type { HostScope, ReadBudget, RovaraCheckPayload } from "@agentx/contracts";
 import type { PullRequestStatus } from "../../../github-pull-status.js";
+import type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
 import type { CommitFilesRequest } from "./commit-files.js";
 
 export type { PullRequestCheck, PullRequestStatus } from "../../../github-pull-status.js";
@@ -172,14 +173,26 @@ export interface GitHubCodeHostProvider {
   /** Optional (lane L12): one comment of Rovara's own fixed text on a pull request's conversation. */
   postPullRequestComment?(repositoryUrl: string, number: number, text: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"posted" | "gone">;
   markPullRequestReady(repositoryUrl: string, number: number, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"ready" | "already_ready">;
+  /** Optional (TE-B4): the source word of the App's own checks (the App's id). */
+  summaryCheckSource?(): Promise<string>;
+  /** Optional (TE-B4): creates or updates the one "Rovara" Check Run on a head with a `checks: write` token of its own (see the client). */
+  upsertRovaraCheck?(repositoryUrl: string, input: { headSha: string; runId?: string | undefined; payload: RovaraCheckPayload; detailsUrl?: string | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ runId: string } | "no_permission">;
   requestReviewers(repositoryUrl: string, number: number, reviewers: readonly string[], scope: GitHubTokenScope, budget?: ReadBudget): Promise<"requested" | "refused">;
   mergePullRequest(repositoryUrl: string, number: number, input: { sha: string; method: "squash" | "merge" }, scope: GitHubTokenScope): Promise<MergePullRequestResult>;
   /** The tail of a GitHub Actions job's log (untrusted text). Used by the GitHub Actions check runner. */
   getJobLogTail(repositoryUrl: string, jobId: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<string | undefined>;
+  /** TE-E0 option A: one check run's times and, for an Actions job, its run attempt. Optional: a client without it gives no run number, and the evidence says so. */
+  getCheckRunFacts?(repositoryUrl: string, checkRunId: string, scope: GitHubTokenScope, budget?: ReadBudget, options?: { actionsJob?: boolean }): Promise<CheckRunFacts | undefined>;
+  /** TE-E0 option A: the latest run of a named check on a commit or a branch's head. */
+  getLatestCheckRun?(repositoryUrl: string, at: { revision: string } | { branch: string }, check: { name: string; appId?: number | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<LatestCheckRun | undefined>;
+  /** TE-E0 option B: the per-test report files of one GitHub Actions workflow run. */
+  getRunReportFiles?(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: ReadBudget, options?: { since?: string }): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" } | { kind: "ambiguous" }>;
+  /** TE-E0 option A, setup: the check names seen on recent pull requests. */
+  listSeenCheckNames?(repositoryUrl: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ checks: SeenCheckName[]; complete: boolean }>;
 }
 
-/** What the GitHub Actions check runner needs of the client. */
-export type GitHubActionsProvider = Pick<GitHubCodeHostProvider, "getPullRequestStatus" | "getJobLogTail">;
+/** What the GitHub Actions check runner needs of the client (the TE-E0 reads are optional). */
+export type GitHubActionsProvider = Pick<GitHubCodeHostProvider, "getPullRequestStatus" | "getJobLogTail"> & Partial<Pick<GitHubCodeHostProvider, "getCheckRunFacts" | "getLatestCheckRun" | "listSeenCheckNames" | "getRunReportFiles">>;
 
 /** The methods a client must have before an adapter is built over it: a client built from an older tree is refused at start-up, not at its first call. */
 export const GITHUB_CODE_HOST_PROVIDER_METHODS = [

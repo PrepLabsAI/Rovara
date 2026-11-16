@@ -54,6 +54,7 @@ function recordedCheckResults(workflow: WorkflowSnapshot, recorded: NonNullable<
   return recorded.results.map((result) => ({
     checkId: result.checkId, label: labels.get(result.checkId), status: result.status,
     couldNotRun: workflowCheckResultBroken(result) || result.neverStarted === true,
+    ...(result.madeByRovara === true ? { madeByRovara: true as const } : {}),
   }));
 }
 

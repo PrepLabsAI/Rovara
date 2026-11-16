@@ -195,7 +195,8 @@ describe("access stack", () => {
 
   it("lets the service role create every resource type the environment templates contain, and nothing unused", () => {
     const needed = resourceTypeServices();
-    expect([...needed].filter((service) => !SERVICE_ROLE_SERVICES.includes(service) && service !== "events")).toEqual([]);
+    // events and route53resolver are granted by scoped statements (EcsFailureEventsRule; DnsFirewall and DnsFirewallList), never by wildcard.
+    expect([...needed].filter((service) => !SERVICE_ROLE_SERVICES.includes(service) && service !== "events" && service !== "route53resolver")).toEqual([]);
     // The reverse: every wildcard service is created by some resource type or called by some role.
     const used = new Set([...needed, ...[...usedActions()].map((a) => a.split(":")[0]!)]);
     expect(SERVICE_ROLE_SERVICES.filter((service) => !used.has(service))).toEqual([]);

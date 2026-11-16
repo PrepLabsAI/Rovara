@@ -6,7 +6,7 @@ function generator(seed: number): () => number { let state = seed; return () => 
 const draw = (field: PolicyField, next: () => number): PolicyValue => field.order?.[next() % field.order.length] ?? (field.kind === "boolean" ? next() % 2 === 0 : field.id === "ci_fix_rounds" ? next() % 4 : field.id === "round_time_minutes" ? 30 + next() % 91 : next() % 100);
 const rank = (field: PolicyField, value: PolicyValue): number => value === null ? -1 : field.order?.indexOf(String(value)) ?? Number(value);
 
-it(`floor property: every field survives all lower layers; seed=${SEED}; cases=10000`, () => {
+it(`bound property: a limit is never exceeded and a minimum never undercut; seed=${SEED}; cases=10000`, () => {
   const next = generator(SEED);
   for (let i = 0; i < 10_000; i += 1) {
     const field = POLICY_FIELDS[i % POLICY_FIELDS.length]!;
@@ -17,7 +17,9 @@ it(`floor property: every field survives all lower layers; seed=${SEED}; cases=1
       taskRaises: { [field.id]: draw(field, next) }, companyLocks: { [field.id]: lock }, ...(field.measured ? { measured: { [field.id]: draw(field, next) } } : {}) };
     const got = resolvePolicy(input);
     expect(got.status, `seed=${SEED}, case=${i}`).toBe("resolved");
-    expect(rank(field, got.values[field.id]!.value), `seed=${SEED}, case=${i}, field=${field.id}`).toBeGreaterThanOrEqual(rank(field, lock));
+    const actual = rank(field, got.values[field.id]!.value);
+    if (field.companyBound === "limit") expect(actual).toBeLessThanOrEqual(rank(field, lock));
+    else expect(actual).toBeGreaterThanOrEqual(rank(field, lock));
   }
 });
 
@@ -46,13 +48,13 @@ it(`task bounds property: upward and within ceiling; seed=${SEED + 2}; cases=100
   }
 });
 
-it(`preset and multifield floor property with ceilings and operator off; seed=${SEED + 3}; cases=10000`, () => {
+it(`preset minima and explicit limits property with ceilings and operator off; seed=${SEED + 3}; cases=10000`, () => {
   const next = generator(SEED + 3);
   for (let i = 0; i < 10_000; i += 1) {
     const careful = i % 2 === 0;
     // Independent minima, not computed by the production preset expansion/comparator.
-    const floor: Record<string, PolicyValue> = { preset_level: careful ? "careful" : "balanced", real_check: careful ? "rovara_real_run" : "their_ci_fix", ci_fix_rounds: 3,
-      round_time_minutes: 30 + next() % 91, extra_review: true, after_merge_revert: "offer_revert", mutation_spot_check: careful ? "on" : "off", prompt_side_by_side: careful ? "on" : "off",
+    const floor: Record<string, PolicyValue> = { preset_level: careful ? "careful" : "balanced", real_check: careful ? "rovara_real_run" : "their_ci_fix", ci_fix_rounds: 0,
+      round_time_minutes: 30 + next() % 91, extra_review: true, after_merge_revert: "offer_revert", mutation_spot_check: careful ? "on" : "off", prompt_side_by_side: careful ? "on" : "off", browser_evidence: "off", device_evidence: "off",
       model_budget_usd: next() % 100, machine_budget_minutes: next() % 100 };
     const patch = () => Object.fromEntries(POLICY_FIELDS.map((field) => [field.id, draw(field, next)]));
     const ceiling = Number(floor["model_budget_usd"]) + next() % 100;
@@ -66,6 +68,7 @@ it(`preset and multifield floor property with ceilings and operator off; seed=${
     for (const field of POLICY_FIELDS) {
       const result = got.values[field.id]!;
       if (off) expect(result, `seed=${SEED + 3}, case=${i}, field=${field.id}`).toEqual({ value: null, origin: "install_off" });
+      else if (field.companyBound === "limit") expect(rank(field, result.value), `seed=${SEED + 3}, case=${i}, field=${field.id}`).toBeLessThanOrEqual(rank(field, floor[field.id]!));
       else expect(rank(field, result.value), `seed=${SEED + 3}, case=${i}, field=${field.id}`).toBeGreaterThanOrEqual(rank(field, floor[field.id]!));
     }
     if (!off) expect(got.values["model_budget_usd"]!.value).toBeLessThanOrEqual(ceiling);

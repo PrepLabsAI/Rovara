@@ -5,7 +5,7 @@
 //
 // The file is UNTRUSTED by the broker, which binds it to the candidate's digest, checks every count against the check report it holds itself and the data guard before anything is kept
 // (broker/src/rovara-code/evidence-keep.ts). This module only has to be bounded and never throw: a fault leaves the file out, and the round goes on as it would have.
-import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidenceRawSchema, createCandidateManifest, redactText, type CandidateRepository, type CheckEntry, type TestServicesUsageRecord, type EvidenceRaw, type ProjectCommand } from "@agentx/contracts";
+import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidenceRawSchema, FLAKY_ON_RERUN_MAX, createCandidateManifest, redactText, type CandidateRepository, type CheckEntry, type TestServicesUsageRecord, type EvidenceRaw, type ProjectCommand, type RawBaseline } from "@agentx/contracts";
 import type { ArtifactSink } from "../artifacts.js";
 import type { CheckPlan } from "./checks.js";
 import { coveragePart, readChangedCoverage, type RepositoryChanges } from "./cobertura-lcov-coverage.js";
@@ -18,12 +18,13 @@ import { readContainedReport } from "./report-file.js";
 import { SARIF_REPORT_MAX_BYTES, findingsPart, newFindings, parseSarif, readsPrebuiltState, sameFindings, sarifPathOf, unverifiedPart, type ParsedSarif } from "./sarif.js";
 import { isWorkspaceUnsafe } from "./original-code.js";
 import { runBaselineScans, type BaselineRun, type BaselineScan } from "./sarif-baseline.js";
-import { changedTestFiles, readCheckReport, type TestProofRepository } from "./test-proof.js";
+import { changedTestFiles, type TestProofRepository } from "./test-proof.js";
 import { withIsolatedGit } from "../isolated-git.js";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { evidenceTests, parseTestReport } from "./test-report.js";
-import { withTestIds } from "./test-ids.js";
+import { evidenceTests } from "./test-report.js";
+import { readCheckTests } from "./check-tests.js";
+import type { FlakyRerunResult } from "./flaky-rerun.js";
 
 export interface CollectEvidenceInput {
   /** The workspace root, where a check's report path is resolved from its cwd. */
@@ -56,6 +57,13 @@ export interface CollectEvidenceInput {
    * report: a round that ran against Postgres says so whether or not a test report was read.
    */
   testServices?: TestServicesUsageRecord | undefined;
+  /** TE-C6: the round's rerun result (`rerunFlaky`), by check id. Present only when the plan asked for the rerun. */
+  flaky?: FlakyRerunResult | undefined;
+  /**
+   * TE-C1: the nearest trusted baseline commit that is an ancestor of the task's base (`findBaselineAncestor`), found at the START of the round. Given only when the plan carried candidates (an asked-for field), so a run
+   * that was not asked writes exactly the file it always wrote. It is kept even when no check left a report: the engine compares the task with that baseline whatever was measured.
+   */
+  baseline?: RawBaseline | undefined;
   /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
   repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }
@@ -121,14 +129,18 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
     for (const [index, command] of input.commands.entries()) {
       const entry = entryOf(index);
       if (entry === undefined) continue;
-      const read = await readCheckReport(input.reportRootPath ?? input.rootPath, command).catch(() => undefined);
-      const reported = read === undefined ? undefined : parseTestReport(read.text, read.kind);
-      // The tests in ID form (contracts `test-id.ts`), the same strings the nightly run and the known-failing marks use.
-      const parsed = reported === undefined ? undefined : await withTestIds(reported, { root: input.rootPath, cwd: command.cwd });
+      // The tests in ID form (contracts `test-id.ts`), the same strings the nightly run and the known-failing marks use (one reader, shared with the flaky rerun). The report is read where the round wrote it (`reportRootPath`); the ids resolve against the workspace.
+      const parsed = (await readCheckTests(input.reportRootPath ?? input.rootPath, command, { idRootPath: input.rootPath }))?.report;
       const partial: CheckParts = { index, entry };
       // The skips among untouched tests before and now, and the tests that ran before and are gone (TE-B3), need the run on the ORIGINAL code, which comes after this file is written: they come from test-proof.json
       // (`weakening`, test-proof.ts) and the broker joins them to this part when it keeps the pack (evidence-keep.ts), so `skippedOutside` is not given here.
-      if (parsed !== undefined) { partial.tests = evidenceTests(parsed, { changedTestPaths }); measured += parsed.total; }
+      if (parsed !== undefined) {
+        partial.tests = evidenceTests(parsed, { changedTestPaths });
+        // TE-C6: the failing tests of this check that passed on the round's one rerun, only when the plan asked for the rerun (absent keys otherwise, so a pack without it reads as it always did). Only ids this report fails.
+        const flaky = input.flaky?.get(entry.id)?.flaky.filter((id) => partial.tests!.names.some((name) => name.name === id && (name.status === "failed" || name.status === "errored")));
+        if (flaky !== undefined && flaky.length > 0) { partial.tests.flakyOnRerun = flaky.slice(0, FLAKY_ON_RERUN_MAX); partial.tests.flakyOnRerunCount = flaky.length; }
+        measured += parsed.total;
+      }
       if (entry.after === "failed") { const tail = outputTailOf(entry.output); if (tail !== undefined) partial.outputTail = tail; }
       // A timed-out, stopped or never-run check may have left an older report on disk: only a check that ended is read.
       if (ended(entry)) {
@@ -212,10 +224,11 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
         ...(partial.outputTail === undefined ? {} : { outputTail: partial.outputTail }),
       });
     }
-    if (checks.length === 0 && input.testServices === undefined) return undefined;
+    if (checks.length === 0 && input.testServices === undefined && input.baseline === undefined) return undefined;
     const raw: EvidenceRaw = {
       schemaVersion: 1, candidateDigest: input.candidateDigest, checks,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
+      ...(input.baseline === undefined ? {} : { baseline: input.baseline }),
       ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(selectionOf(input.selection, measured) === undefined ? {} : { selection: selectionOf(input.selection, measured)! }),
     };
@@ -252,6 +265,10 @@ export async function saveEvidenceRaw(input: {
   baseline?: Pick<BaselineRun, "runners" | "signal" | "budgetMs" | "originalCode" | "capMs"> | undefined;
   /** Test services: the round's usage record (see `CollectEvidenceInput.testServices`). Absent for a task without dependencies: then the file is what it always was. */
   testServices?: TestServicesUsageRecord | undefined;
+  /** TE-C6: see `CollectEvidenceInput.flaky`. */
+  flaky?: FlakyRerunResult | undefined;
+  /** TE-C1: see `CollectEvidenceInput.baseline`. */
+  baselineClaim?: RawBaseline | undefined;
   /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
   repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
 }): Promise<boolean> {
@@ -269,6 +286,8 @@ export async function saveEvidenceRaw(input: {
       repositories: placed, repositoriesComplete: complete,
       selection: input.selection, coveragePaths: input.coveragePaths,
       ...(input.testServices === undefined ? {} : { testServices: input.testServices }),
+      ...(input.flaky === undefined ? {} : { flaky: input.flaky }),
+      ...(input.baselineClaim === undefined ? {} : { baseline: input.baselineClaim }),
       ...(input.repositoryEdges === undefined || (input.repositoryEdges.edges.length === 0 && input.repositoryEdges.notes.length === 0) ? {} : { repositoryEdges: input.repositoryEdges }),
       ...(baseline === undefined || !complete ? {} : {
         baselineScans: (scans: readonly BaselineScan[]) => runBaselineScans(scans, { ...baseline, rootPath: input.rootPath, repositories: placed.map((repository) => ({ directory: repository.directory, commit: repository.startCommit })) }),

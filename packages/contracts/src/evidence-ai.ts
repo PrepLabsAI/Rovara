@@ -14,7 +14,7 @@ export type RealModelRunSummary = z.infer<typeof RealModelRunSummarySchema>;
 const excerpt = (max: number) => z.string().max(max * 2).refine(s => Array.from(s).length <= max);
 const countsSchema = z.object({ questions: count, broke: count, newlyFail: count, newlyPass: count, flaky: count, unchanged: count, excluded: count }).strict();
 const summaryShape = {
-  label: z.enum(["Worse on eval", "No drop found", "Improved on eval", "Not run"]),
+  label: z.enum(["Worse on eval", "No regression measured (eval)", "Improved on eval", "Not run"]),
   notRunReason: z.enum(EVAL_NOT_RUN_REASONS).optional(),
   privateSet: z.boolean(), counts: countsSchema.optional(),
 };

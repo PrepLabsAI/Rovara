@@ -8,6 +8,7 @@ import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -62,7 +63,7 @@ describe("admin change infrastructure", () => {
   type Fn = { Properties: { Environment?: { Variables?: Record<string, unknown> }; Role?: { "Fn::GetAtt": [string, string] } } };
   const functionNamed = (template: Template, prefix: string) => Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, Fn>)
     .find(([id]) => id.replace(/[0-9A-F]{8}$/, "") === prefix)![1];
-  const variablesOf = (template: Template, prefix: string) => functionNamed(template, prefix).Properties.Environment?.Variables ?? {};
+  const variablesOf = (template: Template, prefix: string) => unpackedBrokerVariables(functionNamed(template, prefix).Properties.Environment?.Variables ?? {});
   const keysOf = (statement: Statement) => leading(statement) as string[] | undefined;
   const tableRef = (template: Template, prefix: string) => {
     const [id] = Object.keys(template.findResources("AWS::DynamoDB::Table")).filter((logicalId) => logicalId.replace(/[0-9A-F]{8}$/, "") === prefix);

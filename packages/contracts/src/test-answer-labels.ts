@@ -15,6 +15,8 @@
 // Precedence when one test used several dependencies: faked beats recorded beats real (the least trusted answer names the state). A test that failed is `failed` whatever answered it.
 // Test ids and dependency names come from a repository: every one is made plain (control characters out, cut short) before it is written into a line. Nothing here imports a Node module.
 import { z } from "zod";
+import { scriptedRepliesCountTowardProof, type EvidenceTrustClass } from "./check-kinds.js";
+import { REPLY_PROVENANCES, REPLY_PROVENANCE_LABELS, type ReplyProvenance } from "./model-reply-provenance.js";
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 const line = (max: number) => z.string().min(1).max(max).regex(NO_HIDDEN, "one plain line");
@@ -23,10 +25,22 @@ const Date10 = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, "a date");
 export const TEST_ANSWER_RECORDS_MAX = 5_000;
 export const TEST_ANSWER_USES_MAX = 16;
 
-/** What answered one dependency a test called: a fake that makes answers up or serves hand-written ones, or a recording (with the day it was recorded). A real answer needs no record. */
+/**
+ * What answered one dependency a test called, from every kind of backing (TE-A3):
+ *   `faked`          an answer a fake served that was not recorded from the real service. A record of this source cannot tell a hand-written answer from one the fake made up, so it never counts toward the proof
+ *                    (DECISIONS 169: made-up answers never count). A writer that knows a fake MADE UP the answer (it had no recording for the request) writes `made_by_rovara` instead.
+ *   `recorded`       a recording, with the day it was recorded.
+ *   `emulated`       Rovara local AWS.
+ *   `made_by_rovara` a mock Rovara made, or an answer Rovara made up for a request it had no recording for. Labelled "Made by Rovara"; never counts.
+ *   `scripted`       scripted AI replies, with the reply set's own provenance (`before_task`, `independent`, `task_made`; model-reply-provenance.ts, DECISIONS 192a).
+ * A real answer needs no record. A record written before TE-A3 holds only the first two and still reads.
+ */
 export const TestAnswerUseSchema = z.discriminatedUnion("source", [
   z.object({ source: z.literal("faked"), dependency: line(80) }).strict(),
   z.object({ source: z.literal("recorded"), dependency: line(80), recordedOn: Date10 }).strict(),
+  z.object({ source: z.literal("emulated"), dependency: line(80) }).strict(),
+  z.object({ source: z.literal("made_by_rovara"), dependency: line(80) }).strict(),
+  z.object({ source: z.literal("scripted"), dependency: line(80), provenance: z.enum(REPLY_PROVENANCES) }).strict(),
 ]);
 export type TestAnswerUse = z.infer<typeof TestAnswerUseSchema>;
 
@@ -50,28 +64,85 @@ export type TestAnswerRecord = z.infer<typeof TestAnswerRecordSchema>;
 export const TestAnswerRecordsSchema = z.array(TestAnswerRecordSchema).max(TEST_ANSWER_RECORDS_MAX);
 
 /** The state a test result has. `passed` is only for a test that no faked or recorded answer stood behind. */
-export const TEST_RESULT_STATES = ["passed", "passed_faked", "passed_recorded", "failed", "not_run_no_recording"] as const;
+export const TEST_RESULT_STATES = ["passed", "passed_faked", "passed_recorded", "passed_emulated", "passed_made_by_rovara", "passed_scripted", "failed", "not_run_no_recording"] as const;
 export type TestResultState = (typeof TEST_RESULT_STATES)[number];
 export const TEST_RESULT_STATE_WORDS: Record<TestResultState, string> = {
   passed: "passed",
   passed_faked: "passed against faked answers",
   passed_recorded: "passed against recorded answers",
+  passed_emulated: "passed against Rovara local AWS answers",
+  passed_made_by_rovara: "passed against answers made by Rovara",
+  passed_scripted: "passed against scripted AI replies",
   failed: "failed",
   not_run_no_recording: "not run (no recording)",
 };
 
-/** The state of one record. A passing test that used a faked answer is `passed_faked`, else one that used a recorded answer is `passed_recorded`, else `passed`. */
+/** The sources of an answer, least trusted first: the state of a test is the first of these that any of its answers has. */
+const SOURCE_PRECEDENCE = ["made_by_rovara", "scripted", "faked", "emulated", "recorded"] as const;
+const STATE_OF_SOURCE: Record<(typeof SOURCE_PRECEDENCE)[number], TestResultState> = {
+  made_by_rovara: "passed_made_by_rovara", scripted: "passed_scripted", faked: "passed_faked", emulated: "passed_emulated", recorded: "passed_recorded",
+};
+
+/** The state of one record. A passing test is in the state of the least trusted answer behind it (Made by Rovara, then scripted, faked, Rovara local AWS, recorded), else `passed`. */
 export function testResultState(record: TestAnswerRecord): TestResultState {
   if (record.status === "not_run") return "not_run_no_recording";
   if (record.status === "failed") return "failed";
-  if (record.uses.some((use) => use.source === "faked")) return "passed_faked";
-  return record.uses.some((use) => use.source === "recorded") ? "passed_recorded" : "passed";
+  const first = SOURCE_PRECEDENCE.find((source) => record.uses.some((use) => use.source === source));
+  return first === undefined ? "passed" : STATE_OF_SOURCE[first];
+}
+
+/**
+ * The trust class of one answer (O51): a recording is Recorded, never Real; a mock Rovara made is Made by Rovara, and so is a `faked` answer, which may have been made up (DECISIONS 169), so its class never counts
+ * where `testAnswerCountsTowardProof` does not; everything else that is not a real answer is Simulated, and so is a source this build does not know (which still never counts, by `testAnswerCountsTowardProof`).
+ */
+export function testAnswerTrustClass(use: TestAnswerUse): EvidenceTrustClass {
+  switch (use.source) {
+    case "recorded": return "recorded";
+    case "faked":
+    case "made_by_rovara": return "made_by_rovara";
+    default: return "simulated";
+  }
+}
+
+/** The trust classes of the answers behind a test, each once, in the order of `EVIDENCE_TRUST_CLASSES`. A test with no recorded use has none: this lane only maps what the worker recorded (the join with detected in-process fakes is TE-A6). */
+export function testTrustClasses(record: TestAnswerRecord): EvidenceTrustClass[] {
+  const found = new Set(record.uses.map(testAnswerTrustClass));
+  return (["real", "recorded", "simulated", "made_by_rovara", "no_outside_calls"] as const).filter((trust) => found.has(trust));
+}
+
+/**
+ * Whether one answer can stand behind a proof. A recording and Rovara local AWS can. A mock Rovara made, or an answer it made up, never can, and neither can a `faked` answer, which may have been made up (DECISIONS
+ * 169). Scripted replies follow the Proof table's rule (`scriptedRepliesCountTowardProof`, DECISIONS 192a): replies written in this task count only when `realModel`, the real-model final check's result for this test,
+ * is "confirmed". A source this build does not know does not count.
+ */
+export function testAnswerCountsTowardProof(use: TestAnswerUse, realModel?: unknown): boolean {
+  switch (use.source) {
+    case "recorded":
+    case "emulated":
+      return true;
+    case "scripted":
+      return scriptedRepliesCountTowardProof(use.provenance, realModel);
+    default:
+      return false;
+  }
+}
+
+/** Whether a test counts toward the proof: it passed, and every answer behind it counts (`realModel` is the real-model final check's result for this test, if it ran). */
+export function testCountsTowardProof(record: TestAnswerRecord, realModel?: unknown): boolean {
+  return record.status === "passed" && record.uses.every((use) => testAnswerCountsTowardProof(use, realModel));
 }
 
 /** The oldest recording a test's answers came from (the least fresh answer names the date), or undefined when none was recorded. */
 export function testRecordedOn(record: TestAnswerRecord): string | undefined {
   const dates = record.uses.flatMap((use) => (use.source === "recorded" ? [use.recordedOn] : []));
   return dates.length === 0 ? undefined : [...dates].sort()[0];
+}
+
+/** The provenance that names a test's scripted line: the one that counts least (written in this task, then independent, then from before the task), so a mix never reads better than its worst part. */
+const PROVENANCE_LEAST_FIRST: readonly ReplyProvenance[] = [...REPLY_PROVENANCES].reverse();
+function scriptedProvenanceOf(record: TestAnswerRecord): ReplyProvenance | undefined {
+  const found = record.uses.flatMap((use) => (use.source === "scripted" ? [use.provenance] : []));
+  return PROVENANCE_LEAST_FIRST.find((provenance) => found.includes(provenance));
 }
 
 const plain = (text: string, max: number): string => {
@@ -108,6 +179,15 @@ export function testAnswerSummaryLines(records: readonly TestAnswerRecord[], opt
   const lines: string[] = [];
   const faked = records.filter((record) => testResultState(record) === "passed_faked");
   if (faked.length > 0) lines.push(`${tests(faked.length)} passed against faked ${service} answers (not real ${real}): ${named(faked.map((record) => record.testId))}`);
+  const emulated = records.filter((record) => testResultState(record) === "passed_emulated");
+  if (emulated.length > 0) lines.push(`${tests(emulated.length)} passed against ${service} answers from Rovara local AWS (not real ${real}): ${named(emulated.map((record) => record.testId))}`);
+  // The reply set's own words for each provenance (the same words the evidence uses); whether a group counts is the Proof table's call (it needs the real-model result), so no line here says "counted" or "not counted".
+  for (const provenance of PROVENANCE_LEAST_FIRST) {
+    const group = records.filter((record) => testResultState(record) === "passed_scripted" && scriptedProvenanceOf(record) === provenance);
+    if (group.length > 0) lines.push(`${tests(group.length)} passed against ${REPLY_PROVENANCE_LABELS[provenance]} for ${service} (not real ${real}): ${named(group.map((record) => record.testId))}`);
+  }
+  const madeByRovara = records.filter((record) => testResultState(record) === "passed_made_by_rovara");
+  if (madeByRovara.length > 0) lines.push(`${tests(madeByRovara.length)} passed against answers Rovara made for ${service} (Made by Rovara, not counted toward the proof; not real ${real}): ${named(madeByRovara.map((record) => record.testId))}`);
   const byDate = new Map<string, TestAnswerRecord[]>();
   for (const record of records.filter((entry) => testResultState(entry) === "passed_recorded")) {
     const date = testRecordedOn(record) ?? "";

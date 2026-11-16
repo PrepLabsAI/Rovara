@@ -1,3 +1,4 @@
+import { logWorkspacePointerIntegrity } from "./workspace-pointer.js";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DocumentKey, type DocumentStore, type StoredDocument } from "@agentx/contracts";
 import { operationEventPrefix, operationRequestKey, OPERATION_SK_PREFIX, workspaceKey } from "./keys.js";
 import { legacyOperationRequestKey, legacyWorkspaceKey } from "./legacy-keys.js";
@@ -35,9 +36,14 @@ export async function locateWorkspace(deps: WorkspaceDeps, workspaceId: string):
     try { return await deps.store.get(key); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "workspace unavailable"); }
   };
   const current = await read(scoped);
-  if (current !== undefined) return owned({ companyId: current["companyId"], orgId: current["orgId"] }, deps.companyId) ? { ...keys(deps.companyId, workspaceId, "company"), workspace: current } : undefined;
-  if (deps.companyId !== IMPLICIT_COMPANY_ID) return undefined;
+  if (current !== undefined && current["companyId"] === deps.companyId && owned({ companyId: current["companyId"], orgId: current["orgId"] }, deps.companyId)) return { ...keys(deps.companyId, workspaceId, "company"), workspace: current };
   const legacy = await read(legacyWorkspaceKey(workspaceId));
+  if (legacy?.["entityType"] === "WORKSPACE_COMPANY_POINTER") {
+    // The scoped read above failed this pointer's own company check. Never follow another company's pointer from a company-bound reader.
+    if (legacy["companyId"] === deps.companyId) logWorkspacePointerIntegrity();
+    return undefined;
+  }
+  if (current !== undefined || deps.companyId !== IMPLICIT_COMPANY_ID) return undefined;
   return legacy !== undefined && owned({ companyId: legacy["companyId"], orgId: legacy["orgId"] }, deps.companyId) ? { ...keys(deps.companyId, workspaceId, "legacy"), workspace: legacy } : undefined;
 }
 /** Missing workspaces address only company keys; this helper can never create a legacy workspace. */

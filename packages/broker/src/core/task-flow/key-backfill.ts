@@ -108,10 +108,10 @@ export async function backfillWorkspaceKeysPage(deps: WorkspaceBackfillDeps, inp
         visits++; report.scanned++;
         // Re-read only legacy META. Advance the index checkpoint only after this read succeeds:
         // an interrupted read must retry this workspace, including the final item of the index.
-        if (typeof listed.id !== "string" || listed.pk !== legacyWorkspaceKey(listed.id).pk || listed.sk !== "META") { advanceIndex(); continue; }
+        if (listed.entityType === "WORKSPACE_COMPANY_POINTER" || typeof listed.id !== "string" || listed.pk !== legacyWorkspaceKey(listed.id).pk || listed.sk !== "META") { advanceIndex(); continue; }
         const meta = await get(legacyWorkspaceKey(listed.id));
         advanceIndex();
-        if (meta === undefined) continue;
+        if (meta === undefined || meta.entityType === "WORKSPACE_COMPANY_POINTER") continue;
         if (!owned(meta)) { report.skippedForeign++; continue; }
         if (!eligible(meta, started)) { report.skippedActive++; continue; }
         if (state.dryRun) continue;
@@ -120,7 +120,7 @@ export async function backfillWorkspaceKeysPage(deps: WorkspaceBackfillDeps, inp
       const current = state.current;
       const legacy = legacyWorkspaceKey(current.id), scoped = workspaceKey(IMPLICIT_COMPANY_ID, current.id);
       const meta = await get(legacy);
-      if (meta === undefined) { finish(); continue; }
+      if (meta === undefined || meta.entityType === "WORKSPACE_COMPANY_POINTER") { finish(); continue; }
       if (!owned(meta)) { report.skippedForeign++; finish(); continue; }
       if (!eligible(meta, started) || hash(meta) !== current.metaHash) { report.skippedActive++; finish(); continue; }
       const targetMeta = await get(scoped);
