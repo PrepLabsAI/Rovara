@@ -26,7 +26,7 @@ import { toDocument, type OperationRecord, type TaskRecord } from "../task-flow/
 import type { StoredSecondOpinion } from "../second-review/store.js";
 import { blockTaskWorkflow, commitWorkflow, runDispatchRow } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
-import { checkCommandCouldNotRun, regressedCheckLabels } from "./check-results.js";
+import { regressedCheckLabels, verificationResultsOf } from "./check-results.js";
 import { isNonCandidateRound, verifyWorkflowE2EEvidence } from "../e2e/verification.js";
 import type { E2EVerificationDiagnostic } from "../e2e/authority.js";
 import { SOURCE_TOO_LARGE_BLOCK_REASON, SOURCE_TOO_LARGE_CODE, readCandidateSourceExport, type CandidateSourceRef } from "../e2e/uploads.js";
@@ -242,16 +242,7 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     }
     // The worker reports the readiness commands it was sent as `readiness:<index>`, in the order of the selected checks; agent-claimed entries never stand in for them, and a missing one is unknown.
     const selected = workflowSelectedChecks(workflow.checkPolicy);
-    const byId = new Map(checks.data.checks.filter((entry) => entry.source === "project").map((entry) => [entry.id, entry]));
-    const results = selected.map((check, index) => {
-      const entry = byId.get(`readiness:${index}`);
-      const status = entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const;
-      // The worker's report of a program it could not start, which is all the check's output then holds; any other spawn error with no exit code is the same.
-      const programNotFound = status === "FAILED" && entry?.output.trim() === `spawn ${check.command.executable} ENOENT`;
-      const neverStarted = status === "FAILED" && !programNotFound && entry?.exitCode == null && /^spawn \S+ E[A-Z]+$/u.test(entry?.output.trim() ?? "");
-      const broken = status === "FAILED" && entry !== undefined && (programNotFound || neverStarted || checkCommandCouldNotRun(check.command, entry.exitCode, entry.output));
-      return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}), ...(neverStarted ? { neverStarted: true as const } : {}) };
-    });
+    const results = verificationResultsOf(selected, checks.data.checks);
     if (results.length === 0 && !reviewOnly) { failure = WORKFLOW_BLOCK_REASONS.noCheckResults; throw new Error("there are no selected check results"); }
     next = recordWorkflowVerification(verifying, {
       candidate,

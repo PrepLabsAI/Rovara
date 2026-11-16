@@ -173,8 +173,11 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     return settled(deps, row, "STALE");
   }
   const operationId = graph === undefined ? undefined : newId(deps);
+  // General fakes (slice 2): the coding run verifies with the same fakes a CHECKS round would, but only when it has checks to run.
+  const generalFakes = readiness === undefined || readiness.length === 0 ? undefined : await generalFakesOf(deps, task);
   const payload = jsonOf({
     ...(readiness === undefined ? {} : { readiness }),
+    ...(generalFakes === undefined ? {} : { generalFakes }),
     ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }),
     ...baseOf(task, workflow),
     ...(workflow.fixSource === undefined ? {} : { workflowFix: { source: workflow.fixSource, ...(startFrom === undefined ? {} : { startFrom }) } }),
@@ -189,6 +192,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       "task.workflowMode", ...(readiness === undefined ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"]),
       ...(graph === undefined ? [] : ["task.workflowDependencies"]),
       ...(testPlan === undefined ? [] : testPlan.requires),
+      ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE]),
     ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source"],
     ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),

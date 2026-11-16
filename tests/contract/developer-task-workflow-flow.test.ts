@@ -3188,6 +3188,11 @@ describe("checks AgentX proposes in the coding plan", () => {
       expect(blocked.verification?.results).toEqual([{ checkId: "proposed-1", status: "FAILED", broken: true, neverStarted: true }, { checkId: "proposed-2", status: "FAILED" }]);
     });
 
+    it("keeps a worker entry's Made by Rovara label on the recorded result, and only there (general fakes, DEC 234)", async () => {
+      const recorded = await verified([unitTests, typecheck], [{ ...entry(0, "passed", "", 0), madeByRovara: true }, entry(1, "passed", "", 0)]);
+      expect(recorded.verification?.results).toEqual([{ checkId: "proposed-1", status: "PASS", madeByRovara: true }, { checkId: "proposed-2", status: "PASS" }]);
+    });
+
     const inline = { label: "Inline check", cwd: "repo/demo", executable: "python3", args: ["-c", "import app"], proves: ["1"] };
     const nested = { label: "Nested script", cwd: "repo/demo", executable: "python3.11", args: ["tools/check.py"], proves: ["1"] };
     const brokenResult = [{ checkId: "proposed-1", status: "FAILED", broken: true }];

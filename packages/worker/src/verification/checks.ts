@@ -87,6 +87,11 @@ export interface CheckRunners {
    * network) is always closed and the working sandbox put back, also for the TESTPROOF rerun and the baseline scans, which call `runChecks` themselves. Its rejection is ignored. Absent: nothing changes.
    */
   endRound?(): Promise<void>;
+  /**
+   * General fakes (slice 2): the entries `runChecks` just built, after `endRound` ran, with the checks a Rovara-made fake answered marked `madeByRovara`. Called once per `runChecks`, right after `endRound`, only for a
+   * round that ran to its end. It never throws and never changes an entry it does not mark. Absent: nothing changes.
+   */
+  markEntries?(entries: readonly CheckEntry[]): CheckEntry[];
 }
 
 export interface CheckPlan {
@@ -223,11 +228,13 @@ export async function runChecks(
     }
   }
   if (runners.endRound === undefined) return runChecksRound(plan, runners, options);
+  let round: CheckRound;
   try {
-    return await runChecksRound(plan, runners, options);
+    round = await runChecksRound(plan, runners, options);
   } finally {
     await Promise.resolve().then(() => runners.endRound?.()).catch(() => undefined);
   }
+  return runners.markEntries === undefined ? round : { ...round, entries: runners.markEntries(round.entries) };
 }
 
 async function runChecksRound(

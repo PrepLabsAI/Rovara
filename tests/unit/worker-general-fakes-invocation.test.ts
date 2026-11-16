@@ -50,7 +50,8 @@ async function invoke(payload: { generalFakes?: GeneralFakesPayload; readiness: 
 describe("general fakes in a real CHECKS invocation", () => {
   it("the check's call gets the fake's answer and the round is labelled Made by Rovara", async () => {
     const { result, events } = await invoke({ generalFakes: { services: [{ variable: "PAY_URL" }] }, readiness: [check("/charges/ch_1")] });
-    expect(result.checks?.checks[0]).toMatchObject({ after: "passed" });
+    // The label is on the check result itself (slice 2), not only in the saved test proof.
+    expect(result.checks?.checks[0]).toMatchObject({ after: "passed", madeByRovara: true });
     expect(result.checks?.checks[0]?.output).toContain("paid=true");
     expect(events).toContain("Made by Rovara: 1 outside call in this check round was answered by fakes Rovara made from your OpenAPI description. They never count as change proof.");
   });
@@ -79,6 +80,7 @@ describe("general fakes in a real CHECKS invocation", () => {
     const { result, events } = await invoke({ readiness: [check("/charges/ch_1")] });
     expect(result.checks?.checks[0]).toMatchObject({ after: "failed" });
     expect(result.checks?.checks[0]?.output).toContain("unreachable");
+    expect(result.checks?.checks[0]).not.toHaveProperty("madeByRovara");
     expect(events).not.toContain("Made by Rovara");
     expect(events).not.toContain(GENERAL_FAKES_LOCAL_ONLY_SENTENCE);
   });

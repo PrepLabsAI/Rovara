@@ -456,10 +456,12 @@ generalFakes:
       spec: repo/payments/openapi.yaml    # optional; absent: the one OpenAPI 3 file in your repositories
 ```
 
-- During a verification run of the checks, each listed variable points at Rovara's fake for that service. Each
-  operation answers with a typical body built from its 2xx JSON answer schema (no example values are copied).
-- Every check a fake answered is labelled **Made by Rovara** and **never counts as change proof**: the Proof
-  section shows it as "with a Rovara-made mock; not Proven".
+- During a verification run of the checks, and during the checks the coding run itself makes when the agent finishes,
+  each listed variable points at Rovara's fake for that service. Each operation answers with a typical body built
+  from its 2xx JSON answer schema (no example values are copied).
+- Every check a fake answered is labelled **Made by Rovara** and **never counts as change proof**. The label is on the
+  check's own result: the pull request's Checks section says it on the check's line, and the Proof section shows the
+  check as "with a Rovara-made mock; not Proven" (also when no test proof was saved).
 - A check that fails after a call the fake could not answer reads **Not run** with the reason (no description found,
   more than one found, unreadable, an operation it does not list, or OpenAPI parts Rovara cannot fake yet), never
   "failed".

@@ -232,6 +232,8 @@ export function withGeneralFakesRound(plan: GeneralFakesRoundPlan | undefined, r
   let calls: CallOutcome[] = [];
   let perCheck = new Map<string, number>();
   let seen = new Set<string>();
+  // The checks this round's fakes answered, kept from `endRound` until `markEntries` (runChecks calls it right after) takes them.
+  let answered: ReadonlySet<string> = new Set();
   const onCall = (outcome: CallOutcome | "unattributed"): void => {
     total += 1;
     if (outcome === "unattributed" || !running) { unknown = true; return; }
@@ -277,14 +279,24 @@ export function withGeneralFakesRound(plan: GeneralFakesRoundPlan | undefined, r
       if (id !== undefined && reason !== undefined && (result.exitCode !== 0 || result.timedOut)) throw new CheckNotRunError(GENERAL_FAKE_NOT_RUN_SENTENCES[reason]);
       return result;
     },
+    markEntries(entries) {
+      const ids = answered;
+      answered = new Set();
+      const marked = runners.markEntries === undefined ? [...entries] : runners.markEntries(entries);
+      if (ids.size === 0) return marked;
+      // Only a check that ran to a result is labelled: a check that did not run (Not run, stopped, unknown) shows nothing that could be taken for a pass.
+      return marked.map((entry) => (ids.has(entry.id) && (entry.after === "passed" || entry.after === "failed" || entry.after === "timed_out") ? { ...entry, madeByRovara: true as const } : entry));
+    },
     async endRound() {
       const current = started;
+      answered = new Set();
       try {
         if (current !== undefined) {
           const fakes = await current.catch(() => undefined);
           await fakes?.stop().catch(() => undefined);
           const ids = unknown ? [...new Set([...seen, ...perCheck.keys()])] : [...perCheck.keys()];
           const facts: GeneralFakeFacts = { unknown, checks: ids.map((checkId) => ({ checkId, served: Math.max(1, perCheck.get(checkId) ?? 0) })) };
+          answered = new Set(ids);
           try { plan.onResult({ facts, lines: total > 0 ? [generalFakesRoundLine(total)] : [] }); } catch { /* a sink that throws must not keep the round open */ }
         }
       } finally {

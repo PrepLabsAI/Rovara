@@ -393,7 +393,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         setupAgent: SetupAgentWireSchema.optional(),
         /** The nightly run (NH-1, switch `nh`): what the broker fixed when the fire started it. Only with `workflowMode: "CHECKS"`, and only to a worker whose /ping lists "task.nightlyRun.v1". */
         nightlyRun: NightlyRunPayloadSchema.optional(),
-        /** General fakes (DEC 234): the services a CHECKS round may answer with Rovara-made fakes. Only while the project's `generalFakes` setting is on, only with `workflowMode: "CHECKS"`, and only to a worker whose /ping lists "task.generalFakes.v1". */
+        /** General fakes (DEC 234): the services a CHECKS round, or the coding run's own verification (`workflowMode: "IMPLEMENT"`, slice 2), may answer with Rovara-made fakes. Only while the project's `generalFakes` setting is on, and only to a worker whose /ping lists "task.generalFakes.v1". */
         generalFakes: GeneralFakesPayloadSchema.optional(),
         /**
          * Meta repo lane B: a setup proposal run is told which of the project's repositories is its meta repository (the team's rules, specs and runbooks live there), so it
@@ -577,8 +577,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         if (payload.setupAgent !== undefined && (payload.agentStep !== undefined || payload.ownerRedirect !== undefined || payload.specWrite !== undefined || payload.contextSources !== undefined || payload.diagnosis !== undefined || payload.testEnvDetect !== undefined)) {
           context.addIssue({ code: "custom", path: ["setupAgent"], message: "a setup run carries no agent step, redirect, spec write, context sources, diagnosis or detection" });
         }
-        if (payload.generalFakes !== undefined && payload.workflowMode !== "CHECKS") {
-          context.addIssue({ code: "custom", path: ["generalFakes"], message: "general fakes are a verification-mode setting" });
+        if (payload.generalFakes !== undefined && payload.workflowMode !== "CHECKS" && payload.workflowMode !== "IMPLEMENT") {
+          context.addIssue({ code: "custom", path: ["generalFakes"], message: "general fakes are a checks or coding setting" });
         }
         if (payload.nightlyRun !== undefined && payload.workflowMode !== "CHECKS") {
           context.addIssue({ code: "custom", path: ["nightlyRun"], message: "a nightly run is a verification-mode operation" });

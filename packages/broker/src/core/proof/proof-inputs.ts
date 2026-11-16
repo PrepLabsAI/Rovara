@@ -8,7 +8,7 @@ import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import type { ProofContext, ProofDesignContext } from "./proof-section.js";
 import type { ProofEvidenceContext } from "./evidence-lines.js";
 import { checkIdOfProofItem } from "./proof-table.js";
-import { recordedCheckIdsOf } from "./proof-section.js";
+import { proofCheckResults, recordedCheckIdsOf } from "./proof-section.js";
 import { PROOF_READ_MAX_MS, withinTime } from "./proof-keep.js";
 import { loadTestProof } from "./test-proof-reader.js";
 
@@ -76,6 +76,11 @@ export async function loadProofContext(
       if (checkId === undefined) { testProof = undefined; checkDependencies.clear(); break; }
       checkDependencies.set(checkId, [...(checkDependencies.get(checkId) ?? []), { dependencyId: "general_fake", trust: "made_by_rovara" }]);
     }
+  }
+  // The label on the check result itself (slice 2): a recorded result a Rovara-made fake answered is never Proven, with or without a test proof. One dependency per check, whichever source said it first.
+  for (const result of checked ? proofCheckResults(workflow) : []) {
+    if (result.madeByRovara !== true || checkDependencies.get(result.checkId)?.some((dependency) => dependency.trust === "made_by_rovara") === true) continue;
+    checkDependencies.set(result.checkId, [...(checkDependencies.get(result.checkId) ?? []), { dependencyId: "general_fake", trust: "made_by_rovara" }]);
   }
   return { plan, ...(checkDependencies.size === 0 ? {} : { checkDependencies }), ...(realModelRun === undefined ? {} : { realModelRun }), ...(scenarioRows === undefined ? {} : { scenarioRows }), ...(testProof === undefined ? {} : { testProof }), ...(evidence === undefined ? {} : { evidence }), ...(design === undefined ? {} : { design }) };
 }
