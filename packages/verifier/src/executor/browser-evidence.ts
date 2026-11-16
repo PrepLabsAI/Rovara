@@ -18,7 +18,7 @@ export type { BrowserEvidenceCaptured };
 export type BrowserEvidenceCaptureAnswer = { ok: true; bytes: Uint8Array; consoleErrors: number } | { ok: false; reason: "page_did_not_load" | "time_limit" | "capture_failed" | "masked_content" };
 export type BrowserEvidenceDriver = Readonly<{
   /** Starts the project's app for this side (the base checkout or the candidate) and waits until it answers. Anything but "ready" means it did not start. */
-  startApp(side: BrowserEvidenceSide, options: { timeoutMs: number }): Promise<"ready" | "app_did_not_start" | "time_limit">;
+  startApp(side: BrowserEvidenceSide, options: { timeoutMs: number }): Promise<"ready" | "app_did_not_start" | "time_limit" | "sign_in_failed">;
   /** Opens one route of the app, masks it and takes one JPEG. */
   capture(side: BrowserEvidenceSide, route: string, options: { maskSelectors: readonly string[]; timeoutMs: number }): Promise<BrowserEvidenceCaptureAnswer>;
   /** Stops what `startApp` started for this side. Called once after every `startApp`, whatever it answered. */
@@ -116,7 +116,8 @@ export async function runBrowserEvidence(input: BrowserEvidenceRunInput): Promis
       // A start that answers after the run gave up on it has started an app nobody would stop: it is stopped as soon as that start settles (bounded like every stop).
       if (answer === TIMED_OUT && starting !== undefined) void starting.then(() => within(() => driver.stopApp(side), BROWSER_EVIDENCE_STOP_MS), () => undefined);
       const ready = answer === "ready";
-      if (!ready) return { ...base, durationMs: Math.max(0, now() - started), routes: [], notRun: "app_did_not_start" };
+      // A sign-in that did not work is said as such (the recipe's own fault to fix); every other answer is an app that did not start.
+      if (!ready) return { ...base, durationMs: Math.max(0, now() - started), routes: [], notRun: answer === "sign_in_failed" ? "sign_in_failed" : "app_did_not_start" };
       for (const route of pending) {
         const left = deadline - now();
         if (left <= 0) { fail(route, "time_limit"); continue; }

@@ -1,4 +1,5 @@
 415 record kinds: 55 company-scoped, 15 install-wide, 345 needs-company. 198 routes: 34 company-scoped, 2 install-wide, 162 needs-company.
+395 record kinds: 40 company-scoped, 13 install-wide, 342 needs-company. 175 routes: 11 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -415,6 +416,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:WORKFLOW_E2E_BASELINE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:WORKFLOW_E2E_EVIDENCE_UPLOAD | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:BROWSER_EVIDENCE_UPLOAD | needs-company | State table | no | - | TE-H1 slice 2 (DEC 241b): one upload row per CHECKS operation under WORKSPACE#<workspace>, like the other chunked uploads. The callback reads the operation from the company-scoped store and refuses any operation the broker did not send the recipe to; the keeper reads the row back only for the same workspace and operation; the pictures reach the company-partitioned evidence store. T1: the row key itself is not company-scoped. |
+| record | entity:BROWSER_EVIDENCE_RECIPE | company-scoped | State table | no | - | TE-H1 slice 3 (owner decision DEC 241c): the project's browser evidence recipe, one row per project, under `projectBrowserEvidenceRecipeKey(orgId, project)` (the company's own project partition). Every read names the company and project and checks both again on the row (`readStoredRecipe`: another company's, another project's or a damaged row is no recipe), every write is conditional on the version the page saw, and a sign-in's reference must be the project's own. The row holds no secret: a sign-in is a form and a NAME; its values live in the company's own secret path. |
 | record | entity:WORKFLOW_E2E_GROUNDING | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:WORKFLOW_E2E_REPLAY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:WORKFLOW_RUN_WATCH | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |

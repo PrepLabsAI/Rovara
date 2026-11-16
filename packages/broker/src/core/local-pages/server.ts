@@ -16,7 +16,9 @@ import { renderAutomation, renderDesignReview, renderIndex, renderLessons, rende
 import { renderHowWeWork, renderHowWeWorkIndex } from "./how-we-work-page.js";
 import { renderModelSelection } from "./models-page.js";
 import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
-import type { ApprovalOffer, AutomationPageAction, ConnectionPageAction, LocalActionResult, LocalPageActions, LocalPageData, ModelSelectionPageAction, SecondReviewPageAction } from "./views.js";
+import { renderBrowserEvidenceIndex, renderBrowserEvidencePage } from "./browser-evidence-page.js";
+import { browserEvidenceRecipeFromForm } from "./browser-evidence-form.js";
+import type { ApprovalOffer, AutomationPageAction, BrowserEvidencePageAction, ConnectionPageAction, LocalActionResult, LocalPageActions, LocalPageData, ModelSelectionPageAction, SecondReviewPageAction } from "./views.js";
 
 export interface LocalPagesServer {
   /** `http://127.0.0.1:<port>`. */
@@ -93,6 +95,11 @@ const NOTICES: Record<string, string> = {
   badcode: "That code is not valid: it may have expired or been used. Message Rovara in the chat again for a new one.",
   chatfresh: "Changing chat settings needs a page you opened in the last few minutes. Run `rovara chat` to open one.",
   setupdone: "Done.",
+  bevsaved: "Saved. Browser evidence runs for this project's next checks.",
+  bevoff: "Browser evidence is off for this project.",
+  bevsignin: "The sign-in is saved. Its values are not shown again.",
+  bevsigninoff: "The saved sign-in is removed.",
+  bevfresh: "Changing browser evidence needs a page you opened in the last few minutes. Run `rovara open browser-evidence` to open one.",
   setupoff: "Setting a project up with Rovara is off on this install.",
   tokenfresh: "Making a token needs a page you opened in the last few minutes. Run `rovara token create` to open one.",
   saved: "Saved.",
@@ -712,6 +719,43 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       }
       if (data.removeNoticeTarget === undefined || thread === "") return redirect(`${back}?n=invalid`);
       return redirect(`${back}?n=${outcomeCode(await data.removeNoticeTarget({ channel, tenant, space, thread }), "unnoticed")}`);
+    } },
+    // TE-H1 browser evidence, slice 3: the recipe page. Reading is any page session; every change is one verified form in a page opened within the last ten minutes, checked here and again by the action.
+    { method: "GET", pattern: /^\/browser-evidence$/, handle: async (request) => {
+      if (options.data.listBrowserEvidenceProjects === undefined) return notFound();
+      const projects = await options.data.listBrowserEvidenceProjects();
+      return page(request, (context) => renderBrowserEvidenceIndex(context, projects));
+    } },
+    { method: "GET", pattern: new RegExp(`^/browser-evidence/(${PROJECT})$`), handle: async (request, match) => {
+      const view = await options.data.getBrowserEvidencePage?.(match[1] ?? "");
+      return view === undefined ? notFound() : page(request, (context) => renderBrowserEvidencePage(context, view, { fresh: tokenPageIsFresh(request), useSuggestion: request.url.searchParams.get("suggestion") === "1" }));
+    } },
+    { method: "POST", pattern: new RegExp(`^/browser-evidence/(${PROJECT})/act$`), handle: async (request, match) => {
+      const project = match[1] ?? "";
+      const back = `${request.base}/browser-evidence/${project}`;
+      const act = options.actions.browserEvidence?.bind(options.actions);
+      const op = request.form?.get("op") ?? "";
+      if (act === undefined || options.data.getBrowserEvidencePage === undefined) return notFound();
+      if (!["save", "turn-off", "save-sign-in", "clear-sign-in"].includes(op)) return redirect(`${back}?n=invalid`);
+      if (!verified(request, { action: "browser-evidence.act", subject: `${op}:${project}` })) return redirect(`${back}?n=form`);
+      let input: BrowserEvidencePageAction | undefined;
+      if (op === "save") {
+        const fields: Record<string, string> = {};
+        for (const [name, value] of request.form?.entries() ?? []) if (name !== "ft" && name !== "op" && !Object.hasOwn(fields, name)) fields[name] = value;
+        const recipe = browserEvidenceRecipeFromForm(project, fields);
+        const version = Number(request.form?.get("version"));
+        if (recipe !== undefined && Number.isSafeInteger(version) && version >= 0) input = { op, project, recipe, ...(version === 0 ? {} : { expectedVersion: version }) };
+      } else if (op === "save-sign-in") {
+        // The values are read once from the form and handed to the action; they are in no address, notice or redirect, and the answer to this post is a fixed notice code.
+        const username = request.form?.get("username") ?? "";
+        const password = request.form?.get("password") ?? "";
+        if (username !== "" && password !== "") input = { op, project, username, password };
+      } else input = { op, project } as BrowserEvidencePageAction;
+      if (input === undefined) return redirect(`${back}?n=invalid`);
+      // Every change is good only in a page session opened within the last ten minutes (the same check as making a script token).
+      if (!tokenPageIsFresh(request)) return redirect(`${back}?n=bevfresh`);
+      const result = await act(input, { fresh: tokenPageIsFresh(request) });
+      return redirect(`${back}?n=${!result.ok && result.reason === "reauth" ? "bevfresh" : outcomeCode(result, op === "save" ? "bevsaved" : op === "turn-off" ? "bevoff" : op === "save-sign-in" ? "bevsignin" : "bevsigninoff")}`);
     } },
     { method: "GET", pattern: /^\/setup$/, handle: async (request) => {
       if (options.data.listSetupProjects === undefined) return notFound();
