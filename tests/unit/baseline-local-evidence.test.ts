@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { BaselineRowSchema, projectRevisionKey, type CheckEntry } from "../../packages/contracts/src/index.js";
+import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { createLocalEvidence } from "../../packages/broker/src/local/app/evidence.js";
@@ -12,7 +13,7 @@ const PROJECT = "payments";
 const NOW = Date.UTC(2026, 10, 13, 12, 0, 0);
 const DIGEST = "c".repeat(64);
 const sha = (n: number): string => n.toString(16).padStart(40, "0");
-const TASK = { ownerKey: "owner-1", workspaceId: "ws-1", taskId: "task-1", project: PROJECT };
+const TASK = { companyId: ORG, ownerKey: "owner-1", workspaceId: "ws-1", taskId: "task-1", project: PROJECT };
 const entry: CheckEntry = { id: "readiness:0", label: "pytest -q", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 700, exitCode: 0 };
 const planOf = (candidates?: string[]) => ({ revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "unit", kind: "test" }], ...(candidates === undefined ? {} : { baselineCandidates: candidates.map((value) => ({ sha: value })) }) });
 
@@ -22,7 +23,7 @@ async function world(env: NodeJS.ProcessEnv | undefined, claim: unknown) {
   const text = JSON.stringify({ schemaVersion: 1, candidateDigest: DIGEST, checks: [], ...(claim === undefined ? {} : { baseline: claim }) });
   const rawKey = "private/owner-1/ws-1/op-1/evidence-raw.json";
   await blobs.put(rawKey, Buffer.from(text), { contentType: "application/json", metadata: {}, retention: "evidence-std" });
-  await store.put({ item: { pk: "WORKSPACE#ws-1", sk: "ARTIFACT#op-1#evidence-raw.json", name: "evidence-raw.json", objectKey: rawKey, sha256: createHash("sha256").update(text).digest("hex") } });
+  await store.put({ item: { pk: workspaceKey(TASK.companyId, TASK.workspaceId).pk, sk: "ARTIFACT#op-1#evidence-raw.json", name: "evidence-raw.json", objectKey: rawKey, sha256: createHash("sha256").update(text).digest("hex") } });
   await store.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition: { name: PROJECT, revision: 1, repositories: [{ name: "r", url: "https://example.invalid/r.git", path: "r", defaultBranch: "main", credentialRef: "c" }] } } });
   const testEnv = { store, now: () => NOW, ...(env === undefined ? {} : { env }) };
   await recordBaselineRow(testEnv, mintTrustedBaselineRun({ orgId: ORG, project: PROJECT, row: BaselineRowSchema.parse({

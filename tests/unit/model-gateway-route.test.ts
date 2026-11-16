@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 import { createHmac, randomUUID } from "node:crypto";
 import { expectLinearScalingAsync } from "../support/scaling.js";
 import { describe, expect, it, vi } from "vitest";
@@ -14,9 +15,9 @@ const v = claimVector();
 async function world(enabled = true) {
   const h = createHarness({ audit: "recording" }); const w = signingWorld(); const logs: unknown[] = [];
   h.deps.log = entry => logs.push(entry);
-  await h.store.put({ item: { ...operationKey(v.ws, v.op), id: v.op, workspaceId: v.ws, companyId: h.deps.companyId, status: "RUNNING", fence: 1 } });
-  await h.store.put({ item: { ...workspaceKey(v.ws), id: v.ws, companyId: h.deps.companyId, projectName: v.pid, activeOperationId: v.op, fence: 1, status: "BUSY" } });
-  await h.store.put({ item: { ...taskPointerKey(v.ws), taskId: v.tid } });
+  await h.store.put({ item: { ...operationKey(T1_COMPANY, v.ws, v.op), id: v.op, workspaceId: v.ws, companyId: h.deps.companyId, status: "RUNNING", fence: 1 } });
+  await h.store.put({ item: { ...workspaceKey(T1_COMPANY, v.ws), id: v.ws, companyId: h.deps.companyId, projectName: v.pid, activeOperationId: v.op, fence: 1, status: "BUSY" } });
+  await h.store.put({ item: { ...taskPointerKey(T1_COMPANY, v.ws), taskId: v.tid } });
   await h.store.put({ item: { ...taskKey(v.tid), taskId: v.tid, workspaceId: v.ws, project: v.pid, companyId: h.deps.companyId } });
   const capability = new CallbackCapabilities(Buffer.from(h.deps.callbackSigningKey));
   const issue = (patch = {}) => capability.issue({ workspaceId: v.ws, operationId: v.op, fence: 1, actions: ["model-access"], expiresInSeconds: 900, ...patch });
@@ -70,7 +71,7 @@ describe("model access guards", () => {
   });
   it.each(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED", "CANCEL_REQUESTED", "unknown"])("cannot renew after %s", async status => {
     const w = await world(); expect((await w.call()).statusCode).toBe(200);
-    const key = operationKey(v.ws, v.op); const op = (await w.h.store.get(key))!;
+    const key = operationKey(T1_COMPANY, v.ws, v.op); const op = (await w.h.store.get(key))!;
     await w.h.store.put({ item: { ...op, status } });
     const answer = await w.call(); expect(answer.statusCode).toBe(409); expect(w.w.signs()).toBe(1);
   });
@@ -86,7 +87,7 @@ describe("model access guards", () => {
     ["task", { workflow: { stage: "unknown" } }], ["task", { workflow: {} }], ["task", { workflow: null }], ["task", { workflow: "unknown" }],
   ])("refuses mismatched or ended %s records (%j)", async (kind, patch) => {
     const w = await world();
-    const key = kind === "workspace" ? workspaceKey(v.ws) : kind === "operation" ? operationKey(v.ws, v.op) : taskKey(v.tid);
+    const key = kind === "workspace" ? workspaceKey(T1_COMPANY, v.ws) : kind === "operation" ? operationKey(T1_COMPANY, v.ws, v.op) : taskKey(v.tid);
     const record = (await w.h.store.get(key))!; await w.h.store.put({ item: { ...record, ...patch } });
     const answer = await w.call(); expect(answer.statusCode).toBe(409); expect(w.w.signs()).toBe(0);
     expect(['{"error":{"code":"CALLBACK_FORBIDDEN","message":"this operation has no model access"}}', '{"error":{"code":"STALE_FENCE","message":"callback no longer owns the workspace"}}']).toContain(answer.body);
@@ -155,12 +156,12 @@ it("bounds the whole capability before decoding or reading records", async () =>
 });
 it.each(["operation", "workspace", "pointer", "task"])("refuses a missing %s record", async missing => {
   const w = await world(); const get = w.h.store.get.bind(w.h.store);
-  const key = missing === "operation" ? operationKey(v.ws, v.op) : missing === "workspace" ? workspaceKey(v.ws) : missing === "pointer" ? taskPointerKey(v.ws) : taskKey(v.tid);
+  const key = missing === "operation" ? operationKey(T1_COMPANY, v.ws, v.op) : missing === "workspace" ? workspaceKey(T1_COMPANY, v.ws) : missing === "pointer" ? taskPointerKey(T1_COMPANY, v.ws) : taskKey(v.tid);
   w.h.deps.store.get = async query => query.pk === key.pk && query.sk === key.sk ? undefined : get(query);
   expect((await w.call()).statusCode).toBe(409); expect(w.w.signs()).toBe(0);
 });
 it("refuses a malformed task pointer without reading a guessed task", async () => {
-  const w = await world(); await w.h.store.put({ item: { ...taskPointerKey(v.ws), taskId: "malformed task" } });
+  const w = await world(); await w.h.store.put({ item: { ...taskPointerKey(T1_COMPANY, v.ws), taskId: "malformed task" } });
   const get = w.h.store.get.bind(w.h.store); let reads = 0; w.h.deps.store.get = async key => { reads += 1; return get(key); };
   const answer = await w.call(); expect(answer.statusCode).toBe(409); expect(answer.body).not.toContain("malformed task"); expect(w.w.signs()).toBe(0); expect(reads).toBe(3);
 });
@@ -239,7 +240,7 @@ it("checks elapsed time before signing even when the timer has not run", async (
 
 it.each(["nightly", "app", "cli", "mcp", "slack", "tracker", "jira", "github_issue", "event", "schedule", "test_run", "automatic", "chain", "linear", "offer", undefined])("the default describer reads once and mints only with resolved payer facts (%s)", async origin => {
   const w = await world();
-  const ok = operationKey(v.ws, v.op); const tk = taskKey(v.tid);
+  const ok = operationKey(T1_COMPANY, v.ws, v.op); const tk = taskKey(v.tid);
   await w.h.store.put({ item: { ...(await w.h.store.get(ok))!, kind: "task", requester: { personId: v.per!, provider: "test" } } });
   await w.h.store.put({ item: { ...(await w.h.store.get(tk))!, ...(origin === undefined ? {} : { origin }) } });
   w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
@@ -276,9 +277,9 @@ it.each(["current", "old member", "old no identity"] as const)("real task-start 
   const member = shape === "old no identity" ? "local-owner-marker" : "a".repeat(64);
   const caller = { ...h.owner, principal: { ...h.owner.principal, personId: member } };
   const started = await h.flow.start(caller, { project: "payments", instructions: "Build it", requestId: newRequestId() });
-  const workspace = (await h.store.get(workspaceKey(started.task.workspaceId)))!;
+  const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId)))!;
   const scope = { workspaceId: started.task.workspaceId, operationId: workspace["activeOperationId"] as string, fence: 1 };
-  const key = operationKey(scope.workspaceId, scope.operationId);
+  const key = operationKey(T1_COMPANY, scope.workspaceId, scope.operationId);
   const op = (await h.store.get(key))!;
   await h.store.put({ item: { ...op, kind: "task", status: "RUNNING", programStepId: "build", dispatch: { kind: "task", payload: {} } } });
   const tk = taskKey(started.task.taskId); const task = { ...(await h.store.get(tk))! };

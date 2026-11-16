@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L10, the build step: opening the pull request of exactly the code whose checks and reviews passed. Cloud's `startTaskWorkflowPublicationFromSystem` (developer-tasks/publication.ts), the
 // pull request callback (`reconcilePullRequest`, aws/broker/pull-request-reconcile.ts) and the publish branch of `completedWorkflowItems`, on the code-host port.
 //
@@ -113,12 +114,13 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
  * Rovara recorded (so no person pushed to it and nobody marked it ready). Any other is left as it is, with the reason on its record and in the log: a person has taken it up.
  */
 async function closeOrphanedDrafts(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, host: CodeHost, repositoryUrl: string, failedOperationIds: ReadonlySet<string>, repositoryId: string): Promise<void> {
-  const page = await deps.store.query({ pk: `WORKSPACE#${task.workspaceId}`, sk: { op: "beginsWith", prefix: `PULL_REQUEST#${repositoryId}#` }, limit: 50 });
+  const location = await workspaceKeys(deps, task.workspaceId);
+  const page = await deps.store.query({ pk: location.workspaceKey.pk, sk: { op: "beginsWith", prefix: `PULL_REQUEST#${repositoryId}#` }, limit: 50 });
   for (const item of page.items) {
     const record = fromDocument<PullRequestRecord>(item);
     if (record === undefined || record.state !== "open" || !failedOperationIds.has(record.createdByOperationId) || (workflow.pullRequests ?? []).some((entry) => entry.number === record.number && entry.repositoryId === repositoryId)) continue;
     const ref: ChangeRequestRef = { repository: { url: repositoryUrl }, id: String(record.number), url: record.url };
-    const key = pullRequestRecordKey(task.workspaceId, repositoryId, record.number);
+    const key = pullRequestRecordKey(location.workspaceKey, repositoryId, record.number);
     try {
       const status = await host.changeRequestStatus(ref, scopeOf(deps));
       if (status.state !== "open" || !status.draft || status.headRevision !== record.expectedHeadCommit || status.reviews.length > 0) {
@@ -234,7 +236,7 @@ export async function openPullRequest(deps: TaskFlowDeps, operation: OperationRe
     throw agentXError("CALLBACK_FORBIDDEN", "the opened pull request is not the checked code");
   }
   const record: PullRequestRecord = {
-    ...pullRequestRecordKey(operation.workspaceId, expected.repository, number), entityType: "PULL_REQUEST", workspaceId: operation.workspaceId, repository: expected.repository,
+    ...pullRequestRecordKey((await workspaceKeys(deps, operation.workspaceId)).workspaceKey, expected.repository, number), entityType: "PULL_REQUEST", workspaceId: operation.workspaceId, repository: expected.repository,
     repositoryUrl: expected.repositoryUrl, number, url: reconciled.ref.url, state: "open", headBranch: expected.headBranch, baseBranch: expected.baseBranch, expectedHeadCommit: commit,
     title: expected.title, body: reconciled.draftRefused === true ? `This pull request could not be opened as a draft; it is not ready to merge.\n\n${expected.body}` : expected.body,
     createdByOperationId: operation.id, updatedAt: iso(deps),
@@ -275,7 +277,7 @@ export async function recordPublished(deps: TaskFlowDeps, task: TaskRecord, oper
     const definition = project?.definition.repositories.find((entry) => entry.name === published.data.repository);
     if (definition === undefined) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
     const host = codeHostForRecord(deps.codeHosts, definition);
-    const recordKey = pullRequestRecordKey(operation.workspaceId, published.data.repository, published.data.number);
+    const recordKey = pullRequestRecordKey((await workspaceKeys(deps, operation.workspaceId)).workspaceKey, published.data.repository, published.data.number);
     const recorded = fromDocument<PullRequestRecord>(await deps.store.get(recordKey));
     if (recorded === undefined || recorded.url !== published.data.url || recorded.expectedHeadCommit !== published.data.commit || recorded.createdByOperationId !== operation.id) {
       throw agentXError("STALE_FENCE", "published pull request head does not match the broker-verified publication");

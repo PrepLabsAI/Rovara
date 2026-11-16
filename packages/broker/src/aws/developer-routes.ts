@@ -1354,7 +1354,7 @@ async function projectWorkspaces(deps: DeveloperRouteDependencies, project: stri
       Limit: DEVELOPER_WORKSPACES_PER_PROJECT,
       ...(start === undefined ? {} : { ExclusiveStartKey: start }),
     })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
-    items.push(...(response.Items ?? []));
+    items.push(...(response.Items ?? []).filter((item) => item.entityType !== "WORKSPACE_COMPANY_POINTER"));
     start = items.length >= DEVELOPER_WORKSPACES_PER_PROJECT ? undefined : response.LastEvaluatedKey;
   } while (start !== undefined);
 

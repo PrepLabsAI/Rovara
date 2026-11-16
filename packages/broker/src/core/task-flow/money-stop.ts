@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import { AGENTX_PROTOCOL_VERSION, change, when, type WorkerInvocation } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, taskPointerKey } from "./keys.js";
+import { workspaceKeys } from "./workspace-location.js";
 import { readTask } from "./reads.js";
 import type { OperationRecord, WorkspaceRecord } from "./records.js";
 import { dispatchQueueName, iso, log } from "./support.js";
@@ -111,7 +111,8 @@ export async function askWorkerToFlush(deps: TaskFlowDeps, workspace: Pick<Works
   const sleep = stop.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
   const started = (deps.now?.() ?? new Date()).getTime();
   const queued = await queueCancel(deps, operation);
-  for (let current = await deps.store.get(operationKey(operation.workspaceId, operation.id)); ; current = await deps.store.get(operationKey(operation.workspaceId, operation.id))) {
+  const location = await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId);
+  for (let current = await deps.store.get(location.operationKey(operation.id)); ; current = await deps.store.get(location.operationKey(operation.id))) {
     const status = current?.["status"];
     if (typeof status === "string" && ENDED.has(status)) return "flushed";
     const left = waitMs - elapsedSince(deps, started);
@@ -127,18 +128,18 @@ export async function askWorkerToFlush(deps: TaskFlowDeps, workspace: Pick<Works
  */
 export async function flushBeforeClose(deps: TaskFlowDeps, workspace: WorkspaceRecord | undefined): Promise<void> {
   if (deps.moneyStop === undefined || workspace === undefined || workspace.activeOperationId == null) return;
-  const operation = await deps.store.get(operationKey(workspace.id, workspace.activeOperationId)) as unknown as OperationRecord | undefined;
+  const operation = await deps.store.get((await workspaceKeys({ store: deps.store, companyId: workspace.companyId }, workspace.id)).operationKey(workspace.activeOperationId)) as unknown as OperationRecord | undefined;
   if (operation === undefined || operation.companyId !== deps.companyId || !reportsUsage(operation) || ENDED.has(operation.status)) return;
   await deps.store.update({
-    key: operationKey(workspace.id, operation.id), ops: [change.set("status", "CANCEL_REQUESTED"), change.set("updatedAt", iso(deps))],
+    key: (await workspaceKeys({ store: deps.store, companyId: operation.companyId }, workspace.id)).operationKey(operation.id), ops: [change.set("status", "CANCEL_REQUESTED"), change.set("updatedAt", iso(deps))],
     condition: when.and(when.eq("fence", operation.fence), when.not(when.or(when.eq("status", "SUCCEEDED"), when.eq("status", "FAILED"), when.eq("status", "CANCELLED"), when.eq("status", "INTERRUPTED")))),
   });
   if (await askWorkerToFlush(deps, workspace, operation) === "not_flushed") await endUnflushed(deps, operation);
 }
 
 /** The task a workspace's operation belongs to. */
-async function taskOfOperation(deps: TaskFlowDeps, operation: Pick<OperationRecord, "workspaceId">) {
-  const taskId = (await deps.store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+async function taskOfOperation(deps: TaskFlowDeps, operation: Pick<OperationRecord, "workspaceId" | "companyId">) {
+  const taskId = (await deps.store.get((await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
   return typeof taskId === "string" && taskId !== "" ? await readTask(deps, taskId) : undefined;
 }
 
@@ -150,7 +151,7 @@ export async function endUnflushed(deps: TaskFlowDeps, operation: OperationRecor
   if (deps.moneyStop === undefined || !reportsUsage(operation)) return;
   try {
     // Once per run: a run already taken as unflushed has kept its hold or its estimate.
-    const marked = await deps.store.update({ key: operationKey(operation.workspaceId, operation.id), ops: [change.set("usageUnflushed", true)], condition: when.and(when.present(), when.notExists("usageUnflushed")) });
+    const marked = await deps.store.update({ key: (await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id), ops: [change.set("usageUnflushed", true)], condition: when.and(when.present(), when.notExists("usageUnflushed")) });
     if (!marked.applied) return;
     const task = await taskOfOperation(deps, operation);
     if (task === undefined || task.companyId !== deps.companyId) return;
@@ -169,7 +170,7 @@ export async function requestSpendStop(deps: TaskFlowDeps, operation: OperationR
   if (deps.moneyStop === undefined || !isSpendStopCode(code)) return false;
   const now = iso(deps);
   const asked = await deps.store.update({
-    key: operationKey(operation.workspaceId, operation.id),
+    key: (await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id),
     ops: [change.set("status", "CANCEL_REQUESTED"), change.set("stopReason", code), change.set("stopRequestedAt", now), change.set("updatedAt", now)],
     condition: when.and(when.eq("fence", operation.fence), when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING"), when.eq("status", "RUNNING"))),
   });

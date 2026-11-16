@@ -243,7 +243,7 @@ async function createProxiedModelRuntime(selected: ModelIdentifier & { thinkingL
   const model = runtime.getModel(selected.provider, selected.modelId);
   if (model === undefined) throw agentXError("CONFIG_INVALID", `model ${selected.modelId} is not available on this install`);
   if (!model.reasoning && selected.thinkingLevel && selected.thinkingLevel !== "off") throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
-  const requestKey = typeof proxy.apiKey === "function" ? proxy.apiKey : undefined;
+  const requestKey = typeof proxy.apiKey === "function" ? () => (proxy.apiKey as () => Promise<string>).call(proxy) : undefined;
   const initialKey = requestKey === undefined ? proxy.apiKey as string : await requestKey().catch((error: unknown) => {
     // A spent budget is the task's to end on, not a proxy fault.
     if (error instanceof ModelBudgetExhaustedError || error instanceof ModelNotAllowedError) throw error;
@@ -254,11 +254,23 @@ async function createProxiedModelRuntime(selected: ModelIdentifier & { thinkingL
     baseUrl: proxy.baseUrl, api,
     models: runtime.getModels(selected.provider).filter((entry) => served.has(entry.id))
       .map((entry) => ({ ...entry, api, baseUrl: proxy.baseUrl, compat: requestCompat("anthropic", undefined) })),
-    streamSimple: (entry, context, streamOptions) => safeProviderStream("anthropic", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, requestKey),
+    streamSimple: (entry, context, streamOptions) => safeProviderStream("anthropic", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, proxyRequestKey(proxy)),
   });
   try { await runtime.setRuntimeApiKey(selected.provider, initialKey); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", "the model proxy key could not be initialized"); }
   return runtime;
+}
+
+/** Resolve the existing proxy key method against a request-local receiver; never mix a refreshed key with another answer's URL. */
+function proxyRequestKey(proxy: ModelProxyOptions, api?: InvocationModelRoute["api"]): ((model: Model<Api>) => Promise<string>) | undefined {
+  if (typeof proxy.apiKey !== "function") return undefined;
+  const key = proxy.apiKey;
+  return async (model) => {
+    const request = { ...proxy };
+    const apiKey = await key.call(request);
+    model.baseUrl = api === undefined || api === "anthropic-messages" ? request.baseUrl : `${request.baseUrl.replace(/\/+$/u, "")}/v1`;
+    return apiKey;
+  };
 }
 
 /** What a model the installed catalogs do not know (a company's own) is given: no reasoning, no images, a modest window. */
@@ -272,7 +284,7 @@ const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "
 async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLevel?: string }, options: ModelRuntimeOptions, proxy: ModelProxyOptions, route: InvocationModelRoute): Promise<ModelRuntime> {
   const catalog = catalogModelByName(route.catalog)?.model;
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null, credentials: new InMemoryCredentialStore() });
-  const requestKey = typeof proxy.apiKey === "function" ? proxy.apiKey : undefined;
+  const requestKey = typeof proxy.apiKey === "function" ? () => (proxy.apiKey as () => Promise<string>).call(proxy) : undefined;
   const initialKey = requestKey === undefined ? proxy.apiKey as string : await requestKey().catch((error: unknown) => {
     if (error instanceof ModelBudgetExhaustedError || error instanceof ModelNotAllowedError) throw error;
     throw proxyKeyUnavailable(error);
@@ -291,7 +303,7 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
       compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),
     }],
-    streamSimple: (entry, context, streamOptions) => safeProviderStream(route.api === "anthropic-messages" ? "anthropic" : "openai", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, requestKey, { api: route.api, identity }),
+    streamSimple: (entry, context, streamOptions) => safeProviderStream(route.api === "anthropic-messages" ? "anthropic" : "openai", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, proxyRequestKey(proxy, route.api), { api: route.api, identity }),
   });
   try { await runtime.setRuntimeApiKey(ROUTE_PROVIDER, initialKey); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", "the model proxy key could not be initialized"); }
@@ -332,9 +344,10 @@ function eventModel(data: { model?: unknown; message?: { model?: unknown }; resp
 /** A routed call that holds tool calls or results and declares no tools (tool-history.ts). Never sent. */
 class ToolDeclarationsMissing extends Error {}
 
-function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), plan?: ChatGptPlan, proxyKey?: () => Promise<string>,
+function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), plan?: ChatGptPlan, proxyKey?: (model: Model<Api>) => Promise<string>,
   /** A routed model (Task 27): its API, which picks the client, and the catalog identity its usage is reported under. */
   route?: { api: InvocationModelRoute["api"]; identity: ModelIdentifier }) {
+  model = { ...model };
   const output = createAssistantMessageEventStream();
   const chatgpt = plan !== undefined;
   let failureStatus: number | undefined;
@@ -418,7 +431,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
         }
       }
       // A proxy key is asked for each time too: it is minted for an hour, and a task can run longer.
-      if (proxyKey !== undefined) key = { apiKey: await proxyKey() };
+      if (proxyKey !== undefined) key = { apiKey: await proxyKey(model) };
       // ChatGPT requests are not retried here: a plan's limit does not lift in seconds, and the fallback is ready.
       // Pi 1.4+ hands each request an identity: a detailed User-Agent and, while install telemetry is on, attribution to Pi (OpenRouter's HTTP-Referer and X-OpenRouter-Title, and the like). Rovara's settings turn
       // telemetry off, and the attribution is dropped here as well, so no request announces Pi whatever a caller's settings say.

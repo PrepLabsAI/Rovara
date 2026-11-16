@@ -37,7 +37,7 @@ import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.j
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, encodeBrowserEvidenceUpload, type BrowserEvidenceCaptured } from "../../packages/contracts/src/index.js";
 import { BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_RETRY_REASON, workflowAutoFixCounts, type Admission } from "@agentx/contracts";
-import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { dispatchRowKey, operationKey, taskPointerKey, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
 import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
@@ -207,7 +207,7 @@ async function launch(extra: { planFormat?: "markdown" | "structured"; features?
     const store = runtime.registry.require("storage");
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await runtime.tick();
-      const machineId = ((await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))?.["machine"] as { machineId?: string } | undefined)?.machineId;
+      const machineId = ((await store.get(workspaceKey(IMPLICIT_COMPANY_ID, workspaceId)))?.["machine"] as { machineId?: string } | undefined)?.machineId;
       const fresh = machineId === undefined ? undefined : machines.delivered(machineId).find((job) => !seen.has(job.operationId));
       if (fresh !== undefined) { seen.add(fresh.operationId); return fresh; }
     }
@@ -1214,7 +1214,7 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
     }
     expect((await h.callback(coding, "candidate-export", { stage: "finalize", schemaVersion: "workflow-candidate-export-finalize/v1", uploadId, sha256: digest })).status).toBe(200);
     const store = h.runtime.registry.require("storage");
-    expect(await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${coding.operationId}` })).toBeUndefined();
+    expect(await store.get({ pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId), sk: `CANDIDATE_EXPORT#${coding.operationId}` })).toBeUndefined();
     // The run's result is not held up: the reviews start on the checked code.
     expect((await h.callback(coding, "result", builtResult("d".repeat(40)))).status).toBe(200);
     expect(await h.nextJob(workspaceId, seen)).toMatchObject({ payload: { workflowMode: "REVIEW" } });
@@ -1268,7 +1268,7 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
       const running = { ...workflow, revision: Number(workflow["revision"]) + 1, stage: "VERIFY", state: "RUNNING", candidate,
         e2e: { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64), required: true, currentRoundId: roundId, currentGroupRunIds: [runId], resultRefs: [] } };
       await store.update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("workflow", JSON.parse(JSON.stringify(running)) as JsonValue)] });
-      const operationRow = (await store.get({ pk: `WORKSPACE#${coding.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+      const operationRow = (await store.get(operationKey(IMPLICIT_COMPANY_ID, coding.workspaceId, coding.operationId)))!;
       const operation = { ...operationRow, workflowMode: "CHECKS", workflowRevision: running.revision,
         workflowE2EAdmission: { schemaVersion: 1, taskId, workflowRevision: running.revision, candidateDigest: candidate.digest, roundId, groupRunIds: [runId],
           admissionRef: { key: `workflow-e2e-admissions/sha256/${"5".repeat(64)}.json`, sha256: "5".repeat(64), byteLength: 10 } },
@@ -1434,7 +1434,7 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
 
   // ---- the opus review's fixes (lane L10 round 1)
   type Harness = Awaited<ReturnType<typeof launch>>;
-  const PR_RECORD = (workspaceId: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: "PULL_REQUEST#demo#0000000001" });
+  const PR_RECORD = (workspaceId: string) => ({ pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId), sk: "PULL_REQUEST#demo#0000000001" });
   const recordHead = async (h: Harness, workspaceId: string) => (await h.runtime.registry.require("storage").get(PR_RECORD(workspaceId)))?.["expectedHeadCommit"];
   /** The worker exchanges its repository grant for a credential, as its helper does. */
   const exchange = (h: Harness, job: WorkerInvocation, access: "clone" | "push", url = h.project.repositories[0]!.url) => h.runtime.app.callbacks({
@@ -1873,7 +1873,7 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
   const milestonesOf = async (h: Harness, taskId: string) =>
     (await queryAll(h.runtime.registry.require("storage"), { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#" } })).map((item) => ({ kind: item["kind"] as string, text: item["text"] as string }));
   const checksOperations = async (h: Harness, workspaceId: string) =>
-    (await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items.filter((item) => item["workflowMode"] === "CHECKS");
+    (await h.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } })).items.filter((item) => item["workflowMode"] === "CHECKS");
   /** The base moved on, the merge ran and is pushed: the sync's result is in, so the task stands at the recheck of the merged code. */
   async function mergeLands(h: Harness) {
     const t = await toSync(h);
@@ -2119,7 +2119,7 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     h.model.commit(w.headBranch, { "README.md": "a person's change\n" });
     await h.runtime.tick();
     expect((await taskRecord(h, w.taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-    const operations = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${w.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    const operations = await h.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, w.workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } });
     expect(operations.items.filter((item) => item["workflowMode"] === "IMPLEMENT")).toHaveLength(1);
   });
 
@@ -2130,7 +2130,7 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     const ref = { taskId, workflowRevision: (await taskRecord(h, taskId)).workflow.revision - 1, kind: "IMPLEMENT" as const };
     const again = await Promise.all([runDispatchRow(deps, ref), runDispatchRow(deps, ref)]);
     expect(again).not.toContain("STARTED");
-    const operations = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    const operations = await h.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } });
     expect(operations.items.filter((item) => item["workflowMode"] === "IMPLEMENT")).toHaveLength(1);
   });
 
@@ -2371,7 +2371,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     const rerun = await h.nextJob(workspaceId, seen);
     // The rerun is told the owner's recipe (and only the recipe), and its operation needs a worker that lists the feature.
     expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe } });
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).toContain(BROWSER_EVIDENCE_FEATURE);
     // The worker uploads its screenshots in chunks (init, chunk, finalize), as `callback-client` does.
     const jpeg = (seed: string) => { const bytes = new Uint8Array(70_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
@@ -2431,7 +2431,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
     const rerun = await h.nextJob(workspaceId, seen);
     expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", browserEvidence: recipe } });
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).toEqual(expect.arrayContaining([BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE]));
     const jpeg = (seed: string) => { const bytes = new Uint8Array(70_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
     const webm = (seed: string) => { const bytes = new Uint8Array(90_000); bytes.set([0x1a, 0x45, 0xdf, 0xa3]); bytes.fill(seed.charCodeAt(0), 4); return bytes; };
@@ -2486,7 +2486,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await older.callback(o.coding, "result", oFailing);
     await older.api(`/v1/dev/tasks/${o.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
     await older.nextJob(o.workspaceId, o.seen).catch(() => undefined);
-    const operations = await older.runtime.registry.require("storage").query({ pk: `WORKSPACE#${o.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    const operations = await older.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, o.workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } });
     expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("this worker is too old to run this step; upgrade it");
   });
 
@@ -2501,7 +2501,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await plain.api(`/v1/dev/tasks/${t.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
     const rerun = await plain.nextJob(t.workspaceId, t.seen);
     expect(rerun.payload).not.toHaveProperty("browserEvidence");
-    const operation = (await plain.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await plain.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).not.toContain(BROWSER_EVIDENCE_FEATURE);
     // A recipe without an executor image on this machine is not asked for (the worker could not start the capture): the rerun is the plain one.
     const noImage = await launch({ host: true, readiness: true, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["src/**"] }] } } } } });
@@ -2526,7 +2526,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await older.callback(o.coding, "result", oFailing);
     await older.api(`/v1/dev/tasks/${o.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
     await older.nextJob(o.workspaceId, o.seen).catch(() => undefined);
-    const operations = await older.runtime.registry.require("storage").query({ pk: `WORKSPACE#${o.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    const operations = await older.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, o.workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } });
     expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("this worker is too old to run this step; upgrade it");
   });
 
@@ -2550,7 +2550,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
     const rerun = await h.nextJob(workspaceId, seen);
     expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: recipe } });
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, rerun.operationId)))!;
     expect((operation["dispatch"] as { requires: string[] }).requires).toContain(BROWSER_EVIDENCE_FEATURE);
     // Nothing saved yet: the run is told so, in one fixed word. A run whose recipe has no sign-in (the coding step, which was not asked) cannot ask at all.
     const none = await h.callback(rerun, "browser-evidence-sign-in", { project: "other", ref: "be-other-signin" });
@@ -2563,7 +2563,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect(answer.body).toMatchObject({ status: "ready", values });
     // Nothing the run, the task or the company keeps holds a value: not the operation, not its payload, not the stored recipe, not the task's page, and not a line the run wrote.
     const storage = h.runtime.registry.require("storage");
-    const keep = JSON.stringify([operation, rerun.payload, (await storage.query({ pk: `WORKSPACE#${workspaceId}` })).items, (await storage.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#PROJECT#payments` })).items]);
+    const keep = JSON.stringify([operation, rerun.payload, (await storage.query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId) })).items, await storage.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }), (await storage.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#PROJECT#payments` })).items]);
     for (const text of [values.username, values.password, Buffer.from(values.password).toString("base64"), encodeURIComponent(values.password)]) expect(keep, text).not.toContain(text);
     expect(keep).toContain("be-payments-signin");
     // The run ends; a callback after it takes nothing more.
@@ -3724,7 +3724,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     expect(ordered).toMatchObject({ approval: { graphDigest: t.digest }, sequenceStart: 0, parallel: { max: 3 } });
     expect(ordered?.graph.items).toHaveLength(3);
     // The operation keeps the binding, and the workflow names the operation that carries the graph.
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, coding.operationId)))!;
     expect(operation["workflowDependencies"]).toMatchObject({ approval: { graphDigest: t.digest } });
     expect((await t.record()).workflow.workflowDependenciesOperationId).toBe(coding.operationId);
     // The plan page lists the parts and where each stands.
@@ -3769,7 +3769,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     const stored = (await t.record()).workflow.workflowDependenciesProgress!;
     expect(stored.map((entry) => `${entry.itemId.slice(0, 2)}:${entry.state}`)).toEqual(["11:STARTED", "22:STARTED", "22:IMPLEMENTED", "11:IMPLEMENTED", "33:STARTED"]);
     // The coding run still reads as the run the workflow waits for after its checkpoints moved the workflow's revision.
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, coding.operationId)))!;
     expect(operation["workflowRevision"]).toBe((await t.record()).workflow.revision);
     // An exact repeat of an acknowledged checkpoint is fine; the same number with other content is refused.
     expect((await send(progressEvent(coding, approval, PART_A, 1, "STARTED", base))).status).toBe(200);
@@ -3808,7 +3808,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     expect(jumped?.message).toContain("out of sequence");
     expect((await send(progressEvent(coding, approval, PART_B, 2, "STARTED", base))).status).toBe(200);
     // The cursor (where the history ended) must be where the operation was told to start plus what it has recorded: a record that moved on its own is not continued.
-    await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }, ops: [change.set(["workflowDependencies", "sequenceStart"], 5)] });
+    await h.runtime.registry.require("storage").update({ key: operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, coding.operationId), ops: [change.set(["workflowDependencies", "sequenceStart"], 5)] });
     const moved = errorOf(await send(progressEvent(coding, approval, PART_B, 3, "IMPLEMENTED", base, { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") })));
     expect(moved?.code).toBe("CALLBACK_FORBIDDEN");
     expect(moved?.message).toContain("cursor");
@@ -3819,8 +3819,8 @@ describe("rovara up: ordered work and parts built side by side", () => {
     const cases: Array<[string, (h: Awaited<ReturnType<typeof launch>>, t: Awaited<ReturnType<typeof toOrderedCoding>>, coding: WorkerInvocation) => Promise<void>, string]> = [
       ["the task is closed", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `DEVTASK#${t.taskId}`, sk: "META" }, ops: [change.set("closedAt", "2026-11-10T12:00:00.000Z")] }); }, "no longer matches the current task"],
       ["another run's approval is on the task", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `DEVTASK#${t.taskId}`, sk: "META" }, ops: [change.set(["workflow", "workflowDependenciesApproval", "runId"], "00000000-0000-4000-8000-000000000000")] }); }, "no longer matches the current task"],
-      ["the workspace is no longer busy", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: "META" }, ops: [change.set("status", "READY")] }); }, "stale workspace operation"],
-      ["the workspace is held by another operation", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: "META" }, ops: [change.set("activeOperationId", "00000000-0000-4000-8000-000000000000")] }); }, "stale workspace operation"],
+      ["the workspace is no longer busy", async (h, t) => { await h.runtime.registry.require("storage").update({ key: workspaceKey(IMPLICIT_COMPANY_ID, t.workspaceId), ops: [change.set("status", "READY")] }); }, "stale workspace operation"],
+      ["the workspace is held by another operation", async (h, t) => { await h.runtime.registry.require("storage").update({ key: workspaceKey(IMPLICIT_COMPANY_ID, t.workspaceId), ops: [change.set("activeOperationId", "00000000-0000-4000-8000-000000000000")] }); }, "stale workspace operation"],
     ];
     for (const [label, spoil, message] of cases) {
       const h = await launch({ host: true });
@@ -3839,7 +3839,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     const t = await toOrderedCoding(h);
     const coding = await h.nextJob(t.workspaceId, t.seen);
     expect((await h.callback(coding, "result", { status: "FAILED", error: "RUNTIME_UNAVAILABLE: compute was lost" })).status).toBe(200);
-    await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }, ops: [change.set(["workflowDependencies", "approval", "runId"], "00000000-0000-4000-8000-000000000000")] });
+    await h.runtime.registry.require("storage").update({ key: operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, coding.operationId), ops: [change.set(["workflowDependencies", "approval", "runId"], "00000000-0000-4000-8000-000000000000")] });
     await retryBlockedStep(h.runtime.app.flow.deps, t.taskId, (await t.record()).workflow.revision);
     expect((await t.record()).workflow).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
     expect((await t.record()).workflow.blockReason).toContain("no matching operation binding");
@@ -3993,7 +3993,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     const coding = await h.nextJob(t.workspaceId, t.seen);
     expect((coding.payload as { workflowDependencies?: Record<string, unknown> }).workflowDependencies).not.toHaveProperty("parallel");
     // The broker's record keeps the setting it chose; the checkpoints are judged by the parallel rules, so the parts the older worker builds one after another are accepted.
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+    const operation = (await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, coding.operationId)))!;
     expect(operation["workflowDependencies"]).toMatchObject({ parallel: { max: 3 } });
     const approval = (await t.record()).workflow.workflowDependenciesApproval!;
     const base = h.model.revision(h.base).tree;
@@ -4004,7 +4004,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     await h.nextJob(t.workspaceId, t.seen).catch(() => undefined);
     const ended = (await taskRecord(h, t.taskId)).workflow;
     expect(ended).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
-    const operations = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${t.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    const operations = await h.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, t.workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } });
     expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("This agent needs a newer worker. Ask an admin to upgrade Rovara.");
   });
 
@@ -4013,7 +4013,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     const t = await toOrderedCoding(h);
     const coding = await h.nextJob(t.workspaceId, t.seen);
     // The operation the broker started carried the graph; one that did not (a worker run that was never bound to it) is refused whatever it reports.
-    await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }, ops: [change.remove("workflowDependencies")] });
+    await h.runtime.registry.require("storage").update({ key: operationKey(IMPLICIT_COMPANY_ID, t.workspaceId, coding.operationId), ops: [change.remove("workflowDependencies")] });
     const commit = h.model.commit("work", { "src/parts.ts": "export const parts = 3;\n" });
     expect((await h.callback(coding, "result", builtResult(h.model.revision(commit).tree, h.base, commit))).status).toBe(200);
     expect((await t.record()).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "approved work breakdown was not carried into this implementation" });
@@ -4025,7 +4025,7 @@ describe("rovara up: ordered work and parts built side by side", () => {
     const t = await toOrderedCoding(h);
     const coding = await h.nextJob(t.workspaceId, t.seen);
     expect((coding.payload as { workflowDependencies?: { parallel?: { max: number } } }).workflowDependencies?.parallel).toEqual({ max: 1 });
-    const events = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${t.workspaceId}`, sk: { op: "beginsWith", prefix: `EVENT#${coding.operationId}#` } });
+    const events = await h.runtime.registry.require("storage").query({ pk: workspacePartition(IMPLICIT_COMPANY_ID, t.workspaceId), sk: { op: "beginsWith", prefix: `EVENT#${coding.operationId}#` } });
     expect(JSON.stringify(events.items)).toContain("Running parts one at a time: 1 of 1 of your workspaces are in use.");
     // Only one part may run: a second start while the first is open is refused, though its dependencies are met.
     const approval = (await t.record()).workflow.workflowDependenciesApproval!;
@@ -4456,7 +4456,7 @@ describe("rovara up: the plan check and Rovara's own check of the plan", () => {
     expect(prompt).toContain("Add a /health endpoint");
     expect(prompt).toContain("You advise; you do not decide.");
     expect((critic.payload as { conversationId: string }).conversationId).not.toBe((plan.payload as { conversationId: string }).conversationId);
-    const stored = await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${critic.operationId}` });
+    const stored = await h.runtime.registry.require("storage").get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, critic.operationId));
     expect(stored).toMatchObject({ workflowMode: "PLAN_CRITIQUE", programStepId: "plan_critic" });
     const after = await workflowOf(h, taskId);
     expect(after).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
@@ -4698,14 +4698,14 @@ describe("rovara up: the plan's stored bytes, a late plan-check result, hostile 
     const critic = await h.nextJob(workspaceId, seen);
     await h.callback(critic, "artifacts", { name: "plan-critique.md", mediaType: "text/markdown", content: critiqueAnswer("ok") });
     const storage = h.runtime.registry.require("storage");
-    const operation = fromDocument<OperationRecord>(await storage.get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${critic.operationId}` }))!;
+    const operation = fromDocument<OperationRecord>(await storage.get(operationKey(IMPLICIT_COMPANY_ID, workspaceId, critic.operationId)))!;
     const flow = h.runtime.app.flow.deps;
     const task = (await readTask(flow, taskId))!;
     // A result that names an earlier revision of the plan check (the run before a Retry) is not this check's: nothing is recorded.
     await recordCritiqued(flow, task, { ...operation, workflowRevision: operation.workflowRevision! - 1 }, { status: "SUCCEEDED" });
     expect(await workflowOf(h, taskId)).toMatchObject({ stage: "PLAN_CRITIQUE", state: "RUNNING" });
     // Bytes other than the ones the artifact row's digest names read as a check that gave no answer.
-    const row = (await storage.get({ pk: `WORKSPACE#${workspaceId}`, sk: `ARTIFACT#${critic.operationId}#plan-critique.md` }))!;
+    const row = (await storage.get({ pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId), sk: `ARTIFACT#${critic.operationId}#plan-critique.md` }))!;
     await h.runtime.app.blobs.put(`${row["objectKey"] as string}`, new TextEncoder().encode(critiqueAnswer("revise", [{ id: "p1", severity: "blocking", text: "Forged." }])), { contentType: "text/markdown", metadata: {}, retention: "evidence-std" }, { overwrite: true });
     await h.callback(critic, "result", { status: "SUCCEEDED" });
     const after = await workflowOf(h, taskId);
@@ -5659,7 +5659,7 @@ const GPT_ID = catalogModelIds("openai").find((id) => /^gpt-5/u.test(id) && !/mi
 const operationsOfTask = async (h: Awaited<ReturnType<typeof launch>>, taskId: string): Promise<OperationRecord[]> => {
   const store = h.runtime.registry.require("storage");
   const workspaceId = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
-  return (await queryAll(store, { pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).map((item) => item as unknown as OperationRecord).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.fence - b.fence);
+  return (await queryAll(store, { pk: workspacePartition(IMPLICIT_COMPANY_ID, workspaceId), sk: { op: "beginsWith", prefix: "OPERATION#" } })).map((item) => item as unknown as OperationRecord).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.fence - b.fence);
 };
 /** The form of the models page that carries `op` (and, for a step, its stage): the page holds many forms for one address. */
 function modelsForm(page: string, op: string, stage = ""): Record<string, string> {
@@ -5811,7 +5811,7 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
     for (let tick = 0; tick < 4; tick += 1) await h.runtime.tick();
     const workflow = (await taskRecord(h, taskId)).workflow as unknown as { stage: string; state: string; critique?: { status: string; critiques: unknown[] } };
     expect(workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", critique: { status: "done", critiques: [] } });
-    const delivered = h.machines.delivered(((await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))!["machine"] as { machineId: string }).machineId);
+    const delivered = h.machines.delivered(((await h.runtime.registry.require("storage").get(workspaceKey(IMPLICIT_COMPANY_ID, workspaceId)))!["machine"] as { machineId: string }).machineId);
     expect(delivered.filter((job) => (job.payload as { workflowMode?: string }).workflowMode === "PLAN_CRITIQUE")).toHaveLength(1);
     // It closes on the first refused check: no second check operation is made (one that could only fail for want of a model).
     const checks = (await operationsOfTask(h, taskId)).filter((operation) => operation.workflowMode === "PLAN_CRITIQUE");
@@ -6064,7 +6064,7 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
         const answer = await real.choose(input);
         if (input.stage === "understand" && raced === 0) {
           raced += 1;
-          const waiting = (await queryAll(store, { pk: `WORKSPACE#${currentWorkspace}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).find((item) => item["workflowMode"] === "UNDERSTAND");
+          const waiting = (await queryAll(store, { pk: workspacePartition(IMPLICIT_COMPANY_ID, currentWorkspace), sk: { op: "beginsWith", prefix: "OPERATION#" } })).find((item) => item["workflowMode"] === "UNDERSTAND");
           await store.update({ key: { pk: String(waiting!["pk"]), sk: String(waiting!["sk"]) }, ops: [change.set("modelChoice", other)] });
         }
         return answer;
@@ -6148,7 +6148,7 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
     await priced.runtime.registry.require("storage").update({ key: { pk: costPartition(IMPLICIT_COMPANY_ID, pricedTask), sk: "TOTAL" }, ops: [{ op: "set", path: ["currency"], value: "EUR" }] });
     expect((await priced.runtime.app.modelGrants.grant(understandJob.callbackCapability)).budget).toEqual({ micros: 0, currency: "USD" });
     // A task that cannot be read has nothing to be held to: nothing is left, so the proxy refuses rather than let a call through unheld.
-    await priced.runtime.registry.require("storage").delete({ key: { pk: `WORKSPACE#${pricedWorkspace}`, sk: "DEVELOPER_TASK" } });
+    await priced.runtime.registry.require("storage").delete({ key: taskPointerKey(IMPLICIT_COMPANY_ID, pricedWorkspace) });
     expect((await priced.runtime.app.modelGrants.grant(understandJob.callbackCapability)).budget).toEqual({ micros: 0, currency: "USD" });
     // Without a held limit no budget is given.
     const open = await launch({ environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real", ROVARA_RUN_LIMIT: "0" }, files: { "gateway.mjs": gateway('prices: { currency: "USD", models: { "house-model": { inputMicrosPerMillionTokens: 1000000, outputMicrosPerMillionTokens: 2000000 } } },') }, config });

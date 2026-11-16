@@ -5,6 +5,7 @@ import { IMPLICIT_COMPANY_ID, OrgIdSchema } from "@agentx/contracts";
 
 /** True when the stored row belongs to `companyId`. `companyId` must be a company id (the caller checks it first). */
 export function rowBelongsToCompany(row: Readonly<Record<string, unknown>>, companyId: string): boolean {
+  if (row["entityType"] === "WORKSPACE_COMPANY_POINTER") return false;
   const named = row["companyId"];
   const orgNamed = row["orgId"];
   if (named !== undefined && orgNamed !== undefined && named !== orgNamed) return false;

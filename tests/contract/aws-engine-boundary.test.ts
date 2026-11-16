@@ -1,6 +1,8 @@
+import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/legacy-keys.js";
 // Lane E2 (plan v3.2), step 6 part: the AWS entry points go by a task's stored engine. A workflow task (no stamp) keeps today's AWS readers; a core task is answered by the core's
 // own handlers (the core host's dev routes, company-aware) or refused exactly like a missing task, and no AWS reader returns its record, workspace or operations. A mixed stamp has one
 // owner per operation (the flow's engine). A stamp that cannot be read is an error, never the workflow.
+import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, sharedTaskKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
@@ -98,15 +100,36 @@ describe("reading the stamp", () => {
     expect(sent.mock.calls.length).toBe(before);
   });
 
-  it("a workspace with no task pointer is the workflow's; one whose task the core owns is the core's", async () => {
+  it("a legacy workspace with no task pointer is the workflow's; one whose task the core owns is the core's", async () => {
     const db = new FakeDynamoDb();
     const coreTask = randomUUID();
-    db.set({ pk: "WORKSPACE#w-core", sk: "DEVELOPER_TASK", taskId: coreTask });
+    db.set({ ...legacyWorkspaceKey("w-core"), sk: "DEVELOPER_TASK", taskId: coreTask });
     db.set({ ...engineStampKey(coreTask), coreEngine: MIXED });
-    db.set({ pk: "WORKSPACE#w-flow", sk: "DEVELOPER_TASK", taskId: randomUUID() });
+    db.set({ ...legacyWorkspaceKey("w-flow"), sk: "DEVELOPER_TASK", taskId: randomUUID() });
     expect(await ownerOfWorkspace(table(db), "w-none")).toBe("workflow");
     expect(await ownerOfWorkspace(table(db), "w-flow")).toBe("workflow");
     expect(await ownerOfWorkspace(table(db), "w-core")).toBe("core");
+  });
+
+  it("never uses a discovery pointer alone or a cached engine verdict to bypass scoped ownership", async () => {
+    const db = new FakeDynamoDb();
+    const workspaceId = randomUUID(), taskId = randomUUID();
+    const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: FAKE_COMPANY });
+    // A legacy task pointer must never be a fallback for a company discovery pointer.
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", taskId });
+    db.set({ ...engineStampKey(taskId), coreEngine: CORE });
+    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+    integrity.mockClear();
+    const scoped = { pk: workspacePartition(FAKE_COMPANY, workspaceId), sk: "META", entityType: "WORKSPACE", companyId: FAKE_COMPANY };
+    db.set(scoped);
+    db.set({ pk: scoped.pk, sk: "DEVELOPER_TASK", taskId });
+    expect(await ownerOfWorkspace(table(db), workspaceId)).toBe("core");
+    db.set({ ...scoped, companyId: OTHER });
+    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+    integrity.mockRestore();
   });
 
   it("reads the core's answer: a value for 200, the closed-list error otherwise, and fixed words for anything it cannot read (never echoed)", () => {
@@ -174,7 +197,8 @@ async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "me
   const harness = await createDeveloperTaskBroker(options.wired === false ? {} : { developerExtra: { coreTasks } });
   const rows = [
     ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk),
-    ...await partition(world, `WORKSPACE#${task.workspaceId}`), ...await partition(world, `DEVELOPER#${developerIdOf(owner)}`),
+    ...await partition(world, workspacePartition(FAKE_COMPANY, task.workspaceId)), ...await partition(world, `DEVELOPER#${developerIdOf(owner)}`),
+    ...await partition(world, `WORKSPACE#${task.workspaceId}`),
   ];
   expect(rows.some((row) => typeof row.sk === "string" && row.sk.startsWith("OPERATION#"))).toBe(true);
   for (const row of rows) harness.db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
@@ -386,16 +410,25 @@ describe("the AWS readers see only workflow rows", () => {
     expect(writes).toEqual([]);
   });
 
-  it("the admin console names a core task's workspace by its task only; it never reads the core's task record", async () => {
+  it("the admin console names a legacy core workspace by its task only; it never reads the core's task record", async () => {
     const { db, task, brokerInput } = await coreWorld();
+    db.set({ ...legacyWorkspaceKey(task.workspaceId), sk: "DEVELOPER_TASK", taskId: task.taskId });
     const owner = await workspaceOwner({ documentClient: db, tableName: brokerInput.tableName } as never, { id: task.workspaceId, ownerKey: "k" } as never);
     expect(owner).toEqual({ origin: "ai_tool", owner: { taskId: task.taskId } });
+  });
+  it("known gap: admin workspace owner cannot resolve a scoped core pointer", async () => {
+    const { db, task, brokerInput, sent } = await coreWorld();
+    const deps = { documentClient: db, tableName: brokerInput.tableName } as never;
+    const observed = await workspaceOwner(deps, { id: task.workspaceId, ownerKey: "k" } as never);
+    expect(observed).toEqual(await workspaceOwner(deps, { id: "missing-workspace", ownerKey: "k" } as never));
+    expect(observed).toEqual({ origin: "slack", owner: {} });
+    expect(JSON.stringify(sent.mock.calls)).not.toContain(`DEVTASK#${task.taskId}`);
   });
 
 });
 
 describe("the operation readers behind requireOperation see only workflow rows (T1 follow-up)", () => {
-  const operationOf = async (db: FakeDynamoDb, workspaceId: string) => db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && String(item.sk).startsWith("OPERATION#"))[0] as { id: string; sk: string };
+  const operationOf = async (db: FakeDynamoDb, workspaceId: string) => db.find((item) => item.workspaceId === workspaceId && String(item.sk).startsWith("OPERATION#"))[0] as { id: string; sk: string };
   const notHere = { code: "NOT_FOUND", message: `NOT_FOUND: ${NOT_ON_THE_CORE_YET}` };
 
   for (const entry of ["workflowBinding", "workflowCandidateSourceExportDigest", "requireOperation"] as const) {

@@ -176,3 +176,10 @@ describe("GET /v1/dev/workspaces (spec 041 FR-001, FR-002)", () => {
     expect(response.statusCode).toBe(404);
   });
 });
+
+it("developer workspace lists omit discovery pointers even with stale index and workspace fields", async () => {
+  db.set({ ...workspace({ id: uuid("01"), project: "payments-api", created: "2026-09-20T09:00:00.000Z" }), entityType: "WORKSPACE_COMPANY_POINTER" });
+  const response = await call("/v1/dev/workspaces", claims());
+  expect(response.statusCode).toBe(200);
+  expect((JSON.parse(response.body) as WorkspacesBody).workspaces).toEqual([]);
+});

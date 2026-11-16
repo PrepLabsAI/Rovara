@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The callback endpoints a worker posts to (`/v1/internal/workspaces/<w>/operations/<o>/<action>`), for the three every job has: its events, its artifacts and
 // its terminal result. The capability the flow issued at delivery (HMAC, one workspace, one operation, one fence, a list of actions) is checked first; the ids in the address must be the
 // capability's own. Every other callback the worker can make (a model fallback, the model budget of the browser checks, ...) answers "not available" until its lane is wired; the worker
@@ -12,7 +13,7 @@ import {
 import { CallbackCapabilities, type CallbackAction } from "../callbacks.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { currentDocumentType } from "../core/decisions/workflow-subject.js";
-import { operationKey, taskPointerKey } from "../core/task-flow/keys.js";
+
 import { handleCodingRunUpload, isCodingRunUpload } from "./candidate-export.js";
 import { handleE2EEvidenceUpload, readE2EAdmissionChunk, type RoundRecordReaders } from "../core/e2e/callbacks.js";
 import { handleBrowserEvidenceUpload } from "../core/proof/browser-evidence-upload.js";
@@ -61,7 +62,7 @@ const EVENTS_MAX = 500;
 const EVENT_KEEP_SECONDS = 14 * 86_400;
 
 export const artifactObjectKey = (workspaceId: string, operationId: string, name: string): string => `workspaces/${workspaceId}/operations/${operationId}/${name}`;
-export const artifactKey = (workspaceId: string, operationId: string, name: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: `ARTIFACT#${operationId}#${name}` });
+export const artifactKey = (workspace: { pk: string }, operationId: string, name: string) => ({ pk: workspace.pk, sk: `ARTIFACT#${operationId}#${name}` });
 
 export interface CallbackDeps {
   /** Set only on installs using the signed task-token path. */
@@ -101,7 +102,7 @@ function bodyOf(request: BrokerRequest): Record<string, unknown> {
 }
 
 async function operationOf(deps: CallbackDeps, workspaceId: string, operationId: string): Promise<OperationRecord> {
-  const operation = fromDocument<OperationRecord>(await deps.flow.store.get(operationKey(workspaceId, operationId)));
+  const operation = fromDocument<OperationRecord>(await deps.flow.store.get((await workspaceKeys(deps.flow, workspaceId)).operationKey(operationId)));
   if (operation === undefined || operation.companyId !== deps.flow.companyId) throw agentXError("NOT_FOUND", "operation not found");
   return operation;
 }
@@ -125,7 +126,7 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   const id = randomUUID();
   const objectKey = artifactObjectKey(operation.workspaceId, operation.id, name);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const key = artifactKey(operation.workspaceId, operation.id, name);
+  const key = artifactKey((await workspaceKeys(deps.flow, operation.workspaceId)).workspaceKey, operation.id, name);
   if (REPLACEABLE_ARTIFACT_NAMES.has(name)) {
     // The newest post of a replaceable name stands; its bytes live under their own digest, so an earlier post is never rewritten.
     const replaceableKey = `${objectKey}/${sha256}`;
@@ -202,18 +203,18 @@ async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body
   // when this returns, so what a retry resumes from is what was durably recorded. A checkpoint that does not continue the approved run is refused (the worker then fails the operation).
   await recordWorkItemProgress(deps.flow, operation, parsed);
   // The operation's counter hands out the sequence numbers, so events keep their order whichever batch they arrived in.
-  const counted = await deps.flow.store.update({ key: operationKey(operation.workspaceId, operation.id), ops: [change.add("eventSequence", parsed.length)], condition: when.present(), return: "new" });
+  const counted = await deps.flow.store.update({ key: (await workspaceKeys(deps.flow, operation.workspaceId)).operationKey(operation.id), ops: [change.add("eventSequence", parsed.length)], condition: when.present(), return: "new" });
   const item = counted.applied ? counted.item : undefined;
   const last = typeof item?.["eventSequence"] === "number" ? item["eventSequence"] : parsed.length;
   const expiresAt = Math.floor((deps.flow.now?.() ?? new Date()).getTime() / 1000) + EVENT_KEEP_SECONDS;
   await Promise.all(parsed.map((event, index) => deps.flow.store.put({
-    item: { pk: `WORKSPACE#${operation.workspaceId}`, sk: `EVENT#${operation.id}#${String(last - parsed.length + index + 1).padStart(10, "0")}`, entityType: "OPERATION_EVENT", operationId: operation.id, sequence: last - parsed.length + index + 1, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt, ...JSON.parse(JSON.stringify(event)) as Record<string, never> },
+    item: { pk: operation.pk, sk: `EVENT#${operation.id}#${String(last - parsed.length + index + 1).padStart(10, "0")}`, entityType: "OPERATION_EVENT", operationId: operation.id, sequence: last - parsed.length + index + 1, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt, ...JSON.parse(JSON.stringify(event)) as Record<string, never> },
   })));
   return { accepted: parsed.length };
 }
 
 async function readArtifactText(deps: CallbackDeps, operation: OperationRecord, name: string, maxBytes: number): Promise<{ text: string; artifact: { id: string; objectKey: string; createdAt: string; sha256: string } } | undefined> {
-  const found = await deps.flow.store.get(artifactKey(operation.workspaceId, operation.id, name));
+  const found = await deps.flow.store.get(artifactKey((await workspaceKeys(deps.flow, operation.workspaceId)).workspaceKey, operation.id, name));
   if (found === undefined || typeof found["objectKey"] !== "string" || typeof found["id"] !== "string" || typeof found["createdAt"] !== "string" || typeof found["sha256"] !== "string") return undefined;
   const read = await readVerifiedText(deps.blobs, { objectKey: found["objectKey"], sha256: found["sha256"] }, maxBytes);
   if (!("text" in read)) return undefined;
@@ -241,7 +242,7 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
   if (operation.workflowMode === "PLAN") {
     const saved = await readArtifactText(deps, operation, PLAN_ARTIFACT_NAME, PLAN_MAX_BYTES + 1);
     if (saved === undefined || saved.text.trim() === "") return undefined;
-    const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(operation.workspaceId)));
+    const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get((await workspaceKeys(deps.flow, operation.workspaceId)).taskPointerKey()));
     const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
     const workflow = task?.workflow;
     if (task === undefined || workflow === undefined) return undefined;
@@ -330,10 +331,10 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "browser-evidence-sign-in") {
         // The saved sign-in, for this operation's own recipe and project: the body is not read. The values are in this one answer, which no cache may keep.
         const signIn = deps.browserEvidenceSignIn!;
-        const answer = await handleBrowserEvidenceSignIn({ signIn, companyId: deps.flow.companyId, async projectOf(op) {
-          const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(op.workspaceId)));
+        const answer = await handleBrowserEvidenceSignIn({ signIn, companyId: operation.companyId, async projectOf(op) {
+          const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get((await workspaceKeys({ store: deps.flow.store, companyId: op.companyId }, op.workspaceId)).taskPointerKey()));
           const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
-          return task !== undefined && task.companyId === deps.flow.companyId ? task.project : undefined;
+          return task !== undefined && task.companyId === op.companyId ? task.project : undefined;
         } }, operation);
         return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
       }

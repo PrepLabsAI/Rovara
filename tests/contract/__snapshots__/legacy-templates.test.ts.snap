@@ -3069,6 +3069,27 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::CloudWatch::Alarm",
     },
+    "CoreModelAccessRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "GET /v1/internal/model-access",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
     "DefaultStage": {
       "DependsOn": [
         "DeveloperSignInAuthRoute98555360",

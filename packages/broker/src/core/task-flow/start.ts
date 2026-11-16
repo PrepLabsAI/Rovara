@@ -4,7 +4,9 @@
 // index row, its callback pointer, the conversation, the idempotency record, the workspace-slot charge, whatever `Admission` and `AuditSink`
 // stage, and (for a workflow that understands first) the dispatch row of its first step. Either all of it exists or none of it does.
 import { ROVARA_CODE_PROGRAM } from "../plan/program.js";
+import { legacyWorkspaceKey } from "./legacy-keys.js";
 import {
+  developerTaskPolicy,
   AgentXError,
   WorkOriginSchema,
   UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
@@ -116,6 +118,9 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist`));
   // An archived project accepts no new work (Cloud's requireNewWorkAllowed).
   if (project.archived === true) return refused(agentXError("PROJECT_ARCHIVED", `project \`${request.project}\` is archived; unarchive it to start new work`));
+  const policy = developerTaskPolicy(project.definition);
+  if (!policy.enabled) return refused(agentXError("FORBIDDEN", "tasks from AI tools are turned off for this project"));
+  if (policy.share === "required") return refused(agentXError("FORBIDDEN", "this project requires tasks to be shared to a channel; sharing is not set up on the core yet"));
   // Every repository of the project must live on a code host this install registered, before the budget, the limits and any write.
   if (deps.codeHosts !== undefined) {
     try {
@@ -141,7 +146,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const workflowPath = request.workflowPath ?? "QUICK";
 
   const charge = developerCharge({ companyId: deps.companyId, developerId });
-  const limits = limitsOf(deps);
+  const limits = await limitsOf(deps);
   const full = await limitReached(deps.store, charge, limits);
   if (full !== undefined) return refused(limitError(full, limits));
 
@@ -167,7 +172,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     throw error;
   }
   const workspace: WorkspaceRecord = {
-    ...workspaceKey(workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey,
+    ...workspaceKey(deps.companyId, workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey,
     projectName: project.definition.name, projectRevision: revision, ...(playbookCommit === undefined ? {} : { playbookCommit }), status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
     ...workspaceProjectIndexAttributes({ orgId: deps.companyId, projectName: project.definition.name, createdAt: receivedAt }),
     createdAt: receivedAt, updatedAt: receivedAt,
@@ -206,7 +211,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     }) } : {}),
   };
   const pointer: TaskPointerRecord = {
-    ...taskPointerKey(workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId,
+    ...taskPointerKey(deps.companyId, workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId,
     requester: { kind: "developer", developerId, provider: principal.provider },
     conversationId, firstRequestId: newId(deps),
     // FR-019: the instructions exactly as sent. A task that understands first queues no planning run: its first step is the flow's.
@@ -220,11 +225,12 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     ...staged,
     ...stageAudit(deps, { eventId: `task.started:${taskId}`, actor: { type: "person", id: developerId }, action: "task.started", subject: { type: "task", id: taskId }, details: { project: request.project, workflow: asWorkflow, ...(asWorkflow ? { path: workflowPath } : {}) } }),
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
+    { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace.companyId }, condition: when.absent() },
     ...prepare.items,
     { kind: "put", item: toDocument(taskItem), condition: when.absent() },
     { kind: "put", item: { ...taskIndexKey(developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, orgId: deps.companyId, project: request.project, title, client, status: "STARTING", shared: false, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
     { kind: "put", item: toDocument(pointer), condition: when.absent() },
-    { kind: "put", item: { ...conversationKey(workspaceId, conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
+    { kind: "put", item: { ...conversationKey(deps.companyId, workspaceId, conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
     { kind: "put", item: { ...idempotencyKey, entityType: "IDEMPOTENCY", taskId, payloadHash }, condition: when.absent() },
     // A task that understands first starts by understanding the request, as a dispatch row like every automatic step; it runs once the preparation has ended.
     ...(understandFirst ? [dispatchRowItem(deps, taskId, 1, "UNDERSTAND", receivedAt)] : []),

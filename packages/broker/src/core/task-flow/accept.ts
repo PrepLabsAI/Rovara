@@ -3,13 +3,13 @@
 // (the transactional outbox), so an operation exists if and only if its message does.
 import { INDEX_EXPIRY_ATTRIBUTE, agentXError, when, type DesignReviewBinding, type Operation, type TransactItem, type WorkflowDependencyInvocation } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
-import { operationKey, operationRequestKey } from "./keys.js";
+import { keysOfWorkspace } from "./workspace-location.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { toDocument, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type WorkspaceRecord } from "./records.js";
 import { dispatchQueueName, hashJson, iso, newId } from "./support.js";
 
 export interface AcceptInput {
-  workspace: Pick<WorkspaceRecord, "id" | "fence" | "ownerKey">;
+  workspace: Pick<WorkspaceRecord, "id" | "pk" | "fence" | "ownerKey">;
   kind: "prepare" | "task" | "publish" | "maintain";
   requestId: string;
   operationId?: string;
@@ -50,10 +50,11 @@ export interface DispatchMessage {
 const FIRST_EVENT_KEEP_SECONDS = 14 * 86_400;
 
 export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operation: OperationRecord; items: TransactItem[] } {
+  const location = keysOfWorkspace(deps, input.workspace);
   const now = input.now ?? iso(deps);
   const id = input.operationId ?? newId(deps);
   const operation: OperationRecord = {
-    ...operationKey(input.workspace.id, id),
+    ...location.operationKey(id),
     entityType: "OPERATION",
     companyId: deps.companyId,
     eventSequence: input.firstEvent === undefined ? 0 : 1,
@@ -84,7 +85,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
   const first: TransactItem[] = input.firstEvent === undefined ? [] : [{
     kind: "put",
     item: {
-      pk: `WORKSPACE#${input.workspace.id}`, sk: `EVENT#${id}#${String(1).padStart(10, "0")}`, entityType: "OPERATION_EVENT", operationId: id, sequence: 1,
+      ...location.operationEventKey(id, 1), entityType: "OPERATION_EVENT", operationId: id, sequence: 1,
       [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + FIRST_EVENT_KEEP_SECONDS, type: "progress", timestamp: now, payload: { message: input.firstEvent },
     },
     condition: when.absent(),
@@ -95,7 +96,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
       { kind: "put", item: toDocument(operation), condition: when.absent() },
       ...(input.recordRequest === false ? [] : [{
         kind: "put" as const,
-        item: { ...operationRequestKey(input.workspace.ownerKey, input.workspace.id, input.requestId), entityType: "IDEMPOTENCY", operationId: id, payloadHash: operation.payloadHash },
+        item: { ...location.operationRequestKey(input.workspace.ownerKey, input.requestId), entityType: "IDEMPOTENCY", operationId: id, payloadHash: operation.payloadHash },
         condition: when.absent(),
       }]),
       deps.outbox.stage({ id, companyId: deps.companyId, queue: dispatchQueueName(deps), body: { ...message }, attributes: { kind: input.kind } }),

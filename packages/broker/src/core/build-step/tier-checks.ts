@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The lighter flow after each push: for a task whose planning steps were skipped (`flow.skippedSteps`), the checks that stand in for them run on the CURRENT head of its pull requests, read from the code host
 // with the merge gate's own read (`readReviewInput`), never from the worker, the agent or a cached copy:
 //   - the tier of that head (only up; a head the post-push writer has not tiered, such as a person's own push, is tiered here), and the growth past the level the planning steps were chosen at;
@@ -365,7 +366,7 @@ async function scopeNotice(deps: TaskFlowDeps, task: TaskRecord, input: { flow: 
       const body = withScopeBanner(now.body ?? "", banner);
       if (body === now.body) continue;
       await target.host.updateChangeRequest(ref, { body }, { orgId: deps.companyId });
-      await deps.store.update({ key: pullRequestRecordKey(task.workspaceId, target.repositoryId, target.number), ops: [change.set("body", body), change.set("updatedAt", input.at)], condition: when.present() });
+      await deps.store.update({ key: pullRequestRecordKey((await workspaceKeys(deps, task.workspaceId)).workspaceKey, target.repositoryId, target.number), ops: [change.set("body", body), change.set("updatedAt", input.at)], condition: when.present() });
     }
     if (asked && task.sessionId !== undefined) {
       const text = question.kind === "couldnt_check"
