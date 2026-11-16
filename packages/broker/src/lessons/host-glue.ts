@@ -21,6 +21,7 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import type { LessonsUsedSection } from "../core/proof/pull-request-body.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { applyLoadReport } from "./counters.js";
+import { logTaskCorrections } from "./correction-log.js";
 import { learnedContextForDispatch } from "./load.js";
 import { modeAllows, resolveLearning } from "./policy.js";
 import type { LessonsRuntime } from "./runtime.js";
@@ -202,6 +203,11 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     source: input.sources.source, rows: input.sources.rows, settings: runtime.settings,
     reflect: { model: runtime.judgeModel, spend: runtime.spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause },
     process: runtime.process, counters: runtime.counters, log: (event, fields) => log(event, fields),
+    // The "same mistake twice" measure's log (no text): only this company's tasks, in this company's partition.
+    correctionLog: async (entry) => {
+      if (entry.workspaceId !== companyId) return;
+      await logTaskCorrections(flow.store, { companyId, project: entry.project, taskId: entry.taskId, corrections: entry.corrections, now: now() });
+    },
   };
   const workerDeps = (visibility?: ReflectWorkerDeps["visibility"], deadlineMs = LESSONS_WORKER_DEADLINE_SECONDS * 1000): ReflectWorkerDeps => ({
     claims, now, deadlineMs: Math.min(deadlineMs, LESSONS_WORKER_DEADLINE_SECONDS * 1000), ...(visibility === undefined ? {} : { visibility }), log: (event, fields) => log(event, fields),

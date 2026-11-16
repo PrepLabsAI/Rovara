@@ -28,6 +28,7 @@ import { lessonDeletionPort } from "../lessons/deletion.js";
 import { DocumentLessonStore } from "../lessons/document-store.js";
 import { documentLessonVectors } from "../lessons/document-vectors.js";
 import { lessonAuditSink } from "../lessons/audit-sink.js";
+import { eraseLoggedCorrections } from "../lessons/correction-log.js";
 import type { CodeFactsReader } from "../lessons/code-facts.js";
 import type { TaskSubjectSource } from "../lessons/task-end.js";
 import type { OutcomeRowReader } from "../lessons/task-outcome-rows.js";
@@ -232,7 +233,7 @@ export interface ErasePersonLessonsReport {
   projects: number;
   purged: number;
   scrubbed: number;
-  /** Rows that named the person or a purged lesson outside the lesson itself (a comment's retire request, the "used in" list of a purged lesson) and were removed. */
+  /** Rows that named the person or a purged lesson outside the lesson itself (a comment's retire request, the "used in" list of a purged lesson, a correction they gave as the measure logged it) and were removed. */
   rows: number;
 }
 
@@ -265,6 +266,8 @@ export async function erasePersonLessons(input: { store: DocumentStore; audit: A
     await deletion.scrubAudienceIds(companyId, project, [personId]);
     for (const lessonId of done.purged) await removeAll(companyScoped(companyId, `LESSON_USE#${project}#${lessonId}`));
     await removeAll(companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`), (row) => row["personId"] !== personId);
+    // The corrections the person gave, as the "same mistake twice" measure logged them (no text, but their words' signature and their id).
+    rows += await eraseLoggedCorrections(store, companyId, project, personId);
   }
   input.log?.({ component: "core-lessons", companyId, event: "person_erased", projects: projects.length, purged, scrubbed, rows });
   return { projects: projects.length, purged, scrubbed, rows };

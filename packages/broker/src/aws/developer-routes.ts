@@ -10,6 +10,7 @@ import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
+import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import {
   AgentXNameSchema, AgentXError,
   IMPLICIT_COMPANY_ID, OrgIdSchema,
@@ -167,6 +168,8 @@ export interface DeveloperRouteDependencies {
   tasks?: DeveloperTaskActions;
   /** Lane LM8: the Code lessons API (`core-host/lessons-api.ts`), behind the lessons switch. Absent (the default, until the deployment wires it): every lessons route answers "Lessons are off." and reads nothing. */
   lessons?: Pick<LessonsApi, "answer">;
+  /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
+  lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
   createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
@@ -1402,6 +1405,9 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
 export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
+/** The Home number's paths (`core-host/lessons-repeats-api.ts` parses the same paths; a test holds the two equal). */
+export const LESSONS_REPEATS_ROUTES = /^\/v1\/dev\/(?:projects\/([^/]+)\/)?lessons\/repeats$/u;
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
@@ -1488,6 +1494,10 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (LESSONS_API_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
+  }
+  if (LESSONS_REPEATS_ROUTES.test(url.pathname)) {
+    if (deps.lessonRepeats === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+    return deps.lessonRepeats.answer({ method: request.method, path: url.pathname, query: url.searchParams }, { personId: caller.developerId });
   }
   if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
