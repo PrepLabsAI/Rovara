@@ -554,7 +554,7 @@ async function runTask(
     const baselineClaim = baselineCandidates === undefined || repositories.length !== 1 ? undefined
       : await findBaselineAncestor({ directory: repositories[0]!.directory, baseCommit: repositories[0]!.baseCommitSha, candidates: baselineCandidates, signal: stop.signal });
     // TE-MR2b: with two or more repositories, one claim per repository, all or none (the engine then builds ONE combined baseline, or none).
-    const baselineClaims = baselineCandidates === undefined || repositories.length < 2 ? undefined
+    const baselineClaims = baselineCandidates === undefined || invocation.payload.testEnvironment?.repositoryBaselines !== true || repositories.length < 2 ? undefined
       : await findBaselineAncestors({ repositories: repositories.map((repository) => ({ repositoryId: repository.repositoryId, directory: repository.directory, baseCommitSha: repository.baseCommitSha })), candidates: baselineCandidates, signal: stop.signal });
     try {
       await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });

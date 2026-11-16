@@ -20,7 +20,7 @@ export function featuresForTestPlan(dependencies: readonly TaskDependencyPlan[] 
   // TE-C1: candidates go only to a worker that checks them against the base commit; one that does not list it is refused the run, never sent a plan with a field it cannot read.
   if (plan?.baselineCandidates !== undefined) features.add(TEST_ENV_BASELINE_FEATURE);
   // TE-MR2b: a repository on a check, or a repository-qualified map, goes only to a worker that reads them (its strict parse would refuse the plan).
-  if (plan?.repositoryCoverageMap !== undefined || plan?.checks.some((check) => check.repositoryId !== undefined) === true) features.add(TEST_ENV_MULTI_REPO_FEATURE);
+  if (plan?.repositoryCoverageMap !== undefined || plan?.repositoryBaselines === true || plan?.checks.some((check) => check.repositoryId !== undefined) === true) features.add(TEST_ENV_MULTI_REPO_FEATURE);
   const planned = dependencies ?? plan?.dependencies ?? [];
   if (planned.length > 0) features.add(TEST_SERVICES_PLAN_FEATURE);
   if (planned.some((dependency) => dependency.backing === "emulated")) features.add(TEST_SERVICES_AWS_PLAN_FEATURE);

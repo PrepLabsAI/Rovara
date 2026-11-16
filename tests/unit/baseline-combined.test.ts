@@ -29,16 +29,16 @@ const claim = (repositoryId: string, n: number, commitsBack = 0) => ({ repositor
 const lead = (prefix: string, repositoryId: string, commitsBack = 0) => ({ repositoryId, sha: prefix.padEnd(40, "0"), commitsBack });
 const entry = (id: string): CheckEntry => ({ id, label: "pytest -q", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 700, exitCode: 0 });
 
-async function world(rows: BaselineRow[], rawBaselines: unknown, candidates?: string[]) {
+async function world(rows: BaselineRow[], rawBaselines: unknown, candidates?: string[], repositoryNames: string[] = ["lib", "service"]) {
   const documents = new MemoryDocumentStore();
   const testEnv = { store: documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } };
   for (const value of rows) await recordBaselineRow(testEnv, mintTrustedBaselineRun({ orgId: ORG, project: PROJECT, row: value }));
-  await documents.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition: { name: PROJECT, revision: 1, repositories: [{ name: "r", url: "https://example.invalid/r.git", path: "r", defaultBranch: "main", credentialRef: "c" }] } } });
+  await documents.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition: { name: PROJECT, revision: 1, repositories: repositoryNames.map((name) => ({ name, url: `https://example.invalid/${name}.git`, path: name, defaultBranch: "main", credentialRef: "c" })) } } });
   const blobs = createDocumentEvidenceBlobStore(documents, { companyId: ORG });
   const rawText = JSON.stringify({ schemaVersion: 1, candidateDigest: DIGEST, checks: [], ...(rawBaselines === undefined ? {} : { baselines: rawBaselines }) });
   const deps: KeepEvidenceDeps = {
     scan: scanTextForTests, store: { blobs },
-    actions: { async artifacts() { return [{ name: "evidence-raw.json", objectKey: `${PREFIX}evidence-raw.json` }]; }, async readArtifact(key, max) { return key === `${PREFIX}evidence-raw.json` ? Buffer.from(rawText).subarray(0, max) : undefined; } },
+    actions: { async artifacts() { return [{ name: "evidence-raw.json", objectKey: `${PREFIX}evidence-raw.json` }]; }, async readArtifact(key: string, max: number) { return key === `${PREFIX}evidence-raw.json` ? Buffer.from(rawText).subarray(0, max) : undefined; } },
   } as never;
   const offered = candidates ?? rows.map((value) => value.headSha);
   const baseline = taskBaselineOf(testEnv, { orgId: ORG, project: PROJECT, taskId: TASK.taskId, plan: { revision: 1, baselineCandidates: offered.map((value) => ({ sha: value })) } });
@@ -77,7 +77,7 @@ describe("the wire shapes", () => {
 
 describe("the engine's combination", () => {
   const find = (store: MemoryDocumentStore, parts: Array<{ repositoryId: string; sha: string; commitsBack: number }>, over: Record<string, unknown> = {}) =>
-    combinedBaselineFor({ store, now: () => NOW }, { orgId: ORG as never, project: PROJECT, envRevision: 1, branch: "main", parts, ...over });
+    combinedBaselineFor({ store, now: () => NOW }, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main", parts, ...over });
 
   it("is found when every repository has a trusted run, with the oldest age, the farthest commit count and the sums", async () => {
     const w = await world([row(1, 3), row(2, 10, { tests: { total: 5, passed: 4, failed: 1, skipped: 0 }, failed: ["c.py::q"], flaky: [] })], undefined);
@@ -111,9 +111,9 @@ describe("the engine's combination", () => {
     const w = await world([row(1, 3), row(2, 3)], undefined);
     const found = (await find(w.documents, [claim("lib", 1), claim("service", 2)]))!;
     const words = evidenceCombinedBaselineOf(found);
-    expect(await alreadyFailingFromBaseline({ store: w.documents, now: () => NOW }, { orgId: ORG as never, project: PROJECT, envRevision: 1, branch: "main", words })).toBeUndefined();
+    expect(await alreadyFailingFromBaseline({ store: w.documents, now: () => NOW }, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main", words: { sha: words.sha, commitsBack: words.commitsBack, repositories: words.repositories } })).toBeUndefined();
     // Positive control: the same row, asked as a single repository's words, does excuse its failing tests.
-    expect(await alreadyFailingFromBaseline({ store: w.documents, now: () => NOW }, { orgId: ORG as never, project: PROJECT, envRevision: 1, branch: "main", words: { sha: sha(1), commitsBack: 0 } })).toEqual(["a.py::x", "a.py::y"]);
+    expect(await alreadyFailingFromBaseline({ store: w.documents, now: () => NOW }, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main", words: { sha: sha(1), commitsBack: 0, repositories: undefined } })).toEqual(["a.py::x", "a.py::y"]);
   });
 });
 
@@ -128,6 +128,18 @@ describe("the keeper", () => {
     const w = await world([row(1, 3), row(2, 6)], [claim("lib", 1), claim("service", 2)], [sha(1)]);
     await w.keep();
     expect(await kept(w)).toBeUndefined();
+  });
+  it("keeps nothing for a claim of some of the project's repositories, or of names the project does not have", async () => {
+    const some = await world([row(1, 3), row(2, 6)], [claim("lib", 1), claim("service", 2)], undefined, ["lib", "service", "docs"]);
+    await some.keep();
+    expect(await kept(some)).toBeUndefined();
+    const foreign = await world([row(1, 3), row(2, 6)], [claim("lib", 1), claim("payments", 2)]);
+    await foreign.keep();
+    expect(await kept(foreign)).toBeUndefined();
+    // Positive control: the same rows and the project's own names.
+    const own = await world([row(1, 3), row(2, 6)], [claim("lib", 1), claim("service", 2)]);
+    await own.keep();
+    expect(await kept(own)).toBeDefined();
   });
   it("keeps nothing when one repository has no row, and nothing when the plan offered nothing", async () => {
     const w = await world([row(1, 3)], [claim("lib", 1), claim("service", 2)], [sha(1), sha(2)]);

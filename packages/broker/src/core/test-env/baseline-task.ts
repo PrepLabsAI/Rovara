@@ -4,7 +4,7 @@ import type { EvidenceBaseline, OrgId, TestEnvTaskPlan } from "@agentx/contracts
 import type { KeepEvidenceBaseline } from "../proof/evidence-keep.js";
 import { baselineFor, combinedBaselineFor, knownFailingOf, type FoundBaseline, type FoundCombinedBaseline } from "./baseline-cache.js";
 import type { TestEnvDeps } from "./deps.js";
-import { taskBaselineBranch } from "./nightly-usable.js";
+import { projectRepositoryNames, taskBaselineBranch } from "./nightly-usable.js";
 import { baselineCacheEnabled } from "./switch.js";
 
 /** The words a task keeps for the run it was compared with: numbers and fixed words, frozen when the checks were compared. `knownFailing` is the row's failing set, which a found row always holds whole. */
@@ -39,6 +39,9 @@ export function taskBaselineOf(
     async resolveAll(claims) {
       const branch = await taskBaselineBranch(deps, input.orgId, input.project, input.taskId);
       if (branch === undefined) return undefined;
+      // The claim must be for exactly the repositories of the task's project: a claim of some of them, or of names the project does not have, is no baseline.
+      const names = await projectRepositoryNames(deps, input.orgId, input.project);
+      if (names === undefined || names.length !== claims.length || !names.every((name) => claims.some((claim) => claim.repositoryId === name))) return undefined;
       const found = await combinedBaselineFor(deps, { orgId: input.orgId, project: input.project, envRevision: input.plan.revision, branch, parts: claims });
       return found === undefined ? undefined : evidenceCombinedBaselineOf(found);
     },
@@ -50,7 +53,7 @@ export function taskBaselineOf(
  * branch given (the caller passes the task's own base branch, `taskBaselineBranch`: the same one the keeper used, so the words and the verdict name the same run). Undefined when there is no usable row any more (expired, damaged): the caller then keeps today's rule (`usableNightlyFailing`), never an empty "nothing already fails". Cloud's `known-failing.ts` calls this when the switch is on.
  */
 export async function alreadyFailingFromBaseline(
-  deps: Pick<TestEnvDeps, "store" | "now">, input: { orgId: OrgId; project: string; envRevision: number; branch: string; words: Pick<EvidenceBaseline, "sha" | "commitsBack" | "repositories"> },
+  deps: Pick<TestEnvDeps, "store" | "now">, input: { orgId: OrgId; project: string; envRevision: number; branch: string; words: Pick<EvidenceBaseline, "sha" | "commitsBack"> & { repositories: EvidenceBaseline["repositories"] } },
 ): Promise<string[] | undefined> {
   // A combined baseline (TE-MR2b) holds repository-less failing sets of several repositories: a name failing in one must never excuse the same name in another, so it excuses nothing.
   if (input.words.repositories !== undefined) return undefined;

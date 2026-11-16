@@ -24,6 +24,9 @@ describe("the repository-qualified coverage map", () => {
     for (const bad of ["", "a b", "lib\n", "lib\u0001x", "x".repeat(201), "lib‮"]) expect(RepositoryCoverageMapSchema.safeParse(map([entry(bad, "a.py")])).success).toBe(false);
     expect(RepositoryCoverageMapSchema.safeParse(map([entry("lib", "a.py", [["bad id", "t"]])])).success).toBe(false);
   });
+  it("refuses a path with a control or format character, so no path can forge another repository's key", () => {
+    for (const path of ["\u0001lib\u0001src/lib.py", "a\nb", "a\u202eb"]) expect(RepositoryCoverageMapSchema.safeParse(map([entry("lib", path)])).success).toBe(false);
+  });
   it("refuses the same (repository, path) twice, so one path never has two answers", () => {
     expect(RepositoryCoverageMapSchema.safeParse(map([entry("lib", "a.py"), entry("lib", "a.py")])).success).toBe(false);
     expect(RepositoryCoverageMapSchema.safeParse(map([entry("lib", "a.py"), entry("service", "a.py")])).success).toBe(true);
@@ -38,7 +41,7 @@ describe("the repository-qualified coverage map", () => {
 
 describe("the task plan's cross-repository fields", () => {
   it("a plan without the new fields parses exactly as before, and the feature string is a worker invocation feature", () => {
-    const { repositoryCoverageMap: _map, ...old } = plan();
+    const { repositoryCoverageMap: _map, ...old } = plan(); void _map;
     const oldCheck = { ...old, checks: [{ id: "unit", kind: "test", selectArgs: ["{tests}"] }] };
     const parsed = TestEnvTaskPlanSchema.parse(oldCheck);
     expect(Object.keys(parsed).sort()).toEqual(["checks", "digest", "revision", "roundBudgetMin", "selection"]);
@@ -50,7 +53,7 @@ describe("the task plan's cross-repository fields", () => {
     expect(TestEnvTaskPlanSchema.safeParse(plan({ coverageMap: { builtAt: BUILT, files: {} } })).success).toBe(false);
   });
   it("a check's repository is a valid repository id, on a plan with or without the map", () => {
-    const { repositoryCoverageMap: _map, ...noMap } = plan();
+    const { repositoryCoverageMap: _map, ...noMap } = plan(); void _map;
     expect(TestEnvTaskPlanSchema.safeParse(noMap).success).toBe(true);
     expect(TestEnvTaskPlanSchema.safeParse(plan({ checks: [{ id: "unit", kind: "test", repositoryId: "bad id", selectArgs: ["{tests}"] }] })).success).toBe(false);
   });
@@ -65,10 +68,22 @@ describe("only a worker that reads the fields is sent them", () => {
   it("the plan needs the feature when it carries the map or a check's repository, and not otherwise", () => {
     const withMap = TestEnvTaskPlanSchema.parse(plan());
     expect([...featuresForTestPlan(undefined, withMap)].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_MULTI_REPO_FEATURE].sort());
-    const { repositoryCoverageMap: _map, ...rest } = plan();
+    const { repositoryCoverageMap: _map, ...rest } = plan(); void _map;
     expect([...featuresForTestPlan(undefined, TestEnvTaskPlanSchema.parse(rest))].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_MULTI_REPO_FEATURE].sort());
     const bare = TestEnvTaskPlanSchema.parse({ ...rest, checks: [{ id: "unit", kind: "test", selectArgs: ["{tests}"] }] });
     expect(featuresForTestPlan(undefined, bare)).toEqual(["task.testEnvironment.v1"]);
   });
   it("this worker lists it", () => { expect(WORKER_IMPLEMENTED_FEATURES).toContain(TEST_ENV_MULTI_REPO_FEATURE); });
+});
+
+describe("the engine's ask for combined baselines", () => {
+  it("repositoryBaselines is true or absent, needs the candidates, and the plan then needs the feature", () => {
+    const withCandidates = { ...plan(), baselineCandidates: [{ sha: "a".repeat(40) }] };
+    expect(TestEnvTaskPlanSchema.safeParse({ ...withCandidates, repositoryBaselines: true }).success).toBe(true);
+    expect(TestEnvTaskPlanSchema.safeParse({ ...withCandidates, repositoryBaselines: false }).success).toBe(false);
+    expect(TestEnvTaskPlanSchema.safeParse({ ...plan(), repositoryBaselines: true }).success).toBe(false);
+    const { repositoryCoverageMap: _map, ...noMap } = withCandidates; void _map;
+    const asked = TestEnvTaskPlanSchema.parse({ ...noMap, checks: [{ id: "unit", kind: "test", selectArgs: ["{tests}"] }], repositoryBaselines: true });
+    expect([...featuresForTestPlan(undefined, asked)].sort()).toEqual(["task.testEnvBaseline.v1", "task.testEnvMultiRepo.v1", "task.testEnvironment.v1"]);
+  });
 });

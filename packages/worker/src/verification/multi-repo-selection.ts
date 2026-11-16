@@ -18,7 +18,7 @@ import { commandWithSelection, pathRunsFullSuite, selectTests, type ChangedPath,
 export const MULTI_REPO_SELECTION_LIVE: boolean = false;
 
 /** The dependency facts selection needs (`RepositoryFacts` of multi-repo-edges.ts, only the parts it reads). */
-export interface SelectionFacts { edges: ReadonlyArray<{ consumer: string; provider: string }>; complete: boolean; unknown: readonly string[] }
+export interface SelectionFacts { edges: ReadonlyArray<{ consumer: string; provider: string }>; complete: boolean; unknown: readonly string[]; notes?: readonly string[] | undefined }
 export interface RepositorySelectionCheck { id: string; kind: string; repositoryId: string; command: ProjectCommand; selectArgs?: readonly string[] | undefined }
 export interface RepositorySelectionInput {
   config: Pick<TestEnvironmentBody["selection"], "method" | "declared" | "alwaysRun" | "fullSuiteOn">;
@@ -65,6 +65,13 @@ export function planRepositorySelections(input: RepositorySelectionInput): Map<s
   const prepared = new Set(input.repositories);
   const unknown = new Set(input.facts.unknown);
   const changed = [...input.changes].filter(([, changes]) => changes.length > 0);
+  // The map's own evidence of a dependency: a file of repository P touched by a test of repository R makes P a provider of R's checks whatever the manifests say (a sub-package, an alias, a submodule are invisible to them).
+  const touchedBy = new Map<string, Set<string>>();
+  for (const entry of input.map.entries) for (const test of entry.tests) {
+    const files = touchedBy.get(test.repositoryId) ?? new Set<string>();
+    files.add(entry.repositoryId);
+    touchedBy.set(test.repositoryId, files);
+  }
   for (const check of input.checks) {
     if (check.kind !== "test" || input.config.alwaysRun.includes(check.id)) { plans.set(check.id, { command: check.command }); continue; }
     plans.set(check.id, selectCheck(check));
@@ -78,6 +85,7 @@ export function planRepositorySelections(input: RepositorySelectionInput): Map<s
     if (!prepared.has(check.repositoryId) || !input.facts.complete) return whole(check, "unknown_file");
     if (check.selectArgs === undefined || check.selectArgs.length === 0) return whole(check, "no_template");
     const providers = providersOf(check.repositoryId, input.facts.edges);
+    for (const touched of touchedBy.get(check.repositoryId) ?? []) if (touched !== check.repositoryId) providers.add(touched);
     const own: ChangedPath[] = [];
     const seen: ChangedPath[] = [];
     for (const [repositoryId, changes] of changed) {
@@ -97,6 +105,9 @@ export function planRepositorySelections(input: RepositorySelectionInput): Map<s
       const key = entry.repositoryId === check.repositoryId ? entry.path : providerKey(entry.repositoryId, entry.path);
       files[key] = entry.tests.filter((test) => test.repositoryId === check.repositoryId).map((test) => test.id);
     }
+    // A provider's changed file that the map holds but that no test of this repository touches is not "nothing depends on it": the map may simply not record coverage of the provider's files from this repository's runs
+    // (a provider installed from a registry reads as exactly that). The whole check, until a producer is proven to measure it.
+    for (const change of seen) for (const path of change.oldPath === undefined ? [change.path] : [change.path, change.oldPath]) if (files[path]?.length === 0) return whole(check, "unknown_file");
     const map: CoverageMap = { builtAt: input.map.builtAt, files };
     const result = selectTests({ config, check: { id: check.id, selectArgs: check.selectArgs }, changes: [...own, ...seen], inventory: inventoryOf(input.map, check.repositoryId), coverageMap: map, lastNightlyFailures: input.lastNightlyFailures, now: input.now });
     if (result.mode === "always_full") return { command: check.command };

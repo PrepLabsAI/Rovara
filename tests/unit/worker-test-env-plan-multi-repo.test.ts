@@ -113,9 +113,9 @@ describe("a change in two repositories", () => {
   it("a single repository task, and a plan without the map, are exactly today's path (the facts are never derived)", async () => {
     const derive = vi.fn(async () => facts());
     changes.byDirectory.set(directories.service, [modified("src/rest.py")]);
-    const single = await applyTestEnvironmentPlan({ readiness: [readiness[0]!], plan: plan({ repositoryCoverageMap: undefined, checks: [{ id: "svc", kind: "test", selectArgs: ["{tests}"] }] }), repositories: [repos[0]!], candidateBefore: candidate("service"), now: NOW, multiRepo: { live: true, derive } as never });
+    const single = await applyTestEnvironmentPlan({ readiness: [readiness[0]!], plan: plan({ repositoryCoverageMap: undefined, checks: [{ id: "svc", kind: "test", selectArgs: ["{tests}"] }] }), repositories: [repos[0]!], candidateBefore: candidate("service"), now: NOW, multiRepo: { live: true, derive } });
     expect(single?.selection?.fallbackReason).toBe("map_missing");
-    await applyTestEnvironmentPlan({ readiness: [readiness[0]!], plan: plan({ checks: [{ id: "svc", kind: "test", repositoryId: "service", selectArgs: ["{tests}"] }] }), repositories: [repos[0]!], candidateBefore: candidate("service"), now: NOW, multiRepo: { live: true, derive } as never });
+    await applyTestEnvironmentPlan({ readiness: [readiness[0]!], plan: plan({ checks: [{ id: "svc", kind: "test", repositoryId: "service", selectArgs: ["{tests}"] }] }), repositories: [repos[0]!], candidateBefore: candidate("service"), now: NOW, multiRepo: { live: true, derive } });
     expect(derive).not.toHaveBeenCalled();
   });
 });
@@ -135,7 +135,7 @@ describe("with the real manifests of two repositories", () => {
     }
     return made;
   }
-  const run = (made: Awaited<ReturnType<typeof world>>) => applyTestEnvironmentPlan({ readiness, plan: plan(), repositories: made, candidateBefore: candidate(...made.map((m) => m.repositoryId)), now: NOW, multiRepo: { live: true } });
+  const run = (made: Awaited<ReturnType<typeof world>>, over: Record<string, unknown> = {}) => applyTestEnvironmentPlan({ readiness, plan: plan(over), repositories: made, candidateBefore: candidate(...made.map((m) => m.repositoryId)), now: NOW, multiRepo: { live: true } });
 
   it("narrows the consumer's check from its own package.json dependency on the provider", async () => {
     const made = await world({ service: { "package.json": JSON.stringify({ name: "svc", dependencies: { "lib-pkg": "*" } }) }, lib: { "package.json": JSON.stringify({ name: "lib-pkg" }) } });
@@ -152,10 +152,19 @@ describe("with the real manifests of two repositories", () => {
     expect(applied.readiness[0]!.args).toEqual(["-q", "tests/test_s0.py::test_x", "tests/test_s1.py::test_x"]);
   });
 
+  it("no manifest edge at all, but the map shows a service test touching the lib's file: the map's evidence relates them", async () => {
+    const made = await world({ service: { "package.json": JSON.stringify({ name: "svc" }) }, lib: { "package.json": JSON.stringify({ name: "lib-pkg" }) } });
+    changes.byDirectory.set(made[1]!.directory, [modified("src/lib.py")]);
+    const applied = (await run(made))!;
+    expect(applied.readiness[0]!.args).toEqual(["-q", "tests/test_s0.py::test_x", "tests/test_s1.py::test_x"]);
+  });
+
   it("no edge in either source and a Maven repository: the whole check, never a skip", async () => {
     const made = await world({ service: { "pom.xml": "<project/>" }, lib: { "package.json": JSON.stringify({ name: "lib-pkg" }) } });
     changes.byDirectory.set(made[1]!.directory, [modified("src/lib.py")]);
-    const applied = (await run(made))!;
+    // The map shows no test of service touching lib, so only the manifests could relate them.
+    const isolated = { ...repositoryCoverageMap, entries: repositoryCoverageMap.entries.map((value) => (value.path === "src/lib.py" ? { ...value, tests: value.tests.filter((test) => test.repositoryId === "lib") } : value)) };
+    const applied = (await run(made, { repositoryCoverageMap: isolated }))!;
     expect(applied.readiness[0]).toEqual(readiness[0]);
     // lib's own check is still narrowed by lib's own change: the unknown repository only costs ITS checks their narrowing.
     expect(applied.readiness[1]!.args).toEqual(["-q", "tests/test_l0.py::test_x"]);

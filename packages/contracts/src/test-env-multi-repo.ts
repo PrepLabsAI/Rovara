@@ -23,7 +23,7 @@ export const RepositoryTestSchema = z.object({ repositoryId: RepositoryIdSchema,
 export const RepositoryCoverageMapSchema = z
   .object({
     builtAt: z.string().datetime(),
-    entries: z.array(z.object({ repositoryId: RepositoryIdSchema, path: z.string().min(1).max(500), tests: z.array(RepositoryTestSchema).max(REPOSITORY_MAP_TESTS_MAX) }).strict()).max(COVERAGE_MAP_FILES_MAX),
+    entries: z.array(z.object({ repositoryId: RepositoryIdSchema, path: z.string().min(1).max(500).regex(/^[^\p{Cc}\p{Cf}]+$/u, "a path has no control or format character"), tests: z.array(RepositoryTestSchema).max(REPOSITORY_MAP_TESTS_MAX) }).strict()).max(COVERAGE_MAP_FILES_MAX),
   })
   .strict()
   .superRefine((map, context) => {

@@ -316,10 +316,16 @@ export const TestEnvTaskPlanSchema = z
      * Sent only to a worker that lists `TEST_ENV_MULTI_REPO_FEATURE`. Nothing sends it yet: the nightly is single-repository; a producer comes with the multi-repository nightly.
      */
     repositoryCoverageMap: RepositoryCoverageMapSchema.optional(),
+    /**
+     * TE-MR2b: this engine reads a combined baseline claim (`EvidenceRaw.baselines`) for a task with several repositories. Only with `baselineCandidates`; a worker writes the claim only when it is set, so an engine without it
+     * never receives a raw file with the field (its strict parse would refuse the whole file). Sent only to a worker that lists `TEST_ENV_MULTI_REPO_FEATURE`. Absent: today's plan byte for byte.
+     */
+    repositoryBaselines: z.literal(true).optional(),
   })
   .strict()
   .refine((plan) => plan.coverageMap === undefined || JSON.stringify(plan.coverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["coverageMap"] })
   .refine((plan) => plan.repositoryCoverageMap === undefined || JSON.stringify(plan.repositoryCoverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["repositoryCoverageMap"] })
+  .refine((plan) => plan.repositoryBaselines === undefined || plan.baselineCandidates !== undefined, { message: "combined baselines need baseline candidates", path: ["repositoryBaselines"] })
   .refine((plan) => plan.repositoryCoverageMap === undefined || plan.coverageMap === undefined, { message: "one coverage map, not two", path: ["repositoryCoverageMap"] })
   .refine((plan) => plan.repositoryCoverageMap === undefined || plan.checks.every((check) => check.repositoryId !== undefined), { message: "a repository-qualified map needs a repository on every check", path: ["checks"] })
   .superRefine((plan, context) => {

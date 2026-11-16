@@ -76,6 +76,19 @@ describe("cross-repository selection", () => {
     }
   });
 
+  it("the map's own evidence counts as a dependency: a repository the manifests do not show as a provider still relates when a test of this repository touches its file", () => {
+    const result = planned({ facts: { edges: [], notes: [], complete: true, unknown: [] } });
+    expect(result.get("svc-unit")!.command.args).toEqual(["-q", "tests/test_s0.py::test_x", "tests/test_s1.py::test_x"]);
+  });
+
+  it("a provider's changed file that the map holds but no test of this repository touches runs the whole check", () => {
+    const m = map([entry("lib", "src/uncovered.py", [{ repositoryId: "lib", id: "tests/test_l0.py::test_x" }])]);
+    const result = planned({ map: m, changes: new Map([["lib", [modified("src/uncovered.py")]], ["service", [modified("src/svc.py")]]]) });
+    const one = result.get("svc-unit")!;
+    expect(one.command).toEqual(checks[0]!.command);
+    expect(one.selection).toMatchObject({ method: "full", fallbackReason: "unknown_file" });
+  });
+
   it("a cycle terminates and relates both ways", () => {
     const result = planned({ facts: { edges: [edge("service", "lib"), edge("lib", "service")], notes: [], complete: true, unknown: [] }, changes: new Map([["lib", [modified("src/lib.py")]], ["service", [modified("src/svc.py")]]]) });
     expect(result.get("svc-unit")!.command.args).toContain("tests/test_s0.py::test_x");
@@ -94,13 +107,15 @@ describe("cross-repository selection fails closed", () => {
     unchanged(result, "svc-unit", "unknown_file"); unchanged(result, "lib-unit", "unknown_file");
   });
   it("a repository whose dependencies are not fully known is never skipped as unrelated, whichever side it is on", () => {
+    // The map shows no test of service touching lib: only the manifests could relate them.
+    const isolated = map().entries.map((value) => (value.repositoryId === "lib" && value.path === "src/lib.py" ? { ...value, tests: value.tests.filter((test) => test.repositoryId === "lib") } : value));
     for (const unknown of [["service"], ["lib"], ["service", "lib"]]) {
-      const result = planned({ facts: { edges: [], notes: [], complete: true, unknown } });
+      const result = planned({ map: { builtAt: FRESH, entries: isolated }, facts: { edges: [], notes: [], complete: true, unknown } });
       // service (no edge to lib) and lib: lib changed, no edge. An unknown side means the change may reach it: the whole check.
       unchanged(result, "svc-unit", "unknown_file");
     }
     // Known on both sides with no edge: the change is ignored for the consumer-less repository (no change of its own: nothing selected, the caller runs it whole).
-    const known = planned({ facts: { edges: [], notes: [], complete: true, unknown: [] } });
+    const known = planned({ map: { builtAt: FRESH, entries: isolated }, facts: { edges: [], notes: [], complete: true, unknown: [] } });
     expect(known.get("svc-unit")!.selection).toMatchObject({ selected: 0 });
   });
   it("a path that is not in the map, a stale map and a path that changes what every test means run the whole check", () => {

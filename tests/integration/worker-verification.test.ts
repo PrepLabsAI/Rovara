@@ -2083,7 +2083,10 @@ describe("TE-C1: the baseline claim of a verification run", () => {
     expect((rawOf(many) as { baselines?: unknown } | undefined)?.baselines).toBeUndefined();
     // Positive control: with an offered commit in EVERY repository, one claim per repository is written (sorted by repository id), and no single-repository claim.
     const secondHead = manifest.repositories[1]!["resolvedCommit"] as string;
-    const both = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }, { sha: secondHead }] } } });
+    const both = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }, { sha: secondHead }], repositoryBaselines: true } } });
+    // Without the engine's ask the worker claims nothing, whatever it could find.
+    const unasked = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }, { sha: secondHead }] } } });
+    expect((rawOf(unasked) as { baselines?: unknown } | undefined)?.baselines).toBeUndefined();
     expect(both.failure).toBeUndefined();
     const claims = (rawOf(both) as { baselines?: Array<{ repositoryId: string; sha: string; commitsBack: number }> } | undefined)?.baselines;
     expect(claims?.map((claim) => claim.sha).sort()).toEqual([two.first, secondHead].sort());
