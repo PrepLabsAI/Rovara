@@ -574,7 +574,7 @@ describe("agentx deploy", () => {
 
   it("install answers must name the GitHub App id; upgrade answers may leave it out, and neither accepts an empty one (switch-over gap 1)", async () => {
     const github = (answersJson().github as Record<string, unknown>);
-    const { appId: _appId, ...withoutAppId } = github;
+    const withoutAppId = Object.fromEntries(Object.entries(github).filter(([key]) => key !== "appId"));
     const missing = await writeAnswers({ github: withoutAppId });
     const empty = await writeAnswers({ github: { ...github, appId: "" } });
     const run = async (mode: string, path: string) => {

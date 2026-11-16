@@ -939,8 +939,8 @@ describe("keptOperatorParameters", () => {
 
 describe("an upgrade whose answers leave github.appId out keeps the deployed GitHubAppId (switch-over gap 1)", () => {
   const withoutAppId = (): DeployAnswers => {
-    const { appId: _appId, ...github } = baseAnswers().github;
-    return { ...baseAnswers(), github };
+    const { account, installationId, privateKeySecretArn } = baseAnswers().github;
+    return { ...baseAnswers(), github: { ...(account === undefined ? {} : { account }), ...(installationId === undefined ? {} : { installationId }), privateKeySecretArn } };
   };
   async function installedEnvironment(engine: "cdk" | "templates" = "cdk"): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
     const store = new MemoryParameterStore();
