@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { parseModelHelperArgs, parseModelHelperSummarizeArgs } from "./model-helper-args.js";
 import { createModelLedgerWriter, summarizeModelLedgerFile } from "./model-helper-ledger.js";
 import { startModelHelperLoop, type ModelBackend, type RunningModelHelperLoop } from "./model-helper-http.js";
+import { bridgeModelBackend } from "./model-helper-bridge-backend.js";
 import { UNNAMED_ESCAPE_RECORDER, type ModelHostRecorderPort } from "./model-helper-recorder-port.js";
 import { parseModelHelperRowsBytes, parseModelReplyBundleBytes } from "./model-reply-bundle.js";
 import type { ModelHelperServeArgs } from "./model-helper-args.js";
@@ -62,7 +63,8 @@ export async function serveModelHelper(args: ModelHelperServeArgs, options: Serv
     replySets: bundle.byFamily,
     ledger,
     projectId: args.projectId,
-    backend: options.backend,
+    // A backend given by the caller (tests) wins; otherwise the worker's bridge socket, only when the worker named one (`--bridge-socket`, mode `real` only).
+    backend: options.backend ?? (args.bridgeSocket === undefined ? undefined : bridgeModelBackend(args.bridgeSocket)),
     escapes: args.recordEscapes ? { recorder: options.recorder ?? UNNAMED_ESCAPE_RECORDER, ...(options.escapePorts === undefined ? {} : { ports: options.escapePorts }) } : undefined,
     now,
   });

@@ -3,7 +3,7 @@
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { repoResolver, walkImportGraph } from "../support/import-graph.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,8 +18,14 @@ describe("the helper program's import graph", () => {
     expect(rel).not.toContain("packages/contracts/src/index.ts");
     expect(rel.filter((file) => /channel-command-client|setup-draft/u.test(file))).toEqual([]);
   });
-  it("has no import, call or construction that can open an outbound connection", () => {
-    expect(graph.violations).toEqual([]);
+  it("has no import, call or construction that can open an outbound connection, except the bridge client's one call to the worker's Unix socket (TE-B1: the `real` backend)", () => {
+    expect(graph.violations.map((violation) => ({ file: violation.file.slice(root.length + 1), rule: violation.rule }))).toEqual([{ file: "packages/worker/src/model-helper-bridge-client.ts", rule: "default import of node:http" }]);
+  });
+  it("the bridge client's one outbound call goes to a socket PATH: a single http.request with socketPath, never a host, a port or a lookup", () => {
+    const text = readFileSync(resolve(root, "packages/worker/src/model-helper-bridge-client.ts"), "utf8").replace(/^\s*\/\/.*$/gmu, "");
+    expect(text.match(/\bhttp\.[a-zA-Z]+\(/gu)).toEqual(["http.request("]);
+    expect(text).toMatch(/http\.request\(\{\s*socketPath: call\.socketPath,/u);
+    expect(text).not.toMatch(/\b(?:host|hostname|port|localAddress|lookup|createConnection|family)\s*:/u);
   });
   it("the walker does see renamed default imports, namespace imports, export-from, dynamic import, require and fetch (positive controls)", () => {
     const dir = mkdtempSync(join(tmpdir(), "rsig-"));
