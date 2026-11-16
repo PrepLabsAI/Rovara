@@ -9,7 +9,6 @@ import { TASK_ID, mergeWorld } from "../support/merge-world.js";
 import { ORG, host } from "../support/service-host.js";
 
 const edge = (consumer: string, provider: string) => ({ consumer, provider, language: "node", source: "both" });
-const budget = { signal: new AbortController().signal, beforeRequest: () => undefined };
 
 describe("heldDependents", () => {
   const order = mergeOrderOf(["app", "docs", "lib"], [edge("app", "lib"), edge("docs", "lib")]);
@@ -154,7 +153,7 @@ describe("the warning", () => {
   it("a fault while building the warning never stops the merge from being recorded, and is logged by name", async () => {
     const w = await withEdges([edge("app", "payments-lib")], undefined, undefined, (milestones) => ({
       ...milestones, items: (milestone, n, options) => { if (milestone.kind === "stuck") throw new Error("secret-canary schema"); return milestones.items(milestone, n, options); },
-    }) as typeof milestones);
+    }));
     mergeByHand(w, "app");
     await w.tracking.sweep();
     expect((await readTask(w.h.deps, TASK_ID))!.workflow?.pullRequests?.find((entry) => entry.repositoryId === "app")?.state).toBe("MERGED");

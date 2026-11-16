@@ -32,7 +32,7 @@ function world(rawText: string | undefined, documents = new MemoryDocumentStore(
   };
   const marked: string[] = [];
   const deps: KeepEvidenceDeps = { scan: scanTextForTests, markStored: async (orgId) => { marked.push(orgId); }, actions, store: { blobs } };
-  const keys = async (companyId: string): Promise<string[]> => (await documents.query({ pk: `ORG#${companyId}#EVIDENCE_BLOB` })).items.map((item) => item.sk as string).sort();
+  const keys = async (companyId: string): Promise<string[]> => (await documents.query({ pk: `ORG#${companyId}#EVIDENCE_BLOB` })).items.map((item) => item.sk).sort();
   return { documents, blobs, blobsOf, deps, marked, keys };
 }
 const edgesRecord = (edges: unknown[], notes: string[] = []) => ({ repositoryEdges: { edges, notes } });
@@ -137,16 +137,16 @@ describe("two companies", () => {
 
 describe("the seam over a task flow's records", () => {
   const record = (companyId: string) => ({ ...taskKey(TASK_ID), entityType: "DEVELOPER_TASK", taskId: TASK_ID, companyId, ownerKey: TASK.ownerKey, workspaceId: TASK.workspaceId });
-  const task = (orgId: string): MergeTask => ({ taskId: TASK_ID, orgId: orgId as never, project: "web", startingRevision: 1, workspaceId: "ws-1", ownerId: "o", ownerName: "n", workflow: { candidate: { digest: DIGEST } } as never });
+  const task = (orgId: string): MergeTask => ({ taskId: TASK_ID, orgId: orgId, project: "web", startingRevision: 1, workspaceId: "ws-1", ownerId: "o", ownerName: "n", workflow: { candidate: { digest: DIGEST } } as never });
 
   it("finds a task's evidence from its own record, and refuses a record of another company", async () => {
     const w = world(JSON.stringify(rawOf(edgesRecord([edge("app", "lib")]))));
     await keepEvidence(w.deps, input({ task: { ...TASK, taskId: TASK_ID } }));
-    await w.documents.put({ item: record(COMPANY_A.orgId) as never });
-    const seam = createTaskRepositoryEdgesSeam({ flow: { store: w.documents }, blobs: w.blobs, companyId: COMPANY_A.orgId as never });
+    await w.documents.put({ item: record(COMPANY_A.orgId) });
+    const seam = createTaskRepositoryEdgesSeam({ flow: { store: w.documents }, blobs: w.blobs, companyId: COMPANY_A.orgId });
     expect(await seam(task(COMPANY_A.orgId))).toEqual([{ consumer: "app", provider: "lib" }]);
     // The same task id with a record of company B: company A's seam does not place it, so it does not read.
-    await w.documents.put({ item: record(COMPANY_B.orgId) as never });
+    await w.documents.put({ item: record(COMPANY_B.orgId) });
     await expect(seam(task(COMPANY_A.orgId))).rejects.toThrow();
     // A task with no record at all is unreadable too.
     await w.documents.delete({ key: taskKey(TASK_ID) });
@@ -156,11 +156,11 @@ describe("the seam over a task flow's records", () => {
 
 describe("the merge-order seam", () => {
   const taskOf = (over: Partial<MergeTask> = {}): MergeTask => ({
-    taskId: TASK_ID, orgId: COMPANY_A.orgId as never, project: "web", startingRevision: 1, workspaceId: "ws-1", ownerId: "owner-1", ownerName: "Priya",
+    taskId: TASK_ID, orgId: COMPANY_A.orgId, project: "web", startingRevision: 1, workspaceId: "ws-1", ownerId: "owner-1", ownerName: "Priya",
     workflow: { candidate: { digest: DIGEST } } as never, ...over,
   });
   const located = (task: MergeTask) => (task.taskId === TASK_ID ? { ownerKey: TASK.ownerKey, workspaceId: TASK.workspaceId } : undefined);
-  const seamFor = (blobs: ReturnType<typeof world>["blobs"], companyId: string = COMPANY_A.orgId) => createRepositoryEdgesSeam({ blobs, companyId: companyId as never, locate: async (task) => located(task) });
+  const seamFor = (blobs: ReturnType<typeof world>["blobs"], companyId: string = COMPANY_A.orgId) => createRepositoryEdgesSeam({ blobs, companyId: companyId, locate: async (task) => located(task) });
   const kept = async (w: ReturnType<typeof world>) => { await keepEvidence(w.deps, input({ task: { ...TASK, taskId: TASK_ID } })); };
 
   it("answers the kept facts for the task's current code, no facts when none were recorded, and refuses what it cannot read", async () => {
@@ -181,7 +181,7 @@ describe("the merge-order seam", () => {
     const w = world(JSON.stringify(rawOf(edgesRecord([edge("app", "payments-lib")]))));
     await kept(w);
     // A seam of company B over A's evidence reads nothing from A; a task that carries A's id is refused by a seam of company B.
-    expect(await seamFor(w.blobsOf(COMPANY_B.orgId), COMPANY_B.orgId)(taskOf({ orgId: COMPANY_B.orgId as never }))).toBeUndefined();
+    expect(await seamFor(w.blobsOf(COMPANY_B.orgId), COMPANY_B.orgId)(taskOf({ orgId: COMPANY_B.orgId }))).toBeUndefined();
     await expect(seamFor(w.blobs, COMPANY_B.orgId)(taskOf())).rejects.toThrow();
     await expect(seamFor(w.blobs)(taskOf({ orgId: undefined }))).rejects.toThrow();
   });
