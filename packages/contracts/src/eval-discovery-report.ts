@@ -14,6 +14,8 @@ export const EVAL_DISCOVERY_SUITES_MAX = 4;
 export const EVAL_DISCOVERY_FILES_MAX = 100;
 export const EVAL_DISCOVERY_CALLS_PER_QUESTION_MAX = 20;
 export const EVAL_DISCOVERY_COST_PER_QUESTION_MAX_MICROS = 1_000_000;
+/** The largest report (UTF-8 bytes of its canonical JSON) the broker keeps: well under a hosted store's item limit with its row fields. */
+export const EVAL_DISCOVERY_REPORT_MAX_BYTES = 256 * 1024;
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
 const name = z.string().min(1).max(200).regex(/^[A-Za-z0-9._:/@+-]+$/u);

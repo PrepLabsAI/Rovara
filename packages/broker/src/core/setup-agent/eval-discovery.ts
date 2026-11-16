@@ -17,7 +17,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EvalDiscoveryConfirmBodySchema, SetupEvalDiscoveryReportSchema,
+  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EvalDiscoveryConfirmBodySchema, SetupEvalDiscoveryReportSchema,
   agentXError, canonicalJson, change, evalCommandFingerprintOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
   type DocumentStore, type EvalPlanBody, type OrgId, type Principal, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
@@ -90,6 +90,7 @@ export async function recordEvalDiscovery(deps: EvalDiscoveryRecordDeps, run: Ru
   const parsed = SetupEvalDiscoveryReportSchema.safeParse(rawReport);
   if (!parsed.success) refuse(deps.log, "eval_discovery_refused", "unreadable", "CONFIG_INVALID", "the eval discovery report is not readable");
   const report = parsed.data;
+  if (Buffer.byteLength(canonicalJson(report), "utf8") > EVAL_DISCOVERY_REPORT_MAX_BYTES) refuse(deps.log, "eval_discovery_refused", "unreadable", "CONFIG_INVALID", "the eval discovery report is not readable");
   // The commits the BROKER recorded for this run, never the worker's.
   const task = await deps.store.get(taskKey(run.taskId));
   const base = Array.isArray(task?.["preparedBase"]) ? task["preparedBase"] as unknown[] : [];
@@ -217,7 +218,11 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
 
   // Confirmed first, once (the row's own state and digest guard it), so two confirms cannot both propose; a proposal that fails puts the row back.
   const confirmed = { personId: principal.personId, provider: principal.provider, role, at: new Date(deps.now()).toISOString(), selection: suite.selection, planDigest };
-  const marked = await deps.store.update({ key, ops: [change.set("state", "confirmed"), change.set("confirmed", confirmed)], condition: when.and(when.eq("state", "reported"), when.eq("reportDigest", row.reportDigest)) });
+  const marked = await deps.store.transact([
+    { kind: "update", key, ops: [change.set("state", "confirmed"), change.set("confirmed", confirmed)], condition: when.and(when.eq("state", "reported"), when.eq("reportDigest", row.reportDigest)) },
+    // The run must still be the project's latest setup run when the mark is made (a run started meanwhile makes this report stale).
+    { kind: "check", key: setupAgentKey(company, project), condition: when.eq("taskId", body.taskId) },
+  ]);
   if (!marked.applied) refuse(log, "eval_discovery_confirm_refused", "confirmed", "CHANGE_STALE", "That eval report was already confirmed.");
   const table = { store: deps.store, companyId: company, ...(deps.members === undefined ? {} : { members: deps.members }), ...(deps.monthlyCapMicros === undefined ? {} : { monthlyCapMicros: deps.monthlyCapMicros }) };
   try {

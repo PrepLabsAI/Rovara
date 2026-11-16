@@ -124,7 +124,9 @@ describe("off by default", () => {
     const main = readFileSync(join(__dirname, "../../packages/worker/src/main.ts"), "utf8");
     expect(main).toContain('from "./verification/eval-wiring.js"');
     expect(main).toMatch(/const evalRequested = invocation\.payload\.evalRequest !== undefined;/u);
-    expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: process\.env, controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation, \{ controlPlaneUrl \}\) : undefined \}\)/u);
+    expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: process\.env, controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation, \{ controlPlaneUrl,/u);
+    // DEC 253n(2): the fresh check sandbox is the worker's own (its environment, Docker and workspace key), built per check from the delivered plan.
+    expect(main).toMatch(/fresh: \{ environment: process\.env, docker: createDockerCli\(\), workspaceKey: \(\) => setupWorkspaceKey\(rootPath\) \} \}\) : undefined \}\)/u);
     expect(main).toMatch(/\.\.\.\(evalFinalCheck === undefined \? \{\} : \{ evalFinalCheck \}\)/u);
   });
 });

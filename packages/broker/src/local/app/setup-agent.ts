@@ -266,7 +266,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       // DEC 253n(1): confirm a selection from the latest setup run's eval report; the broker builds the eval plan from its own reads of the code host.
       if (tail === "eval-confirm" && request.method === "POST") {
         return json(200, await confirmEvalDiscovery({
-          store, companyId, now: options.now, members: localMembers, ...(options.evalMonthlyCapMicros === undefined ? {} : { monthlyCapMicros: options.evalMonthlyCapMicros }), latest: deps.latest,
+          store, companyId, now: options.now, members: localMembers, ...(options.evalMonthlyCapMicros === undefined ? {} : { monthlyCapMicros: options.evalMonthlyCapMicros }), latest: (p) => deps.latest(p),
           readFile: (repository, path, commit, readOptions) => codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
             .fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
           log: (entry) => flow.log?.({ component: "setup-agent", ...entry }),

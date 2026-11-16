@@ -26,7 +26,7 @@ import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { taskKey } from "../../packages/broker/src/developer/task-records.js";
-import { evalPlanSourcesFor, plannedFreshEvalSandbox, type EvalFreshHost } from "../../packages/worker/src/verification/eval-wiring.js";
+import { evalHostSourcesFor, evalPlanSourcesFor, plannedFreshEvalSandbox, type EvalFreshHost } from "../../packages/worker/src/verification/eval-wiring.js";
 import { pinnedEvalFreshCheck, withEvalPinnedCandidate } from "../../packages/worker/src/verification/eval-plan-source.js";
 import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
 import type { FreshEvalSandboxConfig } from "../../packages/worker/src/verification/eval-bridged-exec.js";
@@ -152,6 +152,13 @@ describe("the report through the setup run's existing callback", () => {
     }
     expect(await w.store.get(evalDiscoveryKey(A, project, w.taskId))).toBeUndefined();
   });
+  it("refuses a report over the byte cap, even when the schema's item bounds hold (mutant: the byte cap)", async () => {
+    const w = await world(A);
+    const many = Array.from({ length: 4 }, (_, n) => suite({ selection: `s${n}`, questions: Array.from({ length: 250 }, (_, i) => ({ id: `q${n}-${i}-${"x".repeat(100)}`, category: "ordinary", path: `evals/${"p".repeat(200)}/${n}-${i % 100}.txt` })) }));
+    expect(SetupEvalDiscoveryReportSchema.safeParse({ schemaVersion: 1, suites: many }).success).toBe(true);
+    await expect(w.callback({ kind: "eval_discovery", report: { schemaVersion: 1, suites: many } })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(await w.store.get(evalDiscoveryKey(A, project, w.taskId))).toBeUndefined();
+  });
   it("refuses a report from a run that is not this company's setup run: another company's task, a non-setup run, a run that ended, another company's install (mutants: the run checks)", async () => {
     const w = await world(A);
     // The task names company B: from A's install, the run is not A's.
@@ -168,7 +175,7 @@ describe("the report through the setup run's existing callback", () => {
     const w = await world(A);
     const { preparedBase, ...task } = (await w.store.get(taskKey(w.taskId)))!;
     void preparedBase;
-    await w.store.put({ item: task as never });
+    await w.store.put({ item: task });
     await expect(w.callback({ kind: "eval_discovery", report: reportOf(), commits: [{ repository: "web", commit: w.repo.baseSha }] })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     await expect(w.callback({ kind: "eval_discovery", report: reportOf() })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
@@ -230,12 +237,35 @@ describe("the confirm route: who may confirm what", () => {
     await expect(w.callback({ kind: "eval_discovery", report: reportOf({ maxCallsPerQuestion: 3 }) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
     expect(await w.store.get(evalPlanKey(A, project))).toEqual(planBefore);
   });
+  it("two confirms at once: exactly one proposes, the other is refused (mutant: the conditional confirmed mark)", async () => {
+    const w = await world(A);
+    await w.callback({ kind: "eval_discovery", report: reportOf() });
+    const digest = await w.digestOf();
+    const results = await Promise.allSettled([w.confirm(person(A, "admin"), { reportDigest: digest }), w.confirm(person(A, "owner"), { reportDigest: digest, paths: ["evals/demo/q1.txt"] })]);
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(r => r.status === "rejected")).toMatchObject({ reason: { code: "CHANGE_STALE" } });
+    expect((await w.store.get(evalSpendKey(A, project)))!["revision"]).toBe(1);
+    // The winner's confirmation stands: the loser's failed proposal never puts the report back.
+    expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))!.state).toBe("confirmed");
+  });
+  it("a setup run started between the confirm's read and its mark makes the report stale: nothing is marked or proposed (mutant: the pointer check in the mark's transaction)", async () => {
+    const w = await world(A);
+    await w.callback({ kind: "eval_discovery", report: reportOf() });
+    const digest = await w.digestOf();
+    const inner = w.store;
+    const racing = new Proxy(inner, { get: (target, name) => name === "transact"
+      ? async (items: Parameters<MemoryDocumentStore["transact"]>[0]) => { await target.put({ item: { ...setupAgentKey(A, project), entityType: "SETUP_AGENT", taskId: randomUUID() } }); return target.transact(items); }
+      : ((): unknown => { const value: unknown = Reflect.get(target, name); return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value; })() });
+    await expect(confirmEvalDiscovery({ ...w.deps, store: racing }, project, { taskId: w.taskId, reportDigest: digest, selection: "evals/demo", paths: ["evals/demo/q1.txt"] }, person(A, "admin"))).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    expect((await inner.get(evalDiscoveryKey(A, project, w.taskId)))!["state"]).toBe("reported");
+    expect(await inner.get(evalSpendKey(A, project))).toBeUndefined();
+  });
   it("refuses a report the person did not see (digest), an older run's report (not the latest), and a row edited in the store (mutants: the digest, pointer and recomputed-digest checks)", async () => {
     const w = await world(A);
     await w.callback({ kind: "eval_discovery", report: reportOf() });
     await expect(w.confirm(undefined, { reportDigest: "0".repeat(64) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
     const row = (await w.store.get(evalDiscoveryKey(A, project, w.taskId)))!;
-    await w.store.put({ item: { ...row, report: reportOf({ maxCallsPerQuestion: 20 }) } });
+    await w.store.put({ item: { ...row, report: reportOf({ maxCallsPerQuestion: 20 }) as never } });
     await expect(w.confirm(undefined, { reportDigest: row["reportDigest"] })).rejects.toMatchObject({ code: "NOT_FOUND" });
     await w.store.put({ item: row });
     await w.store.put({ item: { ...setupAgentKey(A, project), entityType: "SETUP_AGENT", taskId: randomUUID() } });
@@ -316,7 +346,7 @@ describe("EVAL-APPROVED-ROLE-NO-PRINCIPAL", () => {
 const approversOf = (approver: Principal): Approvers => ({ requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_request, proof) => ({ approved: true, approver, method: proof.method, proofId: proof.proofId }) });
 async function approve(gate: ReturnType<typeof createDecisionGate>, store: MemoryDocumentStore) {
   const item = (await store.get(evalSpendKey(A, project)))!;
-  const decided = await gate.decide({ companyId: A, kind: EVAL_SPEND_KIND, subjectId: project, requestId: `eval-decision-${String(item["revision"])}`, outcome: "approve", seen: { revision: item["revision"] as number, artifactDigest: item["digest"] as string }, credentials: [{ method: "local-session", token: ["fake", "session"].join("-") }] });
+  const decided = await gate.decide({ companyId: A, kind: EVAL_SPEND_KIND, subjectId: project, requestId: `eval-decision-${Number(item["revision"])}`, outcome: "approve", seen: { revision: item["revision"] as number, artifactDigest: item["digest"] as string }, credentials: [{ method: "local-session", token: ["fake", "session"].join("-") }] });
   expect(decided.status).toBe("decided");
 }
 const KEY = Buffer.alloc(32, 9);
@@ -349,10 +379,31 @@ async function confirmedToCheck(options: { head?: Record<string, string> } = {})
     return new Response(reply.body ?? "", { status: reply.statusCode, headers: reply.headers });
   }) as typeof fetch;
   const sources = evalPlanSourcesFor({ workspaceId, operationId, callbackCapability: capability }, { controlPlaneUrl: "http://broker.invalid", fetch: fetchToBroker });
-  return { w, sources, operationId };
+  return { w, sources, operationId, workspaceId, capability, fetchToBroker };
 }
 
 describe("happy path: setup report -> confirm -> approval -> task -> final-check eval (fakes)", () => {
+  it("with the production fresh host, a plan the worker cannot run (another image; no round) is no plan before any hold: not connected, zero calls (mutant: the fresh-mode plan gate)", async () => {
+    const { w, fetchToBroker, capability, workspaceId, operationId } = await confirmedToCheck();
+    const scratch = await realpath(await mkdtemp(join(tmpdir(), "edc-gate-"))); roots.push(scratch);
+    const round = { workingSandbox: null, roundBudgetMs: 60_000, scratchDir: scratch };
+    const hostFor = (image: string) => evalHostSourcesFor({ workspaceId, operationId, callbackCapability: capability }, { controlPlaneUrl: "http://broker.invalid", fetch: fetchToBroker,
+      fresh: { environment: { AGENTX_WORKER_IMAGE: image }, docker: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) }, workspaceKey: async () => "0123456789abcdef" } })!;
+    const pinned = <T>(fn: () => Promise<T>, withRound = true) => withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, fn, withRound ? round : undefined);
+    // Control: the worker's image is the plan's, so the plan port answers the plan.
+    expect(await pinned(() => hostFor(IMAGE).plan())).toMatchObject({ selection: "evals/demo" });
+    // No round facts: no fresh sandbox can be built, so no plan.
+    expect(await pinned(() => hostFor(IMAGE).plan(), false)).toBeUndefined();
+    // Another image: no plan, and the eval reads not connected with nothing held.
+    const other = hostFor(`registry.example/worker@sha256:${"d".repeat(64)}`);
+    expect(await pinned(() => other.plan())).toBeUndefined();
+    let held = 0;
+    const ports = { roundKind: "check_unsealed" as const, ...other, meter: { reserve: async () => { held++; return undefined; } }, runner: async () => { held++; throw new Error("no run"); } };
+    const facts = { status: "verified", candidateDigest: "9".repeat(64), signal: new AbortController().signal };
+    const artifact = await pinned(() => runFinalCheckEval(EVAL_REQUEST, ports as never, facts));
+    expect(artifact).toMatchObject({ outcome: "not_run", notRunReason: "not_connected" });
+    expect(held).toBe(0);
+  });
   it("the confirmed plan reaches the CHECKS run, its own grant holds, both sides run and the eval compares", async () => {
     const { w, sources } = await confirmedToCheck();
     expect(await sources.approval.read()).toMatchObject({ company: A, project, selection: "evals/demo" });
@@ -383,7 +434,7 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
     const { w, sources, operationId } = await confirmedToCheck();
     const configs: FreshEvalSandboxConfig[] = [];
     const scratch = await realpath(await mkdtemp(join(tmpdir(), "edc-scratch-"))); roots.push(scratch);
-    const host = (over: Partial<EvalFreshHost> = {}): EvalFreshHost => ({ environment: { AGENTX_WORKER_IMAGE: IMAGE }, docker: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) } as never,
+    const host = (over: Partial<EvalFreshHost> = {}): EvalFreshHost => ({ environment: { AGENTX_WORKER_IMAGE: IMAGE }, docker: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
       workspaceKey: async () => "0123456789abcdef", make: (config) => { configs.push(config); return { available: () => true, run: async () => ({ report: { root: scratch, cwd: ".", argument: "r.json", notBeforeMs: 0 } }) }; }, ...over });
     const round = { workingSandbox: "rovara-task-1", roundBudgetMs: 60_000, scratchDir: scratch };
     const input = { side: "new" as const, ids: ["q1"], runs: 1 as const, signal: new AbortController().signal, model: { socketPath: "/tmp/e/models/m", token: "a".repeat(32) } };

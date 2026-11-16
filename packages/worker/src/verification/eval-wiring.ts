@@ -179,9 +179,19 @@ export function evalHostSourcesFor(invocation: EvalSourceInvocation, host: { rea
     if (typeof host.controlPlaneUrl !== "string" || host.controlPlaneUrl === "") return undefined;
     const { deliveredPlan, ...sources } = evalPlanSourcesFor(invocation, { controlPlaneUrl: host.controlPlaneUrl, ...(host.fetch === undefined ? {} : { fetch: host.fetch }) });
     // DEC 253n(2): without a given check host, the fresh sandbox is built per run from the same delivered plan (production).
-    const check: EvalCheckHost | undefined = host.check ?? (host.fresh === undefined ? undefined : plannedFreshEvalSandbox(host.fresh, invocation, deliveredPlan));
+    const fresh = host.check === undefined ? host.fresh : undefined;
+    const check: EvalCheckHost | undefined = host.check ?? (fresh === undefined ? undefined : plannedFreshEvalSandbox(fresh, invocation, deliveredPlan));
     if (check === undefined) return undefined;
-    return { ...sources,
+    // A plan this worker's fresh sandbox can never run (no confirmed command, as before 253n; another image than the worker's) is no plan: "not connected", before any hold.
+    const plan: EvalHostSources["plan"] = fresh === undefined ? sources.plan : async () => {
+      try {
+        const found = pinnedEvalFreshCheck(await deliveredPlan());
+        const image = evalImageDigestOf(fresh.environment[EVAL_WORKER_IMAGE_VARIABLE]?.trim());
+        if (found === undefined || image === undefined || image !== evalImageDigestOf(found.imageDigest)) return undefined;
+        return await sources.plan();
+      } catch { return undefined; }
+    };
+    return { ...sources, plan,
       sandbox: check.sandbox, runDir: check.runDir, modelAllowed: check.modelAllowed,
       ...(check.changedPrompt === undefined ? {} : { changedPrompt: check.changedPrompt }), ...(check.meter === undefined ? {} : { meter: check.meter }) };
   } catch { return undefined; }
