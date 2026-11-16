@@ -67,7 +67,7 @@ function bedrockPath(path: string, query: string): string | undefined {
   if (match === null) return undefined;
   let model: string;
   try { model = decodeURIComponent(match[1] as string); } catch { return undefined; }
-  return BEDROCK_MODEL.test(model) ? `/model/${model}/${match[2] as string}` : undefined;
+  return !model.startsWith("arn:") && BEDROCK_MODEL.test(model) ? `/model/${model}/${match[2] as string}` : undefined;
 }
 
 /** Scan the same token spellings as v1, holding bytes across chunks without decoding/re-encoding event-stream CRCs. */
@@ -195,6 +195,13 @@ export function createProductGatewayEgress(options: ProductGatewayEgressOptions)
     const parsed = parseModelEgressFrame(input);
     if (!parsed.ok) { yield* refused(family, parsed.refusal); return; }
     const frame = parsed.frame;
+    if (family === "bedrock" && frame.headers.some(([name]) => /^(?:x-amz-bedrock-|x-amzn-bedrock-)/iu.test(name))) {
+      const message = BEDROCK_REFUSALS[0].message;
+      yield { kind: "head", status: 400, headers: [["content-type", "application/json"], ["x-rovara-refusal", "not_allowed"]] };
+      yield { kind: "chunk", bytes: new TextEncoder().encode(JSON.stringify({ message, error: { type: "not_allowed", message } })) };
+      yield settled(400, "refused", "not_allowed");
+      return;
+    }
     let path: string | undefined;
     let query: string | undefined;
     if (family === "bedrock") {

@@ -49,15 +49,30 @@ describe("Bedrock product contract and request boundary", () => {
     expect(tail(out)).toMatchObject({ class: "ok", costMicros: 0 });
   });
   const credentials = ["Authorization", "X-Amz-Date", "X-Amz-Security-Token", "X-Amz-Content-Sha256", "X-Amz-User-Agent", "X-Amz-Credential", "X-Amz-Signature", "X-Amz-Bedrock-GuardrailIdentifier", "X-Amzn-Bedrock-PerformanceConfig-Latency", "amz-sdk-invocation-id", "Amz-Sdk-Request", "x-api-key", "cookie"];
-  it.each(credentials)("strips %s before gateway forwarding", async name => {
+  it.each(credentials.filter(name => !/^x-amz(?:n)?-bedrock-/iu.test(name)))("strips %s before gateway forwarding", async name => {
     const r = bedrock();
     await r.run(frame({ headers: [...frame().headers, [name, DUMMY]] }));
     expect(r.sent).toHaveLength(1);
     expect(Object.fromEntries(new Headers(r.sent[0]!.init.headers))).toEqual({ "content-type": "application/json", accept: "application/json", "x-api-key": TOKEN });
     expect(JSON.stringify(r.sent[0])).not.toContain(DUMMY);
   });
+  it("refuses Bedrock feature headers with the fixed contract message before token lookup or send", async () => {
+    for (const name of ["X-Amzn-Bedrock-GuardrailIdentifier", "x-AMZ-BEDROCK-PerformanceConfig-Latency"]) {
+      const r = bedrock(); const out = await r.run(frame({ headers: [...frame().headers, [name, "feature-value"]] }));
+      expect(r.sent).toEqual([]); expect(r.tokens()).toBe(0);
+      expect(out[0]).toMatchObject({ kind: "head", status: 400 });
+      expect(JSON.parse(bytes(out).toString())).toEqual({ message: "this Bedrock feature is not offered on the product route: guardrails, priority or latency tiers, provisioned throughput and application inference profiles are refused", error: { type: "not_allowed", message: "this Bedrock feature is not offered on the product route: guardrails, priority or latency tiers, provisioned throughput and application inference profiles are refused" } });
+      expect(tail(out)).toMatchObject({ class: "refused", costMicros: 0, refusal: "not_allowed" });
+    }
+    const r = rig(undefined, "gemini"); await r.run(frame({ path: "/v1beta/models/gemini:generateContent", headers: [...frame().headers, ["X-Amzn-Bedrock-GuardrailIdentifier", "feature-value"]] }));
+    expect(r.sent).toHaveLength(1);
+    expect(Object.fromEntries(new Headers(r.sent[0]!.init.headers))).not.toHaveProperty("x-amzn-bedrock-guardrailidentifier");
+  });
+  it("preserves Bedrock feature headers through the helper boundary for egress refusal", () => {
+    expect(headersForBackend({ "X-Amzn-Bedrock-GuardrailIdentifier": "guardrail", "x-amz-security-token": DUMMY, "content-type": "application/json" })).toEqual({ "x-amzn-bedrock-guardrailidentifier": "guardrail", "content-type": "application/json" });
+  });
   it("strips SDK bookkeeping at the helper boundary too", () => {
-    expect(headersForBackend(Object.fromEntries([...credentials.map((n): [string, string] => [n, DUMMY]), ["content-type", "application/json"]]) as Record<string, string>)).toEqual({ "content-type": "application/json" });
+    expect(headersForBackend(Object.fromEntries([...credentials.filter(n => !/^x-amz(?:n)?-bedrock-/iu.test(n)).map((n): [string, string] => [n, DUMMY]), ["content-type", "application/json"]]) as Record<string, string>)).toEqual({ "content-type": "application/json" });
   });
   it("accepts the SDK's percent-encoded model colon and canonicalizes it", async () => {
     const r = bedrock();
@@ -67,6 +82,7 @@ describe("Bedrock product contract and request boundary", () => {
     expect(r.sent[0]?.url).toBe(`https://gateway.example.test/v1/product/bedrock/model/${model}/converse`);
   });
   it.each([
+    { path: "/model/arn:aws:bedrock:us-east-1:123456789012:x/converse" },
     { path: `/model/${model}/count-tokens` }, { path: `/model/${model}/converse/extra` },
     { path: "/v1/internal/model-access" }, { path: `/v1/product/bedrock/model/${model}/converse` },
     { path: "/model/UPPER/converse" }, { path: "/model/a/converse" }, { path: `/model/${"a".repeat(202)}/converse` },
@@ -101,7 +117,7 @@ describe("Bedrock responses", () => {
   });
   it("cuts a token echo split across binary chunks and cancels without leaking it", async () => {
     let cancelled = false;
-    const r = bedrock(() => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode(TOKEN.slice(0, 12))); c.enqueue(enc.encode(TOKEN.slice(12))); }, cancel() { cancelled = true; } }), { headers: { "content-type": "application/vnd.amazon.eventstream", "x-request-id": TOKEN } }));
+    const r = bedrock(() => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode(`xx${TOKEN.slice(0, 3)}`)); c.enqueue(enc.encode(TOKEN.slice(3, -3))); c.enqueue(enc.encode(`${TOKEN.slice(-3)}yy`)); c.close(); }, cancel() { cancelled = true; } }), { headers: { "content-type": "application/vnd.amazon.eventstream", "x-request-id": TOKEN } }));
     const out = await r.run();
     expect(bytes(out).toString()).not.toContain(TOKEN); expect(JSON.stringify(out[0])).not.toContain(TOKEN);
     expect(tail(out)).toMatchObject({ class: "provider_error" }); expect(cancelled).toBe(true);

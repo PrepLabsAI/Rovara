@@ -22,7 +22,8 @@ export function normalizeHeaderName(name: string): string {
 /** Whether an inbound header could carry a credential: a known credential header, `proxy-*`, any `x-amz-*`, or any name that mentions authorization, an api key or a cookie. Over-broad on purpose: a false positive drops a header nobody needs. */
 export function isInboundCredentialHeader(name: string): boolean {
   const normal = normalizeHeaderName(name);
-  return CREDENTIAL_NAMES.has(normal) || normal.startsWith("proxy-") || normal.startsWith("x-amz-") || normal.includes("authorization") || normal.includes("api-key") || normal.includes("apikey") || normal.includes("cookie");
+  const bedrockFeature = normal.startsWith("x-amz-bedrock-") || normal.startsWith("x-amzn-bedrock-");
+  return CREDENTIAL_NAMES.has(normal) || normal.startsWith("proxy-") || (normal.startsWith("x-amz-") && !bedrockFeature) || normal.includes("authorization") || normal.includes("api-key") || normal.includes("apikey") || normal.includes("cookie");
 }
 
 /** Every inbound credential header removed; what is left is not yet checked against the allow list. */
