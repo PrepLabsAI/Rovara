@@ -8,6 +8,7 @@ import type { DeviceEvidenceCaptured } from "@agentx/contracts";
 import { decodeDeviceExecutorPlan, DEVICE_EXECUTOR_APPS_DIR, encodeDeviceExecutorOutput, type DeviceExecutorPlan } from "../host/device-executor.js";
 import { CAPTURE_SCREENSHOT_MAX_BYTES } from "./capture.js";
 import { createAndroidEmulatorDriver } from "./device-android.js";
+import { watchDeviceListeners } from "./device-listeners.js";
 import { runDeviceEvidence } from "./device-evidence.js";
 import { encodeDeviceJpeg } from "./device-jpeg.js";
 import { createNodeCommandPort, type DeviceCommandPort } from "./device-process.js";
@@ -82,10 +83,12 @@ async function main(): Promise<void> {
       const check = await createNodeCommandPort().run(DEVICE_TOOLS.emulator, ["-accel-check"], { timeoutMs: 20_000, maxStdoutBytes: 4_096, env: DEVICE_ENV, mergeStderr: true });
       process.stderr.write(`device env: emulator -accel-check exit ${String(check.exitCode)} | ${Buffer.from(check.stdout).toString("utf8").replace(/\s+/gu, " ").slice(0, 600)}\n`);
     }
+    const listeners = talk ? watchDeviceListeners(500) : undefined;
     const captured = await runDevicePlan(plan, {
       command: createNodeCommandPort(), writeFile: (path, text) => { writeFileSync(path, text, { mode: 0o600 }); return Promise.resolve(); },
       ...(talk ? { diag: (stage: string, note: string, detail?: string) => { process.stderr.write(`device ${stage}: ${note}${detail === undefined ? "" : ` | ${detail.replace(/\s+/gu, " ")}`}\n`); } } : {}),
     });
+    if (listeners !== undefined) process.stderr.write(`device listeners: ${JSON.stringify(listeners.stop())}\n`);
     // The answer is more than a pipe holds at once (the pictures): wait until it has all been handed over before the process exits, or `process.exit` cuts it off (the first full CI run: a one-line answer cut short).
     await new Promise<void>((resolve) => { process.stdout.write(`${encodeDeviceExecutorOutput(captured)}\n`, () => { resolve(); }); });
   } catch {

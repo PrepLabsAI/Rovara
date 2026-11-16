@@ -25,10 +25,13 @@ const docker = (args: string[], timeout = 120_000) => spawnSync("docker", args, 
 const FIXTURE = join(process.cwd(), "tests/fixtures/device-evidence-app");
 const SCAN = "const n=require('net');const open=[];let left=0;for(let p=1024;p<=65535;p++){left++;const s=n.connect({host:'127.0.0.1',port:p});s.once('connect',()=>{open.push(p);s.destroy();if(--left===0)done()});s.once('error',()=>{if(--left===0)done()});}function done(){console.log(JSON.stringify(open));process.exit(0)}setTimeout(()=>{console.log(JSON.stringify(open));process.exit(0)},20000)";
 /**
- * The loopback listeners the emulator and its tools may open in the namespace they share with the sandbox, each one a way for the sandbox's own code to reach the emulator's guest (which runs that same code
- * anyway): adb's server, the emulator's console and its adb port, and Maestro's driver port. Anything else is a new door and fails the test.
+ * Every listener the emulator and its tools open in the loopback they share with the sandbox is a way for the sandbox's own code to reach the device (which runs that same code anyway: sandbox code can reach
+ * the device's own emulator/adb/Maestro loopback services; this is by design, it already controls the device through adb). What must NOT happen is a listener that is not one of theirs. So the check is by
+ * process identity, made inside the executor container (the entry program's diagnostics, device-listeners.ts): each listening socket's inode must be held by a process that runs the emulator's own files, the
+ * SDK's adb, or the JRE running Maestro. A listener that no process there holds (the sandbox's own code lives in another process namespace) or that any other program holds fails the test. The three
+ * well-known ports are only a second check on top.
  */
-const KNOWN_PORTS = new Map<number, string>([[5037, "adb server"], [5554, "emulator console"], [5555, "emulator adb"], [7001, "Maestro driver"]]);
+const PORT_OWNERS = new Map<number, string>([[5037, "adb"], [5554, "emulator"], [5555, "emulator"]]);
 
 describe.runIf(wanted)("device evidence: the Android emulator in the device executor", () => {
   const suffix = randomBytes(4).toString("hex");
@@ -64,7 +67,7 @@ describe.runIf(wanted)("device evidence: the Android emulator in the device exec
   }
 
   afterAll(() => {
-    for (const name of [run, created, sandbox]) docker(["rm", "--force", name]);
+    for (const name of [run, `${run}-stray`, created, sandbox]) docker(["rm", "--force", name]);
     if (appsDir !== "") rmSync(appsDir, { recursive: true, force: true });
   });
 
@@ -192,10 +195,36 @@ describe.runIf(wanted)("device evidence: the Android emulator in the device exec
     const outcome: DeviceEvidenceOutcome = { ...captured, steps: captured.steps.map((row) => (row.status === "shown" ? { ...row, before: ref(row.before.bytes), after: ref(row.after.bytes) } : row)) };
     expect(deviceEvidenceCheck(outcome).check).toMatchObject({ kind: "visual", runBy: "rovara", label: "Device evidence: Android emulator" });
 
-    // The listeners in the shared loopback, seen from the sandbox. The emulator's guest, adb and Maestro are reachable by what runs in the sandbox (which is the code the emulator runs anyway); nothing else is.
-    process.stdout.write(`listeners seen in the shared loopback: ${JSON.stringify([...seen].sort((a, b) => a - b))}\n`);
-    const unknown = [...seen].filter((port) => !KNOWN_PORTS.has(port));
-    expect(unknown, `ports in the shared network namespace that nobody expected: ${unknown.join(", ")}`).toEqual([]);
+    // The listeners in the shared loopback: the sandbox's side (a scan from inside it) and the executor's side (every listening socket's owner, by the process that holds it).
+    process.stdout.write(`listeners seen from the sandbox in the shared loopback: ${JSON.stringify([...seen].sort((a, b) => a - b))}\n`);
     expect(seen.size, "the sandbox's scan saw none of the emulator's own listeners, so the scan proves nothing").toBeGreaterThan(0);
+    const reported = stderr.split("\n").filter((line) => line.startsWith("device listeners: ")).at(-1);
+    if (reported === undefined) throw new Error("the executor did not report who owns the listeners");
+    const report = JSON.parse(reported.slice("device listeners: ".length)) as { rows: Array<{ port: number; owner: string; exe: string }>; violations: string[] };
+    process.stdout.write(`listener owners: ${JSON.stringify(report.rows)}\n`);
+    expect(report.rows.length, "the executor saw no listeners at all, so its ownership check proves nothing").toBeGreaterThan(0);
+    expect(report.violations, "listeners in the shared network namespace that the emulator, adb and Maestro do not own").toEqual([]);
+    for (const [port, owner] of PORT_OWNERS) {
+      expect(seen.has(port), `port ${String(port)} was not open from the sandbox's side`).toBe(true);
+      expect(report.rows.find((row) => row.port === port)?.owner, `who owns port ${String(port)}`).toBe(owner);
+    }
   }, DEVICE_EVIDENCE_RUN_MS + 2 * DEVICE_EXECUTOR_MARGIN_MS + 120_000);
+
+  it("catches a listener the sandbox's own code opens: the ownership check reports it as owned by nobody in the executor (the mutant the check must fail on)", async (context) => {
+    const kvm = kvmHere();
+    if (!kvm.ok) skipWithReason((note) => context.skip(note), kvm.reason);
+    const { kvmGid } = prepare();
+    // A stray listener started by a process of the sandbox stand-in (it ends itself after a while, so it cannot reach another test).
+    const stray = docker(["exec", "--detach", sandbox, "node", "-e", "require('net').createServer().listen(8081,'127.0.0.1');setTimeout(()=>process.exit(0),60000)"]);
+    expect(stray.status, stray.stderr).toBe(0);
+    await new Promise((resolve) => { setTimeout(resolve, 2_000); });
+    const base = deviceExecutorRunArgs({ image: IMAGE!, sandbox, name: `${run}-stray`, appsDir, kvmGid, plan: encodeDeviceExecutorPlan(planInput) });
+    // The same hardened container, asked only for the ownership report instead of the emulator run.
+    const args = [...base.slice(0, -3), "node", "--input-type=module", "-e", "import('/opt/agentx/packages/verifier/dist/executor/device-listeners.js').then((m) => { process.stdout.write(JSON.stringify(m.listenerReport())); })"];
+    const result = docker(args, 120_000);
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(result.stdout) as { rows: Array<{ port: number; owner: string }>; violations: string[] };
+    expect(report.rows).toContainEqual({ port: 8081, owner: "unowned", exe: "" });
+    expect(report.violations).toContain("8081 unowned");
+  }, 180_000);
 });
