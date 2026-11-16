@@ -355,7 +355,9 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       if (left <= 0) break;
       const taskId = typeof row["taskId"] === "string" ? row["taskId"] : "";
       // Fail closed on legacy, malformed, or foreign rows before reading a task or touching the queue item.
-      if (row["companyId"] !== companyId) {
+      // Rows written before tier rows carried a company exist only in the implicit company's shared partition: read them as implicit there (as reads.ts does), never elsewhere.
+      const rowCompany = row["companyId"] === undefined && companyId === IMPLICIT_COMPANY_ID ? IMPLICIT_COMPANY_ID : row["companyId"];
+      if (rowCompany !== companyId) {
         log({ component: "merge_tracking", event: "tier_checks.unowned_item", companyId, taskId });
         continue;
       }

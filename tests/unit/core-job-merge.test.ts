@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { change, companyScoped } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, change, companyScoped } from "@agentx/contracts";
 import { host, ORG } from "../support/service-host.js";
 import { TASK_ID } from "../support/merge-world.js";
 import { createMergeTrackingService, createMilestoneService } from "../../packages/broker/src/services/merge-tracking.js";
@@ -126,4 +126,35 @@ it("leaves tier due rows untouched when the pass budget is exhausted", async () 
 
   expect(await tracking.tierChecks()).toBe(0);
   expect(await w.h.store.get(key)).toEqual(due);
+});
+
+it("reads a legacy implicit tier row without a company as implicit, only in the implicit partition", async () => {
+  const w = await host();
+  const taskId = "66666666-6666-4666-8666-666666666666";
+  const key = { pk: "TIER_CHECKS_DUE", sk: `TASK#${taskId}` };
+  await w.h.store.put({ item: { ...key, entityType: "TIER_CHECKS_DUE", taskId, lastRunAt: 0, dueAt: w.clock.ms } });
+  const logged: Record<string, unknown>[] = [];
+  const tracking = createMergeTrackingService({
+    flow: w.h.deps, registry: w.registry, companyId: IMPLICIT_COMPANY_ID as never, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
+    people: w.people, settings: fixedCodeSettings(), now: () => w.clock.ms, log: (entry) => logged.push(entry),
+  });
+  await tracking.tierChecks();
+  // Owned by the implicit company: not reported as unowned; its task does not exist, so the row is cleared rather than held forever.
+  expect(logged).not.toContainEqual(expect.objectContaining({ event: "tier_checks.unowned_item", taskId }));
+  expect(await w.h.store.get(key)).toBeUndefined();
+});
+
+it("never runs tier checks for a task whose record belongs to another company", async () => {
+  const w = await host();
+  const company = "org_cccccccccccccccccccc";
+  // TASK_ID is the harness's task, owned by the harness company, not by `company`.
+  const key = { pk: companyScoped(company, "TIER_CHECKS_DUE"), sk: `TASK#${TASK_ID}` };
+  const due = { ...key, entityType: "TIER_CHECKS_DUE", companyId: company, taskId: TASK_ID, lastRunAt: 0, dueAt: w.clock.ms };
+  await w.h.store.put({ item: due });
+  const tracking = createMergeTrackingService({
+    flow: w.h.deps, registry: w.registry, companyId: company as never, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
+    people: w.people, settings: fixedCodeSettings(), now: () => w.clock.ms,
+  });
+  expect(await tracking.tierChecks()).toBe(0);
+  expect(await w.h.store.get(key)).toBeUndefined();
 });
