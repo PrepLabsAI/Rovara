@@ -49,7 +49,7 @@ function recoveryStore(store: DocumentStore, companyId: string): DocumentStore {
       return { ...page, items };
     };
     const value = Reflect.get(target, property, target) as unknown;
-    return typeof value === "function" ? value.bind(target) : value;
+    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) as unknown : value;
   } });
 }
 
