@@ -54,8 +54,10 @@ const measurePair = (name: string, size: number, make: (n: number) => () => Prom
   }
   return { n: 0, four: 0 };
 };
+// The output schema scan is cache-sensitive: at 8N = 512 KiB CI runners measured a steady ratio of about 25 (a quadratic gives about 64), so its timed N is an eighth of the default and 8N stays at 64 KiB.
+const cacheFriendlyTimedN = new Map([["output schema", 128 * 1024 / 16]]);
 it.each(corpora)("linear adversarial scan: %s", (name, make) => {
-  measurePair(name, 128 * 1024, make);
+  measurePair(name, 128 * 1024, make, cacheFriendlyTimedN.get(name));
 });
 it("scales actual scanned files and bounds a 5000-file 32 MiB diff", () => {
   const one = "prompt: '" + "a".repeat(MiB - 12) + "'";

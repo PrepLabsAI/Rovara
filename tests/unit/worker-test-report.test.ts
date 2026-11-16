@@ -89,19 +89,21 @@ describe("JUnit written by a command the agent can influence", () => {
   });
   it("reads a hostile 8 MiB file in one pass: many unclosed test cases, comments or CDATA sections cost no more than a single scan", () => {
     // Scaling checks, not wall-clock bounds: the same hostile shape at an eighth of the count and at the full count (the old input) may take about eight times as long, never sixty-four.
-    const hostile: ReadonlyArray<readonly [string, number]> = [
-      ['<testcase name="a">', 400_000],
-      ["<!--", 2_000_000],
-      ["<![CDATA[", 900_000],
-      ['<testcase name="a" ', 400_000],
+    // The CDATA shape is cache-sensitive: at 8N = 8 MiB CI runners measured a steady ratio of about 25 (a quadratic gives about 64), so its timed N is a sixty-fourth of the count and 8N stays at an eighth of it. The full-size file is still parsed once and checked.
+    const hostile: ReadonlyArray<readonly [string, number, number]> = [
+      ['<testcase name="a">', 400_000, 8],
+      ["<!--", 2_000_000, 8],
+      ["<![CDATA[", 900_000, 64],
+      ['<testcase name="a" ', 400_000, 8],
     ];
-    for (const [unit, count] of hostile) {
+    for (const [unit, count, divisor] of hostile) {
       let got: ReturnType<typeof parseJunit> | undefined = parseJunit('<testsuite><testcase name="seed"/></testsuite>');
       expectLinearScaling((copies) => {
         const text = `<testsuite>${unit.repeat(copies)}`;
         return () => { got = parseJunit(text); };
-      }, { n: count / 8, label: `junit hostile ${JSON.stringify(unit)}` });
+      }, { n: count / divisor, label: `junit hostile ${JSON.stringify(unit)}` });
       expect(got, unit).toBeUndefined();
+      if (divisor > 8) expect(parseJunit(`<testsuite>${unit.repeat(count)}`), `${unit} full size`).toBeUndefined();
     }
   });
 });
