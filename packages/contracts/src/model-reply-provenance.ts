@@ -3,8 +3,8 @@
 // Three provenances:
 //   `before_task`  the reply was in the project's reply set before the task started (customer-written, made by the setup agent from the customer's fakes, a few capped real recordings, or the prompt and expected shape).
 //   `independent`  written during the task by the independent reply agent, which sees only the prompt, the expected answer shape and real examples, never the code change or the tests. It is accepted ONLY through a Rovara-side
-//                  channel (a separate delivery, never a file in the sandbox); Part A only defines the value, no store or agent exists yet.
-//   `task_made`    written or edited by the coding agent, or anything whose origin cannot be shown. Allowed, never counted.
+//                  channel (a separate delivery, never a file in the sandbox); Part A only defines the value, no store or agent exists yet. DEC 192a PARKS that agent: an `independent` reply never counts toward proof.
+//   `task_made`    written or edited by the coding agent, or anything whose origin cannot be shown. Allowed; counts only once the real model confirmed the same test (DEC 192a), which only a caller that has that result can say.
 // Plus two result classes that are not provenances: `failure_pack` (the pack never proves anything) and `unmatched` / `not_served` (no scripted reply was served).
 //
 // Who decides: the WORKER, from the task's base commit (Part B item 3). A value the sandbox could write never decides provenance: the author-side file form of a reply set has no provenance field at all
@@ -31,11 +31,17 @@ export function isReplyResultClass(value: unknown): value is ReplyResultClass {
 }
 
 /**
- * Whether a reply of this provenance or class counts toward "proven with scripted AI replies": `before_task` and `independent` ONLY. `task_made`, `failure_pack`, `unmatched`, `not_served` and any unknown, missing or
- * mis-spelled value are false: fail closed. The failure pack never proves a change, whatever else is true of the call.
+ * THE ONE RULE for whether a reply of this provenance or class counts toward "proven with scripted AI replies" (DECISIONS 161 as amended by 192a). The Proof table, TE-A3's `scriptedRepliesCountTowardProof` and the
+ * helper's ledger all follow it:
+ *   `before_task`  counts.
+ *   `task_made`    counts ONLY when `realModel` is exactly "confirmed": the same test also passed on the real model in the final check. A caller with no real-model result (the helper's ledger, a per-call answer) passes
+ *                  none, so for it a `task_made` reply never counts.
+ *   `independent`  never counts (192a parks the independent reply agent), whatever the real model says.
+ * `failure_pack`, `unmatched`, `not_served` and any unknown, missing or mis-spelled value are false: fail closed. The failure pack never proves a change, whatever else is true of the call.
  */
-export function replyCountsTowardProof(value: unknown): boolean {
-  return value === "before_task" || value === "independent";
+export function replyCountsTowardProof(value: unknown, realModel?: unknown): boolean {
+  if (value === "before_task") return true;
+  return value === "task_made" && realModel === "confirmed";
 }
 
 /** The fixed words the evidence and the PR use (code, never data). Nothing scripted is ever called "Real" (DECISIONS 161); recorded real calls have their own label in TE-F8. */

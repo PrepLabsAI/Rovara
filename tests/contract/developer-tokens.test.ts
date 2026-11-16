@@ -127,7 +127,7 @@ describe("developer key purpose", () => {
       await expect(verify([key])(authorization)).resolves.toMatchObject({ sid: "s-1", aud: "agentx-developer" });
     }
     const refusal = await verify([])(authorization).catch((error: unknown) => error);
-    for (const purpose of ["task", "future", "", null, false, 42, {}, [], undefined]) {
+    for (const purpose of ["task", "policy-question", "future", "", null, false, 42, {}, [], undefined]) {
       const result = await verify([{ ...jwk, rovara_purpose: purpose }])(authorization).catch((error: unknown) => error);
       expect(result).toEqual(refusal);
       expect(result).toMatchObject({ code: "AUTH_REQUIRED" });

@@ -6,6 +6,7 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { resolveTaskPeopleAccess, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
+import { ownerOfExistingTask } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
 export type TaskAction = "read" | "peopleRead" | "comment" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
@@ -59,6 +60,8 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
   const task = response.Item;
   if (task === undefined) throw notFound();
+  // Lane E2: a task the core owns is never acted on through the workflow's access (engine-boundary.ts); it reads exactly like a missing one.
+  if (await ownerOfExistingTask(deps, taskId) === "core") throw notFound();
   try {
     const people = await resolveTaskPeopleAccess(deps, task, caller.developerId);
     if (people !== undefined) {

@@ -1,7 +1,7 @@
 // The port guard: the first check a Rovara Code port lane runs (docs/porting.md). It looks at the work a lane adds to public
 // `code/next` and fails when that work carries something that must never reach the public repository:
 //
-//   cloud-path      a Cloud-only path (decision 41): org/, spend/, audit/, team-record/, devices/, the Cloud web app and audit verifier
+//   cloud-path      a Cloud-only path (decision 41): org/, spend/, audit/, team-record/ (except Code's own packages/broker/src/team-record/, DEC 226), devices/, the Cloud web app and audit verifier
 //                   packages, the Cloud upgrade command, the Cloud CDK stacks, the Cloud-only contracts files
 //   cloud-aws       the AWS line (decision 72, O2, as changed by migration plan v3.2, DEC 214): Code owns its own AWS deployment, so a new file under
 //                   an aws/ directory or under infra/ is Code's and is allowed, and Code's deployment code (aws/, infra/) and its tests (*.test.* under tests/,
@@ -76,6 +76,13 @@ const join = (...parts: string[]): string => parts.join("");
 
 /** Directory names that are Cloud-only wherever they appear in a path. */
 const CLOUD_DIRS = ["org", "spend", "audit", "team-record", "devices"];
+
+/**
+ * DEC 226 (owner, 2026-11-15): the team record lives in Code, engine-side and company-scoped. Code's own team record is this ONE directory (exact case, the broker's
+ * `team-record/`); a path inside it is judged as if the directory were not there, so any other Cloud-only directory below it (an `org/`, a `spend/`, a nested `team-record/`)
+ * is still refused. Every other `team-record/` directory, the `team-record*` contracts files and the `team-record-*` CDK stacks stay Cloud-only.
+ */
+const CODE_TEAM_RECORD_DIR = "packages/broker/src/team-record/";
 
 /** Cloud-only contracts files that Code does keep, each with the reason. A new entry needs both owners (decision 42a). */
 const CLOUD_PATH_ALLOWED = new Set<string>([
@@ -232,7 +239,11 @@ export function cloudPathRule(path: string, names: NameSource = DEFAULT_NAMES): 
   const normal = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "");
   if (CLOUD_PATH_ALLOWED.has(normal.toLowerCase().replace(/\.[cm]?[jt]sx?$/, ""))) return null;
   for (const candidate of [normal, `${normal}/`]) {
-    for (const { label, pattern } of CLOUD_PATH_RULES) if (pattern.test(candidate)) return { rule: "cloud-path", detail: label };
+    for (const { label, pattern } of CLOUD_PATH_RULES) {
+      // Code's team record (DEC 226): only the part below its directory is matched against the Cloud-only directory rule.
+      const judged = pattern === CLOUD_PATH_RULES[0]!.pattern && candidate.startsWith(CODE_TEAM_RECORD_DIR) ? candidate.slice(CODE_TEAM_RECORD_DIR.length) : candidate;
+      if (pattern.test(judged)) return { rule: "cloud-path", detail: label };
+    }
   }
   const adapterHit = adaptersPackageRule(normal);
   if (adapterHit !== null) return { rule: "cloud-aws", detail: adapterHit };
@@ -1078,6 +1089,14 @@ const GUARD_FILES = [
   /^scripts\/port-guard-accepted\.json$/i,
   /^tests\/[^/]+\/port-guard[^/]*$/i,
   /^\.github\/workflows\/ci\.yml$/i,
+  // What decides what a CI run covers and whether it passed (DEC 242): the plan, the gate, and what makes a "full" run the whole suite (the test configuration, the list
+  // of native-only files it leaves out, and the shard split). On a pull request CI runs the base branch's plan and gate, but the test configuration and the shard split
+  // are the pull request's own, so a change to any of them is reviewed by hand.
+  /^scripts\/ci-plan\.ts$/i,
+  /^scripts\/ci-gate\.ts$/i,
+  /^vitest(\.[^/]+)?\.config\.ts$/i,
+  /^tests\/support\/vitest-shared-config\.ts$/i,
+  /^tests\/support\/duration-[^/]*$/i,
   /(^|\/)\.gitleaks[^/]*$/i,
   // The built-in starter list of test service images: part of the source, so Code's release is its trust anchor. A change to the list is a change to what runs with no owner approval, so it is reviewed by hand.
   /^packages\/contracts\/src\/owner-starter-images\.ts$/i,

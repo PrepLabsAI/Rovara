@@ -16,7 +16,7 @@
 // through their built declarations):
 //   node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>]
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +95,33 @@ export function planShards(): Shard[] {
   ];
 }
 
+/** A shard directory entry as a test: a directory means everything under it; a glob over the files directly in a folder ("tests/contract/a*.ts") takes `*` and `?`. */
+function entryMatches(entry: string, file: string): boolean {
+  if (!isGlob(entry)) return file.startsWith(`${entry}/`);
+  const pattern = entry.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]");
+  return new RegExp(`^${pattern}$`).test(file);
+}
+
+/**
+ * The shards that hold these files (repository-relative, forward slashes), each aimed at only those files: the shard's own TypeScript program and rules, but eslint
+ * is given the files, not the whole group. A file no named shard holds goes to the catch-all, as it does in a whole run. Used by `--files` for a pull request's lint.
+ */
+export function shardsForFiles(files: readonly string[]): Shard[] {
+  const all = planShards();
+  const named = all.filter((shard) => shard.name !== REST);
+  const rest = all.find((shard) => shard.name === REST)!;
+  const taken = new Set<string>();
+  const selected: Shard[] = [];
+  for (const shard of named) {
+    const mine = files.filter((file) => shard.targets.some((entry) => entryMatches(entry, file)));
+    mine.forEach((file) => taken.add(file));
+    if (mine.length > 0) selected.push({ ...shard, targets: mine });
+  }
+  const others = files.filter((file) => !taken.has(file));
+  if (others.length > 0) selected.push({ ...rest, targets: others });
+  return selected;
+}
+
 /** The tsconfig of a shard's program. It extends tsconfig.lint.json and changes nothing but which files are in it. */
 export function shardTsconfig(shard: Shard, root: string): object {
   const base = JSON.parse(readFileSync(join(root, "tsconfig.lint.json"), "utf8")) as { exclude?: string[] };
@@ -137,7 +164,7 @@ export function defaultJobs(totalMemoryBytes: number, cores: number): number {
   return totalMemoryBytes >= 14 * 1024 ** 3 && cores >= 4 ? 2 : 1;
 }
 
-export interface Options { list: boolean; heapMb: number; timeoutSeconds?: number; jobs?: number; only?: ReadonlySet<string>; eslintBin?: string }
+export interface Options { list: boolean; heapMb: number; timeoutSeconds?: number; jobs?: number; only?: ReadonlySet<string>; eslintBin?: string; filesList?: string }
 
 export function parseOptions(argv: readonly string[]): Options | string {
   const options: Options = { list: false, heapMb: DEFAULT_HEAP_MB };
@@ -160,11 +187,15 @@ export function parseOptions(argv: readonly string[]): Options | string {
       const value = argv[++index];
       if (value === undefined || value === "") return "--only needs a comma-separated list of shard names";
       options.only = new Set(value.split(","));
+    } else if (arg === "--files") {
+      const value = argv[++index];
+      if (value === undefined || value === "") return "--files needs the path of a file listing the changed paths, one per line";
+      options.filesList = value;
     } else if (arg === "--eslint-bin") {
       const value = argv[++index];
       if (value === undefined || value === "") return "--eslint-bin needs a path";
       options.eslintBin = value;
-    } else return `Unknown option ${arg}. Usage: node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>]`;
+    } else return `Unknown option ${arg}. Usage: node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>] [--files <changed-paths list>]`;
   }
   return options;
 }
@@ -249,7 +280,13 @@ async function main(): Promise<void> {
   const all = planShards();
   const unknown = [...(options.only ?? [])].filter((name) => !all.some((shard) => shard.name === name));
   if (unknown.length > 0) { console.error(`No such shard: ${unknown.join(", ")}. Shards: ${all.map((shard) => shard.name).join(", ")}`); process.exitCode = 2; return; }
-  const selected = all.filter((shard) => options.only === undefined || options.only.has(shard.name));
+  let selected = all.filter((shard) => options.only === undefined || options.only.has(shard.name));
+  if (options.filesList !== undefined) {
+    // A pull request's lint: only the changed TypeScript files that still exist, each in its own shard's program (see shardsForFiles).
+    const listed = readFileSync(options.filesList, "utf8").split("\n").map((line) => line.trim()).filter((line) => /\.ts$/.test(line) && existsSync(join(root, line)));
+    selected = shardsForFiles(listed).filter((shard) => options.only === undefined || options.only.has(shard.name));
+    if (selected.length === 0) { console.log("No changed TypeScript file to lint."); return; }
+  }
   if (options.list) { console.log(selected.map((shard) => `${shard.name}: ${shard.targets.join(" ")}${shard.ignore.length > 0 ? ` (leaving out ${shard.ignore.length} directories the other shards lint)` : ""}`).join("\n")); return; }
 
   const jobs = options.jobs ?? defaultJobs(totalmem(), availableParallelism());

@@ -288,7 +288,7 @@ describe("AI evidence public and private descriptions", () => {
       const text = body(context({ evidenceWriter: 2, repositoryKnownPrivate }, { read }));
       const start = text.indexOf("## Evidence");
       const block = text.slice(start, text.indexOf("\n## ", start + 3));
-      expect(block).toContain(outcome === "not_run" ? "Eval: Not run." : "Eval: No drop found");
+      expect(block).toContain(outcome === "not_run" ? "Eval: Not run." : "Eval: No regression measured (eval)");
       expect(block.startsWith("## Evidence\nAI checks\n")).toBe(true);
       expect(block).not.toMatch(/Verified|Checks:|Tests:|Change proof:|Dependencies:|below/u);
     }

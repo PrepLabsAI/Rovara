@@ -262,7 +262,7 @@ describe("ec2-ebs outbox records", () => {
     const markQueued = vi.fn(async () => undefined);
     const handler = createOutboxPublisherHandler({ send, markQueued });
     const image = (status: string) => ({
-      entityType: { S: "OUTBOX" }, status: { S: status }, id: { S: record.id }, deploymentMode: { S: "ec2-ebs" },
+      pk: { S: `OUTBOX#${record.id}` }, entityType: { S: "OUTBOX" }, status: { S: status }, id: { S: record.id }, deploymentMode: { S: "ec2-ebs" },
     });
     await handler({ Records: [{ eventName: "MODIFY", dynamodb: { NewImage: image("WAITING_FOR_SESSION") } }] });
     expect(send).not.toHaveBeenCalled();

@@ -31,7 +31,7 @@ export const CORE_SERVICES = {
   "admission-hold-sweep": "flow",
 } as const satisfies Record<string, CoreArea>;
 /** The required services (above) and the optional ones: a runtime without an optional one skips its job (`service_not_wired`), and the switch is never refused for it. */
-export type CoreServiceName = keyof typeof CORE_SERVICES | "automation-stop" | "lessons";
+export type CoreServiceName = keyof typeof CORE_SERVICES | "automation-stop" | "lessons" | "person-erase-resume";
 
 export interface CoreRuntime {
   companyId: OrgId;
@@ -72,13 +72,37 @@ export interface CoreRuntimeOptions {
  */
 export { withStartFence } from "../core/task-flow/start-fence.js";
 
+/** A `worker-machines` adapter that serves every company only through a per-company adapter (aws/worker-machines/session-worker-machines.ts `SessionWorkerFleet`). */
+interface CompanyBoundMachines {
+  forCompany(companyId: string): unknown;
+}
+
+const bindsCompanies = (value: unknown): value is CompanyBoundMachines => typeof value === "object" && value !== null && typeof (value as { forCompany?: unknown }).forCompany === "function";
+
+/**
+ * The registry as one company's runtime sees it: a `worker-machines` adapter that serves companies only through `forCompany` is handed out bound to this company, so every machine call
+ * of this runtime is held to this company's workspaces. Any other adapter (the laptop's, which reads the company from each spec) and every other point is the registry's own.
+ */
+export function withCompanyMachines<R extends { require(point: never, name?: never): unknown }>(registry: R, companyId: OrgId): R {
+  return new Proxy(registry, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target) as unknown;
+      if (property === "require" || property === "get") return (point: string, name?: string) => {
+        const found = (value as (point: string, name?: string) => unknown).call(target, point, name);
+        return point === "worker-machines" && bindsCompanies(found) ? found.forCompany(companyId) : found;
+      };
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
+
 /** What a start on a runtime that serves a company only for the tasks it already holds (drain, or a narrowed switch) answers. Fixed words. */
 export const CORE_START_REFUSED_WORDS = "the core engine starts no new task for this company";
 
 export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
   const { registry, companyId } = options;
   // Checked at run time, not only by the type: the core's own default is the laptop's sole-owner rule, which a deployed install must never get by omission.
-  if ((options as { access?: unknown }).access === undefined) throw new Error("the core runtime needs an access rule");
+  if ((options as { access?: unknown }).access == null) throw new Error("the core runtime needs an access rule");
   const store = registry.require("storage");
   const given = options.flowOptions?.startExtras;
   // Every core start writes the engine stamp with the task (a task keeps its engine). Joined with any start extras the deployment gives. A start the switch does not send to the core
@@ -89,7 +113,7 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     const own = given?.(input);
     return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped)] };
   };
-  const base = createTaskFlowFromRegistry(withStepFenceRetry(registry), {
+  const base = createTaskFlowFromRegistry(withStepFenceRetry(withCompanyMachines(registry, companyId)), {
     ...options.flowOptions,
     companyId,
     projects: options.flowOptions?.projects ?? createStoreProjectSource(store, companyId),

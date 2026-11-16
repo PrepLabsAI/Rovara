@@ -130,7 +130,7 @@ describe("port-guard on a temp repository", () => {
       ["a company directory", `packages/broker/src/${ORG}/members.ts`],
       ["a budget directory", `packages/broker/src/${SPEND}/limits.ts`],
       ["an audit directory", `packages/broker/src/${AUDIT}/outbox.ts`],
-      ["a team record directory", `packages/broker/src/${TEAM_RECORD}/store.ts`],
+      ["a team record directory (outside Code's own, DEC 226)", `packages/broker/src/aws/${TEAM_RECORD}/store.ts`],
       ["a devices directory", `packages/broker/src/${DEVICES}/sessions.ts`],
       ["a directory in any case", `packages/broker/src/${ORG.toUpperCase()}/x.ts`],
       ["a Cloud-only contracts file", `packages/contracts/src/${ORG}-node.ts`],
@@ -894,6 +894,31 @@ describe("port-guard hardening (review of lane L0)", () => {
     expect(lane.guard().filter((f) => f.rule === "guard-files").map((f) => f.file)).toEqual(["packages/contracts/src/owner-starter-images.ts"]);
   });
 
+  it("flags an edit to what decides what CI runs and whether it passed (the plan, the gate, the test configuration, the shard split) as guard files (DEC 242)", () => {
+    const decisive = [
+      "scripts/ci-plan.ts",
+      "scripts/ci-gate.ts",
+      "vitest.config.ts",
+      "vitest.native-p0.config.ts",
+      "tests/support/vitest-shared-config.ts",
+      "tests/support/duration-shards.ts",
+      "tests/support/duration-sequencer.ts",
+    ];
+    for (const path of decisive) lane.write(path, "export {};\n");
+    lane.commit();
+    expect(lane.guard().filter((f) => f.rule === "guard-files").map((f) => f.file).sort()).toEqual([...decisive].sort());
+    expect(lane.guard({ allowGuardEdits: true })).toEqual([]);
+  });
+
+  it("does not flag the neighbours of those files (other scripts and test support files)", () => {
+    lane.write("scripts/ci-planner-notes.ts", "export {};\n");
+    lane.write("scripts/lint-shards.ts", "export {};\n");
+    lane.write("tests/support/sample-helper.ts", "export {};\n");
+    lane.write("tests/.timings/vitest-durations.json", "{}\n");
+    lane.commit();
+    expect(lane.guard().filter((f) => f.rule === "guard-files")).toEqual([]);
+  });
+
   it("flags an edit to the port:guard script and a stack nested under infra/lib", () => {
     lane.write("package.json", '{ "scripts": { "port:guard": "true" } }\n');
     lane.write(`infra/lib/stacks/${AUDIT}-stack.ts`, "export {};\n");
@@ -1123,6 +1148,19 @@ describe("port-guard pieces", () => {
     expect(cloudPathRule(`docs/${AUDIT}-ledger-notes.md`)).toBeNull();
     expect(cloudPathRule("packages/uikit/a.ts")).toBeNull();
     expect(cloudPathRule("packages/worker/src/engine.ts")).toBeNull();
+  });
+
+  it("DEC 226: Code's own team record directory is Code's; every other team record path stays Cloud-only, and a Cloud-only directory below it is still refused", () => {
+    const TR = TEAM_RECORD;
+    expect(cloudPathRule(`packages/broker/src/${TR}/record.ts`)).toBeNull();
+    expect(cloudPathRule(`packages/broker/src/${TR}`)).toBeNull();
+    expect(cloudImportReason("packages/broker/src/core-host/x.ts", `../${TR}/record.js`)).toBeNull();
+    expect(cloudImportReason("tests/unit/x.test.ts", `../../packages/broker/src/${TR}/capture.js`)).toBeNull();
+    // Anywhere else, in another case, or with a Cloud-only directory below it: refused.
+    for (const path of [`packages/broker/src/aws/${TR}/a.ts`, `packages/worker/src/${TR}/a.ts`, `packages/broker/${TR}/a.ts`, `packages/broker/src/Team-Record/a.ts`, `packages/broker/src/${TR}/${ORG}/a.ts`, `packages/broker/src/${TR}/x/${TR}/a.ts`, `packages/contracts/src/${TR}.ts`, `infra/lib/${TR}-table.ts`]) {
+      expect(cloudPathRule(path)?.rule, path).toBe("cloud-path");
+    }
+    expect(cloudImportReason("packages/broker/src/x.ts", `./aws/${TR}/a.js`)).not.toBeNull();
   });
 
   it("finds import specifiers in source and leaves strings that are not imports", () => {

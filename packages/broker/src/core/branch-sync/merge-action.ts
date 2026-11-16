@@ -4,6 +4,7 @@
 // one transaction. Here a decider returns DATA: the next workflow, the rows it owns itself (as document-store steps), the dispatch the new workflow state is due for and the
 // milestones to record. The pass (merge tracking, lane L7a) turns the dispatch into a row through the task-flow core (L6a) and the milestones into rows and session lines through the
 // notifications module (L6b), and commits all of it with the tracking item in one `DocumentStore.transact`. No decider names a table, a queue or a provider.
+import type { MarkedDecision } from "../ci-evidence/tracking.js";
 import type { Autonomy, CodeMilestone, MergeTrackingItem, OrgId, TransactItem, WorkflowSnapshot } from "@agentx/contracts";
 
 /** The slots, in the order the pass tries them: a conflict, then failing CI, then feedback, then a branch sync. */
@@ -72,6 +73,8 @@ export interface MergeActionContext {
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
   /** The attribute the document store sweeps for expiry (`DocumentStore.ttlAttribute`); the rows a decider writes carry their expiry under it. Absent: the scheme default. */
   ttlAttribute?: string | undefined;
+  /** TE-E0 option A: a check the customer marked failed or timed out, and what to do about it (environment, ask, or fix within its cap). Absent: nothing marked needs the slot. */
+  marked?: MarkedDecision | undefined;
 }
 
 export interface MergeActionInput {

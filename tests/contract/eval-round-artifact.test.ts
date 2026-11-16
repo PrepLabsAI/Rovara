@@ -10,7 +10,7 @@ const context = { aiChange: true, discovery: "configured" as const, previousPass
 const artifact = (qs = questions(true, false)) => ({ schemaVersion: 1, candidateDigest: "a".repeat(64), roundKind: "check_unsealed", evalPass: 1, outcome: "done", ...captureEvalRoundEvidence({ context, comparison: { questions: qs, changedPromptCalls: qs.length, subsetSupported: true, sameJudgeFamily: false, hiddenSetUsed: false } }), usage: { calls: 28, costMicros: 280 }, cache: "hit", evalConfigured: true });
 
 describe("eval-round artifact", () => {
-  it.each([[true, false, "Worse on eval"], [true, true, "No drop found"], [false, true, "Improved on eval"]] as const)("re-derives %s/%s as %s, ignoring a forged label", (old, head, label) => {
+  it.each([[true, false, "Worse on eval"], [true, true, "No regression measured (eval)"], [false, true, "Improved on eval"]] as const)("re-derives %s/%s as %s, ignoring a forged label", (old, head, label) => {
     const qs = questions(old, head);
     const a = artifact(qs);
     expect(EvalRoundArtifactSchema.safeParse(a).success).toBe(true);

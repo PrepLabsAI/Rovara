@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -26,7 +27,7 @@ function brokerStatements(template: Template): Statement[] {
 function brokerEnvironment(template: Template): Record<string, unknown> {
   const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
   const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-  return broker?.[1].Properties.Environment?.Variables ?? {};
+  return unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {});
 }
 
 describe("the health route's grants (A13)", () => {
@@ -45,7 +46,13 @@ describe("the health route's grants (A13)", () => {
   it("names every alarm a named app creates in the probe's list, and lists no alarm the app never creates (issue 206)", () => {
     const alarmNamesOf = (context: Record<string, unknown>) => buildAgentXApp({ agentxEnv: "live25d", ...context }).node.children.filter((child): child is Stack => Stack.isStack(child))
       .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>))
-      .map((alarm) => alarm.Properties.AlarmName);
+      .map((alarm) => alarm.Properties.AlarmName)
+      // The foundation's egress alarms keep their live hyphenated names and are not on the health route (control-plane.ts unlistedAlarms); pinned here exactly.
+      .filter((name) => !egressAlarmNames.includes(name as string));
+    const egressAlarmNames = ["agentx-live25d-blocked-dns-spike", "agentx-live25d-nat-egress-spike-use1-az1", "agentx-live25d-nat-egress-spike-use1-az2"];
+    const allNames = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child))
+      .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>)).map((alarm) => alarm.Properties.AlarmName);
+    expect(egressAlarmNames.every((name) => allNames.includes(name))).toBe(true);
     const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
     // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
     expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
@@ -76,12 +83,18 @@ describe("the health route's grants (A13)", () => {
     }, 120_000);
 
   it("lets the broker read the attributes of exactly the five dead-letter queues", () => {
-    const queues = brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes");
-    expect(queues).toHaveLength(1);
-    expect(queues[0]?.Resource).toHaveLength(5);
+    expect(brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes")).toEqual([]);
+    const brokerRole = Object.keys(named.findResources("AWS::IAM::Role")).find((id) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id))!;
+    const policies = Object.values(named.findResources("AWS::SQS::QueuePolicy")) as Array<{ Properties: { PolicyDocument: { Statement: Array<Statement & { Effect: string; Principal: unknown }> } } }>;
+    const queues = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement).filter((s) => s.Action === "sqs:GetQueueAttributes");
+    expect(queues).toHaveLength(5);
+    for (const statement of queues) {
+      expect(statement.Effect).toBe("Allow");
+      expect(statement.Principal).toEqual({ AWS: { "Fn::GetAtt": [brokerRole, "Arn"] } });
+    }
     // Exactly the five queues' own ARNs, one each: no wildcard, no other queue. Spec 062 added the channel event one.
     const queueIds = [/^DispatchDeadLetterQueue[0-9A-F]{8}$/, /^SlackRequestDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierNoticeDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierStreamFailureQueue[0-9A-F]{8}$/, /^ChannelApiEventDeadLetters[0-9A-F]{8}$/];
-    const resources = queues[0]?.Resource as Array<{ "Fn::GetAtt"?: [string, string] }>;
+    const resources = queues.map((statement) => statement.Resource) as Array<{ "Fn::GetAtt"?: [string, string] }>;
     for (const resource of resources) {
       expect(resource).toEqual({ "Fn::GetAtt": [expect.any(String), "Arn"] });
       expect(Object.keys(named.findResources("AWS::SQS::Queue"))).toContain(resource["Fn::GetAtt"]?.[0]);
@@ -129,6 +142,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/workflow-e2e-replay.ts",
       // The marker a project setup run leaves for the test machine renewal's drain (AUTOREQUALIFY AR-3) ends at the run's deadline and expires on it a day later.
       "packages/broker/src/e2e/requalify-hold.ts",
+      // TE-C3: the full-suite follow-up, its task pointer (30 days) and the project's day count (3 days) expire on it.
+      "packages/broker/src/core/proof/full-suite-followup.ts",
       // Spec 062 FR-031: a channel link code, one-time and dead after 10 minutes.
       "packages/broker/src/aws/channel-links.ts",
       // The Code port lanes' core (packages/broker/src/core, on the document store port). Each file was read for it: every one writes a row that is meant to expire after a named retention, none a durable record.
@@ -150,6 +165,10 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/channel/thread-notices.ts",
       // Lessons: the rows that record a lesson's source events expire after a named retention (SOURCE_EVENT_TTL_DAYS), none a durable record.
       "packages/broker/src/lessons/document-store.ts",
+      // Lane EV (#649): the company event read only READS the work events' expiry (an expired row is skipped before the store sweeps it); it writes none.
+      "packages/broker/src/core/work-events/read.ts",
+      // Team record (#724, LM7): every record row carries the retention expiry the lessons rows use, and a reader checks it itself; none a durable record.
+      "packages/broker/src/team-record/record.ts",
       // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
       "packages/broker/src/local/app/lessons-routes.ts",
       // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).
@@ -181,8 +200,20 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
       // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
       "packages/broker/src/core/work-events/work-events.ts",
+      // Spend holds (switch-on lane L8): a hold's row and its open-hold index row expire 30 days after the hold's own expiry (the sweep gives an open one back first). The day row and the task
+      // total carry no expiry.
+      "packages/broker/src/core/cost/holds.ts",
+      // Engine host (E2): the State table's TTL attribute is named to strip the core's expiries (retention.ts) and to tell the deployed store which attribute it is (code-modules.ts). Neither writes one.
+      "packages/broker/src/core-host/retention.ts", "packages/broker/src/core-host/code-modules.ts",
       // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item core/sessions/notes.ts writes, with the same 400-day expiry; it reads that item back too.
       "packages/broker/src/developer/task-code-routes.ts",
+      // Task actions (decision 198): the owner's own words for a round they sent back, one OWNER_NOTE row per decision, kept 400 days (KEEP_SECONDS) and then expired. Not a durable record: the decision itself is.
+      "packages/broker/src/core/task-flow/owner-note.ts",
+      // Task actions (decision 201): who accepted a review finding and by what way (one FINDING_ACCEPT row per decision, read when the pull request description is made), kept 400 days like the decision records and then expired.
+      "packages/broker/src/core/task-flow/finding-accept.ts",
+      // Batch merge (#733 L2a, #754 M7): a step-up claim row expires after its token's own expiry plus a short keep (hosted-approvers.ts); the after-merge watcher's watch and action rows
+      // expire after their kept days (after-merge/watch.ts names the store's TTL attribute, defaulting to this one). Neither is a durable record.
+      "packages/broker/src/core-host/hosted-approvers.ts", "packages/broker/src/core/after-merge/watch.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

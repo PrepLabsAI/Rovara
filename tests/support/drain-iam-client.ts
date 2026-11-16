@@ -11,7 +11,7 @@ type Input = {
   ExpressionAttributeValues?: Record<string, string>; ExclusiveStartKey?: unknown;
 };
 
-export interface DrainRequest { command: "GetCommand" | "QueryCommand"; select: string | undefined; attributes: string[] | undefined; indexName: string | undefined }
+export interface DrainRequest { command: "GetCommand" | "QueryCommand"; select: string | undefined; attributes: string[] | undefined; indexName: string | undefined; pk?: string | undefined }
 
 /** The key attributes of the State table (pk, sk) and its bySessionState index (sessionState, workspaceId), spelled out here and not taken from the code under test. */
 export const DRAIN_TABLE_AND_INDEX_KEYS = ["pk", "sk", "sessionState", "workspaceId"] as const;
@@ -46,7 +46,7 @@ export function drainIamClient(items: readonly Item[], options: { allowed?: read
     const resolve = (expression: string | undefined): string[] | undefined =>
       expression === undefined ? undefined : expression.split(",").map((part) => part.trim()).map((part) => (part.startsWith("#") ? input.ExpressionAttributeNames?.[part] ?? `<unresolved ${part}>` : part));
     const attributes = resolve(input.ProjectionExpression);
-    const request: DrainRequest = { command: name, select: input.Select, attributes, indexName: input.IndexName };
+    const request: DrainRequest = { command: name, select: input.Select, attributes, indexName: input.IndexName, pk: input.Key?.pk ?? input.ExpressionAttributeValues?.[":pk"] };
     requests.push(request);
     if (name === "QueryCommand" && input.Select !== "SPECIFIC_ATTRIBUTES") throw denied("Select must be SPECIFIC_ATTRIBUTES");
     if (attributes === undefined) throw denied("a read must name its attributes");

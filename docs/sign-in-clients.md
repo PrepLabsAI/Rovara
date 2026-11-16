@@ -82,6 +82,48 @@ A session records whether the person is a Rovara administrator. Only a company s
 the same identity provider as the admin client and its ID token carries the administrator claim (`AdminClaim`,
 `AdminValues`). A Slack sign-in never counts.
 
+## Ask for a fresh sign-in (step-up)
+
+Some presses need the person to prove, a few minutes ago, that it is really them: a high-risk approval, making a
+script token, and later the other sensitive presses. Signing in again through Slack, Google or GitHub does not count:
+those can send a person straight back without asking anything. Instead Rovara asks with a factor of its own.
+
+1. Send the person to `<api>/v1/auth/authorize` as above, adding `acr_values=step-up`. The discovery document lists
+   `acr_values_supported: ["step-up"]` when the install has a factor set up.
+2. They sign in with Slack or company login as usual; that only says who they are. Rovara then shows its own page and
+   emails a six-digit code to their confirmation email (their "factor email"). It is taken from the verified email of
+   their first sign-in, or set by a company admin; a later change of email at Slack, Google or GitHub never moves it.
+   The page lasts ten minutes, sends at most three codes and allows five tries; a person
+   can start at most five pages an hour.
+3. Once the code is right, the browser goes back to your `redirect_uri` (HTTP 303) with the code. Redeem it as usual.
+   It starts a new session: revoke the old one with `<api>/v1/auth/revoke`.
+4. The access token carries `step_up_at` (when, in seconds since 1970) and `step_up_amr` (`email_code`, `passkey`
+   or `company_reauth`). A refresh keeps the original time; it never makes a step-up fresh again. The route that needs a
+   fresh sign-in checks the time itself, against the company's window (ten minutes unless the company sets a shorter
+   one), whatever the calling service says.
+
+Passkeys: once the emailed code is right, the page offers to add a passkey (WebAuthn, owned by Rovara; it keeps
+only the public key). From then on a passkey tap is the step-up (`step_up_amr: passkey`), and the email code stays
+the fallback. A passkey is only ever added after the email code on the same page, never on the strength of the
+Slack, Google or GitHub sign-in alone, so passkeys need the email sender too; the person is emailed when one is
+added.
+
+A company sign-in counts by itself only when it signs the person in again and says when (`auth_time`) and that is
+inside the window and not before this sign-in request; Rovara asks it with `prompt=login` and `max_age`. Otherwise its people get the email code too.
+If there is no factor for the person (no factor email and no passkey, or no email sender on the install), the service
+gets `error=access_denied` and no code; a company admin can set their factor email.
+
+Managing factors (through the sign-in service, by the caller's own verified session): a person lists their passkeys
+(a live session is enough) and removes one (a fresh step-up is needed). A company admin, with their own fresh step-up,
+can set a person's factor email (the old address is told first; if it cannot be told, nothing changes) and remove all
+of a person's passkeys (the person is told). Ending a person's sessions does not remove their passkeys.
+
+On AWS (named environments): passkeys are on, with the relying-party id the API's own host. The email code is sent
+through Amazon SES from the address in the control plane's `StepUpEmailSender` stack parameter, which must be a
+verified SES email identity in the install's account and region; the sign-in function may send only as that identity.
+While the parameter is empty there is no email sender, so no step-up code is sent and no passkey can be added. While the
+account is in the SES sandbox, SES also accepts only verified recipient addresses.
+
 ## Check what a person can do
 
 `POST <api>/v1/dev/access` answers who the person is, whether they are a Rovara administrator, and which projects

@@ -1,3 +1,5 @@
+import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
+import type { CallerStepUp } from "./step-up-check.js";
 import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
@@ -42,7 +44,7 @@ import {
   SlackUserIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
-  agentXError,
+  agentXError, IMPLICIT_COMPANY_ID,
   cleanClientName,
   developerTaskPolicy,
   diffStat,
@@ -166,7 +168,7 @@ import {
   openReviewFindings,
   resolveWorkflowReviewFindings,
   workflowFindingAccepted,
-  workflowFindingProblem,
+  workflowFindingProblem, GENERAL_FAKE_MADE_NOTE,
   type DeveloperSignInMethod,
 } from "@agentx/contracts";
 import { z } from "zod";
@@ -208,6 +210,7 @@ import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/p
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
+import { requireWebPageForSecurityAccept } from "./security-accept.js";
 import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader, type TaskReaderPerson } from "./task-readers.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
@@ -242,6 +245,7 @@ import {
 } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
+import { TASK_ENTRY_AREAS, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -265,6 +269,10 @@ export interface DeveloperTaskRouteDependencies {
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
   companyId?: string;
+  /** Lane W: the merge core wired for this deployment's tasks (lane E2); absent, `POST .../merge` answers a fixed "not set up". */
+  taskMerge?: TaskMergeWiring;
+  /** Lane W: the caller's step-up as the verified token states it (step-up-check.ts); the merge route checks its age. Never from a header, a query or a body. */
+  stepUp?: CallerStepUp;
   /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
   readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
@@ -283,6 +291,8 @@ export interface DeveloperTaskRouteDependencies {
   projectChannelIds(project: string): Promise<string[]>;
   /** The developer sign-in issuer; the task page the draft pull request links to is on its origin. */
   issuer?: string;
+  /** Lane E2: the core's own handlers, for a task stamped `core` (engine-boundary.ts). Absent: a core task reads exactly like a missing one here. */
+  coreTasks?: CoreTaskEntry;
   /** Spec 061 slice 2: the Slack service's request queue, for "Ask AgentX to reply to this comment"; without it the page says AgentX can't answer here. */
   slackRequestQueue?: SlackRequestQueue;
   now(): number;
@@ -567,6 +577,8 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
     // A malformed ID is never echoed back: it could be long or carry markup.
     throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
+  // Lane E2: a task the core owns is never read here (engine-boundary.ts); it answers exactly like a missing one.
+  if (await ownerOfExistingTask(deps, taskId) === "core") throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
   return task;
 }
 
@@ -580,7 +592,7 @@ async function loadReadableTask(deps: DeveloperTaskRouteDependencies, caller: De
   } catch (error) {
     if (!TASK_ID.test(taskId) || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (task !== undefined && recordInCompany(task, deps.companyId) && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
+    if (task !== undefined && recordInCompany(task, deps.companyId) && await ownerOfExistingTask(deps, taskId) === "workflow" && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
     throw error;
   }
 }
@@ -1745,7 +1757,8 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
         const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
         const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
         if ((row.status !== "CLOSED" || deps.companyId !== undefined) && visible) {
-          if (task !== undefined && task.developerId === caller.developerId) {
+          // Lane E2: a core task's row is listed as its index row says; the workflow never works out (or rewrites) its status.
+          if (task !== undefined && task.developerId === caller.developerId && await ownerOfExistingTask(deps, row.taskId) === "workflow") {
             // Checked lists finish each read before starting the next, so a budget
             // continuation leaves no unfinished reads or partially rendered task.
             const loaded = deps.companyId === undefined ? undefined : {
@@ -2937,6 +2950,8 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
     if (prior.source !== "FINDINGS") throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
     return { task: await taskView(deps, task, { events: 0, details: false }) };
   }
+  // DEC 236h: accepting a security finding is the web page's, the Rovara web app's own sign-in client with a fresh step-up; a token of the CLI, an AI tool, a scoped client or another full-access client may accept only the code review's findings.
+  await requireWebPageForSecurityAccept(caller, workflow, request, deps.now());
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) {
     throw agentXError("IDEMPOTENCY_CONFLICT", "these findings are out of date; refresh the task and try again");
   }
@@ -4015,8 +4030,9 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   const proves = currentPlan?.format === "structured" ? currentPlan.plan.checks?.proves : undefined;
   const checks = workflowSelectedChecks(checkPolicy)
     .map((check) => {
-      const status = results.find((result) => result.checkId === check.id)?.status;
-      return { id: check.id, label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}),
+      const recorded = results.find((result) => result.checkId === check.id);
+      const status = recorded?.status;
+      return { id: check.id, label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}), ...(recorded?.madeByRovara === true ? { madeByRovara: true as const } : {}),
         ...(proposedIds.has(check.id) ? { proposed: true as const } : {}), ...(proves?.[check.id] === undefined ? {} : { proves: proves[check.id]! }) };
     });
   // Model-written: the page escapes it. Review only is said once a coding plan exists to have proposed nothing.
@@ -4371,7 +4387,7 @@ export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: Wor
     PULL_REQUEST_STATUS_END,
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
-    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed. Merge it on GitHub.`,
+    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`,
   ];
   const body = lines.join("\n");
   if (Buffer.byteLength(body, "utf8") <= WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES) return body;
@@ -4389,7 +4405,7 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, proof
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const passed = (workflow.verification?.results ?? []).filter((result) => result.status === "PASS")
     // A proposed check's label is model-written: one line, redacted and made inert like a plan line, as every label is.
-    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed`);
+    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed${result.madeByRovara === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}`);
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
   // The issues noted are those nobody had to resolve: the findings the owner accepted are listed on their own.
   const noted = (workflow.reviews ?? []).reduce((count, review) => count + review.findings.filter((finding) => !workflowFindingAccepted(workflow, review.role, finding)).length, 0);
@@ -6317,9 +6333,47 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 }
 
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
+const TASK_PATH_PREFIX = "/v1/dev/tasks/";
+
+/**
+ * Lane E2: what this route answers for an id with no task behind it, said for a core task the caller may not see here. The same request is routed with a fresh id that has no rows (so
+ * nothing of the core task is read), and the real id is put back in the answer: its input checks, wrong-method answer and words are exactly a missing task's.
+ */
+async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL, taskId: string, rest: string): Promise<unknown> {
+  const stand = randomUUID();
+  const swap = (text: string) => text.replaceAll(stand, taskId);
+  // Rebuilt from the parts the route matched (never a search for the id in the raw path, which may be percent-encoded): the stand-in path always names the stand-in id.
+  const path = `/v1/dev/tasks/${stand}${rest}${url.search}`;
+  const standUrl = new URL(path, url);
+  // The stand-in has no stamp, so this can never come back here; checked anyway, failing closed.
+  if (await ownerOfTaskId(deps, stand) !== "workflow") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  try {
+    const value = await routeDeveloperTaskRequest(deps, caller, { ...request, path, ...(request.body === undefined ? {} : { body: request.body.replaceAll(taskId, stand) }) }, standUrl);
+    return JSON.parse(swap(JSON.stringify(value ?? null))) as unknown;
+  } catch (error) {
+    if (error instanceof Error) error.message = swap(error.message);
+    throw error;
+  }
+}
+
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
+  if (request.method === "POST" && url.pathname === "/v1/dev/tasks") {
+    // Lane E2 step 6: where the switch sends the caller's company to the core, the core starts the task; anywhere else (and with no core entry, the default) the start below, unchanged.
+    const core = await startOnCore(deps.coreTasks, request, caller);
+    if (core !== undefined) return core.value;
+    return startTask(deps, caller, body(request));
+  }
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
+  // Lane E2: a task's route goes by the task's stored engine. A task the core owns is answered by the core's own handlers (or refused), never by the readers below.
+  // Matched by string, not by a path pattern, so the route inventory (named-scopes) reads no new route here.
+  const entryPath = url.pathname.startsWith(TASK_PATH_PREFIX) ? url.pathname.slice(TASK_PATH_PREFIX.length) : undefined;
+  const entrySlash = entryPath === undefined ? -1 : entryPath.indexOf("/");
+  const entry = entryPath === undefined || entryPath === "" ? null : [url.pathname, entrySlash < 0 ? entryPath : entryPath.slice(0, entrySlash), entrySlash < 0 ? "" : entryPath.slice(entrySlash)] as const;
+  const operation = entry === null ? undefined : taskEntryOperation(entry[2]);
+  if (entry !== null && operation !== undefined) {
+    const entryTaskId = safeDecode(entry[1]);
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]));
+  }
   const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
   if (publicationContextRoute !== null && request.method === "POST") {
     return e2ePublicationContext(deps, caller, safeDecode(publicationContextRoute[1]!), body(request));
@@ -6332,7 +6386,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
   if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -6367,5 +6421,9 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "share") return shareTask(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "merge") {
+    // Lane W: every merge rule is the merge core's (task-merge.ts); this only refuses earlier.
+    return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, stepUp: deps.stepUp, body: body(request), now: deps.now() });
+  }
   throw agentXError("NOT_FOUND", "route not found");
 }

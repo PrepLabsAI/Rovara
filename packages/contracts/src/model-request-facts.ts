@@ -15,6 +15,8 @@ export interface ModelRequestFacts {
   /** The `model` field of the body as a name safe to echo, or undefined when the body has none. */
   readonly model: string | undefined;
   readonly stream: boolean;
+  /** OpenAI chat `stream_options.include_usage` is the literal `true` (anything else is false): only then does a real stream end with a usage-only chunk. */
+  readonly includeUsage: boolean;
   /** The first declared tool's name, when the body declares one. */
   readonly toolName: string | undefined;
   /** The prompt text defined above; undefined when the body is not a JSON object. */
@@ -29,7 +31,7 @@ export interface ModelRequestFacts {
   readonly topN: number | undefined;
 }
 
-const NO_FACTS: ModelRequestFacts = { model: undefined, stream: false, toolName: undefined, promptText: undefined, inputCount: 1, dimensions: undefined, base64: false, embeddingTypes: [], documentCount: 0, topN: undefined };
+const NO_FACTS: ModelRequestFacts = { model: undefined, stream: false, includeUsage: false, toolName: undefined, promptText: undefined, inputCount: 1, dimensions: undefined, base64: false, embeddingTypes: [], documentCount: 0, topN: undefined };
 
 const own = (object: object, key: string): unknown => (Object.hasOwn(object, key) ? (object as Record<string, unknown>)[key] : undefined);
 const positiveInt = (value: unknown): number | undefined => (typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined);
@@ -59,6 +61,11 @@ function collectPrompt(root: object): string {
   for (const key of Object.keys(root)) walk((root as Record<string, unknown>)[key], PROMPT_KEYS.has(key), 1);
   const text = pieces.join("\n");
   return text.length > PROMPT_TEXT_MAX_CHARS ? text.slice(0, PROMPT_TEXT_MAX_CHARS) : text;
+}
+
+function includeUsageOf(parsed: object): boolean {
+  const options = own(parsed, "stream_options");
+  return typeof options === "object" && options !== null && !Array.isArray(options) && own(options, "include_usage") === true;
 }
 
 function firstToolName(parsed: object): string | undefined {
@@ -111,6 +118,7 @@ export function readModelRequestFacts(bodyText: string): ModelRequestFacts {
   return {
     model: typeof own(parsed, "model") === "string" ? echoableModelName(own(parsed, "model")) : undefined,
     stream: own(parsed, "stream") === true,
+    includeUsage: includeUsageOf(parsed),
     toolName: firstToolName(parsed),
     promptText: collectPrompt(parsed),
     inputCount: countInputs(parsed),

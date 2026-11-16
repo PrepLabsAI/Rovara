@@ -47,6 +47,21 @@ describe("GitHub App credentials", () => {
     expect(state.reads).toBe(3);
   });
 
+  it("gives the core's code host the same App from the same secret, read once (lane L1b)", async () => {
+    const PEM = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----";
+    const { state, credentials } = fixture({ appId: "12345", privateKey: PEM });
+    expect(credentials.clientOptions.credentialRef).toBe("github-app");
+    expect(credentials.clientOptions.appId).toBe("12345");
+    await expect(credentials.clientOptions.getPrivateKey()).resolves.toBe(PEM);
+    await expect(credentials.clientOptions.getPrivateKey()).resolves.toBe(PEM);
+    expect(JSON.parse(await credentials.clientOptions.getAppSecret())).toEqual({ appId: "12345", privateKey: PEM });
+    expect(state.reads).toBe(1);
+    // A refresh re-reads the secret (spaced like the webhook key's re-reads).
+    state.current = { appId: "12345", privateKey: `${PEM}\n` };
+    expect(JSON.parse(await credentials.clientOptions.getAppSecret({ refresh: true }))).toEqual({ appId: "12345", privateKey: `${PEM}\n` });
+    expect(state.reads).toBe(2);
+  });
+
   it("throttles re-reads to once per 30 seconds", async () => {
     const { state, credentials } = fixture({ appId: "12345", privateKey: "pem" });
     await expect(credentials.webhookSecret()).rejects.toThrow();

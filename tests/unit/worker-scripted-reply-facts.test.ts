@@ -212,11 +212,20 @@ it("the final evidence read has its own timeout even after healthy per-check rea
   } finally { vi.useRealTimers(); }
 });
 
+describe("independent replies (parked by DEC 192a) never count", () => {
+  const withIndependent = (independent: number, taskMade = 0, counted = 0): ModelHelperSummary => ({ ...summary(taskMade, counted), scripted: { before_task: counted, independent, task_made: taskMade } });
+  it("is recorded per check as its own count, never folded into `counted`, and absent when there is none", async () => {
+    const f = fixture([withIndependent(2), withIndependent(2, 1, 1), withIndependent(2, 1, 1)]);
+    await round(f.wrapped, 2);
+    expect(facts(f.results)).toEqual([{ ...fact(0, 0, 0), independent: 2 }, { ...fact(1, 1, 1) }]);
+  });
+});
+
 it.each([
   ["no replies", summary(), false],
   ["task-made", summary(1), true],
   ["before-task", summary(0, 1), true],
-  ["independent", { ...summary(), scripted: { before_task: 0, independent: 1, task_made: 0 }, countsTowardProof: 1 }, true],
+  ["independent", { ...summary(), scripted: { before_task: 0, independent: 1, task_made: 0 }, countsTowardProof: 0 }, true],
   ["failure-pack", { ...summary(), failurePack: 1 }, true],
   ["backend", { ...summary(), backend: 1 }, true],
   ["unreadable", undefined, true],

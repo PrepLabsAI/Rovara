@@ -220,7 +220,7 @@ describe("bounds", () => {
   it("lists exactly the capped number of checks, dependencies and not-tested rows, never more", () => {
     const lines = big().text.split("\n");
     expect(lines.filter((line) => line.startsWith("- Tests:"))).toHaveLength(EVIDENCE_RENDER_LIMITS.checksListed);
-    expect(lines.filter((line) => line.startsWith("- ") && line.includes(": Simulated"))).toHaveLength(EVIDENCE_RENDER_LIMITS.dependenciesListed);
+    expect(lines.filter((line) => line.startsWith("- ") && line.includes(": not available"))).toHaveLength(EVIDENCE_RENDER_LIMITS.dependenciesListed);
     expect(lines).toContain("- and 16 more dependencies");
     expect(lines.filter((line) => line.startsWith("- W") && line.includes("(R"))).toHaveLength(EVIDENCE_RENDER_LIMITS.notTestedListed);
   });
@@ -359,7 +359,13 @@ describe("callers", () => {
       "packages/broker/src/core/proof/evidence-pack.ts",
       "packages/broker/src/core/proof/evidence-v2-lines.ts",
     ];
-    expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText"))).toEqual(writerFiles);
+    // The generic contract finder's mock config (TE-G6; SageMaker is its first adapter) reuses only the trust words, for its "Made by Rovara" label.
+    // General fakes (DEC 234) moved it into contracts so the worker can build fakes; the broker path re-exports it.
+    const mockConfig = "packages/contracts/src/service-contract-mock.ts";
+    expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText" && name !== "EVIDENCE_TRUST_CLASS_WORDS"))).toEqual(writerFiles);
+    // Its users are now all inside contracts (the mock config and general-fakes.ts's "Made by Rovara" label), which `callers` does not list.
+    expect(callers(["EVIDENCE_TRUST_CLASS_WORDS"])).toEqual([]);
+    expect(names.filter((name) => new RegExp(`\\b${name}\\b`, "u").test(readFileSync(`${root}/${mockConfig}`, "utf8")))).toEqual(["EVIDENCE_TRUST_CLASS_WORDS"]);
     // The v1 loader (test-proof-lines.ts) also uses the unconfirmed words.
     for (const name of proofOnly) expect(callers([name])).toEqual([
       "packages/broker/src/core/proof/proof-table.ts",
@@ -431,7 +437,17 @@ describe("no callers", () => {
       "packages/worker/src/setup-prove.ts",
       // The v1 test-proof description loader uses the unconfirmed-replies words (TE-192a B-0).
       "packages/broker/src/developer/test-proof-lines.ts",
+      // The generic contract finder's labelled mock config (TE-G6) reuses the trust words for its label; nothing calls it in production (pinned below).
+      "packages/broker/src/core/test-env/service-contract-mock.ts",
     ]);
     expect(hits.filter((file) => !file.startsWith("packages/contracts/") && !approved.has(file))).toEqual([]);
+    // The contract finder's callers: its own files, the broker re-export paths, and general fakes (DEC 234: the OpenAPI adapter in contracts and the worker's round, behind the project setting, off by default).
+    const wired = spawnSync("git", ["grep", "--untracked", "-l", "-e", "service-contract", "-e", "sagemaker-contract", "-e", "sagemaker-mock", "-e", "generateSageMakerMock", "-e", "findSageMakerContract", "-e", "findServiceContract", "-e", "generateServiceMock", "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect(wired.status).toBe(0);
+    const dir = "packages/broker/src/core/test-env";
+    expect(wired.stdout.trim().split("\n").sort()).toEqual([
+      `${dir}/sagemaker-contract.ts`, `${dir}/sagemaker-mock.ts`, `${dir}/service-contract-mock.ts`, `${dir}/service-contract.md`, `${dir}/service-contract.ts`,
+      "packages/contracts/src/index.ts", "packages/contracts/src/openapi-fake.ts", "packages/contracts/src/service-contract-mock.ts", "packages/contracts/src/service-contract.ts",
+    ].sort());
   });
 });

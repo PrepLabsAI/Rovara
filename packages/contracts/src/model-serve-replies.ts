@@ -3,7 +3,7 @@
 // F0a's file is not edited: for the Gemini, Vertex and OpenAI chat answers this function calls F0a's `serveModelRequest` with the chosen reply, so a reply from the set plugs into F0a's own `reply` hook.
 //
 // What the answer says about itself (for the ledger and the evidence; never a body, a header value, a query or a prompt):
-//   kind `scripted`      a matched reply was served; `provenance` is the reply's; `countsTowardProof` is `replyCountsTowardProof(provenance)`.
+//   kind `scripted`      a matched reply was served; `provenance` is the reply's; `countsTowardProof` is `replyCountsTowardProof(provenance)`: only `before_task`. A served call has no real-model result, so `task_made` cannot count here, and `independent` never does (DEC 192a).
 //   kind `failure_pack`  the failure pack answered; `countsTowardProof` is ALWAYS false.
 //   kind `unmatched`     no reply matched: the family's own error envelope at a fixed status (400), the sentence "not run: no scripted reply for this request", never an invented reply; counted.
 //   kind `not_served`    the request did not reach a served operation (unknown row, bad request, Bedrock, an operation not built here); never counted.
@@ -87,8 +87,8 @@ function notServed(answer: ModelAnswer, state: ServeState, base: Base = NO_BASE,
 }
 
 /** The first tool name, the stream kind and the rest of what a failure answer needs. */
-function failureContext(route: FamilyRouteOk, model: string, toolName: string | undefined, options: ServeRepliesOptions): FailureContext {
-  return { wire: route.wire, operation: route.operation, model, stream: route.stream, seed: options.seed, lineEnding: options.lineEnding ?? "lf", created: options.created ?? 1_700_000_000, enumEncoding: route.enumEncoding, toolName };
+function failureContext(route: FamilyRouteOk, model: string, toolName: string | undefined, includeUsage: boolean, options: ServeRepliesOptions): FailureContext {
+  return { wire: route.wire, operation: route.operation, model, stream: route.stream, seed: options.seed, lineEnding: options.lineEnding ?? "lf", created: options.created ?? 1_700_000_000, enumEncoding: route.enumEncoding, includeUsage, toolName };
 }
 
 /**
@@ -117,7 +117,7 @@ export function serveModelRequestWithReplies(rows: readonly ServableRow[], reply
 
   const failure = options.failure;
   if (failure !== undefined && state.callCount >= (failure.afterCalls ?? 0)) {
-    const answer = shape.failure(failure, failureContext(route, model, facts.toolName, options));
+    const answer = shape.failure(failure, failureContext(route, model, facts.toolName, facts.includeUsage, options));
     return { answer, kind: "failure_pack", resultClass: FAILURE_PACK_CLASS, countsTowardProof: false, ...base, replyId: undefined, provenance: undefined, replySha256: undefined, failureMode: failure.mode, evidenceSentence: undefined, nextState: callState(state.matchCounts) };
   }
 
@@ -139,6 +139,7 @@ export function serveModelRequestWithReplies(rows: readonly ServableRow[], reply
     kind: "scripted",
     resultClass: reply.provenance,
     /** A failure-pack run proves nothing: not even the calls that succeed before `afterCalls` count. */
+    // No real-model result exists at serve time: pass none (fail closed for task_made), and `independent` never counts.
     countsTowardProof: failure === undefined && replyCountsTowardProof(reply.provenance),
     ...base,
     replyId: reply.id,

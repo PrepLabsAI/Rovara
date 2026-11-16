@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below), `scheduler` (when something is due, below), `realtime` (a hint to open pages that something changed, below) and `email` (one plain notice to one address, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `cloud-account` (company credentials for one purpose, below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below), `scheduler` (when something is due, below), `realtime` (a hint to open pages that something changed, below) and `email` (one plain notice to one address, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -371,6 +371,22 @@ adapts the port to its secret store and proxy. On a laptop the keys are READ thr
 adapter asks for `{ "env": "<PROVIDER>_API_KEY" }` and then `{ "key": "<provider>" }`, in that order, so the environment still wins over `keys.json`, and
 `keys.json` keeps its rule (mode 0600, no link). Which providers have a key is the same store's answer for each of `anthropic`, `openai` and `openrouter` (the socket reads one reference at a time, so the listing asks it per provider), so `keys.json` entries for other
 names are not listed. A worker never holds a key (the model proxy below reads it through this point).
+
+## Cloud account (decision 160, TE-IF2)
+
+The `cloud-account` point holds one `CloudAccount` adapter (`packages/contracts/src/ports/cloud-account.ts`). Like `secrets`,
+it is owner-configured only and runs with the broker's rights; never load its configuration from a customer repository or PR.
+Code's default is unavailable and refuses every call without reading ambient credentials. The offline fake and conformance suite
+live in `packages/testing/src/fakes/cloud-account.ts` and `packages/testing/src/ports/cloud-account-conformance.ts`.
+
+Every call validates the company with `OrgIdSchema`. `credentialsFor(companyId, accountRef, purpose)` resolves that company's
+full account reference and issues credentials restricted to one of `invoke_only_endpoint`, `device_farm_project`, `recording_bucket`
+or `test_account_confirm`. The adapter must enforce the corresponding resource and permissions; the purpose enum alone does not.
+AWS is the only credential payload today; all three secret fields remain `SecretValue`. Expiry uses Unix seconds, refuses expired-at-now
+credentials, and allows a fixed 60-second clock-skew margin on the 3600-second maximum (3660 accepted, 3661 refused), without changing expiry.
+`testConnection` checks the connection without issuing credentials; `externalIdFor` returns a stable, separate external id per company.
+All failures, including provider failures, use `CloudAccountRefusedError` with fixed words and no cause or input echo. Credentials are never persisted.
+The issuance ledger is currently a conformance fixture; a production audit hook is deferred to TE-F6 (`IF2-LEDGER-PORT`).
 
 ## Secrets (owner decision 60, item R2)
 
@@ -896,7 +912,7 @@ the conformance suite.
 
 A project's test environment is a setting Rovara PROPOSES, a Prove run checks, and the owner approves once; each approved change is a new immutable revision, and a task keeps the revision it started
 with. The stored rows are Cloud's, key for key (`TESTENV#PROPOSAL#<digest>`, `#PROVE#<digest>`, `#REV#<revision>`, `#LATEST`, the task's `#PIN#<task>`, `#NIGHTLY#...`), under `projectPk(company, project)`, so
-Cloud can switch to this code with no data move.
+Cloud can switch to this code with no data move. One row kind is new and the ENGINE's (TE-C1, switch `ROVARA_BASELINE_CACHE`): `TESTENV#BASELINE#SHA#<revision, 8 digits>#<head sha>`, one per trusted run at a commit (`baseline-cache.ts`), written only by the nightly's record, kept 90 days, deleted with the project's partition. A task's checks keep the words of the run they were compared with beside the evidence pack (`<digest>.baseline.json`, the pack's retention, deleted with the task's evidence).
 
 - **The approval is a subject of the approval gate** (`createTestEnvironmentSubject`, kind `test-environment`). Cloud's own checks (a maintainer role, a fresh sign-in, a second person for a less-safe
   change, a confirmation card) are the Approvers seam's rules here. A less-safe change, a proposal a setup run or draft made, and any card the contract grades high are HIGH risk, so only the methods the
@@ -905,7 +921,7 @@ Cloud can switch to this code with no data move.
 - **The task flow takes it through one seam** (`TaskFlowDeps.testEnvironment`, `core/test-env/seam.ts`): a starting workflow task pins the newest usable revision in its own start transaction (an environment the flow cannot carry out is
   recorded as not applied, with the reason); a coding or verification run is told the plan of the pinned revision and the worker features it needs (a worker that lacks one is refused the run, never sent it without).
 - **Switches** are environment variables read by leaf modules (`switch.ts`): `ROVARA_TEST_ENVIRONMENT` (on unless `0`), `ROVARA_TEST_SERVICES`, `ROVARA_TEST_ACCOUNTS`, `ROVARA_PROJECT_IMAGES`,
-  `ROVARA_SAVED_ENVIRONMENTS` and `ROVARA_NIGHTLY_HEALTH` (each on only when exactly `1`).
+  `ROVARA_SAVED_ENVIRONMENTS`, `ROVARA_NIGHTLY_HEALTH` and `ROVARA_FLAKY_RERUN` (each on only when exactly `1`; the last reruns a failing test of a task round once to tell a flaky one).
 
 ## Realtime (lane K1, a new interface: the owner decides it alone, decision 63)
 

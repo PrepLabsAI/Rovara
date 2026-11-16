@@ -74,7 +74,13 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
   runtime: ["E2eAgentModelId", "ModelFallback"],
   "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled", "WorkflowDependenciesEnabled",
     // Spec 062: channel adapters and Slack through the channel API, as the operator set them (agentx config set).
-    "ChannelAdapters", "SlackViaChannel"],
+    "ChannelAdapters", "SlackViaChannel",
+    // Migration plan v3.2 lane E2: the core engine switch (agentx config set coreEngine.switch).
+    "CoreEngine",
+    // Migration plan v3.2 lane E2: retain every core setting the operator may tune across upgrades.
+    "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons",
+    // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
+    "StepUpEmailSender"],
   slack: ["SlowTurnMinutes", "ModelFallback"],
 };
 

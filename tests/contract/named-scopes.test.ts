@@ -31,6 +31,10 @@ describe("the route table", () => {
       .toEqual(["GET /v1/dev/client/projects/{project}", "POST /v1/dev/access"]);
   });
 
+  it("settings reads and writes require full access, with no new named scope", () => {
+    for (const method of ["GET", "PUT"]) expect(devRouteOf(method, "/v1/dev/projects/web/settings")?.requires).toBe("full");
+  });
+
   it("has one row per method and path", () => {
     const keys = DEV_ROUTES.map((route) => `${route.method} ${route.path.replace(/\{[A-Za-z]+\}/g, "{}")}`);
     expect(new Set(keys).size).toBe(keys.length);
@@ -75,7 +79,7 @@ describe("the route table", () => {
 
 // ---- Every route the broker registers has a row (and every row is a route) ----
 
-/** The concrete paths a router regex literal matches, each `([^/]+)` as `{}`. */
+/** The concrete paths a router regex literal matches, each `([^/]+)` or bare `[^/]+` (R4's grouped task-read pattern) as `{}`. */
 function expandRegex(source: string): string[] {
   const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}").replaceAll("([a-f0-9]{64})", "{}");
   const expand = (text: string): string[] => {
@@ -107,7 +111,8 @@ function expandRegex(source: string): string[] {
 /** Every /v1/dev path the routers name: string literals, a named path constant with suffixes, and regex literals. */
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts"]) {
+  // The company reads' paths are constants of their contract (#649), which the router imports.
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/broker/src/aws/company-member-routes.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
@@ -191,6 +196,8 @@ async function setUp(mode: "linking" | "developer") {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   const config: DeveloperApiConfiguration = {
     companies: { companyOf: async () => IMPLICIT_COMPANY_ID },
+    // Lane W part 4: the company admin routes need the member helper to exist; this one finds nobody, so only the route table's answer is tested here.
+    companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };

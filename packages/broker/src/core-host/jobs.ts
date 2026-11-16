@@ -5,6 +5,7 @@
 //
 // Per-company isolation: each company runs in its own try/catch, so one company's failure never skips the others, and the order rotates by run so a time budget never defers the same tail
 // companies every time.
+import { CORE_JOB_EVENT_SOURCE } from "@agentx/contracts";
 import type { CoreRuntime, CoreServiceName } from "./core-runtime.js";
 import type { CoreArea } from "./flags.js";
 
@@ -39,12 +40,14 @@ export const CORE_JOBS: readonly CoreJob[] = [
   { name: "admission-hold-sweep", area: "flow", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("admission-hold-sweep") },
   // With automations off, the runs already started are stopped at a safe point (optional service). Does nothing while they are on.
   { name: "automation-stop", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("automation-stop") },
+  // Owed person erases: learning first, then the bounded evidence walk, in this runtime's company.
+  { name: "person-erase-resume", area: "flow", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("person-erase-resume") },
   // Lessons (optional service, wired only where `ROVARA_CORE_LESSONS` covers the company): milestones due, the shared reflection queue, and once a day the upkeep (`lessons.ts`).
   { name: "lessons", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("lessons") },
 ];
 
 /** The `source` of the event a core job schedule sends to the broker: `{ source: "agentx.core-job", job: <name> }`. */
-export const CORE_SCHEDULE_SOURCE = "agentx.core-job";
+export const CORE_SCHEDULE_SOURCE: typeof CORE_JOB_EVENT_SOURCE = CORE_JOB_EVENT_SOURCE;
 
 export function scheduleEventOf(job: CoreJob): { source: typeof CORE_SCHEDULE_SOURCE; job: string } {
   return { source: CORE_SCHEDULE_SOURCE, job: job.name };

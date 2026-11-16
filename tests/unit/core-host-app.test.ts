@@ -1,6 +1,8 @@
 // Engine host (migration plan v3.2 lane E2): the deployed composition root. Off by default with no behaviour change; the switch parses fail closed; a task keeps the engine it started on;
 // the registry refuses a half-wired core and Code's laptop defaults for money, authority and audit; jobs run per company in isolation; drain serves the tasks the core holds.
 // Ported from the monolith's host-root tests (its cloud-app.test.ts: the switch, stamp, off, registry, keep-engine, missing-service and job cases); the Cloud money, retention and Slack cases stay there.
+import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
+import { outboxCompaniesOf } from "../../packages/broker/src/aws/core-engine-root.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
@@ -308,6 +310,15 @@ describe("review fixes: a start the switch does not send to the core is refused,
     await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
   });
 
+  it("refuses a null access rule too (the core's own fallback would take it as absent)", async () => {
+    const world = createFakeWorld();
+    const app = createCoreHostApp({
+      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(),
+      runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: null as never, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES }),
+    });
+    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toThrow("the core runtime needs an access rule");
+  });
+
   it("reports an unreadable switch once, by variable and fixed problem, never the value", () => {
     const world = createFakeWorld();
     const entries: Record<string, unknown>[] = [];
@@ -368,4 +379,24 @@ describe("scheduled jobs", () => {
     expect(new Set(CORE_JOBS.map((job) => job.name)).size).toBe(CORE_JOBS.length);
     for (const job of CORE_JOBS) if (job.trigger.kind === "schedule") expect(job.trigger.rate).toMatch(/^rate\((1 minute|\d+ minutes)\)$/);
   });
+});
+
+
+it("L9 relays a two-company INSERT batch to each company's own queue messages", async () => {
+  const world = createFakeWorld();
+  const app = appOver(world, { ROVARA_CORE_ENGINE: "on" });
+  const outbox = createTransactionalOutbox({ store: world.store, queues: world.queues });
+  for (const companyId of [FAKE_COMPANY, OTHER]) {
+    await world.store.transact([outbox.stage({ companyId, id: "same-id", queue: "l9-relay", body: { companyId } })]);
+  }
+  const batch = { Records: [FAKE_COMPANY, OTHER].map((companyId, index) => ({ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { SequenceNumber: String(index + 1), NewImage: { pk: { S: `ORG#${companyId}#OUTBOX#same-id` }, outboxState: { S: `PENDING#${companyId}` } } } })) };
+  expect(await app.relayOutbox(outboxCompaniesOf(batch)!)).toMatchObject([
+    { companyId: FAKE_COMPANY, outcome: "ran", report: { delivered: 1 } },
+    { companyId: OTHER, outcome: "ran", report: { delivered: 1 } },
+  ]);
+  const messages = await (await world.queues.queue("l9-relay")).receive({ maxMessages: 10 });
+  expect(messages.map(({ body, attributes }) => ({ body, companyId: attributes.companyId, outboxId: attributes.outboxId }))).toEqual([
+    { body: { companyId: FAKE_COMPANY }, companyId: FAKE_COMPANY, outboxId: "same-id" },
+    { body: { companyId: OTHER }, companyId: OTHER, outboxId: "same-id" },
+  ]);
 });

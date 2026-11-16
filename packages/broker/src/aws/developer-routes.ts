@@ -1,4 +1,6 @@
+import { projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -8,7 +10,10 @@ import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
-import { devRouteOf, type DevRoute } from "./dev-route-scopes.js";
+import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
+import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js";
+import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
+import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import {
   AgentXNameSchema, AgentXError,
   IMPLICIT_COMPANY_ID, OrgIdSchema,
@@ -62,7 +67,7 @@ import {
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
   SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
-  ActorRefSchema,
+  ActorRefSchema, COMPANY_AUDIT_RECORDS_PATH, COMPANY_EVENTS_PATH,
   SignInClientViewSchema,
   AccessCheckRequestSchema,
   AccessCheckResponseSchema,
@@ -79,6 +84,8 @@ import {
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import { stepUpOf } from "../developer/verify-token.js";
+import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
@@ -101,13 +108,22 @@ import { createFeedbackReviewWeb } from "./feedback-review-web.js";
 import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from "./task-web.js";
 import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
+import type { CoreTaskEntry } from "./engine-boundary.js";
+import type { CoreAppEntry } from "./core-app-routes.js";
+import type { BrokerResponse } from "../handler.js";
 
 export interface DeveloperApiConfiguration {
+  /** Host-owned company rules configuration; absence preserves today's policy. */
+  policyHook?: ProjectSettingsHook;
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
   /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
   since?: Partial<Record<DeveloperSignInMethod, number>>;
   signInTableName: string;
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
+  /** Lane E2: the core's own handlers for a task stamped `core` (engine-boundary.ts), as the deployment composes them. Absent: a core task reads exactly like a missing one. */
+  coreTasks?: CoreTaskEntry;
+  /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only while the core switch serves. Absent: every /v1/app/* path answers "route not found", reading nothing. */
+  coreApp?: CoreAppEntry;
   /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */
   taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
   taskChannelPeople?: (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse>;
@@ -135,6 +151,8 @@ export interface DeveloperApiConfiguration {
   signInClients?: SignInClientRegistry;
   companies?: CompanyMembershipReader;
   companyPreapprovals?: (request: CompanyPreapprovalRequest) => Promise<boolean>;
+  /** Lane W part 4: T3b's member helper (companyMemberActionsThroughLambda), the only way the admin routes list, remove or change a member. Absent: those routes are unknown. */
+  companyMembers?: CompanyMemberActions;
   /**
    * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
    * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
@@ -153,13 +171,21 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
+  channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
+  policyHook?: ProjectSettingsHook;
   companies?: CompanyMembershipReader;
+  /** Lane W: the merge core wired for this deployment's tasks (task-merge.ts). Absent: `POST /v1/dev/tasks/{id}/merge` answers a fixed "not set up". */
+  taskMerge?: TaskMergeWiring;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   developer: DeveloperApiConfiguration;
   now: () => number;
   /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
   tasks?: DeveloperTaskActions;
+  /** Lane LM8: the Code lessons API (`core-host/lessons-api.ts`), behind the lessons switch. Absent (the default, until the deployment wires it): every lessons route answers "Lessons are off." and reads nothing. */
+  lessons?: Pick<LessonsApi, "answer">;
+  /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
+  lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
   createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
@@ -179,9 +205,17 @@ export interface DeveloperRouteDependencies {
   chatgpt?: ChatGptConnections;
   /** Spec 062: channel account links; without them /review/link/* and /v1/dev/channel-links answer NOT_FOUND. */
   channelLinks?: ChannelLinkDependencies;
+  /** Lanes AU and EV: the company audit and event reads for a company administrator; without them those two routes answer NOT_FOUND. */
+  companyReads?: CompanyReadsConfiguration;
 }
 /** `clientId`: the registered sign-in client whose token made the call (plan v3.2 lane ID); absent for the Rovara CLI. */
-export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string }
+export interface DeveloperCaller {
+  developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string; clientId?: string;
+  /** DEC 236h: set only for the Rovara web app's own sign-in client (registered with full access AND marked `webApp` by the operator), from its registration; never for the Rovara CLI's token, a scoped client's, or another full-access client's. */
+  webApp?: true;
+  /** DEC 236h: the person's last step-up as the VERIFIED access token states it (`stepUpOf`), for the acts that need a fresh sign-in; its age is checked where it is used. Never from a header, a query or a body. */
+  stepUp?: { at: string; method: string };
+}
 
 /** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
 export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
@@ -548,7 +582,11 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
   // Delay only OIDC's install-wide switch until the authenticated session can select its policy.
   const config = deps.companies === undefined ? deps.developer : { ...deps.developer, methods: { ...deps.developer.methods, oidc: true } };
   const token = developerClaims(claims, config);
-  try { return await authenticateSession(deps, token, undefined, true); }
+  const stepUp = claims === undefined ? undefined : stepUpOf(claims);
+  try {
+    const caller = await authenticateSession(deps, token, undefined, true);
+    return stepUp === undefined ? caller : { ...caller, stepUp };
+  }
   catch (error) {
     if (deps.companies !== undefined && token.amr === "oidc" && !(error instanceof AgentXError)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
     throw error;
@@ -894,7 +932,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number): Promise<{ client: SignInClientRecord; companyId?: string; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; stepUp?: CallerStepUp }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -926,7 +964,13 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
     // access has the person's rights, so every scope.
     const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
-    return { client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt };
+    // Lane ID part 2 for a sign-in client (switch-on L11): the step-up the VERIFIED token states (`stepUpOf`; the sign-in server writes it only into the token of a session that began with a
+    // step-up on Code's own page, `acr_values=step-up`), never anything else the request sends. The route checks its age.
+    const stepUp = stepUpOf(claims);
+    return {
+      client, ...(companyId === undefined ? {} : { companyId }), developerId: session.developerId, sessionId: claims.sid, amr, administrator: amr === "oidc" && session.administrator === true, scopes, startedAt: session.startedAt,
+      ...(stepUp === undefined ? {} : { stepUp }),
+    };
   } catch (error) {
     if (deps.companies !== undefined && amr === "oidc") throw refused();
     throw error;
@@ -954,7 +998,13 @@ function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord
  * picks the path; each then verifies the token in full. The client's registration is read at every request, so
  * removing a scope or full access takes effect at once.
  */
-async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<DeveloperCaller> {
+/** The caller of a developer route: the Rovara CLI's token, or a sign-in client's with the route's scope (or full access). Exported for its tests. */
+export async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<DeveloperCaller> {
+  return (await authenticateCallerWithStepUp(deps, authorization, route)).caller;
+}
+
+/** As `authenticateCaller`, with the step-up the VERIFIED token carries (lane W; its age is checked by the route that needs it). */
+async function authenticateCallerWithStepUp(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute): Promise<{ caller: DeveloperCaller; stepUp?: CallerStepUp }> {
   let azp: unknown;
   try {
     azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
@@ -964,17 +1014,21 @@ async function authenticateCaller(deps: DeveloperRouteDependencies, authorizatio
   // A client with neither a scope nor full access is refused as before: its tokens are never Rovara's (401).
   const client = typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID ? undefined : await signInClientOf(deps, azp);
   if (client === undefined || (client.fullAccess !== true && (client.scopes ?? []).length === 0)) {
-    return authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization));
+    // The Rovara CLI's token (or a tool holding it) never carries a step-up here: a merge or a loosened rule is a web client's press (plan 7.2 change 5).
+    return { caller: await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(authorization)) };
   }
   const person = await authenticateClientToken(deps, authorization, Math.floor(deps.now() / 1000));
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   requireRouteScope(route, person);
-  return {
+  const caller: DeveloperCaller = {
     developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: developer.displayName, clientId: person.client.clientId,
+    ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }),
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
+    ...(person.client.fullAccess === true && person.client.webApp === true ? { webApp: true as const, ...(person.stepUp === undefined ? {} : { stepUp: person.stepUp }) } : {}),
   };
+  return person.stepUp === undefined ? { caller } : { caller, stepUp: person.stepUp };
 }
 
 /** What the project member reads and changes (spec 065) need. */
@@ -995,6 +1049,37 @@ async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: s
 }
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
+const CLIENT_CODE_SETTINGS = /^\/v1\/dev\/client\/projects\/([^/]+)\/code-settings$/;
+
+/**
+ * Lane W: `GET|PUT /v1/dev/client/projects/{project}/code-settings`. Read by a person who may use the project (in their company, from membership); changed by its administrator or a
+ * company administrator (or, with no company layer, a Rovara administrator). Another company's project, one they may not use and a missing one all answer "project not found".
+ */
+async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, route: DevRoute): Promise<unknown> {
+  const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, person);
+  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
+  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  // As readClientProject: one bounded read budget for the company-checked listing.
+  const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
+  const companyId = await resolveCompany(deps.companies, person.developerId);
+  const access = await projectsAPersonUses(scope === undefined ? deps : { ...deps, documentClient: scope.client }, person.developerId, companyId);
+  scope?.check();
+  if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  if (!access.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
+  const store = { documentClient: deps.documentClient, tableName: deps.tableName };
+  if (request.method === "GET") return { settings: await readCodeSettings(store, companyId ?? IMPLICIT_COMPANY_ID, project) };
+  const own = await projectGrant(memberActions(deps), project, person.developerId);
+  const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
+  const companyAdmin = companyId === undefined ? person.administrator : membership?.companyId === companyId && (membership.role === "admin" || membership.role === "owner");
+  return putCodeSettings({ ...store, now: deps.now, // The file's one company-less logger (already in the log-site inventory), with the company added when there is one.
+    log: (entry) => logDeveloperEvent({ ...entry, ...(companyId === undefined ? {} : { companyId }) }) }, {
+    companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, stepUp: person.stepUp, body: jsonBody(request),
+  });
+}
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
 
 /**
@@ -1006,6 +1091,21 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   // Plan v3.2 lane ID: only a route in the table, and only with its scope.
   const route = devRouteOf(request.method, url.pathname);
   if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // Lanes AU and EV: the company's audit records and events, read as the company administrator of the caller's own company.
+  if (url.pathname === COMPANY_AUDIT_RECORDS_PATH || url.pathname === COMPANY_EVENTS_PATH) {
+    const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    requireRouteScope(route, reader);
+    if (deps.companyReads === undefined) throw agentXError("NOT_FOUND", "route not found");
+    const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${reader.developerId}`);
+    if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+    // A person's name: the host's lookup, else the sign-in table's display name, shown only for a person of the caller's own company.
+    const resolveCompany = deps.companyReads.companyOf;
+    const personName = deps.companyReads.personName ?? (async (developerId: string, companyId: string) => {
+      if (resolveCompany !== undefined && (await resolveCompany(developerId)) !== companyId) return undefined;
+      return (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName;
+    });
+    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator }, url, deps.now());
+  }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
   if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
@@ -1023,6 +1123,9 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
     return readClientProject(deps, creator.developerId, created.name, creator.companyId);
   }
+  // Lane W: a project's merge rules (contract v0 client.projects.codeSettings), in Code's own CodeSettings shape.
+  const settings = CLIENT_CODE_SETTINGS.exec(url.pathname);
+  if (settings !== null && (request.method === "GET" || request.method === "PUT")) return routeClientCodeSettings(deps, request, settings[1]!, route);
   const read = CLIENT_PROJECT.exec(url.pathname);
   if (read !== null && request.method === "GET") {
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
@@ -1267,6 +1370,7 @@ export function developerTaskRouteDependencies(
     tableName: deps.tableName,
     ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     issuer: deps.developer.issuer,
+    ...(deps.developer.coreTasks === undefined ? {} : { coreTasks: deps.developer.coreTasks }),
     actions: deps.tasks!,
     ...(deps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: deps.workflowE2EPresentation }),
     ...(deps.workflowE2EPublicationChecks === undefined ? {} : { workflowE2EPublicationChecks: deps.workflowE2EPublicationChecks }),
@@ -1374,20 +1478,46 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   return { ok: true };
 }
 
+/** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
+export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+
+/** The Home number's paths (`core-host/lessons-repeats-api.ts` parses the same paths; a test holds the two equal). */
+export const LESSONS_REPEATS_ROUTES = /^\/v1\/dev\/(?:projects\/([^/]+)\/)?lessons\/repeats$/u;
+
+/** Lane W part 4: the company administrator's routes (company-member-routes.ts). Unknown, before anyone is authenticated, when the deployment has no company layer or no member helper. */
+async function companyAdminRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const members = deps.developer.companyMembers;
+  if (deps.companies === undefined || members === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // Full access only (DEC ANSWER-4): the route table's `full` row is applied while authenticating, before any membership is read.
+  const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  // The member helper's caller is the signed-in person only (its schema is strict and pinned): the step-up travels beside it, and the web-app mark (DEC 236h) is not the helper's.
+  const { stepUp: _callerStepUp, webApp: _webApp, ...person } = caller;
+  void _callerStepUp; void _webApp;
+  return routeCompanyMembers({
+    documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
+    projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
+  }, { caller: person, stepUp, companyId }, request, url);
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
   if (url.pathname.startsWith("/review/link/")) {
     const links = deps.channelLinks;
-    if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+    if (links === undefined && deps.channelLinkCodes === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
     return createChannelLinkWeb({
       origin: deps.developer.issuer,
       authenticateSession: async (sessionId) => {
         try { return await authenticateDeveloperSessionId(deps, sessionId); }
         catch { return undefined; }
       },
-      preview: (code) => previewLinkCode(links, code),
-      redeem: (developerId, code) => redeemLinkCode(links, developerId, code),
+      preview: (code, personId) => deps.channelLinkCodes === undefined ? previewLinkCode(links!, code) : deps.channelLinkCodes.preview(personId, code),
+      redeem: (developerId, code) => deps.channelLinkCodes === undefined ? redeemLinkCode(links!, developerId, code) : deps.channelLinkCodes.redeem(developerId, code),
     })(request, url);
   }
   if (url.pathname.startsWith("/review/")) {
@@ -1446,7 +1576,9 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   // Spec 065: a registered service acting as its signed-in person, within its scopes.
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
-  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
+  if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") {
     const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
     const companyId = await resolveCompany(deps.companies, caller.developerId);
@@ -1456,15 +1588,29 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   }
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
+  // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
+  if (LESSONS_API_ROUTES.test(url.pathname)) {
+    if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+    return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
+  }
+  if (LESSONS_REPEATS_ROUTES.test(url.pathname)) {
+    if (deps.lessonRepeats === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+    return deps.lessonRepeats.answer({ method: request.method, path: url.pathname, query: url.searchParams }, { personId: caller.developerId });
+  }
   if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
     const checked = request.method === "GET" && (url.pathname === "/v1/dev/tasks" || /^\/v1\/dev\/tasks\/[^/]+(?:\/(messages|diff|comments|events|readers))?$/.test(url.pathname));
     const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
-    const companyId = checked ? await resolveCompany(deps.companies, caller.developerId) : undefined;
+    // Lane W: a merge press is company-checked too (membership, never a claim), and only it carries the caller's step-up.
+    const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
+    const companyId = checked || merging ? await resolveCompany(deps.companies, caller.developerId) : undefined;
     const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
     const checkedDeps = scope === undefined ? taskDeps : { ...taskDeps, actions: companyReadActions(taskDeps.actions, scope),
       ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }) };
-    const result = await routeDeveloperTaskRequest({ ...checkedDeps, ...(companyId === undefined ? {} : { companyId }) }, caller, request, url);
+    const result = await routeDeveloperTaskRequest({
+      ...checkedDeps, ...(companyId === undefined ? {} : { companyId }),
+      ...(merging && deps.taskMerge !== undefined ? { taskMerge: deps.taskMerge } : {}), ...(merging && stepUp !== undefined ? { stepUp } : {}),
+    }, caller, request, url);
     // Only a completed list page with an explicit continuation may consume an item-bound signal.
     scope?.check(url.pathname === "/v1/dev/tasks" && result !== null && typeof result === "object" && "nextCursor" in result);
     return result;
@@ -1476,6 +1622,28 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     return routeOwnChannelLinks(deps, caller, request, url);
   }
   throw agentXError("NOT_FOUND", "route not found");
+}
+
+/**
+ * Lane L12: the core engine's own /v1/app/* routes. Like /v1/dev/*, no API Gateway authorizer runs on them: a method and path with no row in the route table (APP_ROUTES), or any
+ * /v1/app/* path while the core switch is off (no `coreApp`), is refused before anyone is authenticated; otherwise the broker verifies the developer token, checks the row's scope and
+ * hands the signed-in caller (with the verified step-up) to the core, which takes the company from live membership. The core's answer is returned as it is (its status and body), never cached.
+ */
+export async function routeAppRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<BrokerResponse> {
+  const core = deps.developer.coreApp;
+  if (core === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // The core matches the raw path; a path the URL parser would read differently (a backslash, say) is refused rather than matched two ways.
+  if ((request.path.split("?")[0] ?? "") !== url.pathname) throw agentXError("NOT_FOUND", "route not found");
+  const route = appRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  // The core gets the request without its credentials: the caller is already the verified one.
+  const { authorization: _credential, ...headers } = request.headers;
+  void _credential;
+  const answer = await core.route({ method: request.method, path: request.path, headers, ...(request.body === undefined ? {} : { body: request.body }), requestId: request.requestId }, caller);
+  if (answer === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // Never cached: a made script token is in its body.
+  return { ...answer, headers: { ...answer.headers, "cache-control": "no-store" } };
 }
 
 /**

@@ -24,11 +24,11 @@ describe("policy hook: company values", () => {
   it("locks tighten values and never loosen them", async () => {
     const w = world(() => ({ locks: { extra_review: true, ci_fix_rounds: 1, model_budget_usd: 5, real_check: "sandbox_only" } }), { project: { ci_fix_rounds: 2, real_check: "rovara_real_run" } });
     const resolved = await w.source.resolve(scope, {});
-    expect(resolved.values["extra_review"]).toEqual({ value: true, origin: "company_lock", clampedBy: "company_lock" });
-    expect(resolved.values["ci_fix_rounds"]).toEqual({ value: 1, origin: "company_lock", clampedBy: "company_lock" });
-    expect(resolved.values["model_budget_usd"]).toEqual({ value: 5, origin: "company_lock", clampedBy: "company_lock" });
+    expect(resolved.values["extra_review"]).toEqual({ value: true, origin: "company_minimum", clampedBy: "company_minimum", companyBound: { kind: "minimum", value: true } });
+    expect(resolved.values["ci_fix_rounds"]).toEqual({ value: 1, origin: "company_limit", clampedBy: "company_limit", companyBound: { kind: "limit", value: 1 } });
+    expect(resolved.values["model_budget_usd"]).toEqual({ value: 5, origin: "company_limit", clampedBy: "company_limit", companyBound: { kind: "limit", value: 5 } });
     // sandbox_only is looser than the project's rovara_real_run ("higher" is stricter): kept as the project set it.
-    expect(resolved.values["real_check"]).toEqual({ value: "rovara_real_run", origin: "changed_here" });
+    expect(resolved.values["real_check"]).toEqual({ value: "rovara_real_run", origin: "changed_here", companyBound: { kind: "minimum", value: "sandbox_only" } });
     expect(w.service.asked[0]!.q).toEqual({ cid: COMPANY, pid: "web" });
   });
 
@@ -54,8 +54,10 @@ describe("policy hook: company values", () => {
     await expect(w.source.resolve(scope, {})).rejects.toThrow("policy_unavailable");
   });
 
-  it("a preset lock is not readable here: the strictest default", async () => {
-    await expect(world(() => ({ locks: { preset_level: "careful" } })).source.resolve(scope, {})).rejects.toThrow("policy_unavailable");
+  it("a preset lock expands carefulness minima without setting spend bounds", async () => {
+    const result = await world(() => ({ locks: { preset_level: "careful" } })).source.resolve(scope, {});
+    expect(result.values["real_check"]?.value).toBe("rovara_real_run");
+    expect(result.values["model_budget_usd"]?.value).toBeNull();
   });
 
   it("no answer and nothing cached, an unreadable lock, or an unknown scope: the strictest default", async () => {

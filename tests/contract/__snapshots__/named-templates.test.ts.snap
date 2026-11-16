@@ -550,6 +550,33 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
             },
             {
               "Action": [
+                "ses:SendEmail",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ses:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":identity/*",
+                  ],
+                ],
+              },
+              "Sid": "StepUpEmail",
+            },
+            {
+              "Action": [
                 "iam:CreateRole",
                 "iam:DeleteRole",
                 "iam:GetRole",
@@ -2134,6 +2161,13 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Description": "enabled: Slack conversations go through the channel API as the built-in Slack adapter (spec 062 Phase 7); disabled: Slack's own queue, as before",
       "Type": "String",
     },
+    "StepUpEmailSender": {
+      "AllowedPattern": "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$",
+      "Default": "",
+      "Description": "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)",
+      "MaxLength": 254,
+      "Type": "String",
+    },
     "WorkflowDependenciesEnabled": {
       "AllowedValues": [
         "true",
@@ -2270,6 +2304,51 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 },
               ],
             },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -2333,17 +2412,163 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "ADMIN_VALUES": {
               "Ref": "AdminValues",
             },
-            "AGENTX_ALARM_PREFIX": "agentx-staging-",
-            "AGENTX_E2E_AGENT_SETTINGS_PREFIX": "/agentx/staging/",
-            "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-staging-e2e-mock-runtime-v1",
-            "AGENTX_ENV": "staging",
-            "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
-            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
-            "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED": {
-              "Ref": "WorkflowDependenciesEnabled",
+            "AGENTX_ACCOUNT_ID": {
+              "Ref": "AWS::AccountId",
             },
-            "ARTIFACT_BUCKET_NAME": {
-              "Ref": "Artifacts82DD59A1",
+            "AGENTX_ENV": "staging",
+            "AGENTX_NAMES": {
+              "Fn::Join": [
+                "",
+                [
+                  "ar=",
+                  {
+                    "Ref": "Artifacts82DD59A1",
+                  },
+                  ",ce=",
+                  {
+                    "Fn::GetAtt": [
+                      "ChannelApiEventDeadLettersE21C25D1",
+                      "QueueName",
+                    ],
+                  },
+                  ",ck=",
+                  {
+                    "Ref": "ChatGptConnectionKey03C49F9D",
+                  },
+                  ",cs=",
+                  {
+                    "Ref": "CompanySecretsRole63E074C9",
+                  },
+                  ",dl=",
+                  {
+                    "Fn::GetAtt": [
+                      "SessionsDeleterB48741EA",
+                      "Name",
+                    ],
+                  },
+                  ",dn=",
+                  {
+                    "Fn::GetAtt": [
+                      "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                      "QueueName",
+                    ],
+                  },
+                  ",dq=",
+                  {
+                    "Fn::GetAtt": [
+                      "DispatchDeadLetterQueue3E30F4B8",
+                      "QueueName",
+                    ],
+                  },
+                  ",ds=",
+                  {
+                    "Fn::GetAtt": [
+                      "DeveloperTaskNotifierStreamFailureQueue58891933",
+                      "QueueName",
+                    ],
+                  },
+                  ",id=",
+                  {
+                    "Ref": "DeveloperSignInFunction10B62B05",
+                  },
+                  ",kp=",
+                  {
+                    "Ref": "DeveloperSignInPolicyHookKey1CC2C9E2",
+                  },
+                  ",kt=",
+                  {
+                    "Ref": "DeveloperSignInTaskTokenKey10D3ED68",
+                  },
+                  ",pe=",
+                  {
+                    "Ref": "PlanEvidence3615C4CB",
+                  },
+                  ",pv=",
+                  {
+                    "Fn::GetAtt": [
+                      "SessionsProvisioner9C44055B",
+                      "Name",
+                    ],
+                  },
+                  ",sl=",
+                  {
+                    "Ref": "SlackThreads36E14C1E",
+                  },
+                  ",so=",
+                  {
+                    "Ref": "SlackOrchestratorTaskRole2372FE40",
+                  },
+                  ",sq=",
+                  {
+                    "Fn::GetAtt": [
+                      "SlackRequestQueueCC82C864",
+                      "QueueName",
+                    ],
+                  },
+                  ",sr=",
+                  {
+                    "Fn::GetAtt": [
+                      "SlackRequestDeadLetterQueueBBBDDF4E",
+                      "QueueName",
+                    ],
+                  },
+                  ",st=",
+                  {
+                    "Ref": "DeveloperSignInTable26CE739E",
+                  },
+                  ",ti=",
+                  {
+                    "Ref": "HttpApi",
+                  },
+                  ",tr=",
+                  {
+                    "Ref": "TurnRecords69ECFCD9",
+                  },
+                  ",ts=",
+                  {
+                    "Ref": "State1C20CC9A",
+                  },
+                ],
+              ],
+            },
+            "AGENTX_SETTINGS": {
+              "Fn::Join": [
+                "",
+                [
+                  "mc=",
+                  {
+                    "Ref": "McpConfirmElicitation",
+                  },
+                  ",ml=",
+                  {
+                    "Ref": "SlackMemberWorkspaceLimit",
+                  },
+                  ",ol=",
+                  {
+                    "Ref": "SlackOrganizationWorkspaceLimit",
+                  },
+                  ",os=",
+                  {
+                    "Ref": "DeveloperOidcSince",
+                  },
+                  ",sn=",
+                  {
+                    "Ref": "DeveloperSignInSlackSince",
+                  },
+                  ",ss=",
+                  {
+                    "Ref": "DeveloperSignInSlack",
+                  },
+                  ",tm=",
+                  {
+                    "Ref": "SlackTeamId",
+                  },
+                  ",wd=",
+                  {
+                    "Ref": "WorkflowDependenciesEnabled",
+                  },
+                ],
+              ],
             },
             "CALLBACK_SIGNING_KEY": {
               "Ref": "CallbackSigningKey",
@@ -2352,50 +2577,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Ref": "ChannelAdapters",
             },
             "CHANNEL_ADAPTER_SECRET_PREFIX": "agentx/staging/",
-            "CHATGPT_CONNECTION_KEY_ARN": {
-              "Fn::GetAtt": [
-                "ChatGptConnectionKey03C49F9D",
-                "Arn",
-              ],
-            },
-            "CONNECTOR_SECRET_PREFIX": "agentx/staging/connectors/",
-            "DELETER_ARN": {
-              "Ref": "SessionsDeleterB48741EA",
-            },
-            "DEVELOPER_IDENTITY_FUNCTION_ARN": {
-              "Fn::GetAtt": [
-                "DeveloperSignInFunction10B62B05",
-                "Arn",
-              ],
-            },
+            "COMPANY_READS": "enabled",
             "DEVELOPER_OIDC_ISSUER": {
               "Ref": "DeveloperOidcIssuer",
-            },
-            "DEVELOPER_OIDC_SINCE": {
-              "Ref": "DeveloperOidcSince",
-            },
-            "DEVELOPER_SIGNIN_SLACK": {
-              "Ref": "DeveloperSignInSlack",
-            },
-            "DEVELOPER_SIGNIN_SLACK_SINCE": {
-              "Ref": "DeveloperSignInSlackSince",
-            },
-            "DEVELOPER_SIGNIN_TABLE_NAME": {
-              "Ref": "DeveloperSignInTable26CE739E",
-            },
-            "DEVELOPER_TOKEN_ISSUER": {
-              "Fn::Join": [
-                "",
-                [
-                  {
-                    "Fn::GetAtt": [
-                      "HttpApi",
-                      "ApiEndpoint",
-                    ],
-                  },
-                  "/v1/auth",
-                ],
-              ],
             },
             "EC2_WORKER_LAUNCH_TEMPLATE_ID": {
               "Ref": "Ec2WorkerLaunchTemplateId",
@@ -2412,79 +2596,8 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": {
               "Ref": "GitHubAppPrivateKeySecretArn",
             },
-            "HEALTH_DEAD_LETTER_QUEUES": {
-              "Fn::Join": [
-                "",
-                [
-                  "{"dispatch":"",
-                  {
-                    "Ref": "DispatchDeadLetterQueue3E30F4B8",
-                  },
-                  "","slack-requests":"",
-                  {
-                    "Ref": "SlackRequestDeadLetterQueueBBBDDF4E",
-                  },
-                  "","developer-notices":"",
-                  {
-                    "Ref": "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
-                  },
-                  "","developer-notice-stream":"",
-                  {
-                    "Ref": "DeveloperTaskNotifierStreamFailureQueue58891933",
-                  },
-                  "","channel-events":"",
-                  {
-                    "Ref": "ChannelApiEventDeadLettersE21C25D1",
-                  },
-                  ""}",
-                ],
-              ],
-            },
-            "MCP_CONFIRM_ELICITATION": {
-              "Ref": "McpConfirmElicitation",
-            },
             "OIDC_ISSUER": {
               "Ref": "OidcIssuer",
-            },
-            "PLAN_EVIDENCE_FUNCTION_NAME": {
-              "Ref": "PlanEvidence3615C4CB",
-            },
-            "PROVISIONER_ARN": {
-              "Ref": "SessionsProvisioner9C44055B",
-            },
-            "SLACK_MEMBER_WORKSPACE_LIMIT": {
-              "Ref": "SlackMemberWorkspaceLimit",
-            },
-            "SLACK_ORCHESTRATOR_ROLE_ARN": {
-              "Fn::GetAtt": [
-                "SlackOrchestratorTaskRole2372FE40",
-                "Arn",
-              ],
-            },
-            "SLACK_ORGANIZATION_WORKSPACE_LIMIT": {
-              "Ref": "SlackOrganizationWorkspaceLimit",
-            },
-            "SLACK_REQUEST_QUEUE_URL": {
-              "Ref": "SlackRequestQueueCC82C864",
-            },
-            "SLACK_TEAM_ID": {
-              "Ref": "SlackTeamId",
-            },
-            "SLACK_THREADS_TABLE_NAME": {
-              "Ref": "SlackThreads36E14C1E",
-            },
-            "STATE_TABLE_NAME": {
-              "Ref": "State1C20CC9A",
-            },
-            "SWEBENCH_SETTINGS_PREFIX": "/agentx/staging/",
-            "TASK_TOKEN_KEY_ARN": {
-              "Fn::GetAtt": [
-                "DeveloperSignInTaskTokenKey10D3ED68",
-                "Arn",
-              ],
-            },
-            "TURN_RECORDS_TABLE_NAME": {
-              "Ref": "TurnRecords69ECFCD9",
             },
           },
         },
@@ -2516,6 +2629,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::Lambda::Function",
     },
     "BrokerEventInvokeConfig7F5E47E2": {
+      "DependsOn": [
+        "BrokerServiceRoleDefaultPolicyDDFD9E7E",
+      ],
       "Properties": {
         "DestinationConfig": {
           "OnFailure": {
@@ -2666,33 +2782,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 "dynamodb:UpdateItem",
                 "dynamodb:DeleteItem",
                 "dynamodb:DescribeTable",
-              ],
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::GetAtt": [
-                    "State1C20CC9A",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      {
-                        "Fn::GetAtt": [
-                          "State1C20CC9A",
-                          "Arn",
-                        ],
-                      },
-                      "/index/*",
-                    ],
-                  ],
-                },
-              ],
-            },
-            {
-              "Action": [
                 "dynamodb:GetRecords",
                 "dynamodb:GetShardIterator",
               ],
@@ -2721,72 +2810,33 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               ],
             },
             {
-              "Action": [
-                "s3:GetObject*",
-                "s3:GetBucket*",
-                "s3:List*",
-                "s3:DeleteObject*",
-                "s3:PutObject",
-                "s3:PutObjectLegalHold",
-                "s3:PutObjectRetention",
-                "s3:PutObjectTagging",
-                "s3:PutObjectVersionTagging",
-                "s3:Abort*",
-              ],
+              "Action": "secretsmanager:GetSecretValue",
               "Effect": "Allow",
               "Resource": [
                 {
-                  "Fn::GetAtt": [
-                    "Artifacts82DD59A1",
-                    "Arn",
-                  ],
+                  "Ref": "GitHubAppPrivateKeySecretArn",
                 },
                 {
                   "Fn::Join": [
                     "",
                     [
+                      "arn:",
                       {
-                        "Fn::GetAtt": [
-                          "Artifacts82DD59A1",
-                          "Arn",
-                        ],
+                        "Ref": "AWS::Partition",
                       },
-                      "/*",
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/connectors/*",
                     ],
                   ],
                 },
               ],
-            },
-            {
-              "Action": "secretsmanager:GetSecretValue",
-              "Effect": "Allow",
-              "Resource": {
-                "Ref": "GitHubAppPrivateKeySecretArn",
-              },
-            },
-            {
-              "Action": "secretsmanager:GetSecretValue",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":secretsmanager:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":secret:agentx/staging/connectors/*",
-                  ],
-                ],
-              },
             },
             {
               "Action": "secretsmanager:PutSecretValue",
@@ -3181,20 +3231,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               ],
             },
             {
-              "Action": [
-                "sqs:SendMessage",
-                "sqs:GetQueueAttributes",
-                "sqs:GetQueueUrl",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "SlackRequestQueueCC82C864",
-                  "Arn",
-                ],
-              },
-            },
-            {
               "Action": "dynamodb:Query",
               "Effect": "Allow",
               "Resource": [
@@ -3353,19 +3389,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
-              "Action": [
-                "kms:Encrypt",
-                "kms:Decrypt",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "ChatGptConnectionKey03C49F9D",
-                  "Arn",
-                ],
-              },
-            },
-            {
               "Action": "cloudwatch:DescribeAlarms",
               "Effect": "Allow",
               "Resource": {
@@ -3388,42 +3411,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   ],
                 ],
               },
-            },
-            {
-              "Action": "sqs:GetQueueAttributes",
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::GetAtt": [
-                    "DispatchDeadLetterQueue3E30F4B8",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "SlackRequestDeadLetterQueueBBBDDF4E",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "DeveloperTaskNotifierStreamFailureQueue58891933",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::GetAtt": [
-                    "ChannelApiEventDeadLettersE21C25D1",
-                    "Arn",
-                  ],
-                },
-              ],
             },
             {
               "Action": [
@@ -3605,6 +3592,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Effect": "Deny",
               "Principal": {
                 "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEventDeadLettersE21C25D1",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
               },
               "Resource": {
                 "Fn::GetAtt": [
@@ -4920,6 +4925,22 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
               "Resource": "*",
             },
+            {
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -4933,6 +4954,264 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::KMS::Key",
       "UpdateReplacePolicy": "Delete",
+    },
+    "CompanySecretsRole63E074C9": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession",
+              ],
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "aws:TagKeys": [
+                    "rovara:org",
+                  ],
+                },
+                "Null": {
+                  "aws:RequestTag/rovara:org": "false",
+                  "aws:TagKeys": "false",
+                },
+                "StringLike": {
+                  "aws:RequestTag/rovara:org": "org_????????????????????",
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "The broker acting for one company: that company's secrets only (session tag rovara:org)",
+        "Path": "/agentx/staging/",
+        "PermissionsBoundary": {
+          "Fn::If": [
+            "HasPermissionsBoundary",
+            {
+              "Ref": "PermissionsBoundaryArn",
+            },
+            {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:",
+                  {
+                    "Ref": "AWS::Partition",
+                  },
+                  ":iam::",
+                  {
+                    "Ref": "AWS::AccountId",
+                  },
+                  ":policy/agentx/staging/agentx-staging-boundary",
+                ],
+              ],
+            },
+          ],
+        },
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "CompanySecretsRoleDefaultPolicyF6DA40BF": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+                "secretsmanager:PutSecretValue",
+              ],
+              "Condition": {
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-connectors/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-hooks/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "UseOwnCompanySecrets",
+            },
+            {
+              "Action": "secretsmanager:DeleteSecret",
+              "Condition": {
+                "Bool": {
+                  "secretsmanager:ForceDeleteWithoutRecovery": "false",
+                },
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-connectors/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-hooks/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DeleteOwnCompanySecretsRecoverably",
+            },
+            {
+              "Action": "secretsmanager:CreateSecret",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "aws:TagKeys": [
+                    "rovara:org",
+                  ],
+                },
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+                "StringEquals": {
+                  "aws:RequestTag/rovara:org": "\${aws:PrincipalTag/rovara:org}",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-connectors/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/staging/org-hooks/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "CreateOwnCompanySecrets",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "CompanySecretsRoleDefaultPolicyF6DA40BF",
+        "Roles": [
+          {
+            "Ref": "CompanySecretsRole63E074C9",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "ConnectorBrokenAlarmBE25C37B": {
       "Properties": {
@@ -5017,6 +5296,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
     "DefaultStage": {
       "DependsOn": [
         "DeveloperSignInAuthRoute98555360",
+        "DeveloperSignInCoreAppRoute6D4AEEF7",
         "DeveloperSignInDevRoute4BB932E2",
         "DeveloperSignInFeedbackReviewRoute881C7CFE",
       ],
@@ -5027,6 +5307,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "AutoDeploy": true,
         "RouteSettings": {
           "ANY /review/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
+          "ANY /v1/app/{proxy+}": {
             "ThrottlingBurstLimit": 50,
             "ThrottlingRateLimit": 20,
           },
@@ -5060,6 +5344,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "integrations/",
               {
                 "Ref": "DeveloperSignInIntegration50CD0372",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "DeveloperSignInCoreAppRoute6D4AEEF7": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /v1/app/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
               },
             ],
           ],
@@ -5185,6 +5490,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "DEVELOPER_OIDC_SINCE": {
               "Ref": "DeveloperOidcSince",
             },
+            "DEVELOPER_PASSKEYS": "enabled",
             "DEVELOPER_SIGNIN_SLACK": {
               "Ref": "DeveloperSignInSlack",
             },
@@ -5217,6 +5523,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "MCP_CONFIRM_ELICITATION": {
               "Ref": "McpConfirmElicitation",
             },
+            "POLICY_HOOK_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInPolicyHookKey1CC2C9E2",
+                "Arn",
+              ],
+            },
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
             },
@@ -5228,6 +5540,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
             "SLACK_VIA_CHANNEL": {
               "Ref": "SlackViaChannel",
+            },
+            "STEP_UP_EMAIL_FROM": {
+              "Ref": "StepUpEmailSender",
             },
             "TASK_TOKEN_KEY_ARN": {
               "Fn::GetAtt": [
@@ -5450,6 +5765,73 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
+              "Action": "kms:GetPublicKey",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInPolicyHookKey1CC2C9E2",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "ses:SendEmail",
+              "Condition": {
+                "StringEquals": {
+                  "ses:FromAddress": {
+                    "Ref": "StepUpEmailSender",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ses:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":identity/",
+                    {
+                      "Ref": "StepUpEmailSender",
+                    },
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:DeleteItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "PASSKEYS#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": [
                 "secretsmanager:GetSecretValue",
                 "secretsmanager:DescribeSecret",
@@ -5520,6 +5902,126 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "PayloadFormatVersion": "2.0",
       },
       "Type": "AWS::ApiGatewayV2::Integration",
+    },
+    "DeveloperSignInPolicyHookKey1CC2C9E2": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "Signs AgentX staging policy hook questions",
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Sign",
+                "kms:GetPublicKey",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+              "Sid": "BrokerSignsPolicyQuestions",
+            },
+            {
+              "Action": "kms:Sign",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "BrokerServiceRole1938BCC9",
+                      "Arn",
+                    ],
+                  },
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "SignOnlyAsBroker",
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": [
+                    {
+                      "Fn::GetAtt": [
+                        "BrokerServiceRole1938BCC9",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DeveloperSignInFunctionServiceRole47322E59",
+                        "Arn",
+                      ],
+                    },
+                  ],
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "KeySpec": "RSA_2048",
+        "KeyUsage": "SIGN_VERIFY",
+        "PendingWindowInDays": 7,
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperSignInPolicyHookKeyAlias9F9A2B5B": {
+      "Properties": {
+        "AliasName": "alias/agentx/staging/policy-questions",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "DeveloperSignInPolicyHookKey1CC2C9E2",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
     },
     "DeveloperSignInTable26CE739E": {
       "DeletionPolicy": "RetainExceptOnCreate",
@@ -6237,6 +6739,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               },
             },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                  "Arn",
+                ],
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -6458,6 +6978,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               },
             },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierStreamFailureQueue58891933",
+                  "Arn",
+                ],
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -6520,6 +7058,39 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
+    },
+    "DispatchDeadLetterQueuePolicyDF5A20BA": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DispatchDeadLetterQueue3E30F4B8",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "DispatchDeadLetterQueue3E30F4B8",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
     },
     "DispatchQueue898EB017": {
       "DeletionPolicy": "Delete",
@@ -8406,6 +8977,13 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
           "Fn::GetAtt": [
             "State1C20CC9A",
             "StreamArn",
+          ],
+        },
+        "FilterCriteria": {
+          "Filters": [
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"pk":{"S":[{"anything-but":{"prefix":"ORG#"}}]}}}}",
+            },
           ],
         },
         "FunctionName": {
@@ -12783,6 +13361,39 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
     },
+    "SlackRequestDeadLetterQueuePolicy4E7A0CFE": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestDeadLetterQueueBBBDDF4E",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "SlackRequestDeadLetterQueueBBBDDF4E",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
     "SlackRequestQueueCC82C864": {
       "DeletionPolicy": "Delete",
       "Properties": {
@@ -12809,6 +13420,43 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
+    },
+    "SlackRequestQueuePolicyCB6E200F": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestQueueCC82C864",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "SlackRequestQueueCC82C864",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
     },
     "SlackSecretEA96F13F": {
       "DeletionPolicy": "RetainExceptOnCreate",
@@ -17104,5 +17752,12 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
       ],
     },
   },
+}
+`;
+
+exports[`named environment templates > pins L1a's broker core dispatch queue references 1`] = `
+{
+  "CORE_DISPATCH_DEAD_LETTER_URL": undefined,
+  "CORE_DISPATCH_QUEUE_URL": undefined,
 }
 `;

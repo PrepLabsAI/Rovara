@@ -5,7 +5,7 @@ const row = (id: string): EvalQuestionComparison => ({ id, category: "ordinary",
 describe("eval evidence", () => {
   it("golden PR text for every label uses counts only and normal PR disposition", () => {
     const stable = evalCheckResult({ roundKind: "check_unsealed", questions: [row("private customer text")], changedPromptCalls: 1 });
-    expect(stable.summary).toBe("Eval: No drop found — 1 questions · 0 broke · 0 newly pass · 0 flaky · 1 unchanged · on questions the agent could read; on the evaluated areas. Small or noisy sets can miss changes. This check can flag repeated breaks across questions and confirmed safety or refusal breaks. A single ordinary broken question may not change the label.");
+    expect(stable.summary).toBe("Eval: No regression measured (eval) — 1 questions · 0 broke · 0 newly pass · 0 flaky · 1 unchanged · on questions the agent could read; on the evaluated areas. Small or noisy sets can miss changes. This check can flag repeated breaks across questions and confirmed safety or refusal breaks. A single ordinary broken question may not change the label.");
     const down = Array.from({ length: 3 }, (_, i) => ({ ...row(String(i)), first: answer(false), freshOld: [answer(true), answer(true), answer(true)], freshNew: [answer(false), answer(false), answer(false)] }));
     const worse = evalCheckResult({ roundKind: "check_unsealed", questions: down, changedPromptCalls: 1 });
     expect(worse.summary).toBe("Eval: Worse on eval — 3 questions · 3 broke · 0 newly pass · 0 flaky · 0 unchanged · on questions the agent could read; on the evaluated areas. Small or noisy sets can miss changes.");
@@ -33,7 +33,7 @@ describe("eval evidence", () => {
     expect(result.questions[0]!.newAnswers[0]!.length).toBeLessThan(1100);
     expect(performance.now() - start).toBeLessThan(1000);
     const questions = Array.from({ length: 1000 }, (_, i) => row(String(i)));
-    expect(evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1 }).label).toBe("No drop found");
+    expect(evalCheckResult({ roundKind: "check_unsealed", questions, changedPromptCalls: 1 }).label).toBe("No regression measured (eval)");
     expect(evalCheckResult({ roundKind: "check_unsealed", questions: [...questions, row("extra")], changedPromptCalls: 1 }).label).toBe("Not run");
   });
   it("rejects malformed binary samples and duplicate identities instead of dropping them", () => {

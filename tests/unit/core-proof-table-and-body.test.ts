@@ -4,7 +4,7 @@
 // (Port lane L7b: the cases that went through Cloud's broker and the worker's own test-proof writer are not here; the proofs below are written out by hand in the worker's format.)
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { ProofTableViewSchema, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
+import { ProofTableViewSchema, REPLY_PROVENANCES, checkCountsTowardProof, scriptedRepliesCountTowardProof, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { REVIEW_SAME_MODEL_NOTE } from "../../packages/broker/src/core/proof/review-model-lines.js";
 import { PULL_REQUEST_BODY_MAX_BYTES } from "../../packages/broker/src/core/proof/pull-request-body.js";
@@ -713,6 +713,44 @@ describe("192a agent-written replies", () => {
   ] as const)("golden row for %s", (result, state, reason, words) => {
     const table = buildProofTable(input({ realModelRun: result === undefined ? undefined : realRun(result) }));
     expect(rowOf(table, "1.1")).toEqual({ claimId: "1.1", requirement: "The retry waits longer each time.", evidence: [{ kind: "check", label: `${words}: Unit tests`, state, ...(reason === undefined ? {} : { notProvenReason: reason }) }], result: state });
+  });
+  // TE-A3 rework (a): the contract's counting rule gives every reply case the Proof table's own answer (one rule, one set of words).
+  it.each([
+    [undefined, "unconfirmed"], ["not_run", "unconfirmed"], ["failed", "disagreed"], ["passed", "confirmed"], ["passed_on_rerun", "confirmed"],
+  ] as const)("the contract counts a task_made reply case exactly when the Proof table proves it (%s)", (result, realModel) => {
+    const row = rowOf(buildProofTable(input({ realModelRun: result === undefined ? undefined : realRun(result) })), "1.1");
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: "task_made", realModel })).toBe(row.result === "proven");
+  });
+  // DEC 192a, controller away-log 168: one rule for every (provenance x real-model result) pair, in three places that must agree: the Proof table, A3's rule and the reply-set provenance.
+  describe("one rule for every provenance and real-model result", () => {
+    const RESULTS = [[undefined, "unconfirmed"], ["not_run", "unconfirmed"], ["failed", "disagreed"], ["passed", "confirmed"], ["passed_on_rerun", "confirmed"]] as const;
+    const tableFor = (replies: unknown, result: (typeof RESULTS)[number][0]) => buildProofTable(input({
+      realModelRun: result === undefined ? undefined : realRun(result),
+      checkDependencies: new Map([["unit", [{ dependencyId: "never-display-dependency", trust: "simulated" as const, replies: replies as never }]]]),
+    }));
+    it.each([...REPLY_PROVENANCES, "unknown_origin"])("%s: the Proof table, scriptedRepliesCountTowardProof and checkCountsTowardProof give the same answer (the reply-set rule itself is pinned in model-reply-proof-rule-agreement.test.ts)", (provenance) => {
+      for (const [result, realModel] of RESULTS) {
+        const proven = rowOf(tableFor(provenance, result), "1.1").result === "proven";
+        const label = `${provenance} / ${String(result)}`;
+        expect(scriptedRepliesCountTowardProof(provenance, realModel), label).toBe(proven);
+        expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: provenance, realModel }), label).toBe(proven);
+        expect(proven, label).toBe(provenance === "before_task" || (provenance === "task_made" && realModel === "confirmed"));
+      }
+    });
+    it("a before_task reply is proven whatever the real model says, and reads as a plain check (no reply words)", () => {
+      for (const [result] of RESULTS) expect(rowOf(tableFor("before_task", result), "1.1")).toEqual({ claimId: "1.1", requirement: "The retry waits longer each time.", evidence: [{ kind: "check", label: "Unit tests", state: "proven" }], result: "proven" });
+    });
+    it("an independent reply is never proven, even when the real model agrees; it reads as not confirmed", () => {
+      const row = rowOf(tableFor("independent", "passed"), "1.1");
+      expect(row.result).toBe("passed");
+      expect(row.evidence[0]).toMatchObject({ state: "passed", notProvenReason: "agent_replies_unconfirmed" });
+    });
+    it("one independent reply keeps a check unproven when other replies are before_task or confirmed task_made", () => {
+      for (const others of ["before_task", "task_made"] as const) {
+        const table = buildProofTable(input({ realModelRun: realRun("passed"), checkDependencies: new Map([["unit", [{ dependencyId: "a", trust: "simulated" as const, replies: others }, { dependencyId: "b", trust: "simulated" as const, replies: "independent" as const }]]]) }));
+        expect(rowOf(table, "1.1").result, others).toBe("passed");
+      }
+    });
   });
   it("keeps marked non-proving checks plain and Passed with no reply reason", () => {
     for (const testProof of [undefined, proofFor(CODE.digest, "does_not_prove"), proofFor(OTHER.digest)]) {

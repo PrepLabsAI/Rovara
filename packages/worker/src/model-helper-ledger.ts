@@ -119,7 +119,7 @@ export const ModelHelperSummarySchema = z
     replySetDigest: Hex64.nullable(),
     /** Scripted answers by the provenance of the reply that was served. */
     scripted: z.object({ before_task: Count, independent: Count, task_made: Count }).strict(),
-    /** Scripted answers whose reply counts toward "proven with scripted AI replies" (`replyCountsTowardProof`): before_task plus independent, never the failure pack. */
+    /** Scripted answers whose reply counts toward "proven with scripted AI replies" (`replyCountsTowardProof`, no real-model result here): before_task only. `task_made` needs the real model (the Proof table decides it) and `independent` is parked (DEC 192a); never the failure pack. */
     countsTowardProof: Count,
     failurePack: Count,
     unmatched: Count,
@@ -183,6 +183,7 @@ export function summarizeModelLedgerBytes(bytes: Uint8Array): ModelHelperSummary
           // A scripted row that names no provenance is `task_made`: fail closed (never counted).
           const provenance = entry.provenance ?? "task_made";
           counts[provenance] += 1;
+          // The ledger has no real-model result: task_made cannot be confirmed here (fail closed), independent never counts.
           if (replyCountsTowardProof(provenance)) proof += 1;
           break;
         }

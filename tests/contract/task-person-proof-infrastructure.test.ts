@@ -5,7 +5,10 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
+import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -37,7 +40,8 @@ function runtimeCatalogEnvironmentEntries(template: TemplateJson) {
   expect(dispatchers, "one Dispatcher owns the project setup catalog ID").toHaveLength(1);
   const brokerVariables = brokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
   const dispatcherVariables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-  return { broker: brokerVariables.Variables, dispatcher: dispatcherVariables.Variables };
+  // ENV-ROOM: a named broker derives both catalog ids from AGENTX_ENV (tests/support/broker-environment-template.ts gives the derived literal).
+  return { broker: unpackedBrokerVariables(brokerVariables.Variables), dispatcher: dispatcherVariables.Variables };
 }
 
 function expectRuntimeCatalogEnvironment(template: TemplateJson, prefix: string) {
@@ -59,6 +63,13 @@ function appControlPlane(env: string): TemplateJson {
 
 function parentRemainderDigest(template: TemplateJson): string {
   const remainder = structuredClone(template);
+  // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
+  // the legacy template must carry none of it, so legacy stays byte-identical.
+  if (remainder.Parameters?.CoreEngine !== undefined) {
+    withoutCoreEngine(remainder);
+    // The switch-over parity additions of a named control plane (switchover-parity-infrastructure.test.ts); shape asserted, then taken out.
+    withoutSwitchoverControlPlaneParity(remainder);
+  } else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
   // named parameter and its corresponding Broker environment reference from the proof-only hash.
@@ -76,6 +87,8 @@ function parentRemainderDigest(template: TemplateJson): string {
   for (const [id] of workflowDependencyEnvironmentEntries(remainder)) {
     const brokerVariables = resources[id]!.Properties!.Environment as { Variables: Record<string, unknown> };
     delete brokerVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED;
+    // ENV-ROOM: in a named Broker the flag is the `wd` piece of AGENTX_SETTINGS.
+    if (brokerVariables.Variables.AGENTX_SETTINGS !== undefined) removePackedPieces(brokerVariables.Variables, "AGENTX_SETTINGS", ["wd"]);
     delete brokerVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
     delete brokerVariables.Variables.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID;
   }
@@ -187,7 +200,8 @@ describe("the named TEST proof-only installation gate", () => {
       const broker = workflowDependencyEnvironmentEntries(template);
       expect(broker, `${label} has exactly one Broker with the workflow flag`).toHaveLength(1);
       const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-      expect(variables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
+      // ENV-ROOM: in a named Broker the flag is the parameter's piece of AGENTX_SETTINGS.
+      expect(unpackedBrokerVariables(variables.Variables).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
     }
     expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
@@ -195,18 +209,22 @@ describe("the named TEST proof-only installation gate", () => {
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
     expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
+    // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged. Named/foreign re-pinned for lane E2 (the core engine construct, #663,
+    // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.
+    // #722: named/foreign re-pinned for the combined stacked baseline (#689 + R2 step 4; no template change of #722's own), the same values as L1a (#731) measured before its edits.
+    // ENV-ROOM (pr/broker-env-diet): named/foreign re-pinned for the packed broker environment (AGENTX_NAMES, AGENTX_SETTINGS, AGENTX_ACCOUNT_ID; the snapshot diff is the broker's Variables only); legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "60e8b2df37dab9ed3b388c49abb12816f35734dd81870dfc786b4e83f545dc35",
-        withoutRoute: "21a1143c05a22277fad18e43f25a806516dac532e3a4b16a36aafa74bb4ee984",
+        withRoute: "247547c3e6e1808ffdd553bcc9dc88b9a4da453675e23ce4bfc9704255c0e3c4",
+        withoutRoute: "a008009d43061070d530d5863c29af3e9ca10a17be0a0c25952cd5383c5dbf7d",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "321e8ef63aa32b6ee83dc58560eb85e735661527eda95c140fff8206d17ff5fd",
-        withoutRoute: "eb13cafddc56fff296134bce4afc040d1bd922b018f78d723e1e2a8663621286",
+        withRoute: "95bdece8683dbde3bbd98c6a59f9e312073a30a2fc52bdf76cf062dc7d60ff26",
+        withoutRoute: "d432d6d13e81fb7ef768947ff355c7f5b703783ed7e3fed2a0c06b20530a28da",
       },
       {
         label: "legacy",
@@ -215,6 +233,9 @@ describe("the named TEST proof-only installation gate", () => {
         withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
       },
     ] as const;
+    expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
+    expect(foreign.Parameters?.CoreEngine, "foreign has the core engine switch").toBeDefined();
+    expect(legacy.Parameters?.CoreEngine, "legacy has no core engine switch").toBeUndefined();
     for (const { label, template, withRoute, withoutRoute } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {
@@ -369,7 +390,7 @@ describe("the named TEST proof-only installation gate", () => {
       const envVars = (resource.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
       expect(envVars, `${id} must not receive proof-only runtime configuration`).not.toHaveProperty("TASK_PERSON_PROOF_FUNCTION_ARN");
     }
-    const brokerVars = (broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
+    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables);
     expect(brokerVars.SLACK_TEAM_ID).toEqual({ Ref: "SlackTeamId" });
     expect(brokerVars.DEVELOPER_SIGNIN_TABLE_NAME).toEqual({ Ref: tableId });
     const notifierVars = (notifier.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
