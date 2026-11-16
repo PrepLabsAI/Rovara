@@ -293,13 +293,13 @@ describe("the approver a REAL approval records is what the adapter sends (and Cl
   async function approvedBy(approver: ReturnType<typeof localOwnerPrincipal>) {
     const store = new MemoryDocumentStore();
     const members: SessionMembers = { companyRole: (p) => p.companyId === approver.companyId && p.developerId === developerIdOf(approver) ? "owner" : undefined, projectGrant: () => undefined };
-    const deps = { store, companyId: approver.companyId as OrgId, members, monthlyCapMicros: 50_000_000 };
+    const deps = { store, companyId: approver.companyId, members, monthlyCapMicros: 50_000_000 };
     const gate = createDecisionGate({
       store, audit: createNoopAuditSink(), subjects: [createEvalSpendSubject(deps)], now: () => new Date("2026-11-16T05:00:00.000Z"),
       approvers: { requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_request, proof) => ({ approved: true, approver, method: proof.method, proofId: proof.proofId }) },
     });
     const row = await proposeEvalSpendApproval(deps, PROJECT, plan);
-    const decided = await gate.decide({ companyId: approver.companyId as OrgId, kind: EVAL_SPEND_KIND, subjectId: PROJECT, requestId: "eval-decision-1", outcome: "approve", seen: { revision: row.revision, artifactDigest: row.digest }, credentials: [{ method: "local-session", token: ["fake", "session"].join("-") }] });
+    const decided = await gate.decide({ companyId: approver.companyId, kind: EVAL_SPEND_KIND, subjectId: PROJECT, requestId: "eval-decision-1", outcome: "approve", seen: { revision: row.revision, artifactDigest: row.digest }, credentials: [{ method: "local-session", token: ["fake", "session"].join("-") }] });
     expect(decided.status).toBe("decided");
     const g = gateway((s) => ok(answer({ company: bodyOf(s)["company"], principal: { companyId: approver.companyId, personId: approver.personId, displayName: approver.displayName, roles: approver.roles, provider: approver.provider } })));
     const registry = createAdapterRegistry();
