@@ -2,7 +2,7 @@
 // companies with the same project name never see or change each other's lessons; only a project or company admin sets the learning mode; every write is audited; an erased person's words never come back.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
+import { AgentXError, LessonViewSchema, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
@@ -478,5 +478,62 @@ describe("not helpful", () => {
     expect(await call(target, "a-contrib", "POST", path("les_aaaa1111"), {})).toEqual({ ok: true, body: { project: "payments", taskId, lessonId: "les_aaaa1111", marked: "not_helpful" } });
     expect((await store.get({ workspaceId: A, project: "payments" }, "les_aaaa1111"))?.counters.harmful).toBe(1);
     expect(await call(target, "a-contrib", "POST", path("les_aaaa1111"), {})).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+  });
+});
+
+describe("used in N tasks", () => {
+  it("each listed lesson says how many distinct tasks it was given to, from this company's use rows only", async () => {
+    const w = await setUp();
+    await put(w, A, lesson(A, "les_aaaa1111"), lesson(A, "les_aaaa2222"));
+    await put(w, B, lesson(B, "les_aaaa1111"));
+    const at = w.world.clock.now;
+    const row = (companyId: OrgId, lessonId: string, taskId: string) => ({ item: { pk: companyScoped(companyId, `LESSON_USE#payments#${lessonId}`), sk: taskId, entityType: "LESSON_USE", taskId, title: "t", at } });
+    for (const taskId of ["t-1", "t-2", "t-2"]) await w.world.store.put(row(A, "les_aaaa1111", taskId));
+    for (const taskId of ["b-1", "b-2", "b-3", "b-4"]) await w.world.store.put(row(B, "les_aaaa1111", taskId));
+    const { api: target } = api(w);
+    const usedOf = async (personId: string) => {
+      const answer = await call(target, personId, "GET", `${P}/lessons`);
+      if (!answer.ok) return answer;
+      expect(answer.body["usedInIncomplete"]).toBeUndefined();
+      return Object.fromEntries((answer.body["lessons"] as Array<{ id: string; usedInTasks?: unknown; usedInTasksMore?: unknown }>).map((one) => [one.id, one.usedInTasksMore === undefined ? one.usedInTasks : [one.usedInTasks, one.usedInTasksMore]]));
+    };
+    expect(await usedOf("a-contrib")).toEqual({ les_aaaa1111: 2, les_aaaa2222: 0 });
+    expect(await usedOf("b-contrib")).toEqual({ les_aaaa1111: 4 });
+    // Past the cap the number is the cap and the answer says there were more.
+    for (let i = 0; i < 501; i += 1) await w.world.store.put(row(A, "les_aaaa2222", `m-${String(i)}`));
+    expect(await usedOf("a-contrib")).toEqual({ les_aaaa1111: 2, les_aaaa2222: [500, true] });
+    // The answer still matches the contract (strict) with the count in it.
+    const answer = await call(target, "a-contrib", "GET", `${P}/lessons`);
+    for (const one of (answer.ok ? answer.body["lessons"] : []) as unknown[]) expect(LessonViewSchema.safeParse(one).success).toBe(true);
+  });
+
+  it("a count that cannot be read is left out and the page says so; the list itself still answers", async () => {
+    const w = await setUp();
+    await put(w, A, lesson(A, "les_aaaa1111"));
+    const documents = w.lessons.get(A)!.runtime.documents;
+    const query = documents.query.bind(documents);
+    const spy = vi.spyOn(documents, "query").mockImplementation(async (request) => {
+      if (request.pk.includes("LESSON_USE#")) throw new Error("down");
+      return await query(request);
+    });
+    const { api: target } = api(w);
+    const answer = await call(target, "a-contrib", "GET", `${P}/lessons`);
+    spy.mockRestore();
+    expect(answer).toMatchObject({ ok: true, body: { usedInIncomplete: true } });
+    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedInTasks");
+  });
+  it("the proposed list is not counted: a proposed lesson was never given to a task", async () => {
+    const w = await setUp();
+    await put(w, A, lesson(A, "les_apend001", { status: "pending" }));
+    const documents = w.lessons.get(A)!.runtime.documents;
+    const spy = vi.spyOn(documents, "query");
+    const { api: target } = api(w);
+    const answer = await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list: "proposed" });
+    const asked = spy.mock.calls.filter(([request]) => request.pk.includes("LESSON_USE#")).length;
+    spy.mockRestore();
+    expect(answer.ok && (answer.body["lessons"] as Array<{ id: string }>).map((one) => one.id)).toEqual(["les_apend001"]);
+    expect(answer.ok && answer.body["usedInIncomplete"]).toBeUndefined();
+    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedInTasks");
+    expect(asked).toBe(0);
   });
 });

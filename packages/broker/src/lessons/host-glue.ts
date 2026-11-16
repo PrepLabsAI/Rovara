@@ -33,6 +33,7 @@ import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, t
 import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "./used-in-pr.js";
 import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob } from "./repo-file-job.js";
 import { planLoadFacts } from "./plan-facts.js";
+import { LESSON_USE_KEEP_SECONDS } from "./use-count.js";
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
 
 /** The longest a step's dispatch waits for the loader: a slow load sends nothing, and the step runs as it would without lessons. */
@@ -40,7 +41,8 @@ export const LESSON_LOAD_DEADLINE_MS = 2_500;
 /** The messages one pass takes off the reflection queue. */
 export const REFLECT_PER_PASS = 2;
 const LOAD_RECORD_KEEP_SECONDS = 30 * 86_400;
-const USE_RECORD_KEEP_SECONDS = 180 * 86_400;
+/** The use rows ("used in N tasks", `use-count.ts`) are kept as long as that module counts them. */
+const USE_RECORD_KEEP_SECONDS = LESSON_USE_KEEP_SECONDS;
 const INTENT_REQUEST_CHARS = 600;
 
 /** The workflow modes that carry lessons, and the lesson stage each is. Every other mode (the checks, a publication) carries none. */
