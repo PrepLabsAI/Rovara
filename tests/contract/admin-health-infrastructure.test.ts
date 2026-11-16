@@ -136,6 +136,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/workflow-e2e-replay.ts",
       // The marker a project setup run leaves for the test machine renewal's drain (AUTOREQUALIFY AR-3) ends at the run's deadline and expires on it a day later.
       "packages/broker/src/e2e/requalify-hold.ts",
+      // TE-C3: the full-suite follow-up, its task pointer (30 days) and the project's day count (3 days) expire on it.
+      "packages/broker/src/core/proof/full-suite-followup.ts",
       // Spec 062 FR-031: a channel link code, one-time and dead after 10 minutes.
       "packages/broker/src/aws/channel-links.ts",
       // The Code port lanes' core (packages/broker/src/core, on the document store port). Each file was read for it: every one writes a row that is meant to expire after a named retention, none a durable record.

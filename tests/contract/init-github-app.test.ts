@@ -55,7 +55,7 @@ describe("GitHub App manifest", () => {
       redirect_url: "http://127.0.0.1:50123/github/created",
       public: false,
       hook_attributes: { url: WEBHOOK_URL, active: true },
-      default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+      default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read", checks: "write" },
       default_events: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"],
     });
   });

@@ -6,7 +6,7 @@
 // to THIS interface instead. Anything that implements it can sit under the adapters: Cloud's `GitHubAppCredentialProvider`, a client built on
 // `gh` or a personal token for the local runtime (L4), or a test fixture. The types below are copies of Cloud's declarations in `github-app.ts`
 // (same names, same fields); when a lane brings that client in, replace them with `export type { ... } from "../../../github-app.js"`.
-import type { HostScope, ReadBudget } from "@agentx/contracts";
+import type { HostScope, ReadBudget, RovaraCheckPayload } from "@agentx/contracts";
 import type { PullRequestStatus } from "../../../github-pull-status.js";
 import type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
 import type { CommitFilesRequest } from "./commit-files.js";
@@ -173,6 +173,10 @@ export interface GitHubCodeHostProvider {
   /** Optional (lane L12): one comment of Rovara's own fixed text on a pull request's conversation. */
   postPullRequestComment?(repositoryUrl: string, number: number, text: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"posted" | "gone">;
   markPullRequestReady(repositoryUrl: string, number: number, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"ready" | "already_ready">;
+  /** Optional (TE-B4): the source word of the App's own checks (the App's id). */
+  summaryCheckSource?(): Promise<string>;
+  /** Optional (TE-B4): creates or updates the one "Rovara" Check Run on a head with a `checks: write` token of its own (see the client). */
+  upsertRovaraCheck?(repositoryUrl: string, input: { headSha: string; runId?: string | undefined; payload: RovaraCheckPayload; detailsUrl?: string | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ runId: string } | "no_permission">;
   requestReviewers(repositoryUrl: string, number: number, reviewers: readonly string[], scope: GitHubTokenScope, budget?: ReadBudget): Promise<"requested" | "refused">;
   mergePullRequest(repositoryUrl: string, number: number, input: { sha: string; method: "squash" | "merge" }, scope: GitHubTokenScope): Promise<MergePullRequestResult>;
   /** The tail of a GitHub Actions job's log (untrusted text). Used by the GitHub Actions check runner. */

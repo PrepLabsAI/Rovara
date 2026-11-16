@@ -6,6 +6,7 @@ import { scanCompanySources, loadCompanySources, validateCompanyInventory, forwa
 import { judgeProofHold, markReadyAnyway, proofHoldKey, proofOverrideKey, readProofHold, readProofHoldHistory } from "../../packages/broker/src/core/merge/proof-hold.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { mergeWorld } from "../support/merge-world.js";
+import { summaryCheckKey, summaryCheckRecordOf } from "../../packages/broker/src/core/merge/summary-check.js";
 
 const source = (text: string, path = "packages/broker/src/aws/broker.ts") => ({ path, text });
 const markdown = (count = "1 record kinds: 0 company-scoped, 0 install-wide, 1 needs-company. 1 routes: 0 company-scoped, 0 install-wide, 1 needs-company.") => `${count}\n\n| kind | identity | class | table | checked | methods | reason |\n|---|---|---|---|---|---|---|\n| record | entity:TASK | needs-company | State table | no | - | T1 |\n| route | /v1/dev/tasks | needs-company | State table | no | GET | T2 |\n`;
@@ -182,4 +183,14 @@ it("pins L4 legacy pagination as a known gap and preserves company-scoped target
   const text = readFileSync("packages/broker/src/aws/core-project-backfill.ts", "utf8");
   expect(text).toContain("projectRevisionKey(company, definition.name, definition.revision)");
   expect(text).toContain("orgProjectCatalogKey(company, definition.name)");
+});
+
+it("TE-B4: the Rovara Check record is company-scoped: the same task key in two companies is two rows, and a foreign row is refused", () => {
+  const a = summaryCheckKey(COMPANY_A.orgId, "task-1", "app", 7);
+  const b = summaryCheckKey(COMPANY_B.orgId, "task-1", "app", 7);
+  expect(a.pk).not.toBe(b.pk);
+  expect(a.sk).toBe(b.sk);
+  const row = { ...a, entityType: "ROVARA_CHECK", orgId: COMPANY_A.orgId, taskId: "task-1", repositoryId: "app", number: 7, headSha: "a".repeat(40), firstSeenAtMs: 1 };
+  expect(summaryCheckRecordOf(row, COMPANY_A.orgId, "task-1")).toBeDefined();
+  expect(summaryCheckRecordOf(row, COMPANY_B.orgId, "task-1")).toBeUndefined();
 });
