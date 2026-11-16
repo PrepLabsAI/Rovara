@@ -98,4 +98,4 @@ describe("the label wherever a check is said to have passed", () => {
   });
 });
 
-const workflowPullRequestBodyFooter = (w: WorkflowSnapshot): string => workflowPullRequestBody({ title: "T" } as never, w, "# Plan\n", "https://rovara.example/review/x/task", {});
+const workflowPullRequestBodyFooter = (w: WorkflowSnapshot): string => workflowPullRequestBody({ title: "T" }, w, "# Plan\n", "https://rovara.example/review/x/task", {});
