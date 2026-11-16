@@ -15,6 +15,7 @@
 394 record kinds: 40 company-scoped, 13 install-wide, 341 needs-company. 175 routes: 12 company-scoped, 2 install-wide, 161 needs-company.
 395 record kinds: 41 company-scoped, 13 install-wide, 341 needs-company. 174 routes: 11 company-scoped, 2 install-wide, 161 needs-company.
 394 record kinds: 40 company-scoped, 13 install-wide, 341 needs-company. 176 routes: 13 company-scoped, 2 install-wide, 161 needs-company.
+394 record kinds: 39 company-scoped, 13 install-wide, 342 needs-company. 175 routes: 11 company-scoped, 2 install-wide, 162 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -430,6 +431,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:WORKFLOW_DECISION_DETAIL | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:WORKFLOW_E2E_BASELINE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:WORKFLOW_E2E_EVIDENCE_UPLOAD | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:BROWSER_EVIDENCE_UPLOAD | needs-company | State table | no | - | TE-H1 slice 2 (DEC 241b): one upload row per CHECKS operation under WORKSPACE#<workspace>, like the other chunked uploads. The callback reads the operation from the company-scoped store and refuses any operation the broker did not send the recipe to; the keeper reads the row back only for the same workspace and operation; the pictures reach the company-partitioned evidence store. T1: the row key itself is not company-scoped. |
 | record | entity:WORKFLOW_E2E_GROUNDING | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:WORKFLOW_E2E_REPLAY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:WORKFLOW_RUN_WATCH | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -564,6 +566,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/internal/workspaces/{id}/operations/{id}/codebuild | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/e2e-admission | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/e2e-evidence | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
+| route | /v1/internal/workspaces/{id}/operations/{id}/browser-evidence | needs-company | State table | no | POST | TE-H1 slice 2: Cloud answers it with a fixed refusal (browser evidence is not on Cloud yet, DEFERRED 1b-X5) before any read; Code serves it behind the operation capability and the company-scoped operation read. T2: not membership-checked in R4. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/e2e-model-budget | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/events | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/internal/workspaces/{id}/operations/{id}/feedback-approval | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |

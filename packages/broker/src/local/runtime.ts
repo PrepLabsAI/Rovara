@@ -3,6 +3,8 @@
 // Order (it matters, and `docs/local.md` says why): the state folder is checked; the plug-in config is read from there; Code's
 // defaults and the built-in adapters are registered; the config's adapters are loaded (a configured storage or queue replaces the
 // in-memory default); the registry is sealed; then the server starts. Nothing in the registry changes after that except channels.
+import { readFileSync } from "node:fs";
+import { verifyExecutorSeccompProfile } from "@agentx/verifier";
 import type { TierReviewCall } from "../core/build-step/tier-review-calls.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -49,6 +51,7 @@ import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp } from "./app/app.js";
 import { localAllowedDomains } from "./isolation/allow-list.js";
 import { laptopSandboxDenyList, sandboxModelHostsAllowed } from "./isolation/sandbox-model-deny.js";
+import { browserEvidenceRecipeOf, compactJsonText, executorImageOf } from "./isolation/browser-evidence-setting.js";
 import { devcontainerRegistriesForInstall } from "./isolation/stack.js";
 import type { LocalComments } from "./app/comments.js";
 import { configurationAnswer } from "./app/routes.js";
@@ -486,8 +489,12 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
   const approvedHosts: { current?: (project: string | undefined) => Promise<string[]> } = {};
   const sandboxDeny = laptopSandboxDenyList();
+  // TE-H1 browser evidence (DEC 241): the owner names the executor image; a project asks for browser evidence only when its recipe is in the owner's config, this machine holds the image and the pinned profile verifies.
+  const executorImage = executorImageOf(options.environment);
+  const executorProfile = (): string => compactJsonText(readFileSync(verifyExecutorSeccompProfile(), "utf8"));
   const docker = new DockerWorkerMachines({
     image: options.workerImage,
+    ...(executorImage === undefined ? {} : { browserEvidence: { image: executorImage, enabled: (project) => browserEvidenceRecipeOf(config, project) !== undefined, seccomp: executorProfile } }),
     stateDirectory,
     callback: () => {
       if (callbackServer.current === undefined) throw new Error("the callback listener is not running yet");
@@ -661,6 +668,13 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     installDomains: () => localAllowedDomains(options.allowedDomains),
     sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
     sandboxModelHostsOf: (machineId) => docker.sandboxModelHostsOf(machineId),
+    browserEvidenceRecipe: async (project) => {
+      const recipe = executorImage === undefined ? undefined : browserEvidenceRecipeOf(config, project);
+      // The recipe is asked for only when the worker can take it: the executor image is on this machine (a worker without it would be refused the step).
+      if (recipe === undefined) return undefined;
+      try { executorProfile(); } catch { return undefined; }
+      return (await runner.run(["image", "inspect", "--format", "{{.Id}}", executorImage as string], { timeoutMs: 15_000 }).then((result) => result.exitCode === 0, () => false)) ? recipe : undefined;
+    },
     sandboxDenied: (project) => (sandboxModelHostsAllowed(config, project) ? [] : sandboxDeny),
   });
   approvedHosts.current = (project) => app.setupAgent.approvedHosts(project);
