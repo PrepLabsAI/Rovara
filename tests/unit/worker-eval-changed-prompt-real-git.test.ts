@@ -32,17 +32,17 @@ describe("changed-prompt classification over real git", () => {
     const rep = await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha);
     expect(rep?.status).toBe("none_found");
   });
-  it("prompt file change -> changes", async () => {
+  it("prompt file change -> unknown (AI-related)", async () => {
     const r = await repo({ "prompts/sys.md": "old\n" }, { "prompts/sys.md": "new\n" });
-    expect((await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
+    expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
   });
-  it("rename of a prompt file -> changes", async () => {
+  it("rename of a prompt file -> unknown (AI-related)", async () => {
     const r = await repo({ "prompts/a.md": "same\n" }, { "prompts/a.md": null, "prompts/b.md": "same\n" });
-    expect((await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
+    expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
   });
-  it("binary / non-utf8 / symlink -> undefined", async () => {
+  it("an unrelated binary -> none_found; a non-UTF-8 code file -> undefined", async () => {
     const b = await repo({ "x.bin": Buffer.from([1, 0, 2]) }, { "x.bin": Buffer.from([1, 0, 3]) });
-    expect(await candidatePromptChanges(b.repositories, b.candidates, sig(), b.repositories[0]!.baseCommitSha)).toBeUndefined();
+    expect((await candidatePromptChanges(b.repositories, b.candidates, sig(), b.repositories[0]!.baseCommitSha))?.status).toBe("none_found");
     const n = await repo({ "x.ts": Buffer.from([0x61]) }, { "x.ts": Buffer.from([0xff, 0x61]) });
     expect(await candidatePromptChanges(n.repositories, n.candidates, sig(), n.repositories[0]!.baseCommitSha)).toBeUndefined();
   });
@@ -54,20 +54,24 @@ describe("changed-prompt classification over real git", () => {
     expect((await candidatePromptChanges(r.repositories, [{ ...r.candidates[0]!, treeSha: tree }], sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("none_found");
   });
   it("candidate replace ref / textconv attrs / ext diff config are not honoured", async () => {
-    const r = await repo({ "prompts/sys.md": "old\n" }, { "prompts/sys.md": "new\n" }, (dir) => {
-      execFileSync("sh", ["-c", "mkdir -p .git/info && echo '*.md diff=x' > .git/info/attributes"], { cwd: dir });
-      const oldBlob = g(dir, "rev-parse", "HEAD~1:prompts/sys.md"); const newBlob = g(dir, "rev-parse", "HEAD:prompts/sys.md");
+    // A model name in config that no AI file names: F4 still reports it. A honoured replace ref would make both sides equal (none_found).
+    const r = await repo({ "config/app.yaml": "model: gpt-4o\n" }, { "config/app.yaml": "model: gpt-4o-mini\n" }, (dir) => {
+      execFileSync("sh", ["-c", "mkdir -p .git/info && echo '*.yaml diff=x' > .git/info/attributes"], { cwd: dir });
+      const oldBlob = g(dir, "rev-parse", "HEAD~1:config/app.yaml"); const newBlob = g(dir, "rev-parse", "HEAD:config/app.yaml");
       g(dir, "replace", newBlob, oldBlob);
       g(dir, "config", "diff.x.textconv", "false"); g(dir, "config", "diff.external", "false");
     });
     expect((await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
   });
-  it("a runtime-loaded persona.txt (no prompt/system in its name) is unknown, not none_found (EVAL-PROMPT-DETECT-RUNTIME-LOADED)", async () => {
-    const r = await repo({ "assets/persona.txt": "You are terse.\n" }, { "assets/persona.txt": "You are verbose.\n" });
+  const builder = { "package.json": "{\"dependencies\":{\"openai\":\"4.0.0\"}}", "src/llm.ts": "import OpenAI from 'openai';\nimport { readFileSync } from 'node:fs';\nimport { greeting } from './text.js';\nexport const p = readFileSync('assets/persona.txt', 'utf8') + greeting;\n" };
+  it("a runtime-loaded persona.txt (no prompt/system in its name) that an AI file reads is unknown; with no reader it is none_found (EVAL-PROMPT-DETECT-RUNTIME-LOADED, EVAL-TRIGGER-NARROW)", async () => {
+    const r = await repo({ ...builder, "src/text.ts": "export const greeting = 1;\n", "assets/persona.txt": "You are terse.\n" }, { "assets/persona.txt": "You are verbose.\n" });
     expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
+    const lone = await repo({ "assets/persona.txt": "You are terse.\n" }, { "assets/persona.txt": "You are verbose.\n" });
+    expect((await candidatePromptChanges(lone.repositories, lone.candidates, sig(), lone.repositories[0]!.baseCommitSha))?.status).toBe("none_found");
   });
   it("a string constant in a non-AI .ts that the prompt builder imports is unknown, not none_found", async () => {
-    const r = await repo({ "src/text.ts": "export const greeting = 'Be terse.';\n" }, { "src/text.ts": "export const greeting = 'Be verbose.';\n" });
+    const r = await repo({ ...builder, "src/text.ts": "export const greeting = 'Be terse.';\n" }, { "src/text.ts": "export const greeting = 'Be verbose.';\n" });
     expect(await candidatePromptChanges(r.repositories, r.candidates, sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
   });
   it("diffs from the plan's base, not from the commit before the candidate", async () => {
@@ -75,7 +79,8 @@ describe("changed-prompt classification over real git", () => {
     const r = await repo({ "prompts/sys.md": "old\n", "src/c.ts": "export const c = 1;\n" }, { "prompts/sys.md": "new\n" });
     await writeFile(join(r.dir, "src/c.ts"), "export const c = 2;\n"); g(r.dir, "add", "-A"); g(r.dir, "commit", "-qm", "later");
     const tree = g(r.dir, "rev-parse", "HEAD^{tree}");
-    expect((await candidatePromptChanges(r.repositories, [{ ...r.candidates[0]!, treeSha: tree }], sig(), r.repositories[0]!.baseCommitSha))?.status).toBe("changes");
+    // From HEAD~1 only the unrelated c.ts would show (none_found); from the plan's base the prompt file shows too (unknown).
+    expect(await candidatePromptChanges(r.repositories, [{ ...r.candidates[0]!, treeSha: tree }], sig(), r.repositories[0]!.baseCommitSha)).toBeUndefined();
   });
   it("a plan base other than the repository's base is unknown, even when it is a real commit of that repository", async () => {
     const r = await repo({ "src/c.ts": "export const c = 1;\n" }, { "src/c.ts": "export const c = 2;\n" });

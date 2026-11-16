@@ -30,12 +30,25 @@ const repositories = [{ repositoryId: "one", directory: "/worker/repo", baseComm
 const candidates = [{ repositoryId: "one", commitSha: "e".repeat(40), treeSha, baseCommitSha }];
 const signal = () => new AbortController().signal;
 const planned = (baseCommit = baseCommitSha) => async () => ({ key: { baseCommit } });
+/** A fake object store answering the three reads the producer makes: the raw diff, the candidate tree listing and one batch read. */
+function store(diff: string, blobs: Map<string, Buffer>, tree: Array<[path: string, oid: string, mode?: string]>) {
+  git.bytes.mockImplementation(async (args: string[], options?: { input?: string }) => {
+    if (args[0] === "diff") return Buffer.from(diff);
+    if (args[0] === "ls-tree") return Buffer.from(tree.map(([path, oid, mode]) => `${mode ?? "100644"} blob ${oid} ${String(blobs.get(oid)?.length ?? 0).padStart(7)}\t${path}\0`).join(""));
+    if (args[0] === "cat-file" && args[1] === "--batch") {
+      const parts: Buffer[] = [];
+      for (const oid of String(options?.input ?? "").split("\n").filter(Boolean)) {
+        const blob = blobs.get(oid);
+        parts.push(blob === undefined ? Buffer.from(`${oid} missing\n`) : Buffer.concat([Buffer.from(`${oid} blob ${blob.length}\n`), blob, Buffer.from("\n")]));
+      }
+      return Buffer.concat(parts);
+    }
+    throw new Error("unexpected git read");
+  });
+}
+const oidOf = (i: number, side: number) => `${(i * 2 + side).toString(16).padStart(2, "0")}`.repeat(20);
 function source(before: string, after: string, path = "prompts/system.txt", mode = "100644", status = "M") {
-  const old = Buffer.from(before); const next = Buffer.from(after);
-  git.bytes.mockImplementation(async (args: string[]) => args[0] === "diff"
-    ? Buffer.from(`:${mode} ${mode} ${oldOid} ${newOid} ${status}\0${path}\0`)
-    : args[2] === oldOid ? old : next);
-  git.text.mockImplementation(async (args: string[]) => String(args[2] === oldOid ? old.length : next.length));
+  store(`:${mode} ${mode} ${oldOid} ${newOid} ${status}\0${path}\0`, new Map([[oldOid, Buffer.from(before)], [newOid, Buffer.from(after)]]), [[path, newOid, mode]]);
 }
 
 describe("worker F4/F8 classifier", () => {
@@ -71,13 +84,19 @@ describe("worker F4/F8 classifier", () => {
 });
 
 describe("pinned source producer", () => {
-  it("reads complete immutable blob sides in isolated read mode, then runs F4", async () => {
-    source("old", "new prompt");
+  it("reads the diff, the candidate tree and every needed blob from immutable objects in isolated read mode, then runs F4", async () => {
+    source("export const count = 1;", "export const count = 2;", "src/count.ts");
     const change = await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha);
-    expect(change).toMatchObject({ status: "changes", coverage: "complete", counts: { prompt_file: 1 } });
+    expect(change).toMatchObject({ status: "none_found", coverage: "complete" });
     expect(git.read.mock.calls).toEqual([["/worker/repo", "read"]]);
     expect(git.bytes.mock.calls[0]![0]).toEqual(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", baseCommitSha, treeSha, "--"]);
-    expect(git.bytes.mock.calls.slice(1).map((c): unknown => c[0])).toEqual([["cat-file", "blob", oldOid], ["cat-file", "blob", newOid]]);
+    expect(git.bytes.mock.calls.slice(1).map((c): unknown => c[0])).toEqual([["ls-tree", "-r", "-z", "-l", "--full-tree", treeSha], ["cat-file", "--batch"]]);
+    expect(git.bytes.mock.calls[2]![1]).toMatchObject({ input: `${newOid}\n${oldOid}\n` });
+    expect(git.text).not.toHaveBeenCalled();
+  });
+  it("a changed prompt file is AI-related, so the whole classification is unknown", async () => {
+    source("old", "new prompt");
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
   });
   it("makes the production classifier false for a known unrelated change and removes the context afterward", async () => {
     source("export const count = 1;", "export const count = 2;", "src/count.ts");
@@ -105,15 +124,16 @@ describe("pinned source producer", () => {
     expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
     expect(git.text).not.toHaveBeenCalled();
   });
-  it("fails closed on unreadable source, invalid UTF-8, oversized source, and malformed raw diff", async () => {
-    source("old", "new"); git.bytes.mockRejectedValueOnce(new Error("unreadable"));
-    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
-    source("old", "new"); git.bytes.mockResolvedValueOnce(Buffer.from([0xff]));
-    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
-    source("old", "new"); git.text.mockResolvedValue("1048577");
-    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
-    git.bytes.mockResolvedValue(Buffer.from(":invalid\0path.ts\0"));
-    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
+  it("fails closed on unreadable source, invalid UTF-8, oversized source, a short batch read and malformed raw diff", async () => {
+    const ask = () => candidatePromptChanges(repositories, candidates, signal(), baseCommitSha);
+    source("let a = 1;", "let a = 2;", "src/a.ts"); expect(await ask()).toMatchObject({ status: "none_found" });
+    source("let a = 1;", "let a = 2;", "src/a.ts"); git.bytes.mockRejectedValueOnce(new Error("unreadable")); expect(await ask()).toBeUndefined();
+    source("let a = 1;", "let a = \xff;", "src/a.ts"); store(`:100644 100644 ${oldOid} ${newOid} M\0src/a.ts\0`, new Map([[oldOid, Buffer.from("x")], [newOid, Buffer.from([0x61, 0xff])]]), [["src/a.ts", newOid]]);
+    expect(await ask()).toBeUndefined();
+    source("let a = 1;", "x".repeat(1024 * 1024 + 1), "src/a.ts"); expect(await ask()).toBeUndefined();
+    source("let a = 1;", "let a = 2;", "src/a.ts"); store(`:100644 100644 ${oldOid} ${newOid} M\0src/a.ts\0`, new Map([[newOid, Buffer.from("let a = 2;")]]), [["src/a.ts", newOid]]);
+    expect(await ask()).toBeUndefined();
+    git.bytes.mockResolvedValue(Buffer.from(":invalid\0path.ts\0")); expect(await ask()).toBeUndefined();
   });
   it("refuses missing/mismatched bases, duplicate identities and cancellation before Git", async () => {
     const stop = new AbortController(); stop.abort();
@@ -145,7 +165,8 @@ describe("source to final-check artifact (in-memory bridge transport)", () => {
   it.each([
     ["changed prompt ignores a false sandbox claim", "prompts/system.txt", call("new prompt", false), true],
     ["unrelated code ignores a true sandbox claim", "src/count.ts", call("new prompt", true), false],
-    ["unknown file kind", "source.unsupported", call(), true],
+    ["a changed dependency manifest", "package.json", call(), true],
+    ["an unrelated file of an unknown kind", "source.unsupported", call(), false],
     ["unmappable frame", "src/count.ts", modelFrame({ unknownContents: "new prompt", changedPrompt: false }), true],
     ["unreadable diff", "unreadable", call(), true],
   ] as const)("%s", async (_name, path, modelFrame, changed) => {
@@ -181,25 +202,28 @@ describe("source to final-check artifact (in-memory bridge transport)", () => {
   });
 });
 
-/** Several changed files in one diff: each file gets its own pair of blob ids. */
-function sources(files: Array<[path: string, before: string | undefined, after: string | undefined]>) {
-  const blobs = new Map<string, Buffer>(); const lines: string[] = [];
+/** Several changed files in one diff (each with its own pair of blob ids), plus unchanged files of the candidate tree. */
+function sources(files: Array<[path: string, before: string | undefined, after: string | undefined]>, unchanged: Record<string, string> = {}) {
+  const blobs = new Map<string, Buffer>(); const lines: string[] = []; const tree: Array<[string, string]> = [];
   files.forEach(([path, before, after], i) => {
-    const old = `${(i * 2 + 1).toString(16).padStart(2, "0")}`.repeat(20); const next = `${(i * 2 + 2).toString(16).padStart(2, "0")}`.repeat(20);
+    const old = oidOf(i, 1); const next = oidOf(i, 2);
     if (before !== undefined) blobs.set(old, Buffer.from(before));
-    if (after !== undefined) blobs.set(next, Buffer.from(after));
+    if (after !== undefined) { blobs.set(next, Buffer.from(after)); tree.push([path, next]); }
     const status = before === undefined ? "A" : after === undefined ? "D" : "M";
     lines.push(`:${before === undefined ? "000000" : "100644"} ${after === undefined ? "000000" : "100644"} ${before === undefined ? "0".repeat(40) : old} ${after === undefined ? "0".repeat(40) : next} ${status}\0${path}\0`);
   });
-  git.bytes.mockImplementation(async (args: string[]) => args[0] === "diff" ? Buffer.from(lines.join("")) : blobs.get(args[2]!)!);
-  git.text.mockImplementation(async (args: string[]) => String(blobs.get(args[2]!)!.length));
+  Object.entries(unchanged).forEach(([path, body], i) => {
+    if (files.some(([changed]) => changed === path)) return;
+    const oid = oidOf(100 + i, 0); blobs.set(oid, Buffer.from(body)); tree.push([path, oid]);
+  });
+  store(lines.join(""), blobs, tree);
 }
 
 describe("the diff base is the plan's baseCommit (EVAL-WIRE-CLASSIFIER-BASE-BINDING)", () => {
   const other = "9".repeat(40);
   it("diffs from the plan's base when the repository base agrees", async () => {
-    source("old", "new prompt");
-    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toMatchObject({ status: "changes" });
+    source("export const count = 1;", "export const count = 2;", "src/count.ts");
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toMatchObject({ status: "none_found" });
     expect(git.bytes.mock.calls[0]![0] as string[]).toContain(baseCommitSha);
   });
   it.each([
@@ -225,71 +249,49 @@ describe("the diff base is the plan's baseCommit (EVAL-WIRE-CLASSIFIER-BASE-BIND
   });
 });
 
-describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)", () => {
-  const read = (files: Parameters<typeof sources>[0]) => { sources(files); return candidatePromptChanges(repositories, candidates, signal(), baseCommitSha); };
+// EVAL-TRIGGER-NARROW (owner 2026-11-16) replaces #807's "every changed file holding a quote is unknown": the same changes are unknown only when an
+// AI-related file names or imports them. Unrelated, they run no eval.
+describe("a change F4 cannot see is unknown when AI-related code uses it (EVAL-PROMPT-DETECT-RUNTIME-LOADED)", () => {
+  const read = (files: Parameters<typeof sources>[0], unchanged: Record<string, string> = {}) => { sources(files, unchanged); return candidatePromptChanges(repositories, candidates, signal(), baseCommitSha); };
+  const manifest = { "package.json": "{\"dependencies\":{\"openai\":\"4.0.0\"}}" };
+  const loader = { ...manifest, "src/llm.ts": "import OpenAI from 'openai';\nimport { t } from './text.js';\nimport { readFileSync } from 'node:fs';\nconst persona = readFileSync('assets/persona.txt', 'utf8') + readFileSync('docs/persona.md', 'utf8');\nexport const ask = () => new OpenAI().responses.create({ model: 'gpt-4o', input: persona + t });\n", "src/text.ts": "export const t = 1;\n" };
+  const loaderPy = { "app/llm.py": "import openai\nfrom app.text import f\n" };
   it.each([
     ["a runtime-loaded text file with no prompt in its name", [["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]]],
     ["a runtime-loaded markdown file", [["docs/persona.md", "Be terse.\n", "Be verbose.\n"]]],
     ["a runtime-loaded added file", [["assets/persona.txt", undefined, "You are verbose.\n"]]],
     ["a runtime-loaded removed file", [["assets/persona.txt", "You are terse.\n", undefined]]],
-    ["a text file that F4 does not read next to a recognised prompt file", [["prompts/system.txt", "old", "new prompt"], ["assets/persona.txt", "a b", "c d"]]],
-    ["a prose string constant in code with no AI import", [["src/text.ts", "export const greeting = 'Be terse.';\n", "export const greeting = 'Be very terse.';\n"]]],
-    ["a prose string constant added to code", [["src/text.ts", "export const x = 1;\n", "export const x = 'Be very terse.';\n"]]],
-    ["a changed Python docstring", [["app/text.py", 'def f():\n    """Be terse."""\n', 'def f():\n    """Be verbose."""\n']]],
+    ["a prose string constant in code with no AI import", [["src/text.ts", "export const t = 'Be terse.';\n", "export const t = 'Be very terse.';\n"]]],
+    ["a prose string constant added to code", [["src/text.ts", "export const t = 1;\n", "export const t = 'Be very terse.';\n"]]],
     ["a changed template literal that spans lines", [["src/text.ts", "export const t = `a\nb c`;\n", "export const t = `a\nb d`;\n"]]],
-  ] as Array<[string, Parameters<typeof sources>[0]]>)("%s reads unknown, so every call counts as changed", async (_name, files) => {
-    expect(await read(files)).toBeUndefined();
+    ["quote-free logic", [["src/text.ts", "export const t = 1;\n", "export const t = 2;\n"]]],
+  ] as Array<[string, Parameters<typeof sources>[0]]>)("%s: unknown when an AI file reads or imports it, none_found when nothing AI-related does", async (_name, files) => {
+    expect(await read(files, loader)).toBeUndefined();
+    expect(await read(files, manifest)).toMatchObject({ status: "none_found" });
   });
-  it("still reads none_found for code with no quote or backtick anywhere, and for an unchanged file", async () => {
-    expect(await read([["src/count.ts", "export const count = 1;\nexport const other = 2;\n", "export const other = 2;\nexport const count = 3;\n"]])).toMatchObject({ status: "none_found" });
-    expect(await read([["src/py.py", "def f(x):\n    return x + 1\n", "def f(x):\n    return x + 2\n"]])).toMatchObject({ status: "none_found" });
+  it("a changed Python docstring: unknown when an AI module imports it, none_found otherwise", async () => {
+    const files: Parameters<typeof sources>[0] = [["app/text.py", 'def f():\n    """Be terse."""\n', 'def f():\n    """Be verbose."""\n']];
+    expect(await read(files, loaderPy)).toBeUndefined();
+    expect(await read(files)).toMatchObject({ status: "none_found" });
   });
-  it.each([
-    ["an unrelated change in a file that has a string elsewhere", "const s = 'same words';\nconst n = 1;\n", "const s = 'same words';\nconst n = 2;\n"],
-    ["a changed import specifier", "import a from './a.js';\n", "import a from './b.js';\n"],
-    ["a selector edit between two string constants", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = A;\n", "const A = \"terse\"; const B = \"verbose\";\nexport const SYSTEM = B;\n"],
-    ["a Python f-string replacement field", "t = f\"{\n  foo\n}\"\n", "t = f\"{\n  bar\n}\"\n"],
-  ])("%s is conservatively unknown", async (_name, before, after) => {
-    expect(await read([["src/x.ts", before, after]])).toBeUndefined();
+  it("a text file that F4 does not read next to a recognised prompt file is unknown", async () => {
+    expect(await read([["prompts/system.txt", "old", "new prompt"], ["assets/persona.txt", "a b", "c d"]])).toBeUndefined();
   });
-  it("a file F4 found and diffed is accounted for", async () => {
-    expect(await read([["prompts/system.txt", "old", "new prompt"]])).toMatchObject({ status: "changes" });
+  it("JSX text in a .tsx file an AI file imports reads unknown", async () => {
+    const files: Parameters<typeof sources>[0] = [["src/text.tsx", "export const t = () => <p>Be terse</p>;\n", "export const t = () => <p>Be verbose</p>;\n"]];
+    expect(await read(files, loader)).toBeUndefined();
+    expect(await read(files, manifest)).toMatchObject({ status: "none_found" });
   });
   it.each(["'\"", "\\\"", "\\`", "\"\"\"x\\\"", "`'", "from '", "import  \"a'", "\\ ", "\\ \n", "export from ", "const x = require ", "export "])("scans a 1 MiB file of hostile quote runs %j in bounded time", async unit => {
     const hostile = unit.repeat(Math.floor((1024 * 1024 - 2) / unit.length)); // plus the one added char, still under the 1 MiB side cap
     const started = Date.now();
-    await read([["src/hostile.ts", hostile, `${hostile}x`]]);
+    await read([["src/hostile.ts", hostile, `${hostile}x`]], loader);
     expect(Date.now() - started).toBeLessThan(1500);
   });
-  it.each([
-    ["a stray quote earlier on the line", "const re = /\"/.test(s) ? \"You are A\" : \"You are B\";\n", "const re = /\"/.test(s) ? \"You are A\" : \"You are C\";\n"],
-    ["a single-word literal", "const s = \"Summarize.\";\n", "const s = \"Explain.\";\n"],
-    ["an escaped multi-word literal", "const s = \"Line one.\\nLine two\";\n", "const s = \"Line one.\\nLine 2\";\n"],
-    ["a selector for an unchanged table", "const persona = \"terse\";\n", "const persona = \"verbose\";\n"],
-    ["a changed load path", "const t = readFile(\"assets/a.txt\");\n", "const t = readFile(\"assets/b.txt\");\n"],
-    ["a statement-looking line that holds prompt text (export)", "export const P = \"Answer only from 'the docs'\";\n", "export const P = \"Answer only from 'memory'\";\n"],
-    ["a statement-looking line that holds prompt text (require)", "const P = require(\"x\") + \"x\";\n", "const P = require(\"y\") + \"x\";\n"],
-    ["the words from-quote inside a single-quoted prompt", "const t = 'Answer only from \"the docs\" provided';\n", "const t = 'Answer only from \"memory\" provided';\n"],
-    ["the words from-quote inside a template prompt", "const t = `Answer only from \"the docs\" provided`;\n", "const t = `Answer only from \"memory\" provided`;\n"],
-    ["the words from-quote inside a Python prompt", "t = \"Use data from 'the docs' only\"\n", "t = \"Use data from 'anything' only\"\n"],
-    ["the words require-quote inside a prompt", "const t = 'Never require(\"x\") calls';\n", "const t = 'Never require(\"y\") calls';\n"],
-    ["reordered prompt lines", "const p = [\n  \"Be nice\",\n  \"Be strict\",\n];\n", "const p = [\n  \"Be strict\",\n  \"Be nice\",\n];\n"],
-    ["a stray backtick in a string before a template", "const k = \"`\";\nconst t = `\n  be terse\n`;\n", "const k = \"`\";\nconst t = `\n  be verbose\n`;\n"],
-    ["a stray backtick in a regex before a template", "const r = /`/;\nconst t = `\n  be terse\n`;\n", "const r = /`/;\nconst t = `\n  be verbose\n`;\n"],
-    ["a stray backtick in a comment before a template", "// use ` here\nconst t = `\n  be terse\n`;\n", "// use ` here\nconst t = `\n  be verbose\n`;\n"],
-    ["a triple quote inside a .ts string", "const q = '\"\"\"';\nconst t = `\n  be terse\n`;\n", "const q = '\"\"\"';\nconst t = `\n  be verbose\n`;\n"],
-    ["a string continued with a backslash", "const t = \"be \\\n  terse \\\n  ok\";\n", "const t = \"be \\\n  verbose \\\n  ok\";\n"],
-    ["a Python string continued with a backslash", "t = 'be \\\n  terse \\\n  ok'\n", "t = 'be \\\n  verbose \\\n  ok'\n"],
-    ["an indented line inside a template literal", "const t = `\n  be terse\n`;\n", "const t = `\n  be verbose\n`;\n"],
-  ])("code with %s reads unknown", async (_name, before, after) => {
-    expect(await read([["src/x.ts", before, after]])).toBeUndefined();
-  });
-  it("JSX text in a .tsx file reads unknown", async () => {
-    expect(await read([["src/view.tsx", "export const V = () => <p>Be terse</p>;\n", "export const V = () => <p>Be verbose</p>;\n"]])).toBeUndefined();
-  });
-
-  it("the production classifier counts every readable call as changed when coverage is unknown", async () => {
-    sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]]);
+  it("the production classifier counts every readable call as changed when an AI file reads the changed asset, and none when nothing does", async () => {
+    sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]], loader);
     expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), planned(), async () => evalChangedPrompt(call()))).toBe(true);
+    sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]], manifest);
+    expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), planned(), async () => evalChangedPrompt(call()))).toBe(false);
   });
 });

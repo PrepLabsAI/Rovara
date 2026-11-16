@@ -1,10 +1,11 @@
 // Worker-only, invocation-local classification. No source identity or changed-prompt claim comes from the sandbox.
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
-  detectPromptChanges, matchChangedItems, modelPromptSegments, planRecording, readModelRequest, PROMPT_CHANGE_LIMITS,
+  detectPromptChanges, matchChangedItems, modelPromptSegments, planRecording, promptFilePath, readModelRequest, PROMPT_CHANGE_LIMITS,
   type ModelEgressFrame, type PromptChangedFile, type PromptChangeReport,
 } from "@agentx/contracts";
 import { withIsolatedGit } from "../isolated-git.js";
+import { AI_WALK_LIMITS, CODE_PATH, aiRelatedSet, hasAiMarker, hasDynamicLoad, resolutionFile, walkReads, type AiRelatedSet, type AiWalkLimits } from "./eval-ai-related.js";
 import type { CandidateRepositoryInput, CandidateRepositoryIdentity } from "./candidate.js";
 
 const classifiers = new AsyncLocalStorage<(frame: ModelEgressFrame) => boolean>();
@@ -34,38 +35,25 @@ export function evalChangedPrompt(frame: ModelEgressFrame): boolean {
   try { return classifiers.getStore()?.(frame) ?? true; } catch { return true; }
 }
 
-/** A prompt can be loaded at run time from a file F4 cannot classify (assets/persona.txt) or sit in a plain string constant of a module with
- * no AI import. F4 reports nothing for those, which is "not found", never "unchanged". So a changed file that F4 gave no item for is
- * unknown (the whole classification becomes unknown) unless it is code that provably holds no string: no quote or backtick character and no
- * closing JSX tag anywhere in either side. Deliberately over-counting, with no tokenizer state a stray quote could desynchronise: any changed
- * file that has a quote, however placed, is unknown. Known limit (EVAL-WIRE-SELECTOR-EDITS): quote-free logic that only chooses between prompts
- * defined in other, unchanged files still reads unchanged. One linear pass. */
-const codePath = /\.(?:[cm]?[jt]sx?|py|pyi)$/iu;
-const holdsText = /["'`]|<\//u;
-function sameCode(before: string | undefined, after: string | undefined): boolean {
-  const left = before ?? ""; const right = after ?? "";
-  return left === right || (!holdsText.test(left) && !holdsText.test(right));
-}
-function everyChangeAccountedFor(files: readonly PromptChangedFile[], report: PromptChangeReport): boolean {
-  const found = new Set<string>();
-  for (const item of report.items) { found.add(item.path); if (item.oldPath !== undefined) found.add(item.oldPath); }
-  for (const file of files) {
-    if (found.has(file.path) || file.before === file.after) continue;
-    if (!codePath.test(file.path)) return false;
-    if (!sameCode(file.before, file.after)) return false;
-  }
-  return true;
-}
+/** EVAL-TRIGGER-NARROW (owner 2026-11-16, replaces #807's "any changed file holding a quote is unknown"): a changed file counts as a possible
+ * prompt change only when it is AI-related (eval-ai-related.ts: SDK/model-call code, its callers and wrappers, prompt files, what they import,
+ * the assets they name), when either side of it names an AI SDK or loads code from a computed name, or when it decides how imports resolve
+ * (package.json, lockfiles, tsconfig, pyproject, .env). Any such file makes the WHOLE classification unknown, so every call counts as changed.
+ * Other changed code and config files still go through F4, whose findings (a named prompt constant, a model name in config) count as well.
+ * Anything unresolvable is unknown: an unreadable side or tree file, a non-regular mode, a limit, an import the walk cannot follow. */
+const configPath = /\.(?:json|ya?ml|toml|ini)$/iu;
+const envPath = /(?:^|\/)(?:\.env[^/]*|env(?:\.[^/]*)?|[^/]*\.env)$/iu;
+const textNeeded = (path: string): boolean => CODE_PATH.test(path) || configPath.test(path) || envPath.test(path) || resolutionFile(path);
+interface ChangedEntry { path: string; status: "A" | "M" | "D"; oldOid: string | undefined; newOid: string | undefined }
+const CAT_FILE_HEADER = /^([a-f0-9]{40}) blob (\d+)$/u;
 
-/** Read complete changed-file sides from the exact check candidate, never mutable worktree paths or diff drivers.
+/** Read complete changed-file sides and the candidate tree from the exact check candidate, never mutable worktree paths or diff drivers.
  * The diff base is the plan's baseCommit, the commit the eval's old side runs: without one, or when a repository's own base
- * differs, the answer is unknown. Never an arbitrary local base.
- * No rename inference is needed: a rename is a removal plus addition, both scanned by F4. Any missing coverage
- * makes the WHOLE classification unknown. Bounds match F4 and apply before allocating source text.
+ * differs, the answer is unknown. Never an arbitrary local base. Bounds apply before allocating source text.
  */
 export async function candidatePromptChanges(
   repositories: readonly CandidateRepositoryInput[], candidates: readonly CandidateRepositoryIdentity[], signal: AbortSignal,
-  planBaseCommit: string | undefined,
+  planBaseCommit: string | undefined, limits: AiWalkLimits = AI_WALK_LIMITS,
 ): Promise<PromptChangeReport | undefined> {
   try {
     if (typeof planBaseCommit !== "string" || !objectId.test(planBaseCommit)) return undefined;
@@ -73,46 +61,93 @@ export async function candidatePromptChanges(
       || new Set(repositories.map(r => r.repositoryId)).size !== repositories.length
       || new Set(candidates.map(r => r.repositoryId)).size !== candidates.length) return undefined;
     const files: PromptChangedFile[] = [];
-    let totalBytes = 0;
+    let changedCount = 0;
     for (const repository of repositories) {
       const candidate = candidates.find(c => c.repositoryId === repository.repositoryId);
       const base = repository.baseCommitSha;
       if (!candidate || !base || !objectId.test(base) || !objectId.test(candidate.treeSha)
         || candidate.baseCommitSha !== base || base !== planBaseCommit || signal.aborted) return undefined;
-      await withIsolatedGit(repository.directory, "read", async (git) => {
+      const related = await withIsolatedGit(repository.directory, "read", async (git) => {
         const options = { index: "none" as const, signal, timeout: 30_000 };
         const raw = await git.bytes(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv",
           "--ignore-submodules=none", planBaseCommit, candidate.treeSha, "--"], { ...options, maxBuffer: 4 * 1024 * 1024 });
         const fields = new TextDecoder("utf-8", { fatal: true }).decode(raw).split("\0");
         if (fields.pop() !== "" || fields.length % 2 !== 0) throw new Error("unreadable change");
+        const changed: ChangedEntry[] = [];
         for (let i = 0; i < fields.length; i += 2) {
-          if (files.length >= PROMPT_CHANGE_LIMITS.files || signal.aborted) throw new Error("incomplete change");
+          if (++changedCount > PROMPT_CHANGE_LIMITS.files || signal.aborted) throw new Error("incomplete change");
           const match = /^:(100644|100755|000000) (100644|100755|000000) ([a-f0-9]{40}) ([a-f0-9]{40}) ([AMD])$/u.exec(fields[i]!);
           const path = fields[i + 1]!;
           if (!match || path.length === 0 || Buffer.byteLength(path) > PROMPT_CHANGE_LIMITS.pathBytes) throw new Error("unreadable change");
           const [, oldMode, newMode, oldOid, newOid, status] = match;
           if ((status === "A" && (oldMode !== "000000" || oldOid !== zeroId))
-            || (status === "D" && (newMode !== "000000" || newOid !== zeroId))) throw new Error("unreadable change");
-          const side = async (mode: string, oid: string): Promise<string | undefined> => {
-            if (mode === "000000") return undefined;
-            const size = Number((await git.text(["cat-file", "-s", oid], options)).trim());
-            if (!Number.isSafeInteger(size) || size < 0 || size > PROMPT_CHANGE_LIMITS.fileBytes) throw new Error("incomplete source");
-            totalBytes += size;
-            if (totalBytes > PROMPT_CHANGE_LIMITS.totalBytes) throw new Error("incomplete source");
-            const bytes = await git.bytes(["cat-file", "blob", oid], { ...options, maxBuffer: PROMPT_CHANGE_LIMITS.fileBytes + 1 });
-            if (bytes.length !== size || bytes.includes(0)) throw new Error("unreadable source");
-            return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-          };
-          const before = await side(oldMode!, oldOid!); const after = await side(newMode!, newOid!);
-          files.push({ path, status: status === "A" ? "added" : status === "D" ? "removed" : "modified", wholeFile: true,
-            ...(before === undefined ? {} : { before }), ...(after === undefined ? {} : { after }) });
+            || (status === "D" && (newMode !== "000000" || newOid !== zeroId))
+            || (status === "M" && (oldMode === "000000" || newMode === "000000"))) throw new Error("unreadable change");
+          changed.push({ path, status: status as ChangedEntry["status"], oldOid: oldMode === "000000" ? undefined : oldOid, newOid: newMode === "000000" ? undefined : newOid });
         }
+        if (changed.length === 0) return { changed, texts: new Map<string, string>(), set: { known: true, has: () => false } as AiRelatedSet };
+
+        // The whole candidate tree: every path, and the text of every file the walk reads (code, package.json, tsconfig/jsconfig).
+        const listing = await git.bytes(["ls-tree", "-r", "-z", "-l", "--full-tree", candidate.treeSha], { ...options, maxBuffer: 64 * 1024 * 1024 });
+        const entries = new TextDecoder("utf-8", { fatal: true }).decode(listing).split("\0");
+        if (entries.pop() !== "" || entries.length > limits.treeEntries) throw new Error("incomplete tree");
+        const paths: string[] = []; const treeOid = new Map<string, string>(); const wanted = new Map<string, number>();
+        let wantedBytes = 0;
+        for (const entry of entries) {
+          const m = /^(\d{6}) (blob|tree|commit) ([a-f0-9]{40}) +(\d+|-)\t(.+)$/su.exec(entry);
+          if (!m) throw new Error("unreadable tree");
+          const [, mode, , oid, size, path] = m;
+          if (mode === "160000" || mode === "120000") continue; // a submodule or link holds no file of this tree
+          if (mode !== "100644" && mode !== "100755") throw new Error("unreadable tree");
+          paths.push(path!); treeOid.set(path!, oid!);
+          if (!walkReads(path!)) continue;
+          const bytes = Number(size);
+          if (!Number.isSafeInteger(bytes) || bytes > limits.fileBytes) throw new Error("incomplete source");
+          if (!wanted.has(oid!)) { wanted.set(oid!, bytes); wantedBytes += bytes; }
+        }
+        for (const entry of changed) if (textNeeded(entry.path)) for (const oid of [entry.oldOid, entry.newOid]) if (oid !== undefined && !wanted.has(oid)) wanted.set(oid, -1);
+        if (wanted.size > limits.files + 2 * PROMPT_CHANGE_LIMITS.files || wantedBytes > limits.totalBytes) throw new Error("incomplete source");
+
+        // One batch read. Every object must be a blob of the stated size, valid UTF-8 and free of NUL.
+        const texts = new Map<string, string>();
+        if (wanted.size > 0) {
+          const out = await git.bytes(["cat-file", "--batch"], { ...options, input: [...wanted.keys()].join("\n") + "\n",
+            maxBuffer: limits.totalBytes + (2 * PROMPT_CHANGE_LIMITS.files + 1) * PROMPT_CHANGE_LIMITS.fileBytes + wanted.size * 64 });
+          const decoder = new TextDecoder("utf-8", { fatal: true });
+          let at = 0; let changedBytes = 0;
+          for (const [oid, expected] of wanted) {
+            const newline = out.indexOf(10, at);
+            const header = CAT_FILE_HEADER.exec(newline < 0 ? "" : out.subarray(at, newline).toString("latin1"));
+            if (!header || header[1] !== oid) throw new Error("unreadable source");
+            const size = Number(header[2]);
+            if (!Number.isSafeInteger(size) || size > PROMPT_CHANGE_LIMITS.fileBytes || (expected >= 0 && size !== expected)) throw new Error("incomplete source");
+            if (expected < 0 && (changedBytes += size) > PROMPT_CHANGE_LIMITS.totalBytes) throw new Error("incomplete source");
+            const body = out.subarray(newline + 1, newline + 1 + size);
+            if (body.length !== size || out[newline + 1 + size] !== 10 || body.includes(0)) throw new Error("unreadable source");
+            texts.set(oid, decoder.decode(body));
+            at = newline + 2 + size;
+          }
+          if (at !== out.length) throw new Error("unreadable source");
+        }
+        const text = new Map<string, string>();
+        for (const [path, oid] of treeOid) if (walkReads(path)) text.set(path, texts.get(oid)!);
+        const removed = changed.filter(c => c.status === "D").map(c => c.path);
+        return { changed, texts, set: aiRelatedSet({ paths, removed, text }, limits) };
       });
+      if (!related.set.known || signal.aborted) return undefined;
+      for (const entry of related.changed) {
+        const before = entry.oldOid === undefined ? undefined : related.texts.get(entry.oldOid);
+        const after = entry.newOid === undefined ? undefined : related.texts.get(entry.newOid);
+        if (related.set.has(entry.path) || resolutionFile(entry.path) || promptFilePath(entry.path)) return undefined;
+        if (!textNeeded(entry.path)) continue; // documentation, images, scripts: not read by any AI-related file
+        for (const side of [before, after]) if (side !== undefined && (hasAiMarker(side) || hasDynamicLoad(entry.path, side))) return undefined;
+        files.push({ path: entry.path, status: entry.status === "A" ? "added" : entry.status === "D" ? "removed" : "modified", wholeFile: true,
+          ...(before === undefined ? {} : { before }), ...(after === undefined ? {} : { after }) });
+      }
     }
     // Duplicate repository-relative paths make F4 incomplete, which is conservative too.
     if (signal.aborted) return undefined;
-    const { report } = detectPromptChanges({ files });
-    return everyChangeAccountedFor(files, report) ? report : undefined;
+    return detectPromptChanges({ files }).report;
   } catch { return undefined; }
 }
 
