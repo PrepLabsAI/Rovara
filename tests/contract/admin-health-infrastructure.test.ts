@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -26,7 +27,7 @@ function brokerStatements(template: Template): Statement[] {
 function brokerEnvironment(template: Template): Record<string, unknown> {
   const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
   const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-  return broker?.[1].Properties.Environment?.Variables ?? {};
+  return unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {});
 }
 
 describe("the health route's grants (A13)", () => {

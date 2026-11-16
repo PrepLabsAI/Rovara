@@ -1,4 +1,4 @@
-import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js";
+import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";

@@ -2,6 +2,7 @@ import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -209,8 +210,11 @@ function withoutTaskPeopleControls(template: unknown): unknown {
     AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
     AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
   };
-  expect(Object.fromEntries(brokerEnvironmentNames.map((name) => [name, brokerVariables[name]]))).toStrictEqual(expectedBrokerReferences);
-  for (const name of brokerEnvironmentNames) delete brokerVariables[name];
+  // ENV-ROOM: the named Broker gets them as pieces of AGENTX_SETTINGS (codes tc, tu, tv).
+  const unpacked = unpackedBrokerVariables(brokerVariables);
+  expect(Object.fromEntries(brokerEnvironmentNames.map((name) => [name, unpacked[name]]))).toStrictEqual(expectedBrokerReferences);
+  for (const name of brokerEnvironmentNames) expect(brokerVariables).not.toHaveProperty(name);
+  removePackedPieces(brokerVariables, "AGENTX_SETTINGS", ["tc", "tu", "tv"]);
 
   const notifierFunctions = functions.filter(([id]) => id.startsWith("DeveloperTaskNotifier"));
   expect(notifierFunctions).toHaveLength(1);
