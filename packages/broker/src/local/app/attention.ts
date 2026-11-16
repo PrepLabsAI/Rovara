@@ -41,7 +41,7 @@ export interface TaskAttention {
 }
 
 /** What the owner sees and answers, and the words the sessions use, for one task. */
-export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId">, task: TaskRecord, options: { ciMode?: ProjectCiMode } = {}): Promise<TaskAttention> {
+export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId" | "mergeOrderLines" | "ciWaitLines">, task: TaskRecord, options: { ciMode?: ProjectCiMode } = {}): Promise<TaskAttention> {
   const workflow = task.workflow;
   if (workflow === undefined) return { view: {} };
   const view: AttentionView = {};
@@ -89,9 +89,13 @@ export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId"
       if (item === undefined) { lines.push(`${name}: not read yet.`); continue; }
       const failing = item.ci === "failing" && item.failingChecks.length > 0 ? `: ${item.failingChecks.slice(0, 3).map((name_) => line(name_, 60)).join(", ")}` : "";
       lines.push(`${name}: ${item.state === "open" ? (item.draft ? "a draft" : "ready for review") : item.state}; ${CI_WORDS[item.ci]}${failing}; ${REVIEW_WORDS[item.review]}; ${item.branch === "conflicted" ? "it conflicts with its base" : item.branch === "behind" ? "it is behind its base" : "it is up to date with its base"}.`);
+      // MR4: a failing CI that tests this repository alone, while a repository it depends on waits.
+      if (item.ci === "failing") lines.push(...await deps.ciWaitLines?.(task, pullRequest.repositoryId).catch(() => [] as string[]) ?? []);
       if (!item.headByRovara) lines.push("Someone else pushed to it, so Rovara has stopped changing it and only watches.");
       if (record?.changedOutside !== undefined) lines.push(`${CHANGED_OUTSIDE_NOTE.charAt(0).toUpperCase()}${CHANGED_OUTSIDE_NOTE.slice(1)}.`);
     }
+    // MR3b: the order the pull requests merge in, and what Rovara does when one was merged ahead of the one it depends on (nothing for one repository or without dependency facts).
+    lines.push(...await deps.mergeOrderLines?.(task).catch(() => [] as string[]) ?? []);
     const ready = items.length > 0 && items.length === (workflow.pullRequests ?? []).length && items.every((entry) => readyToMerge(entry, options.ciMode)) && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
     if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING") {
       lines.push(ready ? "Ready to merge. Rovara never merges by itself: a person merges it on the code host." : "Rovara is watching it. It is not ready to merge yet.");

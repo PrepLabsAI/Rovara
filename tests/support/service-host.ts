@@ -1,6 +1,6 @@
 // A host that is not the local app: the host-neutral services composed over fake adapters (the in-memory store and queue, a fake code host, a fake chat channel, the fake worker machines of the task-flow harness).
 // One task waits for the merge of one pull request, with a session of its own and a tracking row.
-import { IMPLICIT_COMPANY_ID, WorkflowSnapshotSchema, change, createCandidateManifest, createWorkflowSnapshot, type ConversationRef, type OrgId, type WorkflowProgram } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, WorkflowSnapshotSchema, type CodeHost, change, createCandidateManifest, createWorkflowSnapshot, type ConversationRef, type OrgId, type WorkflowProgram } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -26,30 +26,48 @@ const PROGRAM: WorkflowProgram = { steps: [
 ] };
 export const FOOTER = "Open it in the host's own page.";
 
-export async function host() {
+/** A code host that serves several fake repositories: each call goes to the host of the repository its first argument names (a change request, a repository). */
+function routedHost(hosts: ReadonlyMap<string, CodeHost>): CodeHost {
+  const first = [...hosts.values()][0]!;
+  return new Proxy(first, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        const arg = args[0] as { repository?: { url?: string }; url?: string } | undefined;
+        const routed = hosts.get(arg?.repository?.url ?? arg?.url ?? "") ?? first;
+        return (Reflect.get(routed, property) as (...rest: unknown[]) => unknown).apply(routed, args);
+      };
+    },
+  });
+}
+
+export async function host(options: { repositories?: readonly string[] } = {}) {
+  const repositories = options.repositories ?? ["app"];
   // One store holds everything; the harness builds the task flow's ports over it.
-  const world = await mergeWorld({ store: new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: "indexExpiresAt" }) });
+  const world = await mergeWorld({ store: new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: "indexExpiresAt" }), pullRequests: repositories.map((repositoryId) => ({ repositoryId, number: 1 })) });
   const h = createHarness({ audit: "recording", backend: (clock) => ({ store: world.store, queues: new MemoryQueueService({ now: () => clock.now }) }) });
   await h.registerProject({
     name: "web", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
-    repositories: [{ name: "app", url: "https://github.com/acme/app", path: "repo/app", defaultBranch: "main", credentialRef: "host-app" }],
+    repositories: repositories.map((name) => ({ name, url: `https://github.com/acme/${name}`, path: `repo/${name}`, defaultBranch: "main", credentialRef: `host-${name}` })),
   });
   // The task as the flow reads it (the merge world writes the merge core's own shape), with a session of its own.
   const at = "2026-11-09T10:00:00.000Z";
-  const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
-  const pr = world.prs[0]!;
+  const candidate = createCandidateManifest(repositories.map((repositoryId) => ({ repositoryId, commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) })));
   const workflow = WorkflowSnapshotSchema.parse({
     ...createWorkflowSnapshot({ taskId: TASK_ID, ownerId: OWNER_ID, now: at, definitionVersion: "1.1.0", program: PROGRAM }),
     revision: 9, stage: "WAIT_FOR_MERGE", state: "WAITING", programStepId: "pull_request", candidate,
     verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: "test", recordedAt: at, results: [{ checkId: "unit", status: "PASS" }] },
     reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role, provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: at })),
-    pullRequests: [{ repositoryId: "app", number: pr.number, headSha: pr.head, candidateDigest: candidate.digest, required: true, state: "OPEN", url: pr.model.crUrl(String(pr.number)) }],
+    pullRequests: world.prs.map((pr) => ({ repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head, candidateDigest: candidate.digest, required: true, state: "OPEN", url: pr.model.crUrl(String(pr.number)) })),
   });
   await world.store.update({ key: taskKey(TASK_ID), ops: [change.set(["companyId"], ORG), change.set(["developerId"], OWNER_ID), change.set(["sessionId"], SESSION), change.set(["createdAt"], at), change.set(["charge"], { member: { pk: "LIMIT#member", sk: OWNER_ID }, organization: { pk: "LIMIT#organization", sk: ORG } }), change.set(["workflow"], JSON.parse(JSON.stringify(workflow)) as never)] });
   await world.store.transact(createTaskSessionItems({ orgId: ORG, sessionId: SESSION, taskId: TASK_ID, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Add retry", owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: at }));
   await world.store.put({ item: { ...recoveryRowKey(TASK_ID), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: TASK_ID, nextAttemptAt: 0 } });
   const registry = createAdapterRegistry();
-  registry.register("code-host", "github", (await world.host.repository("web", 1, "app", ORG))!.codeHost);
+  const codeHosts = new Map<string, CodeHost>();
+  for (const name of repositories) codeHosts.set(`https://github.com/acme/${name}`, (await world.host.repository("web", 1, name, ORG))!.codeHost);
+  registry.register("code-host", "github", codeHosts.size === 1 ? [...codeHosts.values()][0]! : routedHost(codeHosts));
   const chat = new FakeChannelAdapter();
   registry.register("channel", "examplechat", chat);
   const clock = { ms: Date.parse(at) };

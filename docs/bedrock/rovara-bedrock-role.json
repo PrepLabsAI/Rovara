@@ -1,0 +1,135 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Rovara: lets Rovara's agents call Amazon Bedrock in this account, on the models you chose, and nothing else. Bedrock bills this account.",
+  "Parameters": {
+    "CompanyId": {
+      "Type": "String",
+      "AllowedPattern": "^org_[0-9a-z]{20}$",
+      "Description": "Your Rovara company id (Rovara's session name in your CloudTrail)."
+    },
+    "ExternalId": {
+      "Type": "String",
+      "AllowedPattern": "^rvb-[0-9a-f]{40}$",
+      "Description": "Your company's external id, shown in Rovara's settings."
+    },
+    "BrokerRoleArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws:iam::[0-9]{12}:role/RovaraBedrockBroker-[a-z0-9-]{1,32}$",
+      "Description": "Rovara's Bedrock broker role, shown in Rovara's settings."
+    },
+    "ModelResourceArns": {
+      "Type": "CommaDelimitedList",
+      "Description": "The Bedrock models and inference profiles Rovara may call, shown in Rovara's settings."
+    },
+    "AllowGlobalRouting": {
+      "Type": "String",
+      "AllowedValues": [
+        "false",
+        "true"
+      ],
+      "Default": "false",
+      "Description": "true lets calls route to any AWS Region (global profiles): data may leave your geography."
+    }
+  },
+  "Conditions": {
+    "DenyGlobalRouting": {
+      "Fn::Equals": [
+        {
+          "Ref": "AllowGlobalRouting"
+        },
+        "false"
+      ]
+    }
+  },
+  "Resources": {
+    "RovaraBedrockInvokeRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "RovaraBedrockInvoke-${CompanyId}"
+        },
+        "Description": "Rovara agents call Bedrock with this role (invoke only, on the chosen models).",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "OnlyRovaraForThisCompany",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Ref": "BrokerRoleArn"
+                }
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "sts:ExternalId": {
+                    "Ref": "ExternalId"
+                  },
+                  "sts:RoleSessionName": {
+                    "Ref": "CompanyId"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "InvokeChosenModelsOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "InvokeChosenModels",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": {
+                    "Ref": "ModelResourceArns"
+                  }
+                },
+                {
+                  "Fn::If": [
+                    "DenyGlobalRouting",
+                    {
+                      "Sid": "NoGlobalRouting",
+                      "Effect": "Deny",
+                      "Action": [
+                        "bedrock:InvokeModel",
+                        "bedrock:InvokeModelWithResponseStream"
+                      ],
+                      "Resource": "*",
+                      "Condition": {
+                        "StringEquals": {
+                          "aws:RequestedRegion": "unspecified"
+                        }
+                      }
+                    },
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "RoleArn": {
+      "Description": "Paste this into Rovara's settings.",
+      "Value": {
+        "Fn::GetAtt": [
+          "RovaraBedrockInvokeRole",
+          "Arn"
+        ]
+      }
+    }
+  }
+}
