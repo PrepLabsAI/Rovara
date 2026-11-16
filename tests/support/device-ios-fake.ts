@@ -18,7 +18,7 @@ export const RUNTIMES = JSON.stringify({ runtimes: [
 ] });
 /** The screenshot is 390 x 844 points at 3x. */
 export const PIXELS = { width: 1170, height: 2532 };
-export const hierarchy = (...children: unknown[]) => JSON.stringify({ attributes: { bounds: "[0,0][390,844]" }, children });
+export const hierarchy = (...children: unknown[]) => JSON.stringify({ attributes: { bounds: "[0,0][390,844]", type: "XCUIElementTypeApplication" }, children });
 export const HIERARCHY = hierarchy({ attributes: { text: "Total: 12", bounds: "[10,100][200,140]" } }, { attributes: { password: "true", text: "••••", bounds: "[10,200][380,240]" } });
 
 export type FakeIosScript = {

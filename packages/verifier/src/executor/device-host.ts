@@ -76,6 +76,8 @@ export function createHostDeviceFiles(): IosDriverOptions["files"] {
 
 // ---- the run
 
+/** The name every Android virtual device Rovara may start on a host begins with; the developer makes one, clean and with no account, for this. */
+export const HOST_AVD_PREFIX = "rovara-device-";
 export type HostProbe = Readonly<{ platform: string }>;
 export type HostAndroidConfig = Readonly<{
   /** The two built apps (`.apk`): the build is not this file's (slice 3 builds them in the task sandbox). */
@@ -156,6 +158,8 @@ export async function runHostDeviceEvidence(input: HostDeviceRunInput): Promise<
       if (input.android === undefined) return notRun(platform, "device_did_not_start");
       const [emulatorPort, adbPort] = [await pickEmulatorPort(input.canBind), await pickAdbServerPort(input.canBind)];
       if (emulatorPort === undefined || adbPort === undefined) return notRun(platform, "device_did_not_start");
+      // Only a virtual device made for Rovara (its name starts `rovara-device-`) is started: never the developer's own, which may hold their accounts and data.
+      if (!input.android.avd.startsWith(HOST_AVD_PREFIX)) return notRun(platform, "device_did_not_start");
       const sdk = input.android.sdkRoot;
       driver = createAndroidEmulatorDriver({
         command: input.command, appId: recipe.appId, apps: input.android.apps, flows: picked.flows, scratchDir: input.scratchDir, port: emulatorPort,

@@ -10,7 +10,7 @@ type Attrs = Record<string, string>;
 const node = (attributes: Attrs, children: unknown[] = []) => ({ attributes, children });
 /** A screen of 390 x 844 points; the screenshot is 3x. */
 const FRAME = { width: 1170, height: 2532 };
-const screen = (...children: unknown[]) => JSON.stringify(node({ bounds: "[0,0][390,844]" }, children));
+const screen = (...children: unknown[]) => JSON.stringify(node({ bounds: "[0,0][390,844]", type: "XCUIElementTypeApplication" }, children));
 const tree = (output: unknown, frame = FRAME) => iosHierarchyToTree(output, frame);
 
 describe("iosHierarchyToTree", () => {
@@ -52,6 +52,23 @@ describe("iosHierarchyToTree", () => {
     const got = tree(screen(node({ text: "Hi", bounds: "oops" }), node({ text: "a@b.co", bounds: "[5,5][1,1]" }))) as { nodes: Array<Record<string, unknown>> };
     expect(got.nodes).toEqual([{ text: "Hi" }, { text: "a@b.co" }]);
     expect(planDeviceMask(got, { frame: FRAME })).toEqual({ status: "withheld", reason: "masked_content" });
+  });
+  it("scales each axis by its own factor, so no edge is placed by the other axis's rounding", () => {
+    // 1170 / 390 = 3 across, but 2540 / 844 = 3.0095 down (within the hundredth that is allowed): a box at the bottom must use the down factor.
+    const got = tree(screen(node({ text: "x", bounds: "[0,800][10,844]" })), { width: 1170, height: 2540 }) as { nodes: Array<{ bounds: { y: number; height: number } }> };
+    expect(got.nodes[0]!.bounds.y).toBe(Math.floor(800 * (2540 / 844)));
+    expect(got.nodes[0]!.bounds.y).not.toBe(800 * 3);
+  });
+  it("is unreadable for a screen whose factor to the screenshot is even across and down but under 1 or over 4", () => {
+    const ok = node({ text: "Hi", bounds: "[0,0][10,10]" });
+    for (const [w, h] of [[2340, 5064], [234, 506.4]]) expect(tree(JSON.stringify(node({ bounds: `[0,0][${String(w)},${String(h)}]`, type: "XCUIElementTypeApplication" }, [ok])))).toBe(DEVICE_UNREADABLE_TREE);
+    expect(tree(JSON.stringify(node({ bounds: "[0,0][1170,2532]", type: "XCUIElementTypeApplication" }, [ok])))).toMatchObject({ nodes: [{ text: "Hi" }] });
+  });
+  it("is unreadable when no element says what type it is: a web view or a drawn surface could not be told from text", () => {
+    const untyped = JSON.stringify(node({ bounds: "[0,0][390,844]" }, [node({ text: "Hi", bounds: "[0,0][10,10]" }), node({ text: "Map below", bounds: "[0,20][10,30]" })]));
+    expect(tree(untyped)).toBe(DEVICE_UNREADABLE_TREE);
+    // one typed element is enough to know the output carries types
+    expect(tree(JSON.stringify(node({ bounds: "[0,0][390,844]" }, [node({ text: "Hi", type: "XCUIElementTypeStaticText", bounds: "[0,0][10,10]" })])))).toMatchObject({ nodes: [{ text: "Hi" }] });
   });
   it("accepts a banner line before or after the JSON (what is inside is checked whole)", () => {
     expect(tree(`Running on iPhone\n${screen(node({ text: "Hi", bounds: "[0,0][10,10]" }))}\ndone\n`)).toMatchObject({ nodes: [{ text: "Hi" }] });

@@ -56,12 +56,12 @@ export function iosHierarchyToTree(output: unknown, frame: { width: number; heig
   const scaleX = frame.width / screen.right;
   const scaleY = frame.height / screen.bottom;
   if (Math.abs(scaleX - scaleY) > 0.01 || scaleX < 1 || scaleX > 4) return DEVICE_UNREADABLE_TREE;
-  const scale = scaleX;
 
   const nodes: DeviceViewTree["nodes"] = [];
   // Reading order is document order: parent before its children, siblings top to bottom. An explicit stack, so a deep tree cannot overflow the call stack.
   const stack: Array<{ node: unknown; depth: number }> = [{ node: root, depth: 0 }];
   let visited = 0;
+  let typed = false;
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
     visited += 1;
@@ -81,14 +81,16 @@ export function iosHierarchyToTree(output: unknown, frame: { width: number; heig
     const type = [string("class"), string("type"), string("elementType")].filter((value): value is string => value !== undefined).join(" ");
     const rawId = string("resource-id");
     const id = rawId !== undefined && rawId.length <= 200 && !/[\p{Cc}\p{Cf}]/u.test(rawId) ? rawId : undefined;
+    if (type !== "") typed = true;
     const webView = WEB_VIEW.test(type);
     const surface = !webView && SURFACE.test(type);
     const secure = attributes["password"] === "true" || attributes["secure"] === "true" || SECURE.test(type);
     const box = boundsOf(attributes["bounds"]);
     const bounds = box === undefined ? undefined : (() => {
-      const x = Math.floor(box.left * scale);
-      const y = Math.floor(box.top * scale);
-      return { x, y, width: Math.ceil(box.right * scale) - x, height: Math.ceil(box.bottom * scale) - y };
+      // Each axis has its own factor (they agree to a hundredth), so no edge is placed by the other axis's rounding.
+      const x = Math.floor(box.left * scaleX);
+      const y = Math.floor(box.top * scaleY);
+      return { x, y, width: Math.ceil(box.right * scaleX) - x, height: Math.ceil(box.bottom * scaleY) - y };
     })();
     if (bounds !== undefined && (Math.abs(bounds.x) > 1_000_000 || Math.abs(bounds.y) > 1_000_000 || bounds.width > 1_000_000 || bounds.height > 1_000_000)) return DEVICE_UNREADABLE_TREE;
     const common = { ...(secure ? { secure: true as const } : {}), ...(webView ? { webView: true as const } : {}), ...(surface ? { surface: true as const } : {}), ...(bounds === undefined ? {} : { bounds }) };
@@ -97,6 +99,8 @@ export function iosHierarchyToTree(output: unknown, frame: { width: number; heig
     nodes.push({ ...(id === undefined ? {} : { id }), ...(texts[0] === undefined ? {} : { text: texts[0] }), ...(description === undefined ? {} : { description }), ...(hint === undefined ? {} : { hint }), ...common });
     for (const extra of texts.slice(1)) nodes.push({ ...(id === undefined ? {} : { id }), text: extra, ...common });
   }
+  // Without an element type on any node, a web view, a map or other drawn surface cannot be told from text: the screen is unreadable, never "a tree with no surfaces" (fails closed until the real shape is seen).
+  if (!typed) return DEVICE_UNREADABLE_TREE;
   return parseDeviceViewTree({ width: frame.width, height: frame.height, nodes }) ?? DEVICE_UNREADABLE_TREE;
 }
 

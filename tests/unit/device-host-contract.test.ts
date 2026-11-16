@@ -34,6 +34,20 @@ describe("the opt-in", () => {
       expect(deviceHostRunAllowed({ policy: ON, recipe: recipe({ outsideSandbox }) }), JSON.stringify(outsideSandbox)).toEqual({ allowed: false, reason: "host_run_not_allowed" });
     }
   });
+  it("does not count an opt-in the recipe only inherits (a polluted prototype), and a recipe or policy that throws when read is not an opt-in", () => {
+    const inherited = Object.assign(Object.create({ outsideSandbox: DEVICE_HOST_RUN_ACK }) as object, recipe());
+    expect(Object.hasOwn(inherited, "outsideSandbox")).toBe(false);
+    expect(deviceHostRunAllowed({ policy: ON, recipe: inherited })).toEqual({ allowed: false, reason: "host_run_not_allowed" });
+    const polluted = Object.prototype as Record<string, unknown>;
+    polluted["outsideSandbox"] = DEVICE_HOST_RUN_ACK;
+    try { expect(deviceHostRunAllowed({ policy: ON, recipe: recipe() }).allowed).toBe(false); } finally { delete polluted["outsideSandbox"]; }
+    const throwing = { ...recipe(), get flows(): never { throw new Error("boom"); } };
+    expect(() => deviceHostRunAllowed({ policy: ON, recipe: throwing })).not.toThrow();
+    expect(deviceHostRunAllowed({ policy: ON, recipe: throwing }).allowed).toBe(false);
+    const proxy = new Proxy({}, { get() { throw new Error("boom"); }, ownKeys() { throw new Error("boom"); } });
+    expect(deviceHostRunAllowed({ policy: ON, recipe: proxy }).allowed).toBe(false);
+    expect(deviceHostRunAllowed({ policy: proxy, recipe: recipe({ outsideSandbox: DEVICE_HOST_RUN_ACK }) }).allowed).toBe(false);
+  });
   it("is 'no recipe' for a recipe that is not valid, whatever the switch says, and never throws", () => {
     for (const bad of [undefined, null, 5, "x", [], {}, recipe({ flows: [] }), recipe({ platform: "windows" }), recipe({ extra: 1 })]) {
       expect(deviceHostRunAllowed({ policy: ON, recipe: bad }), JSON.stringify(bad)).toEqual({ allowed: false, reason: "no_recipe" });
@@ -76,7 +90,7 @@ describe("the pull request's lines for a run on a developer machine", () => {
   it("add one line that says the network was this machine's, for a real device that ran", () => {
     const android = deviceEvidenceLines(shown("android_emulator", "developer_machine"), {});
     expect(android.at(-1)).toBe(`- ${DEVICE_EVIDENCE_HOST_WORDS.android_emulator}`);
-    expect(android[0]).toBe("Device evidence: Ran on an Android emulator on a developer machine. Visual evidence only: it does not count as change proof.");
+    expect(android[0]).toBe("Device evidence: Ran on an Android emulator on a developer machine, not in a sandbox. Visual evidence only: it does not count as change proof.");
     const ios = deviceEvidenceLines(shown("ios_simulator", "developer_machine"), {});
     expect(ios.at(-1)).toBe(`- ${DEVICE_EVIDENCE_HOST_WORDS.ios_simulator}`);
     expect(ios.filter((line) => line.includes("outside a sandbox"))).toHaveLength(1);

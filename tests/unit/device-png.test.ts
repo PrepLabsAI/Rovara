@@ -30,7 +30,7 @@ describe("decodeDevicePng", () => {
     const data = (width: number, height: number, bytesPerPixel: number) => deflateSync(Buffer.alloc((width * bytesPerPixel + 1) * height));
     const build = (ihdr: Uint8Array, idat: Uint8Array) => join(SIG, ihdr, chunk("IDAT", idat), chunk("IEND", new Uint8Array(0)));
     for (const [what, bytes] of [
-      ["16 bits", build(header(2, 2, 16, 6), data(2, 2, 8))], ["palette", build(header(2, 2, 8, 3), data(2, 2, 1))], ["grey", build(header(2, 2, 8, 0), data(2, 2, 1))], ["grey and alpha", build(header(2, 2, 8, 4), data(2, 2, 2))],
+      ["16 bits", build(header(2, 2, 16, 6), data(2, 2, 8))], ["16 bits, data the size of 8", build(header(2, 2, 16, 6), data(2, 2, 4))], ["palette", build(header(2, 2, 8, 3), data(2, 2, 1))], ["grey", build(header(2, 2, 8, 0), data(2, 2, 1))], ["grey and alpha", build(header(2, 2, 8, 4), data(2, 2, 2))],
       ["interlaced", build(header(2, 2, 8, 6, 1), data(2, 2, 4))], ["zero width", build(header(0, 2), data(1, 2, 4))], ["zero height", build(header(2, 0), data(2, 1, 4))],
     ] as const) expect(decodeDevicePng(bytes, 1_000), what).toBeUndefined();
   });
@@ -46,6 +46,8 @@ describe("decodeDevicePng", () => {
     expect(decodeDevicePng(build(rows(2)), 100)).toBeDefined();
     expect(decodeDevicePng(build(rows(1)), 100)).toBeUndefined();
     expect(decodeDevicePng(build(rows(3)), 100)).toBeUndefined();
+    expect(decodeDevicePng(build(deflateSync(Buffer.alloc((2 * 4 + 1) * 2 + 1))), 100), "one byte too many").toBeUndefined();
+    expect(decodeDevicePng(build(deflateSync(Buffer.alloc((2 * 4 + 1) * 2 - 1))), 100), "one byte too few").toBeUndefined();
     expect(decodeDevicePng(build(deflateSync(Buffer.alloc(50_000_000))), 100)).toBeUndefined();
     expect(decodeDevicePng(build(undefined), 100)).toBeUndefined();
     expect(decodeDevicePng(build(new Uint8Array([1, 2, 3, 4])), 100)).toBeUndefined();

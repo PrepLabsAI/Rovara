@@ -213,7 +213,7 @@ describe("runHostDeviceEvidence: the Android emulator on a Mac", () => {
     const fake = fakeAndroid({ dump: `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><displays><display id="0"><window id="1"><hierarchy rotation="0"><node class="android.widget.TextView" text="Total" bounds="[0,100][720,300]" /></hierarchy></window></display></displays>`, screencap: () => answer(rawScreencap720()) });
     const input: HostDeviceRunInput = {
       policy: ON, recipe: androidRecipe, changedFiles: ["App/x.kt"], host: { platform: "darwin" }, checkouts: { before: "/work/base", after: "/work/head" },
-      android: { apps: { before: "/work/base/app.apk", after: "/work/head/app.apk" }, sdkRoot: "/Users/dev/Library/Android/sdk", avd: "Pixel_8_API_35", maestro: "/opt/homebrew/bin/maestro" },
+      android: { apps: { before: "/work/base/app.apk", after: "/work/head/app.apk" }, sdkRoot: "/Users/dev/Library/Android/sdk", avd: "rovara-device-pixel8", maestro: "/opt/homebrew/bin/maestro" },
       scratchDir: "/tmp/rovara-run", env: SOURCE, command: fake.port, files: { writeFile: fake.writeFile, readFile: () => Promise.resolve(undefined), removeFile: () => Promise.resolve(), builtApp: () => Promise.resolve(undefined) },
       canBind: () => Promise.resolve(true), encodeJpeg: (frame) => encodeDeviceJpeg(frame, 512 * 1_024), ...over,
     };
@@ -228,7 +228,7 @@ describe("runHostDeviceEvidence: the Android emulator on a Mac", () => {
     expect(adbServer!.file).toBe("/Users/dev/Library/Android/sdk/platform-tools/adb");
     expect(adbServer!.args).toEqual(["server", "nodaemon"]);
     expect(emulator!.file).toBe("/Users/dev/Library/Android/sdk/emulator/emulator");
-    expect(emulator!.args.slice(0, 4)).toEqual(["-avd", "Pixel_8_API_35", "-port", "5556"]);
+    expect(emulator!.args.slice(0, 4)).toEqual(["-avd", "rovara-device-pixel8", "-port", "5556"]);
     expect(emulator!.args).toContain("-read-only");
     for (const start of fake.starts) {
       expect(start.env).toMatchObject({ ANDROID_ADB_SERVER_PORT: "15037", ANDROID_SDK_ROOT: "/Users/dev/Library/Android/sdk", HOME: "/Users/dev" });
@@ -239,7 +239,9 @@ describe("runHostDeviceEvidence: the Android emulator on a Mac", () => {
   });
   it("says the device did not start, and starts nothing, when no emulator port or no adb port is free, or the SDK path is not a plain path", async () => {
     for (const over of [{ canBind: () => Promise.resolve(false) }, { canBind: (port: number) => Promise.resolve(port >= 15_000) }, { canBind: (port: number) => Promise.resolve(port < 15_000) },
-      { android: { apps: { before: "/a.apk", after: "/b.apk" }, sdkRoot: "/Users/a b/sdk", avd: "x", maestro: "/m" } }, { android: undefined }]) {
+      { android: { apps: { before: "/a.apk", after: "/b.apk" }, sdkRoot: "/Users/a b/sdk", avd: "rovara-device-x", maestro: "/m" } }, { android: undefined },
+      // never the developer's own virtual device (it may hold their accounts and data): only one named for Rovara
+      ...["Pixel_8_API_35", "rovara-device", "my-rovara-device-x", "", "ROVARA-DEVICE-x"].map((avd) => ({ android: { apps: { before: "/a.apk", after: "/b.apk" }, sdkRoot: "/Users/dev/sdk", avd, maestro: "/m" } }))]) {
       const { fake, input } = androidInput(over as Partial<HostDeviceRunInput>);
       expect(await runHostDeviceEvidence(input)).toMatchObject({ captured: { device: "android_emulator", notRun: "device_did_not_start", steps: [] } });
       expect(fake.runs).toHaveLength(0);

@@ -28,10 +28,16 @@ export function deviceEvidenceOn(policy: unknown): boolean {
  * (`outsideSandbox`, exactly the words `DEVICE_HOST_RUN_ACK`); a recipe that is not valid is "no recipe". Fails closed, never throws, and says nothing but a fixed reason.
  */
 export function deviceHostRunAllowed(input: { policy: unknown; recipe: unknown }): { allowed: true; recipe: DeviceEvidenceRecipe } | { allowed: false; reason: Extract<DeviceEvidenceNotRunReason, "no_recipe" | "host_run_not_allowed"> } {
-  const recipe = DeviceEvidenceRecipeSchema.safeParse(input.recipe);
-  if (!recipe.success) return { allowed: false, reason: "no_recipe" };
-  if (!deviceEvidenceOn(input.policy) || recipe.data.outsideSandbox !== DEVICE_HOST_RUN_ACK) return { allowed: false, reason: "host_run_not_allowed" };
-  return { allowed: true, recipe: recipe.data };
+  try {
+    const recipe = DeviceEvidenceRecipeSchema.safeParse(input.recipe);
+    if (!recipe.success) return { allowed: false, reason: "no_recipe" };
+    // The opt-in must be the INPUT recipe's OWN property (never one inherited through the prototype chain: the parsed copy would hold it as its own) and exactly the words.
+    if (!deviceEvidenceOn(input.policy) || typeof input.recipe !== "object" || input.recipe === null || !Object.hasOwn(input.recipe, "outsideSandbox") || recipe.data.outsideSandbox !== DEVICE_HOST_RUN_ACK) return { allowed: false, reason: "host_run_not_allowed" };
+    return { allowed: true, recipe: recipe.data };
+  } catch {
+    // A recipe or policy that throws when read (a getter, a proxy) is not an opt-in.
+    return { allowed: false, reason: "no_recipe" };
+  }
 }
 
 // ---- caps
@@ -180,7 +186,7 @@ export type DeviceEvidenceIsolation = (typeof DEVICE_EVIDENCE_ISOLATIONS)[number
 const FAKE_WORDS = "Ran on a fake device (a test stand-in, not a real run)";
 export const DEVICE_EVIDENCE_DEVICE_WORDS: { [D in DeviceEvidenceDevice]: Partial<Record<DeviceEvidenceIsolation, string>> } = {
   fake: { sandbox: FAKE_WORDS, developer_machine: FAKE_WORDS },
-  android_emulator: { sandbox: "Ran on an Android emulator in Rovara's sandbox", developer_machine: "Ran on an Android emulator on a developer machine" },
+  android_emulator: { sandbox: "Ran on an Android emulator in Rovara's sandbox", developer_machine: "Ran on an Android emulator on a developer machine, not in a sandbox" },
   ios_simulator: { developer_machine: "Ran on an iOS simulator on a developer machine, not in a sandbox" },
 };
 /** What a run on a developer machine adds to the pull request's lines. */
