@@ -77,7 +77,7 @@ import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { runTestProof, serializeTestProof, withScriptedReplyFacts } from "./verification/test-proof.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
-import { findBaselineAncestor } from "./verification/baseline-ancestry.js";
+import { findBaselineAncestor, findBaselineAncestors } from "./verification/baseline-ancestry.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -553,6 +553,9 @@ async function runTask(
     const baselineCandidates = invocation.payload.testEnvironment?.baselineCandidates;
     const baselineClaim = baselineCandidates === undefined || repositories.length !== 1 ? undefined
       : await findBaselineAncestor({ directory: repositories[0]!.directory, baseCommit: repositories[0]!.baseCommitSha, candidates: baselineCandidates, signal: stop.signal });
+    // TE-MR2b: with two or more repositories, one claim per repository, all or none (the engine then builds ONE combined baseline, or none).
+    const baselineClaims = baselineCandidates === undefined || repositories.length < 2 ? undefined
+      : await findBaselineAncestors({ repositories: repositories.map((repository) => ({ repositoryId: repository.repositoryId, directory: repository.directory, baseCommitSha: repository.baseCommitSha })), candidates: baselineCandidates, signal: stop.signal });
     try {
       await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
       // The broker authorizes the private admission read only after the operation is durably
@@ -628,7 +631,7 @@ async function runTask(
         const edgesStarted = Date.now();
         const repositoryEdges = await repositoryChecks.evidence({ kind: runners.kind, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs });
         const edgesSpentMs = Date.now() - edgesStarted;
-        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), ...(baselineClaim === undefined ? {} : { baselineClaim }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
+        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), ...(baselineClaim === undefined ? {} : { baselineClaim }), ...(baselineClaims === undefined ? {} : { baselineClaims }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
           baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs - edgesSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
       }
       const evidenceSpentMs = Date.now() - evidenceStarted;

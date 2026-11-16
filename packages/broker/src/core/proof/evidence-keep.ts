@@ -9,7 +9,7 @@
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
   EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidenceBaselineSchema, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
-  type CheckEntry, type CheckKind, type EvidenceBaseline, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type RawBaseline, type TestEnvProdDeny, type TestProofWeakening,
+  type CheckEntry, type CheckKind, type EvidenceBaseline, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type RawBaseline, type RawRepositoryBaseline, type TestEnvProdDeny, type TestProofWeakening,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
@@ -42,6 +42,8 @@ const WITHHELD_ITEM: EvidenceNotTested = { kind: "environment", id: "data_guard"
 export interface KeepEvidenceBaseline {
   offered: readonly string[];
   resolve(claim: RawBaseline): Promise<EvidenceBaseline | undefined>;
+  /** TE-MR2b: the same for a task with several repositories: one claim per repository, ONE baseline for all of them or nothing. */
+  resolveAll?(claims: readonly RawRepositoryBaseline[]): Promise<EvidenceBaseline | undefined>;
 }
 
 export interface KeepEvidenceInput {
@@ -149,7 +151,11 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     if (parsedRaw !== undefined && parsedRaw.candidateDigest !== input.candidateDigest) return { kept: false, reason: "not_bound" };
     // TE-C1: the worker's claim is used only for a commit this task's plan offered; the engine then looks the row up itself. Anything else (a sha it did not offer, no offer, no row) is no baseline.
     const claim = parsedRaw?.baseline;
-    const baselineWords = claim === undefined || input.baseline === undefined || !input.baseline.offered.includes(claim.sha) ? undefined : await input.baseline.resolve(claim).catch(() => undefined);
+    const claims = parsedRaw?.baselines;
+    const baselineWords = claims !== undefined
+      // TE-MR2b: every repository's claimed commit must be one this task's plan offered; one that was not makes the whole claim void.
+      ? input.baseline?.resolveAll === undefined || !claims.every((part) => input.baseline!.offered.includes(part.sha)) ? undefined : await input.baseline.resolveAll(claims).catch(() => undefined)
+      : claim === undefined || input.baseline === undefined || !input.baseline.offered.includes(claim.sha) ? undefined : await input.baseline.resolve(claim).catch(() => undefined);
     if (parsedRaw !== undefined) {
       // TE-B3: the facts from the run on the original code join the raw file first, so the data guard and the builder check them like every other test name.
       parsedRaw = withWeakeningFacts(parsedRaw, await readWeakeningFacts(deps, input));

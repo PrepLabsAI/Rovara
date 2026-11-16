@@ -344,6 +344,7 @@ export * from "./test-environment-wire.js";
 export * from "./service-mock-additions.js";
 export * from "./test-env-nightly.js";
 export * from "./test-env-baseline.js";
+export * from "./test-env-multi-repo.js";
 export * from "./nightly-run.js";
 export * from "./eval-files.js";
 export * from "./system-owner.js";
