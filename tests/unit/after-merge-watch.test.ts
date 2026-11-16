@@ -1,8 +1,10 @@
 // M7 after-merge watcher, first slice (TE-H2 core). Every collaborator here is a Rovara-made fake: a green run proves the watcher's own logic only (its records, its windows, its
 // isolation, its presses), never that a real code host, alarm source, chat or revert path behaves this way.
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { DocumentStoreError, INDEX_EXPIRY_ATTRIBUTE, type AuditEvent, type AuditSink, type OrgId, type TransactItem, type TriggerEvent } from "@agentx/contracts";
+import { DocumentStoreError, INDEX_EXPIRY_ATTRIBUTE, when, type AuditEvent, type AuditSink, type OrgId, type TransactItem, type TriggerEvent } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { openKey } from "../../packages/broker/src/core/after-merge/records.js";
 import { mergeCommitIndexStep } from "../../packages/broker/src/core/proof/revert/merge-commit-index.js";
 import {
   afterMergeSettingsOf, closeDueWatches, markExpected, observeDeployment, observeSignal, pressRevert, signalKeyOf,
@@ -21,7 +23,7 @@ const T0 = Date.parse("2026-11-15T12:00:00.000Z");
 const minutes = (count: number): number => count * 60_000;
 const at = (offsetMs: number): string => new Date(T0 + offsetMs).toISOString();
 
-interface WorldOptions { settings?: Record<string, unknown> | "absent" | "throws" | undefined; people?: string[]; startFails?: number; reportFailures?: number }
+interface WorldOptions { settingsFor?: (project: string) => unknown; settings?: Record<string, unknown> | "absent" | "throws" | undefined; people?: string[]; startFails?: number; reportFailures?: number }
 
 /** One store for every company (so a key that forgets its company shows), and one set of seams for each. */
 function createWorld() {
@@ -32,7 +34,9 @@ function createWorld() {
     sink: {
       stage(event) {
         audit.events.push(event);
-        return [{ kind: "put", item: { pk: `AUDIT_FAKE#${event.companyId}`, sk: event.eventId, action: event.action } }] satisfies TransactItem[];
+        // As the real document sink: the row is new, or it is the same event (same digest). The same id with another time, person or reason loses.
+        const digest = createHash("sha256").update(JSON.stringify(event)).digest("hex");
+        return [{ kind: "put", item: { pk: `AUDIT_FAKE#${event.companyId}`, sk: event.eventId, action: event.action, digest }, condition: when.or(when.absent(), when.eq("digest", digest)) }] satisfies TransactItem[];
       },
       async record(event) { audit.events.push(event); },
     },
@@ -40,6 +44,7 @@ function createWorld() {
   const tasks = new Map<string, { project: string }>();
   const reports: { orgId: OrgId; report: AfterMergeReport }[] = [];
   const starts: RevertRequest[] = [];
+  const attempts: RevertRequest[] = [];
   const logs: { event: string; fields: Record<string, unknown> }[] = [];
   const settingsByCompany = new Map<OrgId, WorldOptions>();
   const state = { reportFailures: 0, startFails: 0 };
@@ -50,12 +55,12 @@ function createWorld() {
     return {
       store, audit: audit.sink,
       tasks: { read: async (org, taskId) => { const task = tasks.get(`${org}/${taskId}`); return task === undefined ? undefined : { taskId, orgId: org, project: task.project }; } },
-      settings: settingsValue === "absent" ? undefined : { read: async () => { if (settingsValue === "throws") throw new Error("settings canary-secret"); return settingsValue; } },
+      settings: settingsValue === "absent" ? undefined : { read: async (_org, project) => { if (options.settingsFor !== undefined) return options.settingsFor(project); if (settingsValue === "throws") throw new Error("settings canary-secret"); return settingsValue; } },
       reporter: { report: async (org, report) => { if (state.reportFailures > 0) { state.reportFailures -= 1; throw new Error("chat canary-secret"); } reports.push({ orgId: org, report }); } },
       now: () => new Date(clock.ms),
       log: (event, fields) => { logs.push({ event, fields }); },
       authority: { mayAct: async (_org, personId) => (options.people ?? ["person-1"]).includes(personId) },
-      starter: { start: async (request) => { if (state.startFails > 0) { state.startFails -= 1; throw new Error("start canary-secret"); } starts.push(request); return { taskId: `revert-${request.taskId}` }; } },
+      starter: { start: async (request) => { attempts.push(request); if (state.startFails > 0) { state.startFails -= 1; throw new Error("start canary-secret"); } starts.push(request); return { taskId: `revert-${request.taskId}` }; } },
     };
   }
   async function seedMerge(orgId: OrgId, input: { taskId: string; number: number; url: string; sha: string; project?: string; repository?: string }): Promise<void> {
@@ -64,7 +69,7 @@ function createWorld() {
     expect(await store.transact([step])).toEqual({ applied: true });
   }
   return {
-    store, clock, audit, reports, starts, logs, tasks, state,
+    store, clock, audit, reports, starts, attempts, logs, tasks, state,
     deps: depsFor,
     configure(orgId: OrgId, options: WorldOptions) { settingsByCompany.set(orgId, options); },
     seedMerge,
@@ -77,7 +82,7 @@ const deploy = (over: Record<string, unknown> = {}) => ({ repository: REPO, revi
 const alarm = (over: Record<string, unknown> = {}): TriggerEvent => ({
   source: "cloudwatch", type: "alarm.fired", eventKey: "evt-1", occurredAt: at(minutes(5)), project: PROJECT,
   subject: { kind: "alert", id: "HighLatency", title: "High latency on checkout" }, fields: {}, actor: { kind: "unknown" }, ...over,
-}) as TriggerEvent;
+});
 const KEY = signalKeyOf({ source: "cloudwatch", type: "alarm.fired", subjectId: "HighLatency" });
 const person = (personId = "person-1") => ({ type: "person" as const, personId });
 
@@ -239,7 +244,7 @@ describe("a deploy of a merge Rovara made opens a watch", () => {
   it("refuses a non-object fact and a company id that is not one", async () => {
     const world = createWorld();
     for (const value of [null, undefined, 7, "x", []]) expect(await observeDeployment(world.deps(A), A, value)).toEqual({ kind: "ignored", reason: "invalid_fact" });
-    expect(await observeDeployment(world.deps(A), "not-a-company" as OrgId, deploy())).toEqual({ kind: "ignored", reason: "invalid_fact" });
+    expect(await observeDeployment(world.deps(A), "not-a-company", deploy())).toEqual({ kind: "ignored", reason: "invalid_fact" });
   });
 
   it("answers `unavailable` (and logs a fixed code) when the store fails, never `not_ours`", async () => {
@@ -527,7 +532,7 @@ describe("It's expected", () => {
     await opened(world);
     const deps = world.deps(A);
     expect(await markExpected(deps, A, { actor: person("stranger"), repository: REPO, number: 7, signalKey: KEY })).toEqual({ kind: "refused", reason: "not_allowed" });
-    expect(await markExpected(deps, A, { actor: { type: "agent", personId: "person-1" } as never, repository: REPO, number: 7, signalKey: KEY })).toEqual({ kind: "refused", reason: "not_allowed" });
+    expect(await markExpected(deps, A, { actor: { type: "agent", personId: "person-1" }, repository: REPO, number: 7, signalKey: KEY })).toEqual({ kind: "refused", reason: "not_allowed" });
     expect(await markExpected(deps, A, { actor: person(), repository: REPO, number: 99, signalKey: KEY })).toEqual({ kind: "refused", reason: "not_found" });
     expect(await markExpected(deps, A, { actor: person(), repository: REPO, number: 7, signalKey: "nope" })).toEqual({ kind: "refused", reason: "invalid_request" });
     expect(await markExpected(deps, A, { actor: person(), repository: "payments", number: 7, signalKey: KEY })).toEqual({ kind: "refused", reason: "invalid_request" });
@@ -593,6 +598,9 @@ describe("the revert offer", () => {
     expect(await pressRevert(world.deps(A), A, { actor: person(), repository: REPO, number: 7 })).toEqual({ kind: "started", taskId: "revert-task-7" });
     expect(world.starts).toHaveLength(1);
     expect(world.audit.events).toHaveLength(1);
+    expect(world.attempts).toHaveLength(2);
+    expect(world.attempts[0]!.requestId).toMatch(/^[0-9a-f]{64}$/u);
+    expect(world.attempts[1]!.requestId).toBe(world.attempts[0]!.requestId);
   });
 
   it("is refused while no alarm is unexpected, in report_only mode, and for a person without standing", async () => {
@@ -602,7 +610,7 @@ describe("the revert offer", () => {
     world.clock.ms = T0 + minutes(5);
     await observeSignal(world.deps(A), A, alarm());
     expect(await pressRevert(world.deps(A), A, { actor: person("stranger"), repository: REPO, number: 7 })).toEqual({ kind: "refused", reason: "not_allowed" });
-    expect(await pressRevert(world.deps(A), A, { actor: { type: "system", personId: "person-1" } as never, repository: REPO, number: 7 })).toEqual({ kind: "refused", reason: "not_allowed" });
+    expect(await pressRevert(world.deps(A), A, { actor: { type: "system", personId: "person-1" }, repository: REPO, number: 7 })).toEqual({ kind: "refused", reason: "not_allowed" });
     world.configure(A, { settings: { enabled: true, environments: ["staging"], revert: "report_only" } });
     expect(await pressRevert(world.deps(A), A, { actor: person(), repository: REPO, number: 7 })).toEqual({ kind: "refused", reason: "not_offered" });
     expect(await pressRevert(world.deps(A), A, { actor: person(), repository: REPO, number: 99 })).toEqual({ kind: "refused", reason: "not_found" });
@@ -705,19 +713,217 @@ describe("two companies never touch each other's watches", () => {
   });
 });
 
+describe("guards that only a race or a lying neighbour reaches", () => {
+  it("a task reader that answers another company's task is not believed", async () => {
+    const world = createWorld();
+    await world.seedMerge(A, { taskId: "task-7", number: 7, url: URL7, sha: SHA });
+    const deps = { ...world.deps(A), tasks: { read: async (_org: OrgId, taskId: string) => ({ taskId, orgId: B, project: PROJECT }) } };
+    expect(await observeDeployment(deps, A, deploy())).toEqual({ kind: "ignored", reason: "not_ours" });
+    const other = { ...world.deps(A), tasks: { read: async () => ({ taskId: "someone-else", orgId: A, project: PROJECT }) } };
+    expect(await observeDeployment(other, A, deploy())).toEqual({ kind: "ignored", reason: "not_ours" });
+  });
+
+  it("an open watch whose own row names another project is not given the alarm", async () => {
+    const world = createWorld();
+    await opened(world);
+    const [row] = (await world.store.query({ pk: `ORG#${A}#AFTER_MERGE`, sk: { op: "beginsWith", prefix: "WATCH#" } })).items;
+    await world.store.put({ item: { ...row!, project: "another-project" } });
+    world.clock.ms = T0 + minutes(5);
+    expect(await observeSignal(world.deps(A), A, alarm())).toEqual({ kind: "ignored", reason: "no_open_watch" });
+  });
+
+  it("marking an alarm nobody saw is refused", async () => {
+    const world = createWorld();
+    await opened(world);
+    expect(await markExpected(world.deps(A), A, { actor: person(), repository: REPO, number: 7, signalKey: "a".repeat(64) })).toEqual({ kind: "refused", reason: "not_found" });
+    expect((await world.store.query({ pk: `ORG#${A}#AFTER_MERGE`, sk: { op: "beginsWith", prefix: "EXPECTED#" } })).items).toEqual([]);
+  });
+
+  /** A store whose first read of a key family answers "nothing there" (a read that lost a race with a writer). */
+  const staleFirstRead = (world: World, prefix: string): MemoryDocumentStore => {
+    let stale = true;
+    return new Proxy(world.store, {
+      get(target, name) {
+        const value = Reflect.get(target, name, target) as unknown;
+        if (name !== "get") return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+        return async (key: { pk: string; sk: string }) => { if (stale && key.sk.startsWith(prefix)) { stale = false; return undefined; } return target.get(key); };
+      },
+    });
+  };
+
+  it("two presses of It's expected racing: the one that lost the write answers already, and one row and one audit row remain", async () => {
+    const world = createWorld();
+    await opened(world);
+    world.clock.ms = T0 + minutes(5);
+    await observeSignal(world.deps(A), A, alarm());
+    expect(await markExpected(world.deps(A), A, { actor: person(), repository: REPO, number: 7, signalKey: KEY, reason: "first" })).toEqual({ kind: "recorded" });
+    const racing = { ...world.deps(A), store: staleFirstRead(world, "EXPECTED#") };
+    expect(await markExpected(racing, A, { actor: person(), repository: REPO, number: 7, signalKey: KEY, reason: "second" })).toEqual({ kind: "already" });
+    const rows = (await world.store.query({ pk: `ORG#${A}#AFTER_MERGE`, sk: { op: "beginsWith", prefix: "EXPECTED#" } })).items;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ reason: "first" });
+    expect((await world.store.query({ pk: `AUDIT_FAKE#${A}` })).items).toHaveLength(1);
+  });
+
+  it("two presses of Revert racing: the loser does not overwrite the claim and the starter is asked once under one request id", async () => {
+    const world = createWorld();
+    world.configure(A, { people: ["person-1", "person-2"] });
+    await opened(world);
+    world.clock.ms = T0 + minutes(5);
+    await observeSignal(world.deps(A), A, alarm());
+    world.state.startFails = 1;
+    expect(await pressRevert(world.deps(A), A, { actor: person("person-1"), repository: REPO, number: 7 })).toEqual({ kind: "failed" });
+    const racing = { ...world.deps(A), store: staleFirstRead(world, "REVERT#") };
+    expect(await pressRevert(racing, A, { actor: person("person-2"), repository: REPO, number: 7 })).toEqual({ kind: "started", taskId: "revert-task-7" });
+    const [row] = (await world.store.query({ pk: `ORG#${A}#AFTER_MERGE`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items;
+    expect(row).toMatchObject({ requestedBy: "person-1", state: "started" });
+    expect(new Set(world.attempts.map((attempt) => attempt.requestId)).size).toBe(1);
+    expect(world.starts).toHaveLength(1);
+  });
+});
+
 describe("limits", () => {
-  it("reads the open watches of a project within one total bound and refuses beyond it, never half of them", async () => {
+  it("reads the open watches of a project within one total bound: exactly the bound works, one more is refused whole and says so", async () => {
     const world = createWorld();
     world.configure(A, { settings: { enabled: true } });
-    // 205 open watches for one project: one more than the sweep reads in total.
-    for (let i = 0; i < 205; i += 1) {
+    const deps = { ...world.deps(A), limits: { openWatchesMax: 3 } };
+    for (let i = 0; i < 3; i += 1) {
       const sha = i.toString(16).padStart(40, "0");
       await world.seedMerge(A, { taskId: `t${String(i)}`, number: i + 1, url: `https://github.com/acme/payments/pull/${String(i + 1)}`, sha });
-      await observeDeployment(world.deps(A), A, deploy({ revision: sha, environment: "e" }));
+      await observeDeployment(deps, A, deploy({ revision: sha, environment: "e" }));
     }
     world.clock.ms = T0 + minutes(5);
-    expect(await observeSignal(world.deps(A), A, alarm())).toEqual({ kind: "unavailable" });
+    expect(await observeSignal(deps, A, alarm())).toMatchObject({ kind: "recorded", watches: 3, reported: 3 });
+    const sha = "f".repeat(40);
+    await world.seedMerge(A, { taskId: "t9", number: 9, url: "https://github.com/acme/payments/pull/9", sha });
+    await observeDeployment(deps, A, deploy({ revision: sha, environment: "e" }));
+    world.reports.length = 0;
+    expect(await observeSignal(deps, A, alarm({ eventKey: "again", subject: { kind: "alert", id: "Other", title: "Other" } }))).toEqual({ kind: "unavailable" });
     expect(world.reports).toEqual([]);
     expect(world.logs.map((entry) => entry.event)).toContain("after_merge.too_many_rows");
+  });
+
+  it("a sweep pages past due watches of switched-off projects, so they never block an enabled project", async () => {
+    const world = createWorld();
+    // Two project names whose open rows sort the off project first.
+    const names = ["p-a", "p-b", "p-c", "p-d", "p-e", "p-f"];
+    const sorted = [...names].sort((x, y) => openKey(A, x, REPO, 1, "e").sk.localeCompare(openKey(A, y, REPO, 1, "e").sk));
+    const [off, on] = [sorted[0]!, sorted[sorted.length - 1]!];
+    const state = { offActive: false };
+    world.configure(A, { settingsFor: (project) => (project === off && state.offActive ? { enabled: false } : { enabled: true }) });
+    for (let i = 0; i < 101; i += 1) {
+      const sha = (i + 1).toString(16).padStart(40, "0");
+      await world.seedMerge(A, { taskId: `off${String(i)}`, number: i + 1, url: `https://github.com/acme/payments/pull/${String(i + 1)}`, sha, project: off });
+      await observeDeployment(world.deps(A), A, deploy({ revision: sha, environment: "e" }));
+    }
+    const shaOn = "a".repeat(40);
+    await world.seedMerge(A, { taskId: "on1", number: 500, url: "https://github.com/acme/payments/pull/500", sha: shaOn, project: on });
+    await observeDeployment(world.deps(A), A, deploy({ revision: shaOn, environment: "e" }));
+    state.offActive = true;
+    world.clock.ms = T0 + minutes(31);
+    const swept = await closeDueWatches(world.deps(A), A);
+    expect(swept.closed).toBe(1);
+    expect(world.reportsOf(A).map((report) => report.taskId)).toEqual(["on1"]);
+  });
+
+  it("a report skipped while its project was off is sent once the project is on again", async () => {
+    const world = createWorld();
+    await opened(world);
+    world.clock.ms = T0 + minutes(5);
+    world.state.reportFailures = 1;
+    await observeSignal(world.deps(A), A, alarm());
+    world.configure(A, { settings: { enabled: false } });
+    expect(await closeDueWatches(world.deps(A), A)).toMatchObject({ delivered: 0 });
+    world.configure(A, {});
+    world.clock.ms = T0 + minutes(6);
+    expect(await closeDueWatches(world.deps(A), A)).toMatchObject({ delivered: 1 });
+    expect(world.reportsOf(A)).toHaveLength(1);
+  });
+
+  it("a healthy line that could not be sent when the watch closed is sent by the next sweep, once", async () => {
+    const world = createWorld();
+    await opened(world);
+    world.clock.ms = T0 + minutes(31);
+    world.state.reportFailures = 2; // the send at close fails, and so does the retry in the same sweep
+    expect(await closeDueWatches(world.deps(A), A)).toMatchObject({ closed: 1, delivered: 0 });
+    expect(world.reports).toEqual([]);
+    expect(await closeDueWatches(world.deps(A), A)).toMatchObject({ closed: 0, delivered: 1 });
+    expect(await closeDueWatches(world.deps(A), A)).toMatchObject({ delivered: 0 });
+    expect(world.reportsOf(A).map((report) => report.kind)).toEqual(["healthy"]);
+  });
+
+  it("an alarm that lands between the sweep's read and its close keeps the watch from closing as healthy", async () => {
+    const world = createWorld();
+    await opened(world);
+    world.clock.ms = T0 + minutes(31);
+    const real = world.deps(A);
+    let fired = false;
+    const store = new Proxy(world.store, {
+      get(target, name) {
+        if (name !== "query") { const value = Reflect.get(target, name, target) as unknown; return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value; }
+        return async (request: { sk?: { prefix?: string } }) => {
+          const page = await target.query(request as never);
+          if (!fired && request.sk?.prefix?.startsWith("ALARM#") === true) { fired = true; await observeSignal(real, A, alarm({ occurredAt: at(minutes(29)) })); }
+          return page;
+        };
+      },
+    });
+    // The alarm is recorded at minute 29 (inside the window) but after the sweep read the alarm rows.
+    expect(await closeDueWatches({ ...real, store, now: () => new Date(T0 + minutes(31)) }, A)).toMatchObject({ closed: 0 });
+    expect(world.reportsOf(A).map((report) => report.kind)).toEqual(["alarm"]);
+    expect(await closeDueWatches(world.deps(A), A)).toMatchObject({ closed: 1 });
+    expect(world.reportsOf(A).map((report) => report.kind)).toEqual(["alarm"]);
+  });
+
+  it("a task reader that throws gives `unavailable` and no text from the failure", async () => {
+    const world = createWorld();
+    await world.seedMerge(A, { taskId: "task-7", number: 7, url: URL7, sha: SHA });
+    const deps = { ...world.deps(A), tasks: { read: async () => { throw new Error("host canary-secret"); } } };
+    expect(await observeDeployment(deps, A, deploy())).toEqual({ kind: "unavailable" });
+    expect(JSON.stringify(world.logs)).not.toContain("canary-secret");
+  });
+
+  it("a row at the right key whose own fields name another key is not read", async () => {
+    const world = createWorld();
+    await opened(world);
+    const [row] = (await world.store.query({ pk: `ORG#${A}#AFTER_MERGE`, sk: { op: "beginsWith", prefix: "WATCH#" } })).items;
+    await world.store.put({ item: { ...row!, number: 99 } });
+    world.clock.ms = T0 + minutes(5);
+    expect(await observeSignal(world.deps(A), A, alarm())).toEqual({ kind: "ignored", reason: "no_open_watch" });
+  });
+
+  it("a second person's retry press after a failed start is audited, and the starter keeps the first requester", async () => {
+    const world = createWorld();
+    world.configure(A, { people: ["person-1", "person-2"] });
+    await opened(world);
+    world.clock.ms = T0 + minutes(5);
+    await observeSignal(world.deps(A), A, alarm());
+    world.state.startFails = 1;
+    expect(await pressRevert(world.deps(A), A, { actor: person("person-1"), repository: REPO, number: 7 })).toEqual({ kind: "failed" });
+    expect(await pressRevert(world.deps(A), A, { actor: person("person-2"), repository: REPO, number: 7 })).toEqual({ kind: "started", taskId: "revert-task-7" });
+    expect(world.starts).toHaveLength(1);
+    expect(world.starts[0]!.requestedBy).toBe("person-1");
+    const committed = (await world.store.query({ pk: `AUDIT_FAKE#${A}` })).items.map((row) => row["action"]).sort();
+    expect(committed).toEqual(["after_merge.revert_requested", "after_merge.revert_retried"]);
+  });
+
+  it("the starter is called by a person's press and by nothing else (positive control)", async () => {
+    const world = createWorld();
+    await opened(world);
+    world.clock.ms = T0 + minutes(5);
+    await observeSignal(world.deps(A), A, alarm());
+    await markExpected(world.deps(A), A, { actor: person(), repository: REPO, number: 7, signalKey: KEY });
+    world.clock.ms = T0 + minutes(40);
+    await closeDueWatches(world.deps(A), A);
+    expect(world.starts).toEqual([]);
+    await observeSignal(world.deps(A), A, alarm({ eventKey: "z", subject: { kind: "alert", id: "Other", title: "Other" }, occurredAt: at(minutes(5)) }));
+    // The watch is closed, so the second alarm finds nothing; reopen a fresh watch for a real, unexpected alarm and press.
+    await world.seedMerge(A, { taskId: "task-8", number: 8, url: URL8, sha: SHA2 });
+    world.clock.ms = T0 + minutes(41);
+    await observeDeployment(world.deps(A), A, deploy({ revision: SHA2 }));
+    await observeSignal(world.deps(A), A, alarm({ eventKey: "q", occurredAt: at(minutes(42)) }));
+    expect(world.starts).toEqual([]);
+    expect(await pressRevert(world.deps(A), A, { actor: person(), repository: REPO, number: 8 })).toMatchObject({ kind: "started" });
+    expect(world.starts).toHaveLength(1);
   });
 });

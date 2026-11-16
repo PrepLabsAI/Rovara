@@ -47,11 +47,14 @@ export const allPending = (orgId: OrgId): { pk: string; prefix: string } => ({ p
 export const pendingKey = (orgId: OrgId, kind: "watch" | "alarm", repository: string, number: number, environment: string, signalKey: string): DocumentKey =>
   ({ pk: queuePartition(orgId), sk: `PENDING#${kind}#${repository}#${numberKey(number)}#${hashed(environment)}#${signalKey}` });
 
+/** `{ [attribute]: value }`, for spreading into a row: the one place the expiry attribute's name is computed. */
+export const expiring = (attribute: string, value: number): Record<string, number> => ({ [attribute]: value });
+
 /** The expiry attribute value for a row kept `days` after `fromMs`. */
 export const expiryOf = (fromMs: number, days: number): number => Math.floor(fromMs / 1_000) + days * DAY_SECONDS;
 
 const text = (max: number) => z.string().min(1).max(max);
-const base = { pk: z.string(), sk: z.string(), orgId: z.string() };
+const base = { orgId: z.string() };
 const watchShape = {
   ...base, entityType: z.literal(WATCH_ENTITY), taskId: text(200), project: text(200), repository: text(201), repositoryId: text(200), number: z.number().int().positive(), url: text(300),
   revision: text(128), environment: text(64), source: z.enum(["code_host", "ci_import"]), state: z.enum(["open", "closed"]), outcome: z.enum(["healthy", "alarm", "deploy_failed"]).optional(),
@@ -79,13 +82,13 @@ export const PendingRowSchema = z.looseObject({ ...base, entityType: z.literal(Q
 export type PendingRow = z.infer<typeof PendingRowSchema>;
 
 /** The row as the schema reads it, only when it names this company and its own key; anything else is not a row of ours. */
-function readRow<Schema extends z.ZodType<{ orgId: string; pk: string; sk: string }>>(schema: Schema, stored: StoredDocument | undefined, orgId: OrgId, key: (row: z.infer<Schema>) => DocumentKey | undefined): z.infer<Schema> | undefined {
+function readRow<Schema extends z.ZodType<{ orgId: string }>>(schema: Schema, stored: StoredDocument | undefined, orgId: OrgId, key: (row: z.infer<Schema>) => DocumentKey | undefined): z.infer<Schema> | undefined {
   if (stored === undefined) return undefined;
   const parsed = schema.safeParse(stored);
   if (!parsed.success) return undefined;
-  const row = parsed.data as z.infer<Schema>;
+  const row = parsed.data;
   const expected = key(row);
-  return row.orgId === orgId && expected !== undefined && expected.pk === row.pk && expected.sk === row.sk ? row : undefined;
+  return row.orgId === orgId && expected !== undefined && expected.pk === stored.pk && expected.sk === stored.sk ? row : undefined;
 }
 
 export const readWatch = (stored: StoredDocument | undefined, orgId: OrgId): WatchRow | undefined => readRow(WatchRowSchema, stored, orgId, (row) => watchKey(orgId, row.repository, row.number, row.environment));

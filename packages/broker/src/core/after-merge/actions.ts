@@ -11,7 +11,7 @@ import { readBounded } from "./bounded.js";
 import { SIGNAL_KEY, isRepositoryName } from "./facts.js";
 import type { AfterMergeActionDeps, AfterMergeSettings } from "./ports.js";
 import {
-  ALARMS_PER_WATCH_MAX, EXPECTED_ENTITY, EXPECTED_KEPT_DAYS, REVERT_ENTITY, alarmsOfPullRequest, expectedKey, expiryOf, readAlarm, readExpected, readRevert, readWatch, revertKey, watchesOfPullRequest, type WatchRow,
+  ALARMS_PER_WATCH_MAX, EXPECTED_ENTITY, EXPECTED_KEPT_DAYS, expiring, REVERT_ENTITY, alarmsOfPullRequest, expectedKey, expiryOf, readAlarm, readExpected, readRevert, readWatch, revertKey, watchesOfPullRequest, type WatchRow,
 } from "./records.js";
 import { afterMergeSettingsOf } from "./settings.js";
 import { guarded, ttlAttributeOf } from "./watch.js";
@@ -54,7 +54,7 @@ async function standing(deps: AfterMergeActionDeps, orgId: OrgId, input: { actor
   if (watch === undefined) return refuse("not_found");
   const settings = await afterMergeSettingsOf(deps.settings, orgId, watch.project);
   if (settings === undefined) return refuse("off");
-  let allowed = false;
+  let allowed: boolean;
   try {
     allowed = await deps.authority.mayAct(orgId, actor.personId, { taskId: watch.taskId, project: watch.project }) === true;
   } catch {
@@ -87,6 +87,7 @@ export async function markExpected(deps: AfterMergeActionDeps, orgId: OrgId, inp
     // Only an alarm this pull request has seen can be marked expected: no row is made for a key nobody sent.
     const seen = (await readBounded(deps.store, alarmsOfPullRequest(orgId, watch.repository, watch.number), WATCHES_PER_PULL_REQUEST_MAX * ALARMS_PER_WATCH_MAX)).some((stored) => readAlarm(stored, orgId)?.signalKey === signalKey);
     if (!seen) return refuse("not_found");
+    if (readExpected(await deps.store.get(expectedKey(orgId, watch.repository, watch.number, signalKey)), orgId) !== undefined) return { kind: "already" };
     const now = deps.now().toISOString();
     const audit = await stagedAudit(deps, {
       eventId: hex("after_merge.expected", orgId, watch.repository, String(watch.number), signalKey), companyId: orgId, at: now, actor: { type: "person", id: personId }, action: "after_merge.expected",
@@ -95,12 +96,12 @@ export async function markExpected(deps: AfterMergeActionDeps, orgId: OrgId, inp
     if (audit === "unavailable") return { kind: "unavailable" };
     const row: StoredDocument = {
       ...expectedKey(orgId, watch.repository, watch.number, signalKey), entityType: EXPECTED_ENTITY, orgId, taskId: watch.taskId, repository: watch.repository, number: watch.number, signalKey, personId, at: now,
-      ...(reason === undefined ? {} : { reason }), [ttlAttributeOf(deps.store)]: expiryOf(deps.now().getTime(), EXPECTED_KEPT_DAYS),
+      ...(reason === undefined ? {} : { reason }), ...expiring(ttlAttributeOf(deps.store), expiryOf(deps.now().getTime(), EXPECTED_KEPT_DAYS)),
     };
     const written = await deps.store.transact([{ kind: "put", item: row, condition: when.absent() }, ...audit]);
     if (written.applied) return { kind: "recorded" };
-    // Only a lost condition on the press itself (step 0) means it was already recorded; any other lost step (the audit's) means nothing was written.
-    return written.failed.length === 1 && written.failed[0] === 0 ? { kind: "already" } : { kind: "unavailable" };
+    // A lost condition on the press itself (step 0) means it was already recorded (whatever the audit step did); only the audit's step failing alone means nothing was written.
+    return written.failed.includes(0) ? { kind: "already" } : { kind: "unavailable" };
   });
   return result === "unavailable" ? { kind: "unavailable" } : result;
 }
@@ -130,7 +131,7 @@ export async function pressRevert(deps: AfterMergeActionDeps, orgId: OrgId, inpu
       if (audit === "unavailable") return { kind: "unavailable" };
       const claim: StoredDocument = {
         ...key, entityType: REVERT_ENTITY, orgId, taskId: watch.taskId, repository: watch.repository, number: watch.number, url: watch.url, mergeCommit, requestId, requestedBy: personId, requestedAt: now.toISOString(),
-        state: "starting", [ttlAttributeOf(deps.store)]: expiryOf(now.getTime(), EXPECTED_KEPT_DAYS),
+        state: "starting", ...expiring(ttlAttributeOf(deps.store), expiryOf(now.getTime(), EXPECTED_KEPT_DAYS)),
       };
       const written = await deps.store.transact([{ kind: "put", item: claim, condition: when.absent() }, ...audit]);
       if (!written.applied) {
@@ -140,8 +141,19 @@ export async function pressRevert(deps: AfterMergeActionDeps, orgId: OrgId, inpu
         if (row.state === "started" && row.revertTaskId !== undefined) return { kind: "already_started", taskId: row.revertTaskId };
       }
     }
+    if (row !== undefined && row.requestedBy !== personId) {
+      // A different person pressing again after a failed start: the press that reaches the starter is audited too (the claim row must still be the one read).
+      const retryAt = deps.now().toISOString();
+      const retry = await stagedAudit(deps, {
+        eventId: hex("after_merge.revert_retried", requestId, personId, retryAt), companyId: orgId, at: retryAt, actor: { type: "person", id: personId }, action: "after_merge.revert_retried",
+        subject: { type: "change_request", id: `${watch.repository}#${String(watch.number)}` }, details: { repository: watch.repository, number: watch.number, taskId: watch.taskId, mergeCommit },
+      });
+      if (retry === "unavailable") return { kind: "unavailable" };
+      const checked = await deps.store.transact([{ kind: "check", key, condition: when.and(when.eq("orgId", orgId), when.eq("state", "starting")) }, ...retry]);
+      if (!checked.applied) return { kind: "unavailable" };
+    }
     try {
-      const started = await deps.starter.start({ requestId, orgId, taskId: watch.taskId, repository: watch.repository, number: watch.number, url: watch.url, mergeCommit, requestedBy: personId });
+      const started = await deps.starter.start({ requestId, orgId, taskId: watch.taskId, repository: watch.repository, number: watch.number, url: watch.url, mergeCommit, requestedBy: row?.requestedBy ?? personId });
       if (typeof started?.taskId !== "string" || started.taskId.length === 0 || started.taskId.length > 200) throw new Error("no task");
       await deps.store.update({ key, ops: [{ op: "set", path: ["state"], value: "started" }, { op: "set", path: ["revertTaskId"], value: started.taskId }], condition: when.and(when.eq("orgId", orgId), when.eq("state", "starting")) });
       return { kind: "started", taskId: started.taskId };
@@ -157,7 +169,13 @@ export async function pressRevert(deps: AfterMergeActionDeps, orgId: OrgId, inpu
 async function hasUnexpectedAlarm(store: DocumentStore, orgId: OrgId, watch: WatchRow): Promise<boolean> {
   const alarms = (await readBounded(store, alarmsOfPullRequest(orgId, watch.repository, watch.number), WATCHES_PER_PULL_REQUEST_MAX * ALARMS_PER_WATCH_MAX)).map((stored) => readAlarm(stored, orgId)).filter((row) => row !== undefined);
   if (alarms.length === 0) return false;
-  const expected = await store.getMany([...new Set(alarms.map((alarm) => alarm.signalKey))].slice(0, 100).map((signalKey) => expectedKey(orgId, watch.repository, watch.number, signalKey)));
-  const silenced = new Set(expected.map((stored) => readExpected(stored, orgId)?.signalKey).filter((value): value is string => value !== undefined));
+  const keys = [...new Set(alarms.map((alarm) => alarm.signalKey))].map((signalKey) => expectedKey(orgId, watch.repository, watch.number, signalKey));
+  const silenced = new Set<string>();
+  for (let from = 0; from < keys.length; from += 100) {
+    for (const stored of await store.getMany(keys.slice(from, from + 100))) {
+      const signal = readExpected(stored, orgId)?.signalKey;
+      if (signal !== undefined) silenced.add(signal);
+    }
+  }
   return alarms.some((alarm) => !silenced.has(alarm.signalKey));
 }

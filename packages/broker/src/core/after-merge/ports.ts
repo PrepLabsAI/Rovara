@@ -31,7 +31,7 @@ export interface AfterMergeSettings {
   windowMinutes: number;
   /** Environment names that count, compared without case. Empty: every environment counts. */
   environments: readonly string[];
-  /** `report_only` says what happened; `offer_revert` also offers the revert and the "It's expected" press (the policy field `after_merge_revert`). */
+  /** `report_only` says what happened and offers the "It's expected" press; `offer_revert` also offers the revert (the policy field `after_merge_revert`). */
   revert: "report_only" | "offer_revert";
 }
 /** The project's `afterMergeWatch` setting as the host stores it. Read live on every use; the value is untrusted until `afterMergeSettingsOf` has checked it. */
@@ -73,6 +73,8 @@ export interface AfterMergeDeps {
   settings?: AfterMergeSettingsReader | undefined;
   reporter: AfterMergeReporter;
   now: () => Date;
+  /** Test and host tuning of the bounds; absent: the defaults in watch.ts. */
+  limits?: { openWatchesMax?: number } | undefined;
   /** Fixed words and counts only. */
   log?: AfterMergeLog | undefined;
 }

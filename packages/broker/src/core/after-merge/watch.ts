@@ -11,12 +11,12 @@ import { createHash } from "node:crypto";
 import { DocumentStoreError, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, change, when, type DocumentStore, type OrgId, type StoredDocument, type TransactItem } from "@agentx/contracts";
 import { findMergeCommit } from "../proof/revert/merge-commit-index.js";
 import { inertLine } from "../proof/inert-text.js";
-import { PAGES_MAX, TooManyRows, readBounded } from "./bounded.js";
+import { PAGES_MAX, TooManyRows, pageOf, readBounded } from "./bounded.js";
 import { parseDeployFact, readAlarm } from "./facts.js";
 import type { AfterMergeDeps, AfterMergeReport, AfterMergeSettings } from "./ports.js";
 import {
-  ALARMS_PER_WATCH_MAX, ALARM_ENTITY, QUEUE_ENTITY, WATCH_ENTITY, WATCH_KEPT_DAYS, alarmKey, alarmsOfWatch, allOpen, allPending, expectedKey, expiryOf, openKey, openOfProject, pendingKey, readAlarm as readAlarmRow,
-  readExpected, readOpen, readPending, readWatch, watchKey, type AlarmRow, type PendingRow, type WatchRow,
+  ALARMS_PER_WATCH_MAX, ALARM_ENTITY, QUEUE_ENTITY, expiring, WATCH_ENTITY, WATCH_KEPT_DAYS, alarmKey, alarmsOfWatch, allOpen, allPending, expectedKey, expiryOf, openKey, openOfProject, pendingKey, readAlarm as readAlarmRow,
+  readExpected, readOpen, readPending, readWatch, watchKey, WatchRowSchema, type AlarmRow, type PendingRow, type WatchRow,
 } from "./records.js";
 import { afterMergeSettingsOf } from "./settings.js";
 
@@ -75,7 +75,13 @@ export async function observeDeployment(deps: AfterMergeDeps, orgId: OrgId, inpu
   const result = await guarded(deps, async (): Promise<DeploymentOutcome> => {
     const merge = await findMergeCommit(deps.store, { orgId, repositoryFullName: fact.repository, sha: fact.revision });
     if (merge === undefined) return { kind: "ignored", reason: "not_ours" };
-    const task = await deps.tasks.read(orgId, merge.taskId);
+    let task: Awaited<ReturnType<AfterMergeDeps["tasks"]["read"]>>;
+    try {
+      task = await deps.tasks.read(orgId, merge.taskId);
+    } catch {
+      deps.log?.("after_merge.task_unavailable", { level: "warn" });
+      return { kind: "unavailable" };
+    }
     if (task === undefined || task.orgId !== orgId || task.taskId !== merge.taskId) return { kind: "ignored", reason: "not_ours" };
     const settings = await afterMergeSettingsOf(deps.settings, orgId, task.project);
     if (settings === undefined) return { kind: "off" };
@@ -89,11 +95,13 @@ export async function observeDeployment(deps: AfterMergeDeps, orgId: OrgId, inpu
     const row: StoredDocument = {
       ...key, entityType: WATCH_ENTITY, orgId, taskId: merge.taskId, project: task.project, repository: fact.repository, repositoryId: merge.repositoryId, number: merge.number, url: merge.url, revision: fact.revision,
       environment: fact.environment, source: fact.source, state: failed ? "closed" : "open", ...(failed ? { outcome: "deploy_failed", closedAt: new Date(nowMs).toISOString(), reportPending: true } : {}),
-      openedAt: new Date(nowMs).toISOString(), windowEndsAt: new Date(windowEndsMs).toISOString(), windowMinutes: settings.windowMinutes, alarmCount: 0, [ttl]: expiryOf(windowEndsMs, WATCH_KEPT_DAYS),
+      openedAt: new Date(nowMs).toISOString(), windowEndsAt: new Date(windowEndsMs).toISOString(), windowMinutes: settings.windowMinutes, alarmCount: 0, ...expiring(ttl, expiryOf(windowEndsMs, WATCH_KEPT_DAYS)),
     };
+    // A row this code could not read back is never written (a merge record with an odd link or number).
+    if (!WatchRowSchema.safeParse(row).success) return { kind: "ignored", reason: "not_ours" };
     const items: TransactItem[] = [{ kind: "put", item: row, condition: when.absent() }];
     if (failed) items.push(pendingItem(orgId, "watch", fact.repository, merge.number, fact.environment, "-", ttl, nowMs));
-    else items.push({ kind: "put", item: { ...openKey(orgId, task.project, fact.repository, merge.number, fact.environment), entityType: QUEUE_ENTITY, queue: "open", orgId, project: task.project, repository: fact.repository, number: merge.number, environment: fact.environment, windowEndsAtMs: windowEndsMs, [ttl]: expiryOf(windowEndsMs, 1) } });
+    else items.push({ kind: "put", item: { ...openKey(orgId, task.project, fact.repository, merge.number, fact.environment), entityType: QUEUE_ENTITY, queue: "open", orgId, project: task.project, repository: fact.repository, number: merge.number, environment: fact.environment, windowEndsAtMs: windowEndsMs, ...expiring(ttl, expiryOf(windowEndsMs, WATCH_KEPT_DAYS)) } });
     const written = await deps.store.transact(items);
     if (!written.applied) return { kind: "already_watched" };
     if (failed) {
@@ -108,7 +116,7 @@ export async function observeDeployment(deps: AfterMergeDeps, orgId: OrgId, inpu
 // ---- the queue of reports
 
 function pendingItem(orgId: OrgId, kind: "watch" | "alarm", repository: string, number: number, environment: string, signalKey: string, ttl: string, nowMs: number): TransactItem {
-  return { kind: "put", item: { ...pendingKey(orgId, kind, repository, number, environment, signalKey), entityType: QUEUE_ENTITY, queue: "pending", orgId, kind, repository, number, environment, signalKey, [ttl]: expiryOf(nowMs, WATCH_KEPT_DAYS) } };
+  return { kind: "put", item: { ...pendingKey(orgId, kind, repository, number, environment, signalKey), entityType: QUEUE_ENTITY, queue: "pending", orgId, kind, repository, number, environment, signalKey, ...expiring(ttl, expiryOf(nowMs, WATCH_KEPT_DAYS)) } };
 }
 function pendingRowOf(orgId: OrgId, kind: "watch" | "alarm", repository: string, number: number, environment: string, signalKey: string): PendingRow {
   const key = pendingKey(orgId, kind, repository, number, environment, signalKey);
@@ -131,27 +139,29 @@ function reportOf(kind: "healthy" | "alarm" | "deploy_failed", row: { taskId: st
  * person marked expected meanwhile is cleared without being sent. A reporter that fails leaves it pending, with a fixed code in the log and no text from the failure.
  */
 export async function deliverPending(deps: AfterMergeDeps, orgId: OrgId, pending: PendingRow): Promise<Delivery> {
-  const queueKey = { pk: pending.pk, sk: pending.sk };
+  const queueKey = pendingKey(orgId, pending.kind, pending.repository, pending.number, pending.environment, pending.signalKey);
   const drop = async (): Promise<Delivery> => { await deps.store.delete({ key: queueKey }); return "cleared"; };
   if (pending.kind === "watch") {
     const watch = readWatch(await deps.store.get(watchKey(orgId, pending.repository, pending.number, pending.environment)), orgId);
     if (watch === undefined || watch.reportPending !== true || (watch.outcome !== "healthy" && watch.outcome !== "deploy_failed")) return drop();
     if (await afterMergeSettingsOf(deps.settings, orgId, watch.project) === undefined) return "skipped";
-    const reportId = hex("after_merge.report", watch.pk, watch.sk, watch.outcome);
+    const thisKey = watchKey(orgId, watch.repository, watch.number, watch.environment);
+    const reportId = hex("after_merge.report", thisKey.pk, thisKey.sk, watch.outcome);
     const environment = WORDS(watch.environment);
     const text = watch.outcome === "healthy" ? `Deployed to ${environment}, healthy for ${String(watch.windowMinutes)} min.` : `Deploy to ${environment} failed.`;
-    return send(deps, orgId, reportOf(watch.outcome, watch, reportId, { text, revert: false, expected: false }), { key: { pk: watch.pk, sk: watch.sk }, queueKey });
+    return send(deps, orgId, reportOf(watch.outcome, watch, reportId, { text, revert: false, expected: false }), { key: watchKey(orgId, watch.repository, watch.number, watch.environment), queueKey });
   }
   const alarm = readAlarmRow(await deps.store.get(alarmKey(orgId, pending.repository, pending.number, pending.environment, pending.signalKey)), orgId);
   if (alarm === undefined || alarm.reportPending !== true) return drop();
   if (await afterMergeSettingsOf(deps.settings, orgId, alarm.project) === undefined) return "skipped";
   if (readExpected(await deps.store.get(expectedKey(orgId, alarm.repository, alarm.number, alarm.signalKey)), orgId) !== undefined) {
-    await clear(deps, { pk: alarm.pk, sk: alarm.sk }, queueKey);
+    await clear(deps, alarmKey(orgId, alarm.repository, alarm.number, alarm.environment, alarm.signalKey), queueKey);
     return "cleared";
   }
-  const reportId = hex("after_merge.report", alarm.pk, alarm.sk, "alarm");
+  const thisKey = alarmKey(orgId, alarm.repository, alarm.number, alarm.environment, alarm.signalKey);
+  const reportId = hex("after_merge.report", thisKey.pk, thisKey.sk, "alarm");
   const text = `Alarm after deploy to ${WORDS(alarm.environment)}: ${alarm.label}.`;
-  return send(deps, orgId, reportOf("alarm", alarm, reportId, { text, signalKey: alarm.signalKey, revert: alarm.revertOffered, expected: alarm.expectedOffered }), { key: { pk: alarm.pk, sk: alarm.sk }, queueKey });
+  return send(deps, orgId, reportOf("alarm", alarm, reportId, { text, signalKey: alarm.signalKey, revert: alarm.revertOffered, expected: alarm.expectedOffered }), { key: alarmKey(orgId, alarm.repository, alarm.number, alarm.environment, alarm.signalKey), queueKey });
 }
 
 async function clear(deps: AfterMergeDeps, key: { pk: string; sk: string }, queueKey: { pk: string; sk: string }): Promise<void> {
@@ -189,7 +199,7 @@ export async function observeSignal(deps: AfterMergeDeps, orgId: OrgId, input: u
   const nowMs = deps.now().getTime();
   if (alarm.occurredAtMs > nowMs + FUTURE_SKEW_MS) return { kind: "ignored", reason: "no_open_watch" };
   const result = await guarded(deps, async (): Promise<SignalOutcome> => {
-    const open = (await readBounded(deps.store, openOfProject(orgId, alarm.project), OPEN_WATCHES_MAX)).map((row) => readOpen(row, orgId)).filter((row): row is NonNullable<typeof row> => row !== undefined && row.project === alarm.project);
+    const open = (await readBounded(deps.store, openOfProject(orgId, alarm.project), deps.limits?.openWatchesMax ?? OPEN_WATCHES_MAX)).map((row) => readOpen(row, orgId)).filter((row): row is NonNullable<typeof row> => row !== undefined && row.project === alarm.project);
     const watches: WatchRow[] = [];
     for (const row of open) {
       const watch = readWatch(await deps.store.get(watchKey(orgId, row.repository, row.number, row.environment)), orgId);
@@ -216,18 +226,18 @@ async function recordAlarm(deps: AfterMergeDeps, orgId: OrgId, watch: WatchRow, 
   if (await deps.store.get(key) !== undefined) return "duplicate";
   const ttl = ttlAttributeOf(deps.store);
   if (watch.alarmCount >= ALARMS_PER_WATCH_MAX) {
-    const updated = await deps.store.update({ key: { pk: watch.pk, sk: watch.sk }, ops: [change.add(["alarmsDropped"], 1)], condition: when.eq("state", "open"), return: "new" });
+    const updated = await deps.store.update({ key: watchKey(orgId, watch.repository, watch.number, watch.environment), ops: [change.add(["alarmsDropped"], 1)], condition: when.eq("state", "open"), return: "new" });
     if (updated.applied && updated.item?.["alarmsDropped"] === 1) deps.log?.("after_merge.alarm_cap", { level: "warn", max: ALARMS_PER_WATCH_MAX });
     return "dropped";
   }
   const row: StoredDocument = {
     ...key, entityType: ALARM_ENTITY, orgId, taskId: watch.taskId, project: watch.project, repository: watch.repository, number: watch.number, url: watch.url, environment: watch.environment, signalKey: alarm.signalKey,
     label: alarm.label, source: alarm.source, type: alarm.type, occurredAt: new Date(alarm.occurredAtMs).toISOString(), recordedAt: new Date(nowMs).toISOString(), reportPending: true,
-    revertOffered: settings.revert === "offer_revert", expectedOffered: true, [ttl]: expiryOf(nowMs, WATCH_KEPT_DAYS),
+    revertOffered: settings.revert === "offer_revert", expectedOffered: true, ...expiring(ttl, expiryOf(nowMs, WATCH_KEPT_DAYS)),
   };
   const written = await deps.store.transact([
     { kind: "put", item: row, condition: when.absent() },
-    { kind: "update", key: { pk: watch.pk, sk: watch.sk }, ops: [change.add(["alarmCount"], 1)], condition: when.and(when.eq("state", "open"), when.lt("alarmCount", ALARMS_PER_WATCH_MAX)) },
+    { kind: "update", key: watchKey(orgId, watch.repository, watch.number, watch.environment), ops: [change.add(["alarmCount"], 1)], condition: when.and(when.eq("state", "open"), when.lt("alarmCount", ALARMS_PER_WATCH_MAX)) },
     pendingItem(orgId, "alarm", watch.repository, watch.number, watch.environment, alarm.signalKey, ttl, nowMs),
   ]);
   if (!written.applied) return "duplicate";
@@ -247,38 +257,42 @@ export async function closeDueWatches(deps: AfterMergeDeps, orgId: OrgId): Promi
       if (!projects.has(project)) projects.set(project, await afterMergeSettingsOf(deps.settings, orgId, project));
       return projects.get(project);
     };
-    let closed = 0, delivered = 0;
-    const due = await dueOpenRows(deps.store, orgId, nowMs);
-    for (const row of due.rows.slice(0, SWEEP_BATCH_MAX)) {
-      if (await settingsOf(row.project) === undefined) continue;
-      if (await closeOne(deps, orgId, row.project, row.repository, row.number, row.environment, nowMs)) closed += 1;
+    let closed = 0, delivered = 0, handled = 0;
+    // Page past rows of projects that are switched off, so they never block the others; at most one batch is handled, and `more` says the rest waits for the next sweep.
+    let more = false;
+    let cursor: string | undefined;
+    for (let page = 0; page < PAGES_MAX; page += 1) {
+      const result = await pageOf(deps.store, { ...allOpen(orgId), filter: when.lte("windowEndsAtMs", nowMs) }, { limit: SWEEP_BATCH_MAX, cursor });
+      for (const stored of result.items) {
+        const row = readOpen(stored, orgId);
+        if (row === undefined || await settingsOf(row.project) === undefined) continue;
+        if (handled >= SWEEP_BATCH_MAX) { more = true; break; }
+        handled += 1;
+        if (await closeOne(deps, orgId, row.project, row.repository, row.number, row.environment, nowMs)) closed += 1;
+      }
+      cursor = result.cursor;
+      if (cursor === undefined || more) break;
     }
-    // One page of pending reports a sweep; the rest wait for the next one (a retry is never lost by being late).
-    const pending = await deps.store.query({ pk: allPending(orgId).pk, sk: { op: "beginsWith", prefix: allPending(orgId).prefix }, limit: SWEEP_BATCH_MAX });
-    for (const stored of pending.items) {
-      const row = readPending(stored, orgId);
-      if (row === undefined) continue;
-      if (await deliverPending(deps, orgId, row) === "sent") delivered += 1;
+    if (cursor !== undefined) more = true;
+    // Pending reports: the same, paging past reports that are skipped (project off) or keep failing, one batch of attempts a sweep.
+    let attempts = 0;
+    cursor = undefined;
+    for (let page = 0; page < PAGES_MAX && attempts < SWEEP_BATCH_MAX; page += 1) {
+      const result = await pageOf(deps.store, allPending(orgId), { limit: SWEEP_BATCH_MAX, cursor });
+      for (const stored of result.items) {
+        const row = readPending(stored, orgId);
+        if (row === undefined || attempts >= SWEEP_BATCH_MAX) continue;
+        const outcome = await deliverPending(deps, orgId, row);
+        if (outcome === "skipped") continue;
+        attempts += 1;
+        if (outcome === "sent") delivered += 1;
+      }
+      cursor = result.cursor;
+      if (cursor === undefined) break;
     }
-    return { closed, delivered, more: due.more };
+    return { closed, delivered, more };
   });
   return result === "unavailable" ? none : result;
-}
-
-/** The open watches whose window has ended, at most one batch; `more` says there are others for the next sweep. */
-async function dueOpenRows(store: DocumentStore, orgId: OrgId, nowMs: number): Promise<{ rows: NonNullable<ReturnType<typeof readOpen>>[]; more: boolean }> {
-  const rows: NonNullable<ReturnType<typeof readOpen>>[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < PAGES_MAX; page += 1) {
-    const result = await store.query({ pk: allOpen(orgId).pk, sk: { op: "beginsWith", prefix: allOpen(orgId).prefix }, filter: when.lte("windowEndsAtMs", nowMs), limit: SWEEP_BATCH_MAX + 1, ...(cursor === undefined ? {} : { cursor }) });
-    for (const stored of result.items) {
-      const row = readOpen(stored, orgId);
-      if (row !== undefined) rows.push(row);
-    }
-    cursor = result.cursor;
-    if (cursor === undefined || rows.length > SWEEP_BATCH_MAX) break;
-  }
-  return { rows, more: rows.length > SWEEP_BATCH_MAX || cursor !== undefined };
 }
 
 async function closeOne(deps: AfterMergeDeps, orgId: OrgId, project: string, repository: string, number: number, environment: string, nowMs: number): Promise<boolean> {
@@ -300,7 +314,7 @@ async function closeOne(deps: AfterMergeDeps, orgId: OrgId, project: string, rep
   const ttl = ttlAttributeOf(deps.store);
   const items: TransactItem[] = [
     {
-      kind: "update", key, condition: when.and(when.eq("state", "open"), when.eq("orgId", orgId)),
+      kind: "update", key, condition: when.and(when.eq("state", "open"), when.eq("orgId", orgId), when.eq("alarmCount", watch.alarmCount)),
       ops: [change.set(["state"], "closed"), change.set(["outcome"], healthy ? "healthy" : "alarm"), change.set(["closedAt"], new Date(nowMs).toISOString()), change.set([ttl], expiryOf(nowMs, WATCH_KEPT_DAYS)), ...(healthy ? [change.set(["reportPending"], true)] : [])],
     },
     { kind: "delete", key: queueKey },
