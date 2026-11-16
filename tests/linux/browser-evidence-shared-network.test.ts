@@ -75,11 +75,17 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       let listening: number[] = [];
       let open: number[] = [];
       // Whether the capture's Chromium is running right now (its processes as the host lists them).
-      const browserUp = (): boolean => { const top = docker(["top", capture, "-eo", "comm"]); return top.status === 0 && /chrom|headless_shell/u.test(top.stdout.toString("utf8")); };
+      // `docker top` needs a PID column in what ps prints; the command name is the last column (ps cuts it to 15 characters, so a crash handler is "chrome_crashpad" and does not count).
+      const browserUp = (): boolean => {
+        const top = docker(["top", capture, "-eo", "pid,comm"]);
+        return top.status === 0 && top.stdout.toString("utf8").split("\n").slice(1).some((row) => /^(chrome|chromium|headless_shell)$/u.test(row.trim().split(/\s+/u).at(-1) ?? ""));
+      };
+      // Wait (up to 20 s) for the browser to start before the first look, so the looks fall inside its page time.
+      for (let wait = 0; wait < 40 && !browserUp(); wait += 1) spawnSync("sleep", ["0.5"]);
       let looked = 0;
       // The browser needs a moment to start; look several times while the capture runs and keep what was ever seen. A look counts only when the browser was up before and after it.
       for (let look = 0; look < 4; look += 1) {
-        spawnSync("sleep", ["2"]);
+        if (look > 0) spawnSync("sleep", ["1"]);
         const upBefore = browserUp();
         const table = docker(["exec", sandbox, "node", "-e", listeners], 60_000);
         expect(table.status, table.stderr.toString()).toBe(0);
