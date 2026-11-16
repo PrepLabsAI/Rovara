@@ -39,6 +39,7 @@ import type { RealtimePublisher } from "./realtime.js";
 import type { EmailSender } from "./email.js";
 import type { TeamRecordSource } from "./record-source.js";
 import type { WorkerMachines } from "./worker-machines.js";
+import type { EvalReservationAdapter } from "./eval-health.js";
 
 /** Every place an adapter can plug in. A new point is an interface change: the owner decides it (decision 63). */
 export const PLUGIN_POINTS = [
@@ -79,6 +80,11 @@ export const PLUGIN_POINTS = [
   "realtime",
   /** Lane K1: sends one plain notice to one address, from the sender the owner set. Code: none (notices go through the channel adapters); Cloud: its cloud email service. */
   "email",
+  /**
+   * DEC 253k: whether an approved eval may spend (`EvalReservationAdapter.authority`: the stored approval plus the project's own connected customer key). Code: none, so no eval spends;
+   * a deployed install with the model gateway: the gateway's `POST /v1/product/eval/authority` (`core-host/eval-authority-http.ts`). Never a repository plug-in.
+   */
+  "eval-reservation",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -115,6 +121,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   scheduler: "one",
   realtime: "one",
   email: "one",
+  "eval-reservation": "one",
 };
 
 /**
@@ -200,6 +207,7 @@ export interface PluginPointTypes {
   scheduler: Scheduler;
   realtime: RealtimePublisher;
   email: EmailSender;
+  "eval-reservation": EvalReservationAdapter;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];

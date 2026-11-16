@@ -66,6 +66,7 @@ import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
 import { offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
+import { evalReservationModules } from "../core-host/eval-authority-http.js";
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -354,7 +355,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {

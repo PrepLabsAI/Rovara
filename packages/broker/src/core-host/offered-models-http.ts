@@ -47,15 +47,15 @@ export interface OfferedModelsHttpInputs {
   timeoutMs?: number;
 }
 
-/** A service token for one company, signed with the task key. Throws (fixed words) for anything that is not exactly what the gateway accepts. */
-async function serviceToken(input: OfferedModelsHttpInputs, companyId: string): Promise<string> {
+/** A service token for one company and one gateway audience, signed with the task key. Throws (fixed words) for anything that is not exactly what the gateway accepts. Also signs the eval authority ask (DEC 253k). */
+export async function signServiceToken(input: Pick<OfferedModelsHttpInputs, "issuer" | "signer" | "now">, companyId: string, audience: string = OFFERED_MODELS_AUDIENCE): Promise<string> {
   if (typeof input.issuer !== "string" || input.issuer.length > SERVICE_TOKEN_ISSUER_MAX_CHARS || Buffer.byteLength(input.issuer) > TASK_TOKEN_SIGNING_INPUT_MAX_BYTES) throw failed();
   // The purpose is stamped by `taskKeySigner` (the signer is the task key's, wrapped); Cloud's pinned key ids are what decide which key is the task key.
   const key = await input.signer.publicJwk();
   if (key.rovara_purpose !== TASK_KEY_PURPOSE || key.kty !== "RSA" || key.alg !== TASK_TOKEN_ALGORITHM || key.use !== "sig" || typeof key.kid !== "string" || !/^[A-Za-z0-9_-]{16}$/u.test(key.kid)) throw failed();
   const iat = Math.floor((input.now?.() ?? Date.now()) / 1000);
   const header = { alg: TASK_TOKEN_ALGORITHM, typ: SERVICE_TOKEN_TYP, kid: key.kid };
-  const claims = { iss: input.issuer, aud: OFFERED_MODELS_AUDIENCE, jti: randomUUID(), iat, nbf: iat - SERVICE_TOKEN_NOT_BEFORE_SKEW_SECONDS, exp: iat + SERVICE_TOKEN_LIFETIME_SECONDS, cid: companyId };
+  const claims = { iss: input.issuer, aud: audience, jti: randomUUID(), iat, nbf: iat - SERVICE_TOKEN_NOT_BEFORE_SKEW_SECONDS, exp: iat + SERVICE_TOKEN_LIFETIME_SECONDS, cid: companyId };
   const signingInput = Buffer.from(`${base64url(header)}.${base64url(claims)}`);
   if (signingInput.byteLength > TASK_TOKEN_SIGNING_INPUT_MAX_BYTES) throw failed();
   const signature = await input.signer.sign(signingInput);
@@ -63,7 +63,7 @@ async function serviceToken(input: OfferedModelsHttpInputs, companyId: string): 
 }
 
 /** Reads a body of at most `limit` bytes, or throws. */
-async function boundedText(response: Response, limit: number): Promise<string> {
+export async function boundedText(response: Response, limit: number): Promise<string> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) throw failed();
   if (response.body === null) return "";
@@ -93,7 +93,7 @@ export function offeredModelsReader(input: OfferedModelsHttpInputs): OfferedMode
       // The whole read (the signature, the request and the body) is held to one time; a fetch that ignores the abort is still given up on.
       const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(failed()); }, input.timeoutMs ?? OFFERED_MODELS_HTTP_TIMEOUT_MS); });
       const read = async (): Promise<unknown> => {
-        const token = await serviceToken(input, company);
+        const token = await signServiceToken(input, company);
         const response = await (input.fetch ?? fetch)(`${origin}/v1/service/companies/${company}/offered-models`, {
           method: "GET", redirect: "error", signal: controller.signal, headers: { accept: "application/json", authorization: `Bearer ${token}` },
         });
