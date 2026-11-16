@@ -168,7 +168,9 @@ describe("runDeviceEvidence", () => {
     });
     it("refuses a frame that is not what it says: wrong size for its pixels, no pixels, over the pixel cap", async () => {
       const frames: unknown[] = [{ width: W, height: H, rgba: new Uint8Array(10) }, { width: 0, height: 0, rgba: new Uint8Array(0) }, { width: 1.5, height: 2, rgba: new Uint8Array(12) }, null, "frame",
-        { width: W, height: H, rgba: "pixels" }, { width: DEVICE_EVIDENCE_FRAME_PIXELS_MAX + 1, height: 1, rgba: new Uint8Array(4) }];
+        { width: W, height: H, rgba: "pixels" }, { width: DEVICE_EVIDENCE_FRAME_PIXELS_MAX + 1, height: 1, rgba: new Uint8Array(4) },
+        // Even when its pixels are all there: more than the cap is refused.
+        { width: DEVICE_EVIDENCE_FRAME_PIXELS_MAX + 1, height: 1, rgba: new Uint8Array((DEVICE_EVIDENCE_FRAME_PIXELS_MAX + 1) * 4) }];
       for (const frame of frames) {
         const odd = fake({ screen: (side, flow, step) => ({ ...screenOf(side, flow, step), frame: frame as DeviceFrame }) });
         expect(reasons(await runDeviceEvidence(input(odd.driver, { flows: [flows[1]!] }))), JSON.stringify(frame)?.slice(0, 40)).toEqual(["capture_failed"]);
@@ -189,9 +191,11 @@ describe("runDeviceEvidence", () => {
       expect(raised.steps.filter((row) => row.status === "shown")).toHaveLength(8);
     });
     it("a step that fails stops its flow (later steps are Not run), another flow still runs, and the failed step's picture is never half-kept", async () => {
-      const { driver } = fake({ performStep: (side, flow, step) => (side === "after" && flow === "checkout" && step === "open" ? "step_failed" : "ok") });
+      const { driver, calls } = fake({ performStep: (side, flow, step) => (side === "after" && flow === "checkout" && step === "open" ? "step_failed" : "ok") });
       const got = await runDeviceEvidence(input(driver));
       expect(reasons(got)).toEqual(["step_failed", "step_failed", "shown"]);
+      // A flow that failed a step is not driven further: no later step is performed on that side.
+      expect(calls.filter((c) => c.op === "performStep" && c.side === "after" && c.flow === "checkout").map((c) => c.step)).toEqual(["open"]);
       const startFails = fake({ startFlow: (side, flow) => (flow === "checkout" ? "step_failed" : "ok") });
       expect(reasons(await runDeviceEvidence(input(startFails.driver)))).toEqual(["step_failed", "step_failed", "shown"]);
       // The flow's later steps are still performed when only an earlier picture was withheld, so they start from where the app is.
@@ -199,6 +203,8 @@ describe("runDeviceEvidence", () => {
       const second = await runDeviceEvidence(input(withheldFirst.driver, { flows: [flows[0]!] }));
       expect(reasons(second)).toEqual(["masked_content", "shown"]);
       expect(withheldFirst.calls.filter((c) => c.op === "performStep" && c.side === "after").map((c) => c.step)).toEqual(["open", "submit"]);
+      // ...but a step whose picture is already withheld is not photographed again.
+      expect(withheldFirst.calls.filter((c) => c.op === "screenshot" && c.side === "after")).toHaveLength(1);
     });
     it("an app or device that does not come up is Not run for the whole run, nothing is captured, the device is still stopped, and the reason is fixed words", async () => {
       for (const [answer, expected] of [["app_did_not_build", "app_did_not_build"], ["device_did_not_start", "device_did_not_start"], ["needs_macos", "needs_macos"], ["time_limit", "time_limit"],

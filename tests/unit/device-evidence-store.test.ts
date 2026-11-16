@@ -80,6 +80,12 @@ describe("storeDeviceEvidence", () => {
     const outcome = await storeDeviceEvidence({ blobs: failing }, OWNER, run);
     expect(outcome.steps.map((row) => row.status)).toEqual(["shown", "not_run"]);
     expect(outcome.unmasked).toBe(1);
+    // A picture stored for a step that then failed is kept when a LATER kept step names the same bytes.
+    const later = captured();
+    later.steps = [{ flow: "a", step: "s", status: "shown", before: shot("d"), after: shot("c") }, { flow: "b", step: "s", status: "shown", before: shot("e"), after: shot("d") }];
+    const second = await storeDeviceEvidence({ blobs: failing }, OWNER, later);
+    expect(second.steps.map((row) => row.status)).toEqual(["not_run", "shown"]);
+    expect(await blobs.get(keyOf("d"), 1_000)).toBeDefined();
     expect(await blobs.get(keyOf("a"), 1_000)).toBeDefined();
   });
 
