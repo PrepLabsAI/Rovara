@@ -190,7 +190,7 @@ describe("the answer", () => {
       tooBig: new Uint8Array(DEVICE_EXECUTOR_OUTPUT_MAX_BYTES + 1), extraKey: line(wire({ extra: 1 })), version: line(wire({ v: 2 })), fake: line(wire({ device: "fake" })), simulator: line(wire({ device: "ios_simulator" })),
       laptop: line(wire({ isolation: "developer_machine" })), missingStep: line(wire({ steps: (wire().steps as unknown[]).slice(0, 2) })), extraStep: line(wire({ steps: [...(wire().steps as unknown[]), { flow: "other", step: "x", status: "not_run", reason: "capture_failed" }] })),
       reordered: line(wire({ steps: [...(wire().steps as unknown[])].reverse() })), noStepsAndNoReason: line(wire({ steps: [] })), notRunWithSteps: line(wire({ notRun: "device_did_not_start" })),
-      overBound: new Uint8Array([...line(wire()), ...new Uint8Array(DEVICE_EXECUTOR_OUTPUT_MAX_BYTES).fill(0x20)]), prettyPrinted: new TextEncoder().encode(JSON.stringify(wire(), null, 1)),
+      overBound: new Uint8Array([...new TextEncoder().encode(JSON.stringify(wire())), ...new Uint8Array(DEVICE_EXECUTOR_OUTPUT_MAX_BYTES).fill(0x20)]), prettyPrinted: new TextEncoder().encode(JSON.stringify(wire(), null, 1)),
       notShownDiffers: line(wire({ notShown: [{ flow: "x", reason: "over_flow_cap" }] })), moreDiffers: line(wire({ moreNotShown: 3 })), unmaskedWithoutAdmin: line(wire({ unmasked: 1 })), unmaskedOverShown: line(wire({ unmasked: 9 })),
       slow: line(wire({ durationMs: DEVICE_EVIDENCE_RUN_MS + DEVICE_EXECUTOR_MARGIN_MS + 1 })), badReason: line(wire({ steps: [{ flow: "main", step: "open", status: "not_run", reason: "because" }] })), badStatus: line(wire({ steps: [{ flow: "main", step: "open", status: "ok" }] })),
     };
