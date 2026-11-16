@@ -74,7 +74,7 @@ describe("hosted pinned JWKS resolution", () => {
     w.advance(299_999);
     expect(await w.send()).toMatchObject({ answered: true });
     expect(w.get).toHaveBeenCalledTimes(1);
-    expect(w.get).toHaveBeenCalledWith(settings.jwks, expect.objectContaining({ method: "GET", redirect: "error", signal: expect.any(AbortSignal) }));
+    expect(w.get).toHaveBeenCalledWith(settings.jwks, expect.objectContaining({ method: "GET", redirect: "error", signal: expect.any(AbortSignal) as AbortSignal }));
     w.advance(1);
     expect(await w.send()).toMatchObject({ answered: true });
     expect(w.get).toHaveBeenCalledTimes(2);
