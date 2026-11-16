@@ -133,6 +133,10 @@ export const MERGE_ORDER_WORDS = {
     `Rovara stopped there, so these were not merged: ${list(held)}. Press Merge again to finish in order, or ask for a revert of ${list(merged)}.`,
   outOfOrder: (consumer: string, provider: string): string => `${consumer} merged before ${provider}, which it depends on.`,
   /** MR3b: what the task and its chat are told once when a pull request was merged ahead of the one it depends on (by hand, on the code host). `held` are the drafts Rovara keeps; `more` the other pairs. */
+  /** MR4 (TE-R4): what a consumer's pull request says about its own CI. `named` is the providers' names, already joined (`namedProviders`). */
+  ciAlone: (named: string, plural: boolean): string => `Tested together in Rovara; your CI tests each repository alone and may fail until ${named} ${plural ? "merge" : "merges"}.`,
+  /** MR4: what the task page says while that CI is failing: said as it is, with no promise about a re-run (Rovara cannot re-run a person's CI yet). */
+  ciFailureWaits: (named: string, plural = false): string => `Its own CI is failing, and may until ${named} ${plural ? "merge" : "merges"}: it tests this repository alone. Rovara is not trying to fix that failure before then.`,
   /** Which pull requests Rovara keeps as drafts, and until what: at most three are named. */
   keptAsDraft: (held: readonly string[], provider: string): string => {
     const shown = held.slice(0, 3);
@@ -174,4 +178,41 @@ export function mergeOrderStateLines(order: MergeOrder, pullRequests: ReadonlyAr
   const held = heldDependents(order, merged);
   const [first, ...rest] = state.outOfOrder;
   return [...lines, MERGE_ORDER_WORDS.outOfOrderWarning(nameOf(first!.consumer), nameOf(first!.provider), held.map(nameOf), rest.length)];
+}
+
+// ---- MR4 (TE-R4): each repository's own CI tests that repository alone
+
+/** The repositories a repository depends on that have not merged yet, in repository order. Only for an order from dependencies: no other order says what a pull request is waiting for. */
+export function waitingProviders(order: MergeOrder, repositoryId: string, mergedRepositories: readonly string[]): string[] {
+  if (order.kind !== "dependencies") return [];
+  const merged = new Set(mergedRepositories);
+  return (order.providersOf[repositoryId] ?? []).filter((provider) => !merged.has(provider));
+}
+
+/** The providers named with their pull request numbers where known: at most three, then a count. */
+function namedProviders(waiting: readonly string[], pullRequests: ReadonlyArray<{ repositoryId: string; number: number }>): { text: string; plural: boolean } {
+  const numbers = new Map(pullRequests.map((pr) => [pr.repositoryId, pr.number]));
+  const names = waiting.map((repository) => (numbers.has(repository) ? `${nameOf(repository)} #${String(numbers.get(repository))}` : nameOf(repository)));
+  const shown = names.slice(0, 3);
+  const rest = names.length - shown.length;
+  const text = rest > 0 ? `${shown.join(", ")} and ${String(rest)} more` : shown.length < 2 ? shown.join("") : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)!}`;
+  return { text, plural: names.length > 1 };
+}
+
+const mergedOf = (pullRequests: ReadonlyArray<{ repositoryId: string; state?: string | undefined }>): string[] => pullRequests.filter((pr) => pr.state === "MERGED").map((pr) => pr.repositoryId);
+
+/** The sentence a consumer's pull request carries about its own CI while a repository it depends on waits (nothing otherwise: a provider, an independent repository, no dependency facts). */
+export function perRepositoryCiLines(order: MergeOrder, repositoryId: string, pullRequests: ReadonlyArray<{ repositoryId: string; number: number; state?: string | undefined }>): string[] {
+  const waiting = waitingProviders(order, repositoryId, mergedOf(pullRequests));
+  if (waiting.length === 0) return [];
+  const named = namedProviders(waiting, pullRequests);
+  return [MERGE_ORDER_WORDS.ciAlone(named.text, named.plural)];
+}
+
+/** The sentence the task page adds for a consumer whose CI is failing while a repository it depends on waits. */
+export function ciFailureWaitLine(order: MergeOrder, repositoryId: string, pullRequests: ReadonlyArray<{ repositoryId: string; number: number; state?: string | undefined }>): string[] {
+  const waiting = waitingProviders(order, repositoryId, mergedOf(pullRequests));
+  if (waiting.length === 0) return [];
+  const named = namedProviders(waiting, pullRequests);
+  return [MERGE_ORDER_WORDS.ciFailureWaits(named.text, named.plural)];
 }

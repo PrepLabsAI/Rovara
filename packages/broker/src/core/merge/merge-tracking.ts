@@ -41,7 +41,7 @@ import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
-import { orderHoldsReady } from "./order-watch.js";
+import { orderHoldsReady, providersWaitingFor } from "./order-watch.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergePassHooks, MergeTask, SessionTimeline } from "./seams.js";
 import type { MergePeople } from "./people.js";
@@ -436,6 +436,11 @@ export interface MergeActionPassContext extends MergeActionContext {
   feedbackRoundCheck?: (() => Promise<boolean>) | undefined;
   /** Says this pass ran out of its allowance while deciding, so the pass settles as a retry once its item is written. */
   noteCapped?: (() => void) | undefined;
+  /**
+   * MR4 (TE-R4): the repositories this pull request depends on that have not merged yet, while its own CI is failing. That CI tests this repository alone against the others' main, so the failure may only be the missing
+   * repository: the CI fix slot decides nothing while it is not empty (the other slots are not touched).
+   */
+  ciWaitsFor?: readonly string[] | undefined;
 }
 
 const deciders = new Map<MergeActionSlot, MergeActionDecider>();
@@ -471,6 +476,8 @@ export async function nextMergeAction(item: MergeTrackingItem, workflow: Workflo
     return { slot: "none", reason: "owner_card", ...(item.failingChecks.length === 0 ? {} : { ciFailures: item.failingChecks }) };
   }
   for (const slot of MERGE_ACTION_ORDER) {
+    // MR4: a failing CI that is waiting for a repository this one depends on is not sent to the fix loop.
+    if (slot === "ci_fix" && context?.ciWaitsFor !== undefined && context.ciWaitsFor.length > 0) continue;
     const request = await deciders.get(slot)?.({ item, workflow, autonomy, now, ...(context === undefined ? {} : { context }) });
     if (request !== undefined) return request;
   }
@@ -501,6 +508,15 @@ const inertLine = (text: string): string => text.replace(/[\p{Cc}\p{Cf}@]/gu, " 
  */
 /** The held pull requests a person marked ready on the code host, logged once each (per process). */
 const heldNotDraftLogged = new Set<string>();
+/** MR4: the pull request heads whose failing CI was kept out of the fix loop, logged once each (per process). */
+const ciWaitsLogged = new Set<string>();
+function noteCiWaits(deps: Pick<MergeTrackingDependencies, "log">, task: { taskId: string }, number: number, head: string): void {
+  const key = `${task.taskId}#${String(number)}#${head}`;
+  if (ciWaitsLogged.has(key)) return;
+  if (ciWaitsLogged.size > 1_000) ciWaitsLogged.clear();
+  ciWaitsLogged.add(key);
+  deps.log?.("merge_tracking.ci_failure_waits_for_provider", { taskId: task.taskId, number });
+}
 
 export async function trackPullRequest(deps: MergeTrackingDependencies, taskId: string): Promise<TrackResult> {
   return (await trackTask(deps, taskId)).result;
@@ -771,8 +787,13 @@ async function trackOne(
     );
     const bound = deps.autonomyBinding !== undefined ? await deps.autonomyBinding(task) : { autonomy: await (deps.autonomy?.(task) ?? "prepare") };
     const recipeDigest = bound.recipeDigest;
+    // MR4: while this pull request's CI is failing, which repositories it depends on have not merged (only read then: the facts are not consulted for a pull request whose checks are not failing).
+    const deciding = unchanged && current !== undefined ? current : nextItem;
+    const ciWaitsFor = deciding.ci === "failing" ? await providersWaitingFor(deps, task, pullRequest.repositoryId) : [];
+    if (ciWaitsFor.length > 0) noteCiWaits(deps, task, pullRequest.number, status.headRevision);
     let ranOut = false;
-    const decision = await nextMergeAction(unchanged && current !== undefined ? current : nextItem, task.workflow, bound.autonomy, now, {
+    const decision = await nextMergeAction(deciding, task.workflow, bound.autonomy, now, {
+      ...(ciWaitsFor.length === 0 ? {} : { ciWaitsFor }),
       ...(deps.store.ttlAttribute === undefined ? {} : { ttlAttribute: deps.store.ttlAttribute }), orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
       repositoryId: pullRequest.repositoryId, pullRequestNumber: pullRequest.number, pullRequestUrl: pullRequest.url, headSha: status.headRevision, failing: ci.failingDetails,
       behindRequired: status.mergeableState === "behind",

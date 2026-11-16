@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import type { CodeMilestone, OrgId, TransactItem, WorkflowSnapshot } from "@agentx/contracts";
 import { inertLine } from "../proof/inert-text.js";
 import { isHostRateLimit } from "./host-port.js";
-import { heldDependents, mergeOrderOf, mergeOrderStateLines, MERGE_ORDER_NAME_MAX, MERGE_ORDER_WORDS, type MergeOrder } from "./merge-order.js";
+import { ciFailureWaitLine, heldDependents, mergeOrderOf, mergeOrderStateLines, perRepositoryCiLines, waitingProviders, MERGE_ORDER_NAME_MAX, MERGE_ORDER_WORDS, type MergeOrder } from "./merge-order.js";
 import type { CodeMilestones, MergeTask } from "./seams.js";
 
 type DependencyOrder = Extract<MergeOrder, { kind: "dependencies" }>;
@@ -103,6 +103,8 @@ export async function outOfOrderMilestoneItems(
 export async function mergeOrderLinesOfTask(
   deps: { repositoryEdges?: ((task: MergeTask) => unknown) | undefined; log?: ((event: string, fields: Record<string, unknown>) => void) | undefined },
   task: MergeTask & { workflow: WorkflowSnapshot },
+  /** MR4: the repository whose description these lines are for: its own CI words follow the order lines. */
+  repositoryId?: string,
 ): Promise<string[]> {
   if (deps.repositoryEdges === undefined) return [];
   const pullRequests = requiredOf(task.workflow);
@@ -115,5 +117,19 @@ export async function mergeOrderLinesOfTask(
     deps.log?.("merge_tracking.order_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     order = { kind: "no_safe_order", reason: "unreadable", repositories: mergeOrderOf(repositories, undefined).repositories };
   }
-  return mergeOrderStateLines(order, pullRequests);
+  return [...mergeOrderStateLines(order, pullRequests), ...(repositoryId === undefined ? [] : perRepositoryCiLines(order, repositoryId, pullRequests))];
+}
+
+/** MR4: the providers of this repository that have not merged yet (from the same facts), for keeping a CI failure out of the fix loop. Empty without facts, with facts that cannot be read, or without a dependency. Never throws. */
+export async function providersWaitingFor(
+  deps: Parameters<typeof dependencyOrderOf>[0], task: MergeTask & { workflow: WorkflowSnapshot }, repositoryId: string,
+): Promise<string[]> {
+  const order = await dependencyOrderOf(deps, task);
+  return order === undefined ? [] : waitingProviders(order, repositoryId, mergedRepositoriesOf(task.workflow));
+}
+
+/** MR4: what the task page says for this repository's pull request while its CI is failing and a repository it depends on waits. Nothing otherwise. Never throws. */
+export async function ciWaitLinesOfTask(deps: Parameters<typeof dependencyOrderOf>[0], task: MergeTask & { workflow: WorkflowSnapshot }, repositoryId: string): Promise<string[]> {
+  const order = await dependencyOrderOf(deps, task);
+  return order === undefined ? [] : ciFailureWaitLine(order, repositoryId, requiredOf(task.workflow));
 }

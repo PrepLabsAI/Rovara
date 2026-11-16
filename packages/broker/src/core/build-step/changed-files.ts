@@ -156,12 +156,12 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
   const linearIssueKey = await ticketIssueKeyOf(deps, task);
-  // MR3b: the order lines are about the whole task, so they are read once and every pull request's description carries them.
-  const mergeOrderLines = await deps.mergeOrderLines?.(task).catch(() => []) ?? [];
   for (const entry of hosts) {
     try {
       // Each repository's description names the lessons that repository's readers may read.
       const lessonsUsed = await lessonsUsedOf(deps, task, entry.repositoryId);
+      // MR3b and MR4: the order lines are about the whole task; each description adds the words about its own repository's CI.
+      const mergeOrderLines = await deps.mergeOrderLines?.(task, entry.repositoryId).catch(() => []) ?? [];
       const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);
       const ref = changeRequestRef(entry.url, entry.number);

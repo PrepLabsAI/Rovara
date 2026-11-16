@@ -11,7 +11,7 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { readTask } from "../task-flow/reads.js";
 import type { EvidenceBlobStore } from "../proof/evidence-blob-store.js";
 import type { TaskRecord } from "../task-flow/records.js";
-import { mergeOrderLinesOfTask } from "./order-watch.js";
+import { ciWaitLinesOfTask, mergeOrderLinesOfTask } from "./order-watch.js";
 import type { MergeTask } from "./seams.js";
 
 /** Where a task's evidence lives (the evidence keys name an owner and a workspace). Undefined for a task the host does not know. */
@@ -57,13 +57,27 @@ export function createTaskRepositoryEdgesSeam(options: { flow: Pick<TaskFlowDeps
 /** The merge-order lines for a task record (the flow's `mergeOrderLines`, `attention` and the pull request descriptions read them): from the task's own record, through the same seam. Never throws. */
 export function createMergeOrderLines(options: {
   flow: Pick<TaskFlowDeps, "store">; companyId: OrgId; repositoryEdges: (task: MergeTask) => Promise<unknown>; log?: (event: string, fields: Record<string, unknown>) => void;
-}): (task: TaskRecord) => Promise<readonly string[]> {
-  return async (task) => {
-    if (task.companyId !== options.companyId || task.workflow === undefined) return [];
-    const merge: MergeTask & { workflow: NonNullable<TaskRecord["workflow"]> } = {
-      taskId: task.taskId, orgId: options.companyId, project: task.project, startingRevision: task.startingRevision, workspaceId: task.workspaceId,
-      ownerId: task.workflow.ownerId, ownerName: "the owner", workflow: task.workflow,
-    };
-    return mergeOrderLinesOfTask({ repositoryEdges: options.repositoryEdges, ...(options.log === undefined ? {} : { log: options.log }) }, merge).catch(() => []);
+}): (task: TaskRecord, repositoryId?: string) => Promise<readonly string[]> {
+  return async (task, repositoryId) => {
+    const merge = mergeTaskOfRecord(task, options.companyId);
+    return merge === undefined ? [] : mergeOrderLinesOfTask({ repositoryEdges: options.repositoryEdges, ...(options.log === undefined ? {} : { log: options.log }) }, merge, repositoryId).catch(() => []);
+  };
+}
+
+/** MR4: the page's words for a pull request whose CI is failing while a repository it depends on waits (`TaskFlowDeps.ciWaitLines`). From the task's own record, through the same seam. Never throws. */
+export function createCiWaitLines(options: {
+  flow: Pick<TaskFlowDeps, "store">; companyId: OrgId; repositoryEdges: (task: MergeTask) => Promise<unknown>; log?: (event: string, fields: Record<string, unknown>) => void;
+}): (task: TaskRecord, repositoryId: string) => Promise<readonly string[]> {
+  return async (task, repositoryId) => {
+    const merge = mergeTaskOfRecord(task, options.companyId);
+    return merge === undefined ? [] : ciWaitLinesOfTask({ repositoryEdges: options.repositoryEdges, ...(options.log === undefined ? {} : { log: options.log }) }, merge, repositoryId).catch(() => []);
+  };
+}
+
+function mergeTaskOfRecord(task: TaskRecord, companyId: OrgId): (MergeTask & { workflow: NonNullable<TaskRecord["workflow"]> }) | undefined {
+  if (task.companyId !== companyId || task.workflow === undefined) return undefined;
+  return {
+    taskId: task.taskId, orgId: companyId, project: task.project, startingRevision: task.startingRevision, workspaceId: task.workspaceId,
+    ownerId: task.workflow.ownerId, ownerName: "the owner", workflow: task.workflow,
   };
 }
