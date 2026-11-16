@@ -54,6 +54,7 @@ export interface Harness {
 }
 
 export interface HarnessOptions {
+  companyId?: OrgId;
   understandFirst?: boolean;
   limits?: { member: number; organization: number };
   admission?: Admission;
@@ -67,6 +68,7 @@ export interface HarnessOptions {
 }
 
 export function createHarness(options: HarnessOptions = {}): Harness {
+  const companyId = options.companyId ?? COMPANY;
   const clock = { now: Date.parse("2026-11-09T10:00:00.000Z"), advance(seconds: number) { clock.now += seconds * 1_000; } };
   const now = () => new Date(clock.now);
   const { store, queues } = options.backend?.(clock) ?? {
@@ -86,7 +88,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   const grants: Array<{ operationId: string }> = [];
   const repositoryGrants = new RepositoryGrantService(Buffer.alloc(32, 5), async () => ({ token: "unused" }));
   const deps: TaskFlowDeps = {
-    companyId: COMPANY,
+    companyId,
     store,
     queues,
     outbox: createTransactionalOutbox({ store, queues, now }),
@@ -103,14 +105,14 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     ...(options.extra?.(clock) ?? {}),
   };
   // The project source is the store reader a deployment wires.
-  deps.projects = createStoreProjectSource(store, COMPANY);
-  const owner: TaskStartCaller = { principal: localOwnerPrincipal({ companyId: COMPANY }), client: "test", origin: "app" };
-  const guestPrincipal: Principal = { companyId: COMPANY, personId: "guest", displayName: "Guest", roles: [], provider: "local-owner" };
+  deps.projects = createStoreProjectSource(store, companyId);
+  const owner: TaskStartCaller = { principal: localOwnerPrincipal({ companyId }), client: "test", origin: "app" };
+  const guestPrincipal: Principal = { companyId, personId: "guest", displayName: "Guest", roles: [], provider: "local-owner" };
   return {
     flow: createTaskFlow(deps), deps, store, queues, machines, clock, owner, guest: { principal: guestPrincipal, origin: "app" }, audit, grants,
     async registerProject(project = definition) {
-      await store.put({ item: { ...projectRevisionKey(COMPANY, project.name, project.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(project)) as JsonValue } });
-      await store.put({ item: { ...orgProjectCatalogKey(COMPANY, project.name), entityType: "PROJECT_CATALOG", latestRevision: project.revision } });
+      await store.put({ item: { ...projectRevisionKey(companyId, project.name, project.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(project)) as JsonValue } });
+      await store.put({ item: { ...orgProjectCatalogKey(companyId, project.name), entityType: "PROJECT_CATALOG", latestRevision: project.revision } });
     },
   };
 }

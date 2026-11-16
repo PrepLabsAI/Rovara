@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // What makes the registry look at a project (push, poll, the nightly, a task) and what settles the end of a rebuild (the sweep): all inert with the switch off, none throws into its caller, and a build that
 // ended without a result is ended with the backoff and its workspace retired.
 import { describe, expect, it } from "vitest";
@@ -66,21 +67,21 @@ describe("the sweep that settles a rebuild's end", () => {
     w.h.clock.advance(20 * 60);
     expect(await sweepSavedEnvBuilds(sweepDeps(w), 10, ON)).toEqual({ settled: 0, waiting: 1, failed: 0 });
     expect((await w.deps.store.get(COMPANY, PROJECT))?.job?.jobId).toBe(job.jobId);
-    expect((await w.h.store.get(workspaceKey(workspaceId)))?.["status"]).toBe("PREPARING");
-    expect((await w.h.store.get(operationKey(workspaceId, operationId)))?.["status"]).toBe("ACCEPTED");
+    expect((await w.h.store.get(workspaceKey(T1_COMPANY, workspaceId)))?.["status"]).toBe("PREPARING");
+    expect((await w.h.store.get(operationKey(T1_COMPANY, workspaceId, operationId)))?.["status"]).toBe("ACCEPTED");
   });
 
   it("ends a job whose operation ended without a result: the failure backoff, and the workspace is retired and its marker closed", async () => {
     const w = savedWorld();
     const { job, operationId, workspaceId } = await started(w);
-    await w.h.store.update({ key: operationKey(workspaceId, operationId), ops: [{ op: "set", path: ["status"], value: "FAILED" }] });
+    await w.h.store.update({ key: operationKey(T1_COMPANY, workspaceId, operationId), ops: [{ op: "set", path: ["status"], value: "FAILED" }] });
     w.h.clock.advance(11 * 60);
     expect(await sweepSavedEnvBuilds(sweepDeps(w), 10, ON)).toEqual({ settled: 1, waiting: 0, failed: 0 });
     const row = (await w.deps.store.get(COMPANY, PROJECT))!;
     expect(row.job).toBeUndefined();
     expect(row).toMatchObject({ health: "needs_repair", lastFailure: "operation_failed" });
-    expect((await w.h.store.get(workspaceKey(workspaceId)))).toMatchObject({ status: "CLOSED" });
-    expect((await w.h.store.get(workspaceKey(workspaceId)))?.["activeOperationId"]).toBeUndefined();
+    expect((await w.h.store.get(workspaceKey(T1_COMPANY, workspaceId)))).toMatchObject({ status: "CLOSED" });
+    expect((await w.h.store.get(workspaceKey(T1_COMPANY, workspaceId)))?.["activeOperationId"]).toBeUndefined();
     expect(typeof (await w.h.store.get(startMarkerKey(job.jobId)))?.["retiredAt"]).toBe("string");
     // the backoff holds: no rebuild at once
     expect(await checkRebuild(w.deps, ids, "push")).toMatchObject({ ok: true, queued: false, why: "backoff" });
@@ -103,21 +104,21 @@ describe("the sweep that settles a rebuild's end", () => {
     old.h.clock.advance(SAVED_ENV_BUILD_MAX_AGE_MS / 1000 + 60);
     await sweepSavedEnvBuilds(sweepDeps(old), 10, ON);
     expect((await old.deps.store.get(COMPANY, PROJECT))?.job).toBeUndefined();
-    expect((await old.h.store.get(workspaceKey(second.workspaceId)))).toMatchObject({ status: "CLOSED" });
+    expect((await old.h.store.get(workspaceKey(T1_COMPANY, second.workspaceId)))).toMatchObject({ status: "CLOSED" });
     expect(first.job.jobId).not.toBe(second.job.jobId);
   });
 
   it("terminates the workspace's machine through the worker-machines port; a machine that cannot be terminated is looked at again", async () => {
     const w = savedWorld();
     const { operationId, workspaceId } = await started(w);
-    await w.h.store.update({ key: workspaceKey(workspaceId), ops: [{ op: "set", path: ["machine"], value: { machineId: "m-1", machineKey: "k" } }] });
-    await w.h.store.update({ key: operationKey(workspaceId, operationId), ops: [{ op: "set", path: ["status"], value: "FAILED" }] });
+    await w.h.store.update({ key: workspaceKey(T1_COMPANY, workspaceId), ops: [{ op: "set", path: ["machine"], value: { machineId: "m-1", machineKey: "k" } }] });
+    await w.h.store.update({ key: operationKey(T1_COMPANY, workspaceId, operationId), ops: [{ op: "set", path: ["status"], value: "FAILED" }] });
     const terminated: string[] = [];
     const down = { terminate: async (id: string) => { terminated.push(id); throw new Error("busy"); } };
-    expect(await retireBuildWorkspace({ store: w.h.store, machines: down, log: () => undefined }, workspaceId, operationId, (await w.deps.store.get(COMPANY, PROJECT))!.job!.jobId, w.h.clock.now)).toBe("later");
-    expect((await w.h.store.get(workspaceKey(workspaceId)))?.["status"]).toBe("PREPARING");
+    expect(await retireBuildWorkspace({ store: w.h.store, machines: down, log: () => undefined }, COMPANY, workspaceId, operationId, (await w.deps.store.get(COMPANY, PROJECT))!.job!.jobId, w.h.clock.now)).toBe("later");
+    expect((await w.h.store.get(workspaceKey(T1_COMPANY, workspaceId)))?.["status"]).toBe("PREPARING");
     const ok = { terminate: async (id: string) => { terminated.push(id); } };
-    expect(await retireBuildWorkspace({ store: w.h.store, machines: ok, log: () => undefined }, workspaceId, operationId, (await w.deps.store.get(COMPANY, PROJECT))!.job!.jobId, w.h.clock.now)).toBe("retired");
+    expect(await retireBuildWorkspace({ store: w.h.store, machines: ok, log: () => undefined }, COMPANY, workspaceId, operationId, (await w.deps.store.get(COMPANY, PROJECT))!.job!.jobId, w.h.clock.now)).toBe("retired");
     expect(terminated).toEqual(["m-1", "m-1"]);
   });
 
@@ -126,10 +127,10 @@ describe("the sweep that settles a rebuild's end", () => {
     const { job, operationId, workspaceId } = await started(w);
     // another job's marker pointing at THIS job's workspace
     await w.h.store.update({ key: startMarkerKey(job.jobId), ops: [{ op: "set", path: ["workspaceId"], value: workspaceId }] });
-    await w.h.store.update({ key: operationKey(workspaceId, operationId), ops: [{ op: "set", path: ["dispatch", "payload", "savedEnvBuild", "jobId"], value: "someone-elses-job" }, { op: "set", path: ["status"], value: "FAILED" }] });
+    await w.h.store.update({ key: operationKey(T1_COMPANY, workspaceId, operationId), ops: [{ op: "set", path: ["dispatch", "payload", "savedEnvBuild", "jobId"], value: "someone-elses-job" }, { op: "set", path: ["status"], value: "FAILED" }] });
     w.h.clock.advance(11 * 60);
     await sweepSavedEnvBuilds(sweepDeps(w), 10, ON);
-    expect((await w.h.store.get(workspaceKey(workspaceId)))?.["status"]).toBe("PREPARING");
+    expect((await w.h.store.get(workspaceKey(T1_COMPANY, workspaceId)))?.["status"]).toBe("PREPARING");
     expect(await w.h.store.get(startMarkerKey(job.jobId))).toBeUndefined();
   });
 

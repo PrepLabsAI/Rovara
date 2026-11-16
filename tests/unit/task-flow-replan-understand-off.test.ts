@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // A request for changes to a plan plans again, with Understand off (a task whose start named the path, version 1.0.0) as well as on. With Understand off there is no assessment: the planner is
 // given the request and the owner's words. The tests drive the real flow on the in-memory fakes and play the owner's decision the way the gate's `onDecided` does (the words, then a PLAN row).
 import { randomUUID } from "node:crypto";
@@ -29,7 +30,7 @@ async function planWaiting(understand: boolean) {
   const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a /health endpoint", workflow: true, ...(understand ? {} : { workflowPath: "QUICK" as const }) });
   expect(started.task.workflow).toMatchObject({ definitionVersion: understand ? "1.1.0" : "1.0.0" });
   await drain(h);
-  const workspace = (await h.store.get(workspaceKey(started.task.workspaceId))) as unknown as WorkspaceRecord;
+  const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
   const machineId = workspace.machine!.machineId;
   let fence = 1;
   const finish = async (invocation: WorkerInvocation, outcome: Record<string, unknown>): Promise<void> => {

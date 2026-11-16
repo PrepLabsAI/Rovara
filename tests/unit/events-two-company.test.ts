@@ -1,3 +1,4 @@
+import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/legacy-keys.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, companyChangeFeed, companyScoped, type DocumentChange, type DueSchedule } from "@agentx/contracts";
@@ -7,7 +8,6 @@ import { SqliteAuditLog } from "../../packages/local-adapters/src/sqlite-audit-l
 import { DocumentAuditSink, startAuditCopy } from "../../packages/local-adapters/src/document-audit-sink.js";
 import { listWorkEvents, workEventRow } from "../../packages/broker/src/core/work-events/work-events.js";
 import { createHarness } from "../support/task-flow-harness.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { handleNightlyFire } from "../../packages/broker/src/core/test-env/nightly.js";
 import { nightlyWorld } from "../support/nightly-world.js";
 
@@ -61,7 +61,9 @@ describe("T8 byte-identical base goldens", () => {
   });
   it("records an old dispatch body and operation unchanged", async () => {
     const h = createHarness();
-    const key = operationKey("workspace", "operation");
+    // This T8 golden deliberately replays a pre-migration dispatch.
+    const key = { ...legacyWorkspaceKey("workspace"), sk: "OPERATION#operation" };
+    await h.store.put({ item: { ...legacyWorkspaceKey("workspace"), companyId } });
     const operation = { ...key, id: "operation", workspaceId: "workspace", companyId, status: "SUCCEEDED" };
     await h.store.put({ item: operation });
     await (await h.queues.queue("task-dispatch")).enqueue({ body: { v: 1, workspaceId: "workspace", operationId: "operation" } });

@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { change, LIVE_STEER_REAPPROVAL_REASON, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema } from "@agentx/contracts";
 import * as services from "../../packages/broker/src/services/index.js";
@@ -33,8 +34,8 @@ describe("host session actions over injected ports", () => {
 
   it("cancels the active operation and leaves the workflow blocked for retry", async () => {
     const { h, task, actions } = await setup();
-    const workspace = fromDocument<WorkspaceRecord>(await h.store.get(workspaceKey(task.workspaceId)))!;
-    const opKey = operationKey(task.workspaceId, workspace.activeOperationId!);
+    const workspace = fromDocument<WorkspaceRecord>(await h.store.get(workspaceKey(T1_COMPANY, task.workspaceId)))!;
+    const opKey = operationKey(T1_COMPANY, task.workspaceId, workspace.activeOperationId!);
     expect((await h.store.get(opKey))?.["status"]).toBe("ACCEPTED");
     expect(await actions.cancelTask(task.taskId)).toEqual({ nothingRunning: false });
     expect((await h.store.get(opKey))?.["status"]).toBe("CANCELLED");

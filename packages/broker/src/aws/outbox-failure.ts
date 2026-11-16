@@ -1,3 +1,4 @@
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { WORKFLOW_BLOCK_REASONS, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, WorkflowSnapshotSchema, blockWorkflow, blockWorkflowPullRequestUpdate } from "@agentx/contracts";
 import { releaseFailedPreparation } from "./failed-preparation.js";
@@ -183,12 +184,13 @@ export async function failActiveOperation(
   workspaceId: string,
   error: string,
 ): Promise<string | undefined> {
-  const workspace = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }))).Item as { activeOperationId?: unknown } | undefined;
-  const operationId = workspace?.activeOperationId;
+  const resolved = await readWorkspaceMeta(documentClient, tableName, workspaceId);
+  if (resolved === undefined) return undefined;
+  const operationId = resolved.item["activeOperationId"];
   if (typeof operationId !== "string") return undefined;
   const operation = (await documentClient.send(new GetCommand({
     TableName: tableName,
-    Key: { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` },
+    Key: { pk: resolved.key.pk, sk: `OPERATION#${operationId}` },
   }))).Item as { kind?: string; status?: string; fence?: number; closePreviousStatus?: string } | undefined;
   if (operation?.fence === undefined) return undefined;
   const released = operation.kind === "prepare"
@@ -199,7 +201,7 @@ export async function failActiveOperation(
     await documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
         TableName: tableName,
-        Key: { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` },
+        Key: { pk: resolved.key.pk, sk: `OPERATION#${operationId}` },
         UpdateExpression: "SET #status = :failed, updatedAt = :now, #result = :result, #error = :error",
         ConditionExpression: "(#status = :accepted OR #status = :dispatching OR #status = :running OR #status = :cancelRequested) AND fence = :fence",
         ExpressionAttributeNames: { "#status": "status", "#result": "result", "#error": "error" },
@@ -210,17 +212,17 @@ export async function failActiveOperation(
       } },
       { Update: {
         TableName: tableName,
-        Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" },
+        Key: resolved.key,
         UpdateExpression: "SET #status = :released, updatedAt = :now REMOVE activeOperationId",
         ConditionExpression: "activeOperationId = :operation AND fence = :fence",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":released": released, ":now": now, ":operation": operationId, ":fence": operation.fence },
       } },
     ] }));
-    if (released === "PREPARATION_FAILED") await releaseFailedPreparation(documentClient, tableName, workspaceId);
-    if (operation.kind === "maintain") await blockFailedPullRequestUpdate(documentClient, tableName, workspaceId, operationId, error);
+    if (resolved.key.pk === `WORKSPACE#${workspaceId}` && released === "PREPARATION_FAILED") await releaseFailedPreparation(documentClient, tableName, workspaceId);
+    if (resolved.key.pk === `WORKSPACE#${workspaceId}` && operation.kind === "maintain") await blockFailedPullRequestUpdate(documentClient, tableName, workspaceId, operationId, error);
     // A run the owner already asked to stop is the owner's stop, not a lost run (DISPATCHEXHAUST): it is explained and never started again.
-    if (operation.kind === "task") await blockFailedWorkflowRun(documentClient, tableName, workspaceId, operationId, error, operation.status === "CANCEL_REQUESTED");
+    if (resolved.key.pk === `WORKSPACE#${workspaceId}` && operation.kind === "task") await blockFailedWorkflowRun(documentClient, tableName, workspaceId, operationId, error, operation.status === "CANCEL_REQUESTED");
     return operationId;
   } catch (failure) {
     if (failure instanceof Error && failure.name === "TransactionCanceledException") return undefined;

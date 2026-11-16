@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Structured plans: what happens to a planning run's saved answer once the run reports success. Cloud's `storePlanAnswer` (`aws/broker/plan-answers.ts`), on the ports: the
 // answer is read as a plan document (`answer.ts`); an answer that cannot be read is sent back to the planner once by itself (the same automatic second run a plan the self-check sends back gets),
 // else it blocks planning with the problems kept for Retry planning; a readable plan is stored as canonical JSON in the object-storage point under Cloud's key layout and handed to the flow as
@@ -22,7 +23,7 @@ import { planDocumentPrefix, putOnce, sha256Of, structuredArtifactOf } from "./s
 
 /** The planning run's progress events, oldest first, at most 500 (the newest: the dry run's report is the last one it made). */
 async function operationEvents(deps: TaskFlowDeps, operation: OperationRecord): Promise<Array<{ type: string; payload: unknown }>> {
-  const page = await deps.store.query({ pk: `WORKSPACE#${operation.workspaceId}`, sk: { op: "beginsWith", prefix: `EVENT#${operation.id}#` }, descending: true, limit: 500 });
+  const page = await deps.store.query({ pk: (await workspaceKeys(deps, operation.workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: `EVENT#${operation.id}#` }, descending: true, limit: 500 });
   return page.items.reverse().flatMap((item) => (typeof item["type"] === "string" ? [{ type: item["type"], payload: item["payload"] ?? null }] : []));
 }
 

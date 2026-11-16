@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L10, the build step: changes to a pull request Rovara already opened. Two moves, both a `maintain` operation on the task's own branch, onto the head the workflow recorded:
 //  - APPEND: the fix of a round (failing CI, a conflict) whose checks and reviews passed is pushed as exactly the reviewed tree on the task's pinned base (Cloud's
 //    `startTaskWorkflowPullRequestUpdate`, `reconcilePullRequestUpdate`, `completedPullRequestUpdateItems`);
@@ -185,7 +186,7 @@ export async function updatePullRequest(deps: TaskFlowDeps, operation: Operation
   if (JSON.stringify(parents) !== JSON.stringify(wanted)) throw agentXError("STALE_FENCE", "the pushed commit is not built on the head and base this operation was asked for");
   if (expected.action === "append" && await host.tree(repositoryRef, commit, scopeOf(deps)) !== expected.workflowCandidate?.treeSha) throw agentXError("STALE_FENCE", "the pushed tree is not the reviewed tree");
   const written = await deps.store.update({
-    key: pullRequestRecordKey(operation.workspaceId, expected.repository, expected.pullRequestNumber),
+    key: pullRequestRecordKey((await workspaceKeys(deps, operation.workspaceId)).workspaceKey, expected.repository, expected.pullRequestNumber),
     ops: [change.set("expectedHeadCommit", commit), change.set("state", remote.state), change.set("updatedAt", iso(deps))], condition: when.eq("expectedHeadCommit", expected.expectedHeadCommit),
   });
   return { url: remote.ref.url, state: remote.state, reconciled: !written.applied };
@@ -205,7 +206,7 @@ async function restoreRecordHead(deps: TaskFlowDeps, task: TaskRecord, operation
   const record = await pullRequestRecordOf(deps, task.workspaceId, maintenance.repository, maintenance.pullRequestNumber);
   if (record === undefined || held !== maintenance.expectedHeadCommit || record.expectedHeadCommit === maintenance.expectedHeadCommit) return;
   await deps.store.update({
-    key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber),
+    key: pullRequestRecordKey((await workspaceKeys(deps, task.workspaceId)).workspaceKey, maintenance.repository, maintenance.pullRequestNumber),
     ops: [change.set("expectedHeadCommit", maintenance.expectedHeadCommit), change.set("updatedAt", iso(deps))], condition: when.eq("expectedHeadCommit", record.expectedHeadCommit),
   }).catch(() => undefined);
 }
@@ -315,7 +316,7 @@ async function recordAppended(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
   const items: TransactItem[] = [
     ...(await rekeyItems(deps, host, definition.url, task, workflow, next)),
     ...(record !== undefined && record.expectedHeadCommit !== head
-      ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", head), change.set("state", state), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
+      ? [{ kind: "update" as const, key: pullRequestRecordKey((await workspaceKeys(deps, task.workspaceId)).workspaceKey, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", head), change.set("state", state), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
     ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(providerOf(host), definition.url), headSha: head, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number, branch: maintenance.headBranch }, Date.parse(now)),
     // More pull requests to go: the next push is due, as the first one was after the reviews.
     ...(next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)] : []),
@@ -403,7 +404,7 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
       ...(rechecksItself ? [dispatchRowItem(deps, task.taskId, recheck.revision, "AUTOFIX", now, now, "base-merged")] : []),
       ...(await rekeyItems(deps, host, definition.url, task, workflow, outcome.workflow)),
       ...(record !== undefined && record.expectedHeadCommit !== outcome.headSha
-        ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", outcome.headSha), change.set("state", "open"), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
+        ? [{ kind: "update" as const, key: pullRequestRecordKey((await workspaceKeys(deps, task.workspaceId)).workspaceKey, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", outcome.headSha), change.set("state", "open"), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
       ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(providerOf(host), definition.url), headSha: outcome.headSha, taskId: task.taskId, repositoryId: marker.repositoryId, number: marker.number, branch: maintenance.headBranch }, Date.parse(now)),
     ]);
     // The row is looked at right away; a sweep finds it if this process dies first.

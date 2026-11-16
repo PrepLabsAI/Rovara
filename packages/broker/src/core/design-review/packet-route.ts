@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Design review stage: `GET /v1/internal/design-review/packet?slot=<key slot>`, the one route a design-review worker reads a reviewer's packet from (on the task flow's ports).
 //
 // The worker is not trusted with what it reads or with which reviewer it is. This route therefore (security S1 to S5):
@@ -10,7 +11,7 @@ import { DesignReviewBindingSchema, PACKET_DELIVERY_BYTES_MAX, PacketDeliverySch
 import type { CallbackCapabilities } from "../../callbacks.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
-import { operationKey, taskPointerKey } from "../task-flow/keys.js";
+
 import { readTask } from "../task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../task-flow/records.js";
 import { isTerminalStatus } from "../task-flow/results.js";
@@ -33,7 +34,7 @@ export function storedBindingOf(operation: Pick<OperationRecord, "kind" | "workf
 
 /** Whether the task already holds this round's record. A task that cannot be read counts as recorded (fail closed). */
 async function roundRecorded(deps: TaskFlowDeps, operation: OperationRecord, round: number): Promise<boolean> {
-  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(operation.workspaceId)));
+  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey()));
   if (pointer === undefined) return true;
   const task = await readTask(deps, pointer.taskId);
   if (task === undefined || task.companyId !== operation.companyId) return true;
@@ -46,7 +47,7 @@ export async function handleDesignReviewPacket(deps: TaskFlowDeps, capabilities:
   const claims = (() => { try { return capabilities.verify(token, "design-review-packet"); } catch { throw agentXError("CALLBACK_FORBIDDEN", "invalid callback capability"); } })();
   // The worker's own egress gateway stamps the workspace the call comes from: a capability is good only for its own workspace's worker.
   if (request.headers[WORKSPACE_HEADER] !== claims.workspaceId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
-  const operation = fromDocument<OperationRecord>(await deps.store.get(operationKey(claims.workspaceId, claims.operationId)));
+  const operation = fromDocument<OperationRecord>(await deps.store.get((await workspaceKeys(deps, claims.workspaceId)).operationKey(claims.operationId)));
   if (operation === undefined || operation.companyId !== deps.companyId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
   if (operation.fence !== claims.fence) throw agentXError("STALE_FENCE", "callback operation binding is stale");
   if (isTerminalStatus(operation.status)) throw agentXError("STALE_FENCE", "terminal operations cannot read a packet");

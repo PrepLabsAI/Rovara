@@ -15,7 +15,7 @@ import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-h
 import { coreMoneyWiring } from "../../packages/broker/src/aws/core-engine-root.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
-import { operationKey, taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { CHECKPOINT_ENTRY_PREFIX, EMPTY_REPORT_CHARGE_MICROS, readUsagePayload } from "../../packages/broker/src/core-host/usage-booking.js";
 import { RUN_START_ACTION, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
@@ -245,7 +245,8 @@ describe("a stopped run's usage that never arrived: the whole hold is kept, mark
     const taskId = randomUUID();
     const workspaceId = randomUUID();
     await store.put({ item: { ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, workspaceId, companyId: A } });
-    const run = (id: string, extra: Record<string, unknown> = {}) => store.put({ item: { ...operationKey(workspaceId, id), entityType: "OPERATION", id, workspaceId, companyId: A, kind: "task", status: "CANCELLED", fence: 1, eventSequence: 3, dispatch: { kind: "task", payload: {} }, createdAt: NOW.toISOString(), ...extra } });
+    await store.put({ item: { ...workspaceKey(A, workspaceId), id: workspaceId, companyId: A } });
+    const run = (id: string, extra: Record<string, unknown> = {}) => store.put({ item: { ...operationKey(A, workspaceId, id), entityType: "OPERATION", id, workspaceId, companyId: A, kind: "task", status: "CANCELLED", fence: 1, eventSequence: 3, dispatch: { kind: "task", payload: {} }, createdAt: NOW.toISOString(), ...extra } });
     const entry = (entryId: string) => store.put({ item: { pk: costPartition(A, taskId), sk: `ENTRY#${entryId}`, entityType: "COST_ENTRY" } });
     const op = randomUUID();
     await run(op);
@@ -288,7 +289,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
   it("answers the batch that takes the task past its cap with the stop's code, and only that one", async () => {
     const { store, money } = await root(A);
     const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: A } as unknown as OperationRecord;
-    await store.put({ item: { ...taskPointerKey(operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() } });
+    await store.put({ item: { ...taskPointerKey(operation.companyId, operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() } });
     const at = (n: number) => `${DAY}T10:00:0${String(n)}.000Z`;
     expect(await money.bookUsage(operation, [{ type: "usage", timestamp: at(1), payload: telemetry(4_000_000) }])).toEqual({ booked: 1, unreadable: 0 });
     expect(await money.bookUsage(operation, [{ type: "progress", timestamp: at(2), payload: {} }])).toEqual({ booked: 0, unreadable: 0 });
@@ -302,7 +303,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const { store, money } = await root(A);
     const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: A } as unknown as OperationRecord;
     const taskId = randomUUID();
-    await store.put({ item: { ...taskPointerKey(operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
+    await store.put({ item: { ...taskPointerKey(operation.companyId, operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
     const zero = { ...telemetry(0), checkpoint: undefined };
     await money.bookUsage(operation, [
       { type: "usage", timestamp: `${DAY}T10:00:01.000Z`, payload: telemetry(1_000) },
@@ -321,7 +322,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const taskId = randomUUID();
     const mine = { id: randomUUID(), workspaceId: randomUUID(), companyId: A } as unknown as OperationRecord;
     const other = { id: randomUUID(), workspaceId: mine.workspaceId, companyId: A } as unknown as OperationRecord;
-    await store.put({ item: { ...taskPointerKey(mine.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
+    await store.put({ item: { ...taskPointerKey(mine.companyId, mine.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
     const finalZero = { ...telemetry(0), checkpoint: undefined, final: true };
     // Another run's checkpoint does not count for this one.
     await money.bookUsage(other, [{ type: "usage", timestamp: `${DAY}T10:00:01.000Z`, payload: telemetry(1_000) }]);
@@ -355,8 +356,8 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
       const workspaceId = randomUUID();
       const operation = { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${randomUUID()}` };
       const id = operation.sk.slice("OPERATION#".length);
-      await store.put({ item: { ...operationKey(workspaceId, id), entityType: "OPERATION", id, workspaceId, companyId, kind: "task", status: "RUNNING", fence: 1, eventSequence: 0, machineId: `m-${companyId}`, dispatch: { kind: "task", payload: {} } } });
-      await store.put({ item: { pk: `WORKSPACE#${workspaceId}`, sk: "META", id: workspaceId, projectRevision: 1 } });
+      await store.put({ item: { ...operationKey(companyId, workspaceId, id), entityType: "OPERATION", id, workspaceId, companyId, kind: "task", status: "RUNNING", fence: 1, eventSequence: 0, machineId: `m-${companyId}`, dispatch: { kind: "task", payload: {} } } });
+      await store.put({ item: { ...workspaceKey(companyId, workspaceId), id: workspaceId, companyId, projectRevision: 1 } });
       return { workspaceId, id };
     };
     const a = await operationOf(A);
@@ -368,20 +369,20 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const capability = new CallbackCapabilities(signingKey).issue({ workspaceId: a.workspaceId, operationId: a.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
     const answer = await handler({ method: "POST", path: `/v1/internal/workspaces/${a.workspaceId}/operations/${a.id}/events`, headers: { [CAPABILITY_HEADER]: capability }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) });
     expect(answer.statusCode).toBe(200);
-    expect(await store.get(operationKey(a.workspaceId, a.id))).toMatchObject({ status: "CANCEL_REQUESTED", stopReason: "company_day_cap", stopRequestedAt: NOW.toISOString() });
+    expect(await store.get(operationKey(A, a.workspaceId, a.id))).toMatchObject({ status: "CANCEL_REQUESTED", stopReason: "company_day_cap", stopRequestedAt: NOW.toISOString() });
     expect(queued).toHaveLength(1);
     expect(queued[0]!.companyId).toBe(A);
     expect(queued[0]!.body).toMatchObject({ v: 1, companyId: A, workspaceId: a.workspaceId, operationId: a.id });
     expect(typeof queued[0]!.body["cancel"]).toBe("string");
     expect(relayed).toEqual([{ companyId: A, ids: [queued[0]!.body["cancel"]] }]);
     expect(delivered).toEqual([]);
-    expect(await store.get(operationKey(b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });
-    expect(await store.get(operationKey(b.workspaceId, b.id))).not.toHaveProperty("stopReason");
+    expect(await store.get(operationKey(B, b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });
+    expect(await store.get(operationKey(B, b.workspaceId, b.id))).not.toHaveProperty("stopReason");
     // B's operation through A's callback layer: refused as not found, nothing stopped.
     const foreign = new CallbackCapabilities(signingKey).issue({ workspaceId: b.workspaceId, operationId: b.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });
     const refused = await handler({ method: "POST", path: `/v1/internal/workspaces/${b.workspaceId}/operations/${b.id}/events`, headers: { [CAPABILITY_HEADER]: foreign }, body: JSON.stringify({ events: [{ type: "usage", timestamp: NOW.toISOString(), payload: telemetry(1) }] }) });
     expect(refused.statusCode).toBe(404);
-    expect(await store.get(operationKey(b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });
+    expect(await store.get(operationKey(B, b.workspaceId, b.id))).toMatchObject({ status: "RUNNING" });
     expect(queued).toHaveLength(1);
     expect(costPartition(A, "t")).not.toEqual(costPartition(B, "t"));
   });

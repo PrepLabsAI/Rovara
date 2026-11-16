@@ -1,10 +1,11 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The uploads a coding run makes for the browser and API checks, on the document store and object storage: committed source, its build source manifest and the unchanged code.
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, ObjectTooBigError, type DocumentStore, type ObjectStorage } from "@agentx/contracts";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { handleBaselineSource, handleCandidateBuildSource, handleCandidateExport, readCandidateSourceExport } from "../../packages/broker/src/core/e2e/uploads.js";
 import { UPLOAD_CHUNK_BYTES, type UploadOperation, type UploadStores } from "../../packages/broker/src/core/e2e/uploads-chunks.js";
 import { createRealCandidate, disposeRealCandidates, type RealCandidate } from "../support/e2e-application-candidate.js";
@@ -20,10 +21,10 @@ function world(patch: Record<string, unknown> = {}, objectsOf?: (inner: ObjectSt
   const inner = createDocumentObjectStorage(store, { companyId: IMPLICIT_COMPANY_ID });
   const objects = objectsOf === undefined ? inner : objectsOf(inner);
   const stores: UploadStores = { store, objects };
-  const seed = async (more: Record<string, unknown> = {}) => store.put({ item: { ...operationKey(workspaceId, operationId), entityType: "OPERATION", id: operationId, workspaceId, kind: "task",
+  const seed = async (more: Record<string, unknown> = {}) => store.put({ item: { ...operationKey(T1_COMPANY, workspaceId, operationId), entityType: "OPERATION", companyId: T1_COMPANY, id: operationId, workspaceId, kind: "task",
     workflowMode: "IMPLEMENT", status: "RUNNING", fence: 1, ...patch, ...more } });
   /** The operation as the callback layer reads it at the start of a request. */
-  const operation = async (): Promise<UploadOperation> => (await store.get(operationKey(workspaceId, operationId))) as unknown as UploadOperation;
+  const operation = async (): Promise<UploadOperation> => (await store.get(operationKey(T1_COMPANY, workspaceId, operationId))) as unknown as UploadOperation;
   const keysWith = async (needle: string) => (await store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#EVIDENCE_BLOB` })).items.map((item) => item.sk).filter((key) => key.includes(needle));
   return { store, objects, stores, seed, operation, keysWith };
 }
@@ -66,7 +67,7 @@ describe("the candidate's committed source", () => {
     const { finalized } = await upload(w, "export", bytes);
     const digest = sha256(bytes);
     expect(finalized).toEqual({ sourceRef: { key: `workflow-candidate-sources/sha256/${digest}.json`, sha256: digest, byteLength: bytes.byteLength, candidateDigest: candidate.source.candidate.digest } });
-    const row = await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${operationId}` });
+    const row = await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_EXPORT#${operationId}` });
     expect(row).toMatchObject({ entityType: "WORKFLOW_CANDIDATE_EXPORT", status: "COMPLETE", sourceRef: (finalized as { sourceRef: unknown }).sourceRef });
     const operation = await w.operation();
     expect(operation.candidateSourceRef).toEqual((finalized as { sourceRef: unknown }).sourceRef);
@@ -183,7 +184,7 @@ describe("the candidate's committed source", () => {
       await w.seed();
       await expect(upload(w, "export", Buffer.from(text, "utf8"))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
       expect((await w.operation()).candidateSourceRef).toBeUndefined();
-      expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${operationId}` })).toMatchObject({ status: "OPEN" });
+      expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_EXPORT#${operationId}` })).toMatchObject({ status: "OPEN" });
     }
   });
 
@@ -219,7 +220,7 @@ describe("the candidate's committed source", () => {
     const w = world();
     await w.seed();
     const started = await upload(w, "export", exportBytes(candidate), { stopBeforeFinalize: true });
-    await w.store.update({ key: operationKey(workspaceId, operationId), ops: [{ op: "set", path: ["candidateSourceRef"], value: { key: "other", sha256: "b".repeat(64), byteLength: 1, candidateDigest: "c".repeat(64) } }] });
+    await w.store.update({ key: operationKey(T1_COMPANY, workspaceId, operationId), ops: [{ op: "set", path: ["candidateSourceRef"], value: { key: "other", sha256: "b".repeat(64), byteLength: 1, candidateDigest: "c".repeat(64) } }] });
     await rejects(handleCandidateExport(w.stores, { ...(await w.operation()), candidateSourceRef: undefined }, { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId: started.uploadId, sha256: started.digest }), "STALE_FENCE");
   });
 
@@ -246,7 +247,7 @@ describe("the candidate's committed source", () => {
     expect(operation.candidateSourceRef).toBeUndefined();
     expect(operation.candidateSourceRefused).toBe("too-large");
     expect(await w.keysWith("staging")).toEqual([]);
-    expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${operationId}` })).toMatchObject({ status: "REFUSED", refusedReason: "too-large" });
+    expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_EXPORT#${operationId}` })).toMatchObject({ status: "REFUSED", refusedReason: "too-large" });
     expect(await handleCandidateExport(w.stores, operation, { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId, sha256: digest })).toEqual({ accepted: false, reason: "too-large", duplicate: true });
   });
 
@@ -283,7 +284,7 @@ describe("the candidate's committed source", () => {
     expect(staged.length).toBeGreaterThan(0);
     for (const row of staged) expect(row).toMatchObject({ retention: "evidence-short" });
     expect(staged.every((row) => typeof row[INDEX_EXPIRY_ATTRIBUTE] === "number")).toBe(true);
-    const done = await handleCandidateExport(w.stores, await w.operation(), { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId: (await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${operationId}` }))!["uploadId"], sha256: sha256(bytes) });
+    const done = await handleCandidateExport(w.stores, await w.operation(), { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId: (await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_EXPORT#${operationId}` }))!["uploadId"], sha256: sha256(bytes) });
     expect(done).toHaveProperty("sourceRef");
     const kept = (await w.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#EVIDENCE_BLOB` })).items.find((item) => item.sk.startsWith("workflow-candidate-sources/"));
     expect(kept).toMatchObject({ retention: "task-document" });
@@ -324,13 +325,13 @@ describe("the build source manifest of the candidate", () => {
     expect(finalized).toMatchObject({ accepted: true, buildSource: candidate.stored });
     const operation = await w.operation();
     expect(operation.candidateBuildSource).toEqual(candidate.stored);
-    expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${operationId}` })).toMatchObject({ buildSource: candidate.stored });
-    expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_BUILD_SOURCE#${operationId}` })).toMatchObject({ status: "COMPLETE" });
+    expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_EXPORT#${operationId}` })).toMatchObject({ buildSource: candidate.stored });
+    expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_BUILD_SOURCE#${operationId}` })).toMatchObject({ status: "COMPLETE" });
     if (candidate.stored.status !== "READY") throw new Error("expected READY");
     expect(Buffer.from((await w.objects.get(candidate.stored.manifestRef.key, candidate.manifestBytes.byteLength))!).equals(candidate.manifestBytes)).toBe(true);
     expect(await w.keysWith("staging")).toEqual([]);
     // A repeat of the finished upload is the same answer.
-    const again = await handleCandidateBuildSource(w.stores, operation, { stage: "finalize", schemaVersion: SCHEMA.build.finalize, uploadId: (await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_BUILD_SOURCE#${operationId}` }))!["uploadId"] as string, sha256: sha256(candidate.manifestBytes) });
+    const again = await handleCandidateBuildSource(w.stores, operation, { stage: "finalize", schemaVersion: SCHEMA.build.finalize, uploadId: (await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_BUILD_SOURCE#${operationId}` }))!["uploadId"] as string, sha256: sha256(candidate.manifestBytes) });
     expect(again).toMatchObject({ accepted: true, duplicate: true });
   });
 
@@ -375,7 +376,7 @@ describe("the build source manifest of the candidate", () => {
     const answer = await handleCandidateBuildSource(w.stores, await w.operation(), body);
     expect(answer).toMatchObject({ accepted: false, buildSource: { status: "REFUSED", reason: "the worker could not export a build source manifest: no lockfile" } });
     expect(await w.keysWith("workflow-candidate-build-source-staging/")).toEqual([]);
-    expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_BUILD_SOURCE#${operationId}` })).toMatchObject({ status: "ABORTED" });
+    expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_BUILD_SOURCE#${operationId}` })).toMatchObject({ status: "ABORTED" });
     expect(await handleCandidateBuildSource(w.stores, await w.operation(), body)).toMatchObject({ accepted: false, duplicate: true });
     await rejects(handleCandidateBuildSource(w.stores, await w.operation(), { ...body, reason: "another reason" }), "CALLBACK_FORBIDDEN");
   });
@@ -404,8 +405,8 @@ describe("the unchanged code for the baseline round", () => {
     expect(Buffer.from((await w.objects.get(stored.sourceRef.key, stored.sourceRef.byteLength))!).equals(candidate.baseline!.sourceBytes)).toBe(true);
     expect(Buffer.from((await w.objects.get(stored.buildSource.manifestRef.key, stored.buildSource.manifestRef.byteLength))!).equals(candidate.baseline!.manifestBytes)).toBe(true);
     expect(await w.keysWith("staging")).toEqual([]);
-    expect(await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `BASELINE_SOURCE#${operationId}` })).toMatchObject({ status: "COMPLETE" });
-    const again = await handleBaselineSource(w.stores, await w.operation(), { stage: "finalize", schemaVersion: SCHEMA.baseline.finalize, uploadId: (await w.store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `BASELINE_SOURCE#${operationId}` }))!["uploadId"], sha256: sha256(wireOf(candidate)) });
+    expect(await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `BASELINE_SOURCE#${operationId}` })).toMatchObject({ status: "COMPLETE" });
+    const again = await handleBaselineSource(w.stores, await w.operation(), { stage: "finalize", schemaVersion: SCHEMA.baseline.finalize, uploadId: (await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `BASELINE_SOURCE#${operationId}` }))!["uploadId"], sha256: sha256(wireOf(candidate)) });
     expect(again).toMatchObject({ accepted: true, duplicate: true });
   });
 

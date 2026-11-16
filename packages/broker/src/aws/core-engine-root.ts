@@ -52,7 +52,7 @@ import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type Core
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
-import { taskPointerKey } from "../core/task-flow/keys.js";
+import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -331,9 +331,10 @@ export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, comp
     // The per-run stop (core-money-stop): after a batch's usage is booked, the run's task and the company's day are read against the caps; a run past one is answered with the stop's code,
     // and the callback layer asks its worker to stop (core/task-flow/money-stop.ts `requestSpendStop`). Without the caps (`settings`) nothing is read.
     bookUsage: async (operation, events) => {
+      if (operation.companyId !== companyId) throw new Error("operation belongs to another company");
       const booked = await booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events);
       if (settings === undefined || !events.some((event) => event.type === USAGE_EVENT_TYPE)) return booked;
-      const taskId = (await store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+      const taskId = (await store.get((await workspaceKeys({ store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
       const state = typeof taskId === "string" && taskId !== "" ? await runSpendState({ store, ledger, settings, now }, companyId, taskId) : "spend_unknown";
       return state === "within" ? booked : { ...booked, spendStop: state };
     },

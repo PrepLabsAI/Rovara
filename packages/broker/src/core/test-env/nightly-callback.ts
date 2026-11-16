@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The nightly run's result route, broker side: `POST /v1/internal/workspaces/{w}/operations/{o}/nightly-result`, the ONE action a nightly run's worker has to report with.
 //
 // The slot id is not a secret (the scheduler's input names it), so nothing about WHO may record is read from the body. The caller is authenticated the way every operation callback is, and then held to the
@@ -10,7 +11,7 @@
 // Everything else (the lock the slot holds, the clock, the coverage map's digest, the classification and the project's health) is `recordNightlyResultWithHealth`'s own. With `nh` or the test environment
 // off, the route answers CALLBACK_FORBIDDEN and nothing is read.
 import { NIGHTLY_RUN_PURPOSE, NightlyResultCallbackBodySchema, NightlyResultSchema, agentXError, type NightFailedReason, type OrgId } from "@agentx/contracts";
-import { taskKey, taskPointerKey } from "../../developer/task-records.js";
+import { taskKey } from "../../developer/task-records.js";
 import type { StoreOnly, TestEnvDeps } from "./deps.js";
 import { nightlyRunsOn } from "./health-switch.js";
 import { recordNightlyResult, releaseNightly, type MapStore, type NightlyRecorded } from "./nightly.js";
@@ -18,18 +19,20 @@ import { nightFailedItem } from "./night-status.js";
 import type { NightlyTaskFacts } from "./nightly-run.js";
 
 /** The authenticated operation, as the callback route read it. */
-export interface NightlyOperation { kind: string; workflowMode?: string | undefined; status: string; workspaceId: string; orgId?: string | undefined }
+export interface NightlyOperation { companyId?: string | undefined; kind: string; workflowMode?: string | undefined; status: string; workspaceId: string; orgId?: string | undefined }
 
 /** The run an operation belongs to: its task, which must be a nightly task of the operation's company, still open. Undefined for anything else. */
 export async function nightlyRunOfOperation(deps: StoreOnly, operation: NightlyOperation): Promise<{ orgId: OrgId; project: string; taskId: string; started: NonNullable<NightlyTaskFacts["nightlyRun"]> } | undefined> {
   if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || operation.status !== "RUNNING") return undefined;
-  const pointer = (await deps.store.get(taskPointerKey(operation.workspaceId))) as { taskId?: unknown } | undefined;
+  const companyId = operation.companyId ?? operation.orgId;
+  if (companyId === undefined) return undefined;
+  const pointer = (await deps.store.get((await workspaceKeys({ store: deps.store, companyId }, operation.workspaceId)).taskPointerKey())) as { taskId?: unknown } | undefined;
   if (typeof pointer?.taskId !== "string") return undefined;
   const task = (await deps.store.get(taskKey(pointer.taskId))) as (NightlyTaskFacts & { companyId?: string }) | undefined;
   if (task === undefined) return undefined;
   // The hosted product's task rows say `orgId`; this install's say `companyId`: one of them names the company.
   const company = task.orgId ?? task.companyId;
-  if (task.purpose !== NIGHTLY_RUN_PURPOSE || task.nightlyRun === undefined || company === undefined || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined) return undefined;
+  if (task.purpose !== NIGHTLY_RUN_PURPOSE || task.nightlyRun === undefined || company === undefined || company !== companyId || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined) return undefined;
   if (operation.orgId !== undefined && operation.orgId !== company) return undefined;
   return { orgId: company, project: task.project, taskId: task.taskId, started: task.nightlyRun };
 }

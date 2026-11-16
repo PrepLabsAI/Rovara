@@ -16,7 +16,9 @@ import { createAllowAllAdmission, createNoopAuditSink, localOwnerPrincipal } fro
 import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
+import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
@@ -48,8 +50,10 @@ async function createWorld(options: { enabled?: boolean } = {}) {
   const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES });
   const queues = new MemoryQueueService();
   const grants = new RepositoryGrantService(Buffer.alloc(32, 5), async () => ({ token: "unused", expiresAt: new Date(Date.now() + 3_600_000).toISOString() }) as never);
-  // The core's own records say whose a workspace is (the deployed reader reads the same field from the State table).
-  const companyOfWorkspace = async (workspaceId: string): Promise<OrgId | undefined> => ((await store.get(workspaceKey(workspaceId)))?.companyId as OrgId | undefined);
+  const companyOfWorkspace = workspaceCompanyReader({ send: async (command: unknown) => {
+    if (!(command instanceof GetCommand)) throw new Error("unexpected command");
+    return { Item: await store.get(command.input.Key as { pk: string; sk: string }) };
+  } } as never, "state");
   const fleet = machinesWorld.fleet({ companyOfWorkspace });
   const depsOf = (companyId: OrgId, dispatchQueues: QueueService = queues): TaskFlowDeps => ({
     companyId, store, queues: dispatchQueues, outbox: createTransactionalOutbox({ store, queues }),
@@ -137,17 +141,17 @@ describe("the dispatcher as the host of the core's dispatch", () => {
     const w = await createWorld();
     const taskA = await w.start(COMPANY_A);
     const [record] = await w.staged();
-    const workspace = (await w.store.get(workspaceKey(taskA.workspaceId)))!;
+    const workspace = (await w.store.get(workspaceKey(COMPANY_A, taskA.workspaceId)))!;
     await w.store.put({ item: { ...workspace, companyId: COMPANY_B } });
     expect(failures(await w.handler({ Records: [record!] }))).toEqual([record!.messageId]);
     expect(w.depsFor).not.toHaveBeenCalled();
     expect(w.changeVisibility).not.toHaveBeenCalled();
     expect(w.machinesWorld.executions).toEqual([]);
     expect(w.machinesWorld.posts).toEqual([]);
-    // A message rewritten to name the workspace's new company is then B's: B's core finds the operation is not B's and sets it aside (no dead-letter function: kept for the redrive policy).
+    // Rewriting the message cannot change the immutable pointer: A's pointer and B's corrupt scoped row disagree, so routing still refuses.
     const rewritten = { ...w.again(record!), body: JSON.stringify({ ...JSON.parse(record!.body), companyId: COMPANY_B }) };
     expect(failures(await w.handler({ Records: [rewritten] }))).toEqual([rewritten.messageId]);
-    expect(w.depsFor.mock.calls.map(([company]) => company)).toEqual([COMPANY_B]);
+    expect(w.depsFor).not.toHaveBeenCalled();
     expect(w.machinesWorld.executions).toEqual([]);
   });
 
@@ -185,7 +189,7 @@ describe("the dispatcher as the host of the core's dispatch", () => {
     w.depsFor.mockImplementationOnce((companyId, dispatchQueues) => ({ ...w.depsOf(companyId, dispatchQueues), machines: w.fleet.forCompany(COMPANY_B) }));
     expect(failures(await w.handler({ Records: [record!] }))).toEqual([record!.messageId]);
     expect(w.machinesWorld.executions).toEqual([]);
-    expect((await w.store.get(workspaceKey(task.workspaceId)))!.status).not.toBe("CLOSED");
+    expect((await w.store.get(workspaceKey(COMPANY_A, task.workspaceId)))!.status).not.toBe("CLOSED");
     // The same fault with the unbound fleet (a root that forgot to bind it): also refused before anything runs.
     w.depsFor.mockImplementationOnce((companyId, dispatchQueues) => ({ ...w.depsOf(companyId, dispatchQueues), machines: w.fleet }));
     expect(failures(await w.handler({ Records: [w.again(record!)] }))).toEqual([record!.messageId]);
@@ -209,7 +213,7 @@ describe("the dispatcher as the host of the core's dispatch", () => {
     expect(failures(await w.handler({ Records: [cancelRecord(randomUUID())] }))).toEqual([]);
     expect(w.machinesWorld.posts).toHaveLength(before);
     // Being stopped: the cancel goes to its worker, once.
-    await w.store.update({ key: { pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${operationId}` }, ops: [change.set("status", "CANCEL_REQUESTED")] });
+    await w.store.update({ key: operationKey(COMPANY_A, task.workspaceId, operationId), ops: [change.set("status", "CANCEL_REQUESTED")] });
     const cancel = randomUUID();
     expect(failures(await w.handler({ Records: [cancelRecord(cancel)] }))).toEqual([]);
     expect(w.machinesWorld.posts.slice(before)).toEqual([expect.objectContaining({ status: 200, workspaceId: task.workspaceId, operationId: cancel })]);
@@ -494,4 +498,19 @@ describe("the flow inputs the deployment declares on the dispatcher (lane E2 ste
     expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" })).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
     for (const value of ["on", `on:${COMPANY_A}`]) expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: value }), value).toBeUndefined();
   });
+});
+
+it.each(["missing", "foreign"])("dispatcher refuses and logs a %s scoped workspace behind a pointer", async (kind) => {
+  const w = await createWorld();
+  const task = await w.start(COMPANY_A);
+  const batch = await w.staged();
+  const key = workspaceKey(COMPANY_A, task.workspaceId);
+  if (kind === "missing") await w.store.delete({ key });
+  else await w.store.put({ item: { ...(await w.store.get(key))!, companyId: COMPANY_B } });
+  const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    expect(failures(await w.handler({ Records: batch }))).toEqual(batch.map((row) => row.messageId));
+    expect(w.depsFor).not.toHaveBeenCalled();
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+  } finally { integrity.mockRestore(); }
 });

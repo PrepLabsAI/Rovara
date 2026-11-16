@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L10 (review N1): a stop-gap until merge tracking runs on a timer (lane L12). The worker that pushed a pull request's branch held a push credential, and nothing else looks at the branch after
 // its operation ends. So whenever a task is read (its page), the host's head of each open pull request Rovara opened is read and compared with the head Rovara recorded (`expectedHeadCommit`).
 // A mismatch marks the pull request "changed outside Rovara" on its record (cleared if the head is back), the page says so, and `recordedHeadOf` stops answering for it, so merge tracking reads the
@@ -34,7 +35,7 @@ export async function checkPullRequestHeads(deps: TaskFlowDeps, task: TaskRecord
       const remote = await host.getChangeRequest({ repository: { url: definition.url }, id: String(pullRequest.number), url: pullRequest.url }, { orgId: deps.companyId });
       const outside = remote.state === "open" && remote.headRevision !== record.expectedHeadCommit;
       await deps.store.update({
-        key: pullRequestRecordKey(task.workspaceId, pullRequest.repositoryId, pullRequest.number),
+        key: pullRequestRecordKey((await workspaceKeys(deps, task.workspaceId)).workspaceKey, pullRequest.repositoryId, pullRequest.number),
         ops: [change.set("headCheckedAt", iso(deps)), outside ? change.set("changedOutside", `${CHANGED_OUTSIDE_NOTE} (head ${remote.headRevision.slice(0, 12)}).`) : change.remove("changedOutside")], condition: when.present(),
       });
       results.push({ repository: pullRequest.repositoryId, number: pullRequest.number, changedOutside: outside });
@@ -50,7 +51,7 @@ export async function checkPullRequestHeads(deps: TaskFlowDeps, task: TaskRecord
  * The head Rovara last pushed to a pull request, for merge tracking's `recordedHead`: undefined when the record is missing or the pull request was seen changed outside Rovara, so tracking reads the
  * head as someone else's and never takes the pull request out of draft.
  */
-export function recordedHeadOf(deps: Pick<TaskFlowDeps, "store">): (workspaceId: string, repositoryId: string, number: number) => Promise<string | undefined> {
+export function recordedHeadOf(deps: Pick<TaskFlowDeps, "store" | "companyId">): (workspaceId: string, repositoryId: string, number: number) => Promise<string | undefined> {
   return async (workspaceId, repositoryId, number) => {
     const record = await pullRequestRecordOf(deps, workspaceId, repositoryId, number);
     return record === undefined || record.changedOutside !== undefined ? undefined : record.expectedHeadCommit;
