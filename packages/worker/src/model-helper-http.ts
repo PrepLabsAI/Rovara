@@ -18,6 +18,7 @@ import {
   FailureSpecSchema,
   INITIAL_SERVE_STATE,
   MODEL_ECHO_PATTERN,
+  isInboundCredentialHeader,
   SSE_CONTENT_TYPE,
   checkModelHost,
   readModelRequestFacts,
@@ -147,15 +148,13 @@ export function parseModelTarget(raw: unknown): ParsedModelTargetResult {
 
 // ---- headers
 
-const CREDENTIAL_HEADERS = new Set(["authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "api-key", "x-goog-user-project", "cookie", "set-cookie"]);
-const isCredentialHeader = (name: string): boolean => CREDENTIAL_HEADERS.has(name) || name.startsWith("proxy-") || name.startsWith("x-amz-");
-
+// The credential-header rule is the contracts' one (`isInboundCredentialHeader`, reached through the narrow entry): the gateway side drops by the same rule, so the two cannot drift.
 /** The request's headers for a backend: lowercase names, one value each (at most 4 KB), every credential header (a bearer token, an API key, a cookie, a proxy header, an AWS header) dropped. */
 export function headersForBackend(headers: IncomingMessage["headers"]): Record<string, string> {
   const out: Record<string, string> = Object.create(null) as Record<string, string>;
   let count = 0;
   for (const [name, value] of Object.entries(headers)) {
-    if (count >= 100 || isCredentialHeader(name.toLowerCase())) continue;
+    if (count >= 100 || isInboundCredentialHeader(name)) continue;
     const first = typeof value === "string" ? value : Array.isArray(value) ? value[0] : undefined;
     if (typeof first !== "string") continue;
     out[name.toLowerCase()] = first.length > 4096 ? first.slice(0, 4096) : first;

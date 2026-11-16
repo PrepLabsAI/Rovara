@@ -1,29 +1,14 @@
 // TE-F1a: building the one outbound request. Every inbound credential is dropped FIRST (any header name that is, or could be read as, a credential, in any case, with duplicates and line folding; and the `key` query parameter),
 // then only an allow list of headers is kept, then EXACTLY ONE credential is added, as the row's scheme says. The secret arrives as an argument and is never stored here.
+import { isInboundCredentialHeader, normalizeHeaderName } from "./credential-header.js";
 import { hasExternalInput, maxOutputFieldOf, requestedMaxOutputTokens, withDefaultMaxOutput } from "./cost.js";
 import type { ModelEgressFrame } from "./frame.js";
 import { MODEL_EGRESS_HEADER_VALUE_MAX, routeEgressRequest, type EgressRoute } from "./families.js";
 import type { ModelEgressRefusal } from "./refusals.js";
 import { isTokenScheme, type ModelEgressConnection, type ModelEgressRow, type ModelEgressScheme } from "./schemes.js";
 
-/** Header names that carry a credential, exactly. */
-const CREDENTIAL_NAMES = new Set(["authorization", "x-api-key", "x-goog-api-key", "api-key", "x-goog-user-project", "cookie", "cookie2"]);
-
-/** A header name as a lenient reader would compare it: whitespace, control characters and colons gone, lower case. A name with a fold (`authorization\r\n x`) reads as `authorization`. */
-export function normalizeHeaderName(name: string): string {
-  let kept = "";
-  for (const character of name.replace(/[\s:]/gu, "")) {
-    const code = character.codePointAt(0) ?? 0;
-    if (code > 0x1f && code !== 0x7f) kept += character;
-  }
-  return kept.toLowerCase();
-}
-
-/** Whether an inbound header could carry a credential: a known credential header, `proxy-*`, any `x-amz-*`, or any name that mentions authorization, an api key or a cookie. Over-broad on purpose: a false positive drops a header nobody needs. */
-export function isInboundCredentialHeader(name: string): boolean {
-  const normal = normalizeHeaderName(name);
-  return CREDENTIAL_NAMES.has(normal) || normal.startsWith("proxy-") || normal.startsWith("x-amz-") || normal.includes("authorization") || normal.includes("api-key") || normal.includes("apikey") || normal.includes("cookie");
-}
+// The one rule for "could this header carry a credential?" lives in credential-header.ts (shared with the model helper's narrow entry); re-exported here so the egress code and its tests keep one import.
+export { isInboundCredentialHeader, normalizeHeaderName };
 
 /** Every inbound credential header removed; what is left is not yet checked against the allow list. */
 export function dropInboundCredentials(headers: ReadonlyArray<readonly [string, string]>): Array<[string, string]> {

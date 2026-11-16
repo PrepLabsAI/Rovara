@@ -302,7 +302,7 @@ describe("header injection", () => {
   it("the credential name helpers see through folds, case and colons", () => {
     expect(normalizeHeaderName("Authorization\r\n x:")).toBe("authorizationx");
     expect(isInboundCredentialHeader("Authorization\r\n")).toBe(true);
-    for (const name of ["x-custom-api-key", "x-apikey", "X-Goog-Api-Key", "set-cookie", "Cookie", "x-amz-date", "proxy-connection", "X-Goog-User-Project", "my-authorization-header"]) expect(isInboundCredentialHeader(name), name).toBe(true);
+    for (const name of ["x-custom-api-key", "x-apikey", "X-Goog-Api-Key", "set-cookie", "Cookie", "x-amz-date", "amz-sdk-invocation-id", "amz-sdk-request", "x-authorization", "x-amzn-bedrock-authorization", "proxy-connection", "X-Goog-User-Project", "my-authorization-header"]) expect(isInboundCredentialHeader(name), name).toBe(true);
     expect(isInboundCredentialHeader("content-type")).toBe(false);
     expect(isInboundCredentialHeader("x-goog-api-client")).toBe(false);
     expect(dropInboundCredentials([["Authorization", "a"], ["content-type", "b"], ["Proxy-Foo", "c"]])).toEqual([["content-type", "b"]]);

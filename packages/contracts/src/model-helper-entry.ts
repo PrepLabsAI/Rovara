@@ -14,3 +14,4 @@ export { SERVED_MODEL_FAMILIES, type ServedModelFamily } from "./model-served-fa
 export { canonicalJson } from "./canonical-json.js";
 export { sha256HexOf } from "./service-catalog-verify.js";
 export type { ServableRow } from "./model-serve.js";
+export { isInboundCredentialHeader } from "./model-egress/credential-header.js";

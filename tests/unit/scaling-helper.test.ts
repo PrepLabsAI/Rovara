@@ -30,6 +30,13 @@ describe("expectLinearScaling", () => {
     expect(() => expectLinearScaling(linear, { n: 32_768, label: "exactly at the limit", minSampleMs: 0 })).not.toThrow(/byte limit/u);
     expect(() => expectLinearScaling(linear, { n: 200_000, unitBytes: 0, label: "builds no input", minSampleMs: 0 })).not.toThrow(/byte limit/u);
   });
+  it("counts the bytes held in memory whatever n is (fixedBytes) toward the same 256 KiB limit, so a small N with big resident values is refused", () => {
+    // 5 values of 32 KB held for the whole run plus an 8N text of 200 KB is a working set over the limit, though 8N alone is not.
+    expect(() => expectLinearScaling(linear, { n: 25_000, fixedBytes: 160_500, label: "values held" })).toThrow(/over the 262144 byte limit/u);
+    expect(() => expectLinearScaling(linear, { n: 8_000, fixedBytes: 160_500, label: "values held, shrunk", minSampleMs: 0 })).not.toThrow(/byte limit/u);
+    expect(() => expectLinearScaling(linear, { n: 10, unitBytes: 0, fixedBytes: 262_145, label: "fixed alone" })).toThrow(/over the 262144 byte limit/u);
+    expect(() => expectLinearScaling(linear, { n: 10, fixedBytes: -1 })).toThrow(/bad scaling options/u);
+  });
   it("rejects bad options", () => {
     expect(() => expectLinearScaling(linear, { n: 0 })).toThrow(/bad scaling options/u);
     expect(() => expectLinearScaling(linear, { n: 10, k: 1 })).toThrow(/bad scaling options/u);
