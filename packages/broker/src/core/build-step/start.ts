@@ -235,7 +235,7 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
     requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(browserRecipe === undefined ? [] : [BROWSER_EVIDENCE_FEATURE]), ...(testPlan === undefined ? [] : testPlan.requires)],
-    ...(browserRecipe === undefined ? {} : { extraActions: ["browser-evidence"] }),
+    ...(browserRecipe === undefined ? {} : { extraActions: browserRecipe.signIn === undefined ? ["browser-evidence"] : ["browser-evidence", "browser-evidence-sign-in"] }),
   });
   return settled(deps, row, accepted.result);
 }

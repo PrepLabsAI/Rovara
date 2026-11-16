@@ -1,5 +1,5 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
-import { EVAL_ROUND_ARTIFACT, evalResultFromArtifact } from "@agentx/contracts";
+import { EVAL_ROUND_ARTIFACT, evalResultFromArtifact, type BrowserEvidenceSignInAnswer } from "@agentx/contracts";
 import { readFile, realpath } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -158,6 +158,8 @@ export interface TaskInvocationDependencies {
   workflowE2EEvidenceRoot?: string;
   /** TE-H1 browser evidence (DEC 241b): hands the run's before and after screenshots to the broker as one chunked upload. Only the worker's own wiring sets it; without it the screenshots are taken and not kept. */
   browserEvidenceSink?: (bytes: Uint8Array) => Promise<void>;
+  /** TE-H1 browser evidence, slice 3: asks the broker for the project's saved sign-in (see `createWorkerCallbackSinks`). Absent: a recipe with a sign-in is "Not run". */
+  browserEvidenceSignIn?: () => Promise<BrowserEvidenceSignInAnswer>;
   /** TE-H1: tests supply a fake for the capture; default: `collectBrowserEvidence` (the app in the task sandbox, Chromium in the executor image). */
   collectBrowserEvidence?: typeof collectBrowserEvidence;
   /** TE-H1: the executor image the capture container is started from. Default: `EXECUTOR_IMAGE` of the worker's environment. */
@@ -637,7 +639,7 @@ async function runTask(
           await saveBrowserEvidence({
             recipe: invocation.payload.browserEvidence, repositories, candidateTrees: new Map(candidateBefore.map((entry) => [entry.repositoryId, entry.treeSha])), rootPath: canonicalRoot, runners, sandboxName: sandbox?.name,
             originalCode: dependencies.testProofOriginalCode ?? gitOriginalCode, docker: dependencies.docker ?? fileToolsDocker, executorImage: dependencies.browserEvidenceExecutorImage ?? process.env["EXECUTOR_IMAGE"], signal: stop.signal,
-            budgetMs: roundBudgetMs - (Date.now() - roundStarted), sink: dependencies.browserEvidenceSink, progress: (message) => events.append("progress", { message }),
+            budgetMs: roundBudgetMs - (Date.now() - roundStarted), sink: dependencies.browserEvidenceSink, signIn: dependencies.browserEvidenceSignIn, progress: (message) => events.append("progress", { message }),
             ...(dependencies.collectBrowserEvidence === undefined ? {} : { collect: dependencies.collectBrowserEvidence }),
           });
         }

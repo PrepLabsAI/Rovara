@@ -61,8 +61,46 @@ const routes = {
 };
 // Data that arrives after load (a normal app fetch), D ms late, written by the fetch's continuation: /late-fetch/<ms>/<a|b>.
 const lateFetch = (d, who) => shell(`<h1>Profile</h1><p id="w">Signed in as •••</p><script>addEventListener("load", () => fetch("/slow?ms=${d}").then(() => { document.getElementById("w").textContent = "Signed in as ${who === "a" ? "ada@example.com" : "grace@example.org"}"; }));</script>`);
+// Slice 3, an app behind a login: BE_USER and BE_PASS are the one account. A form post with them sets a session cookie and sends the person to /dashboard; anything else is sent back to /login. /expired never holds a session.
+const account = { user: process.env.BE_USER, pass: process.env.BE_PASS };
+const signedIn = (request) => account.user !== undefined && (request.headers.cookie ?? "").split(/;\s*/u).includes(`session=${encodeURIComponent(account.user)}`);
+const loginPage = (note) => shell(`<h1>Sign in</h1>${note}<form method="post" action="/login"><label>Email <input id="email" name="email" type="text"></label><br><label>Password <input id="password" name="password" type="password"></label><br><button type="submit">Sign in</button></form>`);
+const escapeHtml = (text) => text.replace(/[&<>"']/gu, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const signedPages = {
+  "/dashboard": () => shell(`<h1>Dashboard</h1><p>Signed in as ${escapeHtml(account.user ?? "")}</p>`),
+  "/account": () => shell(`<h1>Account</h1><p>Signed in as ${escapeHtml(account.user ?? "")}</p><div class="box">Plan: team</div>`),
+  "/account-urlencoded": () => shell(`<h1>Account</h1><p>Signed in as ${encodeURIComponent(account.user ?? "")}</p><div class="box">Plan: team</div>`),
+  "/profile-field": () => shell(`<h1>Profile</h1><label>Name <input id="name" type="text" value="${escapeHtml(account.user ?? "")}"></label><div class="box">Plan: team</div>`),
+};
+const staticPages = {
+  "/account-static": shell(`<h1>Account</h1><p>Signed in as •••</p><div class="box">Plan: team</div>`),
+  "/account-other": shell(`<h1>Account</h1><p>Signed in as somebody-else-1</p><div class="box">Plan: team</div>`),
+  "/prefilled-a": shell(`<h1>Settings</h1><label>Email <input id="email" type="text" value="alice-visible-1"></label>`),
+  "/prefilled-b": shell(`<h1>Settings</h1><label>Email <input id="email" type="text" value="bob-visible-22"></label>`),
+};
 createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://localhost");
+  if (url.pathname === "/login" && request.method === "GET") { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(loginPage(url.searchParams.has("error") ? "<p>Invalid credentials</p>" : "")); return; }
+  if (url.pathname === "/login" && request.method === "POST") {
+    let text = "";
+    request.on("data", (chunk) => { text += chunk; });
+    request.on("end", () => {
+      const form = new URLSearchParams(text);
+      const ok = account.user !== undefined && form.get("email") === account.user && form.get("password") === account.pass;
+      response.writeHead(303, { location: ok ? "/dashboard" : "/login?error=1", ...(ok ? { "set-cookie": `session=${encodeURIComponent(account.user)}; Path=/; HttpOnly` } : {}) });
+      response.end();
+    });
+    return;
+  }
+  if (url.pathname === "/expired") { response.writeHead(303, { location: "/login" }); response.end(); return; }
+  if (url.pathname === "/away") { response.writeHead(303, { location: "http://other.example/login" }); response.end(); return; }
+  if (Object.hasOwn(signedPages, url.pathname)) {
+    if (!signedIn(request)) { response.writeHead(303, { location: "/login" }); response.end(); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(signedPages[url.pathname]());
+    return;
+  }
+  if (Object.hasOwn(staticPages, url.pathname)) { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(staticPages[url.pathname]); return; }
   if (url.pathname === "/slow") { setTimeout(() => { response.writeHead(200, { "content-type": "text/plain" }); response.end("ok"); }, Math.min(5_000, Number(url.searchParams.get("ms")) || 0)); return; }
   const late = /^\/late-fetch\/(\d{1,4})\/(a|b)$/.exec(url.pathname);
   if (late !== null) { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(lateFetch(Number(late[1]), late[2])); return; }

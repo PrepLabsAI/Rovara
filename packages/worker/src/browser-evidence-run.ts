@@ -11,8 +11,9 @@
 import { randomBytes } from "node:crypto";
 import { relative } from "node:path";
 import {
-  BROWSER_EVIDENCE_EXECUTOR_ENTRY, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_RUN_MS, BrowserEvidenceExecutorLineSchema, ProjectCommandSchema, encodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceUpload, pickChangedRoutes,
-  type BrowserEvidenceCaptured, type BrowserEvidenceExecutorLine, type BrowserEvidenceNotRunReason, type BrowserEvidenceRecipe,
+  BrowserEvidenceSignInAnswerSchema, BROWSER_EVIDENCE_EXECUTOR_ENTRY, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_RUN_MS, BROWSER_EVIDENCE_SIGN_IN_ENV, BrowserEvidenceExecutorLineSchema, ProjectCommandSchema, encodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceSignInEnv,
+  encodeBrowserEvidenceUpload, pickChangedRoutes, recipeMaskSelectors,
+  type BrowserEvidenceCaptured, type BrowserEvidenceExecutorLine, type BrowserEvidenceNotRunReason, type BrowserEvidenceRecipe, type BrowserEvidenceSignInAnswer, type BrowserEvidenceSignInValues,
 } from "@agentx/contracts";
 import { executorContainerArgs, runBrowserEvidence, verifyExecutorSeccompProfile, type BrowserEvidenceCaptureAnswer, type BrowserEvidenceDriver, type BrowserEvidenceSide } from "@agentx/verifier";
 import { isWorkspaceUnsafe, type OriginalCode, type OriginalCodeRepository } from "./verification/original-code.js";
@@ -33,20 +34,22 @@ const STOP_MS = 10_000;
 const PROBE_MS = 5_000;
 
 /** The `docker run` arguments of the capture container. Pure, so a test can read every flag. The one shared thing is the sandbox's network namespace. */
-export function browserEvidenceExecutorArgs(input: { image: string; sandbox: string; name: string; seccompProfile: string; plan: string }): string[] {
+export function browserEvidenceExecutorArgs(input: { image: string; sandbox: string; name: string; seccompProfile: string; plan: string; withSignIn?: boolean }): string[] {
   if (!IMAGE_REFERENCE.test(input.image) || !CONTAINER_NAME.test(input.sandbox) || !CONTAINER_NAME.test(input.name) || !/^[A-Za-z0-9_-]{1,16384}$/u.test(input.plan)) throw new Error("browser evidence executor arguments are not valid");
   return ["run", "--rm", "--pull=never", "--name", input.name, "--label", `${EXECUTOR_LABEL}=1`, "--network", `container:${input.sandbox}`,
+    // The saved sign-in rides in ONE environment variable named without its value (`-e NAME` takes it from the docker CLI's own environment, set by the caller): the value is never an argument of the command line.
+    ...(input.withSignIn === true ? ["-e", BROWSER_EVIDENCE_SIGN_IN_ENV] : []),
     // The executor's own sandbox and limits, the one shared definition (the image smoke test and the e2e host start it with the same).
     ...executorContainerArgs(input.seccompProfile),
     input.image, "node", BROWSER_EVIDENCE_EXECUTOR_ENTRY, input.plan];
 }
 
 /** The capture program's stdout as its lines: every line checked against its schema, the app's line first and once, one row per page at most once and only for a page that was asked for. Anything else is no answer at all (undefined). */
-export function parseCaptureOutput(stdout: Uint8Array, routes: readonly string[]): { app: "ready" | "app_did_not_start" | "time_limit"; shots: Map<string, Extract<BrowserEvidenceExecutorLine, { t: "shot" }>> } | undefined {
+export function parseCaptureOutput(stdout: Uint8Array, routes: readonly string[]): { app: "ready" | "app_did_not_start" | "time_limit" | "sign_in_failed"; shots: Map<string, Extract<BrowserEvidenceExecutorLine, { t: "shot" }>> } | undefined {
   if (stdout.byteLength === 0 || stdout.byteLength > BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES) return undefined;
   try {
     const text = Buffer.from(stdout).toString("utf8");
-    let app: "ready" | "app_did_not_start" | "time_limit" | undefined;
+    let app: "ready" | "app_did_not_start" | "time_limit" | "sign_in_failed" | undefined;
     const shots = new Map<string, Extract<BrowserEvidenceExecutorLine, { t: "shot" }>>();
     for (const row of text.split("\n")) {
       if (row === "") continue;
@@ -74,6 +77,8 @@ export type BrowserEvidenceWorkInput = Readonly<{
   docker: Pick<DockerCli, "run" | "execBytes"> | undefined;
   /** `EXECUTOR_IMAGE` of the worker's environment. */
   executorImage: string | undefined;
+  /** Slice 3: asks the broker for the project's saved sign-in (`browserEvidenceSignIn` of the callback sinks). Only called for a recipe with a sign-in, and only once a page was picked. Absent: such a recipe is not run. */
+  signIn?: (() => Promise<BrowserEvidenceSignInAnswer>) | undefined;
   signal: AbortSignal;
   budgetMs: number;
   /** Test seams. */
@@ -131,23 +136,35 @@ export async function collectBrowserEvidence(input: BrowserEvidenceWorkInput): P
     if (cwd === undefined) return notRun("capture_failed");
     const originalRepositories = input.repositories.map((repository) => ({ directory: repository.directory, commit: repository.baseCommitSha ?? "" }));
     if (originalRepositories.some((repository) => !/^[a-f0-9]{40,64}$/u.test(repository.commit))) return notRun("capture_failed");
+    // A recipe with a sign-in needs the saved values: asked for only now (a page was picked, a sandbox and an executor exist), held in memory for this run, and never written anywhere. No saved sign-in, or no way to ask, is a run that
+    // does not happen: a signed-out page photographed as the signed-in one would be a false picture.
+    let signIn: BrowserEvidenceSignInValues | undefined;
+    if (input.recipe.signIn !== undefined) {
+      let answer: BrowserEvidenceSignInAnswer | undefined;
+      try { answer = await input.signIn?.(); } catch { answer = undefined; }
+      // Whatever the callback gave is read again here: only exactly an answer (the values of a valid sign-in, or `not_set`) is used.
+      const checked = BrowserEvidenceSignInAnswerSchema.safeParse(answer);
+      if (!checked.success) return notRun("capture_failed");
+      if (checked.data.status === "not_set") return notRun("sign_in_not_set");
+      signIn = checked.data.values;
+    }
     const base = input.originalCode(originalRepositories);
     const now = input.now ?? Date.now;
     const runMs = Math.max(1, Math.min(input.budgetMs, BROWSER_EVIDENCE_RUN_MS));
     // One side at a time, and the next side starts only when the one before it is over (its files put back, its app gone), whatever the runner's own race said about it.
     let pending: Promise<unknown> = Promise.resolve();
     let fault: Error | undefined;
-    const side = (which: BrowserEvidenceSide, routes: readonly string[], timeoutMs: number): Promise<Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit"> => {
+    const side = (which: BrowserEvidenceSide, routes: readonly string[], timeoutMs: number): Promise<Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit" | "sign_in_failed"> => {
       // The base code gets half of what is left (the candidate's side the rest), so the first side can never use the second one's time.
       const budget = which === "before" ? Math.floor(timeoutMs / 2) : timeoutMs;
-      const work = () => runSide({ ...input, docker: docker as Required<Pick<DockerCli, "run" | "execBytes">>, sandboxName, executorImage, seccompPath: seccompProfile, cwd, routes, timeoutMs: budget, now });
+      const work = () => runSide({ ...input, docker: docker as Required<Pick<DockerCli, "run" | "execBytes">>, sandboxName, executorImage, seccompPath: seccompProfile, cwd, routes, timeoutMs: budget, now, signInValues: signIn });
       // The base code is shown while the app starts and the pages are taken, and the agent's files are put back exactly before this returns.
       // The runner counts a driver that throws as a page that did not load, so a fault that must stop the task is kept here and thrown again once the run is over; nothing starts after it.
       const run = pending.then(() => { if (fault !== undefined) throw fault; return which === "before" ? base.run(work) : work(); }).catch((error: unknown) => { if (isWorkspaceUnsafe(error)) fault ??= error as Error; throw error; });
       pending = run.then(() => undefined, () => undefined);
       return run;
     };
-    const answers = new Map<BrowserEvidenceSide, Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit">();
+    const answers = new Map<BrowserEvidenceSide, Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit" | "sign_in_failed">();
     const driver: BrowserEvidenceDriver = {
       async startApp(which, options) {
         const result = await side(which, picked.routes, options.timeoutMs);
@@ -163,7 +180,9 @@ export async function collectBrowserEvidence(input: BrowserEvidenceWorkInput): P
       async stopApp() { /* each side stops its own app before it answers */ },
     };
     const captured = await runBrowserEvidence({
-      isolation: "sandbox", routes: picked.routes, notShown: picked.notShown, moreNotShown: picked.moreNotShown, maskSelectors: input.recipe.mask ?? [], driver,
+      isolation: "sandbox", routes: picked.routes, notShown: picked.notShown, moreNotShown: picked.moreNotShown, maskSelectors: recipeMaskSelectors(input.recipe), driver,
+      // Defence in depth: a picture whose bytes carry either saved value is dropped (a JPEG is compressed pixels, so this rarely sees one; the page's own masks are the defence).
+      ...(signIn === undefined ? {} : { redactor: { contains: (bytes: Uint8Array) => [signIn.username, signIn.password].some((value) => Buffer.from(bytes).includes(Buffer.from(value, "utf8"))) } }),
       limits: { runMs }, now,
     });
     await pending;
@@ -176,10 +195,10 @@ export async function collectBrowserEvidence(input: BrowserEvidenceWorkInput): P
   }
 }
 
-type SideInput = BrowserEvidenceWorkInput & { docker: Required<Pick<DockerCli, "run" | "execBytes">>; sandboxName: string; executorImage: string; seccompPath: string; cwd: string; routes: readonly string[]; timeoutMs: number; now: () => number };
+type SideInput = BrowserEvidenceWorkInput & { docker: Required<Pick<DockerCli, "run" | "execBytes">>; sandboxName: string; executorImage: string; seccompPath: string; cwd: string; routes: readonly string[]; timeoutMs: number; now: () => number; signInValues: BrowserEvidenceSignInValues | undefined };
 
 /** One side: start the app in the sandbox, take every page in one capture container, stop the app. Everything the app and the container leave behind is removed before this returns. */
-async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit"> {
+async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit" | "sign_in_failed"> {
   const { recipe, signal } = input;
   const deadline = input.now() + input.timeoutMs;
   const left = () => Math.max(0, deadline - input.now());
@@ -206,16 +225,21 @@ async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCap
   const appRun = input.runners.runProjectCommand(command, AbortSignal.any([signal, stopApp.signal])).then(() => { ended = true; return "ended" as const; }, (error: unknown) => { ended = true; if (isWorkspaceUnsafe(error)) throw error; return "ended" as const; });
   appRun.catch(() => undefined);
   const name = input.newName?.() ?? `rovara-be-${randomBytes(6).toString("hex")}`;
-  let answer: Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit";
+  let answer: Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit" | "sign_in_failed";
   let fault: Error | undefined;
   try {
     // The capture's own time: what is left less the clean-up and the container's start. Too little left is the run's time limit, not a shorter try.
     const captureMs = left() - CLEANUP_RESERVE_MS - START_MARGIN_MS;
     if (captureMs < 1_000) { answer = "time_limit"; return answer; }
-    const plan = encodeBrowserEvidenceExecutorPlan({ port: recipe.port, ...(recipe.readyPath === undefined ? {} : { readyPath: recipe.readyPath }), routes: [...input.routes], maskSelectors: recipe.mask ?? [],
+    const signInPlan = recipe.signIn === undefined ? undefined : { path: recipe.signIn.path, usernameSelector: recipe.signIn.usernameSelector, passwordSelector: recipe.signIn.passwordSelector, submitSelector: recipe.signIn.submitSelector,
+      ...(recipe.signIn.successPath === undefined ? {} : { successPath: recipe.signIn.successPath }), ...(recipe.signIn.successSelector === undefined ? {} : { successSelector: recipe.signIn.successSelector }) };
+    // A recipe with a sign-in and no values is never run (the caller refuses it first); here it is a fault, not a signed-out capture.
+    if (signInPlan !== undefined && input.signInValues === undefined) return "sign_in_failed";
+    const plan = encodeBrowserEvidenceExecutorPlan({ port: recipe.port, ...(recipe.readyPath === undefined ? {} : { readyPath: recipe.readyPath }), ...(signInPlan === undefined ? {} : { signIn: signInPlan }), routes: [...input.routes], maskSelectors: recipeMaskSelectors(recipe),
       runMs: Math.min(120_000, captureMs), pageMs: 15_000 });
-    const args = browserEvidenceExecutorArgs({ image: input.executorImage, sandbox: input.sandboxName, name, seccompProfile: input.seccompPath, plan });
-    const run = await input.docker.execBytes(args, { signal, timeoutMs: captureMs + START_MARGIN_MS, maxStdoutBytes: BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES });
+    const args = browserEvidenceExecutorArgs({ image: input.executorImage, sandbox: input.sandboxName, name, seccompProfile: input.seccompPath, plan, withSignIn: signInPlan !== undefined });
+    const run = await input.docker.execBytes(args, { signal, timeoutMs: captureMs + START_MARGIN_MS, maxStdoutBytes: BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES,
+      ...(input.signInValues === undefined || signInPlan === undefined ? {} : { env: { [BROWSER_EVIDENCE_SIGN_IN_ENV]: encodeBrowserEvidenceSignInEnv(input.signInValues) } }) });
     const parsed = run.exitCode === 0 && run.tooLarge !== true && run.timedOut !== true && run.aborted !== true ? parseCaptureOutput(run.stdout, input.routes) : undefined;
     // Pictures taken while the app we started was not running were taken of something else (a program that held the port first): no picture is kept.
     if (ended) answer = "app_did_not_start";

@@ -1,7 +1,7 @@
 // Lane L8: what the local review pages read and do. The pages know nothing about task records, the document store or a code host: the task flow
 // (lanes L6a and L6b) implements these two interfaces and hands them to `createLocalPagesServer`. Reads are plain view models; every write names
 // the exact revision and digest the person saw, and an approval carries a proof for the W0 `Approvers` seam to check.
-import type { ApprovalProof, BrowserEvidencePanel, CreatedScriptToken, ModelSelectionBody, ModelSelectionState, PlanDocument, PlanEvidenceBundle, ScriptTokenView, SecondReviewContext, SecondReviewMode, SecondReviewModelRef, SecondReviewState } from "@agentx/contracts";
+import type { ApprovalProof, BrowserEvidencePanel, BrowserEvidenceRecipe, CreatedScriptToken, ModelSelectionBody, ModelSelectionState, PlanDocument, PlanEvidenceBundle, ScriptTokenView, SecondReviewContext, SecondReviewMode, SecondReviewModelRef, SecondReviewState } from "@agentx/contracts";
 
 /** Why a write did not happen, in words fit to show. `stale`: the content moved on since the page was drawn. */
 export type LocalActionResult = { ok: true; message?: string } | { ok: false; reason: "stale" | "refused" | "not_found" | "invalid" | "reauth"; message: string };
@@ -399,6 +399,32 @@ export type ConnectionPageAction =
   | { op: "source-confirm" | "source-reject"; project: string; changeId: string };
 
 /** The read side: each method answers undefined for something that is not there. */
+/**
+ * TE-H1 browser evidence, slice 3: what the recipe page shows for one project. The recipe is the one in force (the owner's config file's, shown read-only, or the page's own saved one); nothing secret is in it. The sign-in's VALUES
+ * are never in a view: only whether a usable sign-in is saved.
+ */
+export interface BrowserEvidencePageView {
+  project: string;
+  /** Where the recipe in force comes from: `config` (the owner's config file: change it there), `page` (saved here), `none` (browser evidence is off for this project). */
+  source: "none" | "config" | "page";
+  /** The version of the page's saved recipe, which a save must name (absent when none is saved). */
+  version?: number;
+  recipe?: BrowserEvidenceRecipe;
+  /** Whether a usable sign-in (user name and password) is saved for this project. */
+  signInSaved: boolean;
+  /** What the setup agent suggested from the app's router and scripts, for the owner to read and then save (never applied by itself). */
+  suggestion?: { recipe: Pick<BrowserEvidenceRecipe, "startCommand" | "port" | "readyPath" | "framework" | "routes">; from: string[]; verdict: "verified" | "unverified" | "unchecked" };
+  /** Whether this machine can run the browser (an executor image is set). When false the page says so: a saved recipe would run nothing here. */
+  canRun: boolean;
+}
+
+/** What a recipe page form asks for. The recipe arrives unparsed (the action reads it with the contract's schema); a sign-in's values arrive only in `save-sign-in`. */
+export type BrowserEvidencePageAction =
+  | { op: "save"; project: string; recipe: unknown; expectedVersion?: number }
+  | { op: "turn-off"; project: string }
+  | { op: "save-sign-in"; project: string; username: string; password: string }
+  | { op: "clear-sign-in"; project: string };
+
 export interface LocalPageData {
   /** What waits for the owner. */
   listPending(): Promise<PendingItemView[]>;
@@ -438,6 +464,9 @@ export interface LocalPageData {
   /** The setup agent's page for a project, and the projects it can be opened for. Absent: the setup agent is off here and its pages are not found. */
   listSetupProjects?(): Promise<string[]>;
   getSetupPage?(project: string): Promise<SetupPageView | undefined>;
+  /** The recipe page for browser evidence, and the projects it can be opened for. Absent: the page is not there. */
+  listBrowserEvidenceProjects?(): Promise<string[]>;
+  getBrowserEvidencePage?(project: string): Promise<BrowserEvidencePageView | undefined>;
 }
 
 /** What the automation page shows. Every word is fixed or a name the owner gave; nothing a repository, an event or a model wrote reaches it unredacted. */
@@ -496,6 +525,8 @@ export interface DesignDecisionInput {
 
 /** The write side. Each call is one request from one verified page form. */
 export interface LocalPageActions {
+  /** TE-H1 browser evidence, slice 3: a change of a project's recipe or saved sign-in. Only the owner's own act on a page session opened in the last few minutes (`context.fresh`); the answer's words never hold a value. */
+  browserEvidence?(input: BrowserEvidencePageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   decidePlan(input: PlanDecisionInput): Promise<LocalActionResult>;
   decideDesign(input: DesignDecisionInput): Promise<LocalActionResult>;
   /** `revision` is the revision of the plan the person was reading; the action may refuse a comment on one that has moved on. */
