@@ -8,6 +8,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const withLevel = (reached: string, isolation = "sealed", result = "verified"): EvidencePackV2 => v2Pack({ level: { reached, required: [] }, producer: { edition: "cloud", isolation }, result });
@@ -263,19 +264,23 @@ describe("inert text", () => {
   });
 
   it("cuts its input before processing, so a hostile megabyte costs as much as a short line", () => {
-    const started = Date.now();
     for (const text of ["![".repeat(500_000), "[](".repeat(500_000), "<".repeat(1_000_000), "&".repeat(1_000_000), "a".repeat(1_000_000)]) expect(Array.from(inert(text)).length).toBeLessThanOrEqual(300);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // The cost must not grow faster than the input: each hostile shape at an eighth of its size (the input cap is 262,144 characters) and at full size.
+    for (const [unit, repeats] of [["![", 500_000], ["[](", 500_000], ["<", 1_000_000], ["&", 1_000_000], ["a", 1_000_000]] as const) {
+      expectLinearScaling((scale) => { const text = unit.repeat(scale); return () => inert(text); }, { n: repeats / 8, label: `inert text of ${JSON.stringify(unit)} repeated` });
+    }
   });
 
   it("stays linear for a large max: the largest allowed max is capped, so a million '<' finishes at once", () => {
-    const started = Date.now();
     for (const max of [2_000, 1_000_000_000]) {
       const out = inertEvidenceText("<".repeat(1_000_000), max);
       expect(Array.from(out).length).toBeLessThanOrEqual(2_000);
       expect(Array.from(inertEvidenceText("[](".repeat(400_000), max)).length).toBeLessThanOrEqual(2_000);
     }
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // Both hostile inputs at an eighth of their size and at full size, for each max, must cost about eight times, not sixty-four.
+    for (const max of [2_000, 1_000_000_000]) {
+      expectLinearScaling((scale) => { const angles = "<".repeat(scale * 2.5); const links = "[](".repeat(scale); return () => { inertEvidenceText(angles, max); inertEvidenceText(links, max); }; }, { n: 50_000, label: `inertEvidenceText with max ${String(max)}` });
+    }
   });
 
   it("reads at most 256 KiB of raw input", () => {

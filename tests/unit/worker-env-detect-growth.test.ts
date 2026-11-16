@@ -1,12 +1,24 @@
 // Test services detectors: every detector stays fast as a hostile file grows. A backtracking pattern (`^\s*` with the `m` flag, `[\s\S]*` inside a lookahead, two unbounded
 // repeats side by side) blocks the thread while it runs, so no test timeout can fire: the only defence is to fail at a small size before a large one hangs. Each file kind gets
-// a short lead that takes the detectors past their early exits (the file must be read and look like what it is), then a filler, at growing sizes; the first case over the bar
-// fails the test, so a cubic pattern stops the run at 4 KiB in a second or two instead of hanging at 64 KiB. The 256 KiB sweep of every body is in worker-env-detect-hardening.
+// a short lead that takes the detectors past their early exits (the file must be read and look like what it is), then a filler, at growing sizes; a hang guard at 1 to 4 KiB stops a cubic
+// pattern in a second or two instead of hanging at 64 KiB, and a scaling check (2 KiB against 16 KiB) fails a quadratic one. The 256 KiB sweep of every body is in worker-env-detect-hardening.
 import { describe, expect, it } from "vitest";
 import { DETECTORS, boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 
 type Files = Record<string, string>;
-const SIZES = [1_024, 4_096, 16_384, 65_536] as const;
+// A backtracking pattern blocks the thread and cannot be interrupted, so before the scaling check (below) a hostile file is run ONCE at three small sizes against a very generous hang guard (100 times or more what
+// a linear detector takes at these sizes). It is not a performance bound: its only job is that a catastrophic pattern fails at 1-4 KiB in a second or two instead of hanging inside the scaling check.
+const HANG_GUARDS: ReadonlyArray<readonly [size: number, capMs: number]> = [[1_024, 250], [2_048, 500], [4_096, 1_000]];
+// The scaling check times each hostile file at 2 KiB and at 16 KiB: linear work grows about 8 times, a quadratic pattern about 64 times.
+const SCALING_N = 2_048;
+// Measured: every (file, filler) pair below grows about 10.5 to 12.4 times for 4 times the size, not 4 (the rest stay under 5, measured at 4 KiB against 16 KiB): a scanner that, for each unterminated quote or comment opener in a code file,
+// looks on to the end. The cost is small (about 30 ms at 64 KiB) and bounded by the detectors' file-size limit, so these pairs keep the earlier fixed bar at 16 KiB and 64 KiB instead of the scaling check.
+// Fix the scanner and delete the entry; do NOT widen the ratio.
+const KNOWN_QUADRATIC: ReadonlySet<string> = new Set([
+  "lib/stack.ts|opener /*", "infra/app_stack.py|opener '", "knexfile.js|opener /*", "infra/app_stack.py|opener \"", "inference.py|opener \"", "app/service.py|opener \"",
+  "inference.py|opener '", "src/a.ts|opener /*", "app/service.py|opener '", "app/settings.py|opener '", "src/b.test.ts|opener /*", "app/settings.py|opener \"",
+]);
 const ON_CI = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false";
 const BAR_MS = ON_CI ? 1_000 : 250;
 
@@ -111,14 +123,27 @@ describe("every detector stays fast as a hostile file grows", () => {
   for (const kind of KINDS) {
     it(kind.path, async () => {
       for (const [label, unit] of FILLERS(kind)) {
-        for (const size of SIZES) {
+        for (const [size, capMs] of HANG_GUARDS) {
           const files = { ...COMPANIONS, [kind.path]: body(kind, unit, size) };
           let took = await timed(files);
-          // A case a little over the bar is timed once more (a busy machine), and the faster run is judged; one far over it is not worth a second wait.
-          if (took > BAR_MS && took < 4 * BAR_MS) took = Math.min(took, await timed(files));
-          // Stop at the first case over the bar: a larger size would only take longer, and a backtracking pattern cannot be interrupted.
-          if (took > BAR_MS) expect.fail(`${kind.path} with ${label} at ${String(size)} bytes took ${String(Math.round(took))} ms (bar ${String(BAR_MS)} ms${ON_CI ? " on CI" : ""})`);
+          // A case over the guard is timed once more (a busy machine), and the faster run is judged; stop at the first case over it.
+          if (took > capMs) took = Math.min(took, await timed(files));
+          if (took > capMs) expect.fail(`${kind.path} with ${label} at ${String(size)} bytes took ${String(Math.round(took))} ms (hang guard ${String(capMs)} ms)`);
         }
+        if (KNOWN_QUADRATIC.has(`${kind.path}|${label}`)) {
+          for (const size of [16_384, 65_536]) {
+            const files = { ...COMPANIONS, [kind.path]: body(kind, unit, size) };
+            let took = await timed(files);
+            if (took > BAR_MS && took < 4 * BAR_MS) took = Math.min(took, await timed(files));
+            if (took > BAR_MS) expect.fail(`${kind.path} with ${label} at ${String(size)} bytes took ${String(Math.round(took))} ms (bar ${String(BAR_MS)} ms${ON_CI ? " on CI" : ""})`);
+          }
+          continue;
+        }
+        // The cost must grow about linearly with the file: 2 KiB against 16 KiB.
+        await expectLinearScalingAsync((size) => {
+          const files = { ...COMPANIONS, [kind.path]: body(kind, unit, size) };
+          return async () => { await runDetectors(boundedReader(Object.keys(files), (path) => { read.add(path); return Promise.resolve(files[path]); }).reader, "svc"); };
+        }, { n: SCALING_N, runs: 3, label: `${kind.path} with ${label}` });
       }
       // The file was really read by some detector: a kind no detector reads would pass without testing anything.
       if (!NOT_READ_YET.has(kind.path)) expect(read.has(kind.path), `${kind.path} was never read`).toBe(true);

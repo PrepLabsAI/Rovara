@@ -7,6 +7,7 @@ import {
   RECORDING_NOT_RUN_MISS, RECORDING_NOT_RUN_SCOPE, RECORDING_NOT_RUN_STORE, capSentence, detectPromptChanges, e2eSecretSpellings, recordingLimitSentence, type RecordingStore,
 } from "@agentx/contracts";
 import { installNetworkTripwire, type NetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { COMPANY_A, OLD_SYSTEM_TEXT, SYSTEM_TEXT, USER_TEXT, T0, changedReport, chatFrame, drain, makeRig, messagesFrame, type Rig, type StoreKind } from "./model-record-support.js";
 
 const MATCHING = (rig: Rig, over: Record<string, unknown> = {}) => chatFrame(rig.world, { system: SYSTEM_TEXT, ...over });
@@ -311,13 +312,20 @@ describe.each(["memory", "file"] as StoreKind[])("record and replay on the %s st
   });
 
   it("handles a 1 MB answer fast, on both record and replay, byte-identical", async () => {
-    const big = "y".repeat(1024 * 1024);
-    rig.world.provider.script({ body: JSON.stringify({ choices: [{ message: { content: big } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }) });
-    const engine = rig.engine();
-    const started = performance.now();
-    const recorded = await drain(await engine.serve(MATCHING(rig)));
-    const replayed = await drain(await engine.serve(MATCHING(rig)));
-    expect(performance.now() - started).toBeLessThan(5000);
+    const answer = (size: number) => JSON.stringify({ choices: [{ message: { content: "y".repeat(size) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    // Scaling check: recording then replaying an answer must cost no more than linear in its size (the largest is the old 1 MB). Each run starts from an empty store, so each records afresh.
+    let recorded!: Awaited<ReturnType<typeof drain>>;
+    let replayed!: Awaited<ReturnType<typeof drain>>;
+    await expectLinearScalingAsync((size) => {
+      const body = answer(size);
+      return async () => {
+        rig.world.provider.script({ body });
+        const engine = rig.engine();
+        recorded = await drain(await engine.serve(MATCHING(rig)));
+        replayed = await drain(await engine.serve(MATCHING(rig)));
+        await engine.endTask();
+      };
+    }, { n: 128 * 1024, label: `recording and replaying a large answer (${kind})` });
     expect(replayed.body).toBe(recorded.body);
     expect(recorded.body.length).toBeGreaterThan(1024 * 1024);
   });
