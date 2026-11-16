@@ -277,7 +277,7 @@ import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, type GithubInstallationBindings } from "./github-credentials.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, GithubInstallationBindings } from "./github-credentials.js"; import { brokerCoreCodeHost } from "./core-code-host.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -15206,7 +15206,15 @@ const coreRoot = createBrokerCoreRoot({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrantKey: repositoryGrantSigningKey,
   repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
-  codeModules: () => brokerCoreModuleDeps(process.env),
+  // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
+  codeModules: (core) => brokerCoreModuleDeps(process.env, {
+    codeHost: () => brokerCoreCodeHost({
+      credentials: github.clientOptions,
+      requireInstallationBound: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")).requireBound,
+      storage: core.storage,
+      log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
+    }),
+  }),
   policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
   origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
   log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },

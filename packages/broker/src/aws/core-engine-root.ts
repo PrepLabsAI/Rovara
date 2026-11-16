@@ -72,6 +72,12 @@ type DynamoSender = { send(command: unknown): Promise<unknown> };
 /** The variable that holds the install's policy hook settings (JSON: `{ address, keys }`). Absent or empty: no hook. */
 export const CORE_POLICY_HOOK_VARIABLE = "ROVARA_POLICY_HOOK";
 
+/** What the root gives `codeModules`. */
+export interface BrokerCoreModuleContext {
+  /** The registry's store, once the registry is built (a call before then waits for it). */
+  storage: () => Promise<DocumentStore>;
+}
+
 export interface BrokerCoreRootInputs {
   env: NodeJS.ProcessEnv;
   /** The State table and the sign-in table, as the broker's document client reads them (membership, project grants, the person's name). */
@@ -83,8 +89,11 @@ export interface BrokerCoreRootInputs {
   repositoryGrantKey: Buffer;
   /** Resolves a worker's repository credential (the GitHub App). */
   repositoryCredential: CoreRuntimeOptions["repositoryCredential"];
-  /** Code's AWS adapter inputs, asked for only when the registry is first built. */
-  codeModules: () => CodeModuleDeps;
+  /**
+   * Code's AWS adapter inputs, asked for only when the registry is first built. `core.storage` is the built registry's store, for an input that reads the core's own records at call time
+   * (the code host's company project catalog, lane L1b); it must not be awaited while the registry is being built.
+   */
+  codeModules: (core: BrokerCoreModuleContext) => CodeModuleDeps;
   /** More modules after Code's and the step 5 ones (model keys when lane L2b lands). */
   extraModules?: () => readonly CoreAdapterModule[];
   /** The policy hook's asker (`policyHookInstallFromEnvironment`). Absent: an install with hook settings refuses its registry. */
@@ -328,7 +337,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules()), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env) }), ...gatewayModelKeysModules(env), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -555,13 +564,28 @@ export function taskTokensFromEnvironment(env: NodeJS.ProcessEnv, kms: Parameter
 }
 
 /** What the broker's own adapter inputs still lack (each is an infrastructure or adapter lane), so the registry refuses by these words. Fixed. */
-export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engine's adapters yet: it needs the core dispatch queue's URLs in its environment, a code host provider for the core (the GitHub App behind the scoped provider interface) and its side of the workers' operations";
+export const BROKER_CORE_NOT_CONFIGURED = "the broker cannot build the core engine's adapters yet";
+/** Each input the broker still owes, in fixed words (the refusal names those not yet given). */
+export const BROKER_CORE_OWED = {
+  queue: "the core dispatch queue's URLs in its environment",
+  codeHost: "a code host provider for the core (the GitHub App behind the scoped provider interface)",
+  workerMachines: "its side of the workers' operations",
+} as const;
+
+/** The broker's own parts of Code's AWS adapter inputs, each from its switch-on lane. */
+export interface BrokerCoreModuleParts {
+  /** Lane L1b: the company-scoped GitHub App code host and check runner (aws/core-code-host.ts, `brokerCoreCodeHost`). Built only when every other input is there. */
+  codeHost?: () => Pick<CodeModuleDeps, "codeHost" | "checkRunner">;
+}
 
 /**
- * Code's AWS adapter inputs on the broker. Not given yet (see BROKER_CORE_NOT_CONFIGURED): it refuses, so a serving switch never builds a half-wired registry here. The dispatcher's
- * inputs are complete (aws/worker-machines/dispatcher-core.ts); the broker's land with the infrastructure step that passes the queue URLs and the code host bridge.
+ * Code's AWS adapter inputs on the broker. While any input is still owed (see BROKER_CORE_OWED) it refuses, naming those, so a serving switch never builds a half-wired registry here. The
+ * dispatcher's inputs are complete (aws/worker-machines/dispatcher-core.ts). Owed: the queue URLs (lane L1a) and the workers' operations (lane L1c); the code host is lane L1b's.
  */
-export function brokerCoreModuleDeps(env: NodeJS.ProcessEnv): CodeModuleDeps {
+export function brokerCoreModuleDeps(env: NodeJS.ProcessEnv, parts: BrokerCoreModuleParts = {}): CodeModuleDeps {
   void env;
-  throw Object.assign(new Error(BROKER_CORE_NOT_CONFIGURED), { name: "BrokerCoreNotConfigured" });
+  const owed: string[] = [BROKER_CORE_OWED.queue];
+  if (parts.codeHost === undefined) owed.push(BROKER_CORE_OWED.codeHost);
+  owed.push(BROKER_CORE_OWED.workerMachines);
+  throw Object.assign(new Error(`${BROKER_CORE_NOT_CONFIGURED}: it needs ${owed.join(", ")}`), { name: "BrokerCoreNotConfigured" });
 }
