@@ -22,21 +22,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Few jobs, because the free plan runs about 20 at once and a queue of pull requests backs up behind them. A pull request runs `quick` (the
-# docs-only scope check, the typecheck and lint checks, and the release check, one after another on one machine), the eight `test (n/8)` shards,
-# `linux-runtime`, and `port-guard` (code/next only), each on its own machine and each its own check. There is no gate job: each of those is a
-# check a pull request needs by name (the merge script reads them). A draft skips every job, so it shows no failed check.
+# docs-only scope check, the typecheck and lint checks, and the release check, one after another on one machine), the eight `test (n/8)` shards
+# and `linux-runtime` (each on its own machine), and `port-guard` (code/next only, a check of its own). The job called `local` waits for
+# `quick`, the shards and `linux-runtime`, and is the one check a pull request needs (scripts/ci-gate.ts). A draft skips every job, `local`
+# included, so it shows no failed check.
 #
 # A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips the heavy work (scripts/ci-docs-only.ts). Manual runs
 # always run it. The scope step runs first in `quick`, in each test shard and in `linux-runtime`; when it says docs-only, that job's later steps are
-# skipped and the job still reports success, so its check name is always present. Keep the three copies of the step the same.
+# skipped and the job still reports success. Keep the three copies of the step the same.
 jobs:
-  # What the old `scope`, `checks`, `release` and `local` jobs did, in one job: one checkout, one install, one runner.
+  # What the old `scope`, `checks` and `release` jobs did, in one job: one checkout, one install, one runner.
   # Each part keeps its own condition and its own step time limit; the job's limit is the sum of the old ones (5 + 15 + 15). A failed step
   # fails the job, and its name starts with the part it belongs to (scope, checks, release).
   quick:
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
     steps:
       # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
       - uses: actions/checkout@v5
@@ -297,7 +300,7 @@ jobs:
   # of that copy over the pull request's own commits, without --allow-guard-edits, turns red on any edit to the guard, its tests, the
   # `port:guard` script or this file, which the controller must then review by hand. On a push the run is after the fact (the content is already
   # on code/next), so it detects and does not prevent; the controller's own run before the merge is the preventive one. It is a check of its own,
-  # not part of `quick` (the merge script tolerates a red port-guard on mainline-sync pull requests only, so it must stay a check of its own).
+  # not part of the `local` gate (a skipped job would fail that gate on mainline's pull requests).
   port-guard:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.base_ref == 'code/next' && github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
@@ -336,6 +339,22 @@ jobs:
       - name: Edits to the guard need the controller's review (pull requests only)
         if: github.event_name == 'pull_request'
         run: node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD --public-base refs/remotes/origin/mainline
+
+  # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
+  local:
+    needs: [quick, test, linux-runtime]
+    if: always() && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - name: Every job passed?
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-gate.ts
 
   live-aws:
     if: github.event_name == 'workflow_dispatch' && vars.AGENTX_ENABLE_AWS_TESTS == 'true'

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
+import { GATED_JOBS, gateVerdict, needsVerdict } from "../../scripts/ci-gate.js";
 
 interface Job {
   name?: string;
@@ -28,10 +29,10 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(test.steps.some((step) => step.run === "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}")).toBe(true);
   });
 
-  it("keeps the quick checks, the tests and the Linux runtime check in jobs of their own, none waiting on another, and no job left over from before", async () => {
+  it("keeps the quick checks, the tests and the Linux runtime check in jobs of their own, none waiting on another (only the gate waits), and no job left over from before", async () => {
     const { jobs } = await workflow();
-    expect(Object.keys(jobs).sort()).toEqual(["linux-runtime", "live-aws", "port-guard", "quick", "test"]);
-    for (const [name, job] of Object.entries(jobs)) expect(job.needs, name).toBeUndefined();
+    expect(Object.keys(jobs).sort()).toEqual(["linux-runtime", "live-aws", "local", "port-guard", "quick", "test"]);
+    for (const [name, job] of Object.entries(jobs)) if (name !== "local") expect(job.needs, name).toBeUndefined();
   });
 
   it("puts the old scope, checks and release jobs into `quick`, one after another with their own commands, conditions and time limits, on one checkout and one install", async () => {
@@ -178,5 +179,71 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     const { concurrency } = await workflow();
     expect(concurrency?.group).toContain("github.ref");
     expect(concurrency?.["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
+  });
+
+  it("reports one check called local that waits for quick, the shards and the Linux runtime check, so it cannot go green while one is missing", async () => {
+    const { jobs } = await workflow();
+    const gate = jobs.local!;
+    expect(gate.name).toBeUndefined();
+    expect(gate.if).toBe("always() && github.event.pull_request.draft != true");
+    // port-guard (the Rovara Code port's check, tests/contract/port-guard-ci.test.ts) runs on code/next only; a skipped job would fail the gate on mainline's pull requests.
+    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard").sort();
+    expect([...(gate.needs as string[])].sort()).toEqual(others);
+    expect([...(gate.needs as string[])].sort()).toEqual([...GATED_JOBS].sort());
+    expect(gate["timeout-minutes"]).toBe(5);
+    const run = gate.steps.map((step) => step.run ?? "").join("\n");
+    expect(run).toContain("node scripts/ci-gate.ts");
+    expect(gate.steps.some((step) => step.env?.NEEDS === "${{ toJSON(needs) }}")).toBe(true);
+  });
+});
+
+describe("the gate behind the local check", () => {
+  const ran = { quick: "success", test: "success", "linux-runtime": "success" };
+
+  it("passes when every job succeeded", () => {
+    expect(gateVerdict({ docsOnly: false, results: ran }).ok).toBe(true);
+  });
+
+  it("fails when any job failed, was cancelled or was skipped", () => {
+    for (const result of ["failure", "cancelled", "skipped"]) {
+      for (const job of GATED_JOBS) {
+        expect(gateVerdict({ docsOnly: false, results: { ...ran, [job]: result } }), `${job} ${result}`).toEqual({ ok: false, reason: `${job} was ${result}, not success` });
+      }
+    }
+  });
+
+  it("passes a Markdown-only change only when every job succeeded (their heavy steps are skipped inside the jobs)", () => {
+    expect(gateVerdict({ docsOnly: true, results: ran })).toEqual({ ok: true, reason: "Markdown-only change; every job succeeded with its heavy steps skipped" });
+    expect(gateVerdict({ docsOnly: true, results: { ...ran, test: "skipped" } }).ok).toBe(false);
+    expect(gateVerdict({ docsOnly: true, results: { ...ran, quick: "failure" } }).ok).toBe(false);
+  });
+
+  it("fails a gate that is missing a job it should judge", () => {
+    expect(gateVerdict({ docsOnly: false, results: { quick: "success" } })).toEqual({ ok: false, reason: "test was missing" });
+    expect(gateVerdict({ docsOnly: false, results: {} }).ok).toBe(false);
+    expect(gateVerdict({ docsOnly: false, results: { test: "success", "linux-runtime": "success" } })).toEqual({ ok: false, reason: "quick was missing" });
+  });
+
+  it("reads the needs context GitHub provides", () => {
+    const needs = JSON.stringify({
+      quick: { result: "success", outputs: { docs_only: "false" } },
+      test: { result: "success", outputs: {} },
+      "linux-runtime": { result: "success", outputs: {} },
+    });
+    expect(needsVerdict(needs)).toEqual({ ok: true, reason: "3 jobs succeeded" });
+    const markdownOnly = JSON.stringify({
+      quick: { result: "success", outputs: { docs_only: "true" } },
+      test: { result: "success", outputs: {} },
+      "linux-runtime": { result: "success", outputs: {} },
+    });
+    expect(needsVerdict(markdownOnly).reason).toMatch(/^Markdown-only change/);
+    const manualRun = JSON.stringify({
+      quick: { result: "success", outputs: {} },
+      test: { result: "success", outputs: {} },
+      "linux-runtime": { result: "success", outputs: {} },
+    });
+    expect(needsVerdict(manualRun).ok).toBe(true);
+    expect(needsVerdict("not json").ok).toBe(false);
+    expect(needsVerdict(JSON.stringify({ quick: { result: "success", outputs: {} } })).ok).toBe(false);
   });
 });
