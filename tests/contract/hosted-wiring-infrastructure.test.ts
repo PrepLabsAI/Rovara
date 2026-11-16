@@ -13,6 +13,7 @@ import { defaultBoundaryStatements } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { COMPANY_SECRET_USE_ACTIONS, COMPANY_TAG_VALUE_GLOB } from "../../infra/lib/company-secrets.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -38,7 +39,7 @@ function statementsOfRole(template: TemplateJson, rolePrefix: string): Statement
 }
 const envOf = (template: TemplateJson, functionPrefix: string) => {
   const [, fn] = ofType(template, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === functionPrefix)!;
-  return (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  return unpackedBrokerVariables((fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables);
 };
 const keyPolicy = (template: TemplateJson, prefix: string) => {
   const keys = ofType(template, "AWS::KMS::Key").filter(([id]) => id.startsWith(prefix));
@@ -128,7 +129,8 @@ describe("(c) the policy hook's question key", () => {
     // The broker's own inline policy does not grow for this key.
     expect(JSON.stringify(statementsOfRole(named, "BrokerServiceRole"))).not.toContain(id);
     expect(envOf(named, "DeveloperSignInFunction").POLICY_HOOK_KEY_ARN).toEqual({ "Fn::GetAtt": [id, "Arn"] });
-    expect(envOf(named, "Broker").POLICY_HOOK_KEY_ARN).toEqual({ "Fn::GetAtt": [id, "Arn"] });
+    // ENV-ROOM: the broker is given the key's id packed (AGENTX_NAMES) and builds the same ARN (tests/contract/broker-environment.test.ts).
+    expect(envOf(named, "Broker").POLICY_HOOK_KEY_ARN).toEqual({ Ref: id });
   });
 });
 
@@ -158,7 +160,8 @@ describe("(h) the company-secrets role (T6)", () => {
   it("exists in named environments only, and the broker gets its ARN", () => {
     expect(role()).toBeDefined();
     expect(JSON.stringify(legacy)).not.toContain("CompanySecrets");
-    expect(envOf(named, "Broker").COMPANY_SECRETS_ROLE_ARN).toEqual({ "Fn::GetAtt": [role()[0], "Arn"] });
+    // ENV-ROOM: the role's name packed; the broker builds its ARN in the environment's role path (tests/contract/broker-environment.test.ts).
+    expect(envOf(named, "Broker").COMPANY_SECRETS_ROLE_ARN).toEqual({ Ref: role()[0] });
   });
 
   it("trusts only the broker's role, to assume and tag together, with exactly one company tag", () => {

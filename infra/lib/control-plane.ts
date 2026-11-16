@@ -38,6 +38,7 @@ import { CoreEngine } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
+import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { REQUALIFY_CONTEXT_KEY, REQUALIFY_DEFAULT_HOUR_UTC, RuntimeRequalify } from "./runtime-requalify.js";
@@ -172,11 +173,15 @@ export class ControlPlaneStack extends Stack {
       visibilityTimeout: Duration.minutes(2),
     });
 
+    // ENV-ROOM (infra/lib/broker-names.ts): a named environment's broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides; the legacy
+    // template passes every variable whole, as before.
     const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker.ts", {
-      STATE_TABLE_NAME: state.tableName,
-      AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
-      AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
-      ARTIFACT_BUCKET_NAME: artifacts.bucketName,
+      ...(naming.env !== undefined ? {} : {
+        STATE_TABLE_NAME: state.tableName,
+        AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
+        AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
+        ARTIFACT_BUCKET_NAME: artifacts.bucketName,
+      }),
       OIDC_ISSUER: oidcIssuer.valueAsString,
       ADMIN_CLAIM: adminClaim.valueAsString,
       ADMIN_VALUES: adminValues.valueAsString,
@@ -185,6 +190,12 @@ export class ControlPlaneStack extends Stack {
       GITHUB_APP_ID: githubAppId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
     });
+    if (naming.env !== undefined) {
+      addBrokerName(broker, naming, "stateTable", state.tableName, state.tableName);
+      addBrokerName(broker, naming, "artifactBucket", artifacts.bucketName, artifacts.bucketName);
+      addDerivedBrokerVariable(broker, naming, "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", projectSetupRuntimeCatalogId);
+      addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", e2eFeatureRuntimeCatalogId);
+    }
     const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     if (naming.env !== undefined) {
       // Exactly the two grantReadWriteData statements' action/resource cross product.
@@ -216,14 +227,14 @@ export class ControlPlaneStack extends Stack {
       actions: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
       resources: [this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" })],
     }));
-    if (naming.env !== undefined) broker.addEnvironment("CONNECTOR_SECRET_PREFIX", naming.connectorSecretPrefix);
+    if (naming.env !== undefined) addDerivedBrokerVariable(broker, naming, "CONNECTOR_SECRET_PREFIX", naming.connectorSecretPrefix);
     // Spec 043: SWE-bench runs. The broker reads the optional eval stack's settings, the runner image
     // and the worker model per request, and starts the eval state machine by its fixed name; both
     // exist only once the eval stack is deployed, and until then a run is refused as not installed.
-    broker.addEnvironment("SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
+    addDerivedBrokerVariable(broker, naming, "SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
     // M1.4 Task 4.10 (PREFIXGAP): the broker derives the AI navigation route from the installation's worker settings only when it knows where they are. Nothing ever set this, so setup
     // approval said "AI navigation steps will not run" and dispatch offered none. Named environments only: the legacy production template stays as it is. The read grant below covers it.
-    if (naming.env !== undefined) broker.addEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
+    if (naming.env !== undefined) addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_AGENT_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
     const swebenchParameterArns = [
       swebenchNames(naming).settingsParameterName,
       swebenchNames(naming).runnerImageParameterName,
@@ -282,7 +293,7 @@ export class ControlPlaneStack extends Stack {
       // The GitHub App's key, to read files as the broker does.
       planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "GitHubAppKey", actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
       planEvidence.grantInvoke(broker);
-      broker.addEnvironment("PLAN_EVIDENCE_FUNCTION_NAME", planEvidence.functionName);
+      addBrokerName(broker, naming, "planEvidenceFunction", planEvidence.functionName, planEvidence.functionName);
     }
 
     const outboxPublisher = packagedFunction(
@@ -470,7 +481,7 @@ export class ControlPlaneStack extends Stack {
         resources: [slackRequestQueue.queueArn],
       }));
     } else slackRequestQueue.grantSendMessages(broker);
-    broker.addEnvironment("SLACK_REQUEST_QUEUE_URL", slackRequestQueue.queueUrl);
+    addBrokerName(broker, naming, "slackRequestQueue", slackRequestQueue.queueName, slackRequestQueue.queueUrl);
     slackThreads.grantReadWriteData(slackOrchestratorRole);
     threadSessions.grantReadWrite(slackOrchestratorRole);
     slackSecret.grantRead(slackOrchestratorRole);
@@ -509,7 +520,7 @@ export class ControlPlaneStack extends Stack {
       actions: ["dynamodb:Query"],
       resources: [turnRecords.tableArn, `${turnRecords.tableArn}/index/byTime`],
     }));
-    broker.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
+    addBrokerName(broker, naming, "turnRecordsTable", turnRecords.tableName, turnRecords.tableName);
 
     // No subscription by default: the deployer subscribes an email address or connects AWS Chatbot.
     const operatorAlerts = new sns.Topic(this, "OperatorAlerts", {
@@ -580,7 +591,7 @@ export class ControlPlaneStack extends Stack {
     // per-connector one; the alarms read the dimensionless series, so they cover every connector.
     const agentxSum = (metricName: string, period: Duration) =>
       new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName, statistic: "Sum", period });
-    if (naming.env !== undefined) broker.addEnvironment("AGENTX_METRICS_NAMESPACE", naming.metricsNamespace);
+    if (naming.env !== undefined) addDerivedBrokerVariable(broker, naming, "AGENTX_METRICS_NAMESPACE", naming.metricsNamespace);
     new cloudwatch.Alarm(this, "ConnectorBrokenAlarm", {
       alarmName: naming.alarmName("ConnectorBroken"),
       alarmDescription: "A connector's discovery failed or a vendor changed an approved tool's schema. Check the broker logs for connector metrics and connector.* events.",
@@ -664,9 +675,9 @@ export class ControlPlaneStack extends Stack {
       }).addAlarmAction(notifyOperator);
     }
 
-    broker.addEnvironment("SLACK_ORCHESTRATOR_ROLE_ARN", slackOrchestratorRole.roleArn);
-    broker.addEnvironment("SLACK_MEMBER_WORKSPACE_LIMIT", memberWorkspaceLimit.valueAsString);
-    broker.addEnvironment("SLACK_ORGANIZATION_WORKSPACE_LIMIT", organizationWorkspaceLimit.valueAsString);
+    addBrokerName(broker, naming, "slackOrchestratorRole", slackOrchestratorRole.roleName, slackOrchestratorRole.roleArn);
+    addBrokerSetting(broker, naming, "memberWorkspaceLimit", memberWorkspaceLimit.valueAsString);
+    addBrokerSetting(broker, naming, "organizationWorkspaceLimit", organizationWorkspaceLimit.valueAsString);
 
     const appPostedMessages = new CfnParameter(this, "SlackAppPostedMessages", {
       type: "String",
@@ -907,10 +918,10 @@ export class ControlPlaneStack extends Stack {
           dispatcher,
         });
       }
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_CHANGES_ENABLED", taskParameters.taskPeopleChangesEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", taskParameters.workflowDependenciesEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "taskPeopleChanges", taskParameters.taskPeopleChangesEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "taskPeoplePublicInvitations", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "taskPeoplePrivateInvitations", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "workflowDependencies", taskParameters.workflowDependenciesEnabled.valueAsString);
       // Sign in with ChatGPT (#338): seals each developer's ChatGPT tokens in the State table. A
       // connection belongs to a signed-in developer, so it exists only where developer sign-in
       // does. Only the broker encrypts and decrypts with it, always under an encryption context
@@ -928,18 +939,21 @@ export class ControlPlaneStack extends Stack {
           actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
         }));
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
-      broker.addEnvironment("CHATGPT_CONNECTION_KEY_ARN", chatGptConnectionKey.keyArn);
+      addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
       if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, notifyOperator });
       // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets. Named environments only; nothing assumes it yet.
-      if (naming.env !== undefined) broker.addEnvironment("COMPANY_SECRETS_ROLE_ARN", new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role.roleArn);
+      if (naming.env !== undefined) {
+        const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role;
+        addBrokerName(broker, naming, "companySecretsRole", companySecretsRole.roleName, companySecretsRole.roleArn);
+      }
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
-      broker.addEnvironment("AGENTX_ALARM_PREFIX", alarmPrefix);
+      addDerivedBrokerVariable(broker, naming, "AGENTX_ALARM_PREFIX", alarmPrefix);
       // Issue 206: the probe reads them by exact name (HEALTH_ALARM_SUFFIXES), since a prefix listing
       // is authorized against * while a call naming its alarms is authorized against each alarm's
       // ARN, which this grant covers. A CDK alarm missing from that list would go unreported, so the
@@ -962,7 +976,10 @@ export class ControlPlaneStack extends Stack {
         dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures,
         "channel-events": channelAdapters.eventDeadLetters,
       };
-      broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
+      addBrokerDeadLetterQueues(broker, naming, [
+        ["dispatchDeadLetters", deadLetterQueues.dispatch], ["slackRequestDeadLetters", deadLetterQueues["slack-requests"]], ["developerNoticeDeadLetters", deadLetterQueues["developer-notices"]],
+        ["developerNoticeStreamFailures", deadLetterQueues["developer-notice-stream"]], ["channelEventDeadLetters", deadLetterQueues["channel-events"]],
+      ], () => this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
       // Named environments only: the legacy (production) template keeps one statement on the broker's role, as mainline deploys it.
       if (naming.env !== undefined) {
         for (const queue of Object.values(deadLetterQueues)) queue.addToResourcePolicy(new iam.PolicyStatement({
@@ -1056,7 +1073,7 @@ export class ControlPlaneStack extends Stack {
         },
       }));
       // C14: TASK_BUSY counts the shared thread's waiting messages.
-      broker.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
+      addBrokerName(broker, naming, "slackThreadsTable", slackThreads.tableName, slackThreads.tableName);
       broker.addToRolePolicy(new iam.PolicyStatement({
         actions: ["dynamodb:GetItem"],
         resources: [slackThreads.tableArn],

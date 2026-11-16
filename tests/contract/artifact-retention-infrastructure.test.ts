@@ -8,6 +8,7 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 // M1.3 Task 3.7b, finding F8 and owner decision D4 ("reuse the existing private-artifact retention, else add a 30-day lifecycle rule"): no rule reached the current version of a
 // screenshot, so one is added. S3 lifecycle filters match the start of a key, and a screenshot's key starts with `private/<owner>/<workspace>/` like every other private object, so
@@ -25,7 +26,7 @@ describe("the retention of workflow screenshots is a rule on the bucket the brok
   const brokerBucketId = (() => {
     const functions = Object.entries(controlPlane.findResources("AWS::Lambda::Function") as Record<string, { Properties: { Environment?: { Variables?: Record<string, unknown> } } }>);
     const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-    return (broker?.[1].Properties.Environment?.Variables?.ARTIFACT_BUCKET_NAME as { Ref?: string } | undefined)?.Ref;
+    return (unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {}).ARTIFACT_BUCKET_NAME as { Ref?: string } | undefined)?.Ref;
   })();
 
   it("names the tag once, in the contracts, with the 30-day period of the owner's decision", () => {

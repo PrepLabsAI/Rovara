@@ -4,6 +4,7 @@ import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws
 import { Construct } from "constructs";
 import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
+import { addBrokerName, addBrokerSetting } from "./broker-names.js";
 import { packagedFunction } from "./control-plane.js";
 
 /** One plain address, or empty. The function checks it again (packages/broker/src/aws/step-up-email.ts) and builds no sender for anything else. */
@@ -219,7 +220,7 @@ export class DeveloperSignIn extends Construct {
       }));
       taskTokenKey.grant(fn, "kms:GetPublicKey");
       fn.addEnvironment("TASK_TOKEN_KEY_ARN", taskTokenKey.keyArn);
-      props.broker.addEnvironment("TASK_TOKEN_KEY_ARN", taskTokenKey.keyArn);
+      addBrokerName(props.broker, props.naming, "taskTokenKey", taskTokenKey.keyId, taskTokenKey.keyArn);
     }
     if (policyHookKey !== undefined) {
       // As the task key: key-policy grants, so the broker's inline policy does not grow. Only the broker signs; only the broker and this function read the public key.
@@ -248,7 +249,7 @@ export class DeveloperSignIn extends Construct {
       }));
       policyHookKey.grant(fn, "kms:GetPublicKey");
       fn.addEnvironment("POLICY_HOOK_KEY_ARN", policyHookKey.keyArn);
-      props.broker.addEnvironment("POLICY_HOOK_KEY_ARN", policyHookKey.keyArn);
+      addBrokerName(props.broker, props.naming, "policyHookKey", policyHookKey.keyId, policyHookKey.keyArn);
     }
     // Named environments only (the legacy deployment runs tasks too, but its template stays as deployed).
     const named = props.naming.env !== undefined;
@@ -317,17 +318,18 @@ export class DeveloperSignIn extends Construct {
     if (coreAppRoute !== undefined) props.stage.addDependency(coreAppRoute);
 
     const broker = props.broker;
-    broker.addEnvironment("DEVELOPER_TOKEN_ISSUER", issuer);
+    // ENV-ROOM (broker-names.ts): in a named environment, the names packed and the constrained settings packed; the legacy template passes each whole, as before.
+    addBrokerName(broker, props.naming, "signInApi", props.api.ref, issuer);
     broker.addEnvironment("AGENTX_ENV", props.env);
-    broker.addEnvironment("DEVELOPER_SIGNIN_TABLE_NAME", table.tableName);
-    broker.addEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN", fn.functionArn);
-    broker.addEnvironment("SLACK_TEAM_ID", p.slackTeamId.valueAsString);
-    broker.addEnvironment("DEVELOPER_SIGNIN_SLACK", p.slack.valueAsString);
+    addBrokerName(broker, props.naming, "signInTable", table.tableName, table.tableName);
+    addBrokerName(broker, props.naming, "identityFunction", fn.functionName, fn.functionArn);
+    addBrokerSetting(broker, props.naming, "slackTeamId", p.slackTeamId.valueAsString);
+    addBrokerSetting(broker, props.naming, "signInSlack", p.slack.valueAsString);
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
-    broker.addEnvironment("DEVELOPER_SIGNIN_SLACK_SINCE", p.slackSince.valueAsString);
-    broker.addEnvironment("DEVELOPER_OIDC_SINCE", p.oidcSince.valueAsString);
+    addBrokerSetting(broker, props.naming, "signInSlackSince", p.slackSince.valueAsString);
+    addBrokerSetting(broker, props.naming, "oidcSince", p.oidcSince.valueAsString);
     if (tasks !== undefined) {
-      broker.addEnvironment("MCP_CONFIRM_ELICITATION", tasks.mcpConfirmElicitation.valueAsString);
+      addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
       // Hosted wiring (d), named environments only: the company audit and event reads (still behind SIGN_IN_CLIENT_ROUTES, which nothing in infra sets). Membership is read from
       // COMPANY_MEMBER# (granted below, also named only).
       if (named) broker.addEnvironment("COMPANY_READS", "enabled");
