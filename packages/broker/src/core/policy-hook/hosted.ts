@@ -85,8 +85,8 @@ export function createHostedPolicyHookClient(settings: HostedPolicyHookSettings,
   }
 
   return {
-    prepare: base.prepare,
-    audit: base.audit,
+    prepare(kind, question) { return base.prepare(kind, question); },
+    audit(...args) { return base.audit(...args); },
     async send(prepared) {
       const resolved = await resolve();
       if (resolved === undefined) return { answered: false };
