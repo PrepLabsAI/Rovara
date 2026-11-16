@@ -9,6 +9,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { evidenceArtifactKey, readEvidenceArtifact } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
 import { evidencePackKey, keepEvidence, loadEvidencePack, loadEvidenceRead, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
+import { eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
 import { createLocalEvidence } from "../../packages/broker/src/local/app/evidence.js";
 import { proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
@@ -90,6 +91,16 @@ describe("keeping browser evidence", () => {
     expect(await keepEvidence(w.deps, input({ browserEvidence: bad }))).toMatchObject({ kept: true });
     expect((await storedPack(w.blobs)).schemaVersion).toBe(1);
     expect(await held(w.blobs, "a")).toBeUndefined();
+  });
+
+  it("erasing the task's evidence takes the pictures and the pack with it (every v2 reader and the eraser are in place before a v2 pack can exist)", async () => {
+    const w = world();
+    await keepEvidence(w.deps, input({ browserEvidence: captured() }));
+    expect(await held(w.blobs, "a")).toBeDefined();
+    expect(await eraseTaskEvidence(w.blobs, TASK)).toBe(true);
+    expect(await held(w.blobs, "a")).toBeUndefined();
+    expect(await held(w.blobs, "b")).toBeUndefined();
+    expect(await w.blobs.get(evidencePackKey(TASK, DIGEST), 4_194_304)).toBeUndefined();
   });
 
   it("a keep that writes no pack leaves no picture behind", async () => {
