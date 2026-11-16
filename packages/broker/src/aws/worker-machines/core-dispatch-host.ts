@@ -188,7 +188,7 @@ function batchQueues(name: string, batch: LambdaBatchQueue): QueueService {
 
 export function createCoreDispatchHost(dependencies: CoreDispatchHostDependencies) {
   const queueName = dependencies.dispatchQueue ?? "task-dispatch";
-  const log = dependencies.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "dispatcher", ...entry })));
+  const log = dependencies.log ?? ((entry: Record<string, unknown>) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); });
   return {
     /** The records of a batch that are the core's, when the switch is on. Today's path must skip exactly these. */
     take(records: readonly CoreDispatchRecord[]): Set<string> {

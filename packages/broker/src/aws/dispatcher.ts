@@ -755,7 +755,7 @@ export const handler = withCoreDispatch(workflowHandler, {
         // A dispatch decides nothing for a person, so the identity point names nobody here.
         ...(flow === undefined ? {} : { flow }),
         extraModules: hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } }),
-        log: (entry) => console.log(JSON.stringify({ component: "dispatcher", ...entry })),
+        log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); }, // one JSON line on stderr, as logDispatchFailure's fallback (fixed fields only)
       }).host;
     }).catch((error: unknown) => {
       // Not kept: the next core batch tries again.

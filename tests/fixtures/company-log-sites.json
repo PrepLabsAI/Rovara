@@ -1,6 +1,7 @@
 {
   "packages/aws-adapters/src/dynamodb/document-store.ts": 1,
   "packages/broker/src/aws/admin-change-audit.ts": 1,
+  "packages/broker/src/aws/broker-environment.ts": 1,
   "packages/broker/src/aws/broker.ts": 90,
   "packages/broker/src/aws/channel-events.ts": 1,
   "packages/broker/src/aws/channel-ingress.ts": 1,

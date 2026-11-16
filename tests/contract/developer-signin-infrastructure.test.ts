@@ -7,6 +7,7 @@ import { serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -276,7 +277,8 @@ describe("developer sign-in infrastructure (named environments)", () => {
 
   it("passes the developer configuration to the broker and DeveloperIdentity", () => {
     const functions = Object.fromEntries(ofType(named, "AWS::Lambda::Function").map(([id, resource]) => [
-      withoutHash(id), Object.keys((resource.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables ?? {}),
+      // ENV-ROOM: the broker's packed variables, unpacked (tests/support/broker-environment-template.ts).
+      withoutHash(id), Object.keys(unpackedBrokerVariables((resource.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables ?? {})),
     ]));
     expect(functions.Broker).toEqual(expect.arrayContaining(["DEVELOPER_TOKEN_ISSUER", "AGENTX_ENV", "DEVELOPER_SIGNIN_TABLE_NAME", "DEVELOPER_IDENTITY_FUNCTION_ARN", "SLACK_TEAM_ID", "DEVELOPER_SIGNIN_SLACK", "DEVELOPER_OIDC_ISSUER"]));
     expect(functions.Broker).not.toContain("SLACK_SECRET_ARN");
@@ -286,7 +288,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
       "DEVELOPER_OIDC_DISPLAY_NAME", "DEVELOPER_OIDC_SECRET_ID",
     ]));
     // FR-045: both functions get each method's enabled-since cutoff straight from its parameter.
-    const variables = (prefix: string) => (named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    const variables = (prefix: string) => unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables);
     expect(variables("Broker")).toMatchObject({
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
       AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
@@ -545,8 +547,9 @@ describe("task-token key and membership IAM", () => {
     expect(JSON.stringify(legacy)).not.toContain("TaskTokenKey");
     expect(JSON.stringify(legacy)).not.toContain("TASK_TOKEN_KEY_ARN");
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
-      const variables = (named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-      expect(variables.TASK_TOKEN_KEY_ARN).toEqual(roleArn(id));
+      const variables = unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables);
+      // ENV-ROOM: the broker is given the key's id packed and builds the same ARN (tests/contract/broker-environment.test.ts); the sign-in function gets the ARN whole.
+      expect(variables.TASK_TOKEN_KEY_ARN).toEqual(prefix === "Broker" ? { Ref: id } : roleArn(id));
       if (prefix === "DeveloperSignInFunction") expect(variables.DEVELOPER_TOKEN_KEY_ARN).toEqual(roleArn(signingKey(named, "DeveloperSignInTokenKey")[0]));
     }
   });
@@ -561,6 +564,13 @@ describe("task-token key and membership IAM", () => {
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
       const variables = (remainder.Resources[functionId(remainder, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
       delete variables.TASK_TOKEN_KEY_ARN;
+      // ENV-ROOM: on the broker it is the `kt` piece of AGENTX_NAMES (the key's id).
+      const join = (variables.AGENTX_NAMES as { "Fn::Join"?: [string, unknown[]] } | undefined)?.["Fn::Join"];
+      if (join !== undefined) {
+        const at = join[1].findIndex((part) => typeof part === "string" && /^,?kt=$/u.test(part));
+        expect(join[1][at + 1]).toEqual({ Ref: taskId });
+        join[1].splice(at, 2);
+      }
     }
     let reads = 0;
     let families = 0;
@@ -588,8 +598,10 @@ describe("task-token key and membership IAM", () => {
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
     // and R2 step 4 (the dispatcher's core queue mapping, its reads, the conditional deleter policy, its core variables, the outbox pending index).
-    // L1a re-pins the stacked baseline (also measured before L1a edits); the helper checks and strips both new broker queue references.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("93c005411e7fcf171b145fc2bd60d27e0ff462c7e5ad0d61e6815bfd05f817af");
+    // #722 re-pins the COMBINED stacked baseline (#689's hosted wiring and R2 step 4 together; each PR pinned only its own base). No template change of #722's own; the IAM
+    // tuples are checked exactly against the reviewed lists below. Same value as L1a (#731) measured before its own edits.
+    // ENV-ROOM (pr/broker-env-diet): re-pinned for the packed broker environment (the broker's Variables only; no IAM change).
+    expect(createHash("sha256").update(text).digest("hex")).toBe("1b878d62c360a297aa7fc38b645db416bc52bcd9f4db4dd1372fe809d034cade");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {

@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -26,7 +27,7 @@ function brokerStatements(template: Template): Statement[] {
 function brokerEnvironment(template: Template): Record<string, unknown> {
   const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
   const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-  return broker?.[1].Properties.Environment?.Variables ?? {};
+  return unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {});
 }
 
 describe("the health route's grants (A13)", () => {
@@ -156,6 +157,10 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/channel/thread-notices.ts",
       // Lessons: the rows that record a lesson's source events expire after a named retention (SOURCE_EVENT_TTL_DAYS), none a durable record.
       "packages/broker/src/lessons/document-store.ts",
+      // Lane EV (#649): the company event read only READS the work events' expiry (an expired row is skipped before the store sweeps it); it writes none.
+      "packages/broker/src/core/work-events/read.ts",
+      // Team record (#724, LM7): every record row carries the retention expiry the lessons rows use, and a reader checks it itself; none a durable record.
+      "packages/broker/src/team-record/record.ts",
       // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
       "packages/broker/src/local/app/lessons-routes.ts",
       // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).

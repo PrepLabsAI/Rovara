@@ -2412,17 +2412,163 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "ADMIN_VALUES": {
               "Ref": "AdminValues",
             },
-            "AGENTX_ALARM_PREFIX": "agentx-staging-",
-            "AGENTX_E2E_AGENT_SETTINGS_PREFIX": "/agentx/staging/",
-            "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-staging-e2e-mock-runtime-v1",
-            "AGENTX_ENV": "staging",
-            "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
-            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
-            "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED": {
-              "Ref": "WorkflowDependenciesEnabled",
+            "AGENTX_ACCOUNT_ID": {
+              "Ref": "AWS::AccountId",
             },
-            "ARTIFACT_BUCKET_NAME": {
-              "Ref": "Artifacts82DD59A1",
+            "AGENTX_ENV": "staging",
+            "AGENTX_NAMES": {
+              "Fn::Join": [
+                "",
+                [
+                  "ar=",
+                  {
+                    "Ref": "Artifacts82DD59A1",
+                  },
+                  ",ce=",
+                  {
+                    "Fn::GetAtt": [
+                      "ChannelApiEventDeadLettersE21C25D1",
+                      "QueueName",
+                    ],
+                  },
+                  ",ck=",
+                  {
+                    "Ref": "ChatGptConnectionKey03C49F9D",
+                  },
+                  ",cs=",
+                  {
+                    "Ref": "CompanySecretsRole63E074C9",
+                  },
+                  ",dl=",
+                  {
+                    "Fn::GetAtt": [
+                      "SessionsDeleterB48741EA",
+                      "Name",
+                    ],
+                  },
+                  ",dn=",
+                  {
+                    "Fn::GetAtt": [
+                      "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                      "QueueName",
+                    ],
+                  },
+                  ",dq=",
+                  {
+                    "Fn::GetAtt": [
+                      "DispatchDeadLetterQueue3E30F4B8",
+                      "QueueName",
+                    ],
+                  },
+                  ",ds=",
+                  {
+                    "Fn::GetAtt": [
+                      "DeveloperTaskNotifierStreamFailureQueue58891933",
+                      "QueueName",
+                    ],
+                  },
+                  ",id=",
+                  {
+                    "Ref": "DeveloperSignInFunction10B62B05",
+                  },
+                  ",kp=",
+                  {
+                    "Ref": "DeveloperSignInPolicyHookKey1CC2C9E2",
+                  },
+                  ",kt=",
+                  {
+                    "Ref": "DeveloperSignInTaskTokenKey10D3ED68",
+                  },
+                  ",pe=",
+                  {
+                    "Ref": "PlanEvidence3615C4CB",
+                  },
+                  ",pv=",
+                  {
+                    "Fn::GetAtt": [
+                      "SessionsProvisioner9C44055B",
+                      "Name",
+                    ],
+                  },
+                  ",sl=",
+                  {
+                    "Ref": "SlackThreads36E14C1E",
+                  },
+                  ",so=",
+                  {
+                    "Ref": "SlackOrchestratorTaskRole2372FE40",
+                  },
+                  ",sq=",
+                  {
+                    "Fn::GetAtt": [
+                      "SlackRequestQueueCC82C864",
+                      "QueueName",
+                    ],
+                  },
+                  ",sr=",
+                  {
+                    "Fn::GetAtt": [
+                      "SlackRequestDeadLetterQueueBBBDDF4E",
+                      "QueueName",
+                    ],
+                  },
+                  ",st=",
+                  {
+                    "Ref": "DeveloperSignInTable26CE739E",
+                  },
+                  ",ti=",
+                  {
+                    "Ref": "HttpApi",
+                  },
+                  ",tr=",
+                  {
+                    "Ref": "TurnRecords69ECFCD9",
+                  },
+                  ",ts=",
+                  {
+                    "Ref": "State1C20CC9A",
+                  },
+                ],
+              ],
+            },
+            "AGENTX_SETTINGS": {
+              "Fn::Join": [
+                "",
+                [
+                  "mc=",
+                  {
+                    "Ref": "McpConfirmElicitation",
+                  },
+                  ",ml=",
+                  {
+                    "Ref": "SlackMemberWorkspaceLimit",
+                  },
+                  ",ol=",
+                  {
+                    "Ref": "SlackOrganizationWorkspaceLimit",
+                  },
+                  ",os=",
+                  {
+                    "Ref": "DeveloperOidcSince",
+                  },
+                  ",sn=",
+                  {
+                    "Ref": "DeveloperSignInSlackSince",
+                  },
+                  ",ss=",
+                  {
+                    "Ref": "DeveloperSignInSlack",
+                  },
+                  ",tm=",
+                  {
+                    "Ref": "SlackTeamId",
+                  },
+                  ",wd=",
+                  {
+                    "Ref": "WorkflowDependenciesEnabled",
+                  },
+                ],
+              ],
             },
             "CALLBACK_SIGNING_KEY": {
               "Ref": "CallbackSigningKey",
@@ -2431,57 +2577,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Ref": "ChannelAdapters",
             },
             "CHANNEL_ADAPTER_SECRET_PREFIX": "agentx/staging/",
-            "CHATGPT_CONNECTION_KEY_ARN": {
-              "Fn::GetAtt": [
-                "ChatGptConnectionKey03C49F9D",
-                "Arn",
-              ],
-            },
             "COMPANY_READS": "enabled",
-            "COMPANY_SECRETS_ROLE_ARN": {
-              "Fn::GetAtt": [
-                "CompanySecretsRole63E074C9",
-                "Arn",
-              ],
-            },
-            "CONNECTOR_SECRET_PREFIX": "agentx/staging/connectors/",
-            "DELETER_ARN": {
-              "Ref": "SessionsDeleterB48741EA",
-            },
-            "DEVELOPER_IDENTITY_FUNCTION_ARN": {
-              "Fn::GetAtt": [
-                "DeveloperSignInFunction10B62B05",
-                "Arn",
-              ],
-            },
             "DEVELOPER_OIDC_ISSUER": {
               "Ref": "DeveloperOidcIssuer",
-            },
-            "DEVELOPER_OIDC_SINCE": {
-              "Ref": "DeveloperOidcSince",
-            },
-            "DEVELOPER_SIGNIN_SLACK": {
-              "Ref": "DeveloperSignInSlack",
-            },
-            "DEVELOPER_SIGNIN_SLACK_SINCE": {
-              "Ref": "DeveloperSignInSlackSince",
-            },
-            "DEVELOPER_SIGNIN_TABLE_NAME": {
-              "Ref": "DeveloperSignInTable26CE739E",
-            },
-            "DEVELOPER_TOKEN_ISSUER": {
-              "Fn::Join": [
-                "",
-                [
-                  {
-                    "Fn::GetAtt": [
-                      "HttpApi",
-                      "ApiEndpoint",
-                    ],
-                  },
-                  "/v1/auth",
-                ],
-              ],
             },
             "EC2_WORKER_LAUNCH_TEMPLATE_ID": {
               "Ref": "Ec2WorkerLaunchTemplateId",
@@ -2498,85 +2596,8 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": {
               "Ref": "GitHubAppPrivateKeySecretArn",
             },
-            "HEALTH_DEAD_LETTER_QUEUES": {
-              "Fn::Join": [
-                "",
-                [
-                  "{"dispatch":"",
-                  {
-                    "Ref": "DispatchDeadLetterQueue3E30F4B8",
-                  },
-                  "","slack-requests":"",
-                  {
-                    "Ref": "SlackRequestDeadLetterQueueBBBDDF4E",
-                  },
-                  "","developer-notices":"",
-                  {
-                    "Ref": "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
-                  },
-                  "","developer-notice-stream":"",
-                  {
-                    "Ref": "DeveloperTaskNotifierStreamFailureQueue58891933",
-                  },
-                  "","channel-events":"",
-                  {
-                    "Ref": "ChannelApiEventDeadLettersE21C25D1",
-                  },
-                  ""}",
-                ],
-              ],
-            },
-            "MCP_CONFIRM_ELICITATION": {
-              "Ref": "McpConfirmElicitation",
-            },
             "OIDC_ISSUER": {
               "Ref": "OidcIssuer",
-            },
-            "PLAN_EVIDENCE_FUNCTION_NAME": {
-              "Ref": "PlanEvidence3615C4CB",
-            },
-            "POLICY_HOOK_KEY_ARN": {
-              "Fn::GetAtt": [
-                "DeveloperSignInPolicyHookKey1CC2C9E2",
-                "Arn",
-              ],
-            },
-            "PROVISIONER_ARN": {
-              "Ref": "SessionsProvisioner9C44055B",
-            },
-            "SLACK_MEMBER_WORKSPACE_LIMIT": {
-              "Ref": "SlackMemberWorkspaceLimit",
-            },
-            "SLACK_ORCHESTRATOR_ROLE_ARN": {
-              "Fn::GetAtt": [
-                "SlackOrchestratorTaskRole2372FE40",
-                "Arn",
-              ],
-            },
-            "SLACK_ORGANIZATION_WORKSPACE_LIMIT": {
-              "Ref": "SlackOrganizationWorkspaceLimit",
-            },
-            "SLACK_REQUEST_QUEUE_URL": {
-              "Ref": "SlackRequestQueueCC82C864",
-            },
-            "SLACK_TEAM_ID": {
-              "Ref": "SlackTeamId",
-            },
-            "SLACK_THREADS_TABLE_NAME": {
-              "Ref": "SlackThreads36E14C1E",
-            },
-            "STATE_TABLE_NAME": {
-              "Ref": "State1C20CC9A",
-            },
-            "SWEBENCH_SETTINGS_PREFIX": "/agentx/staging/",
-            "TASK_TOKEN_KEY_ARN": {
-              "Fn::GetAtt": [
-                "DeveloperSignInTaskTokenKey10D3ED68",
-                "Arn",
-              ],
-            },
-            "TURN_RECORDS_TABLE_NAME": {
-              "Ref": "TurnRecords69ECFCD9",
             },
           },
         },

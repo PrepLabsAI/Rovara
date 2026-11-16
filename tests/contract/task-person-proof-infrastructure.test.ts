@@ -7,6 +7,7 @@ import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -38,7 +39,8 @@ function runtimeCatalogEnvironmentEntries(template: TemplateJson) {
   expect(dispatchers, "one Dispatcher owns the project setup catalog ID").toHaveLength(1);
   const brokerVariables = brokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
   const dispatcherVariables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-  return { broker: brokerVariables.Variables, dispatcher: dispatcherVariables.Variables };
+  // ENV-ROOM: a named broker derives both catalog ids from AGENTX_ENV (tests/support/broker-environment-template.ts gives the derived literal).
+  return { broker: unpackedBrokerVariables(brokerVariables.Variables), dispatcher: dispatcherVariables.Variables };
 }
 
 function expectRuntimeCatalogEnvironment(template: TemplateJson, prefix: string) {
@@ -81,6 +83,8 @@ function parentRemainderDigest(template: TemplateJson): string {
   for (const [id] of workflowDependencyEnvironmentEntries(remainder)) {
     const brokerVariables = resources[id]!.Properties!.Environment as { Variables: Record<string, unknown> };
     delete brokerVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED;
+    // ENV-ROOM: in a named Broker the flag is the `wd` piece of AGENTX_SETTINGS.
+    if (brokerVariables.Variables.AGENTX_SETTINGS !== undefined) removePackedPieces(brokerVariables.Variables, "AGENTX_SETTINGS", ["wd"]);
     delete brokerVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
     delete brokerVariables.Variables.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID;
   }
@@ -192,7 +196,8 @@ describe("the named TEST proof-only installation gate", () => {
       const broker = workflowDependencyEnvironmentEntries(template);
       expect(broker, `${label} has exactly one Broker with the workflow flag`).toHaveLength(1);
       const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-      expect(variables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
+      // ENV-ROOM: in a named Broker the flag is the parameter's piece of AGENTX_SETTINGS.
+      expect(unpackedBrokerVariables(variables.Variables).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
     }
     expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
@@ -202,19 +207,20 @@ describe("the named TEST proof-only installation gate", () => {
 
     // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged. Named/foreign re-pinned for lane E2 (the core engine construct, #663,
     // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.
-    // L1a: refresh the stale named/foreign pins against an unchanged-base control; the shared helper removes the two new references. Legacy pins remain unchanged.
+    // #722: named/foreign re-pinned for the combined stacked baseline (#689 + R2 step 4; no template change of #722's own), the same values as L1a (#731) measured before its edits.
+    // ENV-ROOM (pr/broker-env-diet): named/foreign re-pinned for the packed broker environment (AGENTX_NAMES, AGENTX_SETTINGS, AGENTX_ACCOUNT_ID; the snapshot diff is the broker's Variables only); legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "db5deff9f38e2113f6fd80f63229e88657156952e90633356e65f910d5ce151d",
-        withoutRoute: "24fb68933fbdffaedcd8b364d3dcde3ad15f676e218e9d374e2160c466891d46",
+        withRoute: "c9a3d0a6e6dc1a9e1468b4953742785d30549e1e33d0b4a7ee6bafca5912b4bd",
+        withoutRoute: "dfde6fd9fe990a8b986bc5e56a80b3bfb984dbe7e3c2fe477fe7fa2da7b254f0",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "7c24fb2c33b49464b564d4ee7489f29fc9d99f8760323a7f0388bffbdb932c65",
-        withoutRoute: "cd310bbfcab2337921f6312cdf54366a482d334901eb8c0ba0823cd12c045b9b",
+        withRoute: "e55075dcd808d9f695937d8b3b98b4410094146e454c2825ae8bd1ce7661cbf6",
+        withoutRoute: "2f9e966d536cd6a54b636dd48cd690534c88ed57b98d88fce06a73a9c5d2c0ea",
       },
       {
         label: "legacy",
@@ -380,7 +386,7 @@ describe("the named TEST proof-only installation gate", () => {
       const envVars = (resource.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
       expect(envVars, `${id} must not receive proof-only runtime configuration`).not.toHaveProperty("TASK_PERSON_PROOF_FUNCTION_ARN");
     }
-    const brokerVars = (broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
+    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables);
     expect(brokerVars.SLACK_TEAM_ID).toEqual({ Ref: "SlackTeamId" });
     expect(brokerVars.DEVELOPER_SIGNIN_TABLE_NAME).toEqual({ Ref: tableId });
     const notifierVars = (notifier.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
