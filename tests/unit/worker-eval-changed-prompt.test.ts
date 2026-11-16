@@ -29,6 +29,7 @@ const baseCommitSha = "a".repeat(40); const treeSha = "b".repeat(40); const oldO
 const repositories = [{ repositoryId: "one", directory: "/worker/repo", baseCommitSha }];
 const candidates = [{ repositoryId: "one", commitSha: "e".repeat(40), treeSha, baseCommitSha }];
 const signal = () => new AbortController().signal;
+const planned = (baseCommit = baseCommitSha) => async () => ({ key: { baseCommit } });
 function source(before: string, after: string, path = "prompts/system.txt", mode = "100644", status = "M") {
   const old = Buffer.from(before); const next = Buffer.from(after);
   git.bytes.mockImplementation(async (args: string[]) => args[0] === "diff"
@@ -72,7 +73,7 @@ describe("worker F4/F8 classifier", () => {
 describe("pinned source producer", () => {
   it("reads complete immutable blob sides in isolated read mode, then runs F4", async () => {
     source("old", "new prompt");
-    const change = await candidatePromptChanges(repositories, candidates, signal());
+    const change = await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha);
     expect(change).toMatchObject({ status: "changes", coverage: "complete", counts: { prompt_file: 1 } });
     expect(git.read.mock.calls).toEqual([["/worker/repo", "read"]]);
     expect(git.bytes.mock.calls[0]![0]).toEqual(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", baseCommitSha, treeSha, "--"]);
@@ -81,45 +82,45 @@ describe("pinned source producer", () => {
   it("makes the production classifier false for a known unrelated change and removes the context afterward", async () => {
     source("export const count = 1;", "export const count = 2;", "src/count.ts");
     expect(evalChangedPrompt(call())).toBe(true);
-    expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), async () => evalChangedPrompt(call()))).toBe(false);
+    expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), planned(), async () => evalChangedPrompt(call()))).toBe(false);
     expect(evalChangedPrompt(call())).toBe(true);
   });
   it("changed source produces a positive and concurrent/nested check contexts do not share classifications", async () => {
     source("let x = 1;", "let x = 2;", "src/x.ts");
-    await withEvalChangedPromptClassifier(repositories, candidates, signal(), async () => {
+    await withEvalChangedPromptClassifier(repositories, candidates, signal(), planned(), async () => {
       expect(evalChangedPrompt(call())).toBe(false);
-      await withEvalChangedPromptClassifier([], [], signal(), async () => { expect(evalChangedPrompt(call())).toBe(true); });
+      await withEvalChangedPromptClassifier([], [], signal(), planned(), async () => { expect(evalChangedPrompt(call())).toBe(true); });
       expect(evalChangedPrompt(call())).toBe(false);
-      const parallel = withEvalChangedPromptClassifier([], [], signal(), async () => {
+      const parallel = withEvalChangedPromptClassifier([], [], signal(), planned(), async () => {
         await new Promise(resolve => setTimeout(resolve, 0)); return evalChangedPrompt(call());
       });
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(evalChangedPrompt(call())).toBe(false); expect(await parallel).toBe(true);
     });
     source("old", "new prompt");
-    expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), async () => evalChangedPrompt(call()))).toBe(true);
+    expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), planned(), async () => evalChangedPrompt(call()))).toBe(true);
   });
   it.each(["120000", "160000"])("treats non-regular mode %s as unknown without reading its content", async mode => {
     source("old", "new", "app.ts", mode);
-    expect(await candidatePromptChanges(repositories, candidates, signal())).toBeUndefined();
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
     expect(git.text).not.toHaveBeenCalled();
   });
   it("fails closed on unreadable source, invalid UTF-8, oversized source, and malformed raw diff", async () => {
     source("old", "new"); git.bytes.mockRejectedValueOnce(new Error("unreadable"));
-    expect(await candidatePromptChanges(repositories, candidates, signal())).toBeUndefined();
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
     source("old", "new"); git.bytes.mockResolvedValueOnce(Buffer.from([0xff]));
-    expect(await candidatePromptChanges(repositories, candidates, signal())).toBeUndefined();
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
     source("old", "new"); git.text.mockResolvedValue("1048577");
-    expect(await candidatePromptChanges(repositories, candidates, signal())).toBeUndefined();
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
     git.bytes.mockResolvedValue(Buffer.from(":invalid\0path.ts\0"));
-    expect(await candidatePromptChanges(repositories, candidates, signal())).toBeUndefined();
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toBeUndefined();
   });
   it("refuses missing/mismatched bases, duplicate identities and cancellation before Git", async () => {
     const stop = new AbortController(); stop.abort();
-    expect(await candidatePromptChanges(repositories, [{ ...candidates[0]!, baseCommitSha: treeSha }], signal())).toBeUndefined();
-    expect(await candidatePromptChanges([{ ...repositories[0]!, baseCommitSha: undefined } as never], candidates, signal())).toBeUndefined();
-    expect(await candidatePromptChanges([...repositories, ...repositories], [...candidates, ...candidates], signal())).toBeUndefined();
-    expect(await candidatePromptChanges(repositories, candidates, stop.signal)).toBeUndefined();
+    expect(await candidatePromptChanges(repositories, [{ ...candidates[0]!, baseCommitSha: treeSha }], signal(), baseCommitSha)).toBeUndefined();
+    expect(await candidatePromptChanges([{ ...repositories[0]!, baseCommitSha: undefined } as never], candidates, signal(), baseCommitSha)).toBeUndefined();
+    expect(await candidatePromptChanges([...repositories, ...repositories], [...candidates, ...candidates], signal(), baseCommitSha)).toBeUndefined();
+    expect(await candidatePromptChanges(repositories, candidates, stop.signal, baseCommitSha)).toBeUndefined();
     expect(git.read).not.toHaveBeenCalled();
   });
 });
@@ -167,7 +168,7 @@ describe("source to final-check artifact (in-memory bridge transport)", () => {
         },
       });
       expect(ports).toBeDefined();
-      const artifact = await withEvalChangedPromptClassifier(repositories, candidates, signal(), () => runFinalCheckEval(
+      const artifact = await withEvalChangedPromptClassifier(repositories, candidates, signal(), () => w.ports.plan(), () => runFinalCheckEval(
         { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 }, ports,
         { status: "verified", candidateDigest: "f".repeat(64), signal: signal() },
       ));
@@ -177,5 +178,83 @@ describe("source to final-check artifact (in-memory bridge transport)", () => {
       if (changed) expect(result.label).toBe("No regression measured (eval)");
       else expect(result).toMatchObject({ label: "Not run", notRun: { reason: "no_changed_prompt_call" } });
     } finally { await w.cleanup(); }
+  });
+});
+
+/** Several changed files in one diff: each file gets its own pair of blob ids. */
+function sources(files: Array<[path: string, before: string | undefined, after: string | undefined]>) {
+  const blobs = new Map<string, Buffer>(); const lines: string[] = [];
+  files.forEach(([path, before, after], i) => {
+    const old = `${(i * 2 + 1).toString(16).padStart(2, "0")}`.repeat(20); const next = `${(i * 2 + 2).toString(16).padStart(2, "0")}`.repeat(20);
+    if (before !== undefined) blobs.set(old, Buffer.from(before));
+    if (after !== undefined) blobs.set(next, Buffer.from(after));
+    const status = before === undefined ? "A" : after === undefined ? "D" : "M";
+    lines.push(`:${before === undefined ? "000000" : "100644"} ${after === undefined ? "000000" : "100644"} ${before === undefined ? "0".repeat(40) : old} ${after === undefined ? "0".repeat(40) : next} ${status}\0${path}\0`);
+  });
+  git.bytes.mockImplementation(async (args: string[]) => args[0] === "diff" ? Buffer.from(lines.join("")) : blobs.get(args[2]!)!);
+  git.text.mockImplementation(async (args: string[]) => String(blobs.get(args[2]!)!.length));
+}
+
+describe("the diff base is the plan's baseCommit (EVAL-WIRE-CLASSIFIER-BASE-BINDING)", () => {
+  const other = "9".repeat(40);
+  it("diffs from the plan's base when the repository base agrees", async () => {
+    source("old", "new prompt");
+    expect(await candidatePromptChanges(repositories, candidates, signal(), baseCommitSha)).toMatchObject({ status: "changes" });
+    expect(git.bytes.mock.calls[0]![0] as string[]).toContain(baseCommitSha);
+  });
+  it.each([
+    ["no plan base", undefined],
+    ["a plan base that differs from the repository's base", other],
+    ["a malformed plan base", "HEAD~1"],
+    ["a non-string plan base", 5 as never],
+  ] as Array<[string, string | undefined]>)("is unknown for %s, and Git is never read", async (_name, base) => {
+    source("export const count = 1;", "export const count = 2;", "src/count.ts");
+    expect(await candidatePromptChanges(repositories, candidates, signal(), base)).toBeUndefined();
+    expect(git.read).not.toHaveBeenCalled();
+  });
+  it("counts every call as changed without a plan, with an unreadable plan, with a plan for another base, and with an invalid plan base", async () => {
+    source("export const count = 1;", "export const count = 2;", "src/count.ts");
+    const ask = (plan: Parameters<typeof withEvalChangedPromptClassifier>[3]) => withEvalChangedPromptClassifier(repositories, candidates, signal(), plan, async () => evalChangedPrompt(call()));
+    expect(await ask(planned())).toBe(false);
+    expect(await ask(undefined)).toBe(true);
+    expect(await ask(async () => undefined)).toBe(true);
+    expect(await ask(async () => { throw new Error("plan unavailable"); })).toBe(true);
+    expect(await ask(planned("9".repeat(40)))).toBe(true);
+    expect(await ask(planned("not-a-commit"))).toBe(true);
+    expect(await ask(async () => ({}) as never)).toBe(true);
+  });
+});
+
+describe("a change F4 cannot see is unknown (EVAL-PROMPT-DETECT-RUNTIME-LOADED)", () => {
+  const read = (files: Parameters<typeof sources>[0]) => { sources(files); return candidatePromptChanges(repositories, candidates, signal(), baseCommitSha); };
+  it.each([
+    ["a runtime-loaded text file with no prompt in its name", [["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]]],
+    ["a runtime-loaded markdown file", [["docs/persona.md", "Be terse.\n", "Be verbose.\n"]]],
+    ["a runtime-loaded added file", [["assets/persona.txt", undefined, "You are verbose.\n"]]],
+    ["a runtime-loaded removed file", [["assets/persona.txt", "You are terse.\n", undefined]]],
+    ["a text file that F4 does not read next to a recognised prompt file", [["prompts/system.txt", "old", "new prompt"], ["assets/persona.txt", "a b", "c d"]]],
+    ["a prose string constant in code with no AI import", [["src/text.ts", "export const greeting = 'Be terse.';\n", "export const greeting = 'Be very terse.';\n"]]],
+    ["a prose string constant added to code", [["src/text.ts", "export const x = 1;\n", "export const x = 'Be very terse.';\n"]]],
+    ["a changed Python docstring", [["app/text.py", 'def f():\n    """Be terse."""\n', 'def f():\n    """Be verbose."""\n']]],
+    ["a changed template literal that spans lines", [["src/text.ts", "export const t = `a\nb c`;\n", "export const t = `a\nb d`;\n"]]],
+  ] as Array<[string, Parameters<typeof sources>[0]]>)("%s reads unknown, so every call counts as changed", async (_name, files) => {
+    expect(await read(files)).toBeUndefined();
+  });
+  it("still reads none_found for code that changes no prose string", async () => {
+    expect(await read([["src/count.ts", "import a from './a.js';\nexport const count = 1;\n", "import a from './b.js';\nexport const count = 2;\n"]])).toMatchObject({ status: "none_found" });
+    expect(await read([["src/same.ts", "const s = 'same words';\nconst n = 1;\n", "const s = 'same words';\nconst n = 2;\n"]])).toMatchObject({ status: "none_found" });
+  });
+  it("a file F4 found and diffed is accounted for", async () => {
+    expect(await read([["prompts/system.txt", "old", "new prompt"]])).toMatchObject({ status: "changes" });
+  });
+  it("scans a very large file of unterminated quotes in bounded time", async () => {
+    const hostile = "'\"".repeat(450_000);
+    const started = Date.now();
+    await read([["src/hostile.ts", hostile, `${hostile}'`]]);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+  it("the production classifier counts every readable call as changed when coverage is unknown", async () => {
+    sources([["assets/persona.txt", "You are terse.\n", "You are verbose.\n"]]);
+    expect(await withEvalChangedPromptClassifier(repositories, candidates, signal(), planned(), async () => evalChangedPrompt(call()))).toBe(true);
   });
 });

@@ -705,11 +705,15 @@ async function runTask(
         const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
         let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
         try {
-          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, dependencies.evalFinalCheck, {
+          // One plan read serves both the eval and the changed-prompt classifier, so they share one base commit.
+          const ports = dependencies.evalFinalCheck;
+          let planning: ReturnType<EvalFinalCheckPorts["plan"]> | undefined;
+          const plan = ports === undefined ? undefined : () => (planning ??= ports.plan());
+          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : { ...ports, plan }, {
             status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
           });
-          const running = (dependencies.evalFinalCheck === undefined || status !== "verified" ? evaluate()
-            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, evaluate))
+          const running = (ports === undefined || status !== "verified" ? evaluate()
+            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate))
             .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
         } catch (error) {
