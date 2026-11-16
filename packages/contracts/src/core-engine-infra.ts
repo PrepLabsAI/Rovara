@@ -39,10 +39,11 @@ export const CORE_ENGINE_PARAMETER_PATTERN = "^(off|on|drain|on:org_[0-9a-z]{20}
 export const CORE_ENGINE_PARAMETER_MAX_LENGTH = 64;
 export const CORE_ENGINE_DEFAULT = "off";
 /**
- * Whether the broker runs the core engine yet. False until the broker wiring lands (lane E2 step 6, after the second mainline sync): until then the CLI refuses every value but `off`,
- * so switching on cannot enable schedules the broker does not answer. The stack parameter itself already takes every value, so turning this on needs no template change.
+ * Whether the broker runs the core engine. True since L6: the broker wiring has landed and, with the switch off (and not draining), the broker builds nothing and reads no core
+ * setting. While false the CLI refused every value but `off`. Turning the engine on still takes the explicit switch AND an allowed-companies list (default `none` refuses every company;
+ * CORE-SWITCHON-MONEY-CAP-GUARD: the founders' company only until #737/#743 are proven on staging). The stack parameter already takes every value, so this needs no template change.
  */
-export const CORE_ENGINE_BROKER_WIRED = false;
+export const CORE_ENGINE_BROKER_WIRED = true;
 
 /** The core's most dispatch attempts for one message (DISPATCH_ATTEMPTS_MAX in core/task-flow/dispatch.ts). The queue's redrive limit must be above it, or SQS dead-letters a message the core still retries. */
 export const CORE_DISPATCH_ATTEMPTS_MAX = 20;

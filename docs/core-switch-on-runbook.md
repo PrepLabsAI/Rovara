@@ -2,7 +2,7 @@
 
 Release owner: 9d. This document is a procedure, not evidence that staging passed. No account identifiers, credentials, private keys or tokens belong in its evidence. Keep provider keys in the existing company connection UI and token material out of logs.
 
-**HOLD:** `CORE_ENGINE_BROKER_WIRED` remains false pending 9d's gates and review. ANSWER-2 worker routing is implemented per authenticated request; release still requires the rebuilt worker image and staging routing proof. The contract now reaches the real worker/model-runtime transport on fakes for both companies. Its last permitted run exposed a later merge-ready fixture missing verification; the fixture is corrected, but 9d must run the whole contract afresh. The stored-choice file also needs a fresh run after its final settings-read correction. Do not enable the core switch before those checks pass.
+**HOLD:** do not enable the core switch until every step below is done. `CORE_ENGINE_BROKER_WIRED` is now true (L6, #791): the CLI accepts `on`, `on:<company>` and `drain` for `coreEngine.switch`, and with the switch `off` (not draining) the broker reads no core setting and builds nothing (tested). The release still needs the rebuilt worker image and the staging routing proof (step 8). The two-company contract and the stored-choice tests pass on #791.
 
 ## Operator setup and review helpers
 
@@ -130,14 +130,14 @@ core_preview() {
 
 15. **Web marker and security accepts.** Seed only the reviewed webApp sign-in-client marker through the existing identity deployment/seed procedure; check server-owned marker readback, never a request-body/client label. **SECURITY-ACCEPT-PAGE-ROUTE remains OPEN (L11): the core has no page route that can accept a SECURITY finding.** Script/API tokens must refuse even with step-up claims; do not add a route or let a token impersonate a page. Future acceptance requires the actual web page, verified webApp marker and fresh step-up. Preview: identity seed review and refusal tests; rollback: restore/revoke the marker through the same identity procedure. Leave acceptance unavailable in this rehearsal.
 
-16. **Switch only after every HOLD is closed.** 9d commits, gates and reviews; after worker routing and contract proof, a separately reviewed change may set `CORE_ENGINE_BROKER_WIRED=true` with runtime-switch tests. Then:
+16. **Switch on, founders only, after every step above.** The release carrying `CORE_ENGINE_BROKER_WIRED=true` (L6) must be installed first: before it, the CLI refuses every value but `off`. Switching on takes BOTH the switch and the allowed-companies list from step 13 (the default `none` refuses every company). Never `on` or `all` here (CORE-SWITCHON-MONEY-CAP-GUARD). Then:
 
    ```sh
    agentx --env staging config set coreEngine.switch "on:$CORE_COMPANY"
    agentx --env staging config get coreEngine.switch
    ```
 
-   Preview the CLI's stack change set before applying. If the CLI still refuses because the wired flag is false, stop: do not bypass it using the stack parameter. Check the named exact model-access GET, own-company task token, start/dispatch/callback/review/merge jobs, foreign-company refusals, and an uncovered company's old path. Unattended sources remain off until step 14 is satisfied.
+   Preview the CLI's stack change set before applying. If the CLI refuses because the installed release predates the wired flag, stop: do not bypass it using the stack parameter. Check the named exact model-access GET, own-company task token, start/dispatch/callback/review/merge jobs, foreign-company refusals, and an uncovered company's old path. Unattended sources remain off until step 14 is satisfied.
 
 ## Rollback: unattended off → drain → off
 
