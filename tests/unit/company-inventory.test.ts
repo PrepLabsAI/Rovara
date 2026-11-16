@@ -173,3 +173,13 @@ describe("merge-up 3 proof record classifications", () => {
     expect(await world.store.get(key)).toEqual(foreign);
   });
 });
+
+it("pins L4 legacy pagination as a known gap and preserves company-scoped target constructors", () => {
+  const markdown = readFileSync("docs/architecture/company-inventory.md", "utf8");
+  const rows = forwardingCoverage(markdown).filter(row => row.site.startsWith("packages/broker/src/aws/core-project-backfill.ts:"));
+  expect(rows.map(row => row.expression)).toEqual(["projectKey(name, 1).pk", "cursor.after"]);
+  expect(rows.every(row => row.reason.startsWith("Known gap:") && row.constructors === "projectKey (legacy PROJECT)")).toBe(true);
+  const text = readFileSync("packages/broker/src/aws/core-project-backfill.ts", "utf8");
+  expect(text).toContain("projectRevisionKey(company, definition.name, definition.revision)");
+  expect(text).toContain("orgProjectCatalogKey(company, definition.name)");
+});

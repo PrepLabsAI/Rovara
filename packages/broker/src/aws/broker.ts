@@ -1,3 +1,4 @@
+import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
 import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix as posixPath } from "node:path";
@@ -2124,6 +2125,7 @@ async function registerProject(
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
+    if (project.companyId === undefined && !duplicate) brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
     return {
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
@@ -2211,6 +2213,18 @@ async function registerProject(
     // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
     const authority = await judgeAuthority(snapshot.newestRevision);
     const accounts = await planAccounts();
+    // Ownership may be carried forward only from the stored legacy revision (or the checked membership already used above).
+    const storedCompany = snapshot.newest?.companyId;
+    if (storedCompany !== undefined) {
+      if (!OrgIdSchema.safeParse(storedCompany).success || (record.companyId !== undefined && storedCompany !== record.companyId)) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
+      record.companyId = storedCompany;
+    } else if (record.companyId !== undefined && companyId === undefined) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
+    let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
+    try {
+      corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
+      if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
+    }
+    catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
     // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
     if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
     try {
@@ -2242,6 +2256,7 @@ async function registerProject(
       } }] : []),
       ...(setupAdmissionRows?.transactionItems ?? []),
       ...accounts.items,
+      ...corePlan.writes,
       ] }));
       if (authority === "takeover") {
         ownershipTakenOver = true;
@@ -2278,15 +2293,16 @@ async function registerProject(
   throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
 }
 
-async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number }> {
+async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
   const catalog = await getItem<{ entityType?: string; name?: string; latestRevision?: number }>(dependencies, projectCatalogKey(projectName));
   if (catalog !== undefined && (catalog.entityType !== "PROJECT_CATALOG" || catalog.name !== projectName
     || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
     throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is unavailable or invalid");
   }
   let newestRevision = 0;
+  let newest: RegisteredProjectRecord | undefined;
   try {
-    const newest = await requireLatestProject(dependencies, projectName);
+    newest = await requireLatestProject(dependencies, projectName);
     newestRevision = newest.definition.revision;
     if (newest.definition.name !== projectName || !Number.isSafeInteger(newestRevision) || newestRevision < 1) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
@@ -2297,21 +2313,31 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
   if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) {
     throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
   }
-  return { catalog, newestRevision };
+  return { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
 }
 
 async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string, options: { createCatalogRow?: boolean } = {}): Promise<void> {
-  // This is an index-only repair after the immutable revision has already been
-  // authenticated. It never rewrites project, membership, approval, or setup rows.
+  // Legacy index repair and the known-company core copy commit together. No legacy revision is rewritten.
+  const coreBudget = boundedCompanyReads(dependencies.documentClient);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const snapshot = await readProjectCatalogSnapshot(dependencies, projectName);
     const targetRevision = snapshot.newestRevision;
     if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
     if (snapshot.catalog === undefined && options.createCatalogRow === false) throw agentXError("PROJECT_REVISION_MISMATCH", "catalog-row-absent");
-    if (snapshot.catalog?.latestRevision === targetRevision) return;
+    let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
+    try {
+      corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest!);
+      corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
+    }
+    catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+    if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+    const repairLegacy = snapshot.catalog?.latestRevision !== targetRevision;
+    if (!repairLegacy && corePlan.status !== "ready") return;
     const key = projectCatalogKey(projectName);
     try {
-      await dependencies.documentClient.send(new UpdateCommand({
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        ...corePlan.writes,
+        ...(repairLegacy ? [{ Update: {
         TableName: dependencies.tableName,
         Key: key,
         UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
@@ -2323,7 +2349,8 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
         ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":revision": targetRevision,
           ":now": new Date().toISOString(),
           ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
-      }));
+        } }] : []),
+      ] }));
       return;
     } catch (error) {
       if (!isConditional(error)) throw error;
