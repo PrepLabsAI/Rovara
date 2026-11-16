@@ -1,3 +1,4 @@
+import { publishAgentModelChoice } from "./stored-agent-model-choice.js";
 // Agents can pick the models Rovara's AI serves (DEC 243c, DEC 236j, DEC 240). The core engine's agents call AI through Cloud's model gateway, which names every model it serves a company by the exact
 // id it calls (a Claude engine name, or a Bedrock id for every other model). This is the per-company model choice on that list:
 //
@@ -129,11 +130,23 @@ export function createAgentModelChoice(inputs: AgentModelChoiceInputs): AgentMod
     capApplies: () => false, now: inputs.now, words: HOSTED_MODEL_WORDS,
   });
   const base = build(inputs.audit);
-  return { stepModels: { choose: (input) => base.choose(input) }, service: (audit) => (audit === undefined ? base : build(audit)), offered: () => view.list() };
+  let publishing: Promise<void> | undefined;
+  const publish = (): Promise<void> => {
+    publishing ??= (async () => publishAgentModelChoice({ store: inputs.store, companyId: inputs.companyId, offered: { version: 1, models: await view.list() }, defaultModel: await inputs.defaultModel(), now: inputs.now }))().finally(() => { publishing = undefined; });
+    return publishing;
+  };
+  const service = (audit?: AuditSink): ModelSelectionService => {
+    const underlying = audit === undefined ? base : build(audit);
+    return { ...underlying,
+      async state() { const state = await underlying.state(); await publish().catch(() => undefined); return state; },
+      async apply(...args) { const result = await underlying.apply(...args); if (result.ok) await publish(); return result; },
+    };
+  };
+  return { stepModels: { async choose(input) { const result = await base.choose(input); if (result.ok) { try { await publish(); } catch { return { ok: false, code: "MODEL_STALE", words: HOSTED_MODEL_WORDS.refusals.MODEL_STALE }; } } return result; } }, service, offered: () => view.list() };
 }
 
 /**
- * The one company's step rule over the registry the root built (the broker's and the dispatcher's use this alone, so they cannot differ): undefined without a reader, so a deployment without one
+ * The broker's company step rule over its registry: undefined without a reader, so a deployment without one
  * keeps its declared route and nothing here is built. The install's default model is the route the deployment declared (ROVARA_CORE_AGENT_MODEL), read when a step is chosen.
  */
 export function agentModelChoiceFromRegistry(input: {

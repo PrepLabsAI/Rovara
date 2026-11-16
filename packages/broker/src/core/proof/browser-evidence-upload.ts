@@ -22,12 +22,12 @@ const bodySchema = z.discriminatedUnion("stage", [
   z.object({ stage: z.literal("finalize"), uploadId: z.string().uuid(), sha256: SHA256 }).strict(),
 ]);
 
-const spec = (operation: Pick<UploadOperation, "workspaceId" | "id">): UploadSpec => ({
-  label: "browser evidence", entityType: ENTITY, rowKey: uploadRowKey(operation.workspaceId, ENTITY, operation.id),
+const spec = (operation: Pick<UploadOperation, "pk" | "workspaceId" | "id">): UploadSpec => ({
+  label: "browser evidence", entityType: ENTITY, rowKey: uploadRowKey(operation, ENTITY, operation.id),
   stagingKey: (uploadId, index) => `browser-evidence-staging/${operation.workspaceId}/${operation.id}/${uploadId}/${index}.chunk`,
 });
 /** Where an assembled upload is kept: under its operation, named by its digest. */
-const objectPrefix = (operation: Pick<UploadOperation, "workspaceId" | "id">): string => `browser-evidence/${operation.workspaceId}/${operation.id}/`;
+const objectPrefix = (operation: Pick<UploadOperation, "pk" | "workspaceId" | "id">): string => `browser-evidence/${operation.workspaceId}/${operation.id}/`;
 /** Kept as long as the other short-lived evidence objects: it is only a hand-off to the keeper and expires on its own if nobody keeps it. */
 const KEPT_RETENTION = "evidence-short";
 
@@ -85,7 +85,7 @@ export async function handleBrowserEvidenceUpload(stores: UploadStores, operatio
  * The run an operation uploaded, for the keeper: undefined when there is none, it is not complete, it belongs to another operation or workspace, its object is not under this operation's own prefix, the bytes are not
  * the digest the row names, or it does not decode. Never throws. Read again with the same checks as the upload, so a row or object made by anything else is never believed.
  */
-export async function readBrowserEvidenceUpload(stores: Pick<UploadStores, "store" | "objects">, operation: Pick<UploadOperation, "workspaceId" | "id">): Promise<BrowserEvidenceCaptured | undefined> {
+export async function readBrowserEvidenceUpload(stores: Pick<UploadStores, "store" | "objects">, operation: Pick<UploadOperation, "pk" | "workspaceId" | "id">): Promise<BrowserEvidenceCaptured | undefined> {
   try {
     const row = await stores.store.get(spec(operation).rowKey);
     if (row === undefined || row["entityType"] !== ENTITY || row["status"] !== "COMPLETE" || row["operationId"] !== operation.id || row["workspaceId"] !== operation.workspaceId) return undefined;
@@ -99,7 +99,7 @@ export async function readBrowserEvidenceUpload(stores: Pick<UploadStores, "stor
 }
 
 /** Removes what an upload left once the keeper has what it needs (best effort: the object also expires on its own). */
-export async function dropBrowserEvidenceUpload(stores: Pick<UploadStores, "store" | "objects">, operation: Pick<UploadOperation, "workspaceId" | "id">): Promise<void> {
+export async function dropBrowserEvidenceUpload(stores: Pick<UploadStores, "store" | "objects">, operation: Pick<UploadOperation, "pk" | "workspaceId" | "id">): Promise<void> {
   try {
     const row = await stores.store.get(spec(operation).rowKey);
     if (typeof row?.["objectKey"] === "string" && row["objectKey"].startsWith(objectPrefix(operation))) await stores.objects.delete(row["objectKey"]);

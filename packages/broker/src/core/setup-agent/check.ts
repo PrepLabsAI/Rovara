@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // A project's setup check: the owner asks for the project's setup commands and then its test commands to run on a fresh workspace at a revision of the project. No model runs and no budget is asked.
 //
 // Starting a check writes, in ONE transaction, the workspace and its preparation (what a task start writes for its own) and the check's own record. The preparation runs the revision's setup commands and then its
@@ -15,7 +16,8 @@ import {
 import { taskOwnerKey } from "../../developer/task-records.js";
 import { buildOperation } from "../task-flow/accept.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
-import { workspaceKey } from "../task-flow/keys.js";
+import { workspaceKey, OPERATION_SK_PREFIX } from "../task-flow/keys.js";
+import { legacyWorkspaceKey } from "../task-flow/legacy-keys.js";
 import { fromDocument, toDocument, type WorkspaceRecord } from "../task-flow/records.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { releaseAdmission } from "../task-flow/admission.js";
@@ -68,8 +70,8 @@ export function failedStepOf(error: string, definition: Pick<CheckedDefinition, 
 }
 
 /** The error the check's preparation recorded, or undefined when it recorded none. */
-async function recordedFailure(deps: Pick<TaskFlowDeps, "store">, workspaceId: string): Promise<string | undefined> {
-  const page = await deps.store.query({ pk: workspaceKey(workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+async function recordedFailure(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string): Promise<string | undefined> {
+  const page = await deps.store.query({ pk: (await workspaceKeys(deps, workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: OPERATION_SK_PREFIX } });
   const prepares = page.items.filter((item) => item["kind"] === "prepare" && typeof item["error"] === "string");
   const created = (item: { [attribute: string]: unknown }): string => (typeof item["createdAt"] === "string" ? item["createdAt"] : "");
   prepares.sort((a, b) => created(a).localeCompare(created(b)));
@@ -78,11 +80,11 @@ async function recordedFailure(deps: Pick<TaskFlowDeps, "store">, workspaceId: s
 }
 
 /** The status of one check (the project's own, or a proposal's candidate check): derived from the check's workspace on every read. */
-export async function setupStateOfCheck(deps: Pick<TaskFlowDeps, "store" | "now">, check: SetupCheckMark | undefined, definition: CheckedDefinition): Promise<SetupState> {
+export async function setupStateOfCheck(deps: Pick<TaskFlowDeps, "store" | "now" | "companyId">, check: SetupCheckMark | undefined, definition: CheckedDefinition): Promise<SetupState> {
   if (check === undefined) return { status: "unchecked" };
   const checked = { checkedRevision: check.revision, checkedAt: check.startedAt };
   if (check.revision < definition.revision) return { status: "outdated", ...checked };
-  const workspace = await deps.store.get(workspaceKey(check.workspaceId));
+  const workspace = await deps.store.get((await workspaceKeys(deps, check.workspaceId)).workspaceKey);
   if (workspace === undefined || typeof workspace["status"] !== "string") return { status: "unchecked" };
   // A closed workspace reads as it did when it closed; one closed with no record of that (never PREPARING, or failed) reads ready.
   const status = workspace["status"] === "CLOSED" && typeof workspace["closedFrom"] === "string" ? workspace["closedFrom"] : workspace["status"];
@@ -110,7 +112,7 @@ export async function setupStateOf(deps: Pick<TaskFlowDeps, "store" | "now" | "c
 export const setupFailedMessage = (step: string): string => `This project's setup failed its last check (${step}). Fix the setup and check it again, or ask Rovara to set it up, before starting work.`;
 
 /** The record that ties a check's workspace to what started it: the flow reads it when the preparation ends, to close the workspace and the machine. */
-export const setupCheckRecordKey = (workspaceId: string): DocumentKey => ({ pk: workspaceKey(workspaceId).pk, sk: "SETUP_CHECK" });
+export const setupCheckRecordKey = (companyId: string, workspaceId: string): DocumentKey => ({ pk: workspaceKey(companyId, workspaceId).pk, sk: "SETUP_CHECK" });
 
 export interface StartedCheck { workspaceId: string; mark: SetupCheckMark; /** What the start must write in its own transaction. */ items: TransactItem[]; operationId: string }
 
@@ -124,7 +126,7 @@ export function buildSetupCheck(deps: TaskFlowDeps, input: { project: string; re
   const prepareOperationId = newId(deps);
   const ownerKey = taskOwnerKey(input.startedBy, workspaceId);
   const workspace: WorkspaceRecord = {
-    ...workspaceKey(workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey, projectName: input.project, projectRevision: input.revision,
+    ...workspaceKey(deps.companyId, workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey, projectName: input.project, projectRevision: input.revision,
     status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
     ...workspaceProjectIndexAttributes({ orgId: deps.companyId, projectName: input.project, createdAt: now }),
     createdAt: now, updatedAt: now,
@@ -136,8 +138,9 @@ export function buildSetupCheck(deps: TaskFlowDeps, input: { project: string; re
   const mark: SetupCheckMark = { workspaceId, revision: input.revision, startedAt: now, startedBy: input.startedBy };
   const items: TransactItem[] = [
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
+    { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace.companyId }, condition: when.absent() },
     ...prepare.items,
-    { kind: "put", item: { ...setupCheckRecordKey(workspaceId), entityType: "SETUP_CHECK", companyId: deps.companyId, project: input.project, workspaceId, revision: input.revision, candidate: input.candidate, createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + 31 * 86_400 }, condition: when.absent() },
+    { kind: "put", item: { ...setupCheckRecordKey(deps.companyId, workspaceId), entityType: "SETUP_CHECK", companyId: deps.companyId, project: input.project, workspaceId, revision: input.revision, candidate: input.candidate, createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + 31 * 86_400 }, condition: when.absent() },
   ];
   return { workspaceId, mark, items, operationId: prepare.operation.id };
 }
@@ -187,13 +190,14 @@ export async function startProjectSetupCheck(deps: TaskFlowDeps, input: { projec
  */
 export async function closeSetupCheck(deps: TaskFlowDeps, workspaceId: string): Promise<boolean> {
   try {
-    const record = await deps.store.get(setupCheckRecordKey(workspaceId));
+    const location = await workspaceKeys(deps, workspaceId);
+    const record = await deps.store.get(location.row("SETUP_CHECK"));
     if (record === undefined || record["companyId"] !== deps.companyId) return false;
-    const workspace = fromDocument<WorkspaceRecord>(await deps.store.get(workspaceKey(workspaceId)));
+    const workspace = fromDocument<WorkspaceRecord>(await deps.store.get(location.workspaceKey));
     if (workspace === undefined || workspace.status === "CLOSED" || workspace.status === "PREPARING") return false;
     const now = iso(deps);
     const closed = await deps.store.update({
-      key: workspaceKey(workspaceId),
+      key: location.workspaceKey,
       ops: [change.set("closedFrom", workspace.status), change.set("status", "CLOSED"), change.set("activeOperationId", null), change.set("closedAt", now), change.set("fence", workspace.fence + 1), change.set("updatedAt", now)],
       condition: when.and(when.eq("fence", workspace.fence), when.eq("status", workspace.status)),
     });

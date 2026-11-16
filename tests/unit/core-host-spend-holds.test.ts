@@ -11,7 +11,7 @@ import {
   COMPANY_DAY_CAP_REACHED, RESERVATION_CLOSED, SPEND_UNKNOWN, UNKNOWN_CALL_HOLD_MICROS, createHostedAdmission, createHostedHoldSweep, createHostedLedger, type HostedAdmissionSettings,
 } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { runAdmissionConformance } from "../support/ports/policy-conformance.js";
-import { operationKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { workspaceKey, operationKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY_A_ID as COMPANY_A, COMPANY_B_ID as COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
@@ -375,8 +375,9 @@ describe("a task's hold is kept while a run of it may have spent unbooked (revie
   const WORKSPACE = "6a1c1d3e-0b6f-4a35-9a3c-1f2e3d4c5b6a";
   async function withRun(w: ReturnType<typeof setup>, status: string, workflowMode = "IMPLEMENT") {
     const opId = randomUUID();
+    await w.store.put({ item: { ...workspaceKey(ORG, WORKSPACE), id: WORKSPACE, companyId: ORG } });
     await w.store.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK", taskId: TASK, companyId: ORG, workspaceId: WORKSPACE } });
-    await w.store.put({ item: { ...operationKey(WORKSPACE, opId), entityType: "OPERATION", id: opId, workspaceId: WORKSPACE, companyId: ORG, kind: "task", workflowMode, status, fence: 1, eventSequence: 0 } });
+    await w.store.put({ item: { ...operationKey(ORG, WORKSPACE, opId), entityType: "OPERATION", id: opId, workspaceId: WORKSPACE, companyId: ORG, kind: "task", workflowMode, status, fence: 1, eventSequence: 0 } });
     return opId;
   }
 
@@ -412,7 +413,7 @@ describe("a task's hold is kept while a run of it may have spent unbooked (revie
     const first = await startTask(unreadable, TASK);
     await withRun(unreadable, "SUCCEEDED");
     const query = unreadable.store.query.bind(unreadable.store);
-    unreadable.store.query = async (request) => { if (request.pk.startsWith("WORKSPACE#")) throw new Error("store down"); return await query(request); };
+    unreadable.store.query = async (request) => { if (request.pk === workspaceKey(ORG, WORKSPACE).pk) throw new Error("store down"); return await query(request); };
     await unreadable.admission.release(reservationOf(first.staged)!);
     expect(await unreadable.day()).toMatchObject({ reservedMicros: 0, settledMicros: 5_000_000 });
     const other = setup();

@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The three uploads a coding run makes besides its result, on the document store and object storage: the committed source of the candidate (`candidate-export`), the build source manifest
 // that describes it (`candidate-build-source`), and the unchanged code for the baseline round (`baseline-source`). They feed the browser and API checks. Each is judged here against
 // the committed tree and kept under its content address; nothing the worker says about itself is taken as true.
@@ -12,7 +13,7 @@ import {
 } from "@agentx/contracts";
 import { BaselineSourceBodySchema, BaselineSourceWireSchema, StoredBaselineSourceSchema, assessBaselineSource, type StoredBaselineSource } from "../../aws/baseline-source.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, type StoredCandidateBuildSource } from "../../aws/candidate-build-source.js";
-import { operationKey } from "../task-flow/keys.js";
+
 import {
   MAX_CANDIDATE_EXPORT_BYTES, SourceTooLargeError, UPLOAD_CHUNK_BYTES, acceptChunk, assembleUpload, dropChunks, isLiveOperation, openUpload, parseUploadBody, putOnce, requireCurrentUpload, sha256Of, uploadRowKey, whenOperationLive,
   type UploadOperation, type UploadSpec, type UploadStores,
@@ -52,7 +53,7 @@ const exportSpec = (operation: UploadOperation): UploadSpec => ({
   label: "candidate source", entityType: "WORKFLOW_CANDIDATE_EXPORT", rowKey: exportRowKey(operation),
   stagingKey: (uploadId, index) => `workflow-candidate-staging/${operation.workspaceId}/${operation.id}/${uploadId}/${index}.chunk`,
 });
-const exportRowKey = (operation: Pick<UploadOperation, "workspaceId" | "id">): DocumentKey => uploadRowKey(operation.workspaceId, "CANDIDATE_EXPORT", operation.id);
+const exportRowKey = (operation: Pick<UploadOperation, "pk" | "workspaceId" | "id">): DocumentKey => uploadRowKey(operation, "CANDIDATE_EXPORT", operation.id);
 
 /** A stored source reference, as the operation row and the export row carry it. */
 export interface CandidateSourceRef { key: string; sha256: string; byteLength: number; candidateDigest: string }
@@ -140,7 +141,7 @@ async function finalizeCandidateExport(stores: UploadStores, operation: UploadOp
     const refused = await stores.store.transact([
       { kind: "update", key: spec.rowKey, ops: [change.set("status", "REFUSED"), change.set("refusedReason", SOURCE_TOO_LARGE_CODE)],
         condition: when.and(when.eq("status", "OPEN"), when.eq("uploadId", body.uploadId), when.eq("sha256", body.sha256), when.eq("operationId", operation.id), when.eq("fence", operation.fence)) },
-      { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("candidateSourceRefused", SOURCE_TOO_LARGE_CODE)],
+      { kind: "update", key: (await workspaceKeys({ store: stores.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id), ops: [change.set("candidateSourceRefused", SOURCE_TOO_LARGE_CODE)],
         condition: when.and(whenOperationLive(), when.eq("fence", operation.fence), when.eq("workflowMode", "IMPLEMENT"), when.notExists("candidateSourceRef"), when.notExists("candidateSourceRefused")) },
     ]);
     if (!refused.applied) throw agentXError("STALE_FENCE", "candidate source export can no longer be recorded for this operation");
@@ -150,7 +151,7 @@ async function finalizeCandidateExport(stores: UploadStores, operation: UploadOp
   const closed = await stores.store.transact([
     { kind: "update", key: spec.rowKey, ops: [change.set("status", "COMPLETE"), change.set("sourceRef", sourceRef as unknown as JsonValue)],
       condition: when.and(when.eq("status", "OPEN"), when.eq("uploadId", body.uploadId), when.eq("sha256", body.sha256), when.eq("operationId", operation.id), when.eq("fence", operation.fence)) },
-    { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("candidateSourceRef", sourceRef as unknown as JsonValue)],
+    { kind: "update", key: (await workspaceKeys({ store: stores.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id), ops: [change.set("candidateSourceRef", sourceRef as unknown as JsonValue)],
       condition: when.and(whenOperationLive(), when.eq("fence", operation.fence), when.eq("workflowMode", "IMPLEMENT"), when.notExists("candidateSourceRef")) },
   ]);
   if (!closed.applied) throw agentXError("STALE_FENCE", "candidate source export can no longer be recorded for this operation");
@@ -161,7 +162,7 @@ async function finalizeCandidateExport(stores: UploadStores, operation: UploadOp
 // ---- the build source manifest of the candidate
 
 const buildSourceSpec = (operation: UploadOperation): UploadSpec => ({
-  label: "candidate build source", entityType: "WORKFLOW_CANDIDATE_BUILD_SOURCE", rowKey: uploadRowKey(operation.workspaceId, "CANDIDATE_BUILD_SOURCE", operation.id),
+  label: "candidate build source", entityType: "WORKFLOW_CANDIDATE_BUILD_SOURCE", rowKey: uploadRowKey(operation, "CANDIDATE_BUILD_SOURCE", operation.id),
   stagingKey: (uploadId, index) => `workflow-candidate-build-source-staging/${operation.workspaceId}/${operation.id}/${uploadId}/${index}.chunk`,
 });
 
@@ -176,7 +177,7 @@ export async function handleCandidateBuildSource(stores: UploadStores, operation
   if (sourceRef === undefined) throw agentXError("STALE_FENCE", "the candidate build source follows a finalized candidate source export");
   const spec = buildSourceSpec(operation);
   const exportKey = exportRowKey(operation);
-  const opKey = operationKey(operation.workspaceId, operation.id);
+  const opKey = (await workspaceKeys({ store: stores.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id);
   /** Records `stored` once. `closing` closes the upload row in the same transaction: COMPLETE for the upload that carried it, ABORTED for one the worker abandoned. A lost race is answered from what won. */
   const record = async (stored: StoredCandidateBuildSource, closing?: { uploadId: string; sha256: string; status: "COMPLETE" | "ABORTED" }): Promise<Record<string, JsonValue>> => {
     const items: TransactItem[] = [
@@ -244,7 +245,7 @@ export async function handleCandidateBuildSource(stores: UploadStores, operation
 // ---- the unchanged code, for the baseline round
 
 const baselineSpec = (operation: UploadOperation): UploadSpec => ({
-  label: "baseline source", entityType: "WORKFLOW_BASELINE_SOURCE", rowKey: uploadRowKey(operation.workspaceId, "BASELINE_SOURCE", operation.id),
+  label: "baseline source", entityType: "WORKFLOW_BASELINE_SOURCE", rowKey: uploadRowKey(operation, "BASELINE_SOURCE", operation.id),
   stagingKey: (uploadId, index) => `workflow-baseline-staging/${operation.workspaceId}/${operation.id}/${uploadId}/${index}.chunk`,
 });
 
@@ -260,7 +261,7 @@ export async function handleBaselineSource(stores: UploadStores, operation: Uplo
   }
   const body = parseUploadBody(BaselineSourceBodySchema, rawBody, "baseline source upload");
   const spec = baselineSpec(operation);
-  const opKey = operationKey(operation.workspaceId, operation.id);
+  const opKey = (await workspaceKeys({ store: stores.store, companyId: operation.companyId }, operation.workspaceId)).operationKey(operation.id);
   const recorded = StoredBaselineSourceSchema.safeParse(operation.baselineSource);
   /** Records `stored` once; the record already there is answered from, and differs only as an error. `closing` closes the upload row in the same transaction. */
   const record = async (stored: StoredBaselineSource, closing?: { uploadId: string; sha256: string }): Promise<Record<string, JsonValue>> => {

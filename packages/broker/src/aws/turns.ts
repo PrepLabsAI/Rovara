@@ -1,4 +1,5 @@
-import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
+import { QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   ADMIN_LIST_MAX, ADMIN_TURN_FILTER_PAGES, AgentXNameSchema, AiToolTurnRecordSchema, TURN_EXPORT_PAGE, TURN_EXPORT_PARTITION, TurnRecordSchema,
   agentXError, parseSlackThreadSubject, type ExportedTurnRecord,
@@ -71,8 +72,8 @@ export function dynamoTurnRecordSource(client: Client, tableName: string): TurnR
 
 export function workspaceProjectReader(client: Client, stateTableName: string): (workspaceId: string) => Promise<string | undefined> {
   return async (workspaceId) => {
-    const response = await client.send(new GetCommand({ TableName: stateTableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }));
-    const projectName = (response.Item as { projectName?: unknown } | undefined)?.projectName;
+    const workspace = await readWorkspaceMeta(client, stateTableName, workspaceId);
+    const projectName = workspace?.item["projectName"];
     return typeof projectName === "string" ? projectName : undefined;
   };
 }

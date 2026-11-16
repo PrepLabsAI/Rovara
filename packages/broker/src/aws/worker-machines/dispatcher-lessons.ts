@@ -2,8 +2,10 @@
 // with hostedDispatcherFlow. The workspace record, never the job payload, vouches for scope.
 import { AgentXNameSchema, LEARNED_CONTEXT_FEATURE, OrgIdSchema, agentXError, codeRepositoriesOf, lessonSetKey, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { z } from "zod";
+import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
-import { taskKey, taskPointerKey } from "../../core/task-flow/keys.js";
+import { taskKey } from "../../core/task-flow/keys.js";
+import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
 import { switchCovers, type CoreSwitch } from "../../core-host/flags.js";
 import { DocumentLessonStore } from "../../lessons/document-store.js";
@@ -68,10 +70,15 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       const request = Request.safeParse(input);
       if (!request.success || !OrgIdSchema.safeParse(options.companyId).success) refuse();
       if (request.data.workflowMode === undefined || !["UNDERSTAND", "PLAN", "IMPLEMENT", "REVIEW"].includes(request.data.workflowMode) || !request.data.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
-      const client = { send: (command: never) => read(() => options.documentClient.send(command)) };
+      const memo = new Map<string, Promise<StoredDocument | undefined>>();
+      const client = { send: async (command: GetCommand) => {
+        const answer = await read(() => options.documentClient.send(command));
+        // The company reader already validated this workspace; reuse its read below.
+        memo.set(JSON.stringify(command.input.Key), Promise.resolve(answer.Item as StoredDocument | undefined));
+        return answer;
+      } };
       const company = await workspaceCompanyReader(client, options.tableName)(request.data.workspaceId);
       if (company === undefined || company !== options.companyId) refuse();
-      const memo = new Map<string, Promise<StoredDocument | undefined>>();
       const store: DocumentStore = {
         indexes: options.store.indexes,
         async get(key) {
@@ -84,7 +91,7 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
         async getMany(keys) { return await Promise.all(keys.map((key) => store.get(key))); },
         query: () => refuse(), queryIndex: () => refuse(), put: () => refuse(), update: () => refuse(), delete: () => refuse(), transact: () => refuse(),
       };
-      const pointer = await store.get(taskPointerKey(request.data.workspaceId));
+      const pointer = await store.get((await workspaceKeys({ store, companyId: company }, request.data.workspaceId)).taskPointerKey());
       const taskId = z.uuid().safeParse(pointer?.["taskId"]);
       if (!taskId.success) refuse();
       const parsed = Task.safeParse(await store.get(taskKey(taskId.data)));

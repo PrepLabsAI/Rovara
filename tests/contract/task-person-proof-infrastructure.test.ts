@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
+import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -63,6 +64,7 @@ function appControlPlane(env: string): TemplateJson {
 
 function parentRemainderDigest(template: TemplateJson): string {
   const remainder = structuredClone(template);
+  withoutCoreModelAccessRoute(remainder);
   // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
   // the legacy template must carry none of it, so legacy stays byte-identical.
   if (remainder.Parameters?.CoreEngine !== undefined) {

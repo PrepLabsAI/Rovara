@@ -70,7 +70,7 @@ export async function parallelPartsDecision(
   if (!isParallelPartsWorkflow(task.workflow)) return { parallel: undefined };
   const wanted = graph === undefined ? 1 : Math.min(PARALLEL_PARTS_MAX, widestStep(graph));
   try {
-    const limits = limitsOf(deps);
+    const limits = await limitsOf(deps);
     const personUsed = await countOf(deps.store, task.charge.member);
     const orgUsed = await countOf(deps.store, task.charge.organization);
     const freeForPerson = limits.member - personUsed;

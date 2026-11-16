@@ -526,7 +526,7 @@ describe("the runtime: deny is the default; the config turns it off for one proj
     const store = run.runtime.registry.require("storage");
     await store.put({ item: { pk: "WORKSPACE#ws-ev", sk: "META", entityType: "WORKSPACE", id: "ws-ev", projectName: "other-app", machine: { machineId: started.machineId, machineKey: "ws-ev" } } });
     const digest = "9".repeat(64);
-    const task = { ownerKey: "owner-1", workspaceId: "ws-ev", taskId: "task-1" };
+    const task = { companyId: IMPLICIT_COMPANY_ID, ownerKey: "owner-1", workspaceId: "ws-ev", taskId: "task-1" };
     await run.runtime.app.evidence.keepAfterChecks({ task: task as never, operation: { id: "op-1" } as never, workflow: { checkPolicy: { required: [], optional: [], selectedOptionalIds: [] } } as never, candidateDigest: digest, checks: [{ id: "readiness:0", label: "pytest -q", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 7, exitCode: 0 }] });
     expect((await run.runtime.app.evidence.packOf(task, digest))?.notTested.map((item) => item.text)).toContain("model hosts allowed in the test sandbox by project setting");
   });
@@ -545,7 +545,7 @@ describe("the runtime: deny is the default; the config turns it off for one proj
 
 describe("the evidence", () => {
   const DIGEST = "c".repeat(64);
-  const TASK = { ownerKey: "owner-1", workspaceId: "ws-1", taskId: "task-1" };
+  const TASK = { companyId: IMPLICIT_COMPANY_ID, ownerKey: "owner-1", workspaceId: "ws-1", taskId: "task-1" };
   const check = (): CheckEntry => ({ id: "readiness:0", label: "pytest -q", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 700, exitCode: 0 });
 
   it("the fixed sentence is the one 7a asked for", () => {
@@ -577,7 +577,7 @@ describe("the evidence", () => {
         sandboxModelHostsAllowed: () => options.config,
         sandboxModelHostsOf: async () => { if (options.machine === "throws") throw new Error("docker is down"); return options.machine; },
       });
-      const task = { ownerKey: "owner-1", workspaceId: id, taskId: "task-1" };
+      const task = { companyId: IMPLICIT_COMPANY_ID, ownerKey: "owner-1", workspaceId: id, taskId: "task-1" };
       const result = await evidence.keepAfterChecks({ task: task as never, operation: { id: "op-1" } as never, workflow: { checkPolicy: { required: [], optional: [], selectedOptionalIds: [] } } as never, candidateDigest: digest, checks: [check()] });
       expect(result).toMatchObject({ kept: true });
       return (await evidence.packOf(task, digest))?.notTested.map((item) => item.text) ?? [];

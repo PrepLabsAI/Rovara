@@ -22,15 +22,21 @@
 // What the registry still lacks (model keys, the broker's worker machines) and the job services no lane has built for AWS yet (merge tracking, the session sweep, notices)
 // refuse the switch by name at the first use: the registry is never half-wired, and a refused build is retried on the next use. The admission's hold sweep is the root's own (lane L8),
 // and the company's callback layer books its workers' usage reports into the cost ledger (core-host/usage-booking.ts).
+import type { ProjectSettingsHook } from "./project-settings.js";
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, OrgRoleSchema, HostedPolicyHookSettingsSchema, isContextSourceStage,
-  type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
+  when, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
-import { policyCiReporting } from "./core-job-services.js";
+import { resolveTaskPeopleAccess, type TaskPeopleDependencies, type CheckTaskPerson } from "../developer/task-people.js";
+import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import { taskOwnerKey } from "../developer/task-records.js";
+import { isWholeLimit, MAX_PER_PERSON, MAX_PER_ORGANIZATION, readWorkspaceLimits } from "../developer/limits.js";
+import { costUsdOf } from "../core/cost/ledger.js";
+import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.js";
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
@@ -46,7 +52,7 @@ import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type Core
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess } from "../core/task-flow/deps.js";
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
-import { taskPointerKey } from "../core/task-flow/keys.js";
+import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -65,7 +71,7 @@ import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
 import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
-import { offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
+import { CORE_AGENT_MODEL_CHOICE_VARIABLE, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -88,6 +94,7 @@ export interface BrokerCoreModuleContext {
 
 export interface BrokerCoreRootInputs {
   env: NodeJS.ProcessEnv;
+  checkTaskPerson?: CheckTaskPerson;
   /** The State table and the sign-in table, as the broker's document client reads them (membership, project grants, the person's name). */
   documentClient: DynamoSender;
   stateTableName: string;
@@ -153,6 +160,7 @@ export interface BrokerCoreRoot {
    * people port: every lessons route then answers "Lessons are off." and reads nothing.
    */
   readonly lessons: LessonsApi | undefined;
+  readonly policyHook?: ProjectSettingsHook;
   /**
    * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` while the
    * switch is off or for any other path. The broker's HTTP API reaches it through `coreApp` (lane L12).
@@ -177,7 +185,7 @@ const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable."
 /**
  * The hosted install's policy hook settings (ROVARA_POLICY_HOOK, JSON `{ address, jwks, thumbprints }`).
  * Absent or empty gives undefined. Unreadable settings throw in fixed words, so an install meant to ask always has a hook.
- * Developer-API composition (#717) can use this reader and the hosted client when that wiring lands.
+ * Developer-API composition (#717) uses the same resolved setting and hosted client.
  */
 export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): HostedPolicyHookSettings | undefined {
   const raw = env[CORE_POLICY_HOOK_VARIABLE]?.trim() ?? "";
@@ -243,14 +251,29 @@ export const NO_PROJECT_GRANT = "You do not have access to this project.";
 
 /**
  * Who may start work and act on a core task on a deployed install. Every answer re-reads the person's LIVE membership (never the principal's word): the person must be a member of the
- * principal's company now. A start needs the project grant the broker already keeps (no weakening of today's rule). A task may be read and driven only by its own person, as on the
- * broker today (a company role gives no reach into another person's task); anyone else gets "not found" from the flow. A step the system starts on its own needs its person to be a
+ * principal's company now. A start needs the project grant the broker already keeps. Without PEOPLE, the task remains its own person's; PEOPLE owners need the existing fresh proof
+ * and project grant, with a revision fence on acts. A company role grants no reach into another person's task. A step the system starts on its own needs its person to be a
  * member still, with the grant.
  */
-export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId }): TaskAccess {
+export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies }): TaskAccess {
   const liveMember = async (personId: string) => {
     const membership = await inputs.membershipOf(personId);
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
+  };
+  const owner = async (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => {
+    if (principal.companyId !== inputs.companyId || await liveMember(principal.personId) === undefined) return undefined;
+    if (task.taskId === undefined || inputs.storage === undefined) return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
+    const store = await inputs.storage();
+    const stored = await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
+    if (stored?.["companyId"] !== inputs.companyId || stored["developerId"] !== task.developerId || stored["project"] !== task.project) return undefined;
+    // Reuse the broker's existing co-owner proof, including fresh identity/channel eligibility and PEOPLE reconciliation. Missing proof refuses; never trust a role alone.
+    const people = inputs.people === undefined ? undefined : await resolveTaskPeopleAccess(inputs.people, stored as unknown as DeveloperTaskRecord, principal.personId);
+    if (people === undefined) {
+      if (await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }) !== undefined) return undefined;
+      return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
+    }
+    if (people.orphaned || people.role !== "owner" || !await inputs.projectGrant(principal.personId, task.project)) return undefined;
+    return { revision: people.peopleRevision, ownerIds: people.ownerActorIds };
   };
   return {
     async checkStart(principal, project) {
@@ -258,9 +281,17 @@ export function hostedTaskAccess(inputs: { membershipOf: (personId: string) => P
       return (await inputs.projectGrant(principal.personId, project)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
     },
     async canAct(principal, task) {
-      if (principal.companyId !== inputs.companyId) return false;
-      if (principal.personId !== task.developerId) return false;
-      return (await liveMember(principal.personId)) !== undefined;
+      return await owner(principal, task) !== undefined;
+    },
+    async ownerActing(principal, task) {
+      const allowed = await owner(principal, task);
+      if (allowed === undefined) return undefined;
+      const actorId = taskOwnerKey(principal.personId, task.taskId);
+      return {
+        actorId: allowed.revision === undefined ? task.ownerKey : actorId,
+        ...(allowed.revision === undefined ? {} : { authority: { actorId, ownerIds: allowed.ownerIds } }),
+        items: [{ kind: "check", key: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }, condition: allowed.revision === undefined ? when.absent() : when.eq("revision", allowed.revision) }],
+      };
     },
     async checkStep(task) {
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
@@ -300,9 +331,10 @@ export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, comp
     // The per-run stop (core-money-stop): after a batch's usage is booked, the run's task and the company's day are read against the caps; a run past one is answered with the stop's code,
     // and the callback layer asks its worker to stop (core/task-flow/money-stop.ts `requestSpendStop`). Without the caps (`settings`) nothing is read.
     bookUsage: async (operation, events) => {
+      if (operation.companyId !== companyId) throw new Error("operation belongs to another company");
       const booked = await booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events);
       if (settings === undefined || !events.some((event) => event.type === USAGE_EVENT_TYPE)) return booked;
-      const taskId = (await store.get(taskPointerKey(operation.workspaceId)))?.["taskId"];
+      const taskId = (await store.get((await workspaceKeys({ store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
       const state = typeof taskId === "string" && taskId !== "" ? await runSpendState({ store, ledger, settings, now }, companyId, taskId) : "spend_unknown";
       return state === "within" ? booked : { ...booked, spendStop: state };
     },
@@ -315,11 +347,13 @@ export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, comp
 export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRoot {
   const { env, log } = inputs;
   let settingsBlocked = false;
+  let hookSettings: HostedPolicyHookSettings | undefined;
+  let hookProblem = false;
   if (parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value.mode !== "off") {
     try {
       const admission = readHostedAdmissionSettings(env);
       if ("problem" in admission || readCoreLessonsSwitch(env).problem !== undefined) settingsBlocked = true;
-      policyHookSettingsFromEnvironment(env);
+      try { hookSettings = policyHookSettingsFromEnvironment(env); } catch { hookProblem = true; throw new Error("the policy hook settings are not readable"); }
     } catch {
       settingsBlocked = true;
     }
@@ -338,16 +372,19 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     return row === undefined || row["revoked"] === true || typeof row["displayName"] !== "string" ? undefined : row["displayName"];
   };
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
+  const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
+  const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true;
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
   // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
-  const modelChoices = createCompanyModelChoices({ reader: inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens), now: () => now().getTime() });
+  const modelChoices = createCompanyModelChoices({ reader: coreActive && env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
   const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => modelChoices.flowOptionsFor(registry, companyId, modelGateway()!.flowOptions);
-  const lessonsSwitch = readCoreLessonsSwitch(env);
+  // Switch off (and not draining): the core settings are never read, so an install without the core reads exactly what it read before (CORE_ENGINE_BROKER_WIRED).
+  const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = coreActive ? readCoreLessonsSwitch(env) : { value: { mode: "off" } };
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
-  const readSettings = readHostedAdmissionSettings(env);
-  const admissionSettings = "settings" in readSettings ? readSettings.settings : undefined;
+  const readSettings = coreActive ? readHostedAdmissionSettings(env) : undefined;
+  const admissionSettings = readSettings !== undefined && "settings" in readSettings ? readSettings.settings : undefined;
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
@@ -358,7 +395,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
-      const settings = policyHookSettingsFromEnvironment(env);
+      const settings = hookSettings;
       if (settings === undefined) return;
       applyHostedPolicyHook(registry, settings, inputs.policyHookInstall?.(), { audit: registry.require("audit-sink"), now: () => now().getTime(), log });
     },
@@ -367,14 +404,30 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
-      flowOptions: { ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId }),
+      flowOptions: { limits: async () => {
+        const fallback = { member: Number(env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"), organization: Number(env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20") };
+        if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
+        return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
+      }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)), moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }) },
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), people: {
+        documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
+        ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
+      } }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
       log,
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(inputs.policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
+        const choice = modelChoices.choiceFor(companyId);
+        if (choice !== undefined) {
+          // Validate immediately before broker-side dispatch handoff, including start, callbacks and scheduled relays.
+          const outbox = flow.deps.outbox;
+          flow.deps.outbox = { stage: (message) => outbox.stage(message), relay: async (options) => {
+            await choice.service().state();
+            return await outbox.relay(options);
+          } };
+        }
         let lessons: CoreLessons | undefined;
         if (inputs.lessonsPeople === undefined) {
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
@@ -442,6 +495,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {},
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
+          taskActions: { roundCap: async (task) => {
+            if (admissionSettings === undefined || task.companyId !== runtime.companyId) throw new Error("the task cap is unavailable");
+            const ledger = createHostedLedger({ store: registry.require("storage"), metering: registry.require("metering"), now });
+            return { limitUsd: admissionSettings.taskCapMicros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(runtime.companyId, task.taskId)) };
+          } },
           canReadProject: (personId, project) => projectGrant(personId, project),
           auditFor: (caller, sink) => auditSinkForDeployedCaller(sink, { client: caller.client }),
           ...deployedDevWiringParts({ runtime, registry, people: { membershipOf, projectGrantRole }, decisionProofs, codeSettings: inputs.codeSettings, log }),
@@ -547,6 +605,17 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreTasks,
     coreApp,
     lessons,
+    ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {
+      get settings() {
+        if (hookSettings === undefined) throw new Error("the policy hook settings are not readable");
+        return hookSettings;
+      },
+      get install() {
+        const install = inputs.policyHookInstall?.();
+        if (install === undefined) throw new Error("the policy hook install is unavailable");
+        return install;
+      },
+    } }),
     async personErase(request, caller) {
       if (settingsBlocked && app.serving && (request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       return await personErase(request, caller);
@@ -584,7 +653,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     async handleEvent(event, options) {
       if (settingsBlocked && (isCoreJobEvent(event) || outboxCompaniesOf(event) !== undefined)) throw new Error(CORE_SETTINGS_REFUSAL_WORDS);
-      if (isCoreJobEvent(event)) return await app.handleScheduledJob(event, options);
+      if (isCoreJobEvent(event)) return await withSharedMergeRecovery(() => app.handleScheduledJob(event, options));
       return await relayCoreOutboxStream(event, (companies) => app.relayOutbox(companies));
     },
   };
@@ -594,9 +663,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
  * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): while the switch serves, the task routes' core entry and the /v1/app/* routes; off (neither is
  * built), the configuration exactly as given, so the developer API is byte-identical.
  */
-export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry }) {
+export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook">): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry }) {
   if (root.coreTasks === undefined) return config;
-  return { ...config, coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }) };
+  return { ...config, ...(root.policyHook === undefined ? {} : { policyHook: root.policyHook }), coreTasks: root.coreTasks, ...(root.coreApp === undefined ? {} : { coreApp: root.coreApp }) };
 }
 
 /** The path of a worker's model-access request (core/model-gateway/route.ts), for the broker's routing. */
@@ -629,16 +698,29 @@ export const BROKER_CORE_OWED = {
 export interface BrokerCoreModuleParts {
   /** Lane L1b: the company-scoped GitHub App code host and check runner (aws/core-code-host.ts, `brokerCoreCodeHost`). Built only when every other input is there. */
   codeHost?: () => Pick<CodeModuleDeps, "codeHost" | "checkRunner">;
+  workerMachines?: () => NonNullable<CodeModuleDeps["workerMachines"]>;
+  dynamo?: CodeModuleDeps["dynamo"];
+  objects?: CodeModuleDeps["objects"];
+  secrets?: CodeModuleDeps["secrets"];
 }
 
 /**
  * Code's AWS adapter inputs on the broker. While any input is still owed (see BROKER_CORE_OWED) it refuses, naming those, so a serving switch never builds a half-wired registry here. The
- * dispatcher's inputs are complete (aws/worker-machines/dispatcher-core.ts). Owed: the queue URLs (lane L1a) and the workers' operations (lane L1c); the code host is lane L1b's.
+ * dispatcher's inputs live in aws/worker-machines/dispatcher-core.ts. L6 composes the queue (L1a), code host (L1b), and unchanged worker-machines builder output (L1c) here.
  */
 export function brokerCoreModuleDeps(env: NodeJS.ProcessEnv, parts: BrokerCoreModuleParts = {}): CodeModuleDeps {
-  void env;
-  const owed: string[] = [BROKER_CORE_OWED.queue];
+  const owed: string[] = [];
   if (parts.codeHost === undefined) owed.push(BROKER_CORE_OWED.codeHost);
-  owed.push(BROKER_CORE_OWED.workerMachines);
-  throw Object.assign(new Error(`${BROKER_CORE_NOT_CONFIGURED}: it needs ${owed.join(", ")}`), { name: "BrokerCoreNotConfigured" });
+  if (parts.workerMachines === undefined) owed.push(BROKER_CORE_OWED.workerMachines);
+  if (owed.length > 0) throw Object.assign(new Error(`${BROKER_CORE_NOT_CONFIGURED}: it needs ${owed.join(", ")}`), { name: "BrokerCoreNotConfigured" });
+  const queue = brokerCoreDispatchQueue(env);
+  const tableName = env.STATE_TABLE_NAME;
+  const bucket = env.ARTIFACT_BUCKET_NAME;
+  if (!tableName || !bucket || parts.objects === undefined || parts.secrets === undefined) throw new Error(BROKER_CORE_NOT_CONFIGURED);
+  return {
+    tableName, queue, ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }),
+    ...(parts.dynamo === undefined ? {} : { dynamo: parts.dynamo }),
+    objects: parts.objects, secrets: parts.secrets,
+    ...parts.codeHost!(), workerMachines: parts.workerMachines!(),
+  };
 }

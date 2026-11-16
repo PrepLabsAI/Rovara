@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Design review stage: what starts ONE round of the design review. The plan check's start (`startTaskWorkflowPlanCritiqueFromSystem`) hands a task in the design form
 // here; this module does, in this order, and dispatches nothing if any step fails:
 //
@@ -28,7 +29,7 @@ import type { TaskRecord as DeveloperTaskRecord } from "../task-flow/records.js"
 import { toDocument } from "../task-flow/records.js";
 import { acceptStep, commitWorkflow, readWorkspace } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
-import { conversationKey } from "../task-flow/keys.js";
+
 import { estimateDesignReviewUsd, gateDesignReviewCost, nextLowerTier, reviewersForRound, TIER_HAS_MERGE_MODEL, designReviewKeyBudgets, type DesignReviewCapGate, type DesignReviewEstimate } from "./estimate.js";
 import { mergeBindingFor } from "./merge-binding.js";
 import { buildReviewerPacket, estimateInputTokens, PacketBuildError, PACKET_BYTES_MAX, type BuiltPacket, type PacketReaders } from "./packet.js";
@@ -285,7 +286,7 @@ export async function startDesignReviewRound(
   const round = review.rounds.length + 1;
   const requestId = workflowRequestId("agentx-plan-critique", task.taskId, workflow.revision);
   const conversationId = critiqueConversationId(task.taskId, workflow.revision);
-  await deps.store.put({ item: { ...conversationKey(task.workspaceId, conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId: task.workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() });
+  await deps.store.put({ item: { ...(await workspaceKeys(deps, task.workspaceId)).conversationKey(conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId: task.workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() });
 
   const roundInputs: RoundInputs = {
     task, workflow, ports, admission: deps.admission, ...(input.costApprovedBy === undefined ? {} : { costApprovedBy: input.costApprovedBy }),

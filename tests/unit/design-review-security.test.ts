@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The security rules of the design review in Code's own wiring: the packet route (who may read which reviewer's packet), the one-shot model key of a reviewer's slot, the rule that a design-review operation never gets a key of
 // its own, the blocker-reason rule and its record, the tier a reviewed design is approved at, the hold nobody can answer, and a flow with the switch off. Each test names the rule it holds; a change that loosens a rule fails one of them.
 import { describe, expect, it } from "vitest";
@@ -79,7 +80,7 @@ describe("the packet route", () => {
     const slot = binding.reviewers[0]!.keySlot;
     expect((await ask(slot)).statusCode).toBe(200);
     const tampered = { ...binding, reviewers: binding.reviewers.map((reviewer) => ({ ...reviewer, packetDigest: "e".repeat(64) })) };
-    await w.h.store.update({ key: operationKey(w.workspaceId, round.operation.id), ops: [{ op: "set", path: ["designReview"], value: JSON.parse(JSON.stringify(tampered)) as never }] });
+    await w.h.store.update({ key: operationKey(T1_COMPANY, w.workspaceId, round.operation.id), ops: [{ op: "set", path: ["designReview"], value: JSON.parse(JSON.stringify(tampered)) as never }] });
     await expect(ask(slot)).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 

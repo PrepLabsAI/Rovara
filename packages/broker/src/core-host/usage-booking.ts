@@ -10,7 +10,7 @@
 // `bookUsageReport` is the one entry for any reporter: the worker's events here, and the Cloud gateway's usage report when it lands (it names the task and its own entry id).
 import { createHash } from "node:crypto";
 import { type DocumentStore, type MeterEntry, type Metering, type ModelUsage } from "@agentx/contracts";
-import { taskPointerKey } from "../core/task-flow/keys.js";
+import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { costPartition } from "../core/cost/ledger.js";
 import { createHostedLedger } from "./hosted-modules.js";
 
@@ -105,7 +105,7 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
     async bookOperationEvents(operation, events) {
       const usages = events.filter((event) => event.type === USAGE_EVENT_TYPE);
       if (usages.length === 0) return { booked: 0, unreadable: 0 };
-      const pointer = await deps.store.get(taskPointerKey(operation.workspaceId));
+      const pointer = await deps.store.get((await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey());
       const taskId = pointer?.["taskId"];
       if (typeof taskId !== "string" || taskId === "") throw new Error(NO_TASK_FOR_USAGE);
       let booked = 0;

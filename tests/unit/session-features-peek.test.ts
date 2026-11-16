@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // a peek at a running task's working tree, for an Ask. One `peek` invocation through the machines port, to a worker that is up and lists the feature, with a filler where a capability goes (it opens
 // nothing); any failure is no diff, and nothing is ever woken for it.
 import { describe, expect, it } from "vitest";
@@ -22,7 +23,7 @@ async function world(options: { features?: readonly string[]; answer?: unknown; 
   await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "META", taskId: TASK, workspaceId: WORKSPACE } });
   await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", id: WORKSPACE, status: options.status ?? "READY", activeOperationId: null, fence: 3, projectRevision: 1, machine: { machineId: handle.machineId, machineKey: WORKSPACE } } });
   if (options.pointerTask !== null) await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: "DEVELOPER_TASK", taskId: options.pointerTask ?? TASK } });
-  return { machines, handle, store, peek: createPeekClient({ store, machines, newOperationId: () => "11111111-2222-4333-8444-555555555555", timeoutMs: 50 }) };
+  return { machines, handle, store, peek: createPeekClient({ companyId: T1_COMPANY, store, machines, newOperationId: () => "11111111-2222-4333-8444-555555555555", timeoutMs: 50 }) };
 }
 
 describe("a peek at the working tree", () => {

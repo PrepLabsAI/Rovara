@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 // Lane L12, slice 3: proof on a laptop. When a task's checks are recorded for a candidate (a coding run's report, or a rerun of the checks), the evidence of that run is assembled and kept (Cloud's
 // `keepEvidenceAfterChecks`, `aws/broker/evidence-wiring.ts`), so the proof page and the pull request have something to show:
 //   - what the worker saved as `evidence-raw.json` for that operation (a rerun of the checks asks for it; a coding run saves none, and the pack then holds only what the broker itself knows: its own verdict for each check);
@@ -13,7 +14,7 @@ import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { taskBaselineOf } from "../../core/test-env/baseline-task.js";
 import { baselineCacheEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
-import { workspaceKey } from "../../core/task-flow/keys.js";
+
 import { dropBrowserEvidenceUpload, readBrowserEvidenceUpload } from "../../core/proof/browser-evidence-upload.js";
 import { readEvidenceArtifact, type EvidenceRead } from "../../core/proof/evidence-artifacts.js";
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
@@ -44,14 +45,14 @@ export const MODEL_HOSTS_ALLOWED_ITEM: EvidenceNotTested = { kind: "environment"
  * The run's own artifacts, offered to a reader under the names it reads them by (`private/<owner>/<workspace>/<operation>/<name>`): a reader checks an artifact is under the operation's own prefix. Only this operation's
  * rows are listed, and an object is read only through its recorded digest (`readVerifiedText`).
  */
-export function operationArtifactActions(flow: { store: TaskFlowDeps["store"]; blobs: ObjectStorage }, task: Pick<TaskRecord, "ownerKey" | "workspaceId">, operation: Pick<OperationRecord, "id">): Pick<TestProofActions, "artifacts" | "readArtifact"> {
+export function operationArtifactActions(flow: { store: TaskFlowDeps["store"]; blobs: ObjectStorage }, task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "companyId">, operation: Pick<OperationRecord, "id">): Pick<TestProofActions, "artifacts" | "readArtifact"> {
   const { store, blobs } = flow;
   const rows = new Map<string, { name: string; sha256: string; objectKey: string }>();
   const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
   return {
     async artifacts(workspaceId, operationId) {
       if (workspaceId !== task.workspaceId || operationId !== operation.id) return [];
-      const found = await store.query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
+      const found = await store.query({ pk: (await workspaceKeys({ store, companyId: task.companyId }, workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
       const listed: Array<{ name: string; objectKey: string }> = [];
       for (const row of found.items) {
         if (typeof row["name"] !== "string" || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") continue;
@@ -84,9 +85,9 @@ export function createLocalEvidence(options: {
   const log = (event: string, fields: Record<string, unknown>): void => flow.log?.({ component: "evidence", event, ...fields });
   // What applied to this task's sandboxes: the state its MACHINE was created with (a setting changed since then has not reached it). Only when the machine cannot say does the owner's setting for the task's project stand in, so the line is never left
   // out on a guess that it was denied; anything unreadable and no setting says nothing.
-  const modelHostsAllowed = async (workspaceId: string): Promise<boolean> => {
+  const modelHostsAllowed = async (task: TaskRecord): Promise<boolean> => {
     try {
-      const record = await flow.store.get(workspaceKey(workspaceId));
+      const record = await flow.store.get((await workspaceKeys({ store: flow.store, companyId: task.companyId }, task.workspaceId)).workspaceKey);
       const machine = record?.["machine"];
       const machineId = typeof machine === "object" && machine !== null && typeof (machine as Record<string, unknown>)["machineId"] === "string" ? (machine as Record<string, string>)["machineId"] : undefined;
       if (machineId !== undefined && options.sandboxModelHostsOf !== undefined) {
@@ -102,16 +103,16 @@ export function createLocalEvidence(options: {
       const { task, operation } = input;
       let late = false;
       const actions = operationArtifactActions({ store: flow.store, blobs }, task, operation);
-      const browser = await readBrowserEvidenceUpload({ store: flow.store, objects: blobs }, { workspaceId: task.workspaceId, id: operation.id });
+      const browser = await readBrowserEvidenceUpload({ store: flow.store, objects: blobs }, operation);
       const run = keepEvidence({
         scan: scanText, store: { blobs }, late: () => late, log,
         actions,
       }, {
-        orgId: flow.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
+        orgId: task.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),
-        ...(await modelHostsAllowed(task.workspaceId) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
+        ...(await modelHostsAllowed(task) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
         // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), when the switch is on.
-        ...baselineInput(options.testEnv, flow.companyId, task.project, task.taskId, () => operation.dispatch.payload["testEnvironment"]),
+        ...baselineInput(options.testEnv, task.companyId, task.project, task.taskId, () => operation.dispatch.payload["testEnvironment"]),
         // TE-H1: what this operation's browser-evidence upload held (none unless the run was asked for it and uploaded), read with the operation's own workspace and id.
         ...(browser === undefined ? {} : { browserEvidence: browser }),
       });
@@ -120,7 +121,7 @@ export function createLocalEvidence(options: {
       try {
         const result = await Promise.race([run, timeout]);
         // What the upload held is in the store now (or was refused): the hand-off object is not needed any more.
-        if (browser !== undefined) await dropBrowserEvidenceUpload({ store: flow.store, objects: blobs }, { workspaceId: task.workspaceId, id: operation.id });
+        if (browser !== undefined) await dropBrowserEvidenceUpload({ store: flow.store, objects: blobs }, operation);
         return result;
       } finally { clearTimeout(timer); }
     },

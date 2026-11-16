@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The plan check (Cloud's plan critic), on the ports. A Rovara Code coding plan is read by a second step before a person sees it: it is an ordinary read-only step that
 // answers with one block (a verdict and points), and what it writes is untrusted advice: it reaches a planner only inside a labelled block, bounded and redacted, and it can never approve a plan. A
 // blocking point sends the plan back to the planner once; every other result, and the second check whatever it says, goes to the person with the critique. A check that cannot run is never a reason to
@@ -16,7 +17,7 @@ import { textReaderOf } from "../build-step/plan-input.js";
 import { locate, settled, type RowRef } from "../build-step/start.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
-import { conversationKey } from "../task-flow/keys.js";
+
 import { readTask, workspaceOperations } from "../task-flow/reads.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { acceptStep, blockTaskWorkflow, commitWorkflow, planFeedbackOf, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
@@ -78,7 +79,7 @@ export async function startPlanCritique(deps: TaskFlowDeps, row: RowRef): Promis
     task, workspace, requestId: workflowRequestId("agentx-plan-critique", task.taskId, workflow.revision), prompt: planCritiquePrompt({ plan: loaded.markdown, request }),
     workflowMode: "PLAN_CRITIQUE", programStepId: step.id, conversationId, workflow: { current: workflow, next },
     // The check's conversation is its own record, written with the step.
-    extra: [{ kind: "put", item: { ...conversationKey(workspace.id, conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId: workspace.id, createdAt: now, updatedAt: now }, condition: when.absent() }],
+    extra: [{ kind: "put", item: { ...(await workspaceKeys(deps, workspace.id)).conversationKey(conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId: workspace.id, createdAt: now, updatedAt: now }, condition: when.absent() }],
     requires: ["task.workflowMode", "task.workflowPlanCritique"],
   });
   return settled(deps, row, accepted.result);
@@ -132,7 +133,7 @@ function closePlanRevision(workflow: WorkflowSnapshot, now: string): WorkflowSna
 /** The critic's saved answer, read back and checked against the digest recorded with it; undefined when it is missing, too big or changed. */
 async function criticAnswerOf(deps: TaskFlowDeps, operation: OperationRecord): Promise<string | undefined> {
   if (deps.artifacts === undefined) return undefined;
-  const rows = await deps.store.query({ pk: `WORKSPACE#${operation.workspaceId}`, sk: { op: "beginsWith", prefix: `ARTIFACT#${operation.id}#` } });
+  const rows = await deps.store.query({ pk: (await workspaceKeys(deps, operation.workspaceId)).workspaceKey.pk, sk: { op: "beginsWith", prefix: `ARTIFACT#${operation.id}#` } });
   const row = rows.items.find((item) => item["name"] === PLAN_CRITIQUE_ARTIFACT_NAME);
   if (row === undefined || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") return undefined;
   const bytes = await deps.artifacts.get(row["objectKey"], PLAN_CRITIQUE_ANSWER_MAX_BYTES + 1);

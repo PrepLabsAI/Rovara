@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // What the owner does to a design review. The cost hold and its choices (through the approval gate), the question card, Skip, Retry, Resume, `design first`, the wait sweep (reminders, parking,
 // closing), and the design's approval that carries the task on through the plan, the build and the reviews. The worker is simulated; the broker's records are checked in the store.
 import { describe, expect, it } from "vitest";
@@ -327,7 +328,7 @@ describe("a review nobody decided, thirty days after it was parked", () => {
     const workspace = (await readWorkspace(w.h.deps, w.workspaceId))!;
     expect(workspace).toMatchObject({ status: "CLOSED", activeOperationId: null });
     expect(workspace.fence).toBe(workspaceBefore.fence + 1);
-    expect((await w.h.store.get(taskPointerKey(w.workspaceId)))?.["cancelledAt"]).toBeDefined();
+    expect((await w.h.store.get(taskPointerKey(T1_COMPANY, w.workspaceId)))?.["cancelledAt"]).toBeDefined();
     expect((await w.h.store.get(taskIndexKey(before.developerId, before.createdAt, w.taskId)))?.["status"]).toBe("CLOSED");
     // Its machine is stopped and the allowances held for it are given back.
     expect((await w.h.machines.health(machineId!)).state).toBe("terminated");

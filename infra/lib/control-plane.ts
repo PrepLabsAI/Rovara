@@ -797,6 +797,12 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    if (props?.naming !== undefined) new apigwv2.CfnRoute(this, "CoreModelAccessRoute", {
+      apiId: api.ref,
+      routeKey: "GET /v1/internal/model-access",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
     // The setup worker authenticates this one source read with its short-lived project-setup
     // capability, which the broker verifies. Keep the API Gateway exception limited to this GET;
     // the generic internal callback route remains POST-only.

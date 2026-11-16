@@ -69,7 +69,7 @@ export async function seed(options: SeedOptions = {}): Promise<Seeded> {
     workspaceId: WORKSPACE_ID, ownerKey: OWNER_KEY, conversationId: randomUUID(), startingRevision: 1, charge: plain(developerCharge({ companyId: COMPANY, developerId: "local-owner" })), shared: false, createdAt: NOW, updatedAt: NOW,
     ...(workflow === null ? {} : { workflow: plain(workflow) as unknown as JsonValue }), ...options.task,
   } as never });
-  await h.store.put({ item: { ...workspaceKey(WORKSPACE_ID), entityType: "WORKSPACE", id: WORKSPACE_ID, companyId: COMPANY, orgId: COMPANY, ownerKey: OWNER_KEY, projectName: "payments", projectRevision: 1, status: "READY", activeOperationId: null, fence: 1,
+  await h.store.put({ item: { ...workspaceKey(COMPANY, WORKSPACE_ID), entityType: "WORKSPACE", id: WORKSPACE_ID, companyId: COMPANY, orgId: COMPANY, ownerKey: OWNER_KEY, projectName: "payments", projectRevision: 1, status: "READY", activeOperationId: null, fence: 1,
     workspaceProject: "payments", workspaceCreatedAt: NOW, createdAt: NOW, updatedAt: NOW, ...options.workspace } });
   return { h, caller: h.owner };
 }
@@ -105,9 +105,9 @@ export async function seedPlain(options: Omit<SeedOptions, "workflow"> & { first
   const world = await seed({ ...options, workflow: null, workspace: { fence: 2, ...(live ? { status: "BUSY", activeOperationId: "op-first" } : {}), ...options.workspace } });
   const task = await taskOf(world.h);
   const operationId = "op-first";
-  await world.h.store.put({ item: { ...operationKey(WORKSPACE_ID, operationId), entityType: "OPERATION", companyId: COMPANY, orgId: COMPANY, id: operationId, workspaceId: WORKSPACE_ID, kind: "task", requestId: "first-request", payloadHash: "0".repeat(64), status: live ? "RUNNING" : first === "starting" ? "SUCCEEDED" : first,
+  await world.h.store.put({ item: { ...operationKey(task.companyId, WORKSPACE_ID, operationId), entityType: "OPERATION", companyId: COMPANY, orgId: COMPANY, id: operationId, workspaceId: WORKSPACE_ID, kind: "task", requestId: "first-request", payloadHash: "0".repeat(64), status: live ? "RUNNING" : first === "starting" ? "SUCCEEDED" : first,
     fence: 2, eventSequence: 0, createdAt: "2026-11-09T09:00:00.000Z", updatedAt: "2026-11-09T09:30:00.000Z", dispatch: { kind: "task", projectRevision: 1, payload: { conversationId: task.conversationId, prompt: "Just do it" } } } });
-  await world.h.store.put({ item: { ...taskPointerKey(WORKSPACE_ID), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK_ID, developerId: "local-owner", requester: { kind: "developer", developerId: "local-owner", provider: "local-owner" }, conversationId: task.conversationId, firstRequestId: "first-request",
+  await world.h.store.put({ item: { ...taskPointerKey(task.companyId, WORKSPACE_ID), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK_ID, developerId: "local-owner", requester: { kind: "developer", developerId: "local-owner", provider: "local-owner" }, conversationId: task.conversationId, firstRequestId: "first-request",
     ...(first === "starting" ? { pendingPrompt: "Just do it" } : {}) } });
   return { ...world, conversationId: task.conversationId };
 }

@@ -1,9 +1,14 @@
 // Company purge (C112, plan row 13.5): operator only, a closed company only, a cooling-off delay with a cancel window, a dry run in counts, bounded passes that resume after a fault, idempotent,
 // and company-scoped: the second company's data (and the people both share) is untouched, byte for byte.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DocumentStoreError, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
+import { workspaceKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { legacyOperationRequestKey } from "../../packages/broker/src/core/task-flow/legacy-keys.js";
+import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
+import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import {
   COMPANY_PURGE_COOLING_OFF_MIN_MS, COMPANY_PURGE_COOLING_OFF_MS, PURGE_COMPANY_OPEN, PURGE_NOT_CANCELLABLE, PURGE_OPERATOR_ONLY, cancelCompanyPurge, companyPurgeKey, companyPurgeState,
   dryRunCompanyPurge, requestCompanyPurge, resumeCompanyPurges, runCompanyPurge, unversionedPurgeObjects, PURGE_CLOSED_UNKNOWN, PURGE_EARLIER_CLOSE, COMPANY_PURGE_BUDGET_MAX_MS, PURGE_DRY_RUN_HANDLE, PURGE_NEW_REQUEST_ID, type CompanyClosure, type CompanyPurgeDeps, type CompanyPurgeOperator,
@@ -37,8 +42,7 @@ class Versions {
 
 interface World { store: MemoryDocumentStore; files: Versions; clock: { now: number }; closed: Map<string, string>; deps: CompanyPurgeDeps; logs: Record<string, unknown>[]; audit: DocumentAuditSink }
 
-function world(overrides: Partial<CompanyPurgeDeps> = {}): World {
-  const store = new MemoryDocumentStore();
+function world(overrides: Partial<CompanyPurgeDeps> = {}, store = new MemoryDocumentStore()): World {
   const files = new Versions();
   const clock = { now: Date.parse("2026-11-15T10:00:00.000Z") };
   // Each closed company and the id of its current close.
@@ -120,6 +124,94 @@ async function scheduledAndDue(w: World, company: OrgId = A): Promise<void> {
   await requestCompanyPurge(w.deps, { companyId: company, by: OP, requestId: REQ });
   w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
 }
+
+/** Use the CORE writer so the regression follows the current workspace key format. */
+async function startCoreWorkspace(w: World, companyId: OrgId) {
+  const h = createHarness({ companyId, backend: () => ({ store: w.store, queues: new MemoryQueueService() }) });
+  await h.registerProject();
+  const { task } = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a health endpoint" });
+  const key = workspaceKey(companyId, task.workspaceId);
+  const meta = await w.store.get(key);
+  expect(meta).toMatchObject({ companyId, orgId: companyId, id: task.workspaceId });
+  if (typeof meta?.["ownerKey"] !== "string") throw new Error("workspace owner missing");
+  const prefix = `private/${meta["ownerKey"]}/${task.workspaceId}/`;
+  for (const path of ["plan-documents/plan.json", "op1/output.txt", "workflow-e2e-artifacts/run.json", `evidence/${task.taskId}/blob`]) w.files.put(`${prefix}${path}`);
+  return { key, prefix, taskId: task.taskId, workspaceId: task.workspaceId, ownerKey: meta["ownerKey"] };
+}
+
+describe("company purge: CORE company-scoped workspaces", () => {
+  it("keeps the discovery pointer through a failed file pass and deletes it only after all scoped rows", async () => {
+    const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+    const started = await startCoreWorkspace(w, A);
+    const pointerKey = { pk: `WORKSPACE#${started.workspaceId}`, sk: "META" };
+    // Seed explicitly so this regression also catches premature deletion independently of start.
+    await w.store.put({ item: { ...pointerKey, entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: started.workspaceId, companyId: A } });
+    // DynamoDB scan order is unspecified: discover the pointer on a page before its scoped META.
+    const scan = w.store.scanPage.bind(w.store);
+    let pointerFirst = true;
+    vi.spyOn(w.store, "scanPage").mockImplementation(async (request) => {
+      if (pointerFirst) {
+        pointerFirst = false;
+        return { items: [(await w.store.get(pointerKey))!], cursor: "pointer-first" };
+      }
+      return scan(request?.cursor === "pointer-first" ? (request.limit === undefined ? {} : { limit: request.limit }) : request);
+    });
+    const remove = w.store.delete.bind(w.store);
+    let deletedPointer = false;
+    vi.spyOn(w.store, "delete").mockImplementation(async (request) => {
+      if (request.key.pk === pointerKey.pk && request.key.sk === "META") {
+        expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+        expect(w.files.under(started.prefix)).toEqual([]);
+        deletedPointer = true;
+      }
+      return remove(request);
+    });
+    w.files.failPrefix = started.prefix;
+    await scheduledAndDue(w);
+    await runCompanyPurge(w.deps, A);
+    expect(await w.store.get(pointerKey)).toMatchObject({ companyId: A });
+    w.files.failPrefix = undefined;
+    await purgeToEnd(w, A);
+    expect(deletedPointer).toBe(true);
+    expect(await w.store.get(pointerKey)).toBeUndefined();
+  });
+  it("proves the scoped META before deleting it and removes the rows and every workspace file", async () => {
+    const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+    const started = await startCoreWorkspace(w, A);
+    // The offline backfill currently retains this legacy side partition after moving META.
+    const legacyRequest = legacyOperationRequestKey(started.ownerKey, started.workspaceId, "old-request");
+    await w.store.put({ item: { ...legacyRequest, operationId: "old-operation", payloadHash: "old-payload" } });
+    const metaAtFileDeletion: Array<StoredDocument | undefined> = [];
+    w.deps.objects = { deleteEveryVersion: async (prefix) => {
+      if (prefix === started.prefix) metaAtFileDeletion.push(await w.store.get(started.key));
+      return w.files.port.deleteEveryVersion(prefix);
+    } };
+    await scheduledAndDue(w);
+    await purgeToEnd(w, A);
+    expect(w.files.under(started.prefix)).toEqual([]);
+    expect(metaAtFileDeletion).toHaveLength(1);
+    expect(metaAtFileDeletion[0]).toMatchObject({ companyId: A });
+    expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+    expect(await w.store.get(taskKey(started.taskId))).toBeUndefined();
+    expect(await w.store.get(legacyRequest)).toBeUndefined();
+  });
+
+  it("purges A's scoped workspace files while leaving B's scoped rows and file versions unchanged", async () => {
+    const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+    const a = await startCoreWorkspace(w, A);
+    const b = await startCoreWorkspace(w, B);
+    const beforeRows = ofCompany(await all(w.store), b.key.pk, B);
+    const beforeFiles = [...w.files.objects].filter(([key]) => key.startsWith(b.prefix));
+    expect(beforeFiles).toHaveLength(4);
+    await scheduledAndDue(w);
+    await purgeToEnd(w, A);
+    expect(w.files.under(a.prefix)).toEqual([]);
+    expect((await w.store.query({ pk: a.key.pk })).items).toEqual([]);
+    expect(ofCompany(await all(w.store), b.key.pk, B)).toEqual(beforeRows);
+    expect([...w.files.objects].filter(([key]) => key.startsWith(b.prefix))).toEqual(beforeFiles);
+    expect(w.files.deleted).not.toContain(b.prefix);
+  });
+});
 
 describe("company purge: who may ask, and when", () => {
   it("refuses anyone but an operator, with fixed words and nothing written", async () => {
@@ -834,4 +926,59 @@ describe("company purge: laptop files", () => {
     expect(await port.deleteEveryVersion("private/o/w/", {})).toBe(true);
     expect(seen).toEqual(["private/o/w/"]);
   });
+});
+
+it("resumes after scoped deletion while the discovery pointer remains and refuses all pointer reads", async () => {
+  const { workspaceCompanyReader } = await import("../../packages/broker/src/aws/worker-machines/workspace-company.js");
+  const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+  const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
+  const started = await startCoreWorkspace(w, A);
+  const pointerKey = { pk: `WORKSPACE#${started.workspaceId}`, sk: "META" };
+  const remove = w.store.delete.bind(w.store);
+  let stop = true;
+  const deletion = vi.spyOn(w.store, "delete").mockImplementation(async (request) => {
+    if (stop && request.key.pk === pointerKey.pk && request.key.sk === "META") {
+      expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+      throw new Error("injected after scoped deletes");
+    }
+    return remove(request);
+  });
+  await scheduledAndDue(w);
+  await expect(runCompanyPurge(w.deps, A)).rejects.toThrow();
+  expect((await w.store.query({ pk: started.key.pk })).items).toEqual([]);
+  expect(await w.store.get(pointerKey)).toMatchObject({ entityType: "WORKSPACE_COMPANY_POINTER", companyId: A });
+  const reader = workspaceCompanyReader({ send: async (command: unknown) => {
+    if (!(command instanceof GetCommand)) throw new Error("unexpected command");
+    return { Item: await w.store.get(command.input.Key as { pk: string; sk: string }) };
+  } } as never, "state");
+  const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    expect(await reader(started.workspaceId)).toBeUndefined();
+    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
+  } finally { integrity.mockRestore(); }
+  stop = false;
+  w.clock.now += 70_000;
+  await purgeToEnd(w, A);
+  expect(await w.store.get(pointerKey)).toBeUndefined();
+  expect(await companyPurgeState(w.deps, A)).toMatchObject({ status: "done" });
+  deletion.mockRestore();
+});
+
+it("purge scan reports a discovery pointer only as a pointer count, never a workspace", async () => {
+  const w = world();
+  await w.store.put({ item: { pk: "WORKSPACE#pointer-canary", sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: "pointer-canary", companyId: A } });
+  const report = await dryRunCompanyPurge(w.deps, { companyId: A, by: OP });
+  expect(report.partitions.ws).toBe(0);
+  expect(report.rows).toEqual({ WORKSPACE_COMPANY_POINTER: 1 });
+  expect(JSON.stringify(report)).not.toContain("pointer-canary");
+});
+
+it("counts a remaining pointer to an already-drained scoped workspace as deleted, without refusal", async () => {
+  const w = world();
+  const pointer = { pk: "WORKSPACE#already-purged", sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: "already-purged", companyId: A };
+  await w.store.put({ item: pointer });
+  await scheduledAndDue(w);
+  await purgeToEnd(w, A);
+  expect(await w.store.get(pointer)).toBeUndefined();
+  expect(await companyPurgeState(w.deps, A)).toMatchObject({ status: "done", counts: { refused: 0 } });
 });

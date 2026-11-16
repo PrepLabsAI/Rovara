@@ -156,6 +156,23 @@ it("the engine seam rereads settings and rejects a foreign opaque scope before r
   expect(w.send).not.toHaveBeenCalled();
 });
 
+it("uses the hosted JWKS path for the developer API's hook settings and refuses a failed JWKS", async () => {
+  const { policyHookKeyThumbprint } = await import("@agentx/contracts");
+  const w = world();
+  const service = fakeService({ key: hookKey, now: () => now, answer: () => ({ locks: { ci_fix_rounds: 1 } }) });
+  const settings = { address: settingsFor(hookKey).address, jwks: "https://rules.example/keys", thumbprints: [policyHookKeyThumbprint(hookKey.jwk)] };
+  const fetched: string[] = [];
+  w.deps.developer.policyHook = { settings, install: { issuer: ISSUER, signer: signerOf(install) }, fetch: async (url, init) => {
+    const address = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    fetched.push(address);
+    return address === settings.jwks ? Response.json({ keys: [hookKey.jwk] }) : service.fetch(url, init);
+  } };
+  expect(await w.call()).toMatchObject({ values: { ci_fix_rounds: { value: 1 } } });
+  expect(fetched).toEqual([settings.jwks, settings.address]);
+  w.deps.developer.policyHook.fetch = async () => new Response("", { status: 503 });
+  await expect(w.call()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+});
+
 // ---- M4a slice 2: a cost or approval setting is changed on the page, right after a fresh step-up (DEC 236j; the brief's page-only rule) ----
 const PAGE_ONLY_WORDS = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that only holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
 const CHANGES: Record<string, unknown> = {

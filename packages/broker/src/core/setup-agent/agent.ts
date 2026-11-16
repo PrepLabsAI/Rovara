@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Setup agent: the broker's start and stop of a `setup_agent` run, and what the run says now.
 // A setup run is a task with `purpose: "setup_agent"`: the agent has a shell in a setup sandbox and runs the project's setup and test commands, reads the errors and tries again, inside fixed limits, and ends with a
 // proposal. This module is the broker's side only; the start itself is the task flow's (`startTask` with a setup request), so the person's access, the admission seam and the open-workspace limits apply as for any task.
@@ -20,7 +21,7 @@ import {
   BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, when,
   type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunSummary, type SetupVerification, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
-import { taskKey, taskPointerKey, workspaceKey } from "../task-flow/keys.js";
+import { taskKey } from "../task-flow/keys.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { verifyProposalDetailed, type CitationFileReader } from "./proposal-verify.js";
 import { setupAgentKey } from "./keys.js";
@@ -162,10 +163,11 @@ export async function readState(deps: SetupAgentReadDeps, project: string, lates
   // A person's stop only when one was recorded; a task closed or cancelled any other way is a run that could not go on.
   const cancelledWord = task.setupAgentStop === undefined ? ({ stop: "infrastructure", failure: SETUP_AGENT_FAILURES.infrastructure } as const) : ({ stop: "stopped_by_person", failure: SETUP_AGENT_FAILURES.stopped_by_person } as const);
   if (task.closedAt !== undefined) return failed(cancelledWord.stop, cancelledWord.failure);
-  const workspace = await deps.store.get(workspaceKey(task.workspaceId as string));
+  const location = await workspaceKeys(deps, task.workspaceId as string);
+  const workspace = await deps.store.get(location.workspaceKey);
   if (workspace?.["status"] === "PREPARATION_FAILED") return failed("infrastructure", SETUP_AGENT_FAILURES.machine);
   if (workspace?.["status"] === "CLOSED") return failed(cancelledWord.stop, cancelledWord.failure);
-  const taskPointer = await deps.store.get(taskPointerKey(task.workspaceId as string));
+  const taskPointer = await deps.store.get(location.taskPointerKey());
   if (taskPointer?.["cancelledAt"] !== undefined) return failed(cancelledWord.stop, cancelledWord.failure);
   const started = Date.parse(pointer.startedAt);
   if (Number.isFinite(started) && deps.now() - started > staleAfterMs(limits)) return failed("infrastructure", SETUP_AGENT_FAILURES.stale);

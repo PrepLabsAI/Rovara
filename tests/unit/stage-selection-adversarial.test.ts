@@ -1,3 +1,5 @@
+import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import type { DocumentKey } from "@agentx/contracts";
 // The lighter flow's stage selection, attacked: a small change skips its planning steps ONLY when the current plan's estimate is exactly small, the skip lands in the same commit as its record, the
 // reviewer's questions are asked about exactly the patch the merge gate reads, and a change that grew after the build stops and gets the review of the tier it grew to on the CURRENT head before it can merge.
 // Every case is driven through the real task flow of `rovara up` (fake worker, fake code host that gives patches) and the real merge gate (`tierGate`); a fake model answers the reviewers.
@@ -131,7 +133,7 @@ async function launch(options: LaunchOptions = {}) {
   const nextJob = async (workspaceId: string, seen: Set<string>): Promise<WorkerInvocation> => {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await runtime.tick();
-      const machineId = ((await store().get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))?.["machine"] as { machineId?: string } | undefined)?.machineId;
+      const machineId = ((await store().get(workspaceKey(IMPLICIT_COMPANY_ID, workspaceId)))?.["machine"] as { machineId?: string } | undefined)?.machineId;
       const fresh = machineId === undefined ? undefined : machines.delivered(machineId).find((job) => !seen.has(job.operationId));
       if (fresh !== undefined) { seen.add(fresh.operationId); return fresh; }
     }
@@ -338,7 +340,7 @@ describe("T1: a skip is never without the floor being owed", () => {
     expect((await flowOf(h, t.taskId)).skippedSteps).toEqual(skipped);
     // On through the build, the reviews and the publication: every engine writer on the way keeps it.
     const fresh = await readTask(deps, t.taskId);
-    const job = h.machines.delivered(((await h.store().get({ pk: `WORKSPACE#${t.workspaceId}`, sk: "META" }))!["machine"] as { machineId: string }).machineId).find((entry) => (entry.payload as { workflowMode?: string }).workflowMode === "IMPLEMENT")!;
+    const job = h.machines.delivered(((await h.store().get(workspaceKey(IMPLICIT_COMPANY_ID, t.workspaceId)))!["machine"] as { machineId: string }).machineId).find((entry) => (entry.payload as { workflowMode?: string }).workflowMode === "IMPLEMENT")!;
     void fresh;
     await buildAndPublish(h, { ...t, next: job }, SMALL).catch(() => undefined);
     expect((await flowOf(h, t.taskId)).skippedSteps).toEqual(expect.arrayContaining(skipped ?? []));
@@ -991,7 +993,7 @@ describe("R: attacks on the estimate, the reviewer calls, the merge records and 
   it("R05-t5-choose-throws: the checking stage's rule throws; the reviewer must not silently fall back to the install's (possibly weaker) model", async () => {
     const deps = {
       companyId: OrgIdSchema.parse(IMPLICIT_COMPANY_ID),
-      store: { query: async () => ({ items: [] }) } as never,
+      store: { get: async (key: DocumentKey) => ({ ...key, companyId: IMPLICIT_COMPANY_ID }), query: async () => ({ items: [] }) } as never,
       stepModels: { choose: async () => { throw new Error("usable models unreadable"); } } as never,
       installModel: async () => ({ provider: "examplehost", modelId: "cheap-small" }),
     };
@@ -1003,7 +1005,7 @@ describe("R: attacks on the estimate, the reviewer calls, the merge records and 
     const seen: unknown[] = [];
     const deps = {
       companyId: OrgIdSchema.parse(IMPLICIT_COMPANY_ID),
-      store: { query: async () => { throw new Error("store down"); } } as never,
+      store: { get: async (key: DocumentKey) => ({ ...key, companyId: IMPLICIT_COMPANY_ID }), query: async () => { throw new Error("store down"); } } as never,
       stepModels: { choose: async (input: { reference?: unknown }) => { seen.push(input.reference); return { ok: true, step: { model: { provider: "p", modelId: "build-model" }, route: {}, reason: "r", thinkingLevel: null, sameModelAsChecked: false } }; } } as never,
     };
     const chosen = await checkingModelOf(deps, "ws_1");
@@ -1234,7 +1236,7 @@ describe("R: attacks on the estimate, the reviewer calls, the merge records and 
     expect((await workflowOf(h, t.taskId)).decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(0);
     const coderText = JSON.stringify(t.next);
     await buildAndPublish(h, t, SMALL, false);
-    const machineId = ((await h.store().get({ pk: `WORKSPACE#${t.workspaceId}`, sk: "META" }))!["machine"] as { machineId: string }).machineId;
+    const machineId = ((await h.store().get(workspaceKey(IMPLICIT_COMPANY_ID, t.workspaceId)))!["machine"] as { machineId: string }).machineId;
     const body = h.machines.delivered(machineId).map((job) => { const value = (job.payload as Record<string, unknown>)["body"]; return typeof value === "string" ? value : ""; }).filter((text) => text !== "").join("\n");
     console.log(JSON.stringify({ case: "R19", coderSaysApproved: /human-approved plan|Approved plan/u.test(coderText), bodySaysApproved: /approved plan/iu.test(body), bodyLen: body.length }));
     expect(/human-approved plan/u.test(coderText)).toBe(false);

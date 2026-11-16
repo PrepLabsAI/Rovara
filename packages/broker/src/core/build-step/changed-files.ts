@@ -1,3 +1,4 @@
+import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L12: the files the checked code changes, for the pull request's description and the risk it shows.
 //
 // THE RULE (L12 review H3): a list the WORKER reports is never believed. The worker saves `workspace.diff` with each run, and nothing checks that it names what the commit holds; a worker that omits a
@@ -31,9 +32,9 @@ const DIFF_READ_MAX_BYTES = 210_000;
 export const RISK_UNVERIFIED_REASON = "Rovara has not yet checked which files changed against the code host.";
 
 /** The row a worker's artifact is recorded under (`callbacks.ts` writes it; the key is the flow's own scheme). */
-export const artifactRowKey = (workspaceId: string, operationId: string, name: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: `ARTIFACT#${operationId}#${name}` });
+export const artifactRowKey = (workspace: { pk: string }, operationId: string, name: string) => ({ pk: workspace.pk, sk: `ARTIFACT#${operationId}#${name}` });
 /** Where the list read from the code host is kept, for the code with this digest. */
-export const verifiedFilesKey = (workspaceId: string, candidateDigest: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: `VERIFIED_FILES#${candidateDigest}` });
+export const verifiedFilesKey = (workspace: { pk: string }, candidateDigest: string) => ({ pk: workspace.pk, sk: `VERIFIED_FILES#${candidateDigest}` });
 
 /** The "Lessons used" section of a description on an install with no lessons: it says so, so the section is there and a reader knows why it is empty. */
 export const NO_LESSONS_USED: LessonsUsedSection = { count: 0, taskUrl: "", entries: [], none: true };
@@ -59,8 +60,9 @@ export async function reportedChangedFiles(deps: Pick<TaskFlowDeps, "store" | "a
   if (deps.artifacts === undefined) return undefined;
   try {
     const finished = (await workspaceOperations(deps, workspaceId)).filter((operation) => operation.status === "SUCCEEDED" && (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS")).reverse();
+    const location = await workspaceKeys(deps, workspaceId);
     for (const operation of finished) {
-      const row = await deps.store.get(artifactRowKey(workspaceId, operation.id, WORKSPACE_DIFF_ARTIFACT));
+      const row = await deps.store.get(artifactRowKey(location.workspaceKey, operation.id, WORKSPACE_DIFF_ARTIFACT));
       if (row === undefined || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") continue;
       const bytes = await deps.artifacts.get(row["objectKey"], DIFF_READ_MAX_BYTES);
       if (bytes === undefined || createHash("sha256").update(bytes).digest("hex") !== row["sha256"]) continue;
@@ -94,7 +96,8 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   if (workflow === undefined || workflow.definitionVersion !== "1.1.0" || candidate === undefined || deps.codeHosts === undefined || task.closedAt !== undefined) return "not_applicable";
   const pullRequests = workflow.pullRequests ?? [];
   if (pullRequests.length === 0 || pullRequests.some((entry) => entry.candidateDigest !== candidate.digest || (entry.state !== "OPEN" && entry.state !== "UNKNOWN"))) return "not_applicable";
-  if ((await deps.store.get(verifiedFilesKey(task.workspaceId, candidate.digest))) !== undefined) return "already";
+  const location = await workspaceKeys(deps, task.workspaceId);
+  if ((await deps.store.get(verifiedFilesKey(location.workspaceKey, candidate.digest))) !== undefined) return "already";
   const project = await deps.projects.revision(task.project, task.startingRevision);
   const all: ChangedFilesRead["files"][number][] = [];
   // The change tier is read from the same list the host gave: the files with the host's own patch text.
@@ -151,7 +154,7 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
     condition: when.and(when.eq(["workflow", "revision"], workflow.revision), when.notExists("closedAt"), flowIs(workflow.flow)),
   });
   if (!written.applied) return "unavailable";
-  await deps.store.put({ item: { ...verifiedFilesKey(task.workspaceId, candidate.digest), entityType: "VERIFIED_FILES", candidateDigest: candidate.digest, complete, verifiedAt: iso(deps), files: JSON.parse(JSON.stringify(all.slice(0, 200))) as never } });
+  await deps.store.put({ item: { ...verifiedFilesKey(location.workspaceKey, candidate.digest), entityType: "VERIFIED_FILES", candidateDigest: candidate.digest, complete, verifiedAt: iso(deps), files: JSON.parse(JSON.stringify(all.slice(0, 200))) as never } });
   // The description says what changed, read from the host. A description a person edited is left as they left it.
   const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
@@ -179,7 +182,7 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
       beforeRequest?.();
       if ((await entry.host.getChangeRequest(ref, { orgId: deps.companyId })).body !== record.body) continue;
       await entry.host.updateChangeRequest({ repository: { url: entry.url }, id: String(entry.number), url: entry.url_ }, { body }, { orgId: deps.companyId });
-      await deps.store.update({ key: pullRequestRecordKey(task.workspaceId, entry.repositoryId, entry.number), ops: [change.set("body", body), change.set("updatedAt", iso(deps))], condition: when.present() });
+      await deps.store.update({ key: pullRequestRecordKey(location.workspaceKey, entry.repositoryId, entry.number), ops: [change.set("body", body), change.set("updatedAt", iso(deps))], condition: when.present() });
     } catch (error) {
       log(deps, { event: "build_step.description_not_updated", taskId: task.taskId, number: entry.number, error: error instanceof Error ? error.name : "unknown" });
     }
@@ -188,9 +191,9 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
 }
 
 /** The list read from the code host for the task's current code, when one was. */
-export async function verifiedChangedFiles(deps: Pick<TaskFlowDeps, "store">, workspaceId: string, candidateDigest: string | undefined): Promise<ChangedFilesRead | undefined> {
+export async function verifiedChangedFiles(deps: Pick<TaskFlowDeps, "store" | "companyId">, workspaceId: string, candidateDigest: string | undefined): Promise<ChangedFilesRead | undefined> {
   if (candidateDigest === undefined) return undefined;
-  const row = await deps.store.get(verifiedFilesKey(workspaceId, candidateDigest));
+  const row = await deps.store.get(verifiedFilesKey((await workspaceKeys(deps, workspaceId)).workspaceKey, candidateDigest));
   if (row === undefined || !Array.isArray(row["files"])) return undefined;
   return { files: row["files"] as unknown as ChangedFilesRead["files"][number][], complete: row["complete"] === true };
 }

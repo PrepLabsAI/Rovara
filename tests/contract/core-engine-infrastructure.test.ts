@@ -22,7 +22,7 @@ import { CORE_BROKER_QUEUE_ACTIONS, CORE_DISPATCHER_QUEUE_ACTIONS, CORE_DISPATCH
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { DISPATCH_ATTEMPTS_MAX } from "../../packages/broker/src/core/task-flow/dispatch.js";
 import { CORE_ENGINE_VARIABLE as BROKER_SWITCH_VARIABLE, CORE_JOBS, CORE_SCHEDULE_SOURCE, parseCoreSwitch, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
-import { CORE_ENGINE_NOT_WIRED_WORDS, configKey, coreEngineValueWhenWired } from "../../packages/cli/src/config/keys.js";
+import { configKey, coreEngineValueWhenWired } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -89,11 +89,11 @@ describe("the switch (stack parameter CoreEngine)", () => {
     const entry = configKey("coreEngine.switch");
     expect(entry.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "CoreEngine" });
     expect(entry.defaultValue).toBe("off");
-    // Until the broker runs the core engine, only off is accepted (the parameter's pattern still takes every value, so turning it on later needs no template change).
-    expect(CORE_ENGINE_BROKER_WIRED).toBe(false);
+    // L6: the broker runs the core engine, so every clean value is accepted (switching on still needs an allowed-companies list; the default `none` refuses every company).
+    expect(CORE_ENGINE_BROKER_WIRED).toBe(true);
     expect(entry.parse(" off ")).toBe("off");
     for (const value of ["on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) {
-      expect(() => entry.parse(value), value).toThrow(CORE_ENGINE_NOT_WIRED_WORDS);
+      expect(entry.parse(value), value).toBe(value);
       expect(new RegExp(CORE_ENGINE_PARAMETER_PATTERN, "u").test(value), value).toBe(true);
       expect(coreEngineValueWhenWired(value)).toBe(value);
     }
@@ -414,3 +414,12 @@ describe("L1a broker environment derivation", () => {
   });
 });
 import { createHash } from "node:crypto";
+
+
+it("exposes only the exact core model-access GET without an authorizer on named installs", () => {
+  const routes = resources(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties);
+  expect(routes.find((route) => route.RouteKey === "GET /v1/internal/model-access")).toMatchObject({ AuthorizationType: "NONE" });
+  expect(routes.find((route) => route.RouteKey === "ANY /{proxy+}")).toMatchObject({ AuthorizationType: "JWT" });
+  expect(routes.some((route) => route.RouteKey === "GET /v1/internal/{proxy+}")).toBe(false);
+  expect(resources(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "GET /v1/internal/model-access")).toBe(false);
+});
