@@ -249,14 +249,14 @@ describe("browser evidence: creating a capture container", () => {
     // The same body with any other environment is refused, forwarding nothing (mutants: the name, the charset, the length, the count).
     const refusals: Array<[string, unknown]> = [
       ["another name", ["OTHER=AAAA"]], ["a lower-case name", ["rovara_be_signin=AAAA"]], ["a prefix of the name", ["ROVARA_BE_SIGNIN_X=AAAA"]], ["no value", ["ROVARA_BE_SIGNIN="]], ["no equals", ["ROVARA_BE_SIGNIN"]],
-      ["a value with a space", ["ROVARA_BE_SIGNIN=AA AA"]], ["a value with an equals sign", ["ROVARA_BE_SIGNIN=AA=AA"]], ["a value with a newline", ["ROVARA_BE_SIGNIN=AAAA\nPATH=/x"]], ["a value over 1,024 letters", [`ROVARA_BE_SIGNIN=${"A".repeat(1_025)}`]],
+      ["a value with a space", ["ROVARA_BE_SIGNIN=AA AA"]], ["a value with an equals sign", ["ROVARA_BE_SIGNIN=AA=AA"]], ["a value with a newline", ["ROVARA_BE_SIGNIN=AAAA\nPATH=/x"]], ["a value over 1,536 letters", [`ROVARA_BE_SIGNIN=${"A".repeat(1_537)}`]],
       ["the name twice", [variable, variable]], ["the name and another", [variable, "PATH=/x"]], ["an object", { ROVARA_BE_SIGNIN: "AAAA" }], ["a number", 5], ["a string", variable],
     ];
     await using({ image: EXECUTOR, seccomp: SECCOMP }, async (w) => {
       for (const [what, env] of refusals) expect((await create(w, CAPTURE, mutated((v) => { v.Env = env; }))).status, what).toBe(403);
       expect(w.forwarded("/containers/create")).toEqual([]);
-      // The longest the worker sends (1,024 letters) is accepted.
-      expect((await create(w, CAPTURE, mutated((v) => { v.Env = [`ROVARA_BE_SIGNIN=${"A".repeat(1_024)}`]; }))).status).toBe(201);
+      // The longest the worker sends (1,536 letters) is accepted.
+      expect((await create(w, CAPTURE, mutated((v) => { v.Env = [`ROVARA_BE_SIGNIN=${"A".repeat(1_536)}`]; }))).status).toBe(201);
     });
   });
 

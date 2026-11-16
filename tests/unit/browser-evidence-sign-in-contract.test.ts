@@ -141,9 +141,17 @@ describe("how the values reach the capture container", () => {
     expect(text.length).toBeLessThanOrEqual(BROWSER_EVIDENCE_SIGN_IN_ENV_MAX);
     expect(BROWSER_EVIDENCE_SIGN_IN_ENV).toBe("ROVARA_BE_SIGNIN");
     expect(decodeBrowserEvidenceSignInEnv(text)).toEqual(VALUES);
+    // The worst a valid sign-in can be (every character a quote or a backslash, which JSON doubles) still fits the one variable; a value over 200 UTF-8 bytes is no sign-in.
+    const worst = { username: '"'.repeat(200), password: "\\".repeat(200) };
+    expect(encodeBrowserEvidenceSignInEnv(worst).length).toBeLessThanOrEqual(BROWSER_EVIDENCE_SIGN_IN_ENV_MAX);
+    expect(decodeBrowserEvidenceSignInEnv(encodeBrowserEvidenceSignInEnv(worst))).toEqual(worst);
+    expect(BrowserEvidenceSignInValuesSchema.safeParse({ username: "é".repeat(101), password: VALUES.password }).success).toBe(false);
+    expect(BrowserEvidenceSignInValuesSchema.safeParse({ username: "é".repeat(100), password: VALUES.password }).success).toBe(true);
     const longest = { username: "u".repeat(200), password: "p".repeat(200) };
     expect(encodeBrowserEvidenceSignInEnv(longest).length).toBeLessThanOrEqual(BROWSER_EVIDENCE_SIGN_IN_ENV_MAX);
-    for (const bad of [undefined, "", "!!!", "a".repeat(BROWSER_EVIDENCE_SIGN_IN_ENV_MAX + 1), Buffer.from(JSON.stringify({ username: "ab", password: "cd" })).toString("base64url"), Buffer.from("not json").toString("base64url"), Buffer.from(JSON.stringify({ ...VALUES, extra: 1 })).toString("base64url")]) {
+    for (const bad of [undefined, "", "!!!", "a".repeat(BROWSER_EVIDENCE_SIGN_IN_ENV_MAX + 1), Buffer.from(JSON.stringify({ username: "ab", password: "cd" })).toString("base64url"), Buffer.from("not json").toString("base64url"), Buffer.from(JSON.stringify({ ...VALUES, extra: 1 })).toString("base64url"),
+      // Values that are valid, padded with white space past the bound: the bound is the program's own, not only the schema's.
+      Buffer.from(`${JSON.stringify(VALUES)}${" ".repeat(2_000)}`).toString("base64url")]) {
       expect(decodeBrowserEvidenceSignInEnv(bad), String(bad).slice(0, 20)).toBeUndefined();
     }
     expect(() => encodeBrowserEvidenceSignInEnv({ username: "ab", password: "cd" })).toThrow();

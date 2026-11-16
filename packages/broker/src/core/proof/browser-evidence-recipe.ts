@@ -71,8 +71,7 @@ export async function clearStoredRecipe(store: Pick<DocumentStore, "delete">, or
 export type EffectiveRecipe = { source: "config" | "page"; recipe: BrowserEvidenceRecipe; version?: number };
 
 /**
- * The recipe a run of `project` uses: the owner's config file's, when it has one that is valid for the project; otherwise the page's saved one. A config recipe that is there but not valid is NOT replaced by the page's: the
- * stronger source said something and it could not be read, so browser evidence is off (fail closed), never silently another recipe.
+ * The recipe a run of `project` uses: the owner's config file's, when it has one that is valid for the project; otherwise the page's saved one. A config recipe that is there but does not fit the project is NOT replaced by the page's (browser evidence is off). (A config recipe that does not parse never gets here: the install does not start with one.)
  */
 export async function effectiveRecipe(input: { store: Pick<DocumentStore, "get">; orgId: OrgId; project: string; fromConfig: BrowserEvidenceRecipe | undefined | (() => BrowserEvidenceRecipe | undefined) }): Promise<EffectiveRecipe | undefined> {
   const fromConfig = typeof input.fromConfig === "function" ? input.fromConfig() : input.fromConfig;

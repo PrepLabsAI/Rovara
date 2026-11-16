@@ -80,10 +80,9 @@ export function isBrowserEvidenceSignInRefOf(project: unknown, ref: unknown): bo
 export const BROWSER_EVIDENCE_SIGN_IN_VALUE_MIN = 4;
 export const BROWSER_EVIDENCE_SIGN_IN_VALUE_MAX = 200;
 /** The saved sign-in: exactly a user name and a password, both plain single lines (no control, format or line-break character). Never part of a recipe, a payload, a pack or a log. */
-export const BrowserEvidenceSignInValuesSchema = z.object({
-  username: z.string().min(BROWSER_EVIDENCE_SIGN_IN_VALUE_MIN).max(BROWSER_EVIDENCE_SIGN_IN_VALUE_MAX).regex(NO_HIDDEN, "one plain line"),
-  password: z.string().min(BROWSER_EVIDENCE_SIGN_IN_VALUE_MIN).max(BROWSER_EVIDENCE_SIGN_IN_VALUE_MAX).regex(NO_HIDDEN, "one plain line"),
-}).strict();
+// At most 200 characters AND 200 UTF-8 bytes, so the values always fit the one environment variable that carries them (even with every quote or backslash escaped).
+const signInValue = () => z.string().min(BROWSER_EVIDENCE_SIGN_IN_VALUE_MIN).max(BROWSER_EVIDENCE_SIGN_IN_VALUE_MAX).regex(NO_HIDDEN, "one plain line").refine((value) => new TextEncoder().encode(value).byteLength <= BROWSER_EVIDENCE_SIGN_IN_VALUE_MAX, "too long");
+export const BrowserEvidenceSignInValuesSchema = z.object({ username: signInValue(), password: signInValue() }).strict();
 export type BrowserEvidenceSignInValues = z.infer<typeof BrowserEvidenceSignInValuesSchema>;
 
 /**

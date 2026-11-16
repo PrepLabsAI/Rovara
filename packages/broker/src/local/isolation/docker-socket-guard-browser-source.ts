@@ -25,7 +25,7 @@ const BE_LABEL = "rovara.browser-evidence";
 const BE_MAX = 2;
 const BE_TMPFS = "rw,exec,nosuid,nodev,size=512m";
 const BE_SANDBOX_NETWORK = /^container:([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$/;
-const BE_SIGN_IN_ENV = /^ROVARA_BE_SIGNIN=[A-Za-z0-9_-]{1,1024}$/;
+const BE_SIGN_IN_ENV = /^ROVARA_BE_SIGNIN=[A-Za-z0-9_-]{1,1536}$/;
 
 function beNumber(value, expected, name) {
   if (value !== expected) deny(name + " is fixed");

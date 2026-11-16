@@ -241,7 +241,7 @@ export const BrowserEvidenceExecutorSignInSchema = z.object({
 export type BrowserEvidenceExecutorSignIn = z.infer<typeof BrowserEvidenceExecutorSignInSchema>;
 /** The one environment variable the capture container may have: base64url of the sign-in's JSON (`{ username, password }`). The program reads it once and removes it. */
 export const BROWSER_EVIDENCE_SIGN_IN_ENV = "ROVARA_BE_SIGNIN" as const;
-export const BROWSER_EVIDENCE_SIGN_IN_ENV_MAX = 1_024;
+export const BROWSER_EVIDENCE_SIGN_IN_ENV_MAX = 1_536;
 /** The sign-in's values as the environment variable carries them. Throws on values that are not a valid sign-in. */
 export function encodeBrowserEvidenceSignInEnv(values: unknown): string {
   const checked = BrowserEvidenceSignInValuesSchema.parse(values);
