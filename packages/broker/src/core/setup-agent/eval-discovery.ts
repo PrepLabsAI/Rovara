@@ -223,7 +223,7 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
     // The run must still be the project's latest setup run when the mark is made (a run started meanwhile makes this report stale).
     { kind: "check", key: setupAgentKey(company, project), condition: when.eq("taskId", body.taskId) },
   ]);
-  if (!marked.applied) refuse(log, "eval_discovery_confirm_refused", "confirmed", "CHANGE_STALE", "That eval report was already confirmed.");
+  if (!marked.applied) refuse(log, "eval_discovery_confirm_refused", "stale", "CHANGE_STALE", "That eval report was already confirmed, or a newer setup run replaced it. Read it again.");
   const table = { store: deps.store, companyId: company, ...(deps.members === undefined ? {} : { members: deps.members }), ...(deps.monthlyCapMicros === undefined ? {} : { monthlyCapMicros: deps.monthlyCapMicros }) };
   try {
     await proposeEvalSpendApproval(table, project, { selection: suite.selection, inputs, estimate, budget }, plan);
