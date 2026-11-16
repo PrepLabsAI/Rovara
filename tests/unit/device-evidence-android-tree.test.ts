@@ -153,7 +153,9 @@ describe("androidHierarchyToTree", () => {
     expect(planDeviceMask(tree, FRAME)).toEqual({ status: "paint", rects: [{ x: 0, y: 100, width: 720, height: 100 }] });
     // a notification or keyboard window with a secret is painted too
     const heads = node({ class: "android.widget.TextView", text: "New mail from ops@example.org", bounds: box(0, 0, 720, 120) });
-    expect(planDeviceMask(androidHierarchyToTree(windows(app, dialog, heads), SIZE), FRAME)).toMatchObject({ status: "paint", rects: expect.arrayContaining([{ x: 0, y: 0, width: 720, height: 120 }]) });
+    const plan = planDeviceMask(androidHierarchyToTree(windows(app, dialog, heads), SIZE), FRAME);
+    expect(plan.status).toBe("paint");
+    expect(plan.status === "paint" ? plan.rects : []).toEqual([{ x: 0, y: 100, width: 720, height: 100 }, { x: 0, y: 0, width: 720, height: 120 }]);
   });
 
   it("never throws and echoes none of the dump's own text in what it returns for a bad one", () => {

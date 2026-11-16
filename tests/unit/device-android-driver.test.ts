@@ -141,9 +141,9 @@ describe("createAndroidEmulatorDriver", () => {
     });
 
     it("answers the time limit when it is stopped after the boot, even though every later command would have worked", async () => {
-      let driverRef: { stop(side: "before" | "after"): Promise<void> } | undefined;
-      const stopped = setup({ first: (_file, args) => { if (args.includes("wm")) void driverRef!.stop("before"); return undefined; } });
-      driverRef = stopped.driver;
+      const ref: { stop?: () => Promise<void> } = {};
+      const stopped = setup({ first: (_file, args) => { if (args.includes("wm")) void ref.stop?.(); return undefined; } });
+      ref.stop = () => stopped.driver.stop("before");
       expect(await stopped.driver.prepare("before", { timeoutMs: 600_000 })).toBe("time_limit");
       expect(stopped.runs.some((row) => row.args.includes("install"))).toBe(false);
     });
