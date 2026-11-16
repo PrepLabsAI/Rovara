@@ -134,3 +134,28 @@ describe("channel names across lookup pages (A11)", () => {
     expect(labels.has(ids[50] as string)).toBe(false);
   });
 });
+
+it("scoped admin label and membership callbacks keep identical ids in their workspace", async () => {
+  const { privateChannelsFor } = await import("../../packages/broker/src/aws/admin-reads.js");
+  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]] as const) {
+    const workspace = { companyId, teamId };
+    const channelInfo = vi.fn(async () => ({ ok: true as const, channels: [] }));
+    const channelMembers = vi.fn(async () => ({ ok: true as const, memberOf: [] }));
+    const deps = { channelInfo, channelMembers, log: vi.fn(), slackWorkspaces: { requireCompany: async () => companyId }, workspace };
+    await channelLabels(deps as never, ["C0SHARED"]);
+    await privateChannelsFor(deps as never, "U0SHARED", ["C0SHARED"]);
+    expect(channelInfo).toHaveBeenCalledExactlyOnceWith({ kind: "channel-info", channelIds: ["C0SHARED"], workspace });
+    expect(channelMembers).toHaveBeenCalledExactlyOnceWith({ kind: "channel-members", slackUserId: "U0SHARED", channelIds: ["C0SHARED"], workspace });
+  }
+});
+
+it("admin directory callbacks refuse absent, malformed or foreign scope without transport", async () => {
+  const { privateChannelsFor } = await import("../../packages/broker/src/aws/admin-reads.js");
+  for (const workspace of [undefined, { companyId: "invalid-canary", teamId: "T0AAAAAAA" }, { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0AAAAAAA" }]) {
+    const channelInfo = vi.fn(), channelMembers = vi.fn();
+    const deps = { channelInfo, channelMembers, log: vi.fn(), slackWorkspaces: { requireCompany: async () => "org_aaaaaaaaaaaaaaaaaaaa" }, workspace };
+    expect(await channelLabels(deps as never, ["C0SHARED"])).toEqual({ labels: new Map(), available: false });
+    expect(await privateChannelsFor(deps as never, "U0SHARED", ["C0SHARED"])).toEqual(new Set());
+    expect(channelInfo).not.toHaveBeenCalled(); expect(channelMembers).not.toHaveBeenCalled();
+  }
+});
