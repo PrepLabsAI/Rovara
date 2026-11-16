@@ -66,14 +66,31 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const args = browserEvidenceExecutorArgs({ image, sandbox, name: capture, seccompProfile: verifyExecutorSeccompProfile(repoExecutorSeccompProfilePath()), plan });
       const detached = docker(["run", "--detach", ...args.slice(1)]);
       expect(detached.status, detached.stderr.toString()).toBe(0);
-      const scan = "const n=require('net');const open=[];let left=0;for(let p=1024;p<=65535;p++){left++;const s=n.connect({host:'127.0.0.1',port:p});s.once('connect',()=>{open.push(p);s.destroy();if(--left===0)done()});s.once('error',()=>{if(--left===0)done()});}function done(){console.log(JSON.stringify(open));process.exit(0)}setTimeout(()=>{console.log(JSON.stringify(open));process.exit(0)},20000)";
+      // Two looks from inside the sandbox, which shares the capture's network namespace. (1) Every TCP socket in LISTEN state, on any address, IPv4 and IPv6, as the namespace's own /proc/net lists it.
+      // (2) A connect to every port above 1023 on the loopback. A connection whose local port IS the port it was aimed at is the scanner's own socket connected to itself (TCP simultaneous open on Linux:
+      // a connect to a port in the ephemeral range can be given that same port as its source, and only when nothing is bound there), so it is not a listener; any other accepted connection is.
+      const listeners = "const fs=require('fs');const out=new Set();for(const f of ['/proc/net/tcp','/proc/net/tcp6']){let t;try{t=fs.readFileSync(f,'utf8')}catch(e){if(f==='/proc/net/tcp')throw e;continue}for(const l of t.trim().split('\\n').slice(1)){const c=l.trim().split(/\\s+/);if(c[3]==='0A')out.add(parseInt(c[1].split(':').pop(),16))}}console.log(JSON.stringify([...out].sort((a,b)=>a-b)))";
+      const scan = "const n=require('net');const open=[];let left=0;for(let p=1024;p<=65535;p++){left++;const s=n.connect({host:'127.0.0.1',port:p});s.once('connect',()=>{if(s.localPort!==p)open.push(p);s.destroy();if(--left===0)done()});s.once('error',()=>{if(--left===0)done()});}function done(){console.log(JSON.stringify(open));process.exit(0)}setTimeout(()=>{console.log(JSON.stringify(open));process.exit(0)},20000)";
+      const lastJson = (out: Buffer): number[] => JSON.parse(out.toString("utf8").trim().split("\n").at(-1) ?? "[]") as number[];
+      let listening: number[] = [];
       let open: number[] = [];
-      // The browser needs a moment to start; look several times while the capture runs and keep what was ever open.
+      // Whether the capture's Chromium is running right now (its processes as the host lists them).
+      const browserUp = (): boolean => { const top = docker(["top", capture, "-eo", "comm"]); return top.status === 0 && /chrom|headless_shell/u.test(top.stdout.toString("utf8")); };
+      let looked = 0;
+      // The browser needs a moment to start; look several times while the capture runs and keep what was ever seen. A look counts only when the browser was up before and after it.
       for (let look = 0; look < 4; look += 1) {
         spawnSync("sleep", ["2"]);
+        const upBefore = browserUp();
+        const table = docker(["exec", sandbox, "node", "-e", listeners], 60_000);
+        expect(table.status, table.stderr.toString()).toBe(0);
+        listening = [...new Set([...listening, ...lastJson(table.stdout)])];
         const seen = docker(["exec", sandbox, "node", "-e", scan], 60_000);
-        if (seen.status === 0) open = [...new Set([...open, ...(JSON.parse(seen.stdout.toString("utf8").trim().split("\n").at(-1) ?? "[]") as number[])])];
+        if (seen.status === 0) open = [...new Set([...open, ...lastJson(seen.stdout)])];
+        if (upBefore && seen.status === 0 && table.status === 0 && browserUp()) looked += 1;
       }
+      // At least one full look happened while the capture's browser was running, so a port it opened would have been seen.
+      expect(looked).toBeGreaterThan(0);
+      expect(listening).toEqual([port]);
       expect(open).toEqual([port]);
     } finally {
       docker(["rm", "--force", capture]);
