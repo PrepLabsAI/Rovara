@@ -2,8 +2,6 @@
 // command, opens the changed pages in a headless Chromium on the base code and on the candidate, and attaches the before and after screenshots to the evidence. This file holds what
 // every side agrees on: the project setting (off by default), the route recipe, which changed pages are picked, the masks, the caps, the fixed words, the evidence-pack check and the
 // pull request's lines. Visual evidence only: the check's kind is `visual`, which never counts toward the change proof.
-// Slice 4 adds video on failure: a video of a page that failed or showed errors, only for a project whose recipe says its app shows fixture data only (a video cannot be masked frame by frame), never
-// for an app behind a login, kept under the evidence store's `webm` rules, and shown only as a download behind sign-in.
 // Browser-safe and pure: nothing here imports a Node module.
 import { z } from "zod";
 import { ArtifactRefSchema, EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_CHECKS_MAX, EVIDENCE_NOT_TESTED_MAX, type ArtifactRef, type EvidenceCheckV2, type EvidencePackV2 } from "./evidence.js";
@@ -44,15 +42,6 @@ export const BROWSER_EVIDENCE_RUN_MS = 120_000;
 export const BROWSER_EVIDENCE_PAGE_MS = 15_000;
 /** Text longer than this is masked whole rather than scanned. */
 export const BROWSER_EVIDENCE_TEXT_SCAN_MAX = 200_000;
-/** Video on failure (slice 4): one video, how many a run keeps, and all of them together. A video is of one page's own load, so it is also bounded by the page's time (`BROWSER_EVIDENCE_PAGE_MS`). */
-export const BROWSER_EVIDENCE_VIDEO_MAX_BYTES = 2 * 1_048_576;
-export const BROWSER_EVIDENCE_VIDEOS_MAX = 2;
-export const BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES = 4 * 1_048_576;
-/** The recording's frame size: small on purpose (it holds the size down; the pictures are the evidence, the video only shows what went wrong). */
-export const BROWSER_EVIDENCE_VIDEO_SIZE = Object.freeze({ width: 640, height: 360 });
-/** The first bytes of a WebM file (an EBML header). */
-const WEBM_MAGIC = [0x1a, 0x45, 0xdf, 0xa3] as const;
-export const isWebm = (bytes: Uint8Array): boolean => bytes.byteLength >= WEBM_MAGIC.length && WEBM_MAGIC.every((value, index) => bytes[index] === value);
 
 // ---- the recipe
 
@@ -131,33 +120,16 @@ export const BrowserEvidenceSuggestionSchema = z.object({
 }).strict();
 export type BrowserEvidenceSuggestion = z.infer<typeof BrowserEvidenceSuggestionSchema>;
 
-/**
- * Slice 4, the admin's choice to keep a video of a page that failed. A screenshot is masked by reading and rewriting the page's text before the one picture is taken; a video records the live page from the first frame,
- * where nothing has been scrubbed, so it cannot be masked the same way. It is therefore allowed only when the recipe says, in so many words, that the app shows fixture data only (`fixtureDataOnly: true`). The setup agent
- * never proposes it (it is not part of `BrowserEvidenceSuggestionSchema`): it is the owner's own act on the recipe page.
- */
-export const BrowserEvidenceVideoSchema = z.object({ fixtureDataOnly: z.literal(true) }).strict();
-export type BrowserEvidenceVideo = z.infer<typeof BrowserEvidenceVideoSchema>;
-
 export const BrowserEvidenceRecipeSchema = z.object({
   ...BrowserEvidenceSuggestionSchema.shape,
   mask: z.array(SelectorSchema).max(BROWSER_EVIDENCE_MASK_SELECTORS_MAX).optional(),
   /** Slice 3: the sign-in for an app behind a login. Absent: today's recipe, byte for byte. */
   signIn: BrowserEvidenceSignInSchema.optional(),
-  /** Slice 4: keep a video of a page that fails. Absent: no video is ever recorded. */
-  video: BrowserEvidenceVideoSchema.optional(),
 }).strict().superRefine((recipe, context) => {
-  // A sign-in types a saved account into the page, and the recording would hold it: no video for an app behind a login.
-  if (recipe.video !== undefined && recipe.signIn !== undefined) context.addIssue({ code: "custom", path: ["video"], message: "no video for an app behind a login" });
   // The sign-in's two fields are added to the painted-over elements, so they share the run's selector cap.
   if (recipe.signIn !== undefined && (recipe.mask?.length ?? 0) + 2 > BROWSER_EVIDENCE_MASK_SELECTORS_MAX) context.addIssue({ code: "custom", path: ["mask"], message: "leave room for the sign-in's two fields" });
 });
 export type BrowserEvidenceRecipe = z.infer<typeof BrowserEvidenceRecipeSchema>;
-/** Whether a recipe asks for video on failure. Fails closed: only a recipe that parses whole, with `video: { fixtureDataOnly: true }` and no sign-in, wants one. */
-export function browserEvidenceVideoWanted(recipe: unknown): boolean {
-  const parsed = BrowserEvidenceRecipeSchema.safeParse(recipe);
-  return parsed.success && parsed.data.video !== undefined;
-}
 
 // ---- fixed reasons and words
 
@@ -180,27 +152,6 @@ export const BROWSER_EVIDENCE_NOT_RUN_WORDS: Record<BrowserEvidenceNotRunReason,
   sign_in_not_set: "no sign-in is saved for this project",
   sign_in_failed: "the sign-in did not work",
 };
-/** Why a video of a failed page is not kept. Fixed words, never an error's own text. */
-export const BROWSER_EVIDENCE_VIDEO_NOT_KEPT_REASONS = ["over_size_cap", "withheld", "not_recorded", "not_stored"] as const;
-export type BrowserEvidenceVideoNotKeptReason = (typeof BROWSER_EVIDENCE_VIDEO_NOT_KEPT_REASONS)[number];
-export const BROWSER_EVIDENCE_VIDEO_NOT_KEPT_WORDS: Record<BrowserEvidenceVideoNotKeptReason, string> = {
-  over_size_cap: "over the size cap",
-  withheld: "withheld, a page may have shown a secret or personal data",
-  not_recorded: "the recording could not be made",
-  not_stored: "it could not be stored",
-};
-export const BROWSER_EVIDENCE_VIDEO_CHECK_ID = "browser_evidence_video";
-const VIDEO_CHECK_LABEL = "Browser evidence video";
-/**
- * The pages whose failure a video is kept for: one that did not load (a 404, a 500, no answer). Deliberately NOT `capture_failed` or `time_limit`, and never `masked_content`: for those the page's text was never read and
- * verified (the scrub could not finish, or the page never yielded), so nothing says it held no secret, and a recording of it would show whatever it held.
- */
-const VIDEO_FAILURE_REASONS: readonly BrowserEvidenceNotRunReason[] = ["page_did_not_load"];
-/** Whether a page's result is one a video may be kept for: a page that failed, or that showed console errors after the change. Nothing else is. */
-export function browserEvidenceVideoEligible(result: { status: "not_run"; reason: BrowserEvidenceNotRunReason } | { status: "shown"; consoleErrors: { after: number } }): boolean {
-  return result.status === "not_run" ? VIDEO_FAILURE_REASONS.includes(result.reason) : result.consoleErrors.after > 0;
-}
-
 /** Why a changed page was not opened at all. */
 export const BROWSER_EVIDENCE_NOT_SHOWN_REASONS = ["over_route_cap", "dynamic_route"] as const;
 export type BrowserEvidenceNotShownReason = (typeof BROWSER_EVIDENCE_NOT_SHOWN_REASONS)[number];
@@ -399,34 +350,30 @@ export function scrubVisibleText(text: string): string {
 type Count = number;
 /** The runner's result, with the screenshots' bytes (the verifier writes it, the broker stores the bytes and turns it into an outcome). */
 export type BrowserEvidenceShot = { sha256: string; bytes: Uint8Array };
-/** Slice 4: a page that failed (or showed errors after the change) may carry the video of its load, or the fixed reason there is none. Never both; never on any other page. */
-type VideoOf<Video> = { video?: Video; videoNotKept?: BrowserEvidenceVideoNotKeptReason };
-export type BrowserEvidenceRouteResult<Shot, Video = Shot> =
-  | ({ route: string; status: "shown"; before: Shot; after: Shot; consoleErrors: { before: Count; after: Count } } & VideoOf<Video>)
-  | ({ route: string; status: "not_run"; reason: BrowserEvidenceNotRunReason } & VideoOf<Video>);
-type RunResult<Shot, Video = Shot> = {
+export type BrowserEvidenceRouteResult<Shot> =
+  | { route: string; status: "shown"; before: Shot; after: Shot; consoleErrors: { before: Count; after: Count } }
+  | { route: string; status: "not_run"; reason: BrowserEvidenceNotRunReason };
+type RunResult<Shot> = {
   isolation: BrowserEvidenceIsolation;
   durationMs: number;
-  routes: Array<BrowserEvidenceRouteResult<Shot, Video>>;
+  routes: Array<BrowserEvidenceRouteResult<Shot>>;
   notShown: BrowserEvidenceNotShown[];
   moreNotShown: number;
   /** The whole run did not happen (no page was opened). */
   notRun?: BrowserEvidenceNotRunReason;
 };
 export type BrowserEvidenceCaptured = RunResult<BrowserEvidenceShot>;
-/** What the pack and the pull request are written from: the screenshots (and videos) as stored refs. */
+/** What the pack and the pull request are written from: the screenshots as stored refs. */
 export type BrowserEvidenceOutcome = RunResult<ArtifactRef>;
 
 const CountSchema = z.number().int().min(0).max(1_000_000);
 const JpegRefSchema = ArtifactRefSchema.refine((ref) => ref.kind === "jpeg", "a screenshot is a JPEG");
-const WebmRefSchema = ArtifactRefSchema.refine((ref) => ref.kind === "webm" && ref.bytes > 0 && ref.bytes <= BROWSER_EVIDENCE_VIDEO_MAX_BYTES, "a video is a WebM within the video cap");
-const NotKeptSchema = z.enum(BROWSER_EVIDENCE_VIDEO_NOT_KEPT_REASONS);
 const OutcomeBaseSchema = z.object({
   isolation: z.enum(BROWSER_EVIDENCE_ISOLATIONS),
   durationMs: z.number().int().min(0).max(86_400_000),
   routes: z.array(z.discriminatedUnion("status", [
-    z.object({ route: RouteSchema, status: z.literal("shown"), before: JpegRefSchema, after: JpegRefSchema, consoleErrors: z.object({ before: CountSchema, after: CountSchema }).strict(), video: WebmRefSchema.optional(), videoNotKept: NotKeptSchema.optional() }).strict(),
-    z.object({ route: RouteSchema, status: z.literal("not_run"), reason: z.enum(BROWSER_EVIDENCE_NOT_RUN_REASONS), video: WebmRefSchema.optional(), videoNotKept: NotKeptSchema.optional() }).strict(),
+    z.object({ route: RouteSchema, status: z.literal("shown"), before: JpegRefSchema, after: JpegRefSchema, consoleErrors: z.object({ before: CountSchema, after: CountSchema }).strict() }).strict(),
+    z.object({ route: RouteSchema, status: z.literal("not_run"), reason: z.enum(BROWSER_EVIDENCE_NOT_RUN_REASONS) }).strict(),
   ])).max(BROWSER_EVIDENCE_ROUTES_MAX),
   notShown: z.array(z.object({ route: RouteSchema, reason: z.enum(BROWSER_EVIDENCE_NOT_SHOWN_REASONS) }).strict()).max(BROWSER_EVIDENCE_NOT_SHOWN_MAX),
   moreNotShown: CountSchema,
@@ -435,31 +382,21 @@ const OutcomeBaseSchema = z.object({
 const OutcomeSchema = OutcomeBaseSchema.superRefine((outcome, context) => {
   if (new Set(outcome.routes.map((row) => row.route)).size !== outcome.routes.length) context.addIssue({ code: "custom", message: "routes are unique" });
   if (outcome.notRun !== undefined && outcome.routes.length > 0) context.addIssue({ code: "custom", message: "a run that did not happen has no routes" });
-  if (outcome.routes.some((row) => row.video !== undefined && row.videoNotKept !== undefined)) context.addIssue({ code: "custom", message: "a page has a video or a reason there is none, not both" });
-  if (outcome.routes.filter((row) => row.video !== undefined).length > BROWSER_EVIDENCE_VIDEOS_MAX) context.addIssue({ code: "custom", message: "a run keeps at most the run's number of videos" });
-  if (outcome.routes.reduce((sum, row) => sum + (row.video?.bytes ?? 0), 0) > BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES) context.addIssue({ code: "custom", message: "a run keeps at most the run's video byte budget" });
 });
 
 const INVALID = "browser evidence outcome is not valid";
 
 const ShotSchema = z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/u), bytes: z.instanceof(Uint8Array).refine((bytes) => bytes.byteLength > 0 && bytes.byteLength <= BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES) }).strict();
-const VideoShotSchema = z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/u), bytes: z.instanceof(Uint8Array).refine((bytes) => bytes.byteLength > 0 && bytes.byteLength <= BROWSER_EVIDENCE_VIDEO_MAX_BYTES && isWebm(bytes)) }).strict();
 const CapturedSchema = OutcomeBaseSchema.extend({
   routes: z.array(z.discriminatedUnion("status", [
-    z.object({ route: RouteSchema, status: z.literal("shown"), before: ShotSchema, after: ShotSchema, consoleErrors: z.object({ before: CountSchema, after: CountSchema }).strict(), video: VideoShotSchema.optional(), videoNotKept: NotKeptSchema.optional() }).strict(),
-    z.object({ route: RouteSchema, status: z.literal("not_run"), reason: z.enum(BROWSER_EVIDENCE_NOT_RUN_REASONS), video: VideoShotSchema.optional(), videoNotKept: NotKeptSchema.optional() }).strict(),
+    z.object({ route: RouteSchema, status: z.literal("shown"), before: ShotSchema, after: ShotSchema, consoleErrors: z.object({ before: CountSchema, after: CountSchema }).strict() }).strict(),
+    z.object({ route: RouteSchema, status: z.literal("not_run"), reason: z.enum(BROWSER_EVIDENCE_NOT_RUN_REASONS) }).strict(),
   ])).max(BROWSER_EVIDENCE_ROUTES_MAX),
 }).superRefine((captured, context) => {
   if (new Set(captured.routes.map((row) => row.route)).size !== captured.routes.length) context.addIssue({ code: "custom", message: "routes are unique" });
   if (captured.notRun !== undefined && captured.routes.length > 0) context.addIssue({ code: "custom", message: "a run that did not happen has no routes" });
   const total = captured.routes.reduce((sum, row) => sum + (row.status === "shown" ? row.before.bytes.byteLength + row.after.bytes.byteLength : 0), 0);
   if (total > BROWSER_EVIDENCE_TOTAL_MAX_BYTES) context.addIssue({ code: "custom", message: "a run keeps at most the run's byte budget" });
-  if (captured.routes.some((row) => row.video !== undefined && row.videoNotKept !== undefined)) context.addIssue({ code: "custom", message: "a page has a video or a reason there is none, not both" });
-  const videos = captured.routes.flatMap((row) => (row.video === undefined ? [] : [row.video.bytes.byteLength]));
-  if (videos.length > BROWSER_EVIDENCE_VIDEOS_MAX) context.addIssue({ code: "custom", message: "a run keeps at most the run's number of videos" });
-  if (videos.reduce((sum, size) => sum + size, 0) > BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES) context.addIssue({ code: "custom", message: "a run keeps at most the run's video byte budget" });
-  // A video is kept only for a page that failed or showed errors (never a healthy page, never one withheld for what it showed): the producer's own rule, held again here.
-  if (captured.routes.some((row) => (row.video !== undefined || row.videoNotKept !== undefined) && !browserEvidenceVideoEligible(row))) context.addIssue({ code: "custom", message: "a video is kept only for a page that failed" });
 });
 /** The runner's result checked whole before anything of it is stored: the shape, every shot within the screenshot cap, and all of them within the run's budget. Throws otherwise. */
 export function checkedBrowserEvidenceCaptured(captured: unknown): BrowserEvidenceCaptured {
@@ -477,7 +414,7 @@ function checkedOutcome(outcome: unknown): BrowserEvidenceOutcome {
  * The evidence-pack check (v2) and its not-tested rows. Always kind `visual`, run by Rovara in the sandbox stage, so it never counts toward the change proof (check-kinds.ts). One pair per shown
  * route. A run that showed nothing is `not_run` with no pairs. Throws on an outcome it does not understand rather than writing a guess.
  */
-export function browserEvidenceCheck(outcome: BrowserEvidenceOutcome): { check: EvidenceCheckV2; videoCheck?: EvidenceCheckV2; notTested: EvidencePackV2["notTested"] } {
+export function browserEvidenceCheck(outcome: BrowserEvidenceOutcome): { check: EvidenceCheckV2; notTested: EvidencePackV2["notTested"] } {
   const checked = checkedOutcome(outcome);
   const shown = checked.routes.filter((row): row is Extract<BrowserEvidenceRouteResult<ArtifactRef>, { status: "shown" }> => row.status === "shown");
   const any = shown.length > 0;
@@ -487,20 +424,13 @@ export function browserEvidenceCheck(outcome: BrowserEvidenceOutcome): { check: 
     before: any ? "passed" : "not_run", after: any ? "passed" : "not_run", class: "not_rerun", durationMs: checked.durationMs,
     ...(any ? { pairs: shown.map((row) => ({ id: row.route, before: row.before, after: row.after })) } : {}),
   };
-  // Slice 4: the videos of failed pages are a check of their own (the same `visual` kind, so never proof): one pair per kept video, the video as its `after`. Neither outcome is claimed (`unknown`): a recording is not a result.
-  const videos = checked.routes.flatMap((row) => (row.video === undefined ? [] : [{ id: row.route, after: row.video }]));
-  const videoCheck: EvidenceCheckV2 | undefined = videos.length === 0 ? undefined : {
-    id: BROWSER_EVIDENCE_VIDEO_CHECK_ID, kind: "visual", label: VIDEO_CHECK_LABEL, ...(checked.isolation === "sandbox" ? { stage: "sandbox" as const } : {}), runBy: "rovara",
-    before: "not_run", after: "unknown", class: "not_rerun", durationMs: checked.durationMs, pairs: videos,
-  };
   const notTested: EvidencePackV2["notTested"] = [
     ...(checked.notRun === undefined ? [] : [{ what: CHECK_LABEL, reason: `Not run: ${BROWSER_EVIDENCE_NOT_RUN_WORDS[checked.notRun]}` }]),
     ...checked.routes.flatMap((row) => (row.status === "not_run" ? [{ what: `${CHECK_LABEL}: ${row.route}`, reason: `Not run: ${BROWSER_EVIDENCE_NOT_RUN_WORDS[row.reason]}` }] : [])),
     ...checked.notShown.map((row) => ({ what: `${CHECK_LABEL}: ${row.route}`, reason: `Not shown: ${BROWSER_EVIDENCE_NOT_SHOWN_WORDS[row.reason]}` })),
     ...(checked.moreNotShown > 0 ? [{ what: `${CHECK_LABEL}: ${String(checked.moreNotShown)} more changed pages`, reason: `Not shown: ${BROWSER_EVIDENCE_NOT_SHOWN_WORDS.over_route_cap}` }] : []),
-    ...checked.routes.flatMap((row) => (row.videoNotKept === undefined ? [] : [{ what: `${VIDEO_CHECK_LABEL}: ${row.route}`, reason: `Not kept: ${BROWSER_EVIDENCE_VIDEO_NOT_KEPT_WORDS[row.videoNotKept]}` }])),
   ];
-  return { check, ...(videoCheck === undefined ? {} : { videoCheck }), notTested };
+  return { check, notTested };
 }
 
 /**
@@ -509,11 +439,10 @@ export function browserEvidenceCheck(outcome: BrowserEvidenceOutcome): { check: 
  */
 export function addBrowserEvidenceToPack(pack: EvidencePackV2, outcome: BrowserEvidenceOutcome | undefined): EvidencePackV2 {
   if (outcome === undefined) return pack;
-  const { check, videoCheck, notTested } = browserEvidenceCheck(outcome);
-  const added = videoCheck === undefined ? [check] : [check, videoCheck];
-  if (pack.checks.some((entry) => entry.id === BROWSER_EVIDENCE_CHECK_ID || entry.id === BROWSER_EVIDENCE_VIDEO_CHECK_ID) || pack.producer.isolation !== outcome.isolation
-    || pack.checks.length + added.length > EVIDENCE_CHECKS_MAX || pack.notTested.length + notTested.length > EVIDENCE_NOT_TESTED_MAX) throw new Error(INVALID);
-  return { ...pack, checks: [...pack.checks, ...added], notTested: [...pack.notTested, ...notTested] };
+  const { check, notTested } = browserEvidenceCheck(outcome);
+  if (pack.checks.some((entry) => entry.id === BROWSER_EVIDENCE_CHECK_ID) || pack.producer.isolation !== outcome.isolation
+    || pack.checks.length + 1 > EVIDENCE_CHECKS_MAX || pack.notTested.length + notTested.length > EVIDENCE_NOT_TESTED_MAX) throw new Error(INVALID);
+  return { ...pack, checks: [...pack.checks, check], notTested: [...pack.notTested, ...notTested] };
 }
 
 // ---- the pull request
@@ -532,15 +461,12 @@ export function browserEvidenceLines(outcome: BrowserEvidenceOutcome | undefined
   const link = typeof options.taskLink === "string" && options.taskLink.length <= TASK_LINK_MAX && TASK_LINK.test(options.taskLink) ? options.taskLink : undefined;
   const where = link === undefined ? " (on the task page, behind sign-in)" : ` (view behind sign-in: ${link})`;
   const errors = (count: number) => (count === 0 ? "" : `, ${String(count)} console error${count === 1 ? "" : "s"} after`);
-  // Slice 4: a failed page's video, said in words only (kept, behind sign-in; or the fixed reason it is not). Where the file is, and its digest, are never written.
-  const video = (row: { video?: unknown; videoNotKept?: BrowserEvidenceVideoNotKeptReason }) => (row.video !== undefined ? " Video of the failure: kept (download behind sign-in)."
-    : row.videoNotKept !== undefined ? ` Video of the failure: Not kept: ${BROWSER_EVIDENCE_VIDEO_NOT_KEPT_WORDS[row.videoNotKept]}.` : "");
   return [
     `${CHECK_LABEL}: ${BROWSER_EVIDENCE_RUN_BY_WORDS[checked.isolation]}. ${BROWSER_EVIDENCE_NOT_PROOF_WORDS}`,
     ...(checked.notRun === undefined ? [] : [`- Not run: ${BROWSER_EVIDENCE_NOT_RUN_WORDS[checked.notRun]}`]),
     ...checked.routes.map((row) => (row.status === "shown"
-      ? `- \`${row.route}\`: before and after screenshots${errors(row.consoleErrors.after)}${where}${video(row)}`
-      : `- \`${row.route}\`: Not run: ${BROWSER_EVIDENCE_NOT_RUN_WORDS[row.reason]}${video(row)}`)),
+      ? `- \`${row.route}\`: before and after screenshots${errors(row.consoleErrors.after)}${where}`
+      : `- \`${row.route}\`: Not run: ${BROWSER_EVIDENCE_NOT_RUN_WORDS[row.reason]}`)),
     ...checked.notShown.map((row) => `- \`${row.route}\`: Not shown: ${BROWSER_EVIDENCE_NOT_SHOWN_WORDS[row.reason]}`),
     ...(checked.moreNotShown > 0 ? [`- ${String(checked.moreNotShown)} more changed pages not shown: ${BROWSER_EVIDENCE_NOT_SHOWN_WORDS.over_route_cap}`] : []),
   ];

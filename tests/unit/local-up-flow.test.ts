@@ -35,7 +35,7 @@ import { registerConnectionsCommand, registerModelsCommand, registerDiagnosisCom
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, encodeBrowserEvidenceUpload, type BrowserEvidenceCaptured } from "../../packages/contracts/src/index.js";
+import { BROWSER_EVIDENCE_FEATURE, encodeBrowserEvidenceUpload, type BrowserEvidenceCaptured } from "../../packages/contracts/src/index.js";
 import { BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_RETRY_REASON, workflowAutoFixCounts, type Admission } from "@agentx/contracts";
 import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
@@ -2415,79 +2415,6 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect(body).toContain("`/checkout`: before and after screenshots (on the task page, behind sign-in)");
     expect(body).not.toContain(shot("a").sha256);
     expect(body).not.toMatch(/!\[|<img|\/evidence\//u);
-  });
-
-  it("browser evidence slice 4: a recipe with video asks for the video feature too, keeps the video of a failed page, serves it only as a download behind the session, and says in text that one is kept; an older worker without the video feature is refused", async () => {
-    const recipe = { startCommand: "npm run start", port: 4321, readyPath: "/health", routes: [{ path: "/checkout", files: ["src/**"] }, { path: "/settings", files: ["src/**"] }], video: { fixtureDataOnly: true } };
-    const h = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" }, config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: recipe } } } });
-    const { taskId, workspaceId, seen, coding } = await toCoding(h);
-    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
-    const tree = h.model.revision(commit).tree;
-    const digest = createCandidateManifest(candidateOf(tree, h.base, commit)).digest;
-    const check = (after: string, cls: string) => ({ id: "readiness:0", label: "npm test", source: "project", before: "passed", after, class: cls, output: after === "failed" ? "1 failing" : "", durationMs: 5, exitCode: after === "failed" ? 1 : 0 });
-    const withCheck = (entry: object, status: string) => { const r = builtResult(tree, h.base, commit); (r.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status, source: "project", notVerifiedReason: undefined, checks: [entry] }; return r; };
-    const owner = (await taskRecord(h, taskId)) as unknown as { ownerKey: string };
-    await h.callback(coding, "result", withCheck(check("failed", "regression"), "regression"));
-    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
-    const rerun = await h.nextJob(workspaceId, seen);
-    expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", browserEvidence: recipe } });
-    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${rerun.operationId}` }))!;
-    expect((operation["dispatch"] as { requires: string[] }).requires).toEqual(expect.arrayContaining([BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE]));
-    const jpeg = (seed: string) => { const bytes = new Uint8Array(70_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
-    const webm = (seed: string) => { const bytes = new Uint8Array(90_000); bytes.set([0x1a, 0x45, 0xdf, 0xa3]); bytes.fill(seed.charCodeAt(0), 4); return bytes; };
-    const shot = (seed: string) => ({ bytes: jpeg(seed), sha256: createHash("sha256").update(jpeg(seed)).digest("hex") });
-    const clip = { bytes: webm("v"), sha256: createHash("sha256").update(webm("v")).digest("hex") };
-    const run: BrowserEvidenceCaptured = { isolation: "sandbox", durationMs: 4_000, notShown: [], moreNotShown: 0, routes: [
-      { route: "/checkout", status: "shown", before: shot("a"), after: shot("b"), consoleErrors: { before: 0, after: 0 } },
-      { route: "/settings", status: "not_run", reason: "page_did_not_load", video: clip }] };
-    const bytes = Buffer.from(encodeBrowserEvidenceUpload(run));
-    const sha = createHash("sha256").update(bytes).digest("hex");
-    const chunkCount = Math.ceil(bytes.byteLength / 65_536);
-    const init = await h.callback(rerun, "browser-evidence", { stage: "init", totalBytes: bytes.byteLength, chunkCount, sha256: sha });
-    expect(init.status).toBe(200);
-    const uploadId = (init.body as unknown as { uploadId: string }).uploadId;
-    for (let index = 0; index < chunkCount; index += 1) {
-      const chunk = bytes.subarray(index * 65_536, Math.min((index + 1) * 65_536, bytes.byteLength));
-      expect((await h.callback(rerun, "browser-evidence", { stage: "chunk", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") })).status).toBe(200);
-    }
-    expect((await h.callback(rerun, "browser-evidence", { stage: "finalize", uploadId, sha256: sha })).status).toBe(200);
-    await h.callback(rerun, "result", withCheck(check("passed", "passing"), "verified"));
-    const taskView = { ownerKey: owner.ownerKey, workspaceId, taskId };
-    const panel = await h.runtime.app.evidence.browserEvidencePanelOf(taskView, digest);
-    expect(panel).toMatchObject({ pairs: [{ route: "/checkout", before: shot("a").sha256, after: shot("b").sha256 }], videos: [{ route: "/settings", sha256: clip.sha256 }] });
-    const link = await h.browse(`/proof/${taskId}`);
-    const prefix = link.pathname.replace(/\/proof\/.*$/, "");
-    const page = await raw_(h, link);
-    expect(page.body).toContain(`${prefix}/proof/${taskId}/evidence-video/${clip.sha256}`);
-    expect(page.body).not.toMatch(/<video/iu);
-    // The video is a download behind the session, of the right type, and the picture route never serves it.
-    const download = await raw(h.runtime.pagesUrl, { path: `${prefix}/proof/${taskId}/evidence-video/${clip.sha256}`, headers: { host: link.host } });
-    expect(download.status).toBe(200);
-    expect(download.headers["content-type"]).toBe("video/webm");
-    expect(String(download.headers["content-disposition"])).toMatch(/^attachment/u);
-    expect(download.headers["content-length"]).toBe("90000");
-    expect((await raw(h.runtime.pagesUrl, { path: `${prefix}/proof/${taskId}/evidence/${clip.sha256}`, headers: { host: link.host } })).status).toBe(404);
-    expect((await raw(h.runtime.pagesUrl, { path: `${prefix}/proof/${taskId}/evidence-video/${shot("a").sha256}`, headers: { host: link.host } })).status).toBe(404);
-    expect((await raw(h.runtime.pagesUrl, { path: `/proof/${taskId}/evidence-video/${clip.sha256}`, headers: { host: link.host } })).status).toBe(404);
-    // The pull request says it in text only.
-    const review = await h.nextJob(workspaceId, seen);
-    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
-    const publish = await h.nextJob(workspaceId, seen);
-    const body = (publish.payload as { body?: string }).body ?? "";
-    expect(body).toContain("`/settings`: Not run: the page did not load Video of the failure: kept (download behind sign-in).");
-    expect(body).not.toContain(clip.sha256);
-    expect(body).not.toMatch(/webm|<video|!\[|\/evidence-video\//iu);
-    // An older worker (it lists browser evidence but not the video feature) is refused the rerun, never sent a field it cannot read.
-    const older = await launch({ host: true, readiness: true, environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" }, features: [...WORKER_INVOCATION_FEATURES].filter((feature) => feature !== BROWSER_EVIDENCE_VIDEO_FEATURE), config: { version: 1, plugins: [], projectSettings: { payments: { browserEvidence: recipe } } } });
-    const o = await toCoding(older);
-    const oCommit = older.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
-    const oFailing = builtResult(older.model.revision(oCommit).tree, older.base, oCommit);
-    (oFailing.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: "regression", source: "project", notVerifiedReason: undefined, checks: [check("failed", "regression")] };
-    await older.callback(o.coding, "result", oFailing);
-    await older.api(`/v1/dev/tasks/${o.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } });
-    await older.nextJob(o.workspaceId, o.seen).catch(() => undefined);
-    const operations = await older.runtime.registry.require("storage").query({ pk: `WORKSPACE#${o.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
-    expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("this worker is too old to run this step; upgrade it");
   });
 
   it("browser evidence is off without the owner's recipe, and a worker that does not list the feature is refused the step cleanly", async () => {

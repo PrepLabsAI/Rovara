@@ -7,8 +7,7 @@ import type { Browser } from "playwright-core";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
 import {
-  BrowserEvidenceExecutorLineSchema, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_SIGN_IN_ENV, BROWSER_EVIDENCE_VIDEOS_MAX, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES,
-  browserEvidenceVideoEligible, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceSignInEnv, isWebm, withDefaultMasks,
+  BrowserEvidenceExecutorLineSchema, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_SIGN_IN_ENV, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceSignInEnv, withDefaultMasks,
   type BrowserEvidenceExecutorLine, type BrowserEvidenceExecutorPlan,
 } from "@agentx/contracts";
 import type { BrowserEvidenceDriver } from "./browser-evidence.js";
@@ -62,59 +61,26 @@ export async function runCapture(plan: BrowserEvidenceExecutorPlan, deps: Captur
   lines.push({ t: "app", status });
   if (status !== "ready") return lines;
   const maskSelectors = withDefaultMasks(plan.maskSelectors);
-  const recording = plan.video === true;
-  const taken: Array<{ line: BrowserEvidenceExecutorLine; video?: Uint8Array }> = [];
+  let printed = 0;
   for (const route of plan.routes) {
     const left = deadline - now();
     let line: BrowserEvidenceExecutorLine = { t: "shot", route, ok: false, reason: "time_limit" };
-    let video: Uint8Array | undefined;
     if (left > 0) {
       try {
-        const answer = await deps.driver.capture("after", route, { maskSelectors, timeoutMs: Math.min(plan.pageMs, left), ...(recording ? { video: true as const } : {}) });
+        const answer = await deps.driver.capture("after", route, { maskSelectors, timeoutMs: Math.min(plan.pageMs, left) });
         if (answer.ok) line = { t: "shot", route, ok: true, consoleErrors: answer.consoleErrors, jpegBase64: Buffer.from(answer.bytes).toString("base64") };
         else line = { t: "shot", route, ok: false, reason: answer.reason };
-        // A page the driver calls "withheld" (a mask had to rewrite its text, or it could not be read) was not showing fixture data only, healthy or not: the line says so, and it takes every recording of this side with it.
-        if (recording && answer.videoNotKept === "withheld") line = { ...line, videoNotKept: "withheld" };
-        // A recording is believed only when the plan asked for one, and only for a page that failed to load or showed errors (the same rule the runner holds it to).
-        else if (recording && videoAllowed(line)) {
-          const asked: unknown = answer.video;
-          if (asked instanceof Uint8Array) {
-            if (asked.byteLength > BROWSER_EVIDENCE_VIDEO_MAX_BYTES) line = { ...line, videoNotKept: "over_size_cap" };
-            else if (asked.byteLength === 0 || !isWebm(asked)) line = { ...line, videoNotKept: "not_recorded" };
-            else video = asked;
-          } else if (answer.videoNotKept === "over_size_cap") line = { ...line, videoNotKept: "over_size_cap" };
-        }
-      } catch { line = { t: "shot", route, ok: false, reason: "capture_failed" }; video = undefined; }
-    }
-    taken.push({ line, ...(video === undefined ? {} : { video }) });
-  }
-  // One page withheld for what it showed takes every recording of this side with it (a recording cannot be masked, and a page that showed a secret in an app said to hold fixture data only means none can be trusted).
-  const leaked = taken.some((row) => row.line.t === "shot" && ((!row.line.ok && row.line.reason === "masked_content") || row.line.videoNotKept === "withheld"));
-  let videos = 0;
-  let videoBytes = 0;
-  let printed = 0;
-  for (const row of taken) {
-    let line = row.line;
-    if (row.video !== undefined && line.t === "shot") {
-      if (leaked) line = { ...line, videoNotKept: "withheld" };
-      else if (videos + 1 > BROWSER_EVIDENCE_VIDEOS_MAX || videoBytes + row.video.byteLength > BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES) line = { ...line, videoNotKept: "over_size_cap" };
-      else { videos += 1; videoBytes += row.video.byteLength; line = { ...line, videoBase64: Buffer.from(row.video).toString("base64") }; }
+      } catch { line = { t: "shot", route, ok: false, reason: "capture_failed" }; }
     }
     // A line that does not fit its schema (a picture over the cap, a count out of range) is a failed capture, not a guess.
-    if (!BrowserEvidenceExecutorLineSchema.safeParse(line).success) line = { t: "shot", route: line.t === "shot" ? line.route : "/", ok: false, reason: "capture_failed" };
+    if (!BrowserEvidenceExecutorLineSchema.safeParse(line).success) line = { t: "shot", route, ok: false, reason: "capture_failed" };
     // The program never prints more than the bound it is held to: a page that would pass it is "capture_failed".
     const size = Buffer.byteLength(JSON.stringify(line), "utf8") + 1;
-    if (printed + size > (recording ? BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES : BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES)) line = { t: "shot", route: line.t === "shot" ? line.route : "/", ok: false, reason: "capture_failed" };
+    if (printed + size > BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES) line = { t: "shot", route, ok: false, reason: "capture_failed" };
     printed += Buffer.byteLength(JSON.stringify(line), "utf8") + 1;
     lines.push(line);
   }
   return lines;
-}
-
-/** Whether a page's line is one a recording may be kept for (`browserEvidenceVideoEligible`): a page that failed, or showed errors. */
-function videoAllowed(line: BrowserEvidenceExecutorLine): boolean {
-  if (line.t !== "shot") return false;
-  return line.ok ? browserEvidenceVideoEligible({ status: "shown", consoleErrors: { after: line.consoleErrors } }) : browserEvidenceVideoEligible({ status: "not_run", reason: line.reason });
 }
 
 /**

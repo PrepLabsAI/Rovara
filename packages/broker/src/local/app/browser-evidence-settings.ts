@@ -4,7 +4,7 @@
 //   - What the page may do: save, replace or remove the project's recipe and its saved sign-in. Every one is the owner's own act on a page session opened in the last few minutes (`context.fresh`, checked again here); the API
 //     token refuses all of them (`BROWSER_EVIDENCE_ON_THE_PAGE`). The recipe lives in the company's own rows and the sign-in's values in the company's own secret path; nothing the page says back holds either value.
 //   - What the page reads: never a value, only whether a usable sign-in is saved, and the setup agent's last suggestion, read from its stored result (no code host call), as text for the owner to read and then save.
-import { AgentXError, browserEvidenceVideoWanted, type AuditSink, type BrowserEvidenceRecipe, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { AgentXError, type AuditSink, type BrowserEvidenceRecipe, type DocumentStore, type OrgId } from "@agentx/contracts";
 import type { BrowserEvidencePageAction, BrowserEvidencePageView, LocalActionResult } from "../../core/local-pages/views.js";
 import { clearStoredRecipe, effectiveRecipe, readStoredRecipe, saveStoredRecipe } from "../../core/proof/browser-evidence-recipe.js";
 import type { BrowserEvidenceSignIn } from "../../core/proof/browser-evidence-sign-in.js";
@@ -52,10 +52,10 @@ const refusal = (error: unknown): LocalActionResult => {
 export function createLocalBrowserEvidence(options: LocalBrowserEvidenceOptions): LocalBrowserEvidence {
   const { store, companyId } = options;
   const known = async (): Promise<string[]> => (await listProjects(store, companyId)).map((project) => project.name).sort();
-  const audit = async (action: string, project: string, video = false): Promise<void> => {
+  const audit = async (action: string, project: string): Promise<void> => {
     const at = new Date(options.now()).toISOString();
     // The record names the project and the act, never a value; a ledger that cannot be written never undoes or blocks the owner's act.
-    await options.audit?.record({ eventId: `evt_${action.replace(/\./gu, "_")}_${project}_${String(options.now())}`, companyId, at, actor: { type: "person", id: "owner" }, action, details: { project, ...(video ? { video: "on" } : {}) } }).catch(() => undefined);
+    await options.audit?.record({ eventId: `evt_${action.replace(/\./gu, "_")}_${project}_${String(options.now())}`, companyId, at, actor: { type: "person", id: "owner" }, action, details: { project } }).catch(() => undefined);
   };
   const recipeFor = async (project: string): Promise<BrowserEvidenceRecipe | undefined> => {
     try { return (await effectiveRecipe({ store, orgId: companyId, project, fromConfig: () => options.fromConfig(project) }))?.recipe; } catch { return undefined; }
@@ -88,8 +88,7 @@ export function createLocalBrowserEvidence(options: LocalBrowserEvidenceOptions)
             // The owner's config file is the stronger source: a page recipe saved under it would never run, so it is refused rather than hidden.
             if (options.fromConfig(input.project) !== undefined) return { ok: false, reason: "refused", message: "This project's recipe is set in your config file. Change it there." };
             await saveStoredRecipe(store, companyId, input.project, input.recipe, { expectedVersion: input.expectedVersion, now: options.now });
-            // A recipe that asks for video says so in the record: it is the one choice that records the live page.
-            await audit("browser_evidence.recipe_saved", input.project, browserEvidenceVideoWanted(input.recipe));
+            await audit("browser_evidence.recipe_saved", input.project);
             return { ok: true, message: "Saved." };
           }
           case "turn-off": {

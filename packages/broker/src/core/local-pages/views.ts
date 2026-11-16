@@ -442,8 +442,6 @@ export interface LocalPageData {
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
   /** TE-H1: one picture of a task's browser evidence, served by the proof page behind the page session. Only a picture the task's current pack names as a before or after pair of the task's own company; absent or undefined: not found. */
   readEvidenceImage?(taskId: string, sha256: string): Promise<{ contentType: string; bytes: Uint8Array } | undefined>;
-  /** TE-H1 slice 4: one video of a failed page, as a download behind the page session. Only a WebM the task's current pack's video check names, for the install's own company; absent or undefined: not found. */
-  readEvidenceVideo?(taskId: string, sha256: string): Promise<{ contentType: string; bytes: Uint8Array } | undefined>;
   /** the owner's script tokens. Absent, or undefined: script tokens are off here and the page is not found. */
   listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
   /** The projects that have a test environment page. Absent, or undefined: the test environment is off here and the pages are not found. */

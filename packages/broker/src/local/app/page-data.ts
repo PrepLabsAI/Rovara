@@ -268,14 +268,6 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
       const read = await deps.evidence.browserEvidenceImageOf(task, digest, sha256).catch(() => undefined);
       return read?.status === 200 && read.kind === "jpeg" ? { contentType: read.contentType, bytes: read.bytes } : undefined;
     },
-    async readEvidenceVideo(taskId, sha256) {
-      // The same checks as a picture's, and then only a WebM: a digest that names a picture is not served here, and a video's is not served there.
-      const task = await taskOf(taskId);
-      const digest = task?.workflow?.candidate?.digest;
-      if (task === undefined || digest === undefined || deps.evidence === undefined) return undefined;
-      const read = await deps.evidence.browserEvidenceImageOf(task, digest, sha256).catch(() => undefined);
-      return read?.status === 200 && read.kind === "webm" ? { contentType: read.contentType, bytes: read.bytes } : undefined;
-    },
     async getProofReport(taskId): Promise<ProofReportView | undefined> {
       const task = await taskOf(taskId);
       const workflow = task?.workflow;

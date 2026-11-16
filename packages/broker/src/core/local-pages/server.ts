@@ -8,7 +8,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
-import { BROWSER_EVIDENCE_VIDEO_MAX_BYTES, STAGE_IDS, STAGE_REFERENCE, StepThinkingLevelSchema, type ApprovalProof, type StageId } from "@agentx/contracts";
+import { STAGE_IDS, STAGE_REFERENCE, StepThinkingLevelSchema, type ApprovalProof, type StageId } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
 import { renderConnections, renderSources } from "./connection-pages.js";
@@ -56,8 +56,6 @@ const PROJECT = "[A-Za-z0-9][A-Za-z0-9_.-]{0,127}";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-/** One video of a failed page (TE-H1 slice 4): the evidence video cap, which is what the store keeps. */
-const MAX_VIDEO_BYTES = BROWSER_EVIDENCE_VIDEO_MAX_BYTES;
 /** a page session this young may make a script token (Cloud asks for a sign-in made in the last few minutes for the same reason: the credential lasts for weeks). */
 export const SCRIPT_TOKEN_FRESH_MS = 10 * 60 * 1000;
 
@@ -837,12 +835,6 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const image = await options.data.readEvidenceImage?.(match[1] ?? "", match[2] ?? "");
       if (image === undefined || image.contentType !== "image/jpeg" || image.bytes.byteLength > MAX_IMAGE_BYTES) return notFound();
       return { status: 200, type: image.contentType, body: image.bytes, headers: { "content-security-policy": "default-src 'none'; sandbox", "content-disposition": "inline" } };
-    } },
-    // TE-H1 slice 4: a failed page's video, as a download only (an attachment, so the browser never plays it inside the page), behind the page session like the pictures.
-    { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})/evidence-video/([a-f0-9]{64})$`), handle: async (_request, match) => {
-      const video = await options.data.readEvidenceVideo?.(match[1] ?? "", match[2] ?? "");
-      if (video === undefined || video.contentType !== "video/webm" || video.bytes.byteLength > MAX_VIDEO_BYTES) return notFound();
-      return { status: 200, type: video.contentType, body: video.bytes, headers: { "content-security-policy": "default-src 'none'; sandbox", "content-disposition": "attachment; filename=\"failed-page.webm\"" } };
     } },
     { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})$`), handle: async (request, match) => {
       const view = await options.data.getProofReport(match[1] ?? "");

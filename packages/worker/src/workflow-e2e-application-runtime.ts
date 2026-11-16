@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
+import { BROWSER_EVIDENCE_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
 import { assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment } from "@agentx/model-runtime";
 import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
@@ -188,15 +188,14 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     /** Why the agent step feature is on or off /ping now (Task 4.3a). */
     agentSteps: (): AgentStepsAvailability => agentSteps,
     executor: {
-      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE] as const,
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, BROWSER_EVIDENCE_FEATURE] as const,
       withheldInvocationFeatures: () => ({
         // Running a replay needs exactly what an application round needs (the executor image on the host), so it is listed, and withheld, with the others (Task 4.6b).
         ...(latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest, [E2E_REPLAY_CHECKS_FEATURE]: latest,
           // PLANDRYRUN tries the proposed checks in a throwaway container of the executor image, so it needs the same thing (T6).
           [PLAN_DRY_RUN_FEATURE]: latest }),
         // TE-H1 browser evidence runs its capture in a container of the executor image too (DEC 241a), so it needs the image on the host; it needs no shared runtime directory, so it is judged on its own (a laptop worker lists it without listing application CHECKS).
-        // Video on failure (slice 4) records inside that same capture container, so the video feature is judged with it.
-        ...(browserLatest.status === "ready" ? {} : { [BROWSER_EVIDENCE_FEATURE]: browserLatest, [BROWSER_EVIDENCE_VIDEO_FEATURE]: browserLatest }),
+        ...(browserLatest.status === "ready" ? {} : { [BROWSER_EVIDENCE_FEATURE]: browserLatest }),
         ...(agentSteps.status === "available" ? {} : { [E2E_AGENT_STEPS_FEATURE]: agentSteps }),
         // The sync needs the image to carry the label, and an image that has not been checked yet is not known to have it.
         ...(latest.status === "ready" && sessionSyncImage ? {} : { [E2E_MODEL_SESSION_SYNC_FEATURE]: { status: "unavailable", reason: "executor-image-lacks-session-sync" } }),

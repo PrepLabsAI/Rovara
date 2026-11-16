@@ -11,8 +11,8 @@
 import { randomBytes } from "node:crypto";
 import { relative } from "node:path";
 import {
-  BrowserEvidenceSignInAnswerSchema, BROWSER_EVIDENCE_EXECUTOR_ENTRY, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_RUN_MS, BROWSER_EVIDENCE_SIGN_IN_ENV, BrowserEvidenceExecutorLineSchema, ProjectCommandSchema, encodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceSignInEnv,
-  browserEvidenceVideoWanted, encodeBrowserEvidenceUpload, pickChangedRoutes, recipeMaskSelectors,
+  BrowserEvidenceSignInAnswerSchema, BROWSER_EVIDENCE_EXECUTOR_ENTRY, BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_RUN_MS, BROWSER_EVIDENCE_SIGN_IN_ENV, BrowserEvidenceExecutorLineSchema, ProjectCommandSchema, encodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceSignInEnv,
+  encodeBrowserEvidenceUpload, pickChangedRoutes, recipeMaskSelectors,
   type BrowserEvidenceCaptured, type BrowserEvidenceExecutorLine, type BrowserEvidenceNotRunReason, type BrowserEvidenceRecipe, type BrowserEvidenceSignInAnswer, type BrowserEvidenceSignInValues,
 } from "@agentx/contracts";
 import { executorContainerArgs, runBrowserEvidence, verifyExecutorSeccompProfile, type BrowserEvidenceCaptureAnswer, type BrowserEvidenceDriver, type BrowserEvidenceSide } from "@agentx/verifier";
@@ -45,9 +45,8 @@ export function browserEvidenceExecutorArgs(input: { image: string; sandbox: str
 }
 
 /** The capture program's stdout as its lines: every line checked against its schema, the app's line first and once, one row per page at most once and only for a page that was asked for. Anything else is no answer at all (undefined). */
-export function parseCaptureOutput(stdout: Uint8Array, routes: readonly string[], options: { video?: boolean } = {}): { app: "ready" | "app_did_not_start" | "time_limit" | "sign_in_failed"; shots: Map<string, Extract<BrowserEvidenceExecutorLine, { t: "shot" }>> } | undefined {
-  // Only the candidate's side of a recipe with video may print recordings, and only it gets the larger bound.
-  if (stdout.byteLength === 0 || stdout.byteLength > (options.video === true ? BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES : BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES)) return undefined;
+export function parseCaptureOutput(stdout: Uint8Array, routes: readonly string[]): { app: "ready" | "app_did_not_start" | "time_limit" | "sign_in_failed"; shots: Map<string, Extract<BrowserEvidenceExecutorLine, { t: "shot" }>> } | undefined {
+  if (stdout.byteLength === 0 || stdout.byteLength > BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES) return undefined;
   try {
     const text = Buffer.from(stdout).toString("utf8");
     let app: "ready" | "app_did_not_start" | "time_limit" | "sign_in_failed" | undefined;
@@ -58,8 +57,6 @@ export function parseCaptureOutput(stdout: Uint8Array, routes: readonly string[]
       if (!line.success) return undefined;
       if (line.data.t === "app") { if (app !== undefined) return undefined; app = line.data.status; continue; }
       if (app === undefined || !routes.includes(line.data.route) || shots.has(line.data.route)) return undefined;
-      // A side that was not asked to record has no recordings to hand over: a line that carries one is no answer at all.
-      if (options.video !== true && (line.data.videoBase64 !== undefined || line.data.videoNotKept !== undefined)) return undefined;
       shots.set(line.data.route, line.data);
     }
     return app === undefined ? undefined : { app, shots };
@@ -152,7 +149,6 @@ export async function collectBrowserEvidence(input: BrowserEvidenceWorkInput): P
       signIn = checked.data.values;
     }
     const base = input.originalCode(originalRepositories);
-    const video = browserEvidenceVideoWanted(input.recipe);
     const now = input.now ?? Date.now;
     const runMs = Math.max(1, Math.min(input.budgetMs, BROWSER_EVIDENCE_RUN_MS));
     // One side at a time, and the next side starts only when the one before it is over (its files put back, its app gone), whatever the runner's own race said about it.
@@ -161,8 +157,7 @@ export async function collectBrowserEvidence(input: BrowserEvidenceWorkInput): P
     const side = (which: BrowserEvidenceSide, routes: readonly string[], timeoutMs: number): Promise<Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit" | "sign_in_failed"> => {
       // The base code gets half of what is left (the candidate's side the rest), so the first side can never use the second one's time.
       const budget = which === "before" ? Math.floor(timeoutMs / 2) : timeoutMs;
-      // Slice 4: only the candidate's side records, and only for a recipe that parses whole with `video` (fixture data only, no sign-in).
-      const work = () => runSide({ ...input, docker: docker as Required<Pick<DockerCli, "run" | "execBytes">>, sandboxName, executorImage, seccompPath: seccompProfile, cwd, routes, timeoutMs: budget, now, signInValues: signIn, video: which === "after" && video });
+      const work = () => runSide({ ...input, docker: docker as Required<Pick<DockerCli, "run" | "execBytes">>, sandboxName, executorImage, seccompPath: seccompProfile, cwd, routes, timeoutMs: budget, now, signInValues: signIn });
       // The base code is shown while the app starts and the pages are taken, and the agent's files are put back exactly before this returns.
       // The runner counts a driver that throws as a page that did not load, so a fault that must stop the task is kept here and thrown again once the run is over; nothing starts after it.
       const run = pending.then(() => { if (fault !== undefined) throw fault; return which === "before" ? base.run(work) : work(); }).catch((error: unknown) => { if (isWorkspaceUnsafe(error)) fault ??= error as Error; throw error; });
@@ -185,7 +180,7 @@ export async function collectBrowserEvidence(input: BrowserEvidenceWorkInput): P
       async stopApp() { /* each side stops its own app before it answers */ },
     };
     const captured = await runBrowserEvidence({
-      isolation: "sandbox", routes: picked.routes, notShown: picked.notShown, moreNotShown: picked.moreNotShown, maskSelectors: recipeMaskSelectors(input.recipe), driver, ...(video ? { video: true } : {}),
+      isolation: "sandbox", routes: picked.routes, notShown: picked.notShown, moreNotShown: picked.moreNotShown, maskSelectors: recipeMaskSelectors(input.recipe), driver,
       // Defence in depth: a picture whose bytes carry either saved value is dropped (a JPEG is compressed pixels, so this rarely sees one; the page's own masks are the defence).
       ...(signIn === undefined ? {} : { redactor: { contains: (bytes: Uint8Array) => [signIn.username, signIn.password].some((value) => Buffer.from(bytes).includes(Buffer.from(value, "utf8"))) } }),
       limits: { runMs }, now,
@@ -200,13 +195,7 @@ export async function collectBrowserEvidence(input: BrowserEvidenceWorkInput): P
   }
 }
 
-/** What a capture line says about the page's recording: the bytes (base64 in the line, checked again by the runner), or the fixed reason there are none. */
-function videoOf(shot: { videoBase64?: string | undefined; videoNotKept?: "over_size_cap" | "withheld" | "not_recorded" | "not_stored" | undefined }): { video?: Uint8Array; videoNotKept?: "over_size_cap" | "withheld" | "not_recorded" } {
-  if (shot.videoBase64 !== undefined) return { video: new Uint8Array(Buffer.from(shot.videoBase64, "base64")) };
-  return shot.videoNotKept === "over_size_cap" || shot.videoNotKept === "withheld" ? { videoNotKept: shot.videoNotKept } : shot.videoNotKept === undefined ? {} : { videoNotKept: "not_recorded" };
-}
-
-type SideInput = BrowserEvidenceWorkInput & { docker: Required<Pick<DockerCli, "run" | "execBytes">>; sandboxName: string; executorImage: string; seccompPath: string; cwd: string; routes: readonly string[]; timeoutMs: number; now: () => number; signInValues: BrowserEvidenceSignInValues | undefined; video: boolean };
+type SideInput = BrowserEvidenceWorkInput & { docker: Required<Pick<DockerCli, "run" | "execBytes">>; sandboxName: string; executorImage: string; seccompPath: string; cwd: string; routes: readonly string[]; timeoutMs: number; now: () => number; signInValues: BrowserEvidenceSignInValues | undefined };
 
 /** One side: start the app in the sandbox, take every page in one capture container, stop the app. Everything the app and the container leave behind is removed before this returns. */
 async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCaptureAnswer> | "app_did_not_start" | "time_limit" | "sign_in_failed"> {
@@ -246,11 +235,11 @@ async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCap
       ...(recipe.signIn.successPath === undefined ? {} : { successPath: recipe.signIn.successPath }), ...(recipe.signIn.successSelector === undefined ? {} : { successSelector: recipe.signIn.successSelector }) };
     // (A recipe with a sign-in is never run without its values: `collectBrowserEvidence` refuses it first, and the capture program refuses a plan with a sign-in and no values.)
     const plan = encodeBrowserEvidenceExecutorPlan({ port: recipe.port, ...(recipe.readyPath === undefined ? {} : { readyPath: recipe.readyPath }), ...(signInPlan === undefined ? {} : { signIn: signInPlan }), routes: [...input.routes], maskSelectors: recipeMaskSelectors(recipe),
-      runMs: Math.min(120_000, captureMs), pageMs: 15_000, ...(input.video ? { video: true as const } : {}) });
+      runMs: Math.min(120_000, captureMs), pageMs: 15_000 });
     const args = browserEvidenceExecutorArgs({ image: input.executorImage, sandbox: input.sandboxName, name, seccompProfile: input.seccompPath, plan, withSignIn: signInPlan !== undefined });
-    const run = await input.docker.execBytes(args, { signal, timeoutMs: captureMs + START_MARGIN_MS, maxStdoutBytes: input.video ? BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES : BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES,
+    const run = await input.docker.execBytes(args, { signal, timeoutMs: captureMs + START_MARGIN_MS, maxStdoutBytes: BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES,
       ...(input.signInValues === undefined || signInPlan === undefined ? {} : { env: { [BROWSER_EVIDENCE_SIGN_IN_ENV]: encodeBrowserEvidenceSignInEnv(input.signInValues) } }) });
-    const parsed = run.exitCode === 0 && run.tooLarge !== true && run.timedOut !== true && run.aborted !== true ? parseCaptureOutput(run.stdout, input.routes, { video: input.video }) : undefined;
+    const parsed = run.exitCode === 0 && run.tooLarge !== true && run.timedOut !== true && run.aborted !== true ? parseCaptureOutput(run.stdout, input.routes) : undefined;
     // Pictures taken while the app we started was not running were taken of something else (a program that held the port first): no picture is kept.
     if (ended) answer = "app_did_not_start";
     else if (parsed === undefined) answer = run.timedOut === true ? "time_limit" : "app_did_not_start";
@@ -260,7 +249,7 @@ async function runSide(input: SideInput): Promise<Map<string, BrowserEvidenceCap
       for (const route of input.routes) {
         const shot = parsed.shots.get(route);
         picked.set(route, shot === undefined ? { ok: false, reason: "capture_failed" }
-          : shot.ok ? { ok: true, bytes: new Uint8Array(Buffer.from(shot.jpegBase64, "base64")), consoleErrors: shot.consoleErrors, ...videoOf(shot) } : { ok: false, reason: shot.reason, ...videoOf(shot) });
+          : shot.ok ? { ok: true, bytes: new Uint8Array(Buffer.from(shot.jpegBase64, "base64")), consoleErrors: shot.consoleErrors } : { ok: false, reason: shot.reason });
       }
       answer = picked;
     }
@@ -293,8 +282,7 @@ export async function saveBrowserEvidence(input: BrowserEvidenceWorkInput & {
     if (input.sink === undefined) return false;
     await input.sink(encodeBrowserEvidenceUpload(captured));
     const shown = captured.routes.filter((row) => row.status === "shown").length;
-    const clips = captured.routes.filter((row) => row.video !== undefined).length;
-    await input.progress(`${shown > 0 ? `AgentX took before and after screenshots of ${String(shown)} changed page${shown === 1 ? "" : "s"} (visual evidence only).` : "AgentX took no screenshots of the changed pages (see the evidence for why)."}${clips > 0 ? ` It kept a video of ${String(clips)} page${clips === 1 ? "" : "s"} that failed.` : ""}`).catch(() => undefined);
+    await input.progress(shown > 0 ? `AgentX took before and after screenshots of ${String(shown)} changed page${shown === 1 ? "" : "s"} (visual evidence only).` : "AgentX took no screenshots of the changed pages (see the evidence for why).").catch(() => undefined);
     return true;
   } catch (error) {
     if (isWorkspaceUnsafe(error)) throw error;
