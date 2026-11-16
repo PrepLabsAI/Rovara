@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "token": {
+    "contract": "model-gateway-token.v1.json",
+    "keyPurpose": "task",
+    "source": "GET /v1/internal/model-access",
+    "headers": [
+      "x-api-key",
+      "authorization: Bearer"
+    ]
+  },
+  "routePrefix": "/v1/product/",
+  "providers": [
+    {
+      "name": "gemini",
+      "upstreamHost": "generativelanguage.googleapis.com",
+      "paths": [
+        "/v1/product/gemini/{version}/models/{model}:generateContent",
+        "/v1/product/gemini/{version}/models/{model}:streamGenerateContent?alt=sse"
+      ],
+      "versions": [
+        "v1",
+        "v1beta"
+      ],
+      "model": "^[a-z0-9][a-z0-9.-]{0,95}$",
+      "workerRemovesHeaders": [
+        "x-goog-api-key",
+        "x-goog-user-project",
+        "authorization"
+      ],
+      "workerRemovesQuery": [
+        "key"
+      ]
+    }
+  ],
+  "refusals": [
+    {
+      "status": 401,
+      "type": "authentication_error",
+      "message": "invalid or expired model access"
+    },
+    {
+      "status": 403,
+      "type": "task_ended",
+      "message": "task ended"
+    },
+    {
+      "status": 404,
+      "type": "not_set_up",
+      "message": "product AI is not set up for this project"
+    },
+    {
+      "status": 422,
+      "type": "budget_exceeded",
+      "message": "budget exceeded by one call"
+    },
+    {
+      "status": 422,
+      "type": "budget_exceeded",
+      "messagePrefix": "Product AI budget has been exceeded! "
+    },
+    {
+      "status": 429,
+      "type": "busy",
+      "retryAfter": true
+    },
+    {
+      "status": 429,
+      "type": "budget_held",
+      "retryAfter": true
+    },
+    {
+      "status": 429,
+      "type": "provider_limited",
+      "message": "the provider is limiting this product key; try again later"
+    },
+    {
+      "status": 400,
+      "type": "provider_refused",
+      "message": "the provider refused this request"
+    },
+    {
+      "status": 502,
+      "type": "product_key_refused",
+      "message": "not run: the product key was refused (check it in Settings)"
+    }
+  ]
+}
