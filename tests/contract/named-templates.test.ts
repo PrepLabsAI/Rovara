@@ -2,6 +2,7 @@ import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -223,14 +224,17 @@ function withoutTaskPeopleControls(template: unknown): unknown {
 // Issue 157 changes the Slack service's code only. These snapshots were recorded from mainline
 // 4a605fd (re-recorded there when mainline merged in), so a named environment's templates must stay
 // as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop,
-// issue 195's stuck-cancel alarm, and the false-default Task People controls, each checked and taken
-// out above.
+// issue 195's stuck-cancel alarm, the false-default Task People controls and the staging switch-over parity additions (DNS firewall, evidence expiry, broker
+// names; tests/support/switchover-parity-template.ts), each checked and taken out.
 describe("named environment templates", () => {
   const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child));
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template))))) : template).toMatchSnapshot();
+      const parity = stack.stackName === "agentx-staging-foundation" ? withoutDnsFirewall(template)
+        : stack.stackName === "agentx-staging-access" ? withoutDnsFirewallAccess(template)
+        : stack.stackName === "agentx-staging-control-plane" ? withoutSwitchoverControlPlaneParity(template) : template;
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
     }, 120_000);
   }
 });

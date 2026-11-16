@@ -31,7 +31,8 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine } from "./core-engine.js";
@@ -44,6 +45,8 @@ import { swebenchNames } from "./swebench-eval.js";
 import { SWEBENCH_DEPLOYMENT_MODE } from "./swebench-eval-definition.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
+/** Days an evidence pack stored under the `evidence-record` tag value is kept before the bucket expires it. */
+export const EVIDENCE_RECORD_RETENTION_DAYS = 365;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
 export const SLACK_MAX_RECEIVE_COUNT = 5;
 // What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024):
@@ -72,7 +75,12 @@ function unlistedAlarms(scope: Construct, prefix: string): string[] {
     // CloudWatch returns a composite alarm only to a DescribeAlarms grant on *, which the broker has not.
     if (construct instanceof cloudwatch.CfnCompositeAlarm) return [`the health probe cannot read composite alarm ${construct.node.path}`];
     if (!(construct instanceof cloudwatch.CfnAlarm)) return [];
+    // The foundation's egress alarms keep the live names agentx-<env>-blocked-dns-spike and agentx-<env>-nat-egress-spike-<az>, which the probe's single-word suffixes
+    // cannot list. They notify the alerts topic and are not on the admin health route.
+    // Only those names: any other alarm inside EgressAlarms is still refused.
     const name = construct.alarmName;
+    if (name !== undefined && !Token.isUnresolved(name) && name.startsWith(prefix) && construct.node.scopes.some((parent) => parent instanceof EgressAlarms)
+      && (name === `${prefix}blocked-dns-spike` || /^nat-egress-spike-[a-z0-9]+-az[0-9]+$/.test(name.slice(prefix.length)))) return [];
     if (name !== undefined && !Token.isUnresolved(name) && listed.has(name)) return [];
     return [`the health probe does not read alarm ${construct.node.path} (${String(name)}): name it ${prefix}<suffix> and add the suffix to HEALTH_ALARM_SUFFIXES`];
   });
@@ -156,7 +164,19 @@ export class ControlPlaneStack extends Stack {
       // M1.3 Task 3.7b, owner decision D4: a browser or API round's screenshots expire 30 days after they are written. A lifecycle filter matches the start of a key, and a screenshot's
       // key starts like every other private object's, so the rule matches the tag the broker puts on a screenshot and on nothing else. The bucket is not versioned: expiry deletes.
       // Named environments only: the legacy production template stays as it is.
-      ...(naming.env === undefined ? {} : { lifecycleRules: [{ id: "ExpireE2EScreenshots", expiration: Duration.days(E2E_ARTIFACT_RETENTION_DAYS), tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: E2E_ARTIFACT_RETENTION_TAG_VALUE } }] }),
+      ...(naming.env === undefined ? {} : { lifecycleRules: [
+        { id: "ExpireE2EScreenshots", expiration: Duration.days(E2E_ARTIFACT_RETENTION_DAYS), tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: E2E_ARTIFACT_RETENTION_TAG_VALUE } },
+        // Stored evidence expires by class, on the same tag key: evidence-short is video and trace (14 days), evidence-std is screenshots, API samples, output tails and the stored pack
+        // (30 days). The days are the live rules' exactly and are not configurable here: S3 applies a lifecycle rule to objects already stored, so a shorter rule would delete older
+        // evidence. Prefix AND tag (S3 reads that as an `And` filter): an object outside the private evidence keys that happens to carry the tag never matches.
+        ...(["evidence-short", "evidence-std"] as const).map((retentionClass) => ({ id: retentionClass === "evidence-short" ? "ExpireEvidenceShort" : "ExpireEvidenceStd",
+          expiration: Duration.days(EVIDENCE_RETENTION_DAYS[retentionClass].default), prefix: "private/", tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: retentionClass } })),
+        // A pack an earlier release stored with its own tag value, `evidence-record`, is kept for a year, then expires (a constant). Nothing in this bucket outside
+        // these tagged evidence objects and the nightly maps expires (DEC 222: the cost ledger, approvals and decisions are kept forever, and none of them is stored here).
+        { id: "ExpireEvidenceRecord", expiration: Duration.days(EVIDENCE_RECORD_RETENTION_DAYS), prefix: "private/", tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: "evidence-record" } },
+        // The nightly run's coverage maps (`nightly-maps/<company>/<project>/<digest>.json`, NIGHTLY_MAPS_PREFIX) expire after 30 days; selection reads a map no older than 7 days.
+        { id: "ExpireNightlyMaps", prefix: "nightly-maps/", expiration: Duration.days(30) },
+      ] }),
       // Retained: the broker's operation artifacts must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
@@ -184,6 +204,13 @@ export class ControlPlaneStack extends Stack {
       GITHUB_APP_ID: githubAppId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
     });
+    // Named environments: the broker's role and function keep the fixed names a named environment has always had (agentx-<env>-broker-role, agentx-<env>-broker), so an
+    // install already running under them updates them in place instead of replacing them, and operator tools and other stacks that name them keep working. A resource with a
+    // fixed name cannot be replaced by CloudFormation: a later change that needs a new role or function must change the name in the same release. The legacy template is unchanged.
+    if (naming.env !== undefined) {
+      (broker.role!.node.defaultChild as iam.CfnRole).roleName = brokerRoleName(naming);
+      (broker.node.defaultChild as lambda.CfnFunction).functionName = brokerFunctionName(naming);
+    }
     const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     if (naming.env !== undefined) {
       // Exactly the two grantReadWriteData statements' action/resource cross product.
@@ -1252,6 +1279,16 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "TurnRecordsTableName", { value: turnRecords.tableName });
     new CfnOutput(this, "OperatorAlertsTopicArn", { value: operatorAlerts.topicArn });
   }
+}
+
+/** A named environment's broker role name. */
+export function brokerRoleName(naming: AgentXNaming): string {
+  return `${naming.resourcePrefix}-broker-role`;
+}
+
+/** A named environment's broker function name. */
+export function brokerFunctionName(naming: AgentXNaming): string {
+  return `${naming.resourcePrefix}-broker`;
 }
 
 export function packagedFunction(

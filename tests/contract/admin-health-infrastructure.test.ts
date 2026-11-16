@@ -45,7 +45,13 @@ describe("the health route's grants (A13)", () => {
   it("names every alarm a named app creates in the probe's list, and lists no alarm the app never creates (issue 206)", () => {
     const alarmNamesOf = (context: Record<string, unknown>) => buildAgentXApp({ agentxEnv: "live25d", ...context }).node.children.filter((child): child is Stack => Stack.isStack(child))
       .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>))
-      .map((alarm) => alarm.Properties.AlarmName);
+      .map((alarm) => alarm.Properties.AlarmName)
+      // The foundation's egress alarms keep their live hyphenated names and are not on the health route (control-plane.ts unlistedAlarms); pinned here exactly.
+      .filter((name) => !egressAlarmNames.includes(name as string));
+    const egressAlarmNames = ["agentx-live25d-blocked-dns-spike", "agentx-live25d-nat-egress-spike-use1-az1", "agentx-live25d-nat-egress-spike-use1-az2"];
+    const allNames = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child))
+      .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>)).map((alarm) => alarm.Properties.AlarmName);
+    expect(egressAlarmNames.every((name) => allNames.includes(name))).toBe(true);
     const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
     // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
     expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
