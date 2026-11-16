@@ -167,6 +167,24 @@ describe("the usage index (A5, A9)", () => {
     warn.mockRestore();
   });
 
+  it("fails soft when the scoped workspace names another company than its pointer, and reads no task pointer", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
+    const companyB = "org_11111111111111111111";
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
+      { ...workspaceKey(companyA, WORKSPACE), entityType: "WORKSPACE", companyId: companyB, projectName: "core-payments" },
+      { ...scopedTaskPointerKey(companyA, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
+    ]);
+    const get = vi.spyOn(index, "get");
+    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack" });
+    expect(index.puts[0]).not.toHaveProperty("taskId");
+    expect(get).not.toHaveBeenCalledWith(scopedTaskPointerKey(companyA, WORKSPACE), expect.anything());
+    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
+    warn.mockRestore();
+  });
+
   it("fails soft on a broken company pointer without reading the legacy operation", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const companyId = IMPLICIT_COMPANY_ID;

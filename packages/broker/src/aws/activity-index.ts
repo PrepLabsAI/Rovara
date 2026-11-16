@@ -107,9 +107,9 @@ async function contextOf(store: IndexStore, workspaceId: string): Promise<Contex
     }
   }
   const project = text(workspace?.projectName)?.slice(0, PROJECT_MAX) ?? "unknown";
-  const pointer = operationReadable && companyId !== undefined
-    ? await store.get(scopedTaskPointerKey(companyId, workspaceId))
-    : companyId === undefined && operationReadable ? await store.get(taskPointerKey(workspaceId)) : undefined;
+  // The task pointer lives in the workspace's own partition: the company's (through the workspace pointer) or the legacy one.
+  const taskPointerAt = !operationReadable ? undefined : companyId === undefined ? taskPointerKey(workspaceId) : scopedTaskPointerKey(companyId, workspaceId);
+  const pointer = taskPointerAt === undefined ? undefined : await store.get(taskPointerAt);
   const taskId = text(pointer?.taskId);
   if (taskId !== undefined) {
     const task = await store.get(taskKey(taskId));
