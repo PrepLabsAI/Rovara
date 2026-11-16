@@ -193,6 +193,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/developer/task-code-routes.ts",
       // Task actions (decision 198): the owner's own words for a round they sent back, one OWNER_NOTE row per decision, kept 400 days (KEEP_SECONDS) and then expired. Not a durable record: the decision itself is.
       "packages/broker/src/core/task-flow/owner-note.ts",
+      // Task actions (decision 201): who accepted a review finding and by what way (one FINDING_ACCEPT row per decision, read when the pull request description is made), kept 400 days like the decision records and then expired.
+      "packages/broker/src/core/task-flow/finding-accept.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
