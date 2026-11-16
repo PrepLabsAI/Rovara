@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The fixture app of the device-executor CI test (tests/linux/device-evidence-emulator.test.ts): one screen, no permission, no network. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.rovara.fixture">
+  <application android:label="Rovara fixture" android:allowBackup="false" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+    <activity android:name=".MainActivity" android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

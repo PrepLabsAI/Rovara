@@ -148,7 +148,7 @@ export function parseModelTarget(raw: unknown): ParsedModelTargetResult {
 // ---- headers
 
 const CREDENTIAL_HEADERS = new Set(["authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "api-key", "x-goog-user-project", "cookie", "set-cookie"]);
-const isCredentialHeader = (name: string): boolean => CREDENTIAL_HEADERS.has(name) || name.startsWith("proxy-") || name.startsWith("x-amz-");
+const isCredentialHeader = (name: string): boolean => CREDENTIAL_HEADERS.has(name) || name.startsWith("proxy-") || (name.startsWith("x-amz-") && !name.startsWith("x-amz-bedrock-") && !name.startsWith("x-amzn-bedrock-")) || name.startsWith("amz-sdk-");
 
 /** The request's headers for a backend: lowercase names, one value each (at most 4 KB), every credential header (a bearer token, an API key, a cookie, a proxy header, an AWS header) dropped. */
 export function headersForBackend(headers: IncomingMessage["headers"]): Record<string, string> {
