@@ -17,12 +17,8 @@ export const POLICY_HOOK_ANSWER_MAX_SECONDS = 300;
 export const POLICY_HOOK_SKEW_SECONDS = 30;
 export const POLICY_HOOK_MAX_BODY_BYTES = 8192;
 export const POLICY_HOOK_PINNED_KEYS_MAX = 2;
-/**
- * The CorePolicyHook stack parameter's longest value. The settings ride in the broker's and the dispatcher's environments, which Lambda holds to 4,096 bytes, so the cap is what fits
- * there even when every character needs escaping (tests/contract/lambda-environment-size.test.ts). It holds one RSA-2048 key with an address of up to about 90 characters; two keys
- * (a rotation) do not fit until the follow-up lane moves the keys out of the environment (BROKER-ENV-HEADROOM, DEC 246) and nothing uses the hook before it lands.
- */
-export const POLICY_HOOK_PARAMETER_MAX_LENGTH = 540;
+/** Two 200-character URLs and two 43-character thumbprints in compact JSON (DEC 246b). */
+export const POLICY_HOOK_PARAMETER_MAX_LENGTH = 532;
 export const POLICY_HOOK_TIMEOUT_SECONDS = 5;
 export const POLICY_HOOK_START_HOLD_SECONDS = 300;
 export const POLICY_HOOK_VALUES_GRACE_SECONDS = 300;
@@ -118,6 +114,24 @@ export const PolicyHookSettingsSchema = z.object({
   keys: z.array(PolicyHookPinnedKeySchema).min(1).max(POLICY_HOOK_PINNED_KEYS_MAX).refine((keys) => new Set(keys.map((key) => key.kid)).size === keys.length, "two keys share a kid"),
 }).strict();
 export type PolicyHookSettings = z.infer<typeof PolicyHookSettingsSchema>;
+
+/** Hosted-only settings. Code's config file continues to carry inline pinned keys. */
+export const HostedPolicyHookSettingsSchema = z.object({
+  address: z.string().max(200).refine(hostedPolicyHookAddressAllowed, "an https address"),
+  jwks: z.string().max(200).refine(hostedPolicyHookAddressAllowed, "an https address"),
+  thumbprints: z.array(z.string().regex(/^[A-Za-z0-9_-]{43}$/u)).min(1).max(POLICY_HOOK_PINNED_KEYS_MAX)
+    .refine((values) => new Set(values).size === values.length, "duplicate thumbprints"),
+}).strict();
+export type HostedPolicyHookSettings = z.infer<typeof HostedPolicyHookSettingsSchema>;
+
+function hostedPolicyHookAddressAllowed(value: string): boolean {
+  return policyHookAddressAllowed(value) && new URL(value).protocol === "https:";
+}
+
+/** RFC 7638 SHA-256 thumbprint, using only the required RSA members in lexicographic order. */
+export function policyHookKeyThumbprint(key: Pick<PolicyHookPinnedKey, "e" | "kty" | "n">): string {
+  return createHash("sha256").update(JSON.stringify({ e: key.e, kty: key.kty, n: key.n }), "utf8").digest("base64url");
+}
 
 export function policyHookAddressAllowed(value: string): boolean {
   let url: URL;
