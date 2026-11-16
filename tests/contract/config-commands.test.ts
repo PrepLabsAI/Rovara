@@ -40,7 +40,9 @@ describe("agentx config list and get", () => {
     // Spec 062: Slack through the channel API, and channel adapters, both off until set.
     expect(rows.find((row) => row.key === "slack.viaChannel")).toMatchObject({ where: "stack parameter SlackViaChannel on agentx-staging-control-plane" });
     expect(rows.find((row) => row.key === "channels.adapters")).toMatchObject({ where: "stack parameter ChannelAdapters on agentx-staging-control-plane" });
-    expect(rows).toHaveLength(18);
+    // Migration plan v3.2 lane E2: the core engine switch, off until set.
+    expect(rows.find((row) => row.key === "coreEngine.switch")).toMatchObject({ where: "stack parameter CoreEngine on agentx-staging-control-plane" });
+    expect(rows).toHaveLength(19);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

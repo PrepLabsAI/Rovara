@@ -84,10 +84,10 @@ export interface DecisionRouteDependencies<C extends DecisionCaller = DecisionCa
 export interface DecisionRequest { method: string; pathname: string; searchParams: URLSearchParams; body: unknown }
 
 const PATH = /^\/v1\/app\/decisions(?:\/([a-z_]+\/[A-Za-z0-9_-]{1,150})\/(approve|reject|evidence-opened|request-changes))?$/u;
-const ISSUE = (error: { issues: ReadonlyArray<{ path: PropertyKey[]; message: string }> }): never => {
+const ISSUE = (error: { issues: ReadonlyArray<{ path: PropertyKey[]; code?: string; message: string }> }): never => {
   const issue = error.issues[0];
-  // Field names only: the values are the caller's.
-  throw agentXError("CONFIG_INVALID", `${issue?.path.map(String).join(".") || "body"}: ${issue?.message ?? "invalid"}`);
+  // Field names only: the values are the caller's. An unknown key's message would name the caller's own key, so it gets fixed words.
+  throw agentXError("CONFIG_INVALID", `${issue?.path.map(String).join(".") || "body"}: ${issue === undefined ? "invalid" : issue.code === "unrecognized_keys" ? "has a field this route does not take" : issue.message}`);
 };
 
 /** What a Request changes is recorded as in the card history (its outcome is "rejected": the document was not approved). */

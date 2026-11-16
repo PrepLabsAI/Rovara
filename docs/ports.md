@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below), `scheduler` (when something is due, below), `realtime` (a hint to open pages that something changed, below) and `email` (one plain notice to one address, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `cloud-account` (company credentials for one purpose, below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below), `scheduler` (when something is due, below), `realtime` (a hint to open pages that something changed, below) and `email` (one plain notice to one address, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -372,6 +372,22 @@ adapter asks for `{ "env": "<PROVIDER>_API_KEY" }` and then `{ "key": "<provider
 `keys.json` keeps its rule (mode 0600, no link). Which providers have a key is the same store's answer for each of `anthropic`, `openai` and `openrouter` (the socket reads one reference at a time, so the listing asks it per provider), so `keys.json` entries for other
 names are not listed. A worker never holds a key (the model proxy below reads it through this point).
 
+## Cloud account (decision 160, TE-IF2)
+
+The `cloud-account` point holds one `CloudAccount` adapter (`packages/contracts/src/ports/cloud-account.ts`). Like `secrets`,
+it is owner-configured only and runs with the broker's rights; never load its configuration from a customer repository or PR.
+Code's default is unavailable and refuses every call without reading ambient credentials. The offline fake and conformance suite
+live in `packages/testing/src/fakes/cloud-account.ts` and `packages/testing/src/ports/cloud-account-conformance.ts`.
+
+Every call validates the company with `OrgIdSchema`. `credentialsFor(companyId, accountRef, purpose)` resolves that company's
+full account reference and issues credentials restricted to one of `invoke_only_endpoint`, `device_farm_project`, `recording_bucket`
+or `test_account_confirm`. The adapter must enforce the corresponding resource and permissions; the purpose enum alone does not.
+AWS is the only credential payload today; all three secret fields remain `SecretValue`. Expiry uses Unix seconds, refuses expired-at-now
+credentials, and allows a fixed 60-second clock-skew margin on the 3600-second maximum (3660 accepted, 3661 refused), without changing expiry.
+`testConnection` checks the connection without issuing credentials; `externalIdFor` returns a stable, separate external id per company.
+All failures, including provider failures, use `CloudAccountRefusedError` with fixed words and no cause or input echo. Credentials are never persisted.
+The issuance ledger is currently a conformance fixture; a production audit hook is deferred to TE-F6 (`IF2-LEDGER-PORT`).
+
 ## Secrets (owner decision 60, item R2)
 
 The `secrets` point (one adapter) is where any adapter's secret is read: a code host's token, a webhook's signing secret, a model key. `SecretStore` in
@@ -414,7 +430,7 @@ and asks the point; it does not write its own reader.
 - **AWS Secrets Manager (convergence lane A3, owner decision 72 O2).** Opt-in: `{ "point": "secrets", "name": "aws-secrets-manager", "module": "@agentx/broker/plugins/secrets-aws", "settings": { "region",
   one AWS identity, "namePrefix": "rovara/", "companyPaths"? } }` (`createSecretsManagerSecretStore` in `@rovara/aws-adapters/secrets-manager`; the module is `packages/broker/src/plugins/secrets/aws-secrets-manager/`, which shows the adapter's fixed sentences as `LocalSecretError`). Its reference kind is `{ "awsSecret": "<name under the prefix>" }`:
   the secret read is `namePrefix` + the value (the hosted product's names, such as `agentx/<env>/org-connectors/<company>/<id>`, read as they are), and the value is checked first (plain parts, no `.` or `..`),
-  so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. A hosted (many-company) setup MUST set `namePrefix` to its environment's path and `companyPaths` (`org-connectors`, `org-hooks`); without `companyPaths` any name under the prefix is read for any company. `clientFor(companyId)`
+  so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. A hosted (many-company) setup sets `namePrefix` to its environment's path and `hosted: true`, which selects `COMPANY_SECRET_PATHS` (`org-connectors`, `org-hooks`, `org-test-accounts`) and assigns old unscoped names to `IMPLICIT_COMPANY_ID`. Explicit `companyPaths` remains available; without `hosted: true` the plug-in refuses all unscoped reads, including the implicit company. Direct adapter callers may explicitly set `unscopedNamesBelongTo`; otherwise `companyPaths` also refuses unscoped names. Both options absent preserve the original single-owner behavior. A valid other-company name answers `undefined` before any AWS call, exactly like missing; malformed references retain fixed refusals. `clientFor(companyId)`
   lets a deployment sign each company's reads with a session that reaches only that company's secrets (IAM is the second fence). Missing, scheduled for deletion or empty is `undefined`; a refusal, a KMS
   decryption failure, a binary secret or an outage is a fixed sentence that quotes neither the name nor the value. Read on every call. It knows no `{ env }` or `{ key }`, so with it
   configured the model keys and the GitHub token must be named as `{ "awsSecret" }` sources where they are read. Suite: `tests/unit/aws-secrets-manager.test.ts`.
@@ -444,6 +460,22 @@ A connection's key or token is not in its record. The record keeps whether a sec
 at most 16 KiB) and **reads them back through the `secrets` socket** as `{ "file": "<absolute path>" }`, so that socket's file rules apply (no link in the path, a plain file that is yours, not readable by others, small).
 A save writes its version first, and the record's commit decides which save won: a version no record names is never read. The newest two versions are kept; older ones are removed; removing a connection removes all.
 A `secrets` plug-in that does not know `{ "file" }` makes saved connections read as "no key" until it does (a configured plug-in is the source of truth for reads).
+
+T6 adds `createMemberSecretReader` and `memberBoundConnectionSecrets`. Each operation asks `CompanyMembershipReader.companyOf(personId)` once, validates the company, and uses it as authority. Missing, malformed or failed membership refuses in fixed words, without an implicit-company fallback. Local and fake connection reads of a valid other-company name answer `undefined`; writes and deletes still refuse. Both helpers use R4's `CompanyMembershipReader` from `aws/company-check.ts`, the same surface as the developer route checks. See the [company inventory](architecture/company-inventory.md#t6-secret-records-and-entry-points) for record and route coverage and remaining wiring.
+
+`createCompanyClientFactory` injects AssumeRole and client construction: one single-flight session per company, `rovara:org` set from the validated company, 900-second duration, refreshed 60 seconds before expiry; failures are not cached. Each AssumeRole session name includes the company and a fresh 16-hex request id (56 characters total). `createSecretsManagerConnectionSecrets` creates with `rovara:org` and `rovara:use=connector` for connectors or `rovara:use=hook` for hooks, updates existing secrets, reads named versions, and schedules deletion with seven days of recovery. No STS dependency is added. The fake proves session/tag construction, not deployed IAM. IAM is a second fence that can answer AccessDenied; the code's same-answer check prevents cross-company reads from reaching it.
+
+| Secret name family / read site | Class | Owner / remaining work |
+|---|---|---|
+| `agentx/<env>/org-connectors/<company>/<id>` (connectors and registered MCP servers) | company-scoped | T6; hosted wiring R2 |
+| `agentx/<env>/org-hooks/<company>/<id>` | company-scoped | T6; hosted wiring R2 |
+| `agentx/<env>/org-test-accounts/<company>/<account>` | company-scoped | T6 reader; worker dynamic-reference reads T7 |
+| Old names without a company segment | company-scoped (implicit company in hosted mode; refused with companyPaths alone) | IAM preview/backfill and cutover remain |
+| GitHub App private key, webhook and Slack install secrets | install-wide | T4/T5, outside T6 |
+| Model keys: `createSecretModelKeyStore`, `createLocalModelKeyStore`, `credentialOf`, model-runtime environment ARNs | install-wide today | lane G; no model-key family added here |
+
+Paths are unchanged. `companyScoped()` remains the DynamoDB key grammar check, not a Secrets Manager name: its `#` is illegal in a secret name. All nine company-separation parts must pass before the pilot. Real IAM, role split, tag backfill, hosted wiring and staging proof are still owed.
+
 
 ## Object storage (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
 
