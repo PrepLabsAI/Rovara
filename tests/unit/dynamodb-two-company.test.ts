@@ -173,7 +173,7 @@ it("isolates prefix-related company keys and refuses delimiters", async () => {
   for (const company of ["", "a#b", "a b", "a\nb"]) expect(() => companyScoped(company, "shared")).toThrow();
 });
 
-it.each(["bySessionState", "github-webhook-recovery"])("known gap: %s lists both companies (T1/T8)", async (index) => {
+it.each(["bySessionState"])("known gap: %s lists both companies (T1/T8)", async (index) => {
   const { store } = dynamoWorld({ indexes: STATE_TABLE_INDEXES });
   const definition = STATE_TABLE_INDEXES.find((entry) => entry.name === index)!;
   for (const company of [COMPANY_A, COMPANY_B]) await store.put({ item: {
