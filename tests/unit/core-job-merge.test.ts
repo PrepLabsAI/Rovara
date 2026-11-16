@@ -92,7 +92,7 @@ it("partitions tier due rows by company, rechecks ownership, and reports unowned
   const query = vi.spyOn(w.h.store, "query");
   const loggedA: Record<string, unknown>[] = [];
   const service = (companyId: string, log?: (entry: Record<string, unknown>) => void) => createMergeTrackingService({
-    flow: w.h.deps, registry: w.registry, companyId: companyId as never, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
+    flow: w.h.deps, registry: w.registry, companyId: companyId, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
     people: w.people, settings: fixedCodeSettings(), now: () => w.clock.ms, ...(log === undefined ? {} : { log }),
   });
 
@@ -120,7 +120,7 @@ it("leaves tier due rows untouched when the pass budget is exhausted", async () 
   let timeReads = 0;
   const now = () => timeReads++ === 0 ? 0 : 10 * 60_000;
   const tracking = createMergeTrackingService({
-    flow: w.h.deps, registry: w.registry, companyId: company as never, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
+    flow: w.h.deps, registry: w.registry, companyId: company, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
     people: w.people, settings: fixedCodeSettings(), now,
   });
 
@@ -135,7 +135,7 @@ it("reads a legacy implicit tier row without a company as implicit, only in the 
   await w.h.store.put({ item: { ...key, entityType: "TIER_CHECKS_DUE", taskId, lastRunAt: 0, dueAt: w.clock.ms } });
   const logged: Record<string, unknown>[] = [];
   const tracking = createMergeTrackingService({
-    flow: w.h.deps, registry: w.registry, companyId: IMPLICIT_COMPANY_ID as never, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
+    flow: w.h.deps, registry: w.registry, companyId: IMPLICIT_COMPANY_ID, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
     people: w.people, settings: fixedCodeSettings(), now: () => w.clock.ms, log: (entry) => logged.push(entry),
   });
   await tracking.tierChecks();
@@ -152,7 +152,7 @@ it("never runs tier checks for a task whose record belongs to another company", 
   const due = { ...key, entityType: "TIER_CHECKS_DUE", companyId: company, taskId: TASK_ID, lastRunAt: 0, dueAt: w.clock.ms };
   await w.h.store.put({ item: due });
   const tracking = createMergeTrackingService({
-    flow: w.h.deps, registry: w.registry, companyId: company as never, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
+    flow: w.h.deps, registry: w.registry, companyId: company, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
     people: w.people, settings: fixedCodeSettings(), now: () => w.clock.ms,
   });
   expect(await tracking.tierChecks()).toBe(0);
