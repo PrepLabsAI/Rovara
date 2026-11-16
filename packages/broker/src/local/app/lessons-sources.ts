@@ -13,6 +13,7 @@ import { providerOf } from "../../plugins/routing.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { changeRequestRef } from "../../core/merge/host-port.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
+import { readOwnerFindingNotes } from "../../core/task-flow/owner-note.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { isEvalRunMark } from "../../lessons/eval-run.js";
@@ -35,6 +36,8 @@ const MAX_SEND_BACK_IDS = 50;
 const MAX_PULL_REQUESTS = 5;
 const MAX_PULL_REQUEST_COMMENTS = 40;
 const COMMENT_PATH_MAX = 200;
+/** A findings answer's notes, joined, are read up to this many characters (one total limit; each note is already the person's, redacted at write). */
+const FINDING_NOTES_TEXT_MAX = 4_000;
 /** Words an agent wrote are advice at best: the class below Rovara's own structured signals. */
 const AGENT_TEXT_TRUST: TrustClass = "system";
 const CI_FAILURE_PREFIX = "A check failed on the change: ";
@@ -263,7 +266,17 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       const actor = deciderOf(decision);
       const actorTrust = actor === undefined ? undefined : await standingOf(actor, task.project);
       if (actor === undefined || actorTrust === undefined) return undefined;
-      const fact: SendBackFact = { id: `task:${input.taskId}:sendback:${input.requestId}`, origin: "human", actorDeveloperId: actor, actorTrust, reasonText: decision.reason };
+      const id = `task:${input.taskId}:sendback:${input.requestId}`;
+      // A findings answer's reason is code's own summary ("N accepted, M to fix"), never the person's words. Their words are the per-finding notes kept beside the workflow (owner note); with none, the send-back is counted
+      // and its text is code's fixed text. (Read only for a task of this company, checked above.)
+      if (decision.source === "FINDINGS") {
+        const notes = await readOwnerFindingNotes(flow.store, task.taskId, input.requestId);
+        const fact: SendBackFact = notes.length === 0
+          ? { id, origin: "human", actorDeveloperId: actor, actorTrust, fixedText: true }
+          : { id, origin: "human", actorDeveloperId: actor, actorTrust, reasonText: notes.join("\n").slice(0, FINDING_NOTES_TEXT_MAX) };
+        return fact;
+      }
+      const fact: SendBackFact = { id, origin: "human", actorDeveloperId: actor, actorTrust, reasonText: decision.reason };
       return fact;
     },
     async revertedBy(input) {

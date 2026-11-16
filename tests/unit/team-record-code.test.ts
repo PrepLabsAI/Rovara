@@ -122,6 +122,27 @@ describe("capture of a finished task", () => {
     expect((await recordEndedTask({ record: w.a, source, companyId: A, taskId: "task-7", now: () => w.clock.now, rows: rows({}), origin: "app" })).written).toBe(0);
   });
 
+  it("a send-back whose only words are code's (a findings summary) is never recorded as the person's; their per-finding notes are", async () => {
+    const w = world();
+    const source = sourceWith([], ["f1", "f2", "f3", "f4"]);
+    const result = await recordEndedTask({
+      record: w.a, source, companyId: A, taskId: "task-7", now: () => w.clock.now, origin: "app",
+      rows: rows({
+        // The summary, marked as code's (and, as a trap, still carrying the text): counted elsewhere, never recorded.
+        f1: { id: "task:task-7:sendback:f1", origin: "human", actorDeveloperId: "bob", actorTrust: "member", reasonText: "1 accepted, 1 to fix", fixedText: true },
+        f2: { id: "task:task-7:sendback:f2", origin: "human", actorDeveloperId: "bob", actorTrust: "member", fixedText: true },
+        f3: { id: "task:task-7:sendback:f3", origin: "human", actorDeveloperId: "bob", actorTrust: "member", reasonText: "Return 404, not 500." },
+        // An outsider's (or off-roster person's) findings notes are not recorded either.
+        f4: { id: "task:task-7:sendback:f4", origin: "human", actorDeveloperId: "eve", actorTrust: "outsider", reasonText: "Outsider notes." },
+      }),
+    });
+    expect(result.written).toBe(1);
+    const all = (await w.store.query({ pk: teamRecordPk(A, "payments") })).items.filter((item) => item["entityType"] === "TEAM_RECORD_ROW");
+    expect(all.map((item) => item["text"])).toEqual(["Sent the work back: Return 404, not 500."]);
+    expect(JSON.stringify(all)).not.toContain("to fix");
+    expect(JSON.stringify(all)).not.toContain("Outsider notes");
+  });
+
   it("refuses to capture for another company than the record's", async () => {
     const w = world();
     await expect(recordEndedTask({ record: w.a, source: sourceWith([]), rows: rows({}), companyId: B, taskId: "t", now: () => w.clock.now, origin: "app" })).rejects.toBeInstanceOf(TeamRecordCompanyError);

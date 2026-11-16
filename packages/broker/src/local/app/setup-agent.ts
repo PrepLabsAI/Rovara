@@ -81,6 +81,8 @@ export interface LocalSetupAgent {
     decideEval: (input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }) => Promise<LocalActionResult>;
     decideProposal: (input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }) => Promise<LocalActionResult>;
   };
+  /** TE-H1 slice 3: the pages and start command the last setup run suggested for browser evidence, read from its stored result (no code host call). Text for the owner to read; nothing is applied. */
+  browserEvidenceSuggestion(project: string): Promise<{ recipe: { startCommand: string; port: number; readyPath?: string; framework?: "nextjs"; routes: Array<{ path: string; files: string[] }> }; from: string[]; verdict: "verified" | "unverified" | "unchecked" } | undefined>;
   /** The websites the owner approved for a project, for that project's machines to read when they start (an approval reaches no machine already running, and no other project's). A machine with no project gets none. */
   approvedHosts(project: string | undefined): Promise<string[]>;
 }
@@ -271,6 +273,21 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       mayStillRun: async (by) => by === ownerDeveloperId,
     },
     routes, page,
+    async browserEvidenceSuggestion(project) {
+      if (!options.enabled) return undefined;
+      const deps = await depsFor();
+      const latest = await deps.latest(project);
+      if (latest === undefined) return undefined;
+      // The run's stored result only: no code host is asked. A suggestion is never "verified" here (the item has no quote a re-read could match); it says where it came from and the owner reads it.
+      const item = (await readState(deps, project, latest.revision)).view.proposal?.browserEvidence;
+      if (item === undefined) return undefined;
+      const value = item.value;
+      return {
+        recipe: { startCommand: value.startCommand, port: value.port, ...(value.readyPath === undefined ? {} : { readyPath: value.readyPath }), ...(value.framework === undefined ? {} : { framework: value.framework }), routes: value.routes.map((route) => ({ path: route.path, files: [...route.files] })) },
+        from: item.from.slice(0, 4).map((citation) => (citation.path === undefined ? "inferred by Rovara, from no file" : `${citation.repo ?? ""}/${citation.path}${citation.line === undefined ? "" : `:${String(citation.line)}`}`)),
+        verdict: "unchecked" as const,
+      };
+    },
     async approvedHosts(project) {
       return project === undefined ? [] : approvedHostsOf({ store, now: options.now }, companyId, project);
     },

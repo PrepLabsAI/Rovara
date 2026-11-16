@@ -18,6 +18,7 @@ docs/*
 !docs/capabilities/
 !docs/architecture/
 !docs/schemas/
+!docs/bedrock/
 .DS_Store
 Thumbs.db
 *.log

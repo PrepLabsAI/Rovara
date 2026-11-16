@@ -4,8 +4,9 @@ import { operationModelProxy } from "../../packages/worker/src/design-review-ses
 // ANSWER-2: the real worker proxy and model runtime carry each broker answer through to a fake gateway transport.
 import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
+import { z } from "zod";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { LEARNED_CONTEXT_FEATURE, WorkflowSnapshotSchema, change, companyScoped, createCandidateManifest, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, type OrgId, type StoredDocument, type WorkerInvocation } from "@agentx/contracts";
+import { LEARNED_CONTEXT_FEATURE, WorkflowSnapshotSchema, change, companyScoped, createCandidateManifest, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, type OrgId, type WorkerMachines, type StoredDocument, type WorkerInvocation } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { createCoreDispatchHost } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
@@ -54,7 +55,7 @@ async function world(options: { noSigner?: boolean } = {}) {
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     ...(options.noSigner ? {} : { taskTokens: () => ({ signer: taskKeySigner(signerOf(key)), issuer: "https://api.example/v1/auth" }) }),
     origin: () => "https://api.example", now: () => new Date(w.clock.now), log: () => undefined,
-    ciReporting: { honest: true, ciMode: async () => "sandbox_only" },
+    ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
     lessonsPeople: () => ({ approvers: async () => ({ complete: true, membershipVersion: 1, ownerIds: [], eligibleIds: [], lastEligibleLossAtMs: null }), onProjectRoster: async () => true, linkedAccounts: async () => [], displayName: async () => "Member", isErased: async () => false }),
     services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now) }),
   });
@@ -69,21 +70,22 @@ async function world(options: { noSigner?: boolean } = {}) {
     companyOfWorkspace: workspaceCompanyReader(client, "state"),
     depsFor: async (companyId, queues) => {
       const flow = (await root.app.runtimeFor(companyId)).flow;
-      const machines = new Proxy(flow.deps.machines, { get(target, property) {
-        if (property === "companyId") return companyId;
-        const value = Reflect.get(target, property, target) as unknown;
-        return typeof value === "function" ? value.bind(target) : value;
-      } });
+      const source = flow.deps.machines;
+      const machines: WorkerMachines & { companyId: OrgId } = {
+        companyId, capabilities: source.capabilities,
+        start: (spec) => source.start(spec), stop: (id) => source.stop(id), terminate: (id) => source.terminate(id),
+        health: (id) => source.health(id), deliver: (id, job) => source.deliver(id, job),
+      };
       return { ...flow.deps, machines, queues };
     }, changeVisibility: async () => undefined,
   });
   const dispatchOnce = async () => {
     const queue = await w.queues.queue("task-dispatch");
     const messages = await queue.receive({ maxMessages: 10 });
-    const records = messages.map((message) => ({ messageId: message.id, receiptHandle: message.receiptHandle, body: JSON.stringify(message.body) }));
+    const records = messages.map((message) => ({ messageId: message.messageId, receiptHandle: message.receiptHandle, body: JSON.stringify(message.body) }));
     const taken = dispatch.take(records);
     const result = await dispatch.handle(records, taken);
-    for (const message of messages) if (!result.failures.includes(message.id)) await queue.ack(message.receiptHandle);
+    for (const message of messages) if (!result.failures.includes(message.messageId)) await queue.ack(message.receiptHandle);
     return result;
   };
   const invocation = async (workspaceId: string): Promise<WorkerInvocation> => {
@@ -102,9 +104,9 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
   for (const [companyId, person] of [[A, personA], [B, personB]]) {
     const answer = await h.start(person!);
     expect(answer?.statusCode, answer?.body).toBe(200);
-    const taskId = JSON.parse(answer!.body).task.taskId as string;
+    const { task: { taskId } } = z.object({ task: z.object({ taskId: z.string() }) }).parse(JSON.parse(answer!.body));
     const task = (await h.w.store.get(taskKey(taskId)))!;
-    const workspaceId = String(task["workspaceId"]);
+    const workspaceId = z.string().parse(task["workspaceId"]);
     expect(task["companyId"]).toBe(companyId);
     expect((await h.dispatchOnce()).failures).toEqual([]);
     let job = await h.invocation(workspaceId);
@@ -114,24 +116,26 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     expect((await h.dispatchOnce()).failures).toEqual([]);
     job = await h.invocation(workspaceId);
     expect(job.kind).toBe("task");
+    if (job.kind !== "task") throw new Error("expected a task invocation");
     expect((await h.callback(job, "events", { events: [{ type: "progress", timestamp: new Date(h.w.clock.now).toISOString(), payload: { message: companyId } }] }))?.statusCode).toBe(200);
     // Exercise the AWS broker's GET clause with no user JWT/authorizer. The broker's answer is the contract boundary.
-    const get = (query = "") => broker.handler({ version: "2.0", routeKey: "GET /v1/internal/model-access", rawPath: "/v1/internal/model-access", rawQueryString: query, headers: { "x-agentx-callback-capability": job.callbackCapability }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } } as never);
+    const get = (query = "") => broker.handler({ version: "2.0", routeKey: "GET /v1/internal/model-access", rawPath: "/v1/internal/model-access", rawQueryString: query, headers: { "x-agentx-callback-capability": job.callbackCapability }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } });
     const access = await get();
     expect(access.statusCode, access.body).toBe(200);
-    const body = JSON.parse(access.body);
+    const body = z.object({ baseUrl: z.string(), apiKey: z.string() }).parse(JSON.parse(access.body));
     expect(body.baseUrl).toBe(gateway);
-    const claims = JSON.parse(Buffer.from(body.apiKey.split(".")[1], "base64url").toString());
+    const claims: unknown = JSON.parse(Buffer.from(body.apiKey.split(".")[1]!, "base64url").toString());
     expect(claims).toMatchObject({ cid: companyId, ws: workspaceId, op: job.operationId, mdl: [MODEL] });
     const sent: Array<{ url: string; claims: Record<string, unknown> }> = [];
     const proxy = operationModelProxy({ payload: job.payload, proxyUrl: companyId === A ? "https://old-proxy.example" : undefined, controlPlaneUrl: "https://broker.example", capability: job.callbackCapability,
-      fetch: (async () => { const answer = await get(); return new Response(answer.body, { status: answer.statusCode }); }) as typeof fetch });
+      fetch: async () => { const answer = await get(); return new Response(answer.body, { status: answer.statusCode }); } });
     const runtime = await createConfiguredModelRuntime({ provider: "anthropic", modelId: MODEL }, { proxy: { ...proxy!, route: job.payload.modelRoute! }, onUsage: () => undefined,
-      fetch: (async (url, init) => {
+      fetch: async (url, init) => {
         const token = new Headers(init?.headers).get("x-api-key")!;
-        sent.push({ url: `${new URL(String(url)).origin}${new URL(String(url)).pathname}`, claims: JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) });
+        const address = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
+        sent.push({ url: `${address.origin}${address.pathname}`, claims: z.record(z.string(), z.unknown()).parse(JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString())) });
         return new Response("{}", { status: 400 });
-      }) as typeof fetch });
+      } });
     await runtime.completeSimple(runtime.getModel("rovara-route", MODEL)!, { messages: [{ role: "user", content: "fake company model call", timestamp: 0 }] });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ url: `${gateway}/v1/messages`, claims: { cid: companyId, ws: workspaceId, op: job.operationId, mdl: [MODEL] } });
@@ -143,21 +147,21 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     runs.push({ companyId: companyId!, person: person!, taskId, workspaceId, job });
   }
   const [a, b] = runs;
-  for (const [own, other] of [[a!, b!], [b!, a!]]) {
-    const runtime = await h.root.app.runtimeFor(own.companyId);
+  for (const [own, other] of [[a!, b!], [b!, a!]] as const) {
+    await h.root.app.runtimeFor(own.companyId);
     expect((await h.root.coreTasks!.route({ method: "GET", path: `/v1/dev/tasks/${other.taskId}`, headers: {} }, h.caller(own.person)))?.statusCode).toBe(404);
     expect((await h.root.coreTasks!.route({ method: "POST", path: `/v1/dev/tasks/${other.taskId}/continue`, headers: {}, body: "{}" }, h.caller(own.person)))?.statusCode).toBe(404);
     expect((await h.callback(own.job, "events", { events: [] }, other.workspaceId))?.statusCode).toBeGreaterThanOrEqual(400);
     // Fake reviewer evidence is seeded at the review boundary; the owner act and its company checks run on the real root.
     expect((await h.callback(own.job, "result", { status: "SUCCEEDED" }))?.statusCode).toBe(200);
     const task = (await h.w.store.get(taskKey(own.taskId)))!;
-    const security = blockedReview({ taskId: own.taskId, ownerId: String(task["ownerKey"]) }, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]);
+    const security = blockedReview({ taskId: own.taskId, ownerId: z.string().parse(task["ownerKey"]) }, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]);
     await h.w.store.update({ key: taskKey(own.taskId), ops: [change.set("workflow", plain(security))] });
     const refused = await h.root.coreTasks!.route({ method: "POST", path: `/v1/dev/tasks/${own.taskId}/workflow/review-findings`, headers: {}, body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 6, candidateDigest: code.digest, resolutions: [{ findingId: parserId, action: "FIX", note: "Fix this" }, { findingId: tokenId, action: "ACCEPT", note: "Accept this" }] }) }, h.caller(own.person));
     expect(refused?.statusCode).toBe(403);
     expect(refused?.body).toContain("Rovara web page");
     expect((await h.w.store.get(taskKey(own.taskId)))?.["workflow"]).toEqual(plain(security));
-    const workflow = blockedReview({ taskId: own.taskId, ownerId: String(task["ownerKey"]) });
+    const workflow = blockedReview({ taskId: own.taskId, ownerId: z.string().parse(task["ownerKey"]) });
     await h.w.store.update({ key: taskKey(own.taskId), ops: [change.set("workflow", plain(workflow))] });
     const accepted = await h.root.coreTasks!.route({ method: "POST", path: `/v1/dev/tasks/${own.taskId}/workflow/review-findings`, headers: {}, body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 6, candidateDigest: code.digest, resolutions: [{ findingId: parserId, action: "ACCEPT", note: "Reviewed on the fixture" }] }) }, h.caller(own.person));
     expect(accepted?.statusCode, accepted?.body).toBe(200);
@@ -169,11 +173,11 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     // A poisoned foreign row in this partition must be filtered before its task is touched.
     await h.w.store.put({ item: { pk: due.pk, sk: `TASK#${other.taskId}`, taskId: other.taskId, companyId: other.companyId, lastRunAt: 0 } });
     const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) }]);
-    const waiting = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: own.taskId, ownerId: String(task["ownerKey"]), now: new Date(h.w.clock.now).toISOString() }), stage: "WAIT_FOR_MERGE", state: "WAITING", candidate, verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: new Date(h.w.clock.now).toISOString(), results: [{ checkId: "unit", status: "PASS" }] }, reviews: [report("CRITIC", "PASS", [], candidate.digest), report("SECURITY", "PASS", [], candidate.digest)], pullRequests: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: "OPEN", url: "https://github.com/example/demo/pull/1" }] });
+    const waiting = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: own.taskId, ownerId: z.string().parse(task["ownerKey"]), now: new Date(h.w.clock.now).toISOString() }), stage: "WAIT_FOR_MERGE", state: "WAITING", candidate, verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: new Date(h.w.clock.now).toISOString(), results: [{ checkId: "unit", status: "PASS" }] }, reviews: [report("CRITIC", "PASS", [], candidate.digest), report("SECURITY", "PASS", [], candidate.digest)], pullRequests: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: "OPEN", url: "https://github.com/example/demo/pull/1" }] });
     await h.w.store.update({ key: taskKey(own.taskId), ops: [change.set("workflow", plain(waiting))] });
     await h.w.store.put({ item: { ...recoveryRowKey(own.taskId), taskId: own.taskId, kind: "tracking", nextAttemptAt: 0 } });
   }
-  for (const [own, other] of [[a!, b!], [b!, a!]]) {
+  for (const [own, other] of [[a!, b!], [b!, a!]] as const) {
     const record = createTeamRecord({ store: h.w.store, companyId: own.companyId, now: () => h.w.clock.now });
     const hits = await record.search("payments", "shared query", 10);
     expect(hits.some((hit) => hit.row.text.includes(own.companyId))).toBe(true);

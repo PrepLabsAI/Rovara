@@ -2,7 +2,7 @@ import { MissingProviderSecret, type ModelRole } from "./config.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
 import { ROUTE_PROVIDER, bedrockClaudeModelIds, catalogModel, catalogModelByName, proxyGeographyOfModelId } from "./catalog.js";
 export { ROUTE_PROVIDER };
-import { TRANSPORTS, requestCompat } from "./transport.js";
+import { TRANSPORTS, carriesUnsignedReasoning, requestCompat } from "./transport.js";
 import { TOOL_DECLARATIONS_MISSING_WORDS, toolBlocksWithoutTools } from "./tool-history.js";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedMarker, budgetScopeOfProxyBody, modelNotAllowedMarker, type ModelBudgetScope } from "./budget.js";
 export { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedFromMarker, modelNotAllowedFromMarker, type ModelBudgetScope } from "./budget.js";
@@ -301,7 +301,7 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
       reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow, maxTokens: base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
-      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined),
+      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),
     }],
     streamSimple: (entry, context, streamOptions) => safeProviderStream(route.api === "anthropic-messages" ? "anthropic" : "openai", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, proxyRequestKey(proxy, route.api), { api: route.api, identity }),
   });
@@ -310,9 +310,12 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
   return runtime;
 }
 
-/** The request a routed model gets: the shared rules of requestCompat, and no session-affinity header for a company's endpoint. */
-function routeCompat(api: InvocationModelRoute["api"], compat: unknown) {
-  if (api === "anthropic-messages") return requestCompat("anthropic", compat);
+/**
+ * The request a routed model gets: the shared rules of requestCompat, and no session-affinity header for a company's endpoint. A routed Anthropic-format model that
+ * needs its earlier reasoning sent back (carriesUnsignedReasoning) also keeps its unsigned thinking blocks as thinking blocks.
+ */
+function routeCompat(api: InvocationModelRoute["api"], compat: unknown, catalogName: string) {
+  if (api === "anthropic-messages") return { ...requestCompat("anthropic", compat), ...(carriesUnsignedReasoning(catalogName) ? { allowEmptySignature: true } : {}) };
   if (api === "openai-responses") return requestCompat("openai", compat);
   return { ...(compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false, supportsMidConvoSystemMessages: false };
 }

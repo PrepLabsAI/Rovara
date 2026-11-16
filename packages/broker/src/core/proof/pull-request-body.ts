@@ -60,6 +60,11 @@ export interface PullRequestBodyContext {
   proof?: ProofContext | undefined;
   /** Proof and evidence P4: a security scan's new high findings on this code (the evidence pack, only while the proof switch is on). It can only raise the risk shown. */
   evidenceRisk?: EvidenceRiskSignal | undefined;
+  /**
+   * MR3b: the lines about the order this task's pull requests merge in (`mergeOrderLinesOfTask`: the order itself, or the fixed "no safe order" words, and what happened when one was merged ahead of the one it depends
+   * on). Already inert and bounded; printed under their own heading at the top of the block, so every pull request of a multi-repository task says it. Absent or empty: no section, and the description is what it was.
+   */
+  mergeOrderLines?: readonly string[] | undefined;
   /** I3: who asked for the work and who approved its plan, built by the broker from its own records (`broker/src/attribution`). Lines outside the marked block, so a status rewrite leaves them. */
   attribution?: ActingAttribution | undefined;
   /**
@@ -83,6 +88,11 @@ export interface PullRequestBodyContext {
    * is read by everyone who can see the repository, so, like the lessons' titles, the block is printed only when this is true. Absent (unknown) or false (public): no block, the v1 lines. The caller sets it from the code host.
    */
   repositoryKnownPrivate?: boolean | undefined;
+  /**
+   * TE-H1 browser evidence (DEC 241d): the text lines about the before and after screenshots of the changed pages (`browserEvidenceLines`: who ran it, that it is visual evidence only, one line per page, "on the task page, behind sign-in").
+   * Text only: no image, no address of one and no digest ever reaches GitHub, because an image a PR reader's browser can fetch would be public. Absent or empty: the description is exactly what it was.
+   */
+  browserEvidenceLines?: readonly string[] | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -257,6 +267,12 @@ function testLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, 
  * The lines between the markers: What changed, Tests, Reviews and Risk, about the code now on the pull request. `reviewLines(listed)` gives the Reviews section's lines (at most `listed` accepted
  * findings named). The lists shrink until the block fits `budgetBytes`.
  */
+/** The "Browser evidence" section: its fixed lines under a heading and a blank line after; nothing for none. Each line is one line (a line with a break in it is dropped, so a section never carries other markup). */
+export function browserEvidenceSection(lines: readonly string[] | undefined): string[] {
+  const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line));
+  return kept.length === 0 ? [] : ["## Browser evidence", ...kept, ""];
+}
+
 export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, reviewLines: (listed: number) => string[], budgetBytes = PULL_REQUEST_BODY_MAX_BYTES - SUMMARY_MAX_BYTES - 2_000): string[] {
   const risk = riskShown(workflow, context);
   const linearKey = normalizeIssueKey(context.linearIssueKey);
@@ -278,9 +294,11 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     const block = evidenceBlock(level);
     lines = sealLinearText([
       ...(block ?? flags),
+      ...mergeOrderSection(context.mergeOrderLines),
       "## What changed", ...changedLines(context, limit), "",
       ...(testing === undefined ? ["## Tests", ...testLines(workflow, context, limit)] : testingSectionLines(testing, level, testingExtraLines(workflow, context, limit))), "",
       ...(proof === undefined ? [] : [...proof(proofLevel), ""]),
+      ...browserEvidenceSection(context.browserEvidenceLines),
       ...lessonsUsedLines(context.lessonsUsed, limit),
       "## Reviews", ...reviewLines(limit), ...reviewModelLines(workflow, context.reviewSameModel === true).map((line) => inertLine(line, ITEM_MAX)), ...(context.secondReviewLines ?? []), "",
       `## Risk: ${riskHeading(risk?.level ?? "medium")}`, ...(risk?.reasons ?? ["Rovara couldn't assess this change."]).map((reason) => `- ${Array.from(reason).slice(0, ITEM_MAX).join("")}`),
@@ -289,6 +307,13 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     if (byteLength(lines.join("\n")) <= budgetBytes) return lines;
   }
   return lines;
+}
+
+/** The "Merge order" section: at most 4 lines, each one line (the lines are made inert where they are written, and are cut here again, so nothing a caller passes can add a heading or a link). */
+export function mergeOrderSection(lines: readonly string[] | undefined): string[] {
+  // A line that begins with a Markdown marker (a heading, a quote, a list item, a table bar) would become one: a zero-width joiner in front keeps it text.
+  const shown = (lines ?? []).slice(0, 4).map((line) => inertLine(line, 600).replace(/^([#>|*+-]|\d+[.)])/u, "\u200d$1")).filter((line) => line !== "");
+  return shown.length === 0 ? [] : ["## Merge order", ...shown, ""];
 }
 
 const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];

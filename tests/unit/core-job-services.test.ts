@@ -200,7 +200,7 @@ it("shares one recovery-index read across company passes in a scheduled invocati
   await w.h.store.put({ item: { ...recoveryRowKey(otherId), taskId: otherId, kind: "tracking", nextAttemptAt: 0 } });
   const query = vi.spyOn(w.h.store, "query");
   const services = [ORG, B].map((companyId) => createBrokerCoreServices({ companyId, flow: { ...w.h.flow, deps: { ...w.h.deps, companyId } }, registry: w.registry,
-    ciMode: async () => "their_ci_fix", repository: w.world.host.repository, people: w.people, now: () => new Date(w.clock.ms) }));
+    ciMode: async () => "their_ci_fix" as const, repository: w.world.host.repository, people: w.people, now: () => new Date(w.clock.ms) }));
   await withSharedMergeRecovery(async () => {
     for (const service of services) expect(await service["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 1 });
   });

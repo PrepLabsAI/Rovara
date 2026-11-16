@@ -430,7 +430,8 @@ describe("the core on the dispatcher", () => {
     expect(reader.asked).toHaveLength(before);
     expect(reader.asked).toEqual([COMPANY_A, COMPANY_B]);
     made.advance(60_001);
-    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
+    // B's stale choice is Haiku, distinct from the install's Sonnet default: expiry must change the model.
+    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
     expect(made.log).toHaveBeenCalledWith({ component: "dispatcher", event: "core_engine.model_choice_expired" });
     expect(made.log).toHaveBeenCalledTimes(1);
     const state = registry.require("storage");

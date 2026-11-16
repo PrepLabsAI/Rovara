@@ -2,6 +2,9 @@
 // company is membership, never a claim; the task access re-reads live membership and keeps the broker's project grant rule; the stream hook finds only outbox inserts.
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
+import type { CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
   brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
@@ -397,12 +400,18 @@ describe("the broker core dispatch queue piece (L1a)", () => {
 });
 
 it("composes the broker adapters lazily and preserves the L1c builder object including brokerOnly", async () => {
-  const machines = { brokerOnly: true } as never;
-  const codeHost = { codeHost: { provider: {}, options: { credentialRef: "app" } }, checkRunner: { githubActions: {} } } as never;
+  const unused = async (): Promise<never> => { throw new Error("composition does not invoke adapters"); };
+  const machines: NonNullable<CodeModuleDeps["workerMachines"]> = {
+    brokerOnly: true, sessions: { get: unused, ensureSession: unused, deleteSession: unused, claimStop: unused, markStopped: unused },
+    companyOfWorkspace: unused, binding: unused, stopInstance: unused, sign: unused, post: unused, ping: unused,
+  };
+  const codeHost: Pick<CodeModuleDeps, "codeHost"> = {
+    codeHost: { provider: new GitHubFixtureProvider(new FakeHostModel({ url: "https://github.com/example/demo.git", id: "1", fullName: "example/demo" })), options: { credentialRef: "app" } },
+  };
   const workerMachines = vi.fn(() => machines);
   const host = vi.fn(() => codeHost);
   const env = { STATE_TABLE_NAME: STATE, ARTIFACT_BUCKET_NAME: "artifacts", CORE_DISPATCH_QUEUE_URL: "https://queue.example/core", CORE_DISPATCH_DEAD_LETTER_URL: "https://queue.example/dead" };
-  const objects = { bucket: "artifacts", client: {} } as never;
+  const objects: CodeModuleDeps["objects"] = { bucket: "artifacts", client: { send: unused } };
   const secrets = { namePrefix: "", clientFor: () => ({ send: async () => ({}) }) };
   const built = brokerCoreModuleDeps(env, { codeHost: host, workerMachines, objects, secrets });
   expect(built.workerMachines).toBe(machines);

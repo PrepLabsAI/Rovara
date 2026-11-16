@@ -28,6 +28,7 @@ import { mergedMilestoneItems, mergedStateItems } from "../core/merge/merged.js"
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
 import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
 import type { MergePeople } from "../core/merge/people.js";
+import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
 import type { CodeMilestones, CodeSettingsReader, MergeTask, SessionTimeline } from "../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
@@ -147,6 +148,8 @@ export interface MergeTrackingServiceOptions {
   /** Retained by a short-lived pass composer, per company; never stored or shared between companies. */
   scan?: { cursor: string | undefined; complete?: boolean };
   ciMode?: MergeTrackingDependencies["ciMode"];
+  /** MR3b: the dependency facts between a task's repositories (`createRepositoryEdgesSeam`). Absent: a pull request merged out of order is not warned about, and no pull request is held for the order. */
+  repositoryEdges?: ((task: MergeTask) => unknown) | undefined;
   /** Milliseconds since the epoch. The host's clock, so a test can move it. */
   now: () => number;
   log?: Log;
@@ -204,6 +207,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     recordedHead: recordedHeadOf(flow),
     // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
     readyHold: (task, current) => scopeHoldOf(flow, task, current),
+    ...(options.repositoryEdges === undefined ? {} : { repositoryEdges: options.repositoryEdges }),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 
@@ -244,6 +248,26 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
         ...await mergedStateItems({ store, timeline, audit: flow.audit, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
       ];
+      // MR3b: a pull request merged by hand ahead of the one it depends on is said once, on the session and in the chat, naming every pull request of the task.
+      if (state === "MERGED") {
+        // Informational: a fault while building the warning never stops the merge from being recorded (a host's "slow down" still goes up to the sweep).
+        try {
+          items.push(...await outOfOrderMilestoneItems({
+            milestones, repositoryEdges: options.repositoryEdges, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
+            providerState: async (repositoryId) => {
+              const provider = workflow.pullRequests?.find((entry) => entry.repositoryId === repositoryId && entry.required);
+              const providerHome = provider === undefined ? undefined : await resolver(task.project, task.startingRevision, repositoryId, companyId);
+              if (provider === undefined || providerHome?.codeHost.mergeObservation === undefined) return "unknown";
+              // A provider closed without merging is not "waiting to merge": it is not said about.
+              const read = (await providerHome.codeHost.mergeObservation(changeRequestRef(providerHome.url, provider.number), { orgId: companyId }, budget)).state;
+              return read === "merged" ? "merged" : read === "open" ? "not_merged" : "unknown";
+            },
+          }, { ...task, orgId: companyId, workflow: next }, workflow, next, at));
+        } catch (error) {
+          if (hostRateLimitRetryAt(error) !== undefined) throw error;
+          log({ component: "merge_tracking", event: "merge_tracking.order_warning_failed", error: error instanceof Error ? error.name : "unknown" });
+        }
+      }
       const written = await store.transact(items);
       if (written.applied) await milestones.deliver(taskId).catch(() => undefined);
       // The merge completed the task: the host is told it ended, right after the merge's own commit and once (a later close does not tell it again, and a merge seen twice commits once).

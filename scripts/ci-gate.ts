@@ -1,25 +1,71 @@
-// CI's gate. The checks, the test shards and the release check run as separate jobs; the job called
-// `local` waits for all of them and is the one check a pull request needs. GitHub counts a skipped
-// job as a pass, so a plain `needs` would let a pull request go green with a job missing: this
-// checks each result by name. Node runs this file directly, so it imports only Node's own modules.
+// CI's gate. The `plan` job (scripts/ci-plan.ts) decides what a run needs; `quick`, `build`, the test shards, the Linux runtime check and the `ci-mode (full)` check run as
+// separate jobs; the job called `local` waits for all of them and is the one check a pull request needs. GitHub counts a skipped job as a pass, so a plain `needs` would let
+// a pull request go green with a job missing. This reads the plan's answers and holds each job to them: a job the plan skipped by design must have been skipped (it counts as
+// a pass), a job the plan required must have succeeded, and a full run must have run everything. Node runs this file directly, so it imports only Node's own modules.
 
 export interface GateVerdict { ok: boolean; reason: string }
 
-/** `results` maps each job the gate waited for to its result: success, failure, cancelled or skipped. */
-export function gateVerdict(input: { docsOnly: boolean; results: Readonly<Record<string, string>> }): GateVerdict {
-  const { docsOnly, results } = input;
-  if (results.scope !== "success") return { ok: false, reason: `scope was ${results.scope ?? "missing"}, not success` };
-  const heavy = Object.entries(results).filter(([job]) => job !== "scope");
-  if (heavy.length === 0) return { ok: false, reason: "no job to judge besides scope" };
-  // A Markdown-only change skips every heavy job; any other change needs every one to succeed.
-  const expected = docsOnly ? "skipped" : "success";
-  for (const [job, result] of heavy) {
-    if (result !== expected) return { ok: false, reason: `${job} was ${result}, not ${expected}` };
+/** The plan's outputs, as GitHub hands them over (strings). */
+export type PlanOutputs = Readonly<Record<string, string | undefined>>;
+
+/** The jobs `local` judges besides `plan`, in the order they are reported. */
+export const GATED_JOBS = ["quick", "build", "test", "linux-runtime", "ci-mode"] as const;
+
+/** The shard list of a run that executes the whole suite (scripts/ci-plan.ts FULL_SHARDS). */
+export const FULL_SHARD_LIST = "[1,2,3,4,5,6,7,8]";
+const MODES = ["full", "affected"];
+const SCOPES = ["all", "changed", "none"];
+const BOOLEANS = ["true", "false"];
+
+/** What each job's result must be, from the plan: "success" when the plan needs the job, "skipped" when it skipped the job by design. Or a reason the plan itself is not trusted. */
+export function expectedResults(plan: PlanOutputs): { expected: Record<string, "success" | "skipped"> } | { problem: string } {
+  const { mode, docs_only: docsOnly, tests, lint, linux, release } = plan;
+  if (mode === undefined || !MODES.includes(mode)) return { problem: `the plan's mode is ${JSON.stringify(mode)}, not full or affected` };
+  if (tests === undefined || !SCOPES.includes(tests)) return { problem: `the plan's tests is ${JSON.stringify(tests)}, not all, changed or none` };
+  if (lint === undefined || !SCOPES.includes(lint)) return { problem: `the plan's lint is ${JSON.stringify(lint)}, not all, changed or none` };
+  for (const [name, value] of [["docs_only", docsOnly], ["linux", linux], ["release", release]] as const) {
+    if (value === undefined || !BOOLEANS.includes(value)) return { problem: `the plan's ${name} is ${JSON.stringify(value)}, not true or false` };
   }
-  return { ok: true, reason: docsOnly ? "Markdown-only change; every heavy job was skipped" : `${heavy.length} jobs succeeded` };
+  // A full run runs everything; a plan that says full but also skips something is not one to trust.
+  if (mode === "full" && !(tests === "all" && lint === "all" && linux === "true" && release === "true" && docsOnly === "false")) {
+    return { problem: `the plan says full but also skips part of the run (tests ${tests}, lint ${lint}, linux ${linux}, release ${release}, docs_only ${docsOnly})` };
+  }
+  // The whole suite is eight shards: a plan that says so but lists fewer would run only part of it.
+  if (tests === "all" && plan.shards !== FULL_SHARD_LIST) return { problem: `the plan runs the whole suite but its shard list is ${JSON.stringify(plan.shards)}, not ${FULL_SHARD_LIST}` };
+  if (docsOnly === "true" && (mode !== "affected" || tests !== "none")) return { problem: "the plan says Markdown-only but still runs tests" };
+  return {
+    expected: {
+      quick: docsOnly === "true" ? "skipped" : "success",
+      build: tests === "none" ? "skipped" : "success",
+      test: tests === "none" ? "skipped" : "success",
+      "linux-runtime": linux === "true" ? "success" : "skipped",
+      "ci-mode": mode === "full" ? "success" : "skipped",
+    },
+  };
 }
 
-interface Need { result?: unknown; outputs?: { docs_only?: unknown } }
+/** `results` maps each job the gate waited for to its result: success, failure, cancelled or skipped. */
+export function gateVerdict(input: { plan: PlanOutputs; results: Readonly<Record<string, string>> }): GateVerdict {
+  const { plan, results } = input;
+  if (results.plan !== "success") return { ok: false, reason: `plan was ${results.plan ?? "missing"}, not success` };
+  const decided = expectedResults(plan);
+  if ("problem" in decided) return { ok: false, reason: decided.problem };
+  for (const job of GATED_JOBS) {
+    const result = results[job];
+    const expected = decided.expected[job]!;
+    if (result === undefined) return { ok: false, reason: `${job} was missing` };
+    if (result === expected) continue;
+    if (expected === "skipped") return { ok: false, reason: `${job} was ${result}, but the plan skipped it` };
+    if (result === "skipped") return { ok: false, reason: `${job} was skipped, but the plan needs it to succeed` };
+    return { ok: false, reason: `${job} was ${result}, not success` };
+  }
+  const ran = GATED_JOBS.filter((job) => decided.expected[job] === "success");
+  const skipped = GATED_JOBS.filter((job) => decided.expected[job] === "skipped");
+  const mode = plan.mode === "full" ? "FULL run" : plan.docs_only === "true" ? "Markdown-only change" : "affected run";
+  return { ok: true, reason: `${mode}; ${ran.length} jobs succeeded${skipped.length > 0 ? `, ${skipped.length} skipped by design (${skipped.join(", ")})` : ""}` };
+}
+
+interface Need { result?: unknown; outputs?: Record<string, unknown> }
 
 /** The verdict for the JSON of GitHub's `needs` context (`toJSON(needs)`). */
 export function needsVerdict(needsJson: string): GateVerdict {
@@ -32,8 +78,9 @@ export function needsVerdict(needsJson: string): GateVerdict {
   if (typeof needs !== "object" || needs === null) return { ok: false, reason: "the needs context is not an object" };
   const entries = Object.entries(needs as Record<string, Need>);
   const results = Object.fromEntries(entries.map(([job, need]) => [job, String(need?.result)]));
-  const docsOnly = (needs as Record<string, Need>).scope?.outputs?.docs_only === "true";
-  return gateVerdict({ docsOnly, results });
+  const outputs = (needs as Record<string, Need>).plan?.outputs ?? {};
+  const plan = Object.fromEntries(Object.entries(outputs).map(([key, value]) => [key, typeof value === "string" ? value : undefined]));
+  return gateVerdict({ plan, results });
 }
 
 // Usage: NEEDS='<toJSON(needs)>' node scripts/ci-gate.ts
