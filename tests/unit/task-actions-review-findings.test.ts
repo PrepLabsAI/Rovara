@@ -11,10 +11,12 @@ import type { Admission } from "@agentx/contracts";
 import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
 import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
+import type { TaskCaller, TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { acceptedByOf, findingAcceptItem } from "../../packages/broker/src/core/task-flow/finding-accept.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
+import type { TaskActionsOptions } from "../../packages/broker/src/core/task-flow/owner-round.js";
+import { SECURITY_ACCEPT_ON_THE_PAGE } from "../../packages/broker/src/core/task-flow/security-accept.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { COMPANY } from "../support/task-flow-harness.js";
@@ -22,6 +24,13 @@ import {
   NOW, OWNER_KEY, PARSER, REQUEST_A, REQUEST_B, TASK_ID, TOKEN, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, operationsOf, parserId, promptOf, report, seed, stateOf, taskOf, tokenId,
 } from "../support/task-actions-world.js";
 
+// The harness clock stands at this time; a step-up made now is fresh. Accepting a security finding is the web page's (DEC 236h), so most of these tests act as the page with a fresh step-up; the ones about a token say so.
+const STEP_UP_NOW = "2026-11-09T10:00:00.000Z";
+const FRESH = { at: STEP_UP_NOW, method: "email_code" };
+const pageActions = (deps: TaskFlowDeps, options?: TaskActionsOptions) => {
+  const actions = createTaskActions(deps, options);
+  return { resolveFindings: (caller: TaskCaller, taskId: string, body: unknown, via: "page" | "api-token" = "page") => actions.resolveFindings({ ...caller, stepUp: FRESH, webApp: true }, taskId, body, via) };
+};
 const both = () => blockedReview({}, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]);
 const answer = (findingId: string, action: "ACCEPT" | "FIX", note = action === "ACCEPT" ? "A footer we drop on purpose." : "Keep the footer line.") => ({ findingId, action, note });
 const request = (resolutions: unknown[], over: Record<string, unknown> = {}) => ({ requestId: REQUEST_A, expectedRevision: 6, candidateDigest: code.digest, resolutions, ...over });
@@ -31,7 +40,7 @@ const mixed = () => request([answer(parserId, "FIX", "Keep the footer line."), a
 describe("review findings", () => {
   it("sends only the findings to fix back to coding, with the owner's instruction for each, and records the accepted one with who and why", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const view = await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
+    const view = await pageActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
     // 6 (blocked) -> 7 (sent back, ready for coding) -> 8 (the coding run started).
     expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", revision: 8 });
     const task = await taskOf(h);
@@ -53,7 +62,7 @@ describe("review findings", () => {
   it("numbers the owner's instructions by the order the problems are listed, not the order they were answered in", async () => {
     const reversed = blockedReview({}, [report("SECURITY", "FINDINGS", [TOKEN]), report("CRITIC", "FINDINGS", [PARSER])]);
     const { h, caller } = await seed({ workflow: reversed });
-    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", "About the parser."), answer(tokenId, "FIX", "About the token.")]));
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", "About the parser."), answer(tokenId, "FIX", "About the token.")]));
     const prompt = promptOf((await codingOperations(h))[0]!);
     // The coder lists the security review's finding first (the reviews' order); its note is number 1.
     expect(prompt.indexOf(TOKEN.text)).toBeLessThan(prompt.indexOf("New parser drops the last line."));
@@ -62,7 +71,7 @@ describe("review findings", () => {
 
   it("with every finding accepted the draft pull request is due: the decision, the reasons, and no coding", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const view = await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, acceptAll());
+    const view = await pageActions(h.deps).resolveFindings(caller, TASK_ID, acceptAll());
     expect(view.workflow).toMatchObject({ stage: "PULL_REQUEST", revision: 7 });
     const task = await taskOf(h);
     expect(task.workflow!.decisions.at(-1)).toMatchObject({ decision: "APPROVE", source: "FINDINGS", reason: "2 accepted, 0 to fix", actorRole: "TASK_OWNER" });
@@ -76,7 +85,7 @@ describe("review findings", () => {
 
   it("starts nothing when another review still blocks: only the decision is written", async () => {
     const { h, caller } = await seed({ workflow: blockedReview({}, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FAILED", [])]) });
-    const view = await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "ACCEPT")]));
+    const view = await pageActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "ACCEPT")]));
     expect(view.workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
     expect(await operationsOf(h)).toHaveLength(0);
     expect(await dispatchRows(h)).toHaveLength(0);
@@ -85,7 +94,7 @@ describe("review findings", () => {
 
   it("refuses an accept with no reason, even for a security finding, and writes nothing", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const actions = createTaskActions(h.deps);
+    const actions = pageActions(h.deps);
     const before = await stateOf(h);
     for (const note of ["", "   ", "x".repeat(501)]) {
       await expect(actions.resolveFindings(caller, TASK_ID, request([answer(parserId, "ACCEPT", "A footer."), answer(tokenId, "ACCEPT", note)]))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
@@ -97,7 +106,7 @@ describe("review findings", () => {
 
   it("refuses a missing, unknown or repeated answer, and an empty list, and writes nothing", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const actions = createTaskActions(h.deps);
+    const actions = pageActions(h.deps);
     const before = await stateOf(h);
     await expect(actions.resolveFindings(caller, TASK_ID, request([answer(parserId, "ACCEPT")]))).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("every blocking finding") as string });
     await expect(actions.resolveFindings(caller, TASK_ID, request([answer(parserId, "ACCEPT"), answer(tokenId, "ACCEPT"), answer("f".repeat(64), "FIX", "")]))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
@@ -108,7 +117,7 @@ describe("review findings", () => {
 
   it("holds the revision and the code the person saw", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const actions = createTaskActions(h.deps);
+    const actions = pageActions(h.deps);
     const before = await stateOf(h);
     await expect(actions.resolveFindings(caller, TASK_ID, { ...acceptAll(), expectedRevision: 5 })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     await expect(actions.resolveFindings(caller, TASK_ID, { ...acceptAll(), expectedRevision: 7 })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
@@ -119,31 +128,31 @@ describe("review findings", () => {
   it("is refused for anyone but the owner or a co-owner, a script token, a closed task and a task that is not at a blocked review", async () => {
     const guest = await seed({ workflow: both() });
     const before = await stateOf(guest.h);
-    await expect(createTaskActions(guest.h.deps).resolveFindings(guest.h.guest, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    await expect(pageActions(guest.h.deps).resolveFindings(guest.h.guest, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     expect(await stateOf(guest.h)).toEqual(before);
     const viewer = await seed({ workflow: both(), access: accessWithoutOwners() });
-    await expect(createTaskActions(viewer.h.deps).resolveFindings(viewer.h.guest, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    await expect(pageActions(viewer.h.deps).resolveFindings(viewer.h.guest, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     expect((await taskOf(viewer.h)).workflow!.acceptedFindings).toBeUndefined();
     const token = await seed({ workflow: both() });
-    await expect(createTaskActions(token.h.deps).resolveFindings({ ...token.h.owner, scriptToken: { tokenId: "t", name: "CI", permissions: ["read", "start"], projects: ["payments"] } }, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    await expect(pageActions(token.h.deps).resolveFindings({ ...token.h.owner, scriptToken: { tokenId: "t", name: "CI", permissions: ["read", "start"], projects: ["payments"] } }, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     const closed = await seed({ workflow: both(), task: { closedAt: "2026-11-10T11:00:00.000Z" } });
-    await expect(createTaskActions(closed.h.deps).resolveFindings(closed.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(pageActions(closed.h.deps).resolveFindings(closed.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     const running = await seed({ workflow: WorkflowSnapshotSchema.parse({ ...both(), state: "RUNNING", blockReason: undefined }) });
-    await expect(createTaskActions(running.h.deps).resolveFindings(running.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(pageActions(running.h.deps).resolveFindings(running.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     const plain = await seed({ workflow: null });
-    await expect(createTaskActions(plain.h.deps).resolveFindings(plain.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(pageActions(plain.h.deps).resolveFindings(plain.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "NOT_FOUND" });
     // The workspace was closed or never got ready: nothing can be started on it, so nothing is decided.
     for (const status of ["CLOSED", "PREPARATION_FAILED"]) {
       const stuck = await seed({ workflow: both(), workspace: { status } });
       const stuckBefore = await stateOf(stuck.h);
-      await expect(createTaskActions(stuck.h.deps).resolveFindings(stuck.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      await expect(pageActions(stuck.h.deps).resolveFindings(stuck.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
       expect(await stateOf(stuck.h)).toEqual(stuckBefore);
     }
   });
 
   it("answers a repeat with the first and starts one run; other answers under the same id, or an id of another decision, are refused", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const actions = createTaskActions(h.deps);
+    const actions = pageActions(h.deps);
     const first = await actions.resolveFindings(caller, TASK_ID, mixed());
     const again = await actions.resolveFindings(caller, TASK_ID, mixed());
     expect(again.workflow?.revision).toBe(first.workflow?.revision);
@@ -155,12 +164,12 @@ describe("review findings", () => {
     // Nothing accepted any more: the accepted finding's reason cannot differ, but the counts do.
     await expect(actions.resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", "Keep the footer line."), answer(tokenId, "FIX", "")]))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     const sent = await seed({ workflow: blockedReview({ decisions: [{ requestId: REQUEST_A, workflowRevision: 5, decision: "REQUEST_CHANGES", actorId: "a".repeat(64), actorRole: "TASK_OWNER", reason: "Fix it.", source: "SEND_BACK", at: "2026-11-10T09:00:00.000Z" }] }, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]) });
-    await expect(createTaskActions(sent.h.deps).resolveFindings(sent.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(pageActions(sent.h.deps).resolveFindings(sent.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
   });
 
   it("starts one run when the same request arrives twice at once", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const actions = createTaskActions(h.deps);
+    const actions = pageActions(h.deps);
     const [a, b] = await Promise.all([actions.resolveFindings(caller, TASK_ID, mixed()), actions.resolveFindings(caller, TASK_ID, mixed())]);
     expect(a.workflow?.stage).toBe("IMPLEMENT");
     expect(b.workflow?.stage).toBe("IMPLEMENT");
@@ -172,17 +181,17 @@ describe("review findings", () => {
     for (const cap of [{ limitUsd: 6, spentUsd: 6 }, { limitUsd: 6, spentUsd: undefined }]) {
       const { h, caller } = await seed({ workflow: both() });
       const before = await stateOf(h);
-      await expect(createTaskActions(h.deps, { roundCap: async () => cap }).resolveFindings(caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+      await expect(pageActions(h.deps, { roundCap: async () => cap }).resolveFindings(caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
       expect(await stateOf(h)).toEqual(before);
     }
     const refusing: Admission = { ...createAllowAllAdmission(), async admit() { return { allowed: false, code: "budget_exhausted", message: "The monthly budget is used up." }; } };
     const refused = await seed({ workflow: both(), harness: { admission: refusing } });
     const before = await stateOf(refused.h);
-    await expect(createTaskActions(refused.h.deps).resolveFindings(refused.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    await expect(pageActions(refused.h.deps).resolveFindings(refused.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
     expect(await stateOf(refused.h)).toEqual(before);
     // Nothing to pay for: the findings are accepted though the cap is used.
     const accepted = await seed({ workflow: both() });
-    await createTaskActions(accepted.h.deps, { roundCap: async () => ({ limitUsd: 6, spentUsd: 6 }) }).resolveFindings(accepted.caller, TASK_ID, acceptAll());
+    await pageActions(accepted.h.deps, { roundCap: async () => ({ limitUsd: 6, spentUsd: 6 }) }).resolveFindings(accepted.caller, TASK_ID, acceptAll());
     expect((await taskOf(accepted.h)).workflow!.acceptedFindings).toHaveLength(2);
   });
 
@@ -191,13 +200,13 @@ describe("review findings", () => {
     const projects = archived.h.deps.projects;
     archived.h.deps.projects = { ...projects, latest: async (project) => { const found = await projects.latest(project); return found === undefined ? undefined : { ...found, archived: true }; } };
     const before = await stateOf(archived.h);
-    await expect(createTaskActions(archived.h.deps).resolveFindings(archived.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "PROJECT_ARCHIVED" });
+    await expect(pageActions(archived.h.deps).resolveFindings(archived.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "PROJECT_ARCHIVED" });
     expect(await stateOf(archived.h)).toEqual(before);
     const lost = await seed({ workflow: both() });
     lost.h.deps.access = { ...lost.h.deps.access, checkStep: async () => ({ allowed: false, message: "This person no longer has access to the project." }) };
     const lostBefore = await stateOf(lost.h);
-    await expect(createTaskActions(lost.h.deps).resolveFindings(lost.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "FORBIDDEN" });
-    await expect(createTaskActions(lost.h.deps).resolveFindings(lost.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(pageActions(lost.h.deps).resolveFindings(lost.caller, TASK_ID, acceptAll())).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(pageActions(lost.h.deps).resolveFindings(lost.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(await stateOf(lost.h)).toEqual(lostBefore);
   });
 
@@ -205,63 +214,74 @@ describe("review findings", () => {
     const tier = { level: "standard", kinds: ["code_config"], source: "diff", reasons: [{ code: "many_files" }], headSha: "1".repeat(40), at: "2026-11-10T09:00:00.000Z" };
     const flow = { rulesVersion: 1, tier };
     const { h, caller } = await seed({ workflow: WorkflowSnapshotSchema.parse({ ...both(), flow }) });
-    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, mixed());
     expect((await taskOf(h)).workflow!.flow).toEqual(flow);
   });
 });
 
 describe("who accepted, and by what way (DECISIONS 201)", () => {
   it("records the person and the way for each accepted finding, and the pull request says so; a fix records none", async () => {
+    // The code review's finding is accepted by an API token, the security finding on the page: each is recorded with its own way, by the request that made it.
     const { h, caller } = await seed({ workflow: both() });
-    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, acceptAll());
+    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "ACCEPT", "A footer we drop on purpose."), answer(tokenId, "FIX", "Remove the log line.")]));
     const record = await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` });
-    expect(record).toMatchObject({ personId: "local-owner", method: "api-token", fingerprints: [parserId, tokenId] });
-    expect(h.audit[0]!.details).toMatchObject({ method: "api-token", securityAccepted: 1 });
+    expect(record).toMatchObject({ personId: "local-owner", method: "api-token", fingerprints: [parserId] });
+    expect(h.audit[0]!.details).toMatchObject({ method: "api-token", securityAccepted: 0 });
     expect(h.audit[0]!.actor).toMatchObject({ id: "local-owner" });
-    const by = await acceptedByOf(h.store, TASK_ID, code.digest);
-    expect(by).toEqual({ [parserId]: expect.stringContaining("via the API token") as string, [tokenId]: expect.stringContaining("via the API token") as string });
-    const workflow = (await taskOf(h)).workflow!;
+    const page = await seed({ workflow: both() });
+    await pageActions(page.h.deps).resolveFindings(page.caller, TASK_ID, acceptAll());
+    expect(await page.h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ personId: "local-owner", method: "page", fingerprints: [parserId, tokenId] });
+    expect(page.h.audit[0]!.details).toMatchObject({ method: "page", securityAccepted: 1 });
+    const by = await acceptedByOf(page.h.store, TASK_ID, code.digest);
+    expect(by).toEqual({ [parserId]: expect.stringContaining("via the task page") as string, [tokenId]: expect.stringContaining("via the task page") as string });
+    const workflow = (await taskOf(page.h)).workflow!;
     const body = workflowPullRequestBody({ title: "Add a retry flag" }, workflow, "# Plan\n\n1. Add the retry flag.\n", undefined, { acceptedBy: by! });
-    expect(body).toMatch(/\[security\] A token is written to the log\. \u2014 accepted: Test token only\. \(by .+ via the API token \(a tool\)\)/u);
+    expect(body).toMatch(/\[security\] A token is written to the log\. \u2014 accepted: Test token only\. \(by .+ via the task page\)/u);
     expect(body).toMatch(/\[code\] New parser drops the last line\. \u2014 accepted: A footer we drop on purpose\. \(by /u);
     // Nothing recorded: the line is as it was, with the reason alone.
-    expect(workflowPullRequestBody({ title: "Add a retry flag" }, workflow, "# Plan\n\n1. Add the retry flag.\n", undefined, {})).not.toContain("via the API token");
+    expect(workflowPullRequestBody({ title: "Add a retry flag" }, workflow, "# Plan\n\n1. Add the retry flag.\n", undefined, {})).not.toContain("via the task page");
     const fixOnly = await seed({ workflow: both() });
-    await createTaskActions(fixOnly.h.deps).resolveFindings(fixOnly.caller, TASK_ID, request([answer(parserId, "FIX", "Keep it."), answer(tokenId, "FIX", "")]));
+    await pageActions(fixOnly.h.deps).resolveFindings(fixOnly.caller, TASK_ID, request([answer(parserId, "FIX", "Keep it."), answer(tokenId, "FIX", "")]));
     expect(await fixOnly.h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toBeUndefined();
   });
 
   it("records only the findings that were accepted, and the page as the way when the page asks", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed(), "page");
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, mixed(), "page");
     expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ method: "page", fingerprints: [tokenId] });
     expect(await acceptedByOf(h.store, TASK_ID, code.digest)).toEqual({ [tokenId]: expect.stringContaining("via the task page") as string });
   });
 
-  it("names who accepted a finding for THIS code only: the same finding accepted in an earlier round, by someone else on the page, is never shown as this code's accept", async () => {
+  it("names who accepted a finding for THIS code only: the same finding accepted in an earlier round, by someone else, is never shown as this code's accept", async () => {
     const { h, caller } = await seed({ workflow: both() });
     // An earlier round: the same security finding (same fingerprint) accepted on the page by another person, for other code.
     const earlier = findingAcceptItem({ taskId: TASK_ID, requestId: REQUEST_B, candidateDigest: "f".repeat(64), person: { personId: "alice", displayName: "Alice" }, method: "page", fingerprints: [tokenId], at: "2026-11-09T10:00:00.000Z", now: new Date("2026-11-09T10:00:00.000Z") });
     await h.store.put({ item: (earlier as { item: Parameters<typeof h.store.put>[0]["item"] }).item });
-    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, acceptAll());
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, acceptAll());
     const by = await acceptedByOf(h.store, TASK_ID, code.digest);
-    expect(by?.[tokenId]).toContain("via the API token");
+    expect(by?.[tokenId]).toContain("via the task page");
     expect(by?.[tokenId]).not.toContain("Alice");
     expect(await acceptedByOf(h.store, TASK_ID, "f".repeat(64))).toEqual({ [tokenId]: "Alice via the task page" });
   });
 
-  it("an AI tool holding the API token may accept a finding (a security one too) with a reason, over the laptop's route, as the person", async () => {
+  it("an AI tool holding the API token may accept a code review finding with a reason, over the laptop's route, as the person; a security finding it may not", async () => {
     const { h } = await seed({ workflow: both() });
     const routes = createOwnerRoutes({ flow: h.flow, blobs: {} as never, openPage: async () => undefined, version: "0.0.0-test" });
     const post = async (payload: unknown) => (await routes({ method: "POST", path: `/v1/dev/tasks/${TASK_ID}/workflow/review-findings`, headers: {}, body: JSON.stringify(payload) }, h.owner))!;
-    // No reason: refused, even for a security finding, and nothing is recorded.
-    const noReason = await post(request([answer(parserId, "ACCEPT"), answer(tokenId, "ACCEPT", "  ")]));
+    // No reason: refused, and nothing is recorded.
+    const noReason = await post(request([answer(parserId, "ACCEPT", "  "), answer(tokenId, "FIX", "")]));
     expect(noReason.statusCode).toBe(400);
     expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toBeUndefined();
-    const ok = await post(acceptAll());
+    // A security finding accepted by the token's route: refused in fixed words, and nothing is written.
+    const before = await stateOf(h);
+    const security = await post(acceptAll());
+    expect(security.statusCode).toBe(403);
+    expect(JSON.parse(security.body)).toEqual({ error: { code: "FORBIDDEN", message: SECURITY_ACCEPT_ON_THE_PAGE } });
+    expect(await stateOf(h)).toEqual(before);
+    const ok = await post(request([answer(parserId, "ACCEPT"), answer(tokenId, "FIX", "Remove the log line.")]));
     expect(ok.statusCode).toBe(200);
-    expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ personId: "local-owner", method: "api-token" });
-    expect((await taskOf(h)).workflow!.acceptedFindings).toHaveLength(2);
+    expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ personId: "local-owner", method: "api-token", fingerprints: [parserId] });
+    expect((await taskOf(h)).workflow!.acceptedFindings).toHaveLength(1);
   });
 });
 
@@ -298,7 +318,7 @@ describe("what the owner writes is redacted and fenced", () => {
     const fake = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
     expect(redactText(fake)).not.toBe(fake);
     const { h, caller } = await seed({ workflow: both() });
-    await createTaskActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", `Keep the footer line, the key ${fake} is fake.`), answer(tokenId, "ACCEPT", "Test token only.")]));
+    await pageActions(h.deps).resolveFindings(caller, TASK_ID, request([answer(parserId, "FIX", `Keep the footer line, the key ${fake} is fake.`), answer(tokenId, "ACCEPT", "Test token only.")]));
     const prompt = promptOf((await codingOperations(h))[0]!);
     expect(prompt).not.toContain(fake);
     expect(prompt).toContain("Keep the footer line, the key");
@@ -308,7 +328,7 @@ describe("what the owner writes is redacted and fenced", () => {
     for (const blockReason of [WORKFLOW_BLOCK_REASONS.budgetPaused, "This plan's run limit is $12, which needs a project maintainer's approval."]) {
       const { h, caller } = await seed({ workflow: blockedReview({ blockReason }, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]) });
       const before = await stateOf(h);
-      await expect(createTaskActions(h.deps).resolveFindings(caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("more spend") as string });
+      await expect(pageActions(h.deps).resolveFindings(caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("more spend") as string });
       expect(await stateOf(h)).toEqual(before);
     }
   });
@@ -316,11 +336,11 @@ describe("what the owner writes is redacted and fenced", () => {
   it("commits the steps the access seam asks for with the decision, and a fence that no longer holds refuses it with nothing written", async () => {
     const fence = (): TaskFlowDeps["access"] => ({ ...createOwnerTaskAccess(), ownerActing: async (_principal, task) => ({ actorId: task.ownerKey, items: [{ kind: "put", item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" }, condition: when.absent() }] }) });
     const holds = await seed({ workflow: both(), access: fence() });
-    await createTaskActions(holds.h.deps).resolveFindings(holds.caller, TASK_ID, mixed());
+    await pageActions(holds.h.deps).resolveFindings(holds.caller, TASK_ID, mixed());
     expect(await holds.h.store.get({ pk: "ACCESS_FENCE#payments", sk: "META" })).toBeDefined();
     const broken = await seed({ workflow: both(), access: fence() });
     await broken.h.store.put({ item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" } });
-    await expect(createTaskActions(broken.h.deps).resolveFindings(broken.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(pageActions(broken.h.deps).resolveFindings(broken.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect((await taskOf(broken.h)).workflow!.acceptedFindings).toBeUndefined();
     expect(await codingOperations(broken.h)).toHaveLength(0);
   });
@@ -331,7 +351,7 @@ describe("the owner's route", () => {
     const run = async (who: "owner" | "guest") => {
       const { h } = await seed({ workflow: both() });
       const routes = createOwnerRoutes({ flow: h.flow, blobs: {} as never, openPage: async () => undefined, version: "0.0.0-test" });
-      const answered = (await routes({ method: "POST", path: `/v1/dev/tasks/${TASK_ID}/workflow/review-findings`, headers: {}, body: JSON.stringify(mixed()) }, who === "owner" ? h.owner : h.guest))!;
+      const answered = (await routes({ method: "POST", path: `/v1/dev/tasks/${TASK_ID}/workflow/review-findings`, headers: {}, body: JSON.stringify(request([answer(parserId, "ACCEPT"), answer(tokenId, "FIX", "Remove the log line.")])) }, who === "owner" ? h.owner : h.guest))!;
       return { h, status: answered.statusCode, json: JSON.parse(answered.body) as { task?: { workflow?: { stage: string } }; error?: { code: string; message: string } } };
     };
     const ok = await run("owner");
@@ -347,7 +367,7 @@ describe("the owner's route", () => {
 describe("a second answer by another id", () => {
   it("is refused once the first moved the workflow on", async () => {
     const { h, caller } = await seed({ workflow: both() });
-    const actions = createTaskActions(h.deps);
+    const actions = pageActions(h.deps);
     await actions.resolveFindings(caller, TASK_ID, mixed());
     await expect(actions.resolveFindings(caller, TASK_ID, { ...mixed(), requestId: REQUEST_B })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(await codingOperations(h)).toHaveLength(1);
