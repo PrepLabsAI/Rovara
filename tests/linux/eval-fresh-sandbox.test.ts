@@ -57,6 +57,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   let host: Awaited<ReturnType<typeof listenOnAllAddresses>> | undefined;
   let outsider = "";
   let outsiderIp = "";
+  let working = "";
   const tag = `rovara-te-b1-eval:${randomBytes(4).toString("hex")}`;
 
   beforeAll(async () => {
@@ -81,16 +82,20 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect((await docker("run", "--detach", "--pull=never", "--name", outsider, "--user", "1000:1000", APP_NODE_IMAGE, "node", "-e", "require('net').createServer((s)=>s.end('x')).listen(9000)")).code).toBe(0);
     outsiderIp = (await docker("inspect", "--format", "{{.NetworkSettings.Networks.bridge.IPAddress}}", outsider)).stdout.trim();
     expect(outsiderIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+    // The working sandbox the base side must pause (and wake after).
+    working = `teb1-working-${randomBytes(4).toString("hex")}`;
+    expect((await docker("run", "--detach", "--pull=never", "--name", working, "--user", "1000:1000", APP_NODE_IMAGE, "node", "-e", "setInterval(() => undefined, 1000)")).code).toBe(0);
   }, 600_000);
   afterAll(async () => {
     host?.server.close();
     if (outsider !== "") await docker("rm", "--force", outsider);
+    if (working !== "") await docker("rm", "--force", working);
     await docker("image", "rm", "--force", tag);
     if (work !== "") await rm(work, { recursive: true, force: true });
   }, 120_000);
 
   /** One world: a bridge folder and a real bridge (whose egress is a stub the test sees), and a fresh sandbox whose checkout is the eval script. */
-  async function world(evalScript = EVAL_SCRIPT) {
+  async function world(evalScript = EVAL_SCRIPT, workingSandbox: string | null = null) {
     const root = await mkdtemp(join(work, "w-"));
     const bridgeDir = join(root, "e1", EVAL_HELPER_DIR_NAME);
     await mkdir(bridgeDir, { recursive: true });
@@ -112,7 +117,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const config: FreshEvalSandboxConfig = {
       docker: createDockerCli(), image, workspace: WORKSPACE, taskId: `teb1-${randomBytes(4).toString("hex")}`, roundBudgetMs: 300_000,
       repository: { directory: root, baseCommit: "b".repeat(40), candidateCommit: "c".repeat(40) },
-      command: { executable: "node", args: ["eval.js"], cwd: "." }, report: { cwd: ".", argument: REPORT }, rowId: "gemini", scratchDir: join(root, "scratch"), workingSandbox: null,
+      command: { executable: "node", args: ["eval.js"], cwd: "." }, report: { cwd: ".", argument: REPORT }, rowId: "gemini", scratchDir: join(root, "scratch"), workingSandbox,
       environment: { AGENTX_TEST_SERVICES_BOOT_FACTS: FACTS },
       materialize: async (_repo, _commit, destination) => {
         checkout = destination;
@@ -138,7 +143,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
 
   it("runs one side end to end and holds every wall; nothing of the round is left after", async () => {
     expect(host).toBeDefined();
-    const w = await world();
+    const w = await world(EVAL_SCRIPT, working);
     expect(w.sandbox.available()).toBe(true);
     const running = w.sandbox.run({ side: "old", ids: ["q1", "q2"], runs: 2, signal: new AbortController().signal, model: { socketPath: w.socketPath, token: w.token } });
     const sandboxName = await waitFor(runningSandbox);
@@ -158,7 +163,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       if (name === sandboxName) expect(mounts.filter((m) => m.Type !== "tmpfs").map((m) => [m.Destination, m.RW])).toEqual([[FRESH_EVAL_WORKSPACE, true]]);
     }
     // TS-L2: the sandbox and the helper are each on the round network and nothing else, at .4 and .9.
-    expect(JSON.parse((await docker("inspect", "--format", "{{json .NetworkSettings.Networks}}", sandboxName)).stdout) as Record<string, { IPAddress: string }>).toEqual({ [net]: expect.objectContaining({ IPAddress: `${slotBase}.4` }) });
+    const sandboxNetworks = JSON.parse((await docker("inspect", "--format", "{{json .NetworkSettings.Networks}}", sandboxName)).stdout) as Record<string, { IPAddress: string }>;
+    expect(Object.entries(sandboxNetworks).map(([name, entry]) => [name, entry.IPAddress])).toEqual([[net, `${slotBase}.4`]]);
     expect(Object.keys(JSON.parse((await docker("inspect", "--format", "{{json .NetworkSettings.Networks}}", helperName)).stdout) as object)).toEqual([net]);
     expect((await docker("network", "inspect", "--format", "{{.Internal}}", net)).stdout.trim()).toBe("true");
     // TS-L1 (second half): the helper reaches neither the internet nor the host; TS-L2: a container outside the round cannot reach the helper.
@@ -168,7 +174,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // Controls: the host listener and the outsider's listener ARE reachable from the default bridge, so a failure above is the wall, not a dead target.
     expect((await reachFrom(outsider, "1000:1000", outsiderIp, 9000)).stdout.trim()).toBe("open");
 
-    // The eval's own probes (TS-L1, TS-L3), then the go.
+    // The base side runs with the working sandbox paused (the daemon's view).
+    expect((await docker("inspect", "--format", "{{.State.Paused}}", working)).stdout.trim()).toBe("true");
+    // The eval's own probes (TS-L1, TS-L3), then the go. `metadata` and `helperTls` are floors here (no metadata service on the runner, no recorder on the helper): they show nothing answers, not that a wall dropped it.
     await writeFile(join(w.checkoutOf(), "targets.json"), JSON.stringify([
       ["helper", `${slotBase}.9`, 8080], ["internet", "1.1.1.1", 443], ["metadata", "169.254.169.254", 80], ["gateway", `${slotBase}.1`, host!.port], ["outsider", outsiderIp, 9000], ["helperTls", `${slotBase}.9`, 443],
     ]));
@@ -193,6 +201,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(report.interfaces).toEqual([`${slotBase}.4`]);
     expect(report.uid).toBe(1000);
     expect(result.attestation?.baseCommit).toBe("b".repeat(40));
+    expect((await docker("inspect", "--format", "{{.State.Paused}}", working)).stdout.trim()).toBe("false");
     // Join: nothing of the round is left.
     expect(await roundObjects()).toEqual({ containers: "", networks: "" });
     await w.bridge.close();

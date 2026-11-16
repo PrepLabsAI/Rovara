@@ -25,7 +25,7 @@ describe("the helper program's import graph", () => {
     const text = readFileSync(resolve(root, "packages/worker/src/model-helper-bridge-client.ts"), "utf8").replace(/^\s*\/\/.*$/gmu, "");
     expect(text.match(/\bhttp\.[a-zA-Z]+\(/gu)).toEqual(["http.request("]);
     expect(text).toMatch(/http\.request\(\{\s*socketPath: call\.socketPath,/u);
-    expect(text).not.toMatch(/\b(?:host|hostname|port|localAddress|lookup|createConnection|family)\s*:/u);
+    expect(text).not.toMatch(/["'`]?\b(?:host|hostname|port|localAddress|lookup|createConnection|family)\b["'`]?\s*:/u);
   });
   it("the walker does see renamed default imports, namespace imports, export-from, dynamic import, require and fetch (positive controls)", () => {
     const dir = mkdtempSync(join(tmpdir(), "rsig-"));

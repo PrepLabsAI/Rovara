@@ -9,6 +9,7 @@
 // What the exec never does: read the repository's own accounting (the stage counts), turn a thrown fault into a result (the runner makes it "eval run failed"),
 // or claim the changed prompt was exercised on the repository's word: `changedPromptCalls` counts the settled-ok calls whose frame the worker's own
 // `changedPrompt` classifier names, and is 0 when there is no classifier (the eval then reads "no changed prompt call", never a pass).
+import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
@@ -21,7 +22,7 @@ import { modelHostAddHostArgs, type ModelHostBlock } from "../model-helper-block
 import { modelHelperOffer, startModelHelper, type StartedModelHelper } from "../model-helper-network.js";
 import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } from "../model-reply-bundle.js";
 import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL } from "../model-sandbox-env.js";
-import type { ServicesNetwork } from "../run-network.js";
+import { RUN_NETWORK_LABEL, type ServicesNetwork } from "../run-network.js";
 import type { DockerCli } from "../swebench/containers.js";
 import { SANDBOX_INIT } from "../task-sandbox.js";
 import { readContainedReport } from "./report-file.js";
@@ -263,7 +264,7 @@ const configProblem = (config: FreshEvalSandboxConfig): boolean => {
     if (typeof c !== "object" || c === null || typeof c.docker?.run !== "function") return true;
     if (typeof c.image !== "string" || !PINNED_IMAGE.test(c.image)) return true;
     if (typeof c.workspace !== "string" || !WORKSPACE_KEY.test(c.workspace)) return true;
-    if (typeof c.taskId !== "string" || c.taskId.length === 0 || c.taskId.length > 200) return true;
+    if (typeof c.taskId !== "string" || c.taskId.length === 0 || c.taskId.length > 160) return true;
     if (!Number.isSafeInteger(c.roundBudgetMs) || c.roundBudgetMs! <= 0 || c.roundBudgetMs! > FRESH_EVAL_RUN_MAX_MS) return true;
     const repo = c.repository;
     if (typeof repo?.directory !== "string" || !isAbsolute(repo.directory) || typeof repo.baseCommit !== "string" || !SHA1.test(repo.baseCommit) || typeof repo.candidateCommit !== "string" || !SHA1.test(repo.candidateCommit)) return true;
@@ -310,7 +311,7 @@ export function freshEvalSandboxRunArgs(input: FreshEvalSandboxArgsInput, forbid
     "run", "--detach", "--pull=never", "--name", input.name, "--stop-timeout", "1", ...input.net.labelArgs(),
     "--network", input.net.name, "--ip", input.net.checkSandboxIp, "--dns", NO_UPSTREAM_DNS, ...modelHostAddHostArgs(input.block),
     "--user", FRESH_EVAL_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
-    "--memory", FRESH_EVAL_MEMORY, "--memory-swap", FRESH_EVAL_MEMORY, "--cpus", FRESH_EVAL_CPUS, "--pids-limit", FRESH_EVAL_PIDS,
+    "--memory", FRESH_EVAL_MEMORY, "--memory-swap", FRESH_EVAL_MEMORY, "--cpus", FRESH_EVAL_CPUS, "--pids-limit", FRESH_EVAL_PIDS, "--log-driver", "none",
     "--tmpfs", FRESH_EVAL_TMPFS,
     "--volume", `${input.checkout}:${FRESH_EVAL_WORKSPACE}:rw`,
     "--env-file", input.envFile,
@@ -323,7 +324,7 @@ export function freshEvalSandboxRunArgs(input: FreshEvalSandboxArgsInput, forbid
   return args;
 }
 
-const SANDBOX_VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--stop-timeout", "--label", "--network", "--ip", "--dns", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--tmpfs", "--volume", "--env-file", "--workdir", "--entrypoint"]);
+const SANDBOX_VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--stop-timeout", "--label", "--network", "--ip", "--dns", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--tmpfs", "--volume", "--env-file", "--workdir", "--entrypoint", "--log-driver"]);
 const SANDBOX_SINGLE_FLAGS: ReadonlySet<string> = new Set(["--detach", "--pull=never", "--read-only"]);
 const isUnder = (path: string, folder: string): boolean => path === folder || path.startsWith(`${folder.replace(/\/+$/u, "")}/`) || folder.startsWith(`${path.replace(/\/+$/u, "")}/`);
 
@@ -348,7 +349,8 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
       continue;
     }
     if (token.startsWith("-")) { problems.push("a flag the fresh sandbox does not take"); at += 1; continue; }
-    image = token; at += 1; break;
+    image = token;
+    break;
   }
   const only = (flag: string, wanted: string): boolean => (flags.get(flag) ?? []).length === 1 && flags.get(flag)![0] === wanted;
   if (image === undefined || !PINNED_IMAGE.test(image)) problems.push("the sandbox must run the worker's pinned image");
@@ -363,9 +365,16 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   if (!only("--tmpfs", FRESH_EVAL_TMPFS)) problems.push("the sandbox has one tmpfs");
   const volumes = flags.get("--volume") ?? [];
   if (volumes.length !== 1 || volumes[0] !== `${expected.checkout}:${FRESH_EVAL_WORKSPACE}:rw`) problems.push("the sandbox has exactly one mount, the checkout");
-  for (const volume of volumes) if (isUnder(volume.split(":")[0] ?? "", expected.bridgeDir)) problems.push("the sandbox must never mount the bridge folder");
   if (isUnder(expected.checkout, expected.bridgeDir)) problems.push("the sandbox must never mount the bridge folder");
-  if ((flags.get("--env-file") ?? []).length !== 1) problems.push("the sandbox takes one env file");
+  const envFiles = flags.get("--env-file") ?? [];
+  if (envFiles.length !== 1 || !SAFE_HOST_PATH.test(envFiles[0]!) || isUnder(envFiles[0]!, expected.bridgeDir) || isUnder(envFiles[0]!, expected.checkout)) problems.push("the sandbox takes one env file, outside its checkout and the bridge folder");
+  for (const [flag, value] of [["--memory", FRESH_EVAL_MEMORY], ["--memory-swap", FRESH_EVAL_MEMORY], ["--cpus", FRESH_EVAL_CPUS], ["--pids-limit", FRESH_EVAL_PIDS], ["--stop-timeout", "1"], ["--log-driver", "none"], ["--name", `${net.name}-eval`]] as const) {
+    if (!only(flag, value)) problems.push("a limit, the name or the log driver is not the fresh sandbox's own");
+  }
+  const workdirs = flags.get("--workdir") ?? [];
+  if (workdirs.length !== 1 || (workdirs[0] !== FRESH_EVAL_WORKSPACE && !workdirs[0]!.startsWith(`${FRESH_EVAL_WORKSPACE}/`)) || workdirs[0]!.split("/").includes("..")) problems.push("the sandbox's working folder must be in its checkout");
+  const labelKeys = (flags.get("--label") ?? []).map((label) => label.split("=")[0]!);
+  if (labelKeys.some((key) => !key.startsWith(`${RUN_NETWORK_LABEL}`)) || new Set(labelKeys).size !== labelKeys.length) problems.push("the sandbox carries the round network's labels and no other");
   for (const host of flags.get("--add-host") ?? []) if (expected.helperIp === undefined || host.slice(host.lastIndexOf(":") + 1) !== expected.helperIp) problems.push("a pinned name points somewhere other than the model helper");
   return problems;
 }
@@ -395,7 +404,7 @@ export function bridgeFolderMountProblems(input: { helper: Awaited<ReturnType<ty
   const realBridge = realOrSelf(input.bridgeDir);
   if (input.helper === undefined) problems.push("the helper's mounts could not be read");
   else {
-    const binds = input.helper.filter((mount) => mount.type === "bind");
+    const binds = input.helper.filter((mount) => mount.type !== "tmpfs");
     if (binds.length !== 1 || realOrSelf(binds[0]!.source) !== realBridge || binds[0]!.rw) problems.push("the helper must mount the bridge folder, read-only, and nothing else");
   }
   if (input.sandbox === undefined) problems.push("the sandbox's mounts could not be read");
@@ -455,7 +464,17 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
       const kill = (): void => { if (sandboxName !== undefined) killed ??= call(["rm", "--force", sandboxName]); };
       const onAbort = (): void => kill();
       input.signal.addEventListener("abort", onAbort, { once: true });
-      try {
+      let woke = true;
+      const outcome = await (async (): Promise<FreshEvalSandboxResult> => { try {
+        // 0. The base side: the working sandbox is paused (checked from the daemon) BEFORE the checkout is written and stays paused until the run is over, so nothing of the agent's runs beside the base round or
+        // while its objects are read. A sandbox that was already paused is left paused after (it is not ours to wake).
+        if (input.side === "old" && config.workingSandbox !== null) {
+          const before = await call(["inspect", "--format", "{{.State.Paused}}", config.workingSandbox]);
+          if (before.exitCode !== 0 || (before.stdout.trim() !== "true" && before.stdout.trim() !== "false")) throw new Error("the working sandbox could not be read");
+          if (before.stdout.trim() === "false") { paused = true; await call(["pause", config.workingSandbox]); }
+          const state = await call(["inspect", "--format", "{{.State.Paused}}", config.workingSandbox]);
+          if (state.exitCode !== 0 || state.stdout.trim() !== "true") throw new Error("the working sandbox could not be paused");
+        }
         // 1. The Rovara-only checkout of the one commit, by the worker (never by the agent, never from the working tree).
         await mkdir(checkout, { mode: 0o755 });
         await chmod(checkout, 0o755);
@@ -467,7 +486,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         await writeFile(join(bridgeDir, "replies.json"), modelReplyBundleBytes(bundle), { mode: 0o644 });
         // 3. The round network and the helper on it (.9), serving only the sandbox's address (.4), real mode over the bridge socket.
         helper = await startModelHelper(docker, {
-          kind: "round", id: config.taskId, round, workspace: config.workspace, roundBudgetMs: config.roundBudgetMs, image: config.image, runDir: bridgeDir,
+          kind: "round", id: `${config.taskId}#${randomBytes(8).toString("hex")}`, round, workspace: config.workspace, roundBudgetMs: config.roundBudgetMs, image: config.image, runDir: bridgeDir,
           helperArgs: ({ listen, caller }) => modelHelperArgs({
             listen, port: MODEL_HELPER_DEFAULT_PORT, metaPort: undefined, caller, mode: "real", rows: MODEL_HELPER_ROWS_PATH, replies: MODEL_HELPER_REPLIES_PATH, digest: modelReplyBundleDigest(bundle),
             ledger: MODEL_HELPER_LEDGER_PATH, blockState: "by_name", projectId: undefined, recordEscapes: false, bridgeSocket: `${MODEL_HELPER_RUN_DIR}/${EVAL_BRIDGE_SOCKET_NAME}`,
@@ -476,13 +495,6 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         });
         if (helper.sandboxRole !== "check") throw new Error("not a round network");
         const block = helper.sandboxBlock({});
-        // 4. The base side runs with the working sandbox paused (checked from the daemon), so nothing of the agent's runs beside the base round.
-        if (input.side === "old" && config.workingSandbox !== null) {
-          paused = true;
-          await call(["pause", config.workingSandbox]);
-          const state = await call(["inspect", "--format", "{{.State.Paused}}", config.workingSandbox]);
-          if (state.exitCode !== 0 || state.stdout.trim() !== "true") throw new Error("the working sandbox could not be paused");
-        }
         if (input.signal.aborted) throw new Error("eval stage stopped");
         // 5. The sandbox: the env file (0600, read by the docker CLI only), then the container on the round network only, then the daemon's own view of both containers' mounts.
         await writeFile(envFile, freshEvalEnvironment({ rowId: config.rowId, token: input.model.token, side: input.side, runs: input.runs, ids: input.ids }), { mode: 0o600 });
@@ -520,12 +532,18 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         // Once more after the first removal has returned: a removal sent while `docker run` was still creating the container may have found nothing. (The network's stop also removes every container with its labels.)
         if (sandboxName !== undefined) await call(["rm", "--force", sandboxName]);
         await helper?.stop().catch(() => undefined);
-        if (paused && config.workingSandbox !== null) await call(["unpause", config.workingSandbox]);
+        if (paused && config.workingSandbox !== null) {
+          await call(["unpause", config.workingSandbox]);
+          woke = (await call(["inspect", "--format", "{{.State.Paused}}", config.workingSandbox])).stdout.trim() === "false";
+        }
         await rm(runDir, { recursive: true, force: true }).catch(() => undefined);
         if (!finished) await rm(reportRoot, { recursive: true, force: true }).catch(() => undefined);
         await rm(join(bridgeDir, "rows.json"), { force: true }).catch(() => undefined);
         await rm(join(bridgeDir, "replies.json"), { force: true }).catch(() => undefined);
-      }
+      } })();
+      // A working sandbox left paused is a fault of its own (checked after every other step is done): the run is not a result.
+      if (!woke) throw new Error("the working sandbox could not be unpaused");
+      return outcome;
     },
   };
 }

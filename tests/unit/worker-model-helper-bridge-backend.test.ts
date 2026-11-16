@@ -76,10 +76,16 @@ describe("the bridge backend", () => {
     expect(await bridgeModelBackend("/s", scripted([{ kind: "not_run", reason: "fresh_sandbox", sentence: "x" }])).serve(backendRequest(), signal)).toBeUndefined();
     expect(await bridgeModelBackend("/s", scripted([{ kind: "scripted" }])).serve(backendRequest(), signal)).toBeUndefined();
     await expect(bridgeModelBackend("/s", scripted([head, { kind: "chunk", bytes: enc("x") }, { kind: "cut", why: "fault" }])).serve(backendRequest(), signal)).rejects.toThrow();
+    // a cut is the end, even if a settle were to follow it
+    await expect(bridgeModelBackend("/s", scripted([head, { kind: "chunk", bytes: enc("x") }, { kind: "cut", why: "time" }, settle])).serve(backendRequest(), signal)).rejects.toThrow();
     await expect(bridgeModelBackend("/s", scripted([head, { kind: "chunk", bytes: enc("x") }])).serve(backendRequest(), signal)).rejects.toThrow();
     await expect(bridgeModelBackend("/s", scripted([{ kind: "chunk", bytes: enc("x") }, head, settle])).serve(backendRequest(), signal)).rejects.toThrow();
     await expect(bridgeModelBackend("/s", scripted([head, head, settle])).serve(backendRequest(), signal)).rejects.toThrow();
     await expect(bridgeModelBackend("/s", scripted([head, { kind: "chunk", bytes: new Uint8Array(MODEL_HELPER_BRIDGE_ANSWER_MAX_BYTES + 1) }, settle])).serve(backendRequest(), signal)).rejects.toThrow();
+    // a 2xx head whose settle is not ok (the provider failed after the head) is never a success with a partial body
+    await expect(bridgeModelBackend("/s", scripted([head, { kind: "chunk", bytes: enc("{\"part") }, { kind: "settle", status: 502, class: "provider_error", costMicros: 0, estimated: false }])).serve(backendRequest(), signal)).rejects.toThrow();
+    // a refusal (non-2xx head, non-ok settle) is passed on as the answer it is
+    expect((await bridgeModelBackend("/s", scripted([{ kind: "head", status: 429, headers: [] }, { kind: "settle", status: 429, class: "rate_limit", costMicros: 0, estimated: false }])).serve(backendRequest(), signal))?.status).toBe(429);
     // the exact limit is an answer
     expect((await bridgeModelBackend("/s", scripted([head, { kind: "chunk", bytes: new Uint8Array(MODEL_HELPER_BRIDGE_ANSWER_MAX_BYTES) }, settle])).serve(backendRequest(), signal))?.body).toHaveLength(MODEL_HELPER_BRIDGE_ANSWER_MAX_BYTES);
   });

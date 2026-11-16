@@ -31,6 +31,7 @@ interface DaemonOptions {
   /** What the eval does when the sandbox is waited on (default: writes the report into the checkout and exits 0). */
   readonly eval?: (checkout: string, env: string) => Promise<number | "hang">;
   readonly pauseIgnored?: boolean;
+  readonly unpauseIgnored?: boolean;
   readonly extraSandboxMount?: (bridgeDir: string) => { Source: string; Destination: string; RW: boolean; Type: string };
   readonly helperMountRw?: boolean;
   readonly failRun?: (args: readonly string[]) => boolean;
@@ -87,7 +88,7 @@ function fakeDaemon(options: DaemonOptions = {}) {
         return ok(JSON.stringify({ [container.network]: { IPAddress: container.ip } }));
       }
       if (a === "pause") { const c = find(args[1]!); if (c === undefined) return fail(); if (options.pauseIgnored !== true) c.paused = true; return ok(); }
-      if (a === "unpause") { const c = find(args[1]!); if (c === undefined) return fail(); c.paused = false; return ok(); }
+      if (a === "unpause") { const c = find(args[1]!); if (c === undefined) return fail(); if (options.unpauseIgnored !== true) c.paused = false; return ok(); }
       if (a === "wait") {
         const container = find(args[1]!);
         if (container === undefined) return fail("No such container");
@@ -123,11 +124,11 @@ async function world(daemon = fakeDaemon(), over: Partial<FreshEvalSandboxConfig
   const root = await mkdtemp(join(tmpdir(), "fes-")); roots.push(root);
   const bridgeDir = join(root, "e1", EVAL_HELPER_DIR_NAME);
   await mkdir(bridgeDir, { recursive: true, mode: 0o700 });
-  const materialized: { commit: string; destination: string }[] = [];
+  const materialized: { commit: string; destination: string; workingPaused: boolean }[] = [];
   const config: FreshEvalSandboxConfig = {
     docker: daemon.docker, image: IMAGE, workspace: WS, taskId: "op-1", roundBudgetMs: 600_000, repository: { directory: join(root, "repo"), baseCommit: BASE, candidateCommit: CANDIDATE },
     command: { executable: "node", args: ["eval.js"], cwd: "." }, report: REPORT, rowId: "gemini", scratchDir: join(root, "scratch"), workingSandbox: daemon.working.name, environment: OFFERED,
-    materialize: async (_root, commit, destination) => { materialized.push({ commit, destination }); await writeFile(join(destination, "eval.js"), `// ${commit}`); },
+    materialize: async (_root, commit, destination) => { materialized.push({ commit, destination, workingPaused: daemon.working.paused }); await writeFile(join(destination, "eval.js"), `// ${commit}`); },
     sleep: () => Promise.resolve(), ...over,
   };
   const input = (o: Partial<FreshEvalSandboxRun> = {}): FreshEvalSandboxRun => ({ side: "new", ids: ["q1", "q2"], runs: 1, signal: new AbortController().signal, model: { socketPath: join(bridgeDir, EVAL_BRIDGE_SOCKET_NAME), token: TOKEN }, ...o });
@@ -180,7 +181,9 @@ describe("one run", () => {
     expect(result).not.toHaveProperty("attestation");
   });
   it("the token reaches the sandbox only through its env file: never on a docker command line, and the file is gone at once", async () => {
-    const w = await world();
+    let envWhileRunning: boolean | undefined;
+    const daemon = fakeDaemon({ eval: async (dir) => { const run = runArgsOf(daemon.calls, "-eval")!; envWhileRunning = existsSync(run[run.indexOf("--env-file") + 1]!); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
+    const w = await world(daemon);
     await w.sandbox.run(w.input());
     expect(JSON.stringify(w.daemon.calls)).not.toContain(TOKEN);
     expect(w.daemon.envSeen).toHaveLength(1);
@@ -188,6 +191,7 @@ describe("one run", () => {
     expect(w.daemon.envSeen[0]).toContain(`${FRESH_EVAL_IDS_VARIABLE}=q1,q2`);
     const sandbox = runArgsOf(w.daemon.calls, "-eval")!;
     expect(existsSync(sandbox[sandbox.indexOf("--env-file") + 1]!)).toBe(false);
+    expect(envWhileRunning).toBe(false);
   });
   it("the new side checks out the candidate commit; the old side the base commit, with the working sandbox paused (checked) for the run and unpaused after, and a real attestation", async () => {
     const w = await world();
@@ -197,6 +201,8 @@ describe("one run", () => {
     const fresh = await v.sandbox.run(v.input({ side: "new" }));
     const old = await v.sandbox.run(v.input({ side: "old" }));
     expect(v.materialized.map((m) => m.commit)).toEqual([CANDIDATE, BASE]);
+    // the base checkout is written with the working sandbox already paused (it cannot change the objects while they are read)
+    expect(v.materialized.map((m) => m.workingPaused)).toEqual([false, true]);
     expect(pausedWhileRunning).toEqual([false, true]);
     expect(daemon.working.paused).toBe(false);
     expect(fresh.attestation).toBeUndefined();
@@ -289,6 +295,8 @@ describe("TE-F1C-SOCKET-ACCESS from the daemon's view", () => {
     expect(bridgeFolderMountProblems({ ...ok, sandbox: [...sandbox, { source: "/b", destination: "/m", rw: false, type: "bind" }] })).not.toEqual([]);
     expect(bridgeFolderMountProblems({ ...ok, sandbox: [...sandbox, { source: "/var/run/docker.sock", destination: "/var/run/docker.sock", rw: true, type: "bind" }] })).not.toEqual([]);
     expect(bridgeFolderMountProblems({ ...ok, sandbox: [{ ...sandbox[0]!, source: "/elsewhere" }] })).not.toEqual([]);
+    // the sandbox's one mount IS the bridge folder (a checkout path that points at it): refused by the bridge rule itself
+    expect(bridgeFolderMountProblems({ ...ok, sandbox: [{ ...sandbox[0]!, source: "/b/models" }], checkout: "/b/models" })).not.toEqual([]);
   });
 });
 
@@ -339,6 +347,8 @@ describe("refusals before anything starts", () => {
   it("a socket that is not the exec's, a bad token, bad ids, a bad run count or a stop: rejected with no docker call", async () => {
     const daemon = fakeDaemon();
     const w = await world(daemon);
+    // a real folder that is not the exec's `models` folder: refused by its name, not by a failed write
+    await mkdir(join(w.root, "elsewhere"), { recursive: true });
     const stopped = new AbortController(); stopped.abort();
     const bad: Partial<FreshEvalSandboxRun>[] = [
       { model: { socketPath: join(w.root, "elsewhere", EVAL_BRIDGE_SOCKET_NAME), token: TOKEN } }, { model: { socketPath: join(w.bridgeDir, "other"), token: TOKEN } }, { model: { socketPath: "models/m", token: TOKEN } },
@@ -352,5 +362,54 @@ describe("refusals before anything starts", () => {
     expect(() => freshEvalEnvironment({ rowId: "gemini", token: "a\nB=1", side: "new", runs: 1, ids: ["q"] })).toThrow();
     expect(() => freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q r"] })).toThrow();
     expect(freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "old", runs: 3, ids: ["q1", "q2"] }).split("\n").filter(Boolean).map((line) => line.split("=")[0])).toEqual(["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY", "GOOGLE_API_KEY", "HOME", "ROVARA_EVAL_SIDE", "ROVARA_EVAL_RUNS", "ROVARA_EVAL_IDS"]);
+  });
+});
+
+describe("review fixes (TE-B1 REVIEW-1)", () => {
+  it("a working sandbox that was already paused is left paused; one that does not wake fails the run after everything else is removed", async () => {
+    const daemon = fakeDaemon();
+    daemon.working.paused = true;
+    const w = await world(daemon);
+    await w.sandbox.run(w.input({ side: "old" }));
+    expect(daemon.working.paused).toBe(true);
+    expect(daemon.calls.some((c) => c[0] === "pause" || c[0] === "unpause")).toBe(false);
+    const stuck = fakeDaemon({ unpauseIgnored: true });
+    const s2 = await world(stuck);
+    await expect(s2.sandbox.run(s2.input({ side: "old" }))).rejects.toThrow("could not be unpaused");
+    expect(stuck.containers).toEqual([]); expect(stuck.networks).toEqual([]);
+  });
+  it("two sandboxes for the SAME operation (a retried invocation) never share a round network", async () => {
+    const daemon = fakeDaemon();
+    const a = await world(daemon, { taskId: "same-op" });
+    const b = await world(daemon, { taskId: "same-op" });
+    await Promise.all([a.sandbox.run(a.input()), b.sandbox.run(b.input())]);
+    const nets = daemon.calls.filter((c) => c[0] === "network" && c[1] === "create").map((c) => c.at(-1));
+    expect(nets).toHaveLength(2); expect(new Set(nets).size).toBe(2);
+  });
+  it("the sandbox's logs go nowhere (an agent's output cannot fill the host's disk)", async () => {
+    const w = await world();
+    await w.sandbox.run(w.input());
+    const sandbox = runArgsOf(w.daemon.calls, "-eval")!;
+    expect(sandbox[sandbox.indexOf("--log-driver") + 1]).toBe("none");
+  });
+  it("names unsound limits, name, working folder, labels and env file (mutants of the built list)", () => {
+    const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`] };
+    const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
+    const input = { net, image: IMAGE, name: "rovara-svc-0123456789ab-eval", checkout: "/s/r1/checkout", envFile: "/s/r1/env", block, command: { executable: "node", args: [], cwd: "." } };
+    const expected = { checkout: input.checkout, bridgeDir: "/s/e1/models", helperIp: "172.30.7.9" };
+    const args = freshEvalSandboxRunArgs(input, { bridgeDir: expected.bridgeDir });
+    const replace = (flag: string, value: string) => args.map((arg, index) => (args[index - 1] === flag ? value : arg));
+    const at = args.indexOf(IMAGE);
+    const insert = (...extra: string[]) => [...args.slice(0, at), ...extra, ...args.slice(at)];
+    for (const [name, mutant] of Object.entries({
+      memory: replace("--memory", "64g"), swap: replace("--memory-swap", "-1"), cpus: replace("--cpus", "64"), pids: replace("--pids-limit", "-1"), stop: replace("--stop-timeout", "3600"),
+      logs: replace("--log-driver", "json-file"), name: replace("--name", "other"), workdir: replace("--workdir", "/"), workdirUp: replace("--workdir", "/workspace/../etc"),
+      label: insert("--label", "com.docker.compose.project=x"), envInCheckout: replace("--env-file", "/s/r1/checkout/.env"), envInBridge: replace("--env-file", "/s/e1/models/env"),
+    })) expect(freshEvalSandboxArgProblems(mutant, net, expected), name).not.toEqual([]);
+  });
+  it("a helper with any second mount (a volume, not only a bind) is refused", () => {
+    const helper = [{ source: "/b/models", destination: "/rovara/models", rw: false, type: "bind" }, { source: "/var/lib/docker/volumes/x", destination: "/x", rw: true, type: "volume" }];
+    const sandbox = [{ source: "/r/checkout", destination: FRESH_EVAL_WORKSPACE, rw: true, type: "bind" }];
+    expect(bridgeFolderMountProblems({ helper, sandbox, bridgeDir: "/b/models", checkout: "/r/checkout" })).not.toEqual([]);
   });
 });

@@ -45,6 +45,8 @@ export function bridgeModelBackend(socketPath: string, call: (input: ModelBridge
           if (size > MODEL_HELPER_BRIDGE_ANSWER_MAX_BYTES) throw new Error("the model bridge answer is too large");
           parts.push(event.bytes);
         } else {
+          // A 2xx head whose settle is not ok is a cut answer (the provider failed after the head): never a success with a partial body.
+          if (status === undefined || (status >= 200 && status < 300 && event.class !== "ok")) throw new Error("the model bridge answer did not settle ok");
           settled = true;
           break;
         }
