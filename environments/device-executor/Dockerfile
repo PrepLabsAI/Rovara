@@ -92,9 +92,12 @@ COPY --from=android /opt/android-avd /opt/android-avd
 COPY --from=android /opt/maestro /opt/maestro
 
 # Fail the BUILD, not the first run, when the emulator or adb cannot load: every shared library the headless emulator needs must be found, and the tools must start (no KVM is needed to print a version).
+# The emulator's own libraries (emulator/lib64) are found by the `emulator` launcher, which sets LD_LIBRARY_PATH before it starts qemu; the qemu ldd below sets the same one (the first CI run listed 13 of them as not found without it).
 RUN test -x /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless && test -x /opt/android-sdk/emulator/emulator && test -x /opt/android-sdk/platform-tools/adb \
+    && export LD_LIBRARY_PATH=/opt/android-sdk/emulator/lib64 \
     && ! ldd /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless | grep "not found" \
     && ! ldd /opt/android-sdk/emulator/emulator | grep "not found" \
+    && unset LD_LIBRARY_PATH \
     && /opt/android-sdk/emulator/emulator -version | head -n 3 \
     && /opt/android-sdk/platform-tools/adb version \
     && JAVA_HOME=/opt/java /opt/maestro/bin/maestro --version
