@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import { type DocumentStore, type MeterEntry, type Metering, type ModelUsage } from "@agentx/contracts";
 import { taskPointerKey } from "../core/task-flow/keys.js";
+import { costPartition } from "../core/cost/ledger.js";
 import { createHostedLedger } from "./hosted-modules.js";
 
 /** The worker's event type that carries a model session's usage (`TaskUsageTelemetry`). */
@@ -38,10 +39,12 @@ export interface UsageReport {
   at: string;
   /** The reported payload (`TaskUsageTelemetry`): read here, never trusted for more than its numbers. */
   payload: unknown;
+  /** The ledger holds a checkpoint of this report's run (a `final` zero then books $0; without one it is charged the floor). */
+  checkpointsBooked?: boolean;
 }
 
 /** The usage a payload reports, or undefined when it does not read as one (see the file comment). */
-export function readUsagePayload(payload: unknown): { usage: ModelUsage; reportedMicros?: number } | undefined {
+export function readUsagePayload(payload: unknown, options: { checkpointsBooked?: boolean } = {}): { usage: ModelUsage; reportedMicros?: number } | undefined {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
   const record = payload as Record<string, unknown>;
   const tokens = record["tokens"] as Record<string, unknown> | null | undefined;
@@ -52,9 +55,10 @@ export function readUsagePayload(payload: unknown): { usage: ModelUsage; reporte
   if (cost !== undefined && cost !== null && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)) return undefined;
   const reportedMicros = typeof cost === "number" && cost > 0 ? Math.ceil(cost * 1_000_000) : undefined;
   // A report with no tokens and no cost (a session whose call failed before any token, or whose provider sent no usage) is charged a small fixed amount, never $0: the call may have been
-  // billed. It is not taken as unreadable, which would stop the whole company for the day. The one exception is a session's `final` report after its checkpoints (per-run dollar stop):
+  // billed. It is not taken as unreadable, which would stop the whole company for the day. The one exception is a session's `final` report when checkpoints of its run were BOOKED
+  // (`checkpointsBooked`, read from the ledger, never the worker's word; per-run dollar stop): the run's spend is what they booked, never less. Without one, the floor stands:
   // the checkpoints told what it spent, and a zero end says only that nothing is left.
-  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined && record["final"] !== true) {
+  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined && !(record["final"] === true && options.checkpointsBooked === true)) {
     return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, reportedMicros: EMPTY_REPORT_CHARGE_MICROS };
   }
   if (reportedMicros !== undefined && !Number.isSafeInteger(reportedMicros)) return undefined;
@@ -83,7 +87,7 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
   const ledger = createHostedLedger({ store: deps.store, metering: bookingMeter(deps.metering), ...(deps.now === undefined ? {} : { now: deps.now }) });
 
   async function bookUsageReport(report: UsageReport): Promise<boolean> {
-    const read = readUsagePayload(report.payload);
+    const read = readUsagePayload(report.payload, { checkpointsBooked: report.checkpointsBooked === true });
     const entry: MeterEntry = {
       companyId: report.companyId, entryId: report.entryId, at: report.at, taskId: report.taskId,
       usage: read?.usage ?? { provider: UNREADABLE_USAGE_PROVIDER, modelId: "unreadable", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
@@ -113,7 +117,10 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
         if (readUsagePayload(event.payload) === undefined) unreadable += 1;
         // A checkpoint (the spend so far of a session still going) has an entry id of its own kind, so a run is never taken as reported in full by its checkpoints alone (`runsOwed`).
         const checkpoint = (event.payload as { checkpoint?: unknown } | null)?.checkpoint === true;
-        if (await bookUsageReport({ companyId: operation.companyId, taskId, entryId: `${checkpoint ? CHECKPOINT_ENTRY_PREFIX : "usage"}:${operation.id}:${digest}`, at, payload: event.payload })) booked += 1;
+        // A `final` report counts on the run's checkpoints only when the ledger holds one (booked before it, in this batch or an earlier one).
+        const final = (event.payload as { final?: unknown } | null)?.final === true;
+        const checkpointsBooked = final && (await deps.store.query({ pk: costPartition(operation.companyId, taskId), sk: { op: "beginsWith", prefix: `ENTRY#${CHECKPOINT_ENTRY_PREFIX}:${operation.id}:` }, limit: 1 })).items.length > 0;
+        if (await bookUsageReport({ companyId: operation.companyId, taskId, entryId: `${checkpoint ? CHECKPOINT_ENTRY_PREFIX : "usage"}:${operation.id}:${digest}`, at, payload: event.payload, checkpointsBooked })) booked += 1;
       }
       return { booked, unreadable };
     },

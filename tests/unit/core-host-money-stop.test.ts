@@ -16,7 +16,7 @@ import { coreMoneyWiring } from "../../packages/broker/src/aws/core-engine-root.
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { operationKey, taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { CHECKPOINT_ENTRY_PREFIX, EMPTY_REPORT_CHARGE_MICROS } from "../../packages/broker/src/core-host/usage-booking.js";
+import { CHECKPOINT_ENTRY_PREFIX, EMPTY_REPORT_CHARGE_MICROS, readUsagePayload } from "../../packages/broker/src/core-host/usage-booking.js";
 import { RUN_START_ACTION, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
@@ -314,6 +314,25 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 });
     await money.bookUsage(operation, [{ type: "usage", timestamp: `${DAY}T10:00:03.000Z`, payload: zero }]);
     expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 + EMPTY_REPORT_CHARGE_MICROS });
+  });
+
+  it("a final zero with no checkpoint of its run in the ledger keeps the empty-report floor (the worker's word alone never makes it $0)", async () => {
+    const { store, money } = await root(A);
+    const taskId = randomUUID();
+    const mine = { id: randomUUID(), workspaceId: randomUUID(), companyId: A } as unknown as OperationRecord;
+    const other = { id: randomUUID(), workspaceId: mine.workspaceId, companyId: A } as unknown as OperationRecord;
+    await store.put({ item: { ...taskPointerKey(mine.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
+    const finalZero = { ...telemetry(0), checkpoint: undefined, final: true };
+    // Another run's checkpoint does not count for this one.
+    await money.bookUsage(other, [{ type: "usage", timestamp: `${DAY}T10:00:01.000Z`, payload: telemetry(1_000) }]);
+    await money.bookUsage(mine, [{ type: "usage", timestamp: `${DAY}T10:00:02.000Z`, payload: finalZero }]);
+    expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 + EMPTY_REPORT_CHARGE_MICROS });
+    expect(readUsagePayload(finalZero)).toMatchObject({ reportedMicros: EMPTY_REPORT_CHARGE_MICROS });
+    expect(readUsagePayload(finalZero, { checkpointsBooked: true })).not.toHaveProperty("reportedMicros");
+    // A checkpoint of its own booked in an earlier batch counts.
+    await money.bookUsage(mine, [{ type: "usage", timestamp: `${DAY}T10:00:03.000Z`, payload: telemetry(2_000) }]);
+    await money.bookUsage(mine, [{ type: "usage", timestamp: `${DAY}T10:00:04.000Z`, payload: finalZero }]);
+    expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 3_000 + EMPTY_REPORT_CHARGE_MICROS });
   });
 
   it("the callback layer acks the batch and asks the run to stop (CANCEL_REQUESTED, the code, a cancel to its worker); another company's run is never touched", async () => {
