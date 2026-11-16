@@ -176,7 +176,7 @@ describe("the stream hook", () => {
   });
 });
 
-describe("the install's policy hook settings (one setting for the engine and the developer API)", () => {
+describe("the install's hosted policy hook settings", () => {
   it("is absent with no setting, and refuses in fixed words (no echo) anything that is not readable settings", () => {
     expect(policyHookSettingsFromEnvironment({})).toBeUndefined();
     expect(policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: "  " })).toBeUndefined();
@@ -184,8 +184,13 @@ describe("the install's policy hook settings (one setting for the engine and the
     expect(() => policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: JSON.stringify({ address: "http://evil.example/zzq", keys: [] }) })).toThrow(/^the policy hook settings are not readable$/u);
   });
 
-  it("reads well-formed settings (the engine applies them before the seal; #717's settings routes take the same value)", () => {
-    const settings = JSON.stringify({ address: "https://hook.example/answer", keys: [{ kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "k1", alg: "RS256" }] });
+  it("refuses the old inline-keys environment in fixed words", () => {
+    const old = { address: "https://hook.example/answer", keys: [{ kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "k1", alg: "RS256" }] };
+    expect(() => policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: JSON.stringify(old) })).toThrow(/^the policy hook settings are not readable$/u);
+  });
+
+  it("reads well-formed hosted settings", () => {
+    const settings = JSON.stringify({ address: "https://hook.example/answer", jwks: "https://hook.example/keys", thumbprints: ["A".repeat(43)] });
     expect(policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: settings })).toMatchObject({ address: "https://hook.example/answer" });
   });
 });
