@@ -29,7 +29,7 @@ export const projectSettingsKey = (companyId: string, projectName: string) => ({
 });
 const rowsOf = (row: SettingsRow | undefined): PolicyRows => row === undefined ? {} : { ...(row.preset === undefined ? {} : { preset: row.preset }), project: row.overrides };
 /** Fixed words (no field, no value): a cost or approval setting is changed on the page, right after a fresh step-up. */
-export const SETTINGS_CHANGE_ON_THE_PAGE = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
+export const SETTINGS_CHANGE_ON_THE_PAGE = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that only holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "policy_unavailable");
 
 /** Adapter-issued scope, after caller/project authorization. One reader, no fallback or cross-company cache.
@@ -118,7 +118,8 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
   // hides the effect today cannot be used to change what would show when the minimum is lifted. A repeat of what is stored changes nothing and needs none.
   const storedRows = (value: SettingsRow | undefined) => createRowsPolicySource(async (scope) => ({ scope, rows: rowsOf(value) })).resolve(policy.scope, {});
   const [storedBefore, storedAfter] = await Promise.all([storedRows(current), storedRows(row)]);
-  const pageOnlyChange = POLICY_FIELDS.some((field) => policyFieldPageOnly(field.id)
+  // The chosen preset is itself a cost and approval choice: an override that pins preset_level can hide a preset change in the resolved values, so it is compared directly too.
+  const pageOnlyChange = current?.preset !== row.preset || POLICY_FIELDS.some((field) => policyFieldPageOnly(field.id)
     && (storedBefore.values[field.id]!.value !== storedAfter.values[field.id]!.value
       || Object.hasOwn(current?.overrides ?? {}, field.id) !== Object.hasOwn(row.overrides, field.id)));
   if (pageOnlyChange) {

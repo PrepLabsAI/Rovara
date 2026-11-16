@@ -157,7 +157,7 @@ it("the engine seam rereads settings and rejects a foreign opaque scope before r
 });
 
 // ---- M4a slice 2: a cost or approval setting is changed on the page, right after a fresh step-up (DEC 236j; the brief's page-only rule) ----
-const PAGE_ONLY_WORDS = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
+const PAGE_ONLY_WORDS = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that only holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
 const CHANGES: Record<string, unknown> = {
   preset_level: "careful", real_check: "rovara_real_run", ci_fix_rounds: 2, round_time_minutes: 45, model_budget_usd: 7, machine_budget_minutes: 90,
   extra_review: true, mutation_spot_check: "on", prompt_side_by_side: "on",
@@ -242,9 +242,14 @@ it("a step-up in a header, the query or the body is never believed", async () =>
   await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 }, stepUp: { at: new Date(now).toISOString(), method: "passkey" } })).rejects.toThrow(/^invalid settings request$/);
   expect(writes(w)).toEqual([]);
 });
+async function unavailableWithoutCanary(call: Promise<unknown>): Promise<void> {
+  const error = await call.then(() => undefined, (caught: unknown) => caught as Error & { code?: string });
+  expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  expect(error?.message).not.toContain("private-canary");
+}
 it("the company's step-up window may only shorten the default, and an unreadable window refuses", async () => {
   const w = world(); w.setStepUp({ step_up_at: now / 1000 - 120, step_up_amr: "email_code" });
-  const window = vi.fn(async (_company: string): Promise<unknown> => 60);
+  const window = vi.fn<(company: string) => Promise<unknown>>(async () => 60);
   w.deps.developer.stepUpWindowSeconds = window;
   await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
   expect(window).toHaveBeenCalledWith(COMPANY);
@@ -252,15 +257,15 @@ it("the company's step-up window may only shorten the default, and an unreadable
   await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).resolves.toMatchObject({ revision: 1 });
   for (const answer of ["private-canary", -1, 86_401, 1.5, undefined]) {
     window.mockResolvedValue(answer);
-    await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.not.stringContaining("private-canary") });
+    await unavailableWithoutCanary(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } }));
   }
   window.mockRejectedValue(new Error("private-canary"));
-  await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.not.stringContaining("private-canary") });
+  await unavailableWithoutCanary(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } }));
   expect(await w.call()).toMatchObject({ revision: 1 });
 });
 it("a change that needs no step-up never asks the company's window", async () => {
   const w = world(); w.setStepUp(noStepUp());
-  const window = vi.fn(async (_company: string): Promise<unknown> => { throw new Error("must not be asked"); });
+  const window = vi.fn<(company: string) => Promise<unknown>>(async () => { throw new Error("must not be asked"); });
   w.deps.developer.stepUpWindowSeconds = window;
   expect(await w.call("PUT", { expectedRevision: 0, overrides: { after_merge_revert: "off" } })).toMatchObject({ revision: 1 });
   expect(window).not.toHaveBeenCalled();
@@ -294,4 +299,22 @@ it("a registered full-access client's token carries its own step-up claims the s
   await expect(token({})).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
   await expect(token({ step_up_at: now / 1000 - 700, step_up_amr: "passkey" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
   expect(await token({ step_up_at: now / 1000 - 30, step_up_amr: "passkey" })).toMatchObject({ revision: 1 });
+});
+it("a preset change is refused without a step-up even when an override pins preset_level over it", async () => {
+  const w = world();
+  await w.call("PUT", { expectedRevision: 0, preset: "careful", overrides: { preset_level: "balanced" } });
+  w.setStepUp(noStepUp());
+  await expect(w.call("PUT", { expectedRevision: 1, preset: "lightweight" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
+  expect(await w.call()).toMatchObject({ revision: 1, preset: "careful" });
+});
+it("a zero company window refuses every step-up", async () => {
+  const w = world(); w.deps.developer.stepUpWindowSeconds = async () => 0;
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
+  expect(writes(w)).toEqual([]);
+});
+it("an api_ok change next to unchanged page-only overrides needs no step-up", async () => {
+  const w = world();
+  await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3, extra_review: true } });
+  w.setStepUp(noStepUp());
+  expect(await w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 3, extra_review: true, after_merge_revert: "off" } })).toMatchObject({ revision: 2 });
 });
