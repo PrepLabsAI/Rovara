@@ -1,6 +1,6 @@
 import { createHash, createSign } from "node:crypto";
 import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
-import { GitBranchNameSchema, HostRateLimitError, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -344,6 +344,42 @@ const STATUS_TOKEN_PERMISSIONS = { contents: "read", pull_requests: "read", chec
 /** How many pages of 100 reviews a tracking read takes. */
 const REVIEW_PAGES_MAX = 5;
 const BASIC_TOKEN_PERMISSIONS = { contents: "read", pull_requests: "read" } as const;
+
+/** TE-B4: the Check Run write asks for this and nothing else. */
+const CHECK_WRITE_PERMISSIONS = { checks: "write" } as const;
+const CHECK_RUN_ID = /^[1-9][0-9]{0,19}$/u;
+
+/** TE-B4: one write of the "Rovara" Check Run (see `upsertRovaraCheck`). */
+export interface RovaraCheckWrite {
+  headSha: string;
+  runId?: string | undefined;
+  payload: RovaraCheckPayload;
+  detailsUrl?: string | undefined;
+}
+
+/** The request body for a Check Run write, checked at runtime: a head, a known status and conclusion, bounded words, an https details address. Anything else is refused (fixed words). */
+export function rovaraCheckBody(input: RovaraCheckWrite, nowMs: number): Record<string, unknown> {
+  const { payload } = input;
+  const bounded = (text: unknown, max: number): text is string => typeof text === "string" && text.length > 0 && text.length <= max;
+  if (!/^[a-f0-9]{40}$/u.test(input.headSha) || (input.runId !== undefined && !CHECK_RUN_ID.test(input.runId))) throw agentXError("CONFIG_INVALID", "the check run write names no usable head or run");
+  if (!bounded(payload.title, ROVARA_CHECK_TITLE_MAX * 2) || !bounded(payload.summary, ROVARA_CHECK_TEXT_MAX) || !bounded(payload.text, ROVARA_CHECK_TEXT_MAX)) throw agentXError("CONFIG_INVALID", "the check run words do not fit");
+  const completed = payload.status === "completed";
+  if (!completed && payload.status !== "in_progress") throw agentXError("CONFIG_INVALID", "the check run status is not one Rovara writes");
+  if (completed !== (payload.conclusion !== undefined) || (payload.conclusion !== undefined && !["success", "failure", "neutral"].includes(payload.conclusion))) throw agentXError("CONFIG_INVALID", "the check run conclusion is not one Rovara writes");
+  let detailsUrl: string | undefined;
+  if (input.detailsUrl !== undefined) {
+    let parsed: URL | undefined;
+    try { parsed = new URL(input.detailsUrl); } catch { parsed = undefined; }
+    if (parsed?.protocol !== "https:" || input.detailsUrl.length > 2_000) throw agentXError("CONFIG_INVALID", "the check run details address is not https");
+    detailsUrl = input.detailsUrl;
+  }
+  return {
+    name: ROVARA_CHECK_NAME, head_sha: input.headSha, status: payload.status,
+    ...(completed ? { conclusion: payload.conclusion, completed_at: new Date(nowMs).toISOString() } : {}),
+    output: { title: payload.title, summary: payload.summary, text: payload.text },
+    ...(detailsUrl === undefined ? {} : { details_url: detailsUrl }),
+  };
+}
 
 /** A repository the App can reach: its installation, and the owner as GitHub spells it. */
 interface InstalledRepository {
@@ -1147,6 +1183,62 @@ export class GitHubAppCredentialProvider {
     const marked = statusRecord(statusRecord(data.markPullRequestReadyForReview).pullRequest);
     if (marked.isDraft !== false) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub did not take the pull request out of draft");
     return "ready";
+  }
+
+  /** TE-B4: the source word of the App's own checks (`checks[].source` is the App's id, from `statusCheckRollup`'s `checkSuite.app.databaseId`). */
+  async summaryCheckSource(): Promise<string> {
+    const appId = typeof this.options.appId === "string" ? this.options.appId : await this.options.appId();
+    if (!GITHUB_APP_ID.test(appId)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App ID must be numeric");
+    return appId;
+  }
+
+  /**
+   * TE-B4: creates or updates the one "Rovara" Check Run on a head, with a token that asks for `checks: write` only (minted on its own, so no other call gains the permission). An installation that has
+   * not granted it refuses the token (`no_permission`; the pull request body stays the only summary). With `runId` that run is updated (one that is gone is created again); without, the App's own
+   * "Rovara" run on the head is looked up first, so a lost record never makes a second run. The answer must name the same head, name and App, or it is refused. With a `budget` every request counts.
+   */
+  async upsertRovaraCheck(repositoryUrl: string, input: RovaraCheckWrite, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<{ runId: string } | "no_permission"> {
+    const body = rovaraCheckBody(input, this.now());
+    const appId = await this.summaryCheckSource();
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    let token: string;
+    try {
+      token = await provider.createInstallationToken(repository, CHECK_WRITE_PERMISSIONS, scope);
+    } catch (error) {
+      if (isAgentXError(error) && error.code === "GITHUB_NOT_CONNECTED") return "no_permission";
+      throw error;
+    }
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const ours = (value: unknown): string | undefined => {
+      const run = statusRecord(value);
+      const id = run.id;
+      return typeof id === "number" && Number.isSafeInteger(id) && id > 0 && run.name === ROVARA_CHECK_NAME && run.head_sha === input.headSha && String(statusRecord(run.app).id) === appId ? String(id) : undefined;
+    };
+    let runId = input.runId;
+    if (runId === undefined) {
+      const listed = await provider.trackingJson(`${root}/commits/${input.headSha}/check-runs?check_name=${ROVARA_CHECK_NAME}&app_id=${appId}&filter=all&per_page=20`, token, { rateLimit: true });
+      if (listed.status === 403) return "no_permission";
+      if (listed.status !== 200 || !Array.isArray(statusRecord(listed.body).check_runs)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run lookup failed with HTTP ${listed.status}`);
+      runId = (statusRecord(listed.body).check_runs as unknown[]).map(ours).find((id) => id !== undefined);
+    }
+    if (runId !== undefined) {
+      const update = Object.fromEntries(Object.entries(body).filter(([name]) => name !== "head_sha"));
+      const patched = await provider.trackingJson(`${root}/check-runs/${runId}`, token, { method: "PATCH", body: update, rateLimit: true });
+      if (patched.status === 403) return "no_permission";
+      if (patched.status === 200) {
+        const id = ours(patched.body);
+        if (id === undefined || id !== runId) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned another check run");
+        return { runId: id };
+      }
+      if (patched.status !== 404) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run update failed with HTTP ${patched.status}`);
+    }
+    const created = await provider.trackingJson(`${root}/check-runs`, token, { method: "POST", body, rateLimit: true });
+    if (created.status === 403) return "no_permission";
+    if (created.status !== 201) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub check run create failed with HTTP ${created.status}`);
+    const id = ours(created.body);
+    if (id === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned another check run");
+    return { runId: id };
   }
 
   /**
