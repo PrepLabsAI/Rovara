@@ -6,7 +6,7 @@
 //   questions    each question file's content hash (`evalQuestionHash`) at the base commit and in the candidate tree. The BASE hash must equal the hash stored at setup: a question
 //                that moved, vanished or changed on the base since the plan was approved makes the whole plan not runnable. A head hash that differs marks that question "edited".
 // Anything that does not hold (no pinned candidate, another repository layout, a base that is not the broker's, a file over the bounds, an unreadable object) is no plan: the eval
-// reads "not connected" and spends nothing.
+// reads "not connected" and spends nothing. A question file changed on the base since approval reads its own reason ("questions changed since setup approval: re-approve").
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EVAL_QUESTION_LIMIT, EVAL_QUESTION_REMOVED_HASH, EvalPlanBodyShape, evalCodeHash, evalQuestionHash,
@@ -14,7 +14,7 @@ import {
 import { z } from "zod";
 import { withIsolatedGit } from "../isolated-git.js";
 import type { CandidateRepositoryIdentity, CandidateRepositoryInput } from "./candidate.js";
-import type { EvalFinalCheckPlan } from "./eval-final-check.js";
+import { EVAL_PLAN_QUESTIONS_CHANGED, type EvalFinalCheckPlan } from "./eval-final-check.js";
 
 interface Pin { readonly repositories: readonly CandidateRepositoryInput[]; readonly candidates: readonly CandidateRepositoryIdentity[]; readonly signal: AbortSignal }
 const pins = new AsyncLocalStorage<Pin>();
@@ -83,8 +83,10 @@ async function hashesAt(directory: string, treeishes: readonly string[], paths: 
 
 /**
  * The final-check plan for THIS check, from the broker's delivered plan and the pinned candidate, or undefined (not runnable). Never throws. Called inside `withEvalPinnedCandidate`.
+ * A plan that is otherwise this run's (its scope, repository, base and key all hold) but whose question file on the base no longer holds the approved question answers
+ * `EVAL_PLAN_QUESTIONS_CHANGED` (EVAL-PLAN-STALE-REASON): the eval reads "questions changed since setup approval: re-approve", with zero calls.
  */
-export async function pinnedEvalPlan(delivered: unknown): Promise<EvalFinalCheckPlan | undefined> {
+export async function pinnedEvalPlan(delivered: unknown): Promise<EvalFinalCheckPlan | typeof EVAL_PLAN_QUESTIONS_CHANGED | undefined> {
   try {
     const pin = pins.getStore();
     if (pin === undefined || pin.signal.aborted) return undefined;
@@ -109,7 +111,7 @@ export async function pinnedEvalPlan(delivered: unknown): Promise<EvalFinalCheck
     for (const question of plan.questions) {
       const baseHash = atBase.get(question.path);
       // The base must hold exactly the question the approved plan was made from.
-      if (baseHash === undefined || baseHash !== question.hash) return undefined;
+      if (baseHash === undefined || baseHash !== question.hash) return EVAL_PLAN_QUESTIONS_CHANGED;
       questions.push({ id: question.id, category: question.category, baseHash, headHash: atHead.get(question.path) ?? EVAL_QUESTION_REMOVED_HASH });
     }
     return {

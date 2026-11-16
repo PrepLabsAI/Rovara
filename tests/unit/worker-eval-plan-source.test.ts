@@ -7,6 +7,7 @@ import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_REMOVED_HASH, evalCodeHash, evalCommandFingerprint, evalQuestionHash } from "@agentx/contracts";
 import { pinnedEvalPlan, withEvalPinnedCandidate } from "../../packages/worker/src/verification/eval-plan-source.js";
+import { EVAL_PLAN_QUESTIONS_CHANGED } from "../../packages/worker/src/verification/eval-final-check.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
 
 const roots: string[] = [];
@@ -51,16 +52,21 @@ describe("the worker's per-task eval plan from the pinned candidate", () => {
       ],
     });
     const removed = await repo({ "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, { "evals/demo/q2.txt": null });
-    expect((await inPin(removed, delivered(removed.baseSha)))?.questions[1]).toEqual({ id: "q2", category: "safety", baseHash: evalQuestionHash(Buffer.from(Q2)), headHash: EVAL_QUESTION_REMOVED_HASH });
+    expect(((await inPin(removed, delivered(removed.baseSha))) as { questions: unknown[] } | undefined)?.questions[1]).toEqual({ id: "q2", category: "safety", baseHash: evalQuestionHash(Buffer.from(Q2)), headHash: EVAL_QUESTION_REMOVED_HASH });
   });
 
-  it("a base that does not hold the approved question is not runnable: changed, missing, or a folder (mutants: the base hash check, the missing-base check)", async () => {
+  it("a base that does not hold the approved question is not runnable and says so: changed, missing, or a folder read \"questions changed\" (mutants: the base hash check, the missing-base check, the stale reason)", async () => {
     const changed = await repo({ "evals/demo/q1.txt": "something else\n", "evals/demo/q2.txt": Q2 }, {});
-    expect(await inPin(changed, delivered(changed.baseSha))).toBeUndefined();
+    expect(await inPin(changed, delivered(changed.baseSha))).toBe(EVAL_PLAN_QUESTIONS_CHANGED);
     const missing = await repo({ "evals/demo/q2.txt": Q2 }, { "evals/demo/q1.txt": Q1 });
-    expect(await inPin(missing, delivered(missing.baseSha))).toBeUndefined();
+    expect(await inPin(missing, delivered(missing.baseSha))).toBe(EVAL_PLAN_QUESTIONS_CHANGED);
     const folder = await repo({ "evals/demo/q1.txt/inner": Q1, "evals/demo/q2.txt": Q2 }, {});
-    expect(await inPin(folder, delivered(folder.baseSha))).toBeUndefined();
+    expect(await inPin(folder, delivered(folder.baseSha))).toBe(EVAL_PLAN_QUESTIONS_CHANGED);
+    // Only a question change on the base reads so: the same stale base under another run's key is still no plan (the key checks come first).
+    expect(await inPin(changed, delivered(changed.baseSha, {}, { baseCommit: "d".repeat(40) }))).toBeUndefined();
+    // A question the CANDIDATE edits is not stale: it is that run's change.
+    const edited = await repo({ "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, { "evals/demo/q1.txt": "edited on the branch\n" });
+    expect(await inPin(edited, delivered(edited.baseSha))).toMatchObject({ questions: [{ id: "q1" }, { id: "q2" }] });
   });
 
   it("the broker's base must be the pinned candidate's: another base commit, another code hash or another judge pin in the key is not runnable (mutants: each key check)", async () => {

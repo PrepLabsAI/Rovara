@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliverySchema, createDocumentBaseScoreCache, evalBaseCacheKey, evalCommandFingerprint,
-  type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalSpendGrant,
+  type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalSpendApproval, type EvalSpendGrant,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
@@ -47,16 +47,20 @@ async function world(options: { company?: string; operation?: Record<string, unk
   await store.put({ item: { ...taskKey(taskId), taskId, workspaceId: options.taskWorkspace ?? workspaceId, project: "web", companyId: options.taskCompany ?? company } });
   const caches = new Map<string, BaseScoreCache>([[A, createDocumentBaseScoreCache(store, { companyId: A })], [B, createDocumentBaseScoreCache(store, { companyId: B })]]);
   const asked: Array<{ source: string; scope: unknown }> = [];
-  const sources: EvalPlanSources = {
+  // The plan and the approval the one read answers (EVAL-PLAN-SNAPSHOT), each replaceable by a test.
+  const parts: { plan: (scope: EvalPlanScope) => Promise<unknown>; approval: (scope: EvalPlanScope) => EvalSpendApproval | undefined } = {
     plan: vi.fn(async (scope: EvalPlanScope) => { asked.push({ source: "plan", scope }); return planOf(scope.companyId, scope.project); }),
     approval: vi.fn((scope: EvalPlanScope) => { asked.push({ source: "approval", scope }); return { read: async () => grantOf(scope.companyId, scope.project) }; }),
+  };
+  const sources: EvalPlanSources = {
+    read: vi.fn(async (scope: EvalPlanScope) => { const plan = await parts.plan(scope); return plan === undefined ? undefined : { plan, approval: parts.approval(scope) }; }),
     cache: vi.fn((companyId: string) => { asked.push({ source: "cache", scope: companyId }); return caches.get(companyId); }),
   };
   const capabilities = new CallbackCapabilities(KEY);
   const token = (actions: string[], over: { workspaceId?: string; operationId?: string; fence?: number; expiresInSeconds?: number } = {}) => capabilities.issue({ workspaceId: over.workspaceId ?? workspaceId, operationId: over.operationId ?? operationId, fence: over.fence ?? 3, actions: actions as CallbackAction[], expiresInSeconds: over.expiresInSeconds ?? 60 });
   const handler = (deps: { evalPlan?: EvalPlanSources } = { evalPlan: sources }) => createCallbackHandler({ flow: { store, companyId: company, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never, ...deps });
   const call = (capability: string | undefined, body = options.body ?? "{}", h = handler()) => h({ method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/${EVAL_PLAN_DELIVERY_ACTION}`, headers: capability === undefined ? {} : { "x-agentx-callback-capability": capability }, body });
-  return { store, workspaceId, operationId, taskId, sources, asked, caches, token, handler, call, company };
+  return { store, workspaceId, operationId, taskId, sources, parts, asked, caches, token, handler, call, company };
 }
 const json = (reply: { body?: string }) => JSON.parse(reply.body ?? "{}") as Record<string, unknown>;
 
@@ -107,13 +111,13 @@ describe("the eval-plan callback", () => {
   it("cross-company: a source that answers another company's or project's data is not passed on (mutants: each plan scope check, the grant scope check)", async () => {
     for (const [name, wrong] of [["company", planOf(B, "web")], ["project", planOf(A, "api")], ["plan company only", { ...planOf(A, "web"), company: B }], ["plan project only", { ...planOf(A, "web"), project: "api" }], ["key company", { ...planOf(A, "web"), key: { ...planOf(A, "web").key, company: B } }], ["key project", { ...planOf(A, "web"), key: { ...planOf(A, "web").key, project: "api" } }]] as const) {
       const w = await world();
-      w.sources.plan = async () => wrong;
+      w.parts.plan = async () => wrong;
       const answer = json(await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION])));
       expect(answer, name).toEqual({ status: "not_available" });
     }
     for (const grant of [grantOf(B, "web"), grantOf(A, "api")]) {
       const w = await world();
-      w.sources.approval = () => ({ read: async () => grant });
+      w.parts.approval = () => ({ read: async () => grant });
       const answer = EvalPlanDeliverySchema.parse(json(await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION]))));
       expect(answer.status === "ready" && answer.approval).toBeNull();
       expect(JSON.stringify(answer)).not.toContain(B);
@@ -162,7 +166,7 @@ describe("the eval-plan callback", () => {
     expect(foreign.asked).toEqual([]);
     // A plan whose answer would be over the bound: "not_available", and the oversize is logged by its fixed name only.
     const huge = await world();
-    huge.sources.plan = async (scope: EvalPlanScope) => planOf(scope.companyId, scope.project, { padding: "y".repeat(EVAL_PLAN_DELIVERY_MAX_BYTES) });
+    huge.parts.plan = async (scope: EvalPlanScope) => planOf(scope.companyId, scope.project, { padding: "y".repeat(EVAL_PLAN_DELIVERY_MAX_BYTES) });
     const log = vi.fn();
     const answer = await handleEvalPlanDelivery({ sources: huge.sources, companyId: A, projectOf: async () => "web", log },
       (await huge.store.get(operationKey(A, huge.workspaceId, huge.operationId))) as never);
@@ -217,13 +221,13 @@ describe("the eval-plan callback", () => {
     expect(bare.statusCode).toBe(404);
     for (const plan of [async () => undefined, async () => { throw new Error("secret-canary"); }, async () => "not a plan"]) {
       const x = await world();
-      x.sources.plan = plan;
+      x.parts.plan = plan;
       const reply = await x.call(x.token([EVAL_PLAN_DELIVERY_ACTION]));
       expect(json(reply)).toEqual({ status: "not_available" });
       expect(reply.body).not.toContain("secret-canary");
     }
     const y = await world();
-    y.sources.approval = () => ({ read: async () => { throw new Error("secret-canary"); } });
+    y.parts.approval = () => ({ read: async () => { throw new Error("secret-canary"); } });
     y.sources.cache = () => undefined;
     const answer = json(await y.call(y.token([EVAL_PLAN_DELIVERY_ACTION])));
     expect(answer).toMatchObject({ status: "ready", approval: null, baseline: null });

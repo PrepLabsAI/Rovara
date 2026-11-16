@@ -176,12 +176,15 @@ export function createEvalSpendSubject(deps: Table): DecisionSubject {
 }
 
 /** No reservation implementation lives here. F1e binds the trusted adapter; absent/unreadable is zero spend. */
-export function createEvalSpendCapabilities(options: Table & { project: string; current(): Promise<EvalSpendPlan | undefined>; adapter?: EvalReservationAdapter }): { approval: EvalSpendApproval; meter: MonthlyMeter } {
+export function createEvalSpendCapabilities(options: Table & { project: string; current(): Promise<EvalSpendPlan | undefined>; adapter?: EvalReservationAdapter;
+  /** EVAL-PLAN-SNAPSHOT: the digest of the ONE approved item the caller read its plan from. Set: only that item answers (a re-approval in between, of another item, is no grant). */
+  digest?: string }): { approval: EvalSpendApproval; meter: MonthlyMeter } {
   const issued = new WeakMap<EvalSpendGrant, EvalSpendApprovalRecord>();
   const resolve = async () => {
     if (options.adapter === undefined) return undefined;
     const row = await readRecord(options, options.project);
     if (row?.state !== "approved" || row.approvedBy === undefined) return undefined;
+    if (options.digest !== undefined && row.digest !== options.digest) return undefined;
     const parsed = EvalSpendPlanSchema.safeParse(await options.current());
     if (!parsed.success) return undefined;
     const current = parsed.data;
